@@ -1,0 +1,584 @@
+[ {
+  "id" : "coalesce-null",
+  "expr" : "{{ missing ?? 'fallback' }}",
+  "context" : {
+    "missing" : null
+  },
+  "result" : "fallback"
+}, {
+  "id" : "coalesce-present",
+  "expr" : "{{ present ?? 'fallback' }}",
+  "context" : {
+    "present" : "x"
+  },
+  "result" : "x"
+}, {
+  "id" : "coalesce-absent",
+  "expr" : "{{ nothere ?? 'fallback' }}",
+  "context" : { },
+  "result" : "fallback"
+}, {
+  "id" : "undef-coalesce-null",
+  "expr" : "{{ missing ??? 'fallback' }}",
+  "context" : {
+    "missing" : null
+  },
+  "result" : ""
+}, {
+  "id" : "undef-coalesce-absent",
+  "expr" : "{{ nothere ??? 'fallback' }}",
+  "context" : { },
+  "result" : "fallback"
+}, {
+  "id" : "ternary",
+  "expr" : "{{ flag ? 'yes' : 'no' }}",
+  "context" : {
+    "flag" : true
+  },
+  "result" : "yes"
+}, {
+  "id" : "isin",
+  "expr" : "{{ 'b' isIn ['a','b'] }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "gt-strings",
+  "expr" : "{{ 'b' > 'a' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "gt-numbers",
+  "expr" : "{{ 2 > 10 }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "gt-mixed",
+  "expr" : "{{ '2' > 10 }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than comparison ({{ '2' > 10 }}:1)"
+  }
+}, {
+  "id" : "op-inside-string",
+  "expr" : "{{ 'a ?? b' }}",
+  "context" : { },
+  "result" : "a ?? b"
+}, {
+  "id" : "nested-ternary",
+  "expr" : "{{ a ? (b ? 'x' : 'y') : 'z' }}",
+  "context" : {
+    "a" : true,
+    "b" : false
+  },
+  "result" : "y"
+}, {
+  "id" : "filter-chunk",
+  "expr" : "{{ list | chunk(size=2) }}",
+  "context" : {
+    "list" : [ 1, 2, 3, 4, 5 ]
+  },
+  "result" : "[[1,2],[3,4],[5]]"
+}, {
+  "id" : "filter-classname",
+  "expr" : "{{ list | className }}",
+  "context" : {
+    "list" : [ 1, 2, 3 ]
+  },
+  "result" : "java.util.ArrayList"
+}, {
+  "id" : "filter-date",
+  "expr" : "{{ d | date('yyyy-MM-dd', timeZone='UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2024-01-15"
+}, {
+  "id" : "filter-dateadd",
+  "expr" : "{{ d | dateAdd(1, 'DAYS', 'iso', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2024-01-16T10:30:00.000000Z"
+}, {
+  "id" : "filter-timestamp",
+  "expr" : "{{ d | timestamp }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "1705314600"
+}, {
+  "id" : "filter-timestampmicro",
+  "expr" : "{{ d | timestampMicro }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "1705314600000000"
+}, {
+  "id" : "filter-timestampmilli",
+  "expr" : "{{ d | timestampMilli }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "1705314600000"
+}, {
+  "id" : "filter-timestampnano",
+  "expr" : "{{ d | timestampNano }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "1705314600000000000"
+}, {
+  "id" : "filter-jq",
+  "expr" : "{{ json | jq('.a.b') }}",
+  "context" : {
+    "json" : {
+      "a" : {
+        "b" : 42
+      }
+    }
+  },
+  "result" : "[42]"
+}, {
+  "id" : "filter-escapechar",
+  "expr" : "{{ s | escapeChar(type='single') }}",
+  "context" : {
+    "s" : "it's"
+  },
+  "result" : "it\\'s"
+}, {
+  "id" : "filter-tojson",
+  "expr" : "{{ obj | toJson }}",
+  "context" : {
+    "obj" : {
+      "a" : 1,
+      "b" : [ 1, 2 ]
+    }
+  },
+  "result" : "{\"a\":1,\"b\":[1,2]}"
+}, {
+  "id" : "filter-distinct",
+  "expr" : "{{ list | distinct }}",
+  "context" : {
+    "list" : [ 1, 1, 2, 3, 3 ]
+  },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "filter-keys",
+  "expr" : "{{ obj | keys }}",
+  "context" : {
+    "obj" : {
+      "a" : 1,
+      "b" : 2
+    }
+  },
+  "result" : "[\"a\",\"b\"]"
+}, {
+  "id" : "filter-number",
+  "expr" : "{{ s | number(type='INT') }}",
+  "context" : {
+    "s" : "42"
+  },
+  "result" : "42"
+}, {
+  "id" : "filter-urldecode",
+  "expr" : "{{ s | urldecode }}",
+  "context" : {
+    "s" : "hello%20world"
+  },
+  "result" : "hello world"
+}, {
+  "id" : "filter-slugify",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "Hello World!"
+  },
+  "result" : "hello-world"
+}, {
+  "id" : "filter-substringbefore",
+  "expr" : "{{ s | substringBefore(separator='-') }}",
+  "context" : {
+    "s" : "a-b-c"
+  },
+  "result" : "a"
+}, {
+  "id" : "filter-substringbeforelast",
+  "expr" : "{{ s | substringBeforeLast(separator='-') }}",
+  "context" : {
+    "s" : "a-b-c"
+  },
+  "result" : "a-b"
+}, {
+  "id" : "filter-substringafter",
+  "expr" : "{{ s | substringAfter(separator='-') }}",
+  "context" : {
+    "s" : "a-b-c"
+  },
+  "result" : "b-c"
+}, {
+  "id" : "filter-substringafterlast",
+  "expr" : "{{ s | substringAfterLast(separator='-') }}",
+  "context" : {
+    "s" : "a-b-c"
+  },
+  "result" : "c"
+}, {
+  "id" : "filter-flatten",
+  "expr" : "{{ list | flatten }}",
+  "context" : {
+    "list" : [ [ 1, 2 ], [ 3 ], [ 4, 5 ] ]
+  },
+  "result" : "[1,2,3,4,5]"
+}, {
+  "id" : "filter-indent",
+  "expr" : "{{ s | indent(amount=2) }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "line1\n  line2"
+}, {
+  "id" : "filter-nindent",
+  "expr" : "{{ s | nindent(amount=2) }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "\n  line1\n  line2"
+}, {
+  "id" : "filter-yaml",
+  "expr" : "{{ obj | yaml }}",
+  "context" : {
+    "obj" : {
+      "a" : 1,
+      "b" : [ 1, 2 ]
+    }
+  },
+  "result" : "a: 1\nb:\n - 1\n - 2\n"
+}, {
+  "id" : "filter-startswith",
+  "expr" : "{{ s | startsWith(value='hel') }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-endswith",
+  "expr" : "{{ s | endsWith(value='llo') }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-values",
+  "expr" : "{{ obj | values }}",
+  "context" : {
+    "obj" : {
+      "a" : 1,
+      "b" : 2
+    }
+  },
+  "result" : "[1,2]"
+}, {
+  "id" : "filter-toion",
+  "expr" : "{{ obj | toIon }}",
+  "context" : {
+    "obj" : {
+      "a" : 1
+    }
+  },
+  "result" : "{a:1}"
+}, {
+  "id" : "filter-sha1",
+  "expr" : "{{ s | sha1 }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+}, {
+  "id" : "filter-sha512",
+  "expr" : "{{ s | sha512 }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043"
+}, {
+  "id" : "filter-md5",
+  "expr" : "{{ s | md5 }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "5d41402abc4b2a76b9719d911017c592"
+}, {
+  "id" : "filter-string",
+  "expr" : "{{ n | string }}",
+  "context" : {
+    "n" : 42
+  },
+  "result" : "42"
+}, {
+  "id" : "filter-regexmatch",
+  "expr" : "{{ s | regexMatch(regex='\\d+') }}",
+  "context" : {
+    "s" : "abc123"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexreplace",
+  "expr" : "{{ s | regexReplace(regex='\\d+', replacement='#') }}",
+  "context" : {
+    "s" : "abc123def456"
+  },
+  "result" : "abc#def#"
+}, {
+  "id" : "filter-regexextract",
+  "expr" : "{{ s | regexExtract(regex='\\d+') }}",
+  "context" : {
+    "s" : "order-12345-done"
+  },
+  "result" : "12345"
+}, {
+  "id" : "function-now",
+  "expr" : "{{ now() }}",
+  "context" : { },
+  "result" : "2026-09-02T10:47:58.445856+07:00"
+}, {
+  "id" : "function-fromjson",
+  "expr" : "{{ fromJson(json=raw) }}",
+  "context" : {
+    "raw" : "{\"a\": 1, \"b\": [1, 2]}"
+  },
+  "result" : "{\"a\":1,\"b\":[1,2]}"
+}, {
+  "id" : "function-env",
+  "expr" : "{{ env(name='MY_VAR', default='fallback') }}",
+  "context" : { },
+  "result" : "fallback"
+}, {
+  "id" : "function-secret",
+  "expr" : "{{ secret(key='my-key') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [secret] does not exist. ({{ secret(key='my-key') }}:1)"
+  }
+}, {
+  "id" : "function-kv",
+  "expr" : "{{ kv(key='my-key') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [kv] does not exist. ({{ kv(key='my-key') }}:1)"
+  }
+}, {
+  "id" : "function-read",
+  "expr" : "{{ read(path='a/b.txt') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [read] does not exist. ({{ read(path='a/b.txt') }}:1)"
+  }
+}, {
+  "id" : "function-fileuri",
+  "expr" : "{{ fileURI(path='a/b.txt') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileURI] does not exist. ({{ fileURI(path='a/b.txt') }}:1)"
+  }
+}, {
+  "id" : "function-encrypt",
+  "expr" : "{{ encrypt(key=k, plaintext='hello-secret') }}",
+  "context" : {
+    "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
+  },
+  "result" : "JAcIRQQtHcGZ/HNmX2bcKx/lEUYsspxZFEVW3+Zvd5vhvDRHwcTOMg=="
+}, {
+  "id" : "function-decrypt",
+  "expr" : "{{ decrypt(key=k, encrypted=e) }}",
+  "context" : {
+    "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY=",
+    "e" : "jw802WCJ41neKSYhoaevC8MOepbp12q0JVqoduhDIfo0Gv7nMnr2uA=="
+  },
+  "result" : "hello-secret"
+}, {
+  "id" : "function-yaml",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "a: 1\nb: 2\n"
+  },
+  "result" : "{\"a\":1,\"b\":2}"
+}, {
+  "id" : "function-fetchcontext",
+  "expr" : "{{ fetchContext() }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "{\"x\":1}"
+}, {
+  "id" : "function-printcontext",
+  "expr" : "{{ printContext() }}",
+  "context" : {
+    "x" : 1
+  },
+  "result" : "{\"x\":1}"
+}, {
+  "id" : "function-uuid",
+  "expr" : "{{ uuid() }}",
+  "context" : { },
+  "result" : "01a0603b-0f9c-760c-91ab-861c8d216f4a"
+}, {
+  "id" : "function-id",
+  "expr" : "{{ id() }}",
+  "context" : { },
+  "result" : "1CMZWiDU0Cj3c1y0z8CnXY"
+}, {
+  "id" : "function-ksuid",
+  "expr" : "{{ ksuid() }}",
+  "context" : { },
+  "result" : "3IkuRMkX2jsED2R1UsjqsvSQJUM"
+}, {
+  "id" : "function-fromion",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "{a:1,b:2}"
+  },
+  "result" : "{\"a\":1,\"b\":2}"
+}, {
+  "id" : "function-filesize",
+  "expr" : "{{ fileSize(path='a/b.txt') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileSize] does not exist. ({{ fileSize(path='a/b.txt') }}:1)"
+  }
+}, {
+  "id" : "function-randomint",
+  "expr" : "{{ randomInt(lower=1, upper=10) }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-randomport",
+  "expr" : "{{ randomPort() }}",
+  "context" : { },
+  "result" : "52901"
+}, {
+  "id" : "function-fileexists",
+  "expr" : "{{ fileExists(path='a/b.txt') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileExists] does not exist. ({{ fileExists(path='a/b.txt') }}:1)"
+  }
+}, {
+  "id" : "function-isfileempty",
+  "expr" : "{{ isFileEmpty(path='a/b.txt') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [isFileEmpty] does not exist. ({{ isFileEmpty(path='a/b.txt') }}:1)"
+  }
+}, {
+  "id" : "function-nanoid",
+  "expr" : "{{ nanoId() }}",
+  "context" : { },
+  "result" : "hyo_peKNGO81wUBPA7RAW"
+}, {
+  "id" : "function-taskswithstate",
+  "expr" : "{{ tasksWithState(state='FAILED') }}",
+  "context" : {
+    "tasks" : {
+      "myTask" : {
+        "state" : "FAILED"
+      }
+    }
+  },
+  "result" : "[{\"state\":\"FAILED\",\"taskId\":\"myTask\"}]"
+}, {
+  "id" : "function-http",
+  "expr" : "{{ http(uri='https://example.com') }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [http] does not exist. ({{ http(uri='https://example.com') }}:1)"
+  }
+}, {
+  "id" : "function-range",
+  "expr" : "{{ range(start=1, end=5) }}",
+  "context" : { },
+  "result" : "[1,2,3,4,5]"
+}, {
+  "id" : "function-ispublicholiday",
+  "expr" : "{{ isPublicHoliday(date=d, countryCode='FR') }}",
+  "context" : {
+    "d" : "2024-01-01"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth",
+  "expr" : "{{ isDayWeekInMonth(date=d, dayOfWeek='MONDAY', position='FIRST') }}",
+  "context" : {
+    "d" : "2024-01-01"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-isweekend",
+  "expr" : "{{ isWeekend(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-islastworkingday",
+  "expr" : "{{ isLastWorkingDay(date=d) }}",
+  "context" : {
+    "d" : "2024-01-31"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-dayofweek",
+  "expr" : "{{ dayOfWeek(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06"
+  },
+  "result" : "SATURDAY"
+}, {
+  "id" : "function-hourofday",
+  "expr" : "{{ hourOfDay(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T14:30:00Z"
+  },
+  "result" : "14"
+}, {
+  "id" : "function-dayofmonth",
+  "expr" : "{{ dayOfMonth(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06"
+  },
+  "result" : "6"
+}, {
+  "id" : "function-monthofyear",
+  "expr" : "{{ monthOfYear(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06"
+  },
+  "result" : "1"
+}, {
+  "id" : "function-loopoutputs",
+  "expr" : "{{ loopOutputs(outputs=o, name='x') }}",
+  "context" : {
+    "o" : [ {
+      "outputs" : {
+        "x" : 1
+      }
+    }, {
+      "outputs" : {
+        "x" : 2
+      }
+    } ]
+  },
+  "result" : "[1,2]"
+}, {
+  "id" : "test-json-true",
+  "expr" : "{{ (s is json) }}",
+  "context" : {
+    "s" : "{\"a\": 1}"
+  },
+  "result" : "true"
+}, {
+  "id" : "test-json-false",
+  "expr" : "{{ (s is json) }}",
+  "context" : {
+    "s" : "not json"
+  },
+  "result" : "false"
+} ]
