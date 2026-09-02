@@ -2831,6 +2831,19 @@ mod tests {
             err("{{ d | date('yyyyyyyyyyyyyyyyyyyy', timeZone='UTC') }}", d)
                 .contains("The minimum width must be from 1 to 19 inclusive but was 20")
         );
+        // **A fourth sentence, for the two letters whose accepted counts are
+        // not a range.** `v` takes 1 or 4 and `B` takes 1, 4 or 5; anything
+        // else is `Wrong number of pattern letters`, which is a different rule
+        // from `Too many pattern letters` and was unpinned until the fix
+        // round's probe sweep walked every letter at counts 1-11.
+        assert!(err("{{ d | date('vv', timeZone='UTC') }}", d)
+            .contains("Wrong number of pattern letters: v"));
+        assert!(err("{{ d | date('BB', timeZone='UTC') }}", d)
+            .contains("Wrong number of pattern letters: B"));
+        // `v` at a count Java accepts is a REFUSAL, not an invalid pattern --
+        // the distinction the sweep found missing entirely.
+        assert!(err("{{ d | date('vvvv', timeZone='UTC') }}", d)
+            .contains("cannot render pattern letter 'v'"));
         // One under each limit still works, so the messages above are a
         // boundary and not a blanket refusal.
         assert_eq!(ok("{{ d | date('dd', timeZone='UTC') }}", d), "15");
@@ -2911,6 +2924,12 @@ mod tests {
             .contains("Unknown time-zone ID: Not/AZone"));
         assert!(
             err("{{ d | date('iso', timeZone='utc') }}", d).contains("Unknown time-zone ID: utc")
+        );
+        // The four `chrono-tz` ids `ZoneId.of` rejects -- see
+        // `the_four_legacy_zone_ids_java_rejects_are_denied_here_too` for why
+        // this set is closed rather than a guess.
+        assert!(
+            err("{{ d | date('iso', timeZone='EST') }}", d).contains("Unknown time-zone ID: EST")
         );
     }
 
@@ -2995,11 +3014,15 @@ mod tests {
         // The longest a pattern's output can be is a pad, and a pad's width is
         // the pattern's own length -- linear, so `MAX_OUTPUT_BYTES` already
         // measures it where it is written.
+        //
+        // **Asserted as the exact string, not as a length.** The first cut
+        // asserted `.len() == 64`, which a pad that filled with `'0'` instead
+        // of `' '`, or padded on the wrong side, satisfies just as well --
+        // mutating the pad character left all 246 lib tests green. Found by
+        // the fix round's review.
         let pad = format!("{}H", "p".repeat(64));
-        assert_eq!(
-            ok(&format!("{{{{ d | date('{pad}', timeZone='UTC') }}}}"), d).len(),
-            64
-        );
+        let padded = ok(&format!("{{{{ d | date('{pad}', timeZone='UTC') }}}}"), d);
+        assert_eq!(padded, format!("{}10", " ".repeat(62)));
         assert!(err(
             "{{ d | dateAdd(9223372036854775807, 'DAYS', 'iso', 'UTC') }}",
             d
@@ -3034,10 +3057,26 @@ mod tests {
     /// reaches `DateTimeFormatter.ofPattern(null)` and the message is the
     /// single word `pattern`, from the NPE. Omitting the argument entirely is
     /// what selects `iso`.
+    /// **This assertion used to be satisfiable by the wrong implementation.**
+    /// It read `contains("pattern")`, and the obvious wrong port -- drop the
+    /// `containsKey` special case, stringify a null `format` as `"null"`,
+    /// reach `Pattern::parse("null")` -- fails with
+    /// `Unknown pattern letter: l`, which contains "pattern" too. Mutating the
+    /// message left all 246 lib tests green. Found by the fix round's review;
+    /// the message is now pinned WHOLE, and the wrong route's message is
+    /// asserted absent.
     #[test]
     fn a_present_but_null_format_is_not_the_default() {
         let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
-        assert!(err("{{ d | date(null, timeZone='UTC') }}", d).contains("pattern"));
+        let message = err("{{ d | date(null, timeZone='UTC') }}", d);
+        assert!(
+            message.contains("invalid operation: pattern"),
+            "the NPE's message is the single word `pattern`: {message}"
+        );
+        assert!(
+            !message.contains("Unknown pattern letter"),
+            "a null `format` must not be stringified into a pattern: {message}"
+        );
         assert_eq!(
             ok("{{ d | date(timeZone='UTC') }}", d),
             "2024-01-15T10:30:00.000000Z"
@@ -3084,6 +3123,287 @@ mod tests {
             ),
             "2024"
         );
+    }
+
+    // -- W2 Task 5 fix round 1: what the probe sweep earned --------------
+
+    /// The three year letters take **three sign styles by count**, and both
+    /// edges were silently wrong.
+    ///
+    /// `uu` is `Math.abs(value) % 100`, so year -44 is `44` and not `56`; and
+    /// `SignStyle.EXCEEDS_PAD` writes a `+` at count >= 4 when the value needs
+    /// more digits than the pad, so Kestra's DEFAULT `iso` format renders
+    /// `+10000-01-15T…`. `filter-date-pattern-era-bc` could not see the first
+    /// because it probes `y|u|yyyy|uuuu` and omits the one count that breaks;
+    /// nothing probed a year past 9999 at all.
+    #[test]
+    fn the_year_letters_take_three_sign_styles_by_count() {
+        let bc = r#"{"d": "-0044-03-15T10:30:00Z"}"#;
+        let big = r#"{"d": "+10000-01-15T10:30:00Z"}"#;
+        // Reduced: absolute value FIRST, so -44 is `44` and -1 is `01`.
+        assert_eq!(
+            ok("{{ d | date('u|uu|uuu|uuuu', timeZone='UTC') }}", bc),
+            "-44|44|-044|-0044"
+        );
+        assert_eq!(
+            ok(
+                "{{ d | date('u|uu', timeZone='UTC') }}",
+                r#"{"d": "-0001-12-31T00:00:00Z"}"#
+            ),
+            "-1|01"
+        );
+        // EXCEEDS_PAD: a `+` only at count >= 4 and only when the digits
+        // exceed the width. Count 5 holds 10000 exactly, so no sign; count 6
+        // pads instead.
+        assert_eq!(
+            ok(
+                "{{ d | date('y|yy|yyy|yyyy|yyyyy|yyyyyy', timeZone='UTC') }}",
+                big
+            ),
+            "10000|00|10000|+10000|10000|010000"
+        );
+        // …and it reaches the DEFAULT format, which is the reason this matters.
+        assert_eq!(
+            ok("{{ d | date(timeZone='UTC') }}", big),
+            "+10000-01-15T10:30:00.000000Z"
+        );
+    }
+
+    /// `p` needs a **pattern letter** after it, and a pad that is too narrow
+    /// for its value **throws** rather than letting the value through.
+    ///
+    /// Both were wrong in the first cut, and `filter-date-pattern-pad` could
+    /// not see either: its `ppH|'x'pppmm` is evaluated at **05:07**, the one
+    /// clock time where both fields fit inside their pads. At 10:30 the same
+    /// shape throws.
+    #[test]
+    fn date_reproduces_javas_padding_rules() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        // A pad must be followed by a letter -- not a quote, not a bracket.
+        assert!(err(r#"{{ d | date("pp'x'", timeZone='UTC') }}"#, d)
+            .contains("Pad letter 'p' must be followed by valid pad pattern: pp'x'"));
+        assert!(err("{{ d | date('p[H]', timeZone='UTC') }}", d)
+            .contains("Pad letter 'p' must be followed by valid pad pattern: p[H]"));
+        assert!(err("{{ d | date('pp', timeZone='UTC') }}", d)
+            .contains("Pad letter 'p' must be followed by valid pad pattern: pp"));
+        // …and the pad must be wide enough for what it pads.
+        assert!(err("{{ d | date('pH', timeZone='UTC') }}", d)
+            .contains("Cannot print as output of 2 characters exceeds pad width of 1"));
+        // The passing side, spelled out so the pad character and side are
+        // pinned and not just the width.
+        assert_eq!(ok("{{ d | date('ppppH', timeZone='UTC') }}", d), "  10");
+        assert_eq!(
+            ok(
+                "{{ d | date('pH', timeZone='UTC') }}",
+                r#"{"d": "2024-01-15T05:30:00Z"}"#
+            ),
+            "5"
+        );
+    }
+
+    /// `ZoneOffset.of`'s grammar is driven by the id's **length**, and each
+    /// rejection has its own sentence.
+    ///
+    /// A first cut counted digits and ignored where the colon sat, so
+    /// `+0:730` and `+5:30` both resolved to a zone here and throw in Kestra.
+    #[test]
+    fn date_reproduces_javas_zone_offset_grammar() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert!(err("{{ d | date('iso', timeZone='+0:730') }}", d)
+            .contains("Invalid ID for ZoneOffset, non numeric characters found: +0:730"));
+        assert!(err("{{ d | date('iso', timeZone='+5:30') }}", d)
+            .contains("Invalid ID for ZoneOffset, non numeric characters found: +5:30"));
+        assert!(err("{{ d | date('iso', timeZone='+19:00') }}", d)
+            .contains("Zone offset hours not in valid range: value 19 is not in the range"));
+        assert!(err("{{ d | date('iso', timeZone='+18:00:01') }}", d)
+            .contains("Zone offset not in valid range: -18:00 to +18:00"));
+        // A prefixed offset re-wraps the failure under `ZoneId`'s own message.
+        assert!(err("{{ d | date('iso', timeZone='GMT+') }}", d)
+            .contains("Invalid ID for offset-based ZoneId: GMT+"));
+        // The forms Java DOES take, including the one-digit hour that only
+        // exists under a prefix.
+        assert_eq!(ok("{{ d | date('VV', timeZone='+18:00') }}", d), "+18:00");
+        assert_eq!(ok("{{ d | date('VV', timeZone='GMT+7') }}", d), "GMT+07:00");
+        assert_eq!(ok("{{ d | date('VV', timeZone='+05') }}", d), "+05:00");
+    }
+
+    /// `rfc_1123_date_time` is the one named format with a **year range**:
+    /// its year is `appendValue(YEAR, 4, 4, NOT_NEGATIVE)`, so a BC year and a
+    /// five-digit year each throw, with different sentences.
+    #[test]
+    fn rfc_1123_refuses_a_year_it_cannot_print() {
+        assert!(err(
+            "{{ d | date('rfc_1123_date_time', timeZone='UTC') }}",
+            r#"{"d": "+10000-01-15T10:30:00Z"}"#
+        )
+        .contains("exceeds the maximum print width of 4"));
+        assert!(err(
+            "{{ d | date('rfc_1123_date_time', timeZone='UTC') }}",
+            r#"{"d": "-0044-03-15T10:30:00Z"}"#
+        )
+        .contains("cannot be negative according to the SignStyle"));
+        // Four digits is fine, and so is a three-digit year zero-padded to it.
+        assert_eq!(
+            ok(
+                "{{ d | date('rfc_1123_date_time', timeZone='UTC') }}",
+                r#"{"d": "0999-03-15T10:30:00Z"}"#
+            ),
+            "Fri, 15 Mar 0999 10:30:00 GMT"
+        );
+    }
+
+    /// **`HALF_DAYS` is not twelve hours per unit past 255.**
+    ///
+    /// `LocalDateTime.plus` is
+    /// `plusDays(n / 256).plusHours((n % 256) * 12)` — the divisor should be
+    /// 2 — so `dateAdd(256, 'HALF_DAYS')` adds ONE DAY, not 128. Reproduced
+    /// rather than corrected: it is a wrong answer, not a resource vector, and
+    /// a port that quietly fixed it would give a different date for the same
+    /// flow. Found by the fix round's probe sweep; the original corpus probed
+    /// `HALF_DAYS` only at 1, where the two agree.
+    #[test]
+    fn date_add_reproduces_javas_half_days_arithmetic() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        let day = |amount: i64| {
+            ok(
+                &format!("{{{{ d | dateAdd({amount}, 'HALF_DAYS', 'uuuu-MM-dd HH:mm', 'UTC') }}}}"),
+                d,
+            )
+        };
+        // Below 256 the identity holds: 255 half-days is 127 days and 12h.
+        assert_eq!(day(255), "2024-05-21 22:30");
+        // At 256 it does not: one day, where twelve-hours-per-unit is 128.
+        assert_eq!(day(256), "2024-01-16 10:30");
+        assert_eq!(day(-1000), "2023-09-18 10:30");
+    }
+
+    /// `plus(n, ERAS)` **flips the era** when the target is 0 or 1; it is not
+    /// a no-op-or-throw. `with(ERA, 0)` on 2024 is `withYear(1 - 2024)`.
+    #[test]
+    fn date_add_flips_the_era_rather_than_refusing_every_shift() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        assert_eq!(
+            ok("{{ d | dateAdd(-1, 'ERAS', 'uuuu-MM-dd', 'UTC') }}", d),
+            "-2023-01-15"
+        );
+        assert_eq!(
+            ok("{{ d | dateAdd(0, 'ERAS', 'uuuu-MM-dd', 'UTC') }}", d),
+            "2024-01-15"
+        );
+        // Only a target outside {0, 1} is the range error.
+        assert!(err("{{ d | dateAdd(1, 'ERAS', 'iso', 'UTC') }}", d)
+            .contains("Invalid value for Era (valid values 0 - 1): 2"));
+        assert!(err("{{ d | dateAdd(-2, 'ERAS', 'iso', 'UTC') }}", d)
+            .contains("Invalid value for Era (valid values 0 - 1): -1"));
+    }
+
+    /// **egret's date range is `chrono`'s, and it says so in its own words.**
+    ///
+    /// A `NaiveDateTime` reaches about ±262 143 years and `LocalDateTime`
+    /// reaches ±999 999 999, so a `dateAdd` in between succeeds in Kestra and
+    /// cannot be represented here. The limit is `chrono`'s; the first cut
+    /// reported it as `long overflow`, which is Java's sentence for a
+    /// different cause, and its test asserted exactly the two extremes where
+    /// the two engines agree. `filter-dateadd-past-egrets-date-range` is the
+    /// baselined entry.
+    #[test]
+    fn date_add_past_egrets_range_says_so_rather_than_claiming_overflow() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        let message = err("{{ d | dateAdd(100000000, 'DAYS', 'iso', 'UTC') }}", d);
+        assert!(message.contains("egret's dates are chrono's"), "{message}");
+        assert!(
+            !message.contains("long overflow"),
+            "a representable-range refusal must not borrow Java's arithmetic-overflow \
+             sentence: {message}"
+        );
+        // Genuine `long` overflow keeps Java's wording, and the two are now
+        // told apart rather than sharing one message.
+        assert!(err(
+            "{{ d | dateAdd(9223372036854775807, 'DAYS', 'iso', 'UTC') }}",
+            d
+        )
+        .contains("long overflow"));
+    }
+
+    /// `chrono-tz` carries four zone ids `ZoneId.of` rejects, and the set is
+    /// closed: every one of its 597 names was fed to `ZoneId.of` and exactly
+    /// `EST`, `HST`, `MST` and `ROC` threw. Longer aliases of the same zones
+    /// are fine on both sides, which is what makes this counter-intuitive.
+    #[test]
+    fn the_four_legacy_zone_ids_java_rejects_are_denied_here_too() {
+        let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
+        for id in ["EST", "HST", "MST", "ROC"] {
+            let message = err(&format!("{{{{ d | date('iso', timeZone='{id}') }}}}"), d);
+            assert!(
+                message.contains(&format!("Unknown time-zone ID: {id}")),
+                "{message}"
+            );
+        }
+        assert_eq!(ok("{{ d | date('VV', timeZone='EST5EDT') }}", d), "EST5EDT");
+        assert_eq!(
+            ok("{{ d | date('VV', timeZone='US/Eastern') }}", d),
+            "US/Eastern"
+        );
+    }
+
+    /// Java's **adjacent value parsing**: a variable-width field hands digits
+    /// back to the fixed-width fields that follow it, which is the only reason
+    /// `yyyyMMdd` can parse `20240115`. And `ofPattern`'s resolver is
+    /// **SMART**, so a day past the end of its month is clamped — while the
+    /// bare ISO path is STRICT and refuses the same input.
+    #[test]
+    fn an_existing_format_parses_adjacent_values_and_resolves_smartly() {
+        let iso = "{{ d | date('iso', timeZone='UTC', existingFormat=";
+        assert_eq!(
+            ok(&format!("{iso}'yyyyMMdd') }}}}"), r#"{"d": "20240115"}"#),
+            "2024-01-15T00:00:00.000000Z"
+        );
+        assert_eq!(
+            ok(
+                &format!("{iso}'yyyyMMddHHmmss') }}}}"),
+                r#"{"d": "20240115103000"}"#
+            ),
+            "2024-01-15T10:30:00.000000Z"
+        );
+        // SMART clamps the day; STRICT (the bare ISO path) does not.
+        assert_eq!(
+            ok(
+                &format!("{iso}'yyyy-MM-dd') }}}}"),
+                r#"{"d": "2024-02-30"}"#
+            ),
+            "2024-02-29T00:00:00.000000Z"
+        );
+        assert!(err(
+            "{{ d | date('iso', timeZone='UTC') }}",
+            r#"{"d": "2024-02-30"}"#
+        )
+        .contains("could not be parsed"));
+        // A field range is still checked: SMART clamps a date, not a value.
+        assert!(err(
+            &format!("{iso}'yyyy-MM-dd') }}}}"),
+            r#"{"d": "2024-13-01"}"#
+        )
+        .contains("could not be parsed"));
+    }
+
+    /// The ISO literals `T` and `Z` are **case-insensitive** because the
+    /// `java.time` constants call `parseCaseInsensitive()`; a user-written
+    /// `'T'` in an `existingFormat` is **not**, because `ofPattern` does not.
+    /// Measured both ways.
+    #[test]
+    fn the_iso_literals_are_case_insensitive_and_a_pattern_literal_is_not() {
+        assert_eq!(
+            ok(
+                "{{ d | date('iso', timeZone='UTC') }}",
+                r#"{"d": "2024-01-15t10:30:00z"}"#
+            ),
+            "2024-01-15T10:30:00.000000Z"
+        );
+        assert!(err(
+            r#"{{ d | date('iso', timeZone='UTC', existingFormat="yyyy-MM-dd'T'HH:mm:ss") }}"#,
+            r#"{"d": "2024-01-15t10:30:00"}"#
+        )
+        .contains("could not be parsed"));
     }
 
     /// The `timestamp*` filters declare `[timeZone, existingFormat]` and

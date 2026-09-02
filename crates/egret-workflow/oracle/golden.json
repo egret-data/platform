@@ -1290,6 +1290,250 @@
   },
   "result" : "java.lang.Long"
 }, {
+  "id" : "filter-date-pattern-reduced-year-bc",
+  "expr" : "{{ d | date('u|uu|uuu|uuuu|y|yy|Y|YY', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "-0044-03-15T10:30:00Z"
+  },
+  "result" : "-44|44|-044|-0044|45|45|-44|44"
+}, {
+  "id" : "filter-date-pattern-reduced-year-year-one",
+  "expr" : "{{ d | date('u|uu|y|yy|Y|YY', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "-0001-12-31T10:30:00Z"
+  },
+  "result" : "-1|01|2|02|0|00"
+}, {
+  "id" : "filter-date-pattern-year-exceeds-pad",
+  "expr" : "{{ d | date('y|yy|yyy|yyyy|yyyyy|yyyyyy|u|uuuu|Y|YYYY', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15T10:30:00Z"
+  },
+  "result" : "10000|00|10000|+10000|10000|010000|10000|+10000|10000|+10000"
+}, {
+  "id" : "filter-date-format-iso-year-exceeds-pad",
+  "expr" : "{{ d | date('iso', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15T10:30:00Z"
+  },
+  "result" : "+10000-01-15T10:30:00.000000Z"
+}, {
+  "id" : "filter-date-format-sql-year-exceeds-pad",
+  "expr" : "{{ d | date('sql', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15T10:30:00Z"
+  },
+  "result" : "+10000-01-15 10:30:00.000000"
+}, {
+  "id" : "filter-date-pattern-generic-zone-name",
+  "expr" : "{{ d | date('v|vvvv', timeZone='Asia/Tokyo', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "JT|Japan Time"
+}, {
+  "id" : "filter-date-pattern-generic-zone-wrong-count",
+  "expr" : "{{ d | date('vv', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Wrong number of pattern letters: v"
+  }
+}, {
+  "id" : "filter-date-pattern-day-period-wrong-count",
+  "expr" : "{{ d | date('BB', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Wrong number of pattern letters: B"
+  }
+}, {
+  "id" : "filter-date-pattern-pad-at-a-wide-value",
+  "expr" : "{{ d | date(\"pH|'x'pppmm\", timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.DateTimeException: Cannot print as output of 2 characters exceeds pad width of 1"
+  }
+}, {
+  "id" : "filter-date-pattern-pad-wide-enough",
+  "expr" : "{{ d | date('ppppH|ppppmm', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "  10|  30"
+}, {
+  "id" : "filter-date-pattern-pad-not-followed-by-a-letter",
+  "expr" : "{{ d | date(\"pp'x'\", timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Pad letter 'p' must be followed by valid pad pattern: pp'x'"
+  }
+}, {
+  "id" : "filter-date-pattern-pad-before-a-bracket",
+  "expr" : "{{ d | date('p[H]', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Pad letter 'p' must be followed by valid pad pattern: p[H]"
+  }
+}, {
+  "id" : "filter-dateadd-past-egrets-date-range",
+  "expr" : "{{ d | dateAdd(100000000, 'DAYS', 'iso', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "+275814-09-28T10:30:00.000000Z"
+}, {
+  "id" : "filter-timestamp-classname",
+  "expr" : "{{ d | timestamp | className }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "java.lang.Long"
+}, {
+  "id" : "filter-dateadd-half-days-at-256",
+  "expr" : "{{ d | dateAdd(256, 'HALF_DAYS', 'iso', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2024-01-16T10:30:00.000000Z"
+}, {
+  "id" : "filter-dateadd-half-days-past-255",
+  "expr" : "{{ d | dateAdd(-1000, 'HALF_DAYS', 'iso', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2023-09-18T10:30:00.000000Z"
+}, {
+  "id" : "filter-dateadd-half-days-under-256",
+  "expr" : "{{ d | dateAdd(255, 'HALF_DAYS', 'iso', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2024-05-21T22:30:00.000000Z"
+}, {
+  "id" : "filter-dateadd-eras-back-flips-the-era",
+  "expr" : "{{ d | dateAdd(-1, 'ERAS', 'uuuu-MM-dd', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "-2023-01-15"
+}, {
+  "id" : "filter-date-zone-offset-forms",
+  "expr" : "{{ d | date('VV|XXX', timeZone='+18:00', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "+18:00|+18:00"
+}, {
+  "id" : "filter-date-zone-prefixed-offset",
+  "expr" : "{{ d | date('VV|XXX', timeZone='UT+5', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "UT+05:00|+05:00"
+}, {
+  "id" : "filter-date-zone-offset-colon-placement",
+  "expr" : "{{ d | date('iso', timeZone='+0:730', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.DateTimeException: Invalid ID for ZoneOffset, non numeric characters found: +0:730"
+  }
+}, {
+  "id" : "filter-date-zone-offset-out-of-range",
+  "expr" : "{{ d | date('iso', timeZone='+19:00', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.DateTimeException: Zone offset hours not in valid range: value 19 is not in the range -18 to 18"
+  }
+}, {
+  "id" : "filter-date-zone-legacy-three-letter",
+  "expr" : "{{ d | date('iso', timeZone='EST', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.zone.ZoneRulesException: Unknown time-zone ID: EST"
+  }
+}, {
+  "id" : "filter-date-zone-legacy-longer-alias",
+  "expr" : "{{ d | date('VV|XXX', timeZone='EST5EDT', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "EST5EDT|-05:00"
+}, {
+  "id" : "filter-date-format-rfc-1123-year-out-of-range",
+  "expr" : "{{ d | date('rfc_1123_date_time', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15T10:30:00Z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.DateTimeException: Field Year cannot be printed as the value 10000 exceeds the maximum print width of 4"
+  }
+}, {
+  "id" : "filter-date-format-rfc-1123-three-digit-year",
+  "expr" : "{{ d | date('rfc_1123_date_time', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "0999-03-15T10:30:00Z"
+  },
+  "result" : "Fri, 15 Mar 0999 10:30:00 GMT"
+}, {
+  "id" : "filter-date-input-lowercase-iso-literals",
+  "expr" : "{{ d | date('iso', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15t10:30:00z"
+  },
+  "result" : "2024-01-15T10:30:00.000000Z"
+}, {
+  "id" : "filter-date-existing-format-adjacent-values",
+  "expr" : "{{ d | date('iso', timeZone='UTC', existingFormat='yyyyMMdd', locale='en') }}",
+  "context" : {
+    "d" : "20240115"
+  },
+  "result" : "2024-01-15T00:00:00.000000Z"
+}, {
+  "id" : "filter-date-existing-format-adjacent-values-with-time",
+  "expr" : "{{ d | date('iso', timeZone='UTC', existingFormat='yyyyMMddHHmmss', locale='en') }}",
+  "context" : {
+    "d" : "20240115103000"
+  },
+  "result" : "2024-01-15T10:30:00.000000Z"
+}, {
+  "id" : "filter-date-existing-format-smart-resolver",
+  "expr" : "{{ d | date('iso', timeZone='UTC', existingFormat='yyyy-MM-dd', locale='en') }}",
+  "context" : {
+    "d" : "2024-02-30"
+  },
+  "result" : "2024-02-29T00:00:00.000000Z"
+}, {
+  "id" : "filter-date-existing-format-era",
+  "expr" : "{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='G yyyy-MM-dd', locale='en') }}",
+  "context" : {
+    "d" : "BC 0045-03-15"
+  },
+  "result" : "-0044-03-15"
+}, {
   "id" : "filter-jq",
   "expr" : "{{ json | jq('.a.b') }}",
   "context" : {
@@ -1500,7 +1744,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T22:27:12.499606+07:00"
+  "result" : "2026-09-02T23:13:19.007121+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -1551,7 +1795,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "H2F2fv5UJF79vfUlHPdjOigxx5myrhq1nVX458hIz/s1/4R00sA2pg=="
+  "result" : "AJpU5PHG560baAAe9HRJ9R5eGaMuio0nGel5TFFWe4R9/Yat5AZpfQ=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -1585,17 +1829,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a062bb-3a9f-7c21-8b2e-edd3253aa57c"
+  "result" : "01a062e5-7149-73fe-b2d4-429e742b9e61"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "35FILUfBc88e7UaYj7fxKf"
+  "result" : "6dC0OGvKlApIEbG2UWPLRh"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3ImHThnsE0d87DzESeKE6mZLL0a"
+  "result" : "3ImN5Nf8dNINAZagqG4FNKk0LVg"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -1615,12 +1859,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "6"
+  "result" : "9"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "56539"
+  "result" : "59298"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -1641,7 +1885,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "5jHKdVI5qzKRgzY-tPKr_"
+  "result" : "g2LIGxNGoFAlycgUGALmg"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",

@@ -149,23 +149,29 @@ filter-string-undefined-input
 filter-escapechar-map-two-keys
 
 
-# W2 TASK 5, DELIBERATE (1 of 3): egret refuses the two pattern letters whose
+# W2 TASK 5, DELIBERATE (1 of 3): egret refuses the THREE pattern letters whose
 # output is TEXT OUT OF A LOCALE DATABASE, rather than answering plausibly.
 #
-# `z`/`zz`/`zzz`/`zzzz` is the zone's CLDR display name and `zzzz` its long
-# form. Measured through this harness: Asia/Tokyo is `JST`, Asia/Ho_Chi_Minh is
-# `GMT+07:00`, Australia/Eucla is `GMT+08:45`, Europe/Moscow is `GMT+03:00`.
-# tzdb's own abbreviations -- which `chrono-tz` exposes and which are the only
-# zone text available to egret -- agree for the first and the third and say
-# `+07` and `MSK` for the other two. There is no rule that is right for both
-# halves, so `runners::javafmt::format_field` refuses with the letter named.
-# `B` (the day period as text, `in the morning`) is refused for the same
-# reason and has no corpus entry of its own.
+# `z`/`zz`/`zzz`/`zzzz` is the zone's CLDR *specific* display name. Measured
+# through this harness: Asia/Tokyo is `JST`, Asia/Ho_Chi_Minh is `GMT+07:00`,
+# Australia/Eucla is `GMT+08:45`, Europe/Moscow is `GMT+03:00`. tzdb's own
+# abbreviations -- which `chrono-tz` exposes and which are the only zone text
+# available to egret -- agree for the first and the third and say `+07` and
+# `MSK` for the other two. There is no rule that is right for both halves, so
+# `runners::javafmt::format_field` refuses with the letter named.
+#
+# `v`/`vvvv` is the *generic* zone name (`JT` / `Japan Time`), a third CLDR
+# table, and is refused for the same reason. **It was missing from the
+# alphabet entirely until the fix round's probe sweep**, so egret said
+# `Unknown pattern letter: v` where Java says the pattern is valid -- telling
+# an author their pattern was wrong when it was not. `B` (the day period as
+# text, `in the morning`) is the third and has no corpus entry of its own.
 #
 # `full` and `long` are the same fact once removed: their CLDR patterns end in
 # `zzzz` and `z`, so they inherit the refusal. `medium` and `short` do not and
 # both pass.
 filter-date-pattern-zone-name
+filter-date-pattern-generic-zone-name
 filter-date-style-full
 filter-date-style-long
 
@@ -201,3 +207,36 @@ filter-date-locale-french
 # filter-date-epoch-millis-context, filter-date-epoch-nanos-context and
 # filter-date-epoch-nanos-truncating all pass, and this one records the cost.
 filter-date-epoch-seconds-context
+
+
+# W2 TASK 5 FIX ROUND 1, DELIBERATE: egret's DATE RANGE is chrono's, which is
+# narrower than java.time's.
+#
+# A `NaiveDateTime` reaches about +/-262143 years; a `LocalDateTime` reaches
+# +/-999999999. So `dateAdd(100000000, 'DAYS')` is `+275814-09-28` in Kestra
+# and cannot be represented here. The limit is the crate's, not a choice.
+#
+# What WAS a choice, and was wrong, is the message: the first cut reported
+# `long overflow` -- Java's sentence for genuine `long` arithmetic overflowing,
+# a different cause -- and its unit test asserted exactly the two extremes
+# (`Long.MAX_VALUE` DAYS, 1e9 YEARS) where the two engines agree, while the
+# whole middle diverged silently. Both now separated: `runners::javafmt`
+# checks `Math.addExact` first and keeps `long overflow` for it, and says
+# `egret's dates are chrono's` for its own limit.
+filter-dateadd-past-egrets-date-range
+
+# W2 TASK 5 FIX ROUND 1, DELIBERATE: the FOURTH `className` row, which is the
+# one that fails.
+#
+# `{{ d | timestamp | className }}` is `java.lang.Long` in Kestra and
+# `java.lang.Integer` here, because `java_class_name` decides Integer-versus-
+# Long by MAGNITUDE and every epoch SECOND between 1901 and 2038 fits in an
+# `i32`. The milli/micro/nano ones are all outside that range, which is
+# exactly why `filter-timestampmicro-is-a-string`,
+# `filter-timestampnano-is-a-string` and `filter-timestampmilli-is-a-long`
+# pass -- three of four selected, unconsciously, to be the ones that work.
+#
+# The underlying limit is W2 Task 4's and is already recorded above under
+# filter-classname-literal-int. This line records that the `timestamp*` family
+# reaches it too.
+filter-timestamp-classname

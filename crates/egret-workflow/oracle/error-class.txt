@@ -145,3 +145,47 @@ filter-dateadd-unit-lowercase
 filter-dateadd-missing-unit
 filter-dateadd-amount-not-a-number
 filter-dateadd-amount-not-numeric-text
+
+# W2 TASK 5 FIX ROUND 1 -- nine more, every one of them a variant ONE STEP
+# from an entry above that already passed. That is the pattern the fix round's
+# review named, and it is what the probe sweep (every ASCII letter at counts
+# 1-11, every ChronoUnit at ten magnitudes, 50 zone ids, 30 existingFormat
+# patterns) exists to break: the entries above were chosen, unconsciously, to
+# be the variants that pass.
+#
+# Two of these carry a FOURTH JDK sentence the earlier eight never reached --
+# `Wrong number of pattern letters`, which is what `v` and `B` say for a count
+# outside their non-contiguous sets (`v` takes 1 or 4; `B` takes 1, 4 or 5).
+# `Too many pattern letters` is a different rule and was the only one pinned.
+#
+#   filter-date-pattern-generic-zone-wrong-count    -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-day-period-wrong-count      -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-pad-at-a-wide-value         -> date_reproduces_javas_padding_rules
+#   filter-date-pattern-pad-not-followed-by-a-letter-> date_reproduces_javas_padding_rules
+#   filter-date-pattern-pad-before-a-bracket        -> date_reproduces_javas_padding_rules
+#   filter-date-zone-offset-colon-placement         -> date_reproduces_javas_zone_offset_grammar
+#   filter-date-zone-offset-out-of-range            -> date_reproduces_javas_zone_offset_grammar
+#   filter-date-zone-legacy-three-letter            -> date_refuses_an_unknown_time_zone
+#   filter-date-format-rfc-1123-year-out-of-range   -> rfc_1123_refuses_a_year_it_cannot_print
+#
+# `filter-date-pattern-pad-at-a-wide-value` is the sharpest: it is the SAME
+# pattern as the passing `filter-date-pattern-pad`, at a different clock time.
+# 05:07 fits inside both pads; 10:30 does not, and Java throws
+# `Cannot print as output of 2 characters exceeds pad width of 1` where egret
+# was silently emitting the value unpadded.
+#
+# `filter-date-zone-legacy-three-letter` records that `ZoneId.of("EST")`
+# THROWS while `ZoneId.of("EST5EDT")` does not -- the JDK's tzdb build drops
+# the three-letter `backward` links that collide with `ZoneId.SHORT_IDS`.
+# `chrono-tz` carries them, so egret had to deny exactly four ids by name;
+# the set is closed, checked by feeding all 597 `chrono-tz` names to
+# `ZoneId.of`.
+filter-date-pattern-generic-zone-wrong-count
+filter-date-pattern-day-period-wrong-count
+filter-date-pattern-pad-at-a-wide-value
+filter-date-pattern-pad-not-followed-by-a-letter
+filter-date-pattern-pad-before-a-bracket
+filter-date-zone-offset-colon-placement
+filter-date-zone-offset-out-of-range
+filter-date-zone-legacy-three-letter
+filter-date-format-rfc-1123-year-out-of-range

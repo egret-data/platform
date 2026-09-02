@@ -31,23 +31,36 @@
 //!
 //! # What is deliberately NOT ported: text that lives in a locale database
 //!
-//! Two pattern letters and two of the four `FormatStyle`s need CLDR's zone
-//! and day-period text, which is a data set egret does not carry and cannot
-//! approximate without answering *plausibly wrong*:
+//! **Three** pattern letters and two of the four `FormatStyle`s need CLDR's
+//! zone and day-period text, which is a data set egret does not carry and
+//! cannot approximate without answering *plausibly wrong*:
 //!
-//! - **`z`/`zz`/`zzz`/`zzzz`** — the zone's display name. Measured through the
-//!   oracle: `Asia/Tokyo` is `JST`, `Asia/Ho_Chi_Minh` is `GMT+07:00`,
-//!   `Australia/Eucla` is `GMT+08:45`, `Europe/Moscow` is `GMT+03:00`. tzdb's
-//!   own abbreviations (which `chrono-tz` exposes) agree for the first and the
-//!   third but say `+07` for the second and `MSK` for the fourth. A rule that
-//!   is right for some zones and silently wrong for others is worse here than
-//!   a refusal, so [`Pattern::format`] refuses.
+//! - **`z`/`zz`/`zzz`/`zzzz`** — the zone's *specific* display name. Measured
+//!   through the oracle: `Asia/Tokyo` is `JST`, `Asia/Ho_Chi_Minh` is
+//!   `GMT+07:00`, `Australia/Eucla` is `GMT+08:45`, `Europe/Moscow` is
+//!   `GMT+03:00`. tzdb's own abbreviations (which `chrono-tz` exposes) agree
+//!   for the first and the third but say `+07` for the second and `MSK` for
+//!   the fourth. A rule that is right for some zones and silently wrong for
+//!   others is worse here than a refusal, so [`Pattern::format`] refuses.
+//! - **`v`/`vvvv`** — the zone's *generic* name (`JT` / `Japan Time`), a
+//!   third CLDR table. Same reason.
 //! - **`B`** — the day period as text (`in the morning`). Same reason.
 //! - **`full` and `long`** — their CLDR patterns end in `zzzz` and `z`, so
 //!   they inherit the refusal.
 //!
 //! Everything else in the alphabet is arithmetic or a fixed English word and
 //! is ported. See [`Locale`] for the one other locale-shaped limit.
+//!
+//! **This list is the whole refusal set, and it is now checked rather than
+//! recited.** The fix round's probe sweep pushes every ASCII letter at counts
+//! 1-11 through the real engine and through this module and differences the
+//! two, so a letter that is refused here but valid in Java shows up as a diff.
+//! `v` was missing from [`letter_limits`] entirely until it did: egret said
+//! `Unknown pattern letter: v` where Java prints `Japan Time`, which tells a
+//! flow author their pattern is invalid when it is not — a worse failure than
+//! refusing it. **A letter added to the refusal set must be added here, given
+//! a baselined corpus entry, and named in `oracle/README.md`**, the way `z`
+//! was and `v` was not.
 
 use std::fmt::Write as _;
 use std::str::FromStr;
@@ -174,7 +187,7 @@ impl Zone {
             ));
         }
         if id.starts_with('+') || id.starts_with('-') {
-            let offset = parse_offset_id(id).ok_or_else(|| invalid_offset(id))?;
+            let offset = parse_offset_id(id)?;
             return Ok(Zone::Fixed(offset, offset_id(offset)));
         }
         for prefix in ["UTC", "GMT", "UT"] {
@@ -190,7 +203,11 @@ impl Zone {
                     ));
                 }
                 if rest.starts_with('+') || rest.starts_with('-') {
-                    let offset = parse_offset_id(rest).ok_or_else(|| invalid_offset(id))?;
+                    // `ZoneId.of` re-wraps every `ZoneOffset` failure under a
+                    // prefix, so `GMT+` is `Invalid ID for offset-based
+                    // ZoneId` and not the offset parser's own sentence.
+                    let offset = parse_offset_id(rest)
+                        .map_err(|_| format!("Invalid ID for offset-based ZoneId: {id}"))?;
                     let suffix = offset_id(offset);
                     let name = if suffix == "Z" {
                         prefix.to_string()
@@ -200,6 +217,16 @@ impl Zone {
                     return Ok(Zone::Fixed(offset, name));
                 }
             }
+        }
+        // **Four ids `chrono-tz` carries that `ZoneId.of` rejects.** The JDK's
+        // tzdb build drops the three-letter `backward` links that collide with
+        // `ZoneId.SHORT_IDS`, plus `ROC`. The set is CLOSED, not a guess: every
+        // one of `chrono-tz` 0.10's 597 zone names was fed to `ZoneId.of` and
+        // exactly these four threw. (The other direction has 13 entries, all
+        // `SystemV/*`, which `chrono-tz` does not carry at all -- recorded in
+        // `oracle/README.md`, not fixable here.)
+        if matches!(id, "EST" | "HST" | "MST" | "ROC") {
+            return Err(format!("Unknown time-zone ID: {id}"));
         }
         // `Tz`'s parser is not case-sensitive about every id, and Java's is:
         // `ZoneId.of("utc")` throws. Requiring the canonical spelling back
@@ -258,42 +285,77 @@ impl Zone {
     }
 }
 
-fn invalid_offset(id: &str) -> String {
-    format!("Invalid ID for ZoneOffset, invalid format: {id}")
-}
+/// `ZoneOffset.of(id)`, whose grammar is driven by the id's **LENGTH**, not by
+/// how many digits it happens to contain.
+///
+/// `ZoneOffset.of` switches on `offsetId.length()` and reads each number from
+/// a fixed position: 2 is `+h`, 3 is `+hh`, 5 is `+hhmm`, 6 is `+hh:mm`, 7 is
+/// `+hhmmss`, 9 is `+hh:mm:ss`, and every other length is rejected outright.
+/// A first cut of this counted digits and ignored colon *placement*, which
+/// accepted `+0:730` and `+5:30` — both of which Java rejects, the first two
+/// with `non numeric characters found` because position 1 is a digit position
+/// and holds `0:` and `5:`. Found by the fix round's probe sweep.
+///
+/// Each rejection carries Java's own sentence, because these reach a flow
+/// author as the message on their `timeZone` argument.
+fn parse_offset_id(id: &str) -> Result<FixedOffset, String> {
+    let invalid = || format!("Invalid ID for ZoneOffset, invalid format: {id}");
+    let non_numeric = || format!("Invalid ID for ZoneOffset, non numeric characters found: {id}");
+    let no_colon = || format!("Invalid ID for ZoneOffset, colon not found when expected: {id}");
 
-/// `ZoneOffset.of(id)` for the spellings Java accepts: `+HH`, `+HHMM`,
-/// `+HH:MM`, `+HHMMSS`, `+HH:MM:SS`.
-fn parse_offset_id(id: &str) -> Option<FixedOffset> {
-    let (sign, rest) = match id.as_bytes().first()? {
-        b'+' => (1i32, &id[1..]),
-        b'-' => (-1i32, &id[1..]),
-        _ => return None,
+    let bytes = id.as_bytes();
+    let sign = match bytes.first() {
+        Some(b'+') => 1i32,
+        Some(b'-') => -1i32,
+        _ => return Err(invalid()),
     };
-    let digits: Vec<u32> = rest
-        .chars()
-        .filter(|c| *c != ':')
-        .map(|c| c.to_digit(10))
-        .collect::<Option<Vec<u32>>>()?;
-    let colons = rest.matches(':').count();
-    let (h, m, s) = match (digits.len(), colons) {
-        // `ZoneOffset.of` accepts `+h` as well as `+hh`, which is what makes
-        // `ZoneId.of("GMT+7")` a zone.
-        (1, 0) => (digits[0], 0, 0),
-        (2, 0) => (digits[0] * 10 + digits[1], 0, 0),
-        (4, 0) | (4, 1) => (digits[0] * 10 + digits[1], digits[2] * 10 + digits[3], 0),
-        (6, 0) | (6, 2) => (
-            digits[0] * 10 + digits[1],
-            digits[2] * 10 + digits[3],
-            digits[4] * 10 + digits[5],
-        ),
-        _ => return None,
+    // Length 2 is `+h`, which Java handles by rewriting it to `+0h` and
+    // falling through to the length-3 arm. That is what makes
+    // `ZoneId.of("GMT+7")` a zone while `ZoneOffset.of("+5:30")` is not one.
+    let padded;
+    let (bytes, len) = if id.len() == 2 {
+        padded = format!("{}0{}", &id[..1], &id[1..]);
+        (padded.as_bytes(), 3)
+    } else {
+        (bytes, id.len())
     };
-    if h > 18 || m > 59 || s > 59 {
-        return None;
+    let number = |pos: usize, preceded_by_colon: bool| -> Result<i32, String> {
+        if preceded_by_colon && bytes.get(pos - 1) != Some(&b':') {
+            return Err(no_colon());
+        }
+        let hi = bytes.get(pos).copied().ok_or_else(non_numeric)?;
+        let lo = bytes.get(pos + 1).copied().ok_or_else(non_numeric)?;
+        if !hi.is_ascii_digit() || !lo.is_ascii_digit() {
+            return Err(non_numeric());
+        }
+        Ok(i32::from((hi - b'0') * 10 + (lo - b'0')))
+    };
+    let (h, m, s) = match len {
+        3 => (number(1, false)?, 0, 0),
+        5 => (number(1, false)?, number(3, false)?, 0),
+        6 => (number(1, false)?, number(4, true)?, 0),
+        7 => (number(1, false)?, number(3, false)?, number(5, false)?),
+        9 => (number(1, false)?, number(4, true)?, number(7, true)?),
+        _ => return Err(invalid()),
+    };
+
+    // `ZoneOffset.validate`, in its own order: hours, then minutes, then the
+    // total. Each has a different sentence and the sweep separates them.
+    if !(-18..=18).contains(&h) {
+        return Err(format!(
+            "Zone offset hours not in valid range: value {h} is not in the range -18 to 18"
+        ));
     }
-    let seconds = sign * (h * 3600 + m * 60 + s) as i32;
-    FixedOffset::east_opt(seconds)
+    if !(0..=59).contains(&m) {
+        return Err(format!(
+            "Zone offset minutes not in valid range: value {m} is not in the range -59 to 59"
+        ));
+    }
+    let total = sign * (h * 3600 + m * 60 + s);
+    if total.abs() > 18 * 3600 {
+        return Err("Zone offset not in valid range: -18:00 to +18:00".to_string());
+    }
+    FixedOffset::east_opt(total).ok_or_else(invalid)
 }
 
 /// `ZoneOffset.getId()`: `Z` for zero, else `+HH:MM[:SS]`.
@@ -373,8 +435,13 @@ impl Zdt {
     }
 
     /// `ZonedDateTime.getNano()`.
+    ///
+    /// Read straight off the local time, the way [`format_field`] does. A
+    /// first cut went via `and_utc().timestamp_subsec_nanos()`, which is the
+    /// same number by a longer route and left two spellings of one field in
+    /// the module.
     pub(super) fn nano(&self) -> u32 {
-        self.local.and_utc().timestamp_subsec_nanos()
+        self.local.nanosecond().min(999_999_999)
     }
 
     /// `ZonedDateTime.plus(amount, unit)`.
@@ -467,7 +534,44 @@ impl ChronoUnit {
         )
     }
 
+    /// The duration `LocalDateTime.plus(amount, unit)` actually adds.
+    ///
+    /// # `HALF_DAYS` is not twelve hours per unit, and the JDK says so in a
+    /// comment that is wrong
+    ///
+    /// `LocalDateTime.plus` is
+    /// `case HALF_DAYS -> plusDays(amountToAdd / 256).plusHours((amountToAdd %
+    /// 256) * 12);` — read out of `src.zip` on the same Corretto 25 the
+    /// goldens are generated with, and annotated there
+    /// `// no overflow (256 is multiple of 2)`. The divisor should be 2. It is
+    /// 256, so the identity `n half-days == n * 12h` holds only for
+    /// `|n| < 256`: at 256 the JDK adds **one day**, not 128, and
+    /// `dateAdd(-1000, 'HALF_DAYS')` is 119 days back rather than 500.
+    ///
+    /// Reproduced rather than corrected. This is a wrong *answer*, not a
+    /// resource vector, and a port that quietly fixed it would give a
+    /// different date for the same flow — which is the one thing this package
+    /// exists to prevent. Found by the fix round's probe sweep, which walked
+    /// every `ChronoUnit` at ten magnitudes; the original corpus probed
+    /// `HALF_DAYS` only at 1, where the two agree.
+    ///
+    /// Every other time-based unit is exact: `MICROS` and `MILLIS` use the
+    /// same split-the-days trick with the *correct* divisors
+    /// (`MICROS_PER_DAY`, `MILLIS_PER_DAY`), so they cancel.
     fn to_time_delta(self, amount: i64) -> Result<chrono::TimeDelta, String> {
+        let overflow = || "long overflow".to_string();
+        if self == ChronoUnit::HalfDays {
+            let days = amount / 256;
+            let hours = (amount % 256).checked_mul(12).ok_or_else(overflow)?;
+            let total = days
+                .checked_mul(24)
+                .and_then(|h| h.checked_add(hours))
+                .ok_or_else(overflow)?;
+            return total
+                .checked_mul(3_600 * 1_000_000_000)
+                .map(chrono::TimeDelta::nanoseconds)
+                .ok_or_else(overflow);
+        }
         let nanos_each: i64 = match self {
             ChronoUnit::Nanos => 1,
             ChronoUnit::Micros => 1_000,
@@ -475,41 +579,67 @@ impl ChronoUnit {
             ChronoUnit::Seconds => 1_000_000_000,
             ChronoUnit::Minutes => 60 * 1_000_000_000,
             ChronoUnit::Hours => 3_600 * 1_000_000_000,
-            ChronoUnit::HalfDays => 43_200 * 1_000_000_000,
             _ => unreachable!("only time-based units reach to_time_delta"),
         };
-        let nanos = amount
-            .checked_mul(nanos_each)
-            .ok_or_else(|| "long overflow".to_string())?;
+        let nanos = amount.checked_mul(nanos_each).ok_or_else(overflow)?;
         Ok(chrono::TimeDelta::nanoseconds(nanos))
     }
 
     fn add_to_local(self, local: NaiveDateTime, amount: i64) -> Result<NaiveDateTime, String> {
         let overflow = || "long overflow".to_string();
+        let range = |years: i64| out_of_chrono_range(years);
         let out_of_range = |years: i64| {
             format!("Invalid value for Year (valid values -999999999 - 999999999): {years}")
         };
         match self {
             ChronoUnit::Forever => Err("Unsupported unit: Forever".to_string()),
             ChronoUnit::Eras => {
-                // `LocalDateTime.with(ERA, era + amount)`: ISO has exactly two
-                // eras, so anything but a no-op is out of range -- which is
-                // the error Kestra returns, verbatim.
+                // `LocalDate.with(ERA, era + amount)`. ISO has exactly two
+                // eras, so 0 and 1 are the only valid targets -- but the valid
+                // ones are not no-ops: `with(ERA, 0)` on 2024 is
+                // `withYear(1 - 2024)`, i.e. -2023. A first cut errored on
+                // every non-identity shift, which made `dateAdd(-1, 'ERAS')`
+                // an error where Kestra answers `-2023-01-15`. Found by the
+                // fix round's probe sweep.
                 let era = i64::from(local.year() > 0);
                 let target = era.checked_add(amount).ok_or_else(overflow)?;
                 if target == era {
-                    Ok(local)
-                } else {
-                    Err(format!(
-                        "Invalid value for Era (valid values 0 - 1): {target}"
-                    ))
+                    return Ok(local);
                 }
+                if !(0..=1).contains(&target) {
+                    return Err(format!(
+                        "Invalid value for Era (valid values 0 - 1): {target}"
+                    ));
+                }
+                let year = 1 - local.year();
+                local
+                    .with_year(year)
+                    .ok_or_else(|| out_of_chrono_range(i64::from(year)))
             }
-            ChronoUnit::Days => plus_days(local, amount).ok_or_else(overflow),
+            // `ok_or_else(range)`, NOT `overflow`: reaching the end of what a
+            // `NaiveDateTime` can hold is egret's limit, not Java's `long`
+            // arithmetic overflowing. See [`out_of_chrono_range`].
+            // Java overflows a `long` FIRST and only then runs out of
+            // calendar, and the two have different messages -- `plusDays` is
+            // `Math.addExact(epochDay, daysToAdd)` before
+            // `LocalDate.ofEpochDay`'s range check. Reproduce that order, or
+            // `dateAdd(Long.MAX_VALUE, 'DAYS')` reports egret's narrower range
+            // for what is really Java's own arithmetic overflowing.
+            ChronoUnit::Days => {
+                epoch_day(local).checked_add(amount).ok_or_else(overflow)?;
+                plus_days(local, amount).ok_or_else(|| range(amount / 366))
+            }
             ChronoUnit::Weeks => {
-                plus_days(local, amount.checked_mul(7).ok_or_else(overflow)?).ok_or_else(overflow)
+                let days = amount.checked_mul(7).ok_or_else(overflow)?;
+                epoch_day(local).checked_add(days).ok_or_else(overflow)?;
+                plus_days(local, days).ok_or_else(|| range(days / 366))
             }
-            ChronoUnit::Months => plus_months(local, amount).ok_or_else(overflow),
+            ChronoUnit::Months => {
+                month_count(local)
+                    .checked_add(amount)
+                    .ok_or_else(overflow)?;
+                plus_months(local, amount).ok_or_else(|| range(amount / 12))
+            }
             ChronoUnit::Years
             | ChronoUnit::Decades
             | ChronoUnit::Centuries
@@ -528,11 +658,46 @@ impl ChronoUnit {
                     return Err(out_of_range(target));
                 }
                 let months = years.checked_mul(12).ok_or_else(overflow)?;
-                plus_months(local, months).ok_or_else(|| out_of_range(target))
+                plus_months(local, months).ok_or_else(|| range(target))
             }
             _ => unreachable!("only date-based units reach add_to_local"),
         }
     }
+}
+
+/// **egret's date range is `chrono`'s, and it is narrower than `java.time`'s.**
+///
+/// A `NaiveDateTime` spans roughly +/-262143 years; `LocalDateTime` spans
+/// +/-999999999. So `dateAdd(100000000, 'DAYS')` is `+275814-09-28` in Kestra
+/// and is not representable here.
+///
+/// The limit is `chrono`'s, not a choice -- but the *message* is a choice, and
+/// a first cut of this reported `long overflow`, which is Java's sentence for
+/// genuine `long` arithmetic overflowing and is a different cause entirely.
+/// The unit test that covered it asserted exactly the two extremes
+/// (`i64::MAX` DAYS, `1e9` YEARS) where the two engines happen to agree, while
+/// the whole middle diverged silently. Both found by the fix round's review.
+///
+/// `filter-dateadd-past-egrets-date-range` is the baselined corpus entry.
+fn out_of_chrono_range(years: i64) -> String {
+    format!(
+        "the 'dateAdd' filter cannot represent a date about {years} years away: egret's dates are \
+         chrono's, which reach about +/-262143, narrower than java.time's +/-999999999"
+    )
+}
+
+/// `LocalDate.toEpochDay()`, the value `plusDays` adds to with `addExact`.
+fn epoch_day(local: NaiveDateTime) -> i64 {
+    local
+        .date()
+        .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).expect("a real date"))
+        .num_days()
+}
+
+/// `LocalDate`'s `prolepticMonth`, the value `plusMonths` adds to with
+/// `addExact`.
+fn month_count(local: NaiveDateTime) -> i64 {
+    i64::from(local.year()) * 12 + i64::from(local.month0())
 }
 
 fn plus_days(local: NaiveDateTime, amount: i64) -> Option<NaiveDateTime> {
@@ -613,6 +778,18 @@ fn letter_limits(letter: char) -> Option<(usize, usize)> {
         'z' => (1, 4),
         'O' => (1, 4),
         'X' | 'x' | 'Z' => (1, 5),
+        // `v` and `B` are the two letters whose ACCEPTED COUNTS are not a
+        // range: `v` takes 1 or 4, `B` takes 1, 4 or 5, and every other count
+        // is `Wrong number of pattern letters` -- a fourth JDK sentence,
+        // distinct from `Too many pattern letters`. Enforced at the call site.
+        //
+        // A first cut of this table had no `'v'` arm at all, so `date('vvvv')`
+        // said `Unknown pattern letter: v` where Java says the pattern is
+        // valid and prints `Japan Time`. That is worse than refusing it: it
+        // tells an author their pattern is wrong when it is not. Found by the
+        // fix round's probe sweep, which walked every ASCII letter at counts
+        // 1-11 rather than the letters someone thought to list.
+        'v' => (1, 4),
         'B' => (1, 5),
         _ => return None,
     })
@@ -651,10 +828,13 @@ impl Pattern {
                 }
                 i += count;
                 if c == 'p' {
-                    // `padNext` needs something to pad. A pattern that ends
-                    // in `p` is rejected by the JDK with the rest of the
-                    // pattern quoted back.
-                    if i >= chars.len() {
+                    // `padNext` needs a **pattern letter** to pad, not merely
+                    // something. `pp'x'`, `p[H]` and `p-` are all rejected by
+                    // the JDK, and a first cut of this only checked that the
+                    // pattern did not END there -- so those three rendered
+                    // here and threw in Kestra. The JDK quotes the rest of the
+                    // pattern from the `p` run back in the message.
+                    if !chars.get(i).is_some_and(|c| c.is_ascii_alphabetic()) {
                         let rest: String = chars[i - count..].iter().collect();
                         return Err(format!(
                             "Pad letter 'p' must be followed by valid pad pattern: {rest}"
@@ -674,6 +854,12 @@ impl Pattern {
                 }
                 if c == 'c' && count == 2 {
                     return Err(format!("Invalid pattern \"{pattern}\""));
+                }
+                // The two letters with a non-contiguous count set.
+                if (c == 'v' && !matches!(count, 1 | 4))
+                    || (c == 'B' && !matches!(count, 1 | 4 | 5))
+                {
+                    return Err(format!("Wrong number of pattern letters: {c}"));
                 }
                 if count > max {
                     return Err(match c {
@@ -766,11 +952,11 @@ impl Pattern {
                     continue;
                 }
                 Piece::Literal(text) => {
-                    push_padded(&mut out, text, pad.take());
+                    push_padded(&mut out, text, pad.take())?;
                 }
                 Piece::Field { letter, count } => {
                     let text = format_field(*letter, *count, zdt)?;
-                    push_padded(&mut out, &text, pad.take());
+                    push_padded(&mut out, &text, pad.take())?;
                 }
             }
         }
@@ -778,16 +964,28 @@ impl Pattern {
     }
 }
 
-fn push_padded(out: &mut String, text: &str, pad: Option<usize>) {
-    match pad {
-        Some(width) => {
-            for _ in text.chars().count()..width {
-                out.push(' ');
-            }
-            out.push_str(text);
-        }
-        None => out.push_str(text),
+/// `PadPrinterParserDecorator.format` — left-pads with spaces, and **throws
+/// when the value is wider than the pad** rather than letting it through.
+///
+/// `date('pH')` at 05:00 is ` 5` and at 10:00 is a `DateTimeException`, which
+/// is why `filter-date-pattern-pad`'s 05:07 input was the one clock time where
+/// the entry could not see the difference. Found by the fix round's review.
+fn push_padded(out: &mut String, text: &str, pad: Option<usize>) -> Result<(), String> {
+    let Some(width) = pad else {
+        out.push_str(text);
+        return Ok(());
+    };
+    let len = text.chars().count();
+    if len > width {
+        return Err(format!(
+            "Cannot print as output of {len} characters exceeds pad width of {width}"
+        ));
     }
+    for _ in len..width {
+        out.push(' ');
+    }
+    out.push_str(text);
+    Ok(())
 }
 
 const MONTHS_FULL: [&str; 12] = [
@@ -840,8 +1038,8 @@ fn format_field(letter: char, count: usize, zdt: &Zdt) -> Result<String, String>
         // `y` is the year OF ERA (always positive); `u` is the proleptic year
         // (negative before year 1). `-0044` prints `45` under `y` and `-44`
         // under `u` -- the one place the two letters visibly disagree.
-        'y' => reduced_or_padded(i64::from(year_of_era(date.year())), count),
-        'u' => reduced_or_padded(i64::from(date.year()), count),
+        'y' => year_field(i64::from(year_of_era(date.year())), count),
+        'u' => year_field(i64::from(date.year()), count),
         'M' | 'L' => month_text(date.month0() as usize, count),
         'd' => zero_pad(i64::from(date.day()), count),
         'D' => zero_pad(i64::from(date.ordinal()), count),
@@ -849,7 +1047,7 @@ fn format_field(letter: char, count: usize, zdt: &Zdt) -> Result<String, String>
         'e' | 'c' if count <= 2 => zero_pad(i64::from(localized_day_of_week(&date)), count),
         'e' | 'c' => day_text(date.weekday().num_days_from_monday() as usize, count),
         'w' => zero_pad(i64::from(week_of_week_based_year(&date)), count),
-        'Y' => reduced_or_padded(i64::from(week_based_year(&date)), count),
+        'Y' => year_field(i64::from(week_based_year(&date)), count),
         'W' => zero_pad(i64::from(week_of_month(&date)), count),
         'F' => zero_pad(i64::from((date.day() - 1) / 7 + 1), count),
         'Q' | 'q' => quarter_text((date.month0() / 3) as usize, count),
@@ -879,7 +1077,12 @@ fn format_field(letter: char, count: usize, zdt: &Zdt) -> Result<String, String>
             _ => offset_text(zdt.offset, 5, true),
         },
         'O' => localized_gmt(zdt.offset, count),
-        'z' | 'B' => {
+        // The three letters whose output is text out of a locale database.
+        // `v`/`vvvv` are the *generic* zone name (`JT` / `Japan Time`), a
+        // third CLDR table beside `z`'s specific names and `B`'s day periods.
+        // All three are refused HERE rather than at parse time, so the pattern
+        // is still reported valid-or-not the way Java reports it.
+        'z' | 'B' | 'v' => {
             return Err(format!(
                 "the 'date' filters cannot render pattern letter '{letter}': it needs the locale's \
                  zone/day-period names, which egret does not carry"
@@ -1100,11 +1303,47 @@ fn zero_pad(value: i64, width: usize) -> String {
     }
 }
 
-/// `appendValueReduced(field, 2, 2, …)` for a count of 2, and a zero-padded
-/// value otherwise. Java's `yy` prints the last two digits; `yyyyy` pads.
-fn reduced_or_padded(value: i64, count: usize) -> String {
+/// `y`, `u` and `Y` — the three year letters, which take **three different
+/// sign styles depending on the letter count**.
+///
+/// `DateTimeFormatterBuilder.parseField` reads:
+///
+/// ```text
+/// count == 2  -> appendValueReduced(field, 2, 2, BASE_DATE)
+/// count <  4  -> appendValue(field, count, 19, SignStyle.NORMAL)
+/// else        -> appendValue(field, count, 19, SignStyle.EXCEEDS_PAD)
+/// ```
+///
+/// Both edges were wrong in the first cut, and both are silent — a wrong year,
+/// not an error:
+///
+/// - **`ReducedPrinterParser.getValue` is `Math.abs(value) % 100`**, not a
+///   modulo of the signed value. `uu` on year -44 is `44` and this wrote `56`;
+///   on year -1 it is `01` and this wrote `99`. `yy` was right only because
+///   year-of-era is always positive — which is exactly why the original
+///   `filter-date-pattern-era-bc` entry, which probes `y|u|yyyy|uuuu` on a BC
+///   date, could not see it: it omits the one count that breaks.
+/// - **`SignStyle.EXCEEDS_PAD` writes a leading `+`** when the value needs
+///   more digits than the pad width. `yyyy` on year 10000 is `+10000`, so
+///   Kestra's DEFAULT `iso` format is `+10000-01-15T…`. Note it applies at
+///   count >= 4 only, and only when the digits *exceed* the width: `yyyyy` on
+///   year 10000 is `10000`, with no sign, and `yyyyyy` is `010000`.
+///
+/// Both found by the fix round's review, and both reproduce in the probe
+/// sweep across twelve year magnitudes.
+fn year_field(value: i64, count: usize) -> String {
     if count == 2 {
-        format!("{:02}", value.rem_euclid(100))
+        // `Math.abs(value) % 100` -- absolute value FIRST.
+        return format!("{:02}", value.unsigned_abs() % 100);
+    }
+    if count < 4 {
+        // SignStyle.NORMAL: a sign only when negative.
+        return zero_pad(value, count);
+    }
+    // SignStyle.EXCEEDS_PAD.
+    let digits = value.unsigned_abs().to_string().len();
+    if value >= 0 && digits > count {
+        format!("+{value}")
     } else {
         zero_pad(value, count)
     }
@@ -1236,7 +1475,7 @@ impl Format {
             // it: it is always UTC. Measured -- `iso_instant` answers the same
             // string for `timeZone='UTC'` and `timeZone='Asia/Tokyo'`.
             FormatKind::BuiltIn(BuiltIn::IsoInstant) => Ok(format_iso_instant(&shown)),
-            FormatKind::BuiltIn(built_in) => Ok(format_built_in(*built_in, &shown)),
+            FormatKind::BuiltIn(built_in) => format_built_in(*built_in, &shown),
         }
     }
 
@@ -1350,9 +1589,9 @@ fn format_iso_instant(zdt: &Zdt) -> String {
     )
 }
 
-fn format_built_in(built_in: BuiltIn, zdt: &Zdt) -> String {
+fn format_built_in(built_in: BuiltIn, zdt: &Zdt) -> Result<String, String> {
     let offset = offset_id(zdt.offset);
-    match built_in {
+    Ok(match built_in {
         BuiltIn::IsoLocalDate => iso_local_date(zdt),
         BuiltIn::IsoDate => format!("{}{offset}", iso_local_date(zdt)),
         BuiltIn::IsoLocalTime => iso_local_time(zdt),
@@ -1384,6 +1623,24 @@ fn format_built_in(built_in: BuiltIn, zdt: &Zdt) -> String {
         // day-of-month is NOT zero padded.
         BuiltIn::Rfc1123DateTime => {
             let d = zdt.local.date();
+            // `appendValue(YEAR, 4, 4, SignStyle.NOT_NEGATIVE)` -- four digits
+            // and no sign, so this is the one format with a YEAR RANGE. Both
+            // messages are the JDK's; found by the probe sweep, which fed
+            // every named format a BC year and a five-digit one.
+            if d.year() < 0 {
+                return Err(format!(
+                    "Field Year cannot be printed as the value {} cannot be negative according to \
+                     the SignStyle",
+                    d.year()
+                ));
+            }
+            if d.year() > 9999 {
+                return Err(format!(
+                    "Field Year cannot be printed as the value {} exceeds the maximum print width \
+                     of 4",
+                    d.year()
+                ));
+            }
             let t = zdt.local.time();
             let zone = if zdt.offset.local_minus_utc() == 0 {
                 "GMT".to_string()
@@ -1402,7 +1659,7 @@ fn format_built_in(built_in: BuiltIn, zdt: &Zdt) -> String {
             )
         }
         BuiltIn::IsoInstant => format_iso_instant(zdt),
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,6 +1688,19 @@ impl<'a> Scan<'a> {
 
     fn eat(&mut self, c: char) -> bool {
         if self.peek() == Some(c) {
+            self.at += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The ISO formatters call `parseCaseInsensitive()`, so
+    /// `2024-01-15t10:30:00z` parses. **`ofPattern` does not** -- a
+    /// user-written `'T'` literal is case-sensitive there, measured -- which
+    /// is why this is a second method rather than a change to [`Scan::eat`].
+    fn eat_ignoring_case(&mut self, c: char) -> bool {
+        if self.peek().is_some_and(|got| got.eq_ignore_ascii_case(&c)) {
             self.at += 1;
             true
         } else {
@@ -1477,7 +1747,14 @@ impl<'a> Scan<'a> {
 /// The fields a parse can produce, before they are assembled.
 #[derive(Default, Clone)]
 struct Parsed {
+    /// The PROLEPTIC year, from `u`. Kept apart from `year_of_era` because
+    /// `G BC` turns the latter into `1 - value` and must leave the former
+    /// alone -- Kestra rejects a pattern that supplies both and disagrees
+    /// (`Conflict found: Field Era 1 differs from Era 0`).
     year: Option<i32>,
+    year_of_era: Option<i32>,
+    /// 1 for AD, 0 for BC, from `G`.
+    era: Option<u32>,
     month: Option<u32>,
     day: Option<u32>,
     day_of_year: Option<u32>,
@@ -1496,16 +1773,50 @@ impl Parsed {
     /// offset is a `ZonedDateTime`; one that produced a date and a time is a
     /// `LocalDateTime.atZone(zone)`; one that produced only a date is a
     /// `LocalDate.atStartOfDay().atZone(zone)`.
-    fn build(self, text: &str, zone: &Zone) -> Result<Zdt, String> {
+    fn build(self, text: &str, zone: &Zone, smart: bool) -> Result<Zdt, String> {
         let unable = || {
             format!("Text '{text}' could not be parsed: Unable to obtain ZonedDateTime from the parsed fields")
         };
-        let year = self.year.ok_or_else(unable)?;
+        let invalid = || format!("Text '{text}' could not be parsed: Invalid date");
+        // `y` is the year OF ERA, so a parsed `G BC` makes the proleptic year
+        // `1 - value`; `u` is already proleptic and ignores the era.
+        let year = match (self.year, self.year_of_era) {
+            // `u` and `G` are both resolved and CROSS-CHECKED: Java refuses
+            // `G uuuu-MM-dd` on `BC 2024-01-15` with
+            // `Conflict found: Field Era 1 differs from Era 0`, because the
+            // proleptic year says AD and the era text says BC.
+            (Some(year), _) => {
+                let implied = u32::from(year > 0);
+                if self.era.is_some_and(|era| era != implied) {
+                    return Err(format!(
+                        "Text '{text}' could not be parsed: Conflict found: Field Era {implied} \
+                         differs from Era {} derived from {year}",
+                        self.era.unwrap_or_default()
+                    ));
+                }
+                year
+            }
+            (None, Some(year_of_era)) => match self.era {
+                Some(0) => 1 - year_of_era,
+                _ => year_of_era,
+            },
+            (None, None) => return Err(unable()),
+        };
         let date = match (self.month, self.day, self.day_of_year) {
-            (Some(month), Some(day), _) => NaiveDate::from_ymd_opt(year, month, day)
-                .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid date"))?,
-            (_, _, Some(ordinal)) => NaiveDate::from_yo_opt(year, ordinal)
-                .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid date"))?,
+            // **`ResolverStyle.SMART` is `ofPattern`'s default**, and it
+            // clamps a day-of-month past the end of its month rather than
+            // refusing: `2024-02-30` parses as `2024-02-29`. The bare ISO
+            // path is STRICT and does refuse, which is why `smart` is a
+            // parameter and not a constant. Measured both ways.
+            (Some(month), Some(day), _) => {
+                let first = NaiveDate::from_ymd_opt(year, month, 1).ok_or_else(invalid)?;
+                match NaiveDate::from_ymd_opt(year, month, day) {
+                    Some(date) => date,
+                    None if smart && (1..=31).contains(&day) => last_day_of_month(first),
+                    None => return Err(invalid()),
+                }
+            }
+            (_, _, Some(ordinal)) => NaiveDate::from_yo_opt(year, ordinal).ok_or_else(invalid)?,
             _ => return Err(unable()),
         };
         let hour = match (self.hour, self.hour_of_ampm, self.pm) {
@@ -1540,6 +1851,15 @@ impl Parsed {
     }
 }
 
+/// The last day of `first`'s month, which is what `ResolverStyle.SMART` clamps
+/// an over-long day-of-month to.
+fn last_day_of_month(first: NaiveDate) -> NaiveDate {
+    first
+        .checked_add_months(Months::new(1))
+        .and_then(|next| next.pred_opt())
+        .unwrap_or(first)
+}
+
 /// `ZonedDateTime.parse(text)`, then `LocalDateTime.parse(text).atZone(zone)`,
 /// then `LocalDate.parse(text).atStartOfDay().atZone(zone)` — the cascade
 /// `AbstractDate.convert` runs when no `existingFormat` is given.
@@ -1569,7 +1889,7 @@ pub(super) fn parse_iso(text: &str, zone: &Zone) -> Result<Zdt, String> {
     }
     parsed.day = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
 
-    if scan.eat('T') {
+    if scan.eat_ignoring_case('T') {
         parsed.hour = Some(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0);
         if !scan.eat(':') {
             return Err(scan.fail());
@@ -1588,12 +1908,14 @@ pub(super) fn parse_iso(text: &str, zone: &Zone) -> Result<Zdt, String> {
     if scan.at != scan.chars.len() {
         return Err(scan.trailing());
     }
-    parsed.build(text, zone)
+    // `LocalDate.parse` is ISO_LOCAL_DATE, whose resolver is STRICT: the ISO
+    // path refuses `2024-02-30` where the `ofPattern` path clamps it.
+    parsed.build(text, zone, false)
 }
 
 /// The offset and the optional `[Zone]` that follows it.
 fn parse_iso_offset(scan: &mut Scan<'_>, parsed: &mut Parsed) -> Result<(), String> {
-    if scan.eat('Z') {
+    if scan.eat_ignoring_case('Z') {
         parsed.offset = FixedOffset::east_opt(0);
     } else if matches!(scan.peek(), Some('+') | Some('-')) {
         let sign = if scan.eat('-') {
@@ -1649,7 +1971,7 @@ impl Pattern {
         if scan.at != scan.chars.len() {
             return Err(scan.trailing());
         }
-        parsed.build(text, zone)
+        parsed.build(text, zone, true)
     }
 
     fn parse_pieces(
@@ -1676,7 +1998,13 @@ impl Pattern {
                     i += 1;
                 }
                 Piece::Field { letter, count } => {
-                    parse_field(*letter, *count, scan, parsed)?;
+                    parse_field(
+                        *letter,
+                        *count,
+                        subsequent_width(&pieces[i + 1..]),
+                        scan,
+                        parsed,
+                    )?;
                     i += 1;
                 }
                 // An optional section is attempted and rolled back whole --
@@ -1702,6 +2030,55 @@ impl Pattern {
     }
 }
 
+/// **Java's adjacent value parsing**, which is what lets `yyyyMMdd` parse
+/// `20240115` at all.
+///
+/// `appendValue(field, minWidth, maxWidth, signStyle)` with `minWidth !=
+/// maxWidth` is variable-width, and `yyyy` is `appendValue(YEAR, 4, 19, …)`.
+/// On its own it would swallow all eight digits. Java instead lets each
+/// *fixed*-width field that immediately follows reserve its own width, and the
+/// variable field then keeps `parsed_len - subsequent_width` digits.
+///
+/// This returns that reserved width: the fixed widths of the run of numeric
+/// fields that follows, stopping at the first literal, optional marker, pad,
+/// text-style field or second variable-width field — which is where Java's
+/// active-parsing mode ends too.
+///
+/// Found by the fix round's review: `yyyyMMdd` is one of the commonest date
+/// formats in the wild and did not parse.
+fn subsequent_width(rest: &[Piece]) -> usize {
+    let mut total = 0;
+    for piece in rest {
+        match piece {
+            Piece::Field { letter, count } => match fixed_parse_width(*letter, *count) {
+                Some(width) => total += width,
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    total
+}
+
+/// The width a field consumes when it is fixed-width for *parsing*, or `None`
+/// when it is variable-width or not numeric.
+fn fixed_parse_width(letter: char, count: usize) -> Option<usize> {
+    match letter {
+        // `yy`/`uu`/`YY` are `appendValueReduced(field, 2, 2, …)`: fixed at 2.
+        'y' | 'u' | 'Y' if count == 2 => Some(2),
+        // Every other year count is variable-width.
+        'y' | 'u' | 'Y' => None,
+        'M' | 'L' | 'Q' | 'q' | 'E' | 'e' | 'c' if count > 2 => None,
+        'M' | 'L' | 'd' | 'D' | 'H' | 'h' | 'k' | 'K' | 'm' | 's' | 'S' | 'Q' | 'q' | 'e' | 'c'
+        | 'w' | 'W' | 'F' | 'A' | 'N' | 'n' | 'g'
+            if count >= 2 =>
+        {
+            Some(count)
+        }
+        _ => None,
+    }
+}
+
 fn matching_end(pieces: &[Piece], start: usize) -> usize {
     let mut depth = 0usize;
     for (i, piece) in pieces.iter().enumerate().skip(start) {
@@ -1722,6 +2099,7 @@ fn matching_end(pieces: &[Piece], start: usize) -> usize {
 fn parse_field(
     letter: char,
     count: usize,
+    subsequent: usize,
     scan: &mut Scan<'_>,
     parsed: &mut Parsed,
 ) -> Result<(), String> {
@@ -1739,16 +2117,47 @@ fn parse_field(
     };
     match letter {
         'y' | 'u' => {
-            if count == 2 {
+            let value = if count == 2 {
                 // `appendValueReduced(field, 2, 2, 2000)`.
-                let value = scan.digits(2, 2).ok_or_else(|| scan.fail())?.0;
-                parsed.year = Some(2000 + value as i32);
+                i32::from(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0 as i16) + 2000
             } else {
                 let negative = scan.eat('-');
-                let value = scan.digits(count.max(1), 10).ok_or_else(|| scan.fail())?.0;
+                // Greedy, then hand `subsequent` digits back to the
+                // fixed-width fields that follow -- see [`subsequent_width`].
+                let start = scan.at;
+                let (_, taken) = scan.digits(count.max(1), 10).ok_or_else(|| scan.fail())?;
+                let keep = taken.saturating_sub(subsequent).max(count.max(1));
+                if keep > taken {
+                    return Err(scan.fail());
+                }
+                scan.at = start;
+                let value = scan.digits(keep, keep).ok_or_else(|| scan.fail())?.0;
                 let value = i32::try_from(value).map_err(|_| scan.fail())?;
-                parsed.year = Some(if negative { -value } else { value });
+                if negative {
+                    -value
+                } else {
+                    value
+                }
+            };
+            if letter == 'u' {
+                parsed.year = Some(value);
+            } else {
+                parsed.year_of_era = Some(value);
             }
+        }
+        // `G` — the era, which is what turns a `y` year-of-era into a
+        // negative proleptic year. `GG yyyy-MM-dd` on `AD 2024-01-15` parses
+        // in Kestra, measured, and a first cut refused the letter outright.
+        'G' => {
+            let index = if count >= 4 {
+                eat_one_of(scan, &["Anno Domini", "Before Christ"])
+            } else if count == 5 {
+                eat_one_of(scan, &["A", "B"])
+            } else {
+                eat_one_of(scan, &["AD", "BC"])
+            }
+            .ok_or_else(|| scan.fail())?;
+            parsed.era = Some(if index == 0 { 1 } else { 0 });
         }
         'M' | 'L' if count <= 2 => parsed.month = Some(numeric(scan, 2)?),
         'M' | 'L' if count == 3 || count == 4 => {

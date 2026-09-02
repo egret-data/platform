@@ -93,3 +93,14 @@ filter-dateadd-unit-lowercase          test:date_add_refuses_a_unit_that_is_not_
 filter-dateadd-missing-unit            test:date_add_refuses_a_missing_unit
 filter-dateadd-amount-not-a-number     test:date_add_refuses_an_amount_that_is_not_a_number
 filter-dateadd-amount-not-numeric-text test:date_add_refuses_an_amount_that_is_not_a_number
+
+# --- W2 Task 5 fix round 1: what the probe sweep found.
+filter-date-pattern-generic-zone-wrong-count    test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-day-period-wrong-count      test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-pad-at-a-wide-value         test:date_reproduces_javas_padding_rules
+filter-date-pattern-pad-not-followed-by-a-letter test:date_reproduces_javas_padding_rules
+filter-date-pattern-pad-before-a-bracket        test:date_reproduces_javas_padding_rules
+filter-date-zone-offset-colon-placement         test:date_reproduces_javas_zone_offset_grammar
+filter-date-zone-offset-out-of-range            test:date_reproduces_javas_zone_offset_grammar
+filter-date-zone-legacy-three-letter            test:date_refuses_an_unknown_time_zone
+filter-date-format-rfc-1123-year-out-of-range   test:rfc_1123_refuses_a_year_it_cannot_print

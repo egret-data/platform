@@ -126,30 +126,34 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**42** entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
-String/Number mix), the eight registered-but-null-backed functions,
-`raw-multiline`, the three `isin-*` entries where an absent variable raises,
-and **twelve from W2 Task 4** — four wrong-typed inputs, five exceptions its
-first fix round found, and three more from its third (`indent`'s own
-`MAX_AMOUNT`, and `number`'s two `type`-argument casts). **Every one of the
-twelve is separately backed by a unit test in `runners::filters` asserting
-egret's own message**, named alongside it in `error-class.txt`, so what carries
-them is the test and not the mode. **W2 Task 5 added fourteen more** — eight of
-them the Java pattern compiler refusing a pattern — backed by nine tests, all
-named in `error-class-pairs.txt`. Twelve is a lot, and it is a deliberate
-trade: each records an exception Kestra actually throws, which is worth having
-in `golden.json`, at the cost of an entry the ratchet cannot fail. Note that
-marking an entry error-class does **not** make it pass: five of the 28 still
-mismatch, because egret *succeeds* where Kestra throws — which is a real
-divergence and stays visible.
+**51** entries carry it today, counted out of `golden.json` rather than added
+up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
+eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
+entries where an absent variable raises, **twelve from W2 Task 4** — four
+wrong-typed inputs, five exceptions its first fix round found, and three more
+from its third (`indent`'s own `MAX_AMOUNT`, and `number`'s two `type`-argument
+casts) — **fourteen from W2 Task 5** (eight of them the Java pattern compiler
+refusing a pattern) and **nine more from Task 5's fix round**, which its probe
+sweep earned. **Every one of them is separately backed by a unit test in
+`runners::filters` asserting egret's own message**, named alongside it in
+`error-class.txt` and mechanically checked against `error-class-pairs.txt`, so
+what carries them is the test and not the mode.
+
+That is a lot, and it is a deliberate trade: each records an exception Kestra
+actually throws, which is worth having in `golden.json`, at the cost of an
+entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
+whose whole deliverable is refusals. Note that marking an entry error-class
+does **not** make it pass: 5 of the 51 are *also* in `baseline.txt`, because
+egret *succeeds* where Kestra throws — a real divergence, and it stays
+visible.
 
 ## `baseline.txt` — the ratchet
 
 `tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
 is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
-60 of 291 after fix round 3, **59 of 426** after W2 Task 5. The test fails in
-**both** directions:
+60 of 291 after fix round 3, 59 of 426 after W2 Task 5, **62 of 457** after
+that task's fix round. The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -660,7 +664,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 426 entries)
+## Corpus (`corpus.json`, 457 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -964,7 +968,7 @@ used to list as unimplemented are now both in `Oracle.render`:
   stops changing, capped at 100 iterations) even though no current corpus
   entry's output happens to look like another template.
 
-## What W2 Task 5's 135 new entries measured (read before touching `date`)
+## What W2 Task 5's 166 new entries measured (read before touching `date`)
 
 Task 5 ported the six `AbstractDate` filters — `date`, `dateAdd`, `timestamp`,
 `timestampMicro`, `timestampMilli`, `timestampNano` — and with them Java's
@@ -1098,3 +1102,116 @@ A third, smaller one: the twelve `java.time`-constant formats cannot be used as
 an `existingFormat`, since they have no pattern spelling for egret's parser to
 walk. Four of the twelve fail in Kestra too (they yield no date); the other
 eight are the divergence.
+
+## W2 Task 5, fix round 1 — and the PROBE SWEEP that produced it
+
+The first cut of Task 5 was reviewed with a 2 580-expression probe corpus and
+then re-checked with a 3 441-expression one of its own. Between them they found
+**nine divergence families the 135 hand-written corpus entries could not see**,
+and the pattern behind them is worth more than any single fix:
+
+> **Six of the nine sat exactly one variant away from an entry that passed.**
+> `uu` beside `u` and `uuuu`; 10:30 beside 05:07; year 10000 beside 2024;
+> `timestamp` beside `timestampMilli`; `HALF_DAYS` at 1000 beside `HALF_DAYS`
+> at 1. The entries had been chosen, unconsciously, to be the variants that
+> pass — and a ratchet structurally cannot notice that, because every entry in
+> it is green.
+
+### Run the sweep before committing a filter batch
+
+This is now the standing process for anything with a **vocabulary** — a
+pattern language, an enum argument, a set of format names, a zone id. Generate
+the cross-product, push it through the harness and through egret, difference
+the two sets, and add corpus entries for what comes back. It is a script, not
+a design: the corpus format and the harness already exist.
+
+Task 5's sweep was every ASCII letter at counts 1-11 against five dates (a BC
+one, a year past 9999, one with single-digit fields, one with sub-second
+nanos), all 16 `ChronoUnit` names at ten magnitudes, 50 zone ids, 30
+`existingFormat` patterns, 39 quoting/pad patterns, 25 ISO parse inputs and 27
+format names. Two machine checks came with it, and both are worth repeating:
+
+- **every pattern letter's accepted COUNTS**, tabulated from the harness and
+  differenced against `runners::javafmt::letter_limits`. That is how `v`
+  (missing from the alphabet) and `B` (accepted at counts 2 and 3, which Java
+  rejects) were found;
+- **every one of `chrono-tz` 0.10's 597 zone names fed to `ZoneId.of`**, which
+  is how the deny-list below is a closed set rather than a guess.
+
+### What it found
+
+- **`ReducedPrinterParser.getValue` is `Math.abs(value) % 100`.** `uu` on year
+  -44 is `44`, not `56`; on year -1 it is `01`, not `99`. `yy` was right only
+  because year-of-era is always positive — which is exactly why
+  `filter-date-pattern-era-bc` could not see it: it probes
+  `G|GG|GGGG|GGGGG|y|u|yyyy|uuuu` and omits the one count that breaks.
+- **`SignStyle.EXCEEDS_PAD` puts a `+` on a year past the pad width**, at
+  count >= 4 only, and only when the digits *exceed* the width. So `yyyy` on
+  year 10000 is `+10000`, `yyyyy` is `10000` and `yyyyyy` is `010000` — and
+  Kestra's DEFAULT `iso` format therefore writes `+10000-01-15T…`.
+- **`LocalDateTime.plus(n, HALF_DAYS)` is
+  `plusDays(n / 256).plusHours((n % 256) * 12)`.** Read out of `src.zip` on the
+  same Corretto 25 the goldens come from, where it carries the comment
+  `// no overflow (256 is multiple of 2)`. The divisor should be 2, so the
+  identity `n half-days == n × 12h` holds only for `|n| < 256`: at 256 the JDK
+  adds **one day**, not 128, and `dateAdd(-1000, 'HALF_DAYS')` moves 119 days
+  rather than 500. Reproduced rather than corrected — it is a wrong *answer*,
+  not a resource vector, and a port that quietly fixed it would give a
+  different date for the same flow.
+- **`plus(n, ERAS)` FLIPS the era**; it is not a no-op-or-throw.
+  `with(ERA, 0)` on 2024 is `withYear(1 - 2024)`, so `dateAdd(-1, 'ERAS')` is
+  `-2023-01-15`. Only a target outside `{0, 1}` is the range error.
+- **`v` is a pattern letter and `B` has a non-contiguous count set.** `v` takes
+  1 or 4 (`JT` / `Japan Time`, the *generic* zone name — a third CLDR table
+  beside `z`'s specific names); `B` takes 1, 4 or 5. Everything else is
+  `Wrong number of pattern letters`, a **fourth** JDK sentence that nothing had
+  pinned. egret had no `v` at all and said `Unknown pattern letter: v`, which
+  tells an author their pattern is invalid where Java says it is valid.
+- **`p` must be followed by a pattern LETTER, and a too-narrow pad throws.**
+  `pp'x'`, `p[H]` and `p-` are all rejected by the JDK, and `date('pH')` at
+  10:30 is `Cannot print as output of 2 characters exceeds pad width of 1`.
+  `filter-date-pattern-pad` is `ppH|'x'pppmm` at **05:07** — the one clock time
+  where both fields fit inside their pads.
+- **`ZoneOffset.of` is a LENGTH-driven grammar.** It switches on the id's
+  length (2 `+h`, 3 `+hh`, 5 `+hhmm`, 6 `+hh:mm`, 7 `+hhmmss`, 9 `+hh:mm:ss`)
+  and reads each number from a fixed position, so `+0:730` and `+5:30` are
+  `non numeric characters found` rather than plausible offsets. `+19:00` and
+  `+18:00:01` have two further, different sentences, and a failure under a
+  `GMT`/`UTC`/`UT` prefix is re-wrapped as `Invalid ID for offset-based
+  ZoneId`.
+- **Four `chrono-tz` zone ids `ZoneId.of` rejects**: `EST`, `HST`, `MST`,
+  `ROC` — the JDK's tzdb build drops the three-letter `backward` links that
+  collide with `ZoneId.SHORT_IDS`. `EST5EDT` and `US/Eastern` are fine on both
+  sides, which is what makes it counter-intuitive. The set is closed (all 597
+  names checked), so `runners::javafmt` denies exactly those four by name. The
+  other direction is 13 `SystemV/*` ids Java has and `chrono-tz` does not
+  carry at all; those are not fixable here and have no corpus entry.
+- **`rfc_1123_date_time` has a year range.** Its year is
+  `appendValue(YEAR, 4, 4, NOT_NEGATIVE)`, so a BC year and a five-digit year
+  each throw, with different sentences. Every other named format takes both.
+- **The ISO literals `T` and `Z` are case-insensitive** (the `java.time`
+  constants call `parseCaseInsensitive()`), and a user-written `'T'` in an
+  `existingFormat` is **not** (`ofPattern` does not). Measured both ways.
+- **`existingFormat` needs adjacent value parsing and a SMART resolver.**
+  `yyyyMMdd` parses `20240115` only because a variable-width field hands
+  digits back to the fixed-width fields that follow it; and `ofPattern`'s
+  default resolver clamps `2024-02-30` to `2024-02-29`, where the bare ISO
+  path is STRICT and refuses the same input. `G` is parseable too, and Java
+  cross-checks it against a `u` year (`Conflict found: Field Era 1 differs`).
+
+### The two divergences this round had to RECORD rather than fix
+
+- **egret's date range is `chrono`'s** (about ±262 143 years) where
+  `java.time`'s is ±999 999 999, so `dateAdd(100000000, 'DAYS')` succeeds in
+  Kestra and cannot be represented here. The limit is the crate's; the
+  *message* was a choice and was wrong — it reported `long overflow`, Java's
+  sentence for a different cause. `runners::javafmt` now checks
+  `Math.addExact` first, keeps `long overflow` for genuine arithmetic
+  overflow, and says `egret's dates are chrono's` for its own limit.
+  `filter-dateadd-past-egrets-date-range` is the baselined entry.
+- **`{{ d | timestamp | className }}` is `java.lang.Long` in Kestra and
+  `java.lang.Integer` here.** `java_class_name` decides Integer-versus-Long by
+  magnitude, and every epoch *second* between 1901 and 2038 fits in an `i32`;
+  the milli/micro/nano ones are all outside it, which is exactly why the three
+  `className` entries that were added pass and the fourth was the one not
+  added. Same underlying limit as `filter-classname-literal-int`.
