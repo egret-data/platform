@@ -159,7 +159,7 @@ is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
 60 of 291 after fix round 3, 59 of 426 after W2 Task 5, 62 of 457 after that
 task's fix round, 62 of 486 after its second, 66 of 513 after its third,
-**76 of 630** after W2 Task 6 -- which BANKED seven (its whole batch of
+**76 of 632** after W2 Task 6 -- which BANKED seven (its whole batch of
 filters) and RECORDED seventeen, every one of them a place the two engines
 answer differently rather than a filter that is not ported.
 The test fails in **both** directions:
@@ -673,7 +673,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 630 entries)
+## Corpus (`corpus.json`, 632 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -1260,6 +1260,7 @@ this list first, or they will read a moved golden as a regression in egret.
 | 4 | **`AbstractDate.convert`'s 19-digit branch throws away the milliseconds it just read.** It is `Instant.ofEpochMilli(l / 1_000_000).atZone(zone).withNano((int)(l % 1_000_000) * 1000)`, and `withNano` **replaces** the whole nanosecond field — so `ofEpochMilli`'s `.123` is discarded and `1705314600123456789` renders `.456789`, not `.123456789`. | `javap -p -c AbstractDate.class`, the `digitCount == 19` branch: `ldiv` by `1000000`, `Instant.ofEpochMilli`, `atZone`, then `ZonedDateTime.withNano` | `filter-date-epoch-nanos-truncating` |
 
 | 5 | **`jq` never sees a null-valued key.** `JqFilter`'s non-String branch is `JacksonMapper.ofJson().valueToTree(input)`, and that mapper is `NON_NULL`, so a map's null-valued entries are dropped on the way IN: `{{ obj \| jq('keys') }}` on `{a:1,b:null,c:3}` answers `["a","c"]`. A flow author reading `keys` gets fewer keys than the object has, and nothing says so. | `javap -p -c JacksonMapper.class`: `configure()` calls `setDefaultPropertyInclusion(NON_NULL)`, and `JqFilter.apply` calls `ofJson().valueToTree` | `filter-jq-keys-drops-null-values` |
+| 6 | **`yaml` writes values its own reader cannot read back, and values it reads back as a DIFFERENT TYPE.** With `MINIMIZE_QUOTES` on and `ALWAYS_QUOTE_NUMBERS_AS_STRINGS` off, a numeric-looking STRING is written unquoted: `{{ '1e5' \| yaml }}` is `1e5`, and `yaml(yaml='1e5')` reads that back as the double `100000.0`. `'42'` comes back as an integer. Worse, `{{ '.inf' \| yaml }}` is `.inf` and Kestra's own `yaml()` function then **throws** `Malformed numeric value '.inf'`. | round-tripped 86 values through `x \| yaml` and back through `yaml(yaml=…)` in the harness: 3 of 86 changed type and 2 more errored, all of them `yaml` | `filter-yaml-number-shaped-string`, `filter-yaml-exponent-shaped-string`, `filter-yaml-writes-what-its-own-reader-refuses` |
 
 ### What is NOT on that list, and why the distinction matters
 
@@ -1818,6 +1819,32 @@ were still necessary, and the mismatch count was measured either side of each:
 
 Both were verified by reverting them one at a time: each makes exactly its own
 entry fail and nothing else.
+
+### The round trip: 6 of 258 do not come back, and all six are upstream
+
+Serialising with the engine and feeding the output back through the engine's
+own reader is the technique W2 Task 5's fix round 2 used on `existingFormat`,
+and it is the one instrument that finds a value that survived being written
+and then means something else. 86 values × three round trips
+(`fromJson(x | toJson)`, `fromIon(x | toIon)`, `yaml(x | yaml)`), through the
+harness, comparing each against `x` serialised directly:
+
+- **252 stable**;
+- **3 came back a different TYPE**: `'42'` -> `42`, `'1.5'` -> `1.5`, and
+  `'1e5'` -> `100000.0` — a string in, a double out, no error anywhere. All
+  three are `yaml`, and they are `MINIMIZE_QUOTES` with
+  `ALWAYS_QUOTE_NUMBERS_AS_STRINGS` off;
+- **2 errored on the way back in**: `{{ '.inf' | yaml }}` is `.inf` and
+  Kestra's own `yaml()` function refuses it with `Malformed numeric value
+  '.inf'`. Same for `.nan`. The filter writes what its own reader rejects;
+- **1 errored for a different reason**: `{{ nothing | toIon }}` is the string
+  `"null"` and `fromIon('null')` throws `Invalid ion: t is null in
+  sink.next(t)`. That is the null-input branch this whole batch shares meeting
+  the `fromIon` function, which is Task 7's.
+
+`toJson`/`fromJson` and `toIon`/`fromIon` are otherwise lossless across all 86.
+egret reproduces the three type changes and the two refusals exactly — its
+`yaml` writes `1e5` and `.inf` unquoted, because that is what Kestra writes.
 
 ### The registration count closes at 35
 

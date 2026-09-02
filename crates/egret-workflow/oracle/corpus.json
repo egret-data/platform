@@ -572,6 +572,8 @@
   {"id": "filter-yaml-scalar-keeps-its-newline", "expr": "<{{ s | yaml }}>", "context": {"s": "a"}},
   {"id": "filter-yaml-map-null-value", "expr": "{{ m | yaml }}", "context": {"m": {"a": null, "b": 1}}},
   {"id": "filter-yaml-number-shaped-string", "expr": "{{ s | yaml }}", "context": {"s": "42"}},
+  {"id": "filter-yaml-exponent-shaped-string", "expr": "{{ s | yaml }}", "context": {"s": "1e5"}},
+  {"id": "filter-yaml-writes-what-its-own-reader-refuses", "expr": "{{ s | yaml }}", "context": {"s": ".inf"}},
   {"id": "filter-yaml-two-quoting-layers", "expr": "{{ l | yaml }}", "context": {"l": ["yes", "&a", "a: b", "a:b", ",a"]}},
   {"id": "filter-yaml-leading-zero-run", "expr": "{{ l | yaml }}", "context": {"l": ["007", "0789", "0x0", "0"]}},
   {"id": "filter-yaml-literal-block", "expr": "{{ s | yaml }}", "context": {"s": "line1\nline2"}},

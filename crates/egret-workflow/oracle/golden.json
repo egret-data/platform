@@ -2175,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-03T01:44:24.713097+07:00"
+  "result" : "2026-09-03T01:57:13.162212+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2226,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "bPt6ISBCiJN8YSyac4A0HSpMNyKdzLHAYgIg+3Le4RBm8AWDtmWLqA=="
+  "result" : "ljRxlC18F25Nfej0FZ62nD72OVaki6ShDnrGM19znsRYgrvr9uhQ4A=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2260,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a0636f-c634-768f-b90d-7c59d8498466"
+  "result" : "01a0637b-8017-7ade-bd23-e5110f370029"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "6U66XRFaF27ZqHbygaZbHG"
+  "result" : "6032J3W5xPlyPt829vUbvk"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3ImfSZhPCXd3alAcQoJNC6MntKf"
+  "result" : "3Imh1ElXOWKD44cKDMONFMHMEij"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2290,12 +2290,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "9"
+  "result" : "4"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "51581"
+  "result" : "52275"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2316,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "m6RLui8ufcT444oLJL5WY"
+  "result" : "qowM7ObselkGysGVTp9vz"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -4011,6 +4011,20 @@
     "s" : "42"
   },
   "result" : "42\n"
+}, {
+  "id" : "filter-yaml-exponent-shaped-string",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : "1e5"
+  },
+  "result" : "1e5\n"
+}, {
+  "id" : "filter-yaml-writes-what-its-own-reader-refuses",
+  "expr" : "{{ s | yaml }}",
+  "context" : {
+    "s" : ".inf"
+  },
+  "result" : ".inf\n"
 }, {
   "id" : "filter-yaml-two-quoting-layers",
   "expr" : "{{ l | yaml }}",
