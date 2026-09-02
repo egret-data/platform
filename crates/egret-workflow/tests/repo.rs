@@ -176,6 +176,134 @@ async fn the_same_flow_id_is_allowed_in_two_namespaces() {
     }
 }
 
+/// `FlowRepo::list`'s filters, flagged by Task 5 as implemented-to-its-own-
+/// design and never tested. Folder, namespace, and state each narrow the
+/// list, ANDed with the mandatory `workspace_id` predicate -- and a filter
+/// can never be the thing that reaches another workspace's flows, since
+/// nothing here relaxes that predicate.
+#[tokio::test]
+async fn list_filters_narrow_and_cannot_cross_a_workspace_boundary() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let (other_ws, other_user) = common::seed_workspace(&db).await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+
+    let a = repo
+        .create(
+            ws,
+            user,
+            &egret_workflow::CreateFlowInput {
+                namespace: "list.a".into(),
+                flow_id: "one".into(),
+                source: "id: one\n".into(),
+                plan: serde_json::json!({}),
+                folder_id: None,
+            },
+        )
+        .await
+        .expect("create a");
+    let _b = repo
+        .create(
+            ws,
+            user,
+            &egret_workflow::CreateFlowInput {
+                namespace: "list.b".into(),
+                flow_id: "two".into(),
+                source: "id: two\n".into(),
+                plan: serde_json::json!({}),
+                folder_id: None,
+            },
+        )
+        .await
+        .expect("create b (present only so the unfiltered list must see BOTH of ws's flows)");
+    // A flow in a DIFFERENT workspace, using the SAME namespace as `a` -- so
+    // a namespace filter that leaked across workspaces would return it too.
+    repo.create(
+        other_ws,
+        other_user,
+        &egret_workflow::CreateFlowInput {
+            namespace: "list.a".into(),
+            flow_id: "foreign".into(),
+            source: "id: foreign\n".into(),
+            plan: serde_json::json!({}),
+            folder_id: None,
+        },
+    )
+    .await
+    .expect("create foreign");
+
+    // No filter: both of `ws`'s own flows, never the foreign one.
+    let all = repo
+        .list(ws, &egret_workflow::ListFilter::default())
+        .await
+        .expect("list all");
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert!(all.iter().all(|f| f.workspace_id == ws));
+
+    // `namespace` narrows to exactly the match IN `ws`, never the foreign
+    // workspace's flow of the identical namespace.
+    let by_ns = repo
+        .list(
+            ws,
+            &egret_workflow::ListFilter {
+                namespace: Some("list.a".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list by namespace");
+    assert_eq!(by_ns.len(), 1, "{by_ns:?}");
+    assert_eq!(by_ns[0].id, a.id);
+
+    // `state`: both are still drafts.
+    let by_state = repo
+        .list(
+            ws,
+            &egret_workflow::ListFilter {
+                state: Some("draft".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list by state");
+    assert_eq!(by_state.len(), 2);
+    let by_wrong_state = repo
+        .list(
+            ws,
+            &egret_workflow::ListFilter {
+                state: Some("live".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list by wrong state");
+    assert!(by_wrong_state.is_empty());
+
+    // `folder_id`: neither flow has one, so a real, unrelated folder id
+    // narrows to nothing.
+    let by_folder = repo
+        .list(
+            ws,
+            &egret_workflow::ListFilter {
+                folder_id: Some(Uuid::new_v4()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list by folder");
+    assert!(by_folder.is_empty());
+
+    // The direct cross-workspace check, independent of any filter: asking
+    // for `other_ws`'s list (even from that workspace's own filter set)
+    // returns only its own single flow.
+    let foreign_list = repo
+        .list(other_ws, &egret_workflow::ListFilter::default())
+        .await
+        .expect("list other_ws");
+    assert_eq!(foreign_list.len(), 1);
+    assert_eq!(foreign_list[0].namespace, "list.a");
+}
+
 /// `true` for the one `Err` shape 8-way contention on `insert_version` is
 /// expected to produce: the `UNIQUE (flow_id, version)` violation from two
 /// racers computing the same next number. `egret_core::Error::Internal` wraps

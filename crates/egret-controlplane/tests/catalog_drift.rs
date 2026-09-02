@@ -68,6 +68,10 @@ const EXTRA_FILES: &[&str] = &[
     // directly. `can_invoke` is that call and is the one thing in this file; see
     // `GATE_FNS`.
     "../egret-dataapi/src/invoke.rs",
+    // `workflow:read`/`workflow:manage` (Workflow W1 Task 7) are gated via
+    // `authz::require` in the Workflow seam's management router, using the
+    // `WF_READ`/`WF_MANAGE` consts the scan resolves below.
+    "../egret-workflow/src/routes.rs",
 ];
 
 /// Gate function names whose permission-key argument (an inline

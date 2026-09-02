@@ -14,11 +14,14 @@ serde.workspace = true
 serde_norway = "0.9"
 serde_json.workspace = true
 
-# Task 5: the repository. `egret-core` for `UserId` and `Error`/`Result` (no
-# `http` feature -- this crate maps neither to axum nor produces `ApiError`
-# itself; that is Task 7's job). `egret-metastore` for `Db`. Plain `sqlx` for
+# Task 5: the repository. `egret-metastore` for `Db`. Plain `sqlx` for
 # `query_as`/`FromRow`, following `crates/egret-dataapi/src/endpoints.rs`.
-egret-core.workspace = true
+#
+# Task 7: `http` feature turned on -- this crate now DOES map to axum
+# (`Error -> Response`, `WorkspacePath`, `Ack`) for `routes.rs`, unlike the
+# note this comment used to carry ("no `http` feature ... that is Task 7's
+# job").
+egret-core = { workspace = true, features = ["http"] }
 egret-metastore.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
@@ -28,18 +31,49 @@ anyhow.workspace = true
 # Task 6 (publish): `RefKind` and `WorkflowRefPort` -- the port trait publish
 # resolves every reference through -- now live in this leaf crate rather than
 # here, so `egret-dataapi`/`egret-automation`/etc. can implement it without
-# depending on the workflow engine. This is the "first type this crate needs
-# from it" the [dev-dependencies] note below used to promise.
+# depending on the workflow engine.
 egret-workflow-api.workspace = true
+
+# Task 7 (routes): the HTTP surface. `axum`/`utoipa` for the router and its
+# OpenAPI doc; `egret-workspace` for `WsContext` (the extractor that resolves
+# `{workspace}`, membership, and the feature-entitlement gate); `egret-auth`
+# for `SessionService`, which `WsContext` authenticates against; `egret-audit`
+# for the mutation trail every other management seam writes to.
+axum.workspace = true
+utoipa.workspace = true
+egret-workspace.workspace = true
+egret-auth.workspace = true
+egret-audit.workspace = true
+
+# Task 7's `refs.rs`: the real `WorkflowRefPort` implementation resolves
+# `RefKind::DataApiEndpoint`/`RefKind::Notebook` through these two LEAF
+# contract crates (no sqlx/axum, mirroring `egret-automation`'s identical
+# pair) rather than depending on `egret-dataapi`/`egret-notebook` themselves.
+# `RefKind::Database`/`Dataset`/`Chart` have no such port anywhere in the
+# workspace yet and resolve to `None` (fail-closed) -- see `refs.rs`'s module
+# comment for the per-kind table.
+egret-dataapi-api.workspace = true
+egret-analytics-api.workspace = true
+
+# `refs.rs`'s `WorkflowRefs` implements `WorkflowRefPort` (async-trait), and
+# `routes.rs`'s DTO conversions from `spec::{Finding, ValidationReport}`
+# derive `Serialize`/`ToSchema` -- moved out of [dev-dependencies] because
+# both are now used by the library itself, not only by
+# `tests/publish.rs`'s `FakeRefs`.
+async-trait.workspace = true
 
 [dev-dependencies]
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.
 
-# tests/publish.rs's FakeRefs implements WorkflowRefPort.
-async-trait.workspace = true
-
 # repo.rs's DB-gated tests (`tests/repo.rs`): one private, already-migrated
 # database per test process, per `egret-test-db`'s own doc.
 egret-test-db.workspace = true
 tokio.workspace = true
+
+# tests/routes.rs drives the router over a real `axum::Router` and a real
+# `CedarPdp`, following `crates/egret-dataapi/tests/endpoints_routes.rs`.
+# Body bytes come off the response via `axum::body::to_bytes`, so no separate
+# `http-body-util` dependency is needed (that crate's own dependency covers it).
+tower.workspace = true
+egret-events.workspace = true
