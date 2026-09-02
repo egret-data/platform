@@ -301,7 +301,15 @@ thành một `dataapi/src/lifecycle.rs` nữa — 12.091 dòng trong một file.
      tại `96893b589` (2.0.0-SNAPSHOT).
    - *Tham chiếu artifact* — phiên bản đã publish mà plugin host và oracle Pebble
      liên kết tới: `2.0.0-rc13`.
-   Hai thứ này khác nhau và phải nâng cùng nhau, có chủ đích. Lưu ý Kestra 2.x
+   Hai thứ này khác nhau và phải nâng cùng nhau, có chủ đích.
+
+   **Chúng đã lệch nội dung thật, và không phải lệch hình thức.** Oracle của W2 phát hiện `2.0.0-rc13`
+   mang function `range` (`BoundedRangeFunction`) **không tồn tại ở đâu** trong checkout `96893b589` —
+   xác nhận bằng cách decompile `Extension.class`. Nghĩa là artifact đã publish không được build từ
+   commit ghim. Luật rút ra: **artifact là thẩm quyền về HÀNH VI**, vì đó là thứ oracle đo được và là
+   thứ Kestra của người dùng thực sự chạy; checkout là thẩm quyền để **đọc** một bản hiện thực. Chỗ nào
+   một bề mặt chỉ tồn tại trong artifact, hãy ghi lại rồi port theo hành vi đo được hoặc bỏ qua kèm lý
+   do — tuyệt đối không lặng lẽ cho rằng hai bên trùng nhau. Lưu ý Kestra 2.x
    biên dịch cho Java 25, 1.3.x cho Java 21; JDK của image host bám theo tham
    chiếu artifact.
 2. **Tên module Rust phản chiếu tên package Java**: `models/`, `runners/`,
