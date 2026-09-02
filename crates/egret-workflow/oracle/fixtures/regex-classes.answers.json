@@ -1,0 +1,2914 @@
+[ {
+  "id" : "re-cls-1",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-1",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-2",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-2",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-cls-3",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-3",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&b]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-4",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-4",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-5",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-5",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-6",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-6",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-7",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&[b]&&[c]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-7",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&[b]&&[c]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-8",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&[b]&&[c]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-8",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&[b]&&[c]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-9",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-9",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-10",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-10",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-cls-11",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-11",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-c&&a-b&&b-c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-12",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-12",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&a]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-13",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[&&a]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-13",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[&&a]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-14",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '[&&]': Bad class syntax ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-cls-14",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '[&&]': Bad class syntax (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-cls-15",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a&&]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-15",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a&&]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-16",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-16",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-17",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-17",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-18",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-18",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a-z&&[^bc]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-19",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-19",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-20",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-20",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-21",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-21",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[[a-z]&&[^bc]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-22",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-22",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-23",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-23",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-24",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "1",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-24",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "1",
+    "p" : "[^a-z&&b]"
+  },
+  "result" : "<1>"
+}, {
+  "id" : "re-cls-25",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-25",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-26",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-26",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-cls-27",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-27",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "<c>"
+}, {
+  "id" : "re-cls-28",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "d",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-28",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "d",
+    "p" : "[[a][b][c]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-29",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a[b]c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-29",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a[b]c]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-30",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a[b]c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-30",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a[b]c]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-cls-31",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "c",
+    "p" : "[a[b]c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-31",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "c",
+    "p" : "[a[b]c]"
+  },
+  "result" : "<c>"
+}, {
+  "id" : "re-cls-32",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "4",
+    "p" : "[\\d&&[^5]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-32",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "4",
+    "p" : "[\\d&&[^5]]"
+  },
+  "result" : "<4>"
+}, {
+  "id" : "re-cls-33",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "5",
+    "p" : "[\\d&&[^5]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-33",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "5",
+    "p" : "[\\d&&[^5]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-34",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&\\w]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-34",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-z&&\\w]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-35",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "1",
+    "p" : "[a-z&&\\w]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-35",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "1",
+    "p" : "[a-z&&\\w]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-36",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "]",
+    "p" : "[]a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-36",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "]",
+    "p" : "[]a]"
+  },
+  "result" : "<]>"
+}, {
+  "id" : "re-cls-37",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[]a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-37",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[]a]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-38",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "]",
+    "p" : "[^]a]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-38",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "]",
+    "p" : "[^]a]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-39",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[^]a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-39",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[^]a]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-cls-40",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-40",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[a-]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-41",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "-",
+    "p" : "[a-]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-41",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "-",
+    "p" : "[a-]"
+  },
+  "result" : "<->"
+}, {
+  "id" : "re-cls-42",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-42",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[-a]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-43",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "-",
+    "p" : "[-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-43",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "-",
+    "p" : "[-a]"
+  },
+  "result" : "<->"
+}, {
+  "id" : "re-cls-44",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "-",
+    "p" : "[a\\-z]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-44",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "-",
+    "p" : "[a\\-z]"
+  },
+  "result" : "<->"
+}, {
+  "id" : "re-cls-45",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a\\-z]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-45",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[a\\-z]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-46",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "B",
+    "p" : "[\\x41-\\x43]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-46",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "B",
+    "p" : "[\\x41-\\x43]"
+  },
+  "result" : "<B>"
+}, {
+  "id" : "re-cls-47",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "D",
+    "p" : "[\\x41-\\x43]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-47",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "D",
+    "p" : "[\\x41-\\x43]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-48",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "+",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-48",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "+",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "<+>"
+}, {
+  "id" : "re-cls-49",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-49",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-50",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "q",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-50",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "q",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-51",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[\\p{Alpha}&&[^b]]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-51",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[\\p{Alpha}&&[^b]]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-cls-52",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[\\p{Alpha}&&[^b]]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-52",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "[\\p{Alpha}&&[^b]]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-cls-53",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "é",
+    "p" : "[\\p{L}]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-cls-53",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "é",
+    "p" : "[\\p{L}]"
+  },
+  "result" : "<é>"
+}, {
+  "id" : "re-cls-54",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "1",
+    "p" : "[\\p{L}]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-cls-54",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "1",
+    "p" : "[\\p{L}]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-55",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-55",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-case-56",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-56",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-case-57",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-57",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-58",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)\\p{Upper}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-58",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)\\p{Upper}"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-case-59",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Upper}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-59",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Upper}"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-case-60",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Alpha}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-60",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Alpha}"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-case-61",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "1",
+    "p" : "(?i)\\p{Alpha}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-61",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "1",
+    "p" : "(?i)\\p{Alpha}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-62",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "B",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-62",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "B",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "<B>"
+}, {
+  "id" : "re-case-63",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-63",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-case-64",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "D",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-64",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "D",
+    "p" : "(?i)[a-c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-65",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "z",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-65",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "z",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "<z>"
+}, {
+  "id" : "re-case-66",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "Z",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-66",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "Z",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "<Z>"
+}, {
+  "id" : "re-case-67",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-67",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-case-68",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "_",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-68",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "_",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "<_>"
+}, {
+  "id" : "re-case-69",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)[A-Z]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-69",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?i)[A-Z]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-case-70",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "z",
+    "p" : "(?i)[A-Z]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-70",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "z",
+    "p" : "(?i)[A-Z]"
+  },
+  "result" : "<z>"
+}, {
+  "id" : "re-case-71",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "B",
+    "p" : "(?i)[^a-c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-71",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "B",
+    "p" : "(?i)[^a-c]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-72",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "d",
+    "p" : "(?i)[^a-c]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-72",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "d",
+    "p" : "(?i)[^a-c]"
+  },
+  "result" : "<d>"
+}, {
+  "id" : "re-case-73",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)[a-z0-9]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-73",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)[a-z0-9]"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-case-74",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "5",
+    "p" : "(?i)[a-z0-9]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-74",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "5",
+    "p" : "(?i)[a-z0-9]"
+  },
+  "result" : "<5>"
+}, {
+  "id" : "re-case-75",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "K",
+    "p" : "(?i)k"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-75",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "K",
+    "p" : "(?i)k"
+  },
+  "result" : "<K>"
+}, {
+  "id" : "re-case-76",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "k",
+    "p" : "(?i)k"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-76",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "k",
+    "p" : "(?i)k"
+  },
+  "result" : "<k>"
+}, {
+  "id" : "re-case-77",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "K",
+    "p" : "(?i)k"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-77",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "K",
+    "p" : "(?i)k"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-78",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "K",
+    "p" : "(?iu)k"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-78",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "K",
+    "p" : "(?iu)k"
+  },
+  "result" : "<K>"
+}, {
+  "id" : "re-case-79",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "K",
+    "p" : "(?iu)k"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-79",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "K",
+    "p" : "(?iu)k"
+  },
+  "result" : "<K>"
+}, {
+  "id" : "re-case-80",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "É",
+    "p" : "(?iu)é"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-80",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "É",
+    "p" : "(?iu)é"
+  },
+  "result" : "<É>"
+}, {
+  "id" : "re-case-81",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)é"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-81",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)é"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-82",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)[é]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-82",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "É",
+    "p" : "(?i)[é]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-83",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ß",
+    "p" : "(?i)ss"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-83",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ß",
+    "p" : "(?i)ss"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-84",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "SS",
+    "p" : "(?i)ss"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-84",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "SS",
+    "p" : "(?i)ss"
+  },
+  "result" : "<SS>"
+}, {
+  "id" : "re-case-85",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "AB",
+    "p" : "(?i)\\Qab\\E"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-85",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "AB",
+    "p" : "(?i)\\Qab\\E"
+  },
+  "result" : "<AB>"
+}, {
+  "id" : "re-case-86",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "AB",
+    "p" : "(?i)(?-i:ab)"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-86",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "AB",
+    "p" : "(?i)(?-i:ab)"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-case-87",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?i)(?-i:ab)"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-87",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?i)(?-i:ab)"
+  },
+  "result" : "<ab>"
+}, {
+  "id" : "re-case-88",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\w"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-88",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\w"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-case-89",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "F",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-89",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "F",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "<F>"
+}, {
+  "id" : "re-case-90",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "f",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-case-90",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "f",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "<f>"
+}, {
+  "id" : "re-case-91",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "G",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-case-91",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "G",
+    "p" : "(?i)\\p{XDigit}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-92",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?d)a.b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-92",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?d)a.b"
+  },
+  "result" : "<ab>"
+}, {
+  "id" : "re-flag-93",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?d)a.b"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-93",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?d)a.b"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-94",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?d)a.b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-94",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?d)a.b"
+  },
+  "result" : "<a\rb>"
+}, {
+  "id" : "re-flag-95",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?dm)^b"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-95",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?dm)^b"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-96",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?dm)^b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-96",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?dm)^b"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-97",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b\ra",
+    "p" : "(?dm)b$"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-97",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b\ra",
+    "p" : "(?dm)b$"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-98",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b\na",
+    "p" : "(?dm)b$"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-98",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b\na",
+    "p" : "(?dm)b$"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-99",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?m)^b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-99",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?m)^b"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-100",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?m)^b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-100",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?m)^b"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-101",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?m)^b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-101",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?m)^b"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-102",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b\ra",
+    "p" : "(?m)b$"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-102",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b\ra",
+    "p" : "(?m)b$"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-103",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b\na",
+    "p" : "(?m)b$"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-103",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b\na",
+    "p" : "(?m)b$"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-104",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?s)a.b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-104",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\nb",
+    "p" : "(?s)a.b"
+  },
+  "result" : "<a\nb>"
+}, {
+  "id" : "re-flag-105",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?s)a.b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-105",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?s)a.b"
+  },
+  "result" : "<a\rb>"
+}, {
+  "id" : "re-flag-106",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-106",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-107",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-107",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-flag-108",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-108",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "<b>"
+}, {
+  "id" : "re-flag-109",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?x)a b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-109",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?x)a b"
+  },
+  "result" : "<ab>"
+}, {
+  "id" : "re-flag-110",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a b",
+    "p" : "(?x)a b"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-110",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a b",
+    "p" : "(?x)a b"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-111",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?x)a#c\nb"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-111",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?x)a#c\nb"
+  },
+  "result" : "<ab>"
+}, {
+  "id" : "re-flag-112",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "acb",
+    "p" : "(?x)a#c\nb"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-112",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "acb",
+    "p" : "(?x)a#c\nb"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-113",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "#",
+    "p" : "(?x)[a#b]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?x)[a#b]': Unclosed character class ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-flag-113",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "#",
+    "p" : "(?x)[a#b]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?x)[a#b]': Unclosed character class (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-flag-114",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?x)[a#b]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?x)[a#b]': Unclosed character class ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-flag-114",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?x)[a#b]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?x)[a#b]': Unclosed character class (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-flag-115",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aaa",
+    "p" : "(?U)a+"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-115",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aaa",
+    "p" : "(?U)a+"
+  },
+  "result" : "<aaa>"
+}, {
+  "id" : "re-flag-116",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "é",
+    "p" : "(?U)\\w"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-116",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "é",
+    "p" : "(?U)\\w"
+  },
+  "result" : "<é>"
+}, {
+  "id" : "re-flag-117",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?U)\\w"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-117",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?U)\\w"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-flag-118",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "le café noir",
+    "p" : "(?U)\\bcafé\\b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-118",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "le café noir",
+    "p" : "(?U)\\bcafé\\b"
+  },
+  "result" : "<café>"
+}, {
+  "id" : "re-flag-119",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "٣",
+    "p" : "(?U)\\d"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-119",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "٣",
+    "p" : "(?U)\\d"
+  },
+  "result" : "<٣>"
+}, {
+  "id" : "re-flag-120",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "5",
+    "p" : "(?U)\\d"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-120",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "5",
+    "p" : "(?U)\\d"
+  },
+  "result" : "<5>"
+}, {
+  "id" : "re-flag-121",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "(?U)\\s"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-121",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "(?U)\\s"
+  },
+  "result" : "< >"
+}, {
+  "id" : "re-flag-122",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "(?U)\\s"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-122",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "(?U)\\s"
+  },
+  "result" : "< >"
+}, {
+  "id" : "re-flag-123",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "Ab",
+    "p" : "(?i:a)b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-123",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "Ab",
+    "p" : "(?i:a)b"
+  },
+  "result" : "<Ab>"
+}, {
+  "id" : "re-flag-124",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?i:a)b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-124",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(?i:a)b"
+  },
+  "result" : "<ab>"
+}, {
+  "id" : "re-flag-125",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?-i)a"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-125",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "(?-i)a"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-flag-126",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?-i)a"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-126",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?-i)a"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-flag-127",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aB",
+    "p" : "a(?i)b"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-flag-127",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aB",
+    "p" : "a(?i)b"
+  },
+  "result" : "<aB>"
+}, {
+  "id" : "re-flag-128",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "AB",
+    "p" : "a(?i)b"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-flag-128",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "AB",
+    "p" : "a(?i)b"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-129",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\X"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-129",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\X"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-130",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\N{LATIN SMALL LETTER A}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-130",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\N{LATIN SMALL LETTER A}"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-131",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{all}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-131",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{all}"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-132",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsAlphabetic}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-132",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsAlphabetic}"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-133",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "1",
+    "p" : "\\p{IsAlphabetic}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-133",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "1",
+    "p" : "\\p{IsAlphabetic}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-134",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "\\p{IsWhite_Space}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-134",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "\\p{IsWhite_Space}"
+  },
+  "result" : "< >"
+}, {
+  "id" : "re-esc-135",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsWhite_Space}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-135",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsWhite_Space}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-136",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "$",
+    "p" : "\\p{Sc}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-136",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "$",
+    "p" : "\\p{Sc}"
+  },
+  "result" : "<$>"
+}, {
+  "id" : "re-esc-137",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{Sc}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-137",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{Sc}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-138",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "中",
+    "p" : "\\p{IsHan}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-138",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "中",
+    "p" : "\\p{IsHan}"
+  },
+  "result" : "<中>"
+}, {
+  "id" : "re-esc-139",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsHan}"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-139",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{IsHan}"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-140",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "\\x{1F600}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-140",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "\\x{1F600}"
+  },
+  "result" : "<\uD83D\uDE00>"
+}, {
+  "id" : "re-esc-141",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "[\\x{1F600}]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-141",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "[\\x{1F600}]"
+  },
+  "result" : "<\uD83D\uDE00>"
+}, {
+  "id" : "re-esc-142",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "\\ud83d\\ude00"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-142",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "\\ud83d\\ude00"
+  },
+  "result" : "<\uD83D\uDE00>"
+}, {
+  "id" : "re-esc-143",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "\\u0041"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-143",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "\\u0041"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-esc-144",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\r\n",
+    "p" : "\\R"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-144",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\r\n",
+    "p" : "\\R"
+  },
+  "result" : "<\r\n>"
+}, {
+  "id" : "re-esc-145",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\n",
+    "p" : "\\R"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-145",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\n",
+    "p" : "\\R"
+  },
+  "result" : "<\n>"
+}, {
+  "id" : "re-esc-146",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "",
+    "p" : "\\R"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-146",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "",
+    "p" : "\\R"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-147",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\t",
+    "p" : "\\h"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-147",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\t",
+    "p" : "\\h"
+  },
+  "result" : "<\t>"
+}, {
+  "id" : "re-esc-148",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "\\h"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-148",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "\\h"
+  },
+  "result" : "< >"
+}, {
+  "id" : "re-esc-149",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\h"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-149",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\h"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-150",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\n",
+    "p" : "\\v"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-150",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\n",
+    "p" : "\\v"
+  },
+  "result" : "<\n>"
+}, {
+  "id" : "re-esc-151",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\u000B",
+    "p" : "\\v"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-151",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\u000B",
+    "p" : "\\v"
+  },
+  "result" : "<\u000B>"
+}, {
+  "id" : "re-esc-152",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a**"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a**': Dangling meta character '*' ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-152",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a**"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a**': Dangling meta character '*' (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-153",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a*+"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-153",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a*+"
+  },
+  "result" : "<aaa>"
+}, {
+  "id" : "re-esc-154",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a{",
+    "p" : "a{"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{': Illegal repetition ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-154",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a{",
+    "p" : "a{"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{': Illegal repetition (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-155",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a{,3}",
+    "p" : "a{,3}"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{,3}': Illegal repetition ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-155",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a{,3}",
+    "p" : "a{,3}"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{,3}': Illegal repetition (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-156",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aa",
+    "p" : "a{2,1}"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{2,1}': Illegal repetition range ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-156",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aa",
+    "p" : "a{2,1}"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{2,1}': Illegal repetition range (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-157",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aa",
+    "p" : "a{2}"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-157",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "aa",
+    "p" : "a{2}"
+  },
+  "result" : "<aa>"
+}, {
+  "id" : "re-esc-158",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<name>a)"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-158",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<name>a)"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-159",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<λ>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<λ>a)': capturing group name does not start with a Latin letter ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-159",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<λ>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<λ>a)': capturing group name does not start with a Latin letter (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-160",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<1a>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<1a>a)': capturing group name does not start with a Latin letter ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-160",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<1a>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<1a>a)': capturing group name does not start with a Latin letter (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-161",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<na_me>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<na_me>a)': named capturing group is missing trailing '>' ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "rx-esc-161",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<na_me>a)"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<na_me>a)': named capturing group is missing trailing '>' (<{{ s | regexExtract(regex=p) }}>:1)"
+  }
+}, {
+  "id" : "re-esc-162",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\Z"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-162",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "\\Z"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-163",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "a\\Z"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-163",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "a\\Z"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-164",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "()"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-164",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "()"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-165",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(|a)"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-165",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(|a)"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-166",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "a|"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-166",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "a|"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-167",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[^\\W]"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-167",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "[^\\W]"
+  },
+  "result" : "<a>"
+}, {
+  "id" : "re-esc-168",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "[^\\W]"
+  },
+  "result" : "false"
+}, {
+  "id" : "rx-esc-168",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : " ",
+    "p" : "[^\\W]"
+  },
+  "result" : "<>"
+}, {
+  "id" : "re-esc-169",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\u0001",
+    "p" : "\\cA"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-169",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\u0001",
+    "p" : "\\cA"
+  },
+  "result" : "<\u0001>"
+}, {
+  "id" : "re-esc-170",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "\\0101"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-170",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "A",
+    "p" : "\\0101"
+  },
+  "result" : "<A>"
+}, {
+  "id" : "re-esc-171",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\u001B",
+    "p" : "\\e"
+  },
+  "result" : "true"
+}, {
+  "id" : "rx-esc-171",
+  "expr" : "<{{ s | regexExtract(regex=p) }}>",
+  "context" : {
+    "s" : "\u001B",
+    "p" : "\\e"
+  },
+  "result" : "<\u001B>"
+}, {
+  "id" : "rr-0",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "aab",
+    "p" : "a*",
+    "r" : "-"
+  },
+  "result" : "--b-"
+}, {
+  "id" : "rr-1",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "",
+    "p" : "a*",
+    "r" : "-"
+  },
+  "result" : "-"
+}, {
+  "id" : "rr-2",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "",
+    "r" : "-"
+  },
+  "result" : "-a-b-"
+}, {
+  "id" : "rr-3",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "x*",
+    "r" : "-"
+  },
+  "result" : "-a-b-"
+}, {
+  "id" : "rr-4",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "abc",
+    "p" : "b*",
+    "r" : "-"
+  },
+  "result" : "-a--c-"
+}, {
+  "id" : "rr-5",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "ab",
+    "p" : "(a)|(b)",
+    "r" : "[$1$2]"
+  },
+  "result" : "[a][b]"
+}, {
+  "id" : "rr-6",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "ab cd",
+    "p" : "\\b",
+    "r" : "-"
+  },
+  "result" : "-ab- -cd-"
+}, {
+  "id" : "rr-7",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a",
+    "r" : "$0$0"
+  },
+  "result" : "aaaaaa"
+}, {
+  "id" : "rr-8",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(a)",
+    "r" : "${1}x"
+  },
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: capturing group name {1} starts with digit character"
+  }
+}, {
+  "id" : "rr-9",
+  "expr" : "{{ s | regexReplace(regex=p, replacement=r) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "a",
+    "r" : "x\\ny"
+  },
+  "result" : "xny"
+}, {
+  "id" : "rg-0",
+  "expr" : "<{{ s | regexExtract(regex=p, group=g) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "(a)|(b)",
+    "g" : 1
+  },
+  "result" : "<>"
+}, {
+  "id" : "rg-1",
+  "expr" : "<{{ s | regexExtract(regex=p, group=g) }}>",
+  "context" : {
+    "s" : "b",
+    "p" : "(a)|(b)",
+    "g" : 2
+  },
+  "result" : "<b>"
+}, {
+  "id" : "rg-2",
+  "expr" : "<{{ s | regexExtract(regex=p, group=g) }}>",
+  "context" : {
+    "s" : "abc",
+    "p" : "x*",
+    "g" : 0
+  },
+  "result" : "<>"
+}, {
+  "id" : "rg-3",
+  "expr" : "<{{ s | regexExtract(regex=p, group=g) }}>",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<n>a)",
+    "g" : 1
+  },
+  "result" : "<a>"
+}, {
+  "id" : "rg-4",
+  "expr" : "<{{ s | regexExtract(regex=p, group=g) }}>",
+  "context" : {
+    "s" : "ab",
+    "p" : "(a(b))",
+    "g" : 2
+  },
+  "result" : "<b>"
+} ]

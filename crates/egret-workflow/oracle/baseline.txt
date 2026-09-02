@@ -332,13 +332,35 @@ filter-yaml-next-line-character-folds
 
 # --- W2 Task 6, fix round 1. Two more refusals, both places Kestra ANSWERS.
 #
-# jaq's parser is recursive descent with no depth limit: 171 nested brackets
-# overflow a 2 MiB stack -- a tokio worker's -- and a stack overflow is
-# SIGABRT, which `catch_unwind` does not see and `tests/oracle.rs`'s panic
-# guard therefore cannot report. `runners::jqsandbox` bounds the source's
-# nesting at 64 before the loader is called; Kestra parses 2000 levels fine.
-filter-jq-deeply-nested-source
 # A jq `def` can call itself, directly or through another definition, and
 # nothing egret can read from the source bounds that -- `def f: f; f` is two
 # words. Refused by name; Kestra answers it. See `runners::jqsandbox`.
 filter-jq-user-definition
+
+# --- W2 Task 6, fix round 2. Four more, in two groups.
+
+# 1. A context integer wider than 64 bits loses its digits, and NOT in a
+# filter: `serde_json` without `arbitrary_precision` converts such a literal
+# to an `f64` inside its own parser, before any `Visitor` method is called, so
+# nothing in this crate can see the digits. Jackson reads it as a
+# `BigInteger`. The fix is a workspace-wide Cargo feature -- features are
+# additive across the graph, so turning it on changes `serde_json::Value`'s
+# number representation for every crate here -- and that is not W2's call.
+# `runners::filters`' `number(type='BIGINTEGER')` path is byte-exact; this is
+# the CONTEXT path.
+context-integer-past-u64
+context-integer-past-u64-tojson
+context-integer-past-u64-classname
+
+# 2. `(?U)` (UNICODE_CHARACTER_CLASS) redefines the whole POSIX family --
+# \p{Alpha}, \p{Alnum}, \p{Graph}, \p{Print}, \p{Upper}, \p{Lower},
+# \p{Punct}, \p{Digit}, \p{Space}, \p{Blank}, \p{XDigit} -- and not only the
+# four escapes the refusal message used to name. 29 measured rows. Refused
+# rather than approximated: Java's `(?U)` sets are close to the crate's
+# Unicode ones and not equal to them.
+filter-regexmatch-unicode-classes-over-posix
+
+# 3. Java has no line at all in an empty subject, so `(?m)^` does not match
+# there; the crate's multi-line `^` matches at position 0. Refused rather than
+# answered, in `runners::javare::check_haystack`.
+filter-regexmatch-multiline-anchor-on-an-empty-subject

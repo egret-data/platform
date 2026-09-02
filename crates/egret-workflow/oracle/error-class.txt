@@ -312,3 +312,15 @@ filter-regexmatch-non-latin-group-name
 filter-jq-environment-is-withheld
 filter-jq-service-log-is-withheld
 filter-jq-host-timezone-is-withheld
+
+# --- W2 Task 6, fix round 2.
+#
+#   filter-regexmatch-ampersands-only  -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-jq-source-past-the-cap      -> every_deep_jq_source_is_refused_before_the_parser_sees_it
+#
+# `[&&&]` is `Bad class syntax` in Java and the `regex` crate accepts it.
+# A 4000-byte `-`x4000 source is a StackOverflowError in Kestra's own parser --
+# so both engines fail, for different reasons and at different sizes, and
+# egret's is a bound rather than a crash.
+filter-regexmatch-ampersands-only
+filter-jq-source-past-the-cap

@@ -470,6 +470,26 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
         Ok(OrderedJson(MjValue::from(v)))
     }
 
+    /// **A context integer wider than 64 bits arrives here as a FLOAT, and
+    /// its digits are already gone.**
+    ///
+    /// `{"v": 18446744073709551616}` renders `1.8446744073709552E19` where
+    /// Kestra renders the exact digits — through `{{ v }}`, `toJson`, `yaml`,
+    /// `toIon` and `jq` — and `className` says `java.lang.Double` where
+    /// Jackson says `java.math.BigInteger`. Jackson reads such a literal as a
+    /// `BigInteger`; `serde_json` without `arbitrary_precision` converts it to
+    /// an `f64` **inside its own parser**, before any `Visitor` method is
+    /// called, so `visit_i128`/`visit_u128` do not help and are deliberately
+    /// not implemented here — a visitor that is never called, documented as a
+    /// fix, is worse than none.
+    ///
+    /// The fix is `serde_json`'s `arbitrary_precision`, and Cargo features
+    /// are additive across the graph: turning it on changes
+    /// `serde_json::Value`'s number representation for **every** crate in
+    /// this workspace. That is not W2's call to make.
+    ///
+    /// Recorded rather than hidden: `context-integer-past-u64` and its
+    /// siblings are the entries, baselined with this reason.
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
         Ok(OrderedJson(MjValue::from(v)))
     }

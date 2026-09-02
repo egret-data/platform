@@ -29,7 +29,6 @@
 #
 # Escapes are JSON's (`\t`, `\n`, `\u00e9`), because a tab-separated file
 # cannot carry a literal tab and a subject can.
-
 [a-z&&b]	a	false	false	-
 [a-z&&b]	b	true	true	-
 [a-z&&b]	c	false	false	-
@@ -145,13 +144,13 @@
 (?x)[a#b]	#	error	error	-
 (?x)[a#b]	a	error	error	-
 (?U)a+	aaa	true	true	-
-(?U)\\w	é	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\w	a	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\bcafé\\b	le café noir	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\d	٣	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\d	5	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\s	 	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
-(?U)\\s	 	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\w	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\w	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\bcafé\\b	le café noir	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\d	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\d	5	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\s	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\s	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
 (?i:a)b	Ab	true	true	-
 (?i:a)b	ab	true	true	-
 (?-i)a	A	false	false	-

@@ -129,7 +129,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**87** entries carry it today, counted out of `golden.json` rather than added
+**89** entries carry it today, counted out of `golden.json` rather than added
 up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -152,7 +152,7 @@ That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
 entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
 whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 87 are *also* in `baseline.txt`, because
+does **not** make it pass: 5 of the 89 are *also* in `baseline.txt`, because
 egret *succeeds* where Kestra throws — a real divergence, and it stays
 visible.
 
@@ -165,9 +165,8 @@ is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 task's fix round, 62 of 486 after its second, 66 of 513 after its third,
 76 of 632 after W2 Task 6 -- which BANKED seven (its whole batch of
 filters) and RECORDED seventeen, every one of them a place the two engines
-answer differently rather than a filter that is not ported -- and **78 of
-673** after that task's fix round, which added two more refusals and no
-mismatch it did not declare.
+answer differently rather than a filter that is not ported -- and 78 of
+673 after that task's fix round, and **82 of 693** after its second.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -679,7 +678,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 673 entries)
+## Corpus (`corpus.json`, 693 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -2077,3 +2076,190 @@ right ones come out of the files:
   It was written `<{{ s | yaml }}>`, and the `>` after the value is what stops
   minijinja trimming the newline — so the entry passed either way. It is now
   a bare `{{ s | yaml }}` and it fails under the reversion.
+
+## Regenerating the two answer fixtures
+
+`regex-classes.txt` and `jq-surface.txt` each carry a **Kestra column** that
+`golden.json` does not: they are answers from the Java harness, committed as
+text. Unlike `golden.json` they were, for one round, snapshots nothing could
+re-derive — so a change upstream could not make them rot loudly.
+
+Both are regenerated the same way `golden.json` is, from a probe corpus in the
+same schema:
+
+```bash
+export JAVA_HOME=/Users/1pro-l4r8/Library/Java/JavaVirtualMachines/amazon-corretto-25.jdk/Contents/Home
+cd crates/egret-workflow/oracle
+mvn -q -o compile
+CP=$(mvn -q -o dependency:build-classpath -Dmdep.outputFile=/dev/stdout | tail -1)
+
+# `fixtures/regex-classes.probe.json` and `fixtures/jq-surface.probe.json` are
+# committed beside this file, in `corpus.json`'s schema.
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate \
+    fixtures/regex-classes.probe.json fixtures/regex-classes.answers.json
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate \
+    fixtures/jq-surface.probe.json fixtures/jq-surface.answers.json
+```
+
+The probe corpora and the harness answers are **committed next to the
+fixtures**, so the `kestra` and `java` columns can be diffed against a
+regenerated pair the same way `golden.json` is, and a Kestra bump moves them
+visibly. `runners::javare::the_regex_classes_match_the_engine` and
+`runners::jqsandbox::the_jq_surface_matches_the_engine` assert that the
+committed column and the committed answers agree, so a hand-edited fixture
+fails.
+
+## W2 Task 6, fix round 2 — bounding by CLASS, not by the examples in the review
+
+A review found that both bounds from fix round 1 had been fitted to the
+examples in its own message rather than to the class behind them, and walked
+past both in minutes. That is the "the entries were the variants that pass"
+shape, moved from the corpus to the fix. **Measured examples are evidence of a
+class, not a specification of it.**
+
+### The parse: no scanner can bound it, so the STACK is the bound
+
+`check_source` counted bracket nesting. **Six of the seven abort vectors
+contain no bracket at all**, so it saw depth 0. Re-measured here by bisecting
+the shortest program of each shape that aborts a 2 MiB stack:
+
+| construct | shortest abort | stack per source byte |
+|---|---:|---:|
+| `-`×N + `1` | **205 B** | **9.99 KiB** |
+| `[`×N / `(`×N | 345 B | 5.94 KiB |
+| `{a:`×N | 513 B | 3.99 KiB |
+| `try `×N | 817 B | 2.51 KiB |
+| `.` + `\|.`×N | 5.1 kB | 0.40 KiB |
+| `.` + `,.`×N | 43 kB | 0.05 KiB |
+| `.` + ` // .`×N | 109 kB | 0.02 KiB |
+
+And the scanner had a scanner's defect on top: it popped an interpolation
+frame on **any** `)`, so after `"\((1),` it believed it was inside a string
+and stopped counting — `"\((1),` + `[`×171 + `]`×171 + `)"`, 352 bytes,
+aborted.
+
+The cost per byte is **constant in the stack size** (9.99 at 2 MiB, 9.93 at
+8 MiB, 9.91 at 64 MiB), so it is a property of the construct and can be used
+as a bound. Two mechanisms, no scanner:
+
+1. the parse and the run happen on a **dedicated thread with an explicit
+   stack** (`JQ_STACK_BYTES` = 64 MiB), so the budget does not depend on
+   whether the caller was a 2 MiB tokio worker;
+2. the source is capped at `MAX_SOURCE_BYTES` = 64 MiB / 10 KiB / 6 =
+   **1092 bytes**, and the arithmetic is in the constants.
+
+`a_source_at_the_cap_parses_on_the_jq_thread` is the other half of the
+derivation: a bound that refuses everything is not evidence that what it
+admits is safe.
+
+The `def` refusal is now **not string-aware on purpose** — a `def` inside a
+string literal is refused too. That over-refuses `jq('"def"')` and removes the
+class of defect a scanner has, which this module has now paid for twice.
+
+### The run: a step counter cannot bound a step that never happens, or one whose cost grows
+
+Two shapes got past `MAX_STEPS`:
+
+- **`range` with a step of `0`** spins inside the native, one call, no steps.
+  `jqsandbox.rs`'s guard was `$by != 0 and …`, and the short-circuit removed
+  the guard for precisely the step that never terminates. Measured: 1.67 GiB
+  RSS at 20 s, still climbing; `reduce range(0;1;0) as $x (0;.+1)` a flat
+  8.9 MiB pure CPU spin.
+- **`[recurse(.+[1])]`** stops at 65 536 iterations as designed and reaches
+  **9.9 GiB**, because each value is one element longer than the last.
+
+So the bound is no longer only a counter:
+
+- **`__egret_tick` is a wall-clock DEADLINE** (`MAX_RUN` = 1 s), called once
+  per step by all four bounded recursion definitions. A deadline does not need
+  anyone to predict the shape of the next abuse, which is the property a
+  counter lacks.
+- **`__egret_guard` adds a shallow-length cap** in jq, because a `RunPtr` is a
+  higher-ranked `fn` over `<D as DataT>::V<'a>` and naming that projection as
+  `Val` — which inspecting the value needs — does not typecheck. It tests
+  `. >= ""`, since jq's total order puts numbers before strings, arrays and
+  objects, and **`BOUNDED_DEFS` may use only what `jaq-core`'s defs.jq has
+  defined above the group it replaces**: `type` comes from `jaq-std`, and
+  referencing it made the whole standard library fail to compile.
+- **`range` with a step of `0` now emits nothing**, which is what Kestra's
+  `jackson-jq` does with it — measured, `[range(0;1;0)] | length` is `0`
+  there. `jaq` spins. Matching Kestra is both the fidelity answer and the
+  terminating one.
+
+**What is left, stated rather than implied:** a program can still compose
+bounded pieces into an expensive whole and reach the deadline only at the next
+tick. The complete answer is abandoning the thread on a timeout, which leaks a
+runaway thread into a long-lived process.
+
+### The regex sweep, widened: 151 silent rows, all closed
+
+Round 1's fixture sampled where the answers agree. A 1 465-probe
+cross-product of every Java POSIX name and six Unicode categories against
+`(?i)`, `(?u)`, `(?U)` and 19 subjects found **151 silent rows in 30 pattern
+classes**. All 2 161 regex probes now leave **zero**.
+
+- **`(?i)` over a property has a DIFFERENT fold, and the round-1 doc's premise
+  was wrong.** It said Java's rule is `c ∈ C or swapAsciiCase(c) ∈ C`
+  "whatever `C` is". True for a character, a range and an **ASCII-only**
+  property; false for a Unicode one — Java folds `\p{Lu}` with full Unicode
+  mapping even without `UNICODE_CASE`. `(?i)\p{Lu}` matches `é`, `ς`, `ſ`,
+  `à` and `к`. A first cut of the fix then folded *every* property with
+  Unicode and got the other half wrong: `(?i)\p{Alpha}` matched `ſ` and
+  `\u212a`, which Java does not.
+- **`(?U)` redefines the whole POSIX family**, not the four escapes its own
+  refusal message named. 29 rows.
+- **`(?u)` was dropped inside a class**, so `(?iu)[k]` did not match U+212A
+  while `(?iu)k` did — the fixture had the literal forms.
+- **`[a&&&b]` is `[ab&]` in Java.** `clazz()` reads the right operand
+  `while (ch != ']' && ch != '&')`, so a third `&` leaves it null, the `&&`
+  does nothing, and the `&` is a literal. Derived from eleven measured
+  `&`-runs, not guessed: `[a&&&&b]` IS an intersection and `[&&&]` throws.
+- **`(?m)^` does not match an empty subject** in Java — there is no line —
+  and the crate's matches at position 0. Refused.
+- **A lone surrogate (`\uD83D`) compiles in Java** and matches nothing; egret
+  called the pattern invalid. It is now a subexpression that cannot match.
+
+### Two more
+
+- **A context integer wider than 64 bits loses its digits, and not in a
+  filter.** `{"v": 18446744073709551616}` renders `1.8446744073709552E19`
+  where Kestra renders the exact digits, through `{{ v }}`, `toJson`, `yaml`,
+  `toIon` and `jq`. `serde_json` without `arbitrary_precision` converts such a
+  literal to an `f64` **inside its own parser**, before any `Visitor` method
+  is called — so `visit_i128`/`visit_u128` do not help and are deliberately
+  not implemented. The fix is a Cargo feature, and features are additive
+  across the graph: it would change `serde_json::Value`'s number
+  representation for every crate in this workspace. Baselined with that
+  reason.
+- **The definition list is now guarded the way the native list is.**
+  `ALLOWED_NATIVES` made a new *native* a test failure; nothing did the same
+  for a new *definition*, which is the thing this module bounds by replacing.
+  `the_definition_list_is_the_one_this_module_was_written_against` pins the
+  count and the set of definitions that name themselves.
+
+### Two tests that passed the implementation that shipped
+
+Both are recorded because the shape recurs:
+
+- `a_deeply_nested_jq_source_is_refused_before_the_parser_sees_it` tested `[`
+  and `(` — the two the review named — and passed while `-`×241 aborted in
+  241 bytes.
+- `the_bounded_definitions_parse` asserted the definition **names**, which
+  `def repeat(f): .;` passes with no bound anywhere; and
+  `the_literal_in_the_jq_source_is_the_bound` counted the literal `65536`,
+  which `rec($n)` instead of `rec($n-1)` passes while the bound never fires.
+  They are replaced by `every_bounded_definition_actually_stops`, which RUNS
+  each program and asserts the message names the bound that stopped it.
+
+### `\L` and `\P` are unreachable, and the hazard is still there
+
+`yamlfmt`'s double-quoted writer emits `\N`, `\_`, `\L` and `\P`. The last
+two are unreachable today, and that matches Java: the style selector never
+picks a double-quoted scalar for a string whose only unusual character is
+U+2028 or U+2029 — SnakeYAML folds a **plain** scalar across them instead,
+which is what `filter-yaml-next-line-character-folds` records.
+
+**The read-back hazard is still there, on both engines.** A raw U+0085,
+U+2028 or U+2029 in a scalar is a line break to a YAML 1.1 reader, so Kestra's
+own plain-scalar output does not round trip. Escaping is what avoids it, and
+Kestra does not escape.

@@ -153,3 +153,7 @@ filter-regexmatch-non-latin-group-name             test:a_pattern_java_rejects_i
 filter-jq-environment-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
 filter-jq-service-log-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
 filter-jq-host-timezone-is-withheld                test:the_host_reading_jq_natives_are_refused_by_name
+
+# --- W2 Task 6, fix round 2.
+filter-regexmatch-ampersands-only test:a_pattern_java_rejects_is_rejected_here_too
+filter-jq-source-past-the-cap     test:every_deep_jq_source_is_refused_before_the_parser_sees_it

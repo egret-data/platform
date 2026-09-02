@@ -495,11 +495,21 @@ fn write_double_quoted(out: &mut String, s: &str) {
             '\u{07}' => out.push_str("\\a"),
             '\0' => out.push_str("\\0"),
             '\u{1b}' => out.push_str("\\e"),
-            // YAML's four NAMED escapes beyond the C-like ones. The last
-            // three matter for more than looks: a raw U+0085, U+2028 or
-            // U+2029 inside a double-quoted scalar is a LINE BREAK to a YAML
-            // 1.1 reader, so writing them literally produces output that
-            // reads back as a different string.
+            // YAML's four NAMED escapes beyond the C-like ones.
+            //
+            // **`\L` and `\P` are unreachable today**, and that matches
+            // Java: the style selector never picks a double-quoted scalar for
+            // a string whose only unusual character is U+2028 or U+2029 —
+            // SnakeYAML folds a PLAIN scalar across them instead, which is
+            // the divergence `filter-yaml-next-line-character-folds` records.
+            // They are here so that a value which reaches this writer by some
+            // other route is written correctly rather than raw.
+            //
+            // **The read-back hazard is still there**, on both engines: a raw
+            // U+0085, U+2028 or U+2029 in a scalar is a LINE BREAK to a YAML
+            // 1.1 reader, so Kestra's own plain-scalar output does not round
+            // trip either. Escaping is what avoids it, and Kestra does not
+            // escape.
             '\u{85}' => out.push_str("\\N"),
             '\u{a0}' => out.push_str("\\_"),
             '\u{2028}' => out.push_str("\\L"),

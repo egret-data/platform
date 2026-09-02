@@ -11,16 +11,42 @@
 //!
 //! # 1. The parser overflows the stack, and that is an ABORT
 //!
-//! `Loader::load` is recursive descent with no depth limit. Measured:
-//! **692** nested `[` on the 8 MiB main stack and **171 on a 2 MiB stack — a
-//! tokio worker's — i.e. a template about 360 bytes long.** `[`, `(` and
-//! `{a:` all reach it.
+//! `Loader::load` is recursive descent with no depth limit, and a stack
+//! overflow is `SIGABRT`, not a panic: `catch_unwind` does not see it and
+//! `tests/oracle.rs`'s panic guard cannot report it.
 //!
-//! A stack overflow is `SIGABRT`, not a panic: `catch_unwind` does not see it
-//! and neither does `tests/oracle.rs`'s panic guard, which is why nothing in
-//! this package would have reported it. [`check_source`] bounds the nesting
-//! **before** the loader is called, the way `rewrite::MAX_NESTING_DEPTH`
-//! bounds the expression rewriter for the same reason.
+//! **An earlier cut bounded the source's BRACKET NESTING, and that was the
+//! wrong invariant** — the parser recurses on productions, not on characters.
+//! Six of the seven vectors contain no bracket at all. Measured here, on a
+//! 2 MiB stack (a tokio worker's), by bisecting the shortest program that
+//! aborts:
+//!
+//! | construct | shortest abort | stack per source byte |
+//! |---|---:|---:|
+//! | `-`×N + `1` | **205 B** | **9.99 KiB** |
+//! | `[`×N … | 345 B | 5.94 KiB |
+//! | `{a:`×N … | 513 B | 3.99 KiB |
+//! | `try `×N + `.` | 817 B | 2.51 KiB |
+//! | `.` + `\|.`×N | 5.1 kB | 0.40 KiB |
+//! | `.` + `,.`×N | 43 kB | 0.05 KiB |
+//! | `.` + ` // .`×N | 109 kB | 0.02 KiB |
+//!
+//! The cost per byte is **constant in the stack size** — re-measured at 8 MiB
+//! and 64 MiB, `-`×N gives 9.93 and 9.91 KiB per byte — so it is a property
+//! of the construct and can be used as a bound.
+//!
+//! So there are two mechanisms and no scanner:
+//!
+//! 1. **the parse and the run happen on a dedicated thread with an explicit
+//!    stack** ([`JQ_STACK_BYTES`]), so the budget does not depend on which
+//!    caller reached this filter;
+//! 2. **the source is capped at [`MAX_SOURCE_BYTES`]**, which is that stack
+//!    divided by the worst measured cost per byte and by a margin. The
+//!    arithmetic is in the constants, so the next person can re-derive it
+//!    with a different jaq.
+//!
+//! A 1 MiB cap — what the earlier cut allowed — is not compatible with any
+//! stack that can be allocated: it would need 10 GiB. The honest cap is small.
 //!
 //! # 2. The evaluator has no budget of any kind
 //!
@@ -28,29 +54,40 @@
 //! (`grep fuel|budget|steps` finds nothing), and minijinja's own `FUEL` does
 //! not help, because the whole jq program runs inside one filter call.
 //!
-//! An earlier cut of this filter counted bytes **as outputs were emitted**,
-//! which bounds a generator that emits and nothing else: `[repeat(1)]`,
-//! `reduce repeat(1) as $x (0; .+1)`, `until(false; .)` and `def f: f; f`
-//! all produce their first output never, and walk straight past it.
+//! Two cuts have now been wrong about this, in the same way. The first
+//! counted bytes **as outputs were emitted**, which a program that emits
+//! nothing walks past. The second counted **steps**, which bounds neither a
+//! step that never happens (`range` with a step of `0` spins inside the
+//! native, one call) nor a step whose *cost* grows (`[recurse(.+[1])]` stops
+//! at 65 536 iterations and reaches 9.9 GiB, because each value is one
+//! element longer than the last).
 //!
-//! jaq exposes exactly two places a caller can stand: the **definition list**
-//! and the **native function list**, both arguments to the loader and the
-//! compiler. Everything below is built on those two.
+//! Both of those are outside "count the steps", so the bound is not a
+//! counter. jaq offers exactly two hooks — the definition list and the native
+//! list — and every construct that can loop **without emitting** goes through
+//! one of them:
 //!
-//! - [`BOUNDED_DEFS`] replaces jaq's own `repeat`, `recurse`, `while` and
-//!   `until` — which are jq-source definitions, not natives — with
-//!   depth-counting versions that `error` past [`MAX_STEPS`]. That closes the
-//!   whole family, `..`, `paths`, `walk` and `leaf_paths` included, since
-//!   every one of them is defined on `recurse`.
-//! - `range/3` is a native, so it is **renamed** and shadowed by a definition
-//!   that refuses a count past [`MAX_STEPS`] before calling it. Renaming is
-//!   possible because a native is a `(name, args, ptr)` tuple; the name is
-//!   just the first field.
-//! - a **user `def` is refused outright**. `def f: f; f` is two words and no
-//!   bound above touches it, mutual recursion cannot be detected by reading
-//!   the text, and a `def` inside a one-line `Property` expression is not a
-//!   thing flows do. Refused by name, like the regex constructs in
-//!   `super::javare`, and recorded as a divergence rather than hidden.
+//! | construct | how it is bounded |
+//! |---|---|
+//! | `recurse`, `repeat`, `while`, `until` (and `..`, `paths`, `walk`, `leaf_paths`, which are defined on them) | replaced definitions that call [`TICK`] once per step |
+//! | `range` — the only native generator | a guarded definition that refuses a step of `0` and a count past [`MAX_STEPS`] |
+//! | a user `def` | refused; nothing else can bound a recursion egret did not write |
+//!
+//! **[`TICK`] is a wall-clock DEADLINE, not a counter**, and that is the
+//! point: it does not need anyone to predict the shape of the next abuse. It
+//! also carries a cheap shallow-length cap, which catches a single enormous
+//! step that the deadline would let through.
+//!
+//! What it cuts: a legitimate jq program that runs longer than
+//! [`MAX_RUN`]. Nothing in this package's 191-expression sweep is within two
+//! orders of magnitude of it.
+//!
+//! **What it does not cover, stated rather than implied:** a program can
+//! still compose *bounded* pieces into an expensive whole — nested `range`s
+//! inside a collector, say — and reach the deadline only at the next tick.
+//! The complete answer is abandoning the thread on a timeout, which leaks a
+//! runaway thread into a long-lived process, and that is worse than a bound
+//! that is late.
 //!
 //! # 3. Some natives read the host, and the guard has to be an ALLOW-list
 //!
@@ -68,8 +105,9 @@
 //! `the_allow_list_covers_every_native_jaq_registers` fails if the crates
 //! ever register a name that is on neither list.
 
+use jaq_core::box_iter::box_once;
 use jaq_core::load::parse::Def;
-use jaq_core::Native;
+use jaq_core::{Cv, DataT, Error, Exn, Native, ValXs};
 use jaq_json::Val;
 
 /// The one value type this crate runs jq over.
@@ -106,20 +144,55 @@ pub(super) type Data = jaq_core::data::JustLut<Val>;
 #[allow(dead_code)]
 pub(super) const MAX_STEPS: usize = 65536;
 
-/// The nesting depth [`check_source`] allows in a jq program.
+/// The stack the jq thread gets, and the only stack the parser ever runs on.
 ///
-/// jaq's parser overflows at 171 on a 2 MiB stack in a debug build. 64 leaves
-/// a factor of 2.6 there and far more in a release build, where frames are
-/// smaller, and no jq program a flow author writes is anywhere near it — the
-/// deepest in this package's own 132-expression sweep is 4.
-pub(super) const MAX_SOURCE_DEPTH: usize = 64;
+/// Explicit rather than inherited: a 2 MiB tokio worker and an 8 MiB main
+/// thread give the same source wildly different room, and a bound that
+/// depends on the caller is not a bound. 64 MiB of thread stack is reserved
+/// address space, committed lazily, and the cap below keeps the amount
+/// actually touched to a fraction of it.
+pub(super) const JQ_STACK_BYTES: usize = 64 * 1024 * 1024;
 
-/// The length [`check_source`] allows in a jq program, in bytes.
+/// The worst measured parser stack cost per byte of jq source, over every
+/// recursive construct found: `-`×N, at **9.99 KiB per byte** on a 2 MiB
+/// stack, 9.93 at 8 MiB and 9.91 at 64 MiB. Rounded up.
 ///
-/// Bounds the parse itself rather than what it produces. Derived from the same
-/// output cap: a query longer than the largest output a render can return is
-/// not a query anyone can use the result of.
-pub(super) const MAX_SOURCE_BYTES: usize = super::env::MAX_OUTPUT_BYTES;
+/// Re-measure this against a new `jaq` by bisecting the shortest program of
+/// each shape that aborts; the module doc has the table.
+const WORST_STACK_PER_SOURCE_BYTE: usize = 10 * 1024;
+
+/// How much of [`JQ_STACK_BYTES`] the worst possible source is allowed to
+/// need. Six, so the parse touches at most a sixth of the stack it has.
+const PARSE_STACK_MARGIN: usize = 6;
+
+/// The length [`check_source`] allows, **derived** rather than chosen:
+/// 64 MiB / 10 KiB / 6 = 1092 bytes.
+///
+/// The arithmetic is here so it can be re-derived. It is small, and it has to
+/// be: at 10 KiB of stack per byte, a 1 MiB source would need 10 GiB.
+pub(super) const MAX_SOURCE_BYTES: usize =
+    JQ_STACK_BYTES / WORST_STACK_PER_SOURCE_BYTE / PARSE_STACK_MARGIN;
+
+/// How long a jq program may run before [`TICK`] refuses it.
+///
+/// A deadline rather than a step count, because the two shapes that got past
+/// the step count — a native that spins without stepping, and a step whose
+/// cost grows — are both invisible to a counter and both obvious to a clock.
+pub(super) const MAX_RUN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The shallow length (elements, entries or bytes) a value may have at a
+/// step, enforced by `__egret_guard` in [`BOUNDED_DEFS`] rather than here —
+/// see [`tick_native`] for why it could not be done in Rust.
+///
+/// Insurance against one enormous step that the deadline would let through;
+/// the deadline is what actually closes the growth cases. Derived from
+/// [`super::env::MAX_OUTPUT_BYTES`]: a value with more elements than the
+/// output cap has bytes cannot be rendered.
+#[allow(dead_code)]
+pub(super) const MAX_VALUE_LENGTH: usize = super::env::MAX_OUTPUT_BYTES;
+
+/// The name of the per-step guard [`BOUNDED_DEFS`] calls.
+pub(super) const TICK: &str = "__egret_tick";
 
 /// Why a jq program was refused before it ran.
 ///
@@ -150,13 +223,14 @@ pub(super) struct Refused(pub(super) String);
 /// in terms of `recurse/1` and would otherwise still resolve to jaq's
 /// unbounded one.
 const BOUNDED_DEFS: &str = r#"
-def repeat(f): def rec($n): if $n <= 0 then error("jq: repeat exceeded egret's step bound") else f, rec($n-1) end; rec(65536);
-def recurse(f): def rec($n): if $n <= 0 then error("jq: recurse exceeded egret's step bound") else ., (f | rec($n-1)) end; rec(65536);
+def __egret_guard: __egret_tick as $t | if . >= "" and length > 1048576 then error("jq: a value grew past egret's element limit") else . end;
+def repeat(f): def rec($n): if $n <= 0 then error("jq: repeat exceeded egret's step bound") else __egret_guard as $t | (f, rec($n-1)) end; rec(65536);
+def recurse(f): def rec($n): if $n <= 0 then error("jq: recurse exceeded egret's step bound") else __egret_guard as $t | (., (f | rec($n-1))) end; rec(65536);
 def recurse: recurse(.[]?);
 def recurse(f; cond): recurse(f | select(cond));
-def while(cond; update): def rec($n): if $n <= 0 then error("jq: while exceeded egret's step bound") elif cond then ., (update | rec($n-1)) else empty end; rec(65536);
-def until(cond; update): def rec($n): if $n <= 0 then error("jq: until exceeded egret's step bound") elif cond then . else update | rec($n-1) end; rec(65536);
-def range($from; $to; $by): if $by != 0 and ($to - $from) / $by > 65536 then error("jq: range exceeded egret's step bound") else __egret_range($from; $to; $by) end;
+def while(cond; update): def rec($n): if $n <= 0 then error("jq: while exceeded egret's step bound") elif cond then __egret_guard as $t | (., (update | rec($n-1))) else empty end; rec(65536);
+def until(cond; update): def rec($n): if $n <= 0 then error("jq: until exceeded egret's step bound") elif cond then . else __egret_guard as $t | (update | rec($n-1)) end; rec(65536);
+def range($from; $to; $by): if $by == 0 then empty elif ($to - $from) / $by > 65536 then error("jq: range exceeded egret's step bound") else __egret_range($from; $to; $by) end;
 def range(from; to): range(from; to; 1);
 def range(to): range(0; to);
 "#;
@@ -357,6 +431,15 @@ const REFUSED_DEFS: &[(&str, usize)] = &[
     ("halt_error", 0),
 ];
 
+/// **`BOUNDED_DEFS` may use only what `jaq-core`'s own `defs.jq` has defined
+/// ABOVE the group it replaces** — `error`, `select`, `empty`, the operators,
+/// and the natives. `type`, `arrays` and `strings` come from `jaq-std` and
+/// `jaq-json`, which load later, and referencing one of them makes the WHOLE
+/// standard library fail to compile: measured, `{{ x | jq('.a') }}` broke.
+/// That is why `__egret_guard` tests `. >= ""` — jq's total order puts
+/// numbers before strings, arrays and objects, so it is exactly "this value
+/// has a length" — rather than asking `type`.
+///
 /// The bodies that replace [`REFUSED_DEFS`].
 const REFUSED_DEFS_SOURCE: &str = r#"
 def stderr: error("jq: 'stderr' is not available in egret -- it writes to the service log, and Kestra's jq does not have it");
@@ -487,6 +570,7 @@ pub(super) fn natives() -> impl Iterator<Item = jaq_core::native::Filter<Native<
                 (name, args, native)
             }
         })
+        .chain(core::iter::once(tick_native::<Data>()))
 }
 
 /// `name/arity`, which is how jaq keys a native and how this file lists them.
@@ -496,118 +580,104 @@ fn key(name: &str, arity: usize) -> String {
 
 /// Refuses a jq program before the loader sees it.
 ///
-/// Three checks, in the order they can be answered: length, nesting depth,
-/// and the two identifiers egret reserves.
+/// **Two checks and no scanner.** The scanner this replaces had a defect of
+/// exactly the kind a scanner has: it popped an interpolation frame on any
+/// `)`, so `"\((1),` left it believing it was inside a string and it stopped
+/// counting — `"\((1),` + `[`×171 + `]`×171 + `)"`, 352 bytes, aborted while
+/// 150 levels returned normally. Depth-of-anything in the text was the wrong
+/// invariant anyway; see the module doc.
 ///
-/// The scanner tracks jq string literals so that a bracket inside `"…"` is not
-/// counted as nesting and a `def` inside `"…"` is not read as a definition.
-/// `\(…)` interpolation is code again, and is counted.
+/// The `def` check is deliberately **not** string-aware: a `def` inside a
+/// string literal is refused too. That over-refuses `jq('"def"')` and it is
+/// the price of not having a scanner to be wrong about, which is a trade this
+/// module has now paid for twice.
 pub(super) fn check_source(source: &str) -> Result<(), Refused> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Refused(format!(
-            "jq: the query is longer than egret's {MAX_SOURCE_BYTES}-byte limit"
+            "jq: the query is {} bytes and egret's limit is {MAX_SOURCE_BYTES} -- jaq's parser \
+             costs up to {} KiB of stack per byte of source, and that limit is the {} MiB \
+             thread stack divided by it",
+            source.len(),
+            WORST_STACK_PER_SOURCE_BYTE / 1024,
+            JQ_STACK_BYTES / 1024 / 1024,
         )));
     }
-
-    // `in_string` is a stack rather than a flag, because `"\( "x" )"` nests.
-    let mut in_string: Vec<bool> = vec![false];
-    let mut depth = 0usize;
-    let chars: Vec<char> = source.chars().collect();
-    let mut i = 0;
-    let mut word = String::new();
-
-    while i < chars.len() {
-        let c = chars[i];
-        let inside = *in_string.last().expect("stack is never empty");
-
-        if inside {
-            match c {
-                '\\' => {
-                    if chars.get(i + 1) == Some(&'(') {
-                        // Interpolation: the body is code, and it is nested.
-                        in_string.push(false);
-                        depth += 1;
-                        i += 2;
-                        continue;
-                    }
-                    // Any other escape consumes its second character, so a
-                    // `\"` does not end the string.
-                    i += 2;
-                    continue;
-                }
-                '"' => {
-                    in_string.pop();
-                    i += 1;
-                    continue;
-                }
-                _ => {
-                    i += 1;
-                    continue;
-                }
-            }
-        }
-
-        // Outside a string: a `#` comment runs to the end of the line.
-        if c == '#' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-
-        if c.is_alphanumeric() || c == '_' {
-            word.push(c);
-            i += 1;
-            continue;
-        }
-        if !word.is_empty() {
-            check_word(&word)?;
-            word.clear();
-        }
-
-        match c {
-            '"' => in_string.push(true),
-            '[' | '(' | '{' => {
-                depth += 1;
-                if depth > MAX_SOURCE_DEPTH {
-                    return Err(Refused(format!(
-                        "jq: the query nests more than {MAX_SOURCE_DEPTH} levels deep, which \
-                         overflows the parser's stack"
-                    )));
-                }
-            }
-            ']' | '}' => depth = depth.saturating_sub(1),
-            ')' => {
-                depth = depth.saturating_sub(1);
-                // The `)` that closes a `\(` returns to the string it was in.
-                if in_string.len() > 1 && !*in_string.last().expect("checked len") {
-                    in_string.pop();
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+    if contains_word(source, "def") {
+        return Err(Refused(
+            "jq: 'def' (a user-defined function) is not available in egret -- a definition can \
+             call itself, directly or through another definition, and it is the one recursion \
+             egret does not write and so cannot bound"
+                .to_string(),
+        ));
     }
-    if !word.is_empty() {
-        check_word(&word)?;
+    if source.contains("__egret") {
+        return Err(Refused(
+            "jq: '__egret' is a name prefix egret reserves".to_string(),
+        ));
     }
     Ok(())
 }
 
-/// The two identifiers a program may not use.
-fn check_word(word: &str) -> Result<(), Refused> {
-    if word == "def" {
-        return Err(Refused(
-            "jq: 'def' (a user-defined function) is not available in egret -- a definition can \
-             call itself, directly or through another definition, and nothing egret can read \
-             from the source bounds that"
-                .to_string(),
-        ));
+/// `word` as a whole identifier somewhere in `source`.
+fn contains_word(source: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    source.match_indices(word).any(|(at, _)| {
+        let before = source[..at].chars().next_back();
+        let after = source[at + word.len()..].chars().next();
+        !before.is_some_and(ident) && !after.is_some_and(ident)
+    })
+}
+
+/// The per-step deadline [`BOUNDED_DEFS`] calls, as a native.
+///
+/// Identity on the way through; it raises once the run has taken longer than
+/// [`MAX_RUN`]. [`start_run`] sets the clock, on the jq thread, at the top of
+/// each call.
+///
+/// **The length half of the guard is in jq, not here**, and not by choice: a
+/// `RunPtr` is a higher-ranked `fn` over `<Data as DataT>::V<'a>`, and naming
+/// that projection as `Val` — which is what inspecting the value needs — does
+/// not typecheck. `__egret_guard` in [`BOUNDED_DEFS`] does it with `length`
+/// instead, which is O(1) on the three types it applies to.
+fn tick_native<D: DataT>() -> jaq_core::native::Filter<Native<D>>
+where
+    for<'a> D::V<'a>: jaq_core::ValT,
+{
+    // Generic over `D`, the way jaq writes its own natives: with the type
+    // parameter in place the associated type stays unnormalised, and the fn
+    // item coerces to the higher-ranked `RunPtr`. Written concretely it does
+    // not, because the body normalises `D::V<'a>` to `Val`.
+    fn tick<'a, D: DataT>(cv: Cv<'a, D>) -> ValXs<'a, D::V<'a>> {
+        if past_deadline() {
+            return box_once(Err(Exn::from(Error::str(format!(
+                "jq: the query ran for longer than egret's {} ms limit",
+                MAX_RUN.as_millis()
+            )))));
+        }
+        box_once(Ok(cv.1))
     }
-    if word.starts_with("__egret") {
-        return Err(Refused(format!("jq: '{word}' is a name egret reserves")));
-    }
-    Ok(())
+    jaq_core::native::run((
+        TICK,
+        jaq_core::native::v(0),
+        tick::<D> as jaq_core::RunPtr<D>,
+    ))
+}
+
+std::thread_local! {
+    /// When the jq program on this thread started. Thread-local rather than
+    /// shared because [`super::filters::run_jq`] gives every call its own
+    /// thread, so there is nothing to synchronise and nothing to reset.
+    static RUN_STARTED: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Starts the clock [`TICK`] reads. Called on the jq thread.
+pub(super) fn start_run() {
+    RUN_STARTED.with(|started| started.set(Some(std::time::Instant::now())));
+}
+
+fn past_deadline() -> bool {
+    RUN_STARTED.with(|started| started.get().is_some_and(|at| at.elapsed() > MAX_RUN))
 }
 
 #[cfg(test)]
@@ -688,6 +758,19 @@ mod tests {
             );
         }
         assert_eq!(rows, 191, "the fixture lost rows");
+        // Every ROW comes from a probe; the corpus additionally carries the
+        // argument-shape probes, whose `e` is not a string.
+        let corpus: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../oracle/fixtures/jq-surface.probe.json"))
+                .expect("the probe corpus must parse");
+        let expressions = corpus
+            .iter()
+            .filter(|p| p["context"]["e"].is_string())
+            .count();
+        assert_eq!(
+            rows, expressions,
+            "the fixture and its probe corpus describe different expression sets"
+        );
         assert_eq!(
             divergent, 19,
             "the divergence count moved without the file saying so"
@@ -702,93 +785,322 @@ mod tests {
         })
     }
 
-    #[test]
-    fn the_source_check_bounds_nesting_before_the_parser_can_overflow() {
-        // 171 is where jaq's parser overflows a 2 MiB stack. The bound is 64,
-        // so the refusal happens with a wide margin -- and it happens for all
-        // three bracket shapes.
-        for open in ['[', '(', '{'] {
-            let close = match open {
-                '[' => ']',
-                '(' => ')',
-                _ => '}',
-            };
-            let deep: String = std::iter::repeat_n(open, 200)
-                .chain(std::iter::repeat_n(close, 200))
-                .collect();
-            let refused = check_source(&deep).expect_err("must refuse");
-            assert!(refused.0.contains("nests more than 64"), "{refused:?}");
+    /// `WITHHELD_NATIVES` and `ALLOWED_NATIVES` must be disjoint and must
+    /// together be exactly what the three crates register. A `cargo update`
+    /// that adds a native fails here rather than registering it silently,
+    /// which is the whole reason this is an allow-list and not a deny-list.
+    /// Every recursive construct measured, at the cap and past it.
+    ///
+    /// **Six of the seven shapes contain no bracket at all**, which is why
+    /// the bound is a byte count and not a scanner. This is the shapes, not
+    /// the examples a review happened to send.
+    fn shapes(n: usize) -> Vec<(&'static str, String)> {
+        vec![
+            ("unary minus", "-".repeat(n) + "1"),
+            ("bracket", "[".repeat(n) + "1" + &"]".repeat(n)),
+            ("paren", "(".repeat(n) + "1" + &")".repeat(n)),
+            ("object", "{a:".repeat(n) + "1" + &"}".repeat(n)),
+            ("try", "try ".repeat(n) + "."),
+            ("pipe", ".".to_string() + &"|.".repeat(n)),
+            ("comma", ".".to_string() + &",.".repeat(n)),
+            ("alternative", ".".to_string() + &" // .".repeat(n)),
+            (
+                "if",
+                "if true then ".repeat(n) + "1" + &" else 1 end".repeat(n),
+            ),
+        ]
+    }
+
+    /// The same shapes, each at the largest size the cap admits — which is a
+    /// different `n` per shape, because a `try ` costs four bytes and a `-`
+    /// costs one.
+    fn shapes_at_the_cap() -> Vec<(&'static str, String)> {
+        let mut at_cap = Vec::new();
+        for (name, _) in shapes(1) {
+            let (mut low, mut high) = (1usize, MAX_SOURCE_BYTES);
+            while low + 1 < high {
+                let mid = (low + high) / 2;
+                let len = shapes(mid)
+                    .into_iter()
+                    .find(|(n, _)| *n == name)
+                    .expect("same list")
+                    .1
+                    .len();
+                if len <= MAX_SOURCE_BYTES {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            let program = shapes(low)
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .expect("same list")
+                .1;
+            at_cap.push((name, program));
         }
-        // And it does NOT refuse the depth a real query has.
+        at_cap
+    }
+
+    /// The cap refuses every shape that can abort, and it IS the arithmetic
+    /// in the constants beside it.
+    #[test]
+    fn the_source_cap_is_the_stack_divided_by_the_worst_measured_cost() {
+        assert_eq!(
+            MAX_SOURCE_BYTES,
+            JQ_STACK_BYTES / WORST_STACK_PER_SOURCE_BYTE / PARSE_STACK_MARGIN
+        );
+        const {
+            assert!(
+                MAX_SOURCE_BYTES * WORST_STACK_PER_SOURCE_BYTE * PARSE_STACK_MARGIN
+                    <= JQ_STACK_BYTES
+            )
+        };
+        for (name, program) in shapes(4000) {
+            let refused = check_source(&program).expect_err("a 4000-deep program is refused");
+            assert!(
+                refused.0.contains("egret's limit is"),
+                "{name}: {refused:?}"
+            );
+        }
         check_source(".a.b | map(select(.x > 1)) | {y: [.[] | .z]}").expect("must allow");
     }
 
-    /// A bracket inside a string literal is not nesting, and an escaped quote
-    /// does not end the string. Both are the ways a character-counting
-    /// scanner refuses a valid query.
+    /// A source AT the cap parses without aborting, for every shape.
+    ///
+    /// This is the other half of the derivation and the half a cap alone does
+    /// not give: a bound that refuses everything is not evidence that what it
+    /// admits is safe. Its observable claim is that these calls RETURN — a
+    /// stack overflow is `SIGABRT` and would take the test binary with it.
     #[test]
-    fn the_source_check_reads_string_literals() {
-        let brackets_in_a_string = format!("\"{}\"", "[".repeat(200));
-        check_source(&brackets_in_a_string).expect("a string is not nesting");
-        check_source("\"a\\\"[[[b\"").expect("an escaped quote does not end the string");
-        // Interpolation IS code again.
-        check_source("\"v=\\(.a)\"").expect("interpolation is allowed");
-        let deep_interpolation = format!("\"\\({}1{})\"", "[".repeat(100), "]".repeat(100));
-        assert!(check_source(&deep_interpolation).is_err());
+    fn a_source_at_the_cap_parses_on_the_jq_thread() {
+        for (name, program) in shapes_at_the_cap() {
+            assert!(program.len() <= MAX_SOURCE_BYTES, "{name}");
+            assert!(
+                program.len() > MAX_SOURCE_BYTES - 20,
+                "{name}: {} is not AT the cap",
+                program.len()
+            );
+            let outcome = render_jq(&program, "[]");
+            if let Err(message) = &outcome {
+                assert!(
+                    !message.contains("egret's limit is"),
+                    "{name}: refused at the cap: {message}"
+                );
+            }
+        }
     }
 
+    /// `def` is refused **including inside a string literal**, on purpose.
+    ///
+    /// The scanner this replaces got its own string tracking wrong: it popped
+    /// an interpolation frame on any `)`, so `"\((1),` left it believing it
+    /// was inside a string and it stopped counting brackets entirely.
+    /// Refusing a `def` that appears anywhere costs one over-refusal and
+    /// removes the class.
     #[test]
-    fn a_user_def_is_refused_by_name() {
-        let refused = check_source("def f: f; f").expect_err("must refuse");
-        assert!(refused.0.contains("'def'"), "{refused:?}");
-        // `def` inside a string is not a definition, and neither is a word
-        // that merely contains it.
-        check_source("\"def\"").expect("a string is not a definition");
+    fn a_user_def_is_refused_wherever_it_appears() {
+        for source in ["def f: f; f", "\"def\"", ". | def g: 1; g", "# def\n.a"] {
+            let refused = check_source(source).expect_err("must refuse");
+            assert!(refused.0.contains("'def'"), "{source:?}: {refused:?}");
+        }
         check_source(".defined").expect("a longer word is not `def`");
-        check_source("# def\n.a").expect("a comment is not a definition");
+        check_source(".undef").expect("a longer word is not `def`");
     }
 
     #[test]
     fn the_reserved_prefix_is_refused() {
-        let refused = check_source("__egret_range(0; 3; 1)").expect_err("must refuse");
-        assert!(refused.0.contains("reserves"), "{refused:?}");
+        for source in ["__egret_range(0; 3; 1)", "__egret_tick", "__egret_guard"] {
+            let refused = check_source(source).expect_err("must refuse");
+            assert!(refused.0.contains("reserves"), "{source}: {refused:?}");
+        }
     }
 
+    /// **The bound has to FIRE, not merely be spelled.**
+    ///
+    /// The two tests this replaces asserted the definitions' NAMES and the
+    /// presence of the literal `65536`. `def repeat(f): .;` passes the first
+    /// with no bound anywhere, and `rec($n)` instead of `rec($n-1)` passes
+    /// the second while the bound never fires. So this RUNS them: every
+    /// program below is non-terminating without its bound, and each assertion
+    /// names the bound that stopped it.
     #[test]
-    fn a_very_long_query_is_refused_before_it_is_parsed() {
-        let long = ".".repeat(MAX_SOURCE_BYTES + 1);
-        assert!(check_source(&long).is_err());
+    fn every_bounded_definition_actually_stops() {
+        for (program, needle) in [
+            ("[repeat(1)]", "repeat exceeded"),
+            // Emits nothing, so the byte counter never sees it; the step
+            // bound inside `repeat` is what stops it.
+            ("reduce repeat(1) as $x (0; .+1)", "repeat exceeded"),
+            ("[while(true; .)]", "while exceeded"),
+            ("until(false; .)", "until exceeded"),
+            ("[recurse(.)]", "recurse exceeded"),
+            ("[range(1e12)]", "range exceeded"),
+            // The one shape a STEP COUNT cannot see: a step whose COST
+            // grows. 65 536 iterations, each value one element longer than
+            // the last, is O(n^2) retained -- 9.9 GiB, nothing emitted, the
+            // byte cap never reached. Only a clock sees it.
+            ("[recurse(.+[1])] | length", "ran for longer"),
+        ] {
+            let message =
+                render_jq(program, "[]").expect_err(&format!("{program} must be refused"));
+            assert!(message.contains(needle), "{program}: {message:?}");
+        }
     }
 
-    /// The replacement definitions have to parse, or every jq call fails.
+    /// The bounded definitions still answer what a flow writes.
+    #[test]
+    fn the_bounded_definitions_still_answer_real_programs() {
+        for (program, expected) in [
+            ("[range(3)]", "[[0,1,2]]"),
+            ("[range(1;4)]", "[[1,2,3]]"),
+            // A step of 0 emits NOTHING and terminates, which is what
+            // Kestra's `jackson-jq` does with it. `jaq`'s own `range` spins
+            // forever on `range(0;1;0)`; the guarded definition is what makes
+            // these two answers the same rather than a hang and a `[]`.
+            ("[range(0;0;0)]", "[[]]"),
+            ("[range(0;1;0)]", "[[]]"),
+            ("reduce range(0;1;0) as $x (0;.+1)", "[0]"),
+            ("[limit(3; repeat(1))]", "[[1,1,1]]"),
+            ("[1 | while(. < 4; . + 1)]", "[[1,2,3]]"),
+            ("3 | until(. > 5; . + 1)", "[6]"),
+            ("[paths]", "[[]]"),
+            ("[..] | length", "[1]"),
+        ] {
+            assert_eq!(
+                render_jq(program, "[]").expect(program),
+                expected,
+                "{program}"
+            );
+        }
+    }
+
+    /// The definitions parse, they are the ones this module means to replace,
+    /// and each recursion **decrements** and **calls the guard** — neither of
+    /// which is visible in a list of names.
     #[test]
     fn the_bounded_definitions_parse() {
         let names: Vec<&str> = bounded_defs().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
             vec![
-                "repeat", "recurse", "recurse", "recurse", "while", "until", "range", "range",
+                "__egret_guard",
+                "repeat",
+                "recurse",
+                "recurse",
+                "recurse",
+                "while",
+                "until",
+                "range",
+                "range",
                 "range"
             ]
         );
+        assert_eq!(BOUNDED_DEFS.matches("rec($n-1)").count(), 4);
+        assert_eq!(BOUNDED_DEFS.matches("__egret_guard as $t").count(), 4);
+        assert_eq!(BOUNDED_DEFS.matches(TICK).count(), 1);
     }
 
-    /// The jq source carries the bound as a literal because it has to; this
-    /// is what stops the literal and the constant drifting apart, and what
-    /// keeps the derivation from `MAX_OUTPUT_BYTES` true rather than
-    /// merely written down.
+    /// The literals in the jq source are the constants beside it.
     #[test]
-    fn the_literal_in_the_jq_source_is_the_bound() {
+    fn the_literals_in_the_jq_source_are_the_bounds() {
         const { assert!(MAX_STEPS * 2 <= crate::runners::env::MAX_OUTPUT_BYTES) };
-        let literal = MAX_STEPS.to_string();
-        // Four recursion definitions plus the `range` guard.
-        assert_eq!(BOUNDED_DEFS.matches(&literal).count(), 5);
+        assert_eq!(BOUNDED_DEFS.matches(&MAX_STEPS.to_string()).count(), 5);
+        assert_eq!(
+            BOUNDED_DEFS.matches(&MAX_VALUE_LENGTH.to_string()).count(),
+            1
+        );
     }
 
-    /// `WITHHELD_NATIVES` and `ALLOWED_NATIVES` must be disjoint and must
-    /// together be exactly what the three crates register. A `cargo update`
-    /// that adds a native fails here rather than registering it silently,
-    /// which is the whole reason this is an allow-list and not a deny-list.
+    /// Renders `{{ v | jq(program) }}` against a JSON input.
+    fn render_jq(program: &str, input: &str) -> Result<String, String> {
+        let context = format!(
+            "{{\"v\": {input}, \"e\": {}}}",
+            serde_json::to_string(program).expect("a &str serialises")
+        );
+        let cx = crate::runners::env::RenderContext::from_json_str(&context)
+            .unwrap_or_else(|e| panic!("{program}: context must parse: {e}"));
+        crate::runners::env::render_str("{{ v | jq(e) }}", &cx).map_err(|e| e.to_string())
+    }
+
+    /// The **definition** list is guarded the way the native list is.
+    ///
+    /// `ALLOWED_NATIVES` makes a new native a test failure; nothing did the
+    /// same for a new *definition*, and `splice` only asserts the names it
+    /// replaces. A `cargo update` that adds a recursive definition — the one
+    /// thing this module bounds by replacing definitions — would have been
+    /// invisible.
+    ///
+    /// The count is deliberately the assertion: a change in either direction
+    /// says "read the new defs.jq and decide whether one of them can loop".
+    #[test]
+    fn the_definition_list_is_the_one_this_module_was_written_against() {
+        let stock: Vec<String> = jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs())
+            .map(|d| format!("{}/{}", d.name, d.args.len()))
+            .collect();
+        assert_eq!(
+            stock.len(),
+            128,
+            "jaq's definition list changed size; read the new defs.jq and decide whether any \
+             new definition can loop without emitting, then update this count"
+        );
+
+        // Every name this module replaces must still be there, at the arity
+        // it replaces. `splice` asserts this too, at run time; here it is a
+        // named failure rather than a panic inside a render.
+        for (name, arity) in REPLACED_DEFS
+            .iter()
+            .chain(REFUSED_DEFS)
+            .chain(KESTRA_DEFS_1)
+            .chain(KESTRA_DEFS_2)
+        {
+            assert!(
+                stock.contains(&format!("{name}/{arity}")),
+                "jaq no longer defines {name}/{arity}"
+            );
+        }
+
+        // And the set of definitions whose body names their own definition
+        // is committed. Most are ARITY OVERLOADS (`range/2` calling
+        // `range/3`), not recursion — telling the two apart needs a call
+        // graph, so this asserts the set instead and a NEW member is a human
+        // decision: is it an overload, or a loop this module must bound?
+        let mut self_naming: Vec<&str> = jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs())
+            .filter(|d| format!("{:?}", d.body).contains(&format!("\"{}\"", d.name)))
+            .map(|d| d.name)
+            .collect();
+        self_naming.sort_unstable();
+        assert_eq!(
+            self_naming,
+            vec![
+                "add",
+                "all",
+                "all",
+                "any",
+                "any",
+                "capture",
+                "combinations",
+                "flatten",
+                "halt",
+                "halt_error",
+                "match",
+                "range",
+                "range",
+                "recurse",
+                "recurse",
+                "scan",
+                "splits",
+                "sub",
+                "test",
+            ],
+            "a definition now names itself that did not before -- decide whether it is an arity \
+             overload or a recursion this module has to bound"
+        );
+    }
+
     #[test]
     fn the_allow_list_covers_every_native_jaq_registers() {
         let registered: std::collections::BTreeSet<String> = jaq_core::funs::<Data>()

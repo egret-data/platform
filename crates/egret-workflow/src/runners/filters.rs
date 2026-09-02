@@ -2271,12 +2271,16 @@ fn jq(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         ))
     };
 
+    // The input is carried as TEXT, not as a `jaq_json::Val`: `Val` is
+    // `Rc`-based and therefore not `Send`, and the whole jq call happens on
+    // its own thread (see [`run_jq`]). Which of the two readings applies is
+    // decided here, where the value's type is still visible.
     let input = match value.as_str() {
-        Some(text) => read_tree(text).ok_or_else(failed)?,
+        Some(text) => JqInput::ReadTree(text.to_string()),
         None => {
             let mut json = String::new();
             write_json(&mut json, &value, true);
-            jaq_json::read::parse_single(json.as_bytes()).map_err(|_| failed())?
+            JqInput::Json(json)
         }
     };
 
@@ -2326,9 +2330,40 @@ fn jq(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// could fit in the output anyway, so refusing here rather than after the
 /// allocation costs no reachable behaviour. Same call as `indent`'s prefix
 /// bound and `rewrite`'s nesting depth.
-fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, JqFailure> {
-    // Before the loader, because the loader is what overflows the stack.
+fn run_jq(expression: &str, input: JqInput) -> Result<Vec<MjValue>, JqFailure> {
+    // Before anything else, because everything else is what overflows.
     jqsandbox::check_source(expression).map_err(|e| JqFailure::Refused(e.0))?;
+
+    // **On its own thread, with an explicit stack.** The parser's cost is a
+    // property of the source, and `jqsandbox::MAX_SOURCE_BYTES` is derived
+    // from THIS stack size -- so the bound must not depend on whether the
+    // caller was a 2 MiB tokio worker or an 8 MiB main thread. See
+    // `runners::jqsandbox`'s module doc for the measured cost per byte.
+    let expression = expression.to_string();
+    let worker = std::thread::Builder::new()
+        .name("egret-jq".to_string())
+        .stack_size(jqsandbox::JQ_STACK_BYTES)
+        .spawn(move || run_jq_on_this_thread(&expression, input))
+        .map_err(|_| JqFailure::Failed)?;
+    // A panic on the worker is a failure like any other; it cannot be a
+    // silent success.
+    let outputs = worker.join().map_err(|_| JqFailure::Failed)??;
+    Ok(outputs.into_iter().map(jaq_value).collect())
+}
+
+/// The body of [`run_jq`], on the jq thread.
+///
+/// Returns [`JqOut`] rather than `minijinja::Value` because the latter is not
+/// `Send`; the conversion happens back on the caller's thread.
+fn run_jq_on_this_thread(expression: &str, input: JqInput) -> Result<Vec<JqOut>, JqFailure> {
+    jqsandbox::start_run();
+
+    let input = match input {
+        JqInput::ReadTree(text) => read_tree(&text).ok_or(JqFailure::Failed)?,
+        JqInput::Json(json) => {
+            jaq_json::read::parse_single(json.as_bytes()).map_err(|_| JqFailure::Failed)?
+        }
+    };
 
     let program = jaq_core::load::File {
         code: expression,
@@ -2338,7 +2373,8 @@ fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, JqFail
     // `jqsandbox` owns both lists: jaq's own unbounded `repeat`/`recurse`/
     // `while`/`until`/`range` definitions are spliced out for bounded ones,
     // and the native list is an allow-list with six host-reading names
-    // replaced by refusals. Read that module before changing either.
+    // withheld and a per-step deadline added. Read that module before
+    // changing either.
     let defs = jqsandbox::definitions();
     let funs = jqsandbox::natives();
 
@@ -2356,9 +2392,6 @@ fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, JqFail
     let mut outputs = Vec::new();
     let mut bytes = 0usize;
     for result in filter.id.run((ctx, input)) {
-        // Never `unwrap_valr`: see this function's doc. A halt and an error
-        // are both just "this jq program failed", which is the only thing
-        // `JqFilter`'s catch-all reports either.
         // A jq runtime error is Kestra's catch-all sentence -- except when it
         // is EGRET's own bound talking. `runners::jqsandbox` writes every one
         // of its refusals with a `jq: ` prefix precisely so it can be told
@@ -2386,14 +2419,76 @@ fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, JqFail
             .saturating_add(value.to_string().len())
             .saturating_add(1);
         // This bounds a generator that EMITS. It is not the bound that stops
-        // `[repeat(1)]` -- that one never reaches here, and
-        // `runners::jqsandbox` is what stops it.
+        // `[repeat(1)]` or `[range(0;1;0)]` -- neither reaches here, and
+        // `runners::jqsandbox` is what stops them.
         if bytes > MAX_OUTPUT_BYTES {
             return Err(JqFailure::Failed);
         }
-        outputs.push(jaq_value(value));
+        outputs.push(jq_out(value));
     }
     Ok(outputs)
+}
+
+/// A jq input, as text, because `jaq_json::Val` is `Rc`-based and not `Send`.
+///
+/// The two readings are not interchangeable: a String input goes through
+/// `ObjectMapper.readTree`, which takes the FIRST JSON value and tolerates an
+/// empty document, and anything else is already JSON.
+enum JqInput {
+    ReadTree(String),
+    Json(String),
+}
+
+/// One jq output, in a form that can cross a thread boundary.
+///
+/// `minijinja::Value` is not `Send`, and a JSON round trip would lose a big
+/// integer, so this is the same shape [`jaq_value`] used to build directly.
+enum JqOut {
+    Null,
+    Bool(bool),
+    Int(i128),
+    Float(f64),
+    Text(String),
+    Arr(Vec<JqOut>),
+    Obj(Vec<(String, JqOut)>),
+}
+
+fn jq_out(value: jaq_json::Val) -> JqOut {
+    match value {
+        jaq_json::Val::Null => JqOut::Null,
+        jaq_json::Val::Bool(b) => JqOut::Bool(b),
+        jaq_json::Val::Num(n) => match n {
+            jaq_json::Num::Int(i) => JqOut::Int(i as i128),
+            jaq_json::Num::Float(f) => JqOut::Float(f),
+            // A big integer or a decimal keeps its text; both are outside
+            // what an `i64` holds and neither has a corpus entry.
+            other => match other.to_string().parse::<i128>() {
+                Ok(i) => JqOut::Int(i),
+                Err(_) => match other.to_string().parse::<f64>() {
+                    Ok(f) => JqOut::Float(f),
+                    Err(_) => JqOut::Text(other.to_string()),
+                },
+            },
+        },
+        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
+            JqOut::Text(String::from_utf8_lossy(&s).into_owned())
+        }
+        jaq_json::Val::Arr(items) => JqOut::Arr(items.iter().cloned().map(jq_out).collect()),
+        jaq_json::Val::Obj(entries) => JqOut::Obj(
+            entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
+                            String::from_utf8_lossy(s).into_owned()
+                        }
+                        other => other.to_string(),
+                    };
+                    (key, jq_out(v.clone()))
+                })
+                .collect(),
+        ),
+    }
 }
 
 /// The marker every refusal `runners::jqsandbox` writes begins with, so a
@@ -2420,41 +2515,18 @@ enum JqFailure {
 /// Objects become [`OrderedMap`], because `JqFilter`'s own output lambda
 /// converts an `ObjectNode` to a `Map` and Kestra's writer keeps insertion
 /// order — `keys_unsorted` is the entry that separates the two.
-fn jaq_value(value: jaq_json::Val) -> MjValue {
+fn jaq_value(value: JqOut) -> MjValue {
     match value {
-        jaq_json::Val::Null => MjValue::from(()),
-        jaq_json::Val::Bool(b) => MjValue::from(b),
-        jaq_json::Val::Num(n) => match n {
-            jaq_json::Num::Int(i) => MjValue::from(i as i64),
-            jaq_json::Num::Float(f) => MjValue::from(f),
-            // A big integer or a decimal keeps its text; both are outside
-            // what an `i64` holds and neither has a corpus entry.
-            other => match other.to_string().parse::<i128>() {
-                Ok(i) => MjValue::from(i),
-                Err(_) => match other.to_string().parse::<f64>() {
-                    Ok(f) => MjValue::from(f),
-                    Err(_) => MjValue::from(other.to_string()),
-                },
-            },
-        },
-        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
-            MjValue::from(String::from_utf8_lossy(&s).into_owned())
-        }
-        jaq_json::Val::Arr(items) => {
-            MjValue::from(items.iter().cloned().map(jaq_value).collect::<Vec<_>>())
-        }
-        jaq_json::Val::Obj(entries) => MjValue::from_object(OrderedMap(
+        JqOut::Null => MjValue::from(()),
+        JqOut::Bool(b) => MjValue::from(b),
+        JqOut::Int(i) => MjValue::from(i),
+        JqOut::Float(f) => MjValue::from(f),
+        JqOut::Text(s) => MjValue::from(s),
+        JqOut::Arr(items) => MjValue::from(items.into_iter().map(jaq_value).collect::<Vec<_>>()),
+        JqOut::Obj(entries) => MjValue::from_object(OrderedMap(
             entries
-                .iter()
-                .map(|(k, v)| {
-                    let key = match k {
-                        jaq_json::Val::BStr(s) | jaq_json::Val::TStr(s) => {
-                            String::from_utf8_lossy(s).into_owned()
-                        }
-                        other => other.to_string(),
-                    };
-                    (key, jaq_value(v.clone()))
-                })
+                .into_iter()
+                .map(|(k, v)| (k, jaq_value(v)))
                 .collect(),
         )),
     }
@@ -2559,6 +2631,12 @@ fn regex_replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError
 }
 
 /// `RegexExtractFilter` — the first match's group `group`, or null.
+///
+/// `filter-regexextract-group-one` and `-group-two` are both kept
+/// deliberately. `-group-two` alone does catch an off-by-one in the group
+/// index, so the pair is redundant against that one defect; it is not
+/// redundant against a change that reads group 1 correctly and group 2 by a
+/// different path, and two goldens is what that costs.
 ///
 /// Three ways it answers null and they are not the same thing: no match at
 /// all, a group that did not participate in the match, and a null input. Java
@@ -4675,20 +4753,35 @@ mod tests {
         }
     }
 
-    /// A jq source deep enough to overflow jaq's recursive-descent parser is
-    /// refused **before** the parser runs.
+    /// A jq source big enough to overflow jaq's parser is refused **before**
+    /// the parser runs, for every recursive construct — not for the two the
+    /// review happened to name.
+    ///
+    /// **Six of these contain no bracket at all.** An earlier cut bounded
+    /// bracket nesting and tested `[` and `(`; `-`x241 aborted in 241 bytes.
     ///
     /// This one cannot be written as "assert it errors": a stack overflow is
-    /// `SIGABRT`, so a run that reaches the parser takes the whole test binary
-    /// with it and reports a signal rather than a failure. The assertion that
-    /// this call RETURNS is the claim.
+    /// `SIGABRT`, so a run that reaches the parser takes the whole test
+    /// binary with it and reports a signal rather than a failure. The
+    /// assertion that these calls RETURN is the claim.
     #[test]
-    fn a_deeply_nested_jq_source_is_refused_before_the_parser_sees_it() {
-        for (open, close) in [('[', ']'), ('(', ')')] {
-            let program: String = std::iter::repeat_n(open, 2000)
-                .chain(std::iter::once('1'))
-                .chain(std::iter::repeat_n(close, 2000))
-                .collect();
+    fn every_deep_jq_source_is_refused_before_the_parser_sees_it() {
+        let n = 4000;
+        for program in [
+            "-".repeat(n) + "1",
+            "[".repeat(n) + "1" + &"]".repeat(n),
+            "(".repeat(n) + "1" + &")".repeat(n),
+            "{a:".repeat(n) + "1" + &"}".repeat(n),
+            "try ".repeat(n) + ".",
+            ".".to_string() + &"|.".repeat(n),
+            ".".to_string() + &",.".repeat(n),
+            ".".to_string() + &" // .".repeat(n),
+            "if true then ".repeat(n) + "1" + &" else 1 end".repeat(n),
+            // The shape that walked past the string-aware scanner: after
+            // `"\((1),` it believed it was inside a string and stopped
+            // counting brackets.
+            "\"\\((1),".to_string() + &"[".repeat(n) + "1" + &"]".repeat(n) + ")\"",
+        ] {
             let message = err(
                 "{{ m | jq(e) }}",
                 &format!(
@@ -4696,8 +4789,23 @@ mod tests {
                     serde_json_string(&program)
                 ),
             );
-            assert!(message.contains("nests more than"), "{message:?}");
+            assert!(message.contains("egret's limit is"), "{message:?}");
         }
+
+        // And the 352-byte version of that last shape -- the one that walked
+        // past the scanner -- now ANSWERS, because 352 bytes is inside both
+        // the cap and the stack. The bound is the source's size, not its
+        // shape, so a shape the scanner could not see is no longer special.
+        let inside = "\"\\((1),".to_string() + &"[".repeat(171) + "1" + &"]".repeat(171) + ")\"";
+        assert!(inside.len() < 400);
+        assert!(render(
+            "{{ m | jq(e) }}",
+            &format!(
+                "{{\"m\": {{\"a\": 1}}, \"e\": {}}}",
+                serde_json_string(&inside)
+            ),
+        )
+        .is_ok());
     }
 
     /// The six natives that read or write the host, each refused by name.

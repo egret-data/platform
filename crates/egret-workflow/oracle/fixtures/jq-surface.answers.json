@@ -1,0 +1,3230 @@
+[ {
+  "id" : "jq-identity",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "."
+  },
+  "result" : "[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]"
+}, {
+  "id" : "jq-field",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a"
+  },
+  "result" : "[{\"b\":42}]"
+}, {
+  "id" : "jq-nested",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a.b"
+  },
+  "result" : "[42]"
+}, {
+  "id" : "jq-missing",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".nope"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-missing-deep",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".nope.deeper"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-optional",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a?"
+  },
+  "result" : "[{\"b\":42}]"
+}, {
+  "id" : "jq-index-str",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".[\"a\"]"
+  },
+  "result" : "[{\"b\":42}]"
+}, {
+  "id" : "jq-iterate",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[]"
+  },
+  "result" : "[3,1,2]"
+}, {
+  "id" : "jq-iterate-all",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".[]"
+  },
+  "result" : "[{\"b\":42},[3,1,2],\"hi\",true,1.5]"
+}, {
+  "id" : "jq-index-0",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[0]"
+  },
+  "result" : "[3]"
+}, {
+  "id" : "jq-index-neg",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[-1]"
+  },
+  "result" : "[2]"
+}, {
+  "id" : "jq-slice",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[0:2]"
+  },
+  "result" : "[[3,1]]"
+}, {
+  "id" : "jq-keys",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "keys"
+  },
+  "result" : "[[\"a\",\"f\",\"list\",\"s\",\"t\"]]"
+}, {
+  "id" : "jq-keys-unsorted",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "keys_unsorted"
+  },
+  "result" : "[[\"a\",\"list\",\"s\",\"t\",\"f\"]]"
+}, {
+  "id" : "jq-length",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | length"
+  },
+  "result" : "[3]"
+}, {
+  "id" : "jq-length-str",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".s | length"
+  },
+  "result" : "[2]"
+}, {
+  "id" : "jq-type",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | type"
+  },
+  "result" : "[\"object\"]"
+}, {
+  "id" : "jq-values",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | .[]"
+  },
+  "result" : "[3,1,2]"
+}, {
+  "id" : "jq-map",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | map(. + 1)"
+  },
+  "result" : "[[4,2,3]]"
+}, {
+  "id" : "jq-select",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[] | select(. > 1)"
+  },
+  "result" : "[3,2]"
+}, {
+  "id" : "jq-alt-operator",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".nope // \"dflt\""
+  },
+  "result" : "[\"dflt\"]"
+}, {
+  "id" : "jq-to-entries",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | to_entries"
+  },
+  "result" : "[[{\"key\":\"b\",\"value\":42}]]"
+}, {
+  "id" : "jq-from-entries",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[{key:\"k\",value:1}] | from_entries"
+  },
+  "result" : "[{\"k\":1}]"
+}, {
+  "id" : "jq-with-entries",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | with_entries(.value += 1)"
+  },
+  "result" : "[{\"b\":43}]"
+}, {
+  "id" : "jq-add",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | add"
+  },
+  "result" : "[6]"
+}, {
+  "id" : "jq-any",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | any(. > 2)"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-all",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | all(. > 0)"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-sort",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | sort"
+  },
+  "result" : "[[1,2,3]]"
+}, {
+  "id" : "jq-sort-by",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[{x:2},{x:1}] | sort_by(.x)"
+  },
+  "result" : "[[{\"x\":1},{\"x\":2}]]"
+}, {
+  "id" : "jq-group-by",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,1,2] | group_by(.)"
+  },
+  "result" : "[[[1,1],[2]]]"
+}, {
+  "id" : "jq-unique",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,1,2] | unique"
+  },
+  "result" : "[[1,2]]"
+}, {
+  "id" : "jq-flatten",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[[1,[2]],3] | flatten"
+  },
+  "result" : "[[1,2,3]]"
+}, {
+  "id" : "jq-reverse",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | reverse"
+  },
+  "result" : "[[2,1,3]]"
+}, {
+  "id" : "jq-min-max",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list | [min, max]"
+  },
+  "result" : "[[1,3]]"
+}, {
+  "id" : "jq-range",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[range(3)]"
+  },
+  "result" : "[[0,1,2]]"
+}, {
+  "id" : "jq-range-2",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[range(1;4)]"
+  },
+  "result" : "[[1,2,3]]"
+}, {
+  "id" : "jq-tostring",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | tostring"
+  },
+  "result" : "[\"{\\\"b\\\":42}\"]"
+}, {
+  "id" : "jq-tonumber",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"42\" | tonumber"
+  },
+  "result" : "[42]"
+}, {
+  "id" : "jq-tojson",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | tojson"
+  },
+  "result" : "[\"{\\\"b\\\":42}\"]"
+}, {
+  "id" : "jq-fromjson",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"{\\\"z\\\":1}\" | fromjson"
+  },
+  "result" : "[{\"z\":1}]"
+}, {
+  "id" : "jq-ascii-downcase",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"AB\" | ascii_downcase"
+  },
+  "result" : "[\"ab\"]"
+}, {
+  "id" : "jq-ltrimstr",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | ltrimstr(\"a\")"
+  },
+  "result" : "[\"bc\"]"
+}, {
+  "id" : "jq-startswith",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | startswith(\"a\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-split",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a,b\" | split(\",\")"
+  },
+  "result" : "[[\"a\",\"b\"]]"
+}, {
+  "id" : "jq-join",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"a\",\"b\"] | join(\"-\")"
+  },
+  "result" : "[\"a-b\"]"
+}, {
+  "id" : "jq-test",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | test(\"b\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-test-flags",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"ABC\" | test(\"b\";\"i\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-match",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | [match(\"b\").offset]"
+  },
+  "result" : "[[1]]"
+}, {
+  "id" : "jq-capture",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a1\" | capture(\"(?<d>[0-9])\") | .d"
+  },
+  "result" : "[\"1\"]"
+}, {
+  "id" : "jq-sub",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | sub(\"b\";\"X\")"
+  },
+  "result" : "[\"aXc\"]"
+}, {
+  "id" : "jq-gsub",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"aba\" | gsub(\"a\";\"X\")"
+  },
+  "result" : "[\"XbX\"]"
+}, {
+  "id" : "jq-splits",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"a,b\" | splits(\",\")]"
+  },
+  "result" : "[[\"a\",\"b\"]]"
+}, {
+  "id" : "jq-interp",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"v=\\(.a.b)\""
+  },
+  "result" : "[\"v=42\"]"
+}, {
+  "id" : "jq-at-base64",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"ab\" | @base64"
+  },
+  "result" : "[\"YWI=\"]"
+}, {
+  "id" : "jq-at-json",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | @json"
+  },
+  "result" : "[\"{\\\"b\\\":42}\"]"
+}, {
+  "id" : "jq-at-csv",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[[1,2]] | .[] | @csv"
+  },
+  "result" : "[\"1,2\"]"
+}, {
+  "id" : "jq-at-tsv",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[[1,2]] | .[] | @tsv"
+  },
+  "result" : "[\"1\\t2\"]"
+}, {
+  "id" : "jq-at-uri",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a b\" | @uri"
+  },
+  "result" : "[\"a%20b\"]"
+}, {
+  "id" : "jq-at-sh",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a b\" | @sh"
+  },
+  "result" : "[\"'a b'\"]"
+}, {
+  "id" : "jq-at-html",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"<a>\" | @html"
+  },
+  "result" : "[\"&lt;a&gt;\"]"
+}, {
+  "id" : "jq-at-text",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | @text"
+  },
+  "result" : "[\"{\\\"b\\\":42}\"]"
+}, {
+  "id" : "jq-if-then",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "if .a.b > 1 then \"big\" else \"small\" end"
+  },
+  "result" : "[\"big\"]"
+}, {
+  "id" : "jq-try-catch",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "try error(\"boom\") catch ."
+  },
+  "result" : "[\"boom\"]"
+}, {
+  "id" : "jq-error",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "error(\"boom\")"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-reduce",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "reduce .list[] as $x (0; . + $x)"
+  },
+  "result" : "[6]"
+}, {
+  "id" : "jq-foreach",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[foreach .list[] as $x (0; . + $x)]"
+  },
+  "result" : "[[3,4,6]]"
+}, {
+  "id" : "jq-def",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "def f: . + 1; .a.b | f"
+  },
+  "result" : "[43]"
+}, {
+  "id" : "jq-var-binding",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a.b as $x | $x + 1"
+  },
+  "result" : "[43]"
+}, {
+  "id" : "jq-update-assign",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a.b |= . + 1"
+  },
+  "result" : "[{\"a\":{\"b\":43},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]"
+}, {
+  "id" : "jq-plain-assign",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a.b = 7"
+  },
+  "result" : "[{\"a\":{\"b\":7},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]"
+}, {
+  "id" : "jq-alt-assign",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".nope //= \"d\""
+  },
+  "result" : "[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5,\"nope\":\"d\"}]"
+}, {
+  "id" : "jq-del",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "del(.a)"
+  },
+  "result" : "[{\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]"
+}, {
+  "id" : "jq-has",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | has(\"b\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-in-op",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"b\" | in({b:1})"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-contains",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".s | contains(\"h\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-inside",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"h\" | inside(\"hi\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-paths",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 1
+      }
+    },
+    "e" : "[paths]"
+  },
+  "result" : "[[[\"a\"],[\"a\",\"b\"]]]"
+}, {
+  "id" : "jq-getpath",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "getpath([\"a\",\"b\"])"
+  },
+  "result" : "[42]"
+}, {
+  "id" : "jq-setpath",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : 1
+    },
+    "e" : "setpath([\"z\"];1)"
+  },
+  "result" : "[{\"a\":1,\"z\":1}]"
+}, {
+  "id" : "jq-leaf-paths",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 1
+      }
+    },
+    "e" : "[leaf_paths]"
+  },
+  "result" : "[[[\"a\",\"b\"]]]"
+}, {
+  "id" : "jq-recurse",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 1
+      }
+    },
+    "e" : "[..] | length"
+  },
+  "result" : "[3]"
+}, {
+  "id" : "jq-env",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "$ENV | type"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-env-fn",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "env | type"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-now",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "now | type"
+  },
+  "result" : "[\"number\"]"
+}, {
+  "id" : "jq-input-line",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "input_line_number"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-limit",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[limit(2; .list[])]"
+  },
+  "result" : "[[3,1]]"
+}, {
+  "id" : "jq-first-last",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[first(.list[]), last(.list[])]"
+  },
+  "result" : "[[3,2]]"
+}, {
+  "id" : "jq-until",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[.list[] | until(. > 2; . + 1)]"
+  },
+  "result" : "[[3,3,3]]"
+}, {
+  "id" : "jq-while",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1 | while(. < 4; . + 1)]"
+  },
+  "result" : "[[1,2,3]]"
+}, {
+  "id" : "jq-repeat",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[limit(3; 1 | repeat(. + 1))]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-todate",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "0 | todate"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-strftime",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "0 | strftime(\"%Y\")"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-ascii",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "65 | [.] | implode"
+  },
+  "result" : "[\"A\"]"
+}, {
+  "id" : "jq-explode",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"ab\" | explode"
+  },
+  "result" : "[[97,98]]"
+}, {
+  "id" : "jq-splits-empty",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"\" | splits(\",\")]"
+  },
+  "result" : "[[\"\"]]"
+}, {
+  "id" : "jq-tostream",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[.a | tostream] | length"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-walk",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "walk(if type == \"number\" then . + 1 else . end) | .a.b"
+  },
+  "result" : "[43]"
+}, {
+  "id" : "jq-input",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "input"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-debug",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "debug"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-halt",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "halt"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-getpath-missing",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "getpath([\"x\",\"y\"])"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-comma",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a, .s"
+  },
+  "result" : "[{\"b\":42},\"hi\"]"
+}, {
+  "id" : "jq-empty",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "empty"
+  },
+  "result" : "[]"
+}, {
+  "id" : "jq-not",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "false | not"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-arith-div0",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "1 / 0"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-arith-str-add",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a\" + \"b\""
+  },
+  "result" : "[\"ab\"]"
+}, {
+  "id" : "jq-arith-obj-add",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "{a:1} + {b:2}"
+  },
+  "result" : "[{\"a\":1,\"b\":2}]"
+}, {
+  "id" : "jq-arith-type-error",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "1 + \"a\""
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-null-field",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".n.x"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-iterate-scalar",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".s[]"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-syntax-error",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a["
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-unknown-fn",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "no_such_function"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-bignum",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "9007199254740993"
+  },
+  "result" : "[9007199254740993]"
+}, {
+  "id" : "jq-float-out",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".f"
+  },
+  "result" : "[1.5]"
+}, {
+  "id" : "jq-null-out",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".n"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-bool-out",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".t"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-multiple-out",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[]"
+  },
+  "result" : "[3,1,2]"
+}, {
+  "id" : "jq-object-out",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a"
+  },
+  "result" : "[{\"b\":42}]"
+}, {
+  "id" : "jq-empty-object",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "{}"
+  },
+  "result" : "[{}]"
+}, {
+  "id" : "jq-nan",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "nan | isnan"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-infinite",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "infinite"
+  },
+  "result" : "[\"Infinity\"]"
+}, {
+  "id" : "jq-in-string-json",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "{\"a\":1}",
+    "e" : "."
+  },
+  "result" : "[{\"a\":1}]"
+}, {
+  "id" : "jq-in-string-number",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "42",
+    "e" : "."
+  },
+  "result" : "[42]"
+}, {
+  "id" : "jq-in-string-quoted",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "\"x\"",
+    "e" : "."
+  },
+  "result" : "[\"x\"]"
+}, {
+  "id" : "jq-in-string-bare",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "abc",
+    "e" : "."
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value 'abc' with type 'java.lang.String' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-in-string-empty",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "",
+    "e" : "."
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-in-string-two-docs",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "1 2",
+    "e" : "."
+  },
+  "result" : "[1]"
+}, {
+  "id" : "jq-in-number",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : 7,
+    "e" : "."
+  },
+  "result" : "[7]"
+}, {
+  "id" : "jq-in-bool",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : true,
+    "e" : "."
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-in-list",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : [ 1, 2 ],
+    "e" : ".[]"
+  },
+  "result" : "[1,2]"
+}, {
+  "id" : "jq-in-float",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : 1.5,
+    "e" : "."
+  },
+  "result" : "[1.5]"
+}, {
+  "id" : "jq-in-string-null",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : "null",
+    "e" : "."
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-null-input",
+  "expr" : "<{{ v | jq('.') }}>",
+  "context" : {
+    "v" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "jq-missing-expression",
+  "expr" : "{{ v | jq() }}",
+  "context" : {
+    "v" : {
+      "a" : 1
+    }
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'jq' filter expects an argument 'expression'. ({{ v | jq() }}:1)"
+  }
+}, {
+  "id" : "jq-expression-null",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : 1
+    },
+    "e" : null
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-expression-number",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : 1
+    },
+    "e" : 1
+  },
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "jq-named-arg",
+  "expr" : "{{ v | jq(expression='.a') }}",
+  "context" : {
+    "v" : {
+      "a" : 1
+    }
+  },
+  "result" : "[1]"
+}, {
+  "id" : "jq-scan",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a1b2\" | [scan(\"[0-9]\")]"
+  },
+  "result" : "[[\"1\",\"2\"]]"
+}, {
+  "id" : "jq-scan-group",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a1b2\" | [scan(\"([0-9])\")]"
+  },
+  "result" : "[[[\"1\"],[\"2\"]]]"
+}, {
+  "id" : "jq-splits-multi",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"a,b,c\" | splits(\",\")]"
+  },
+  "result" : "[[\"a\",\"b\",\"c\"]]"
+}, {
+  "id" : "jq-sub-global",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"aba\" | sub(\"a\";\"X\")"
+  },
+  "result" : "[\"Xba\"]"
+}, {
+  "id" : "jq-gsub-group",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"a1\" | gsub(\"(?<d>[0-9])\";\"<\\(.d)>\")"
+  },
+  "result" : "[\"a<1>\"]"
+}, {
+  "id" : "jq-test-ci",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"AB\" | test(\"ab\";\"i\")"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-match-all",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"aa\" | [match(\"a\";\"g\").offset]"
+  },
+  "result" : "[[0,1]]"
+}, {
+  "id" : "jq-getpath-str",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "getpath([\"a\",\"b\"])"
+  },
+  "result" : "[42]"
+}, {
+  "id" : "jq-ltrimstr-nonmatch",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abc\" | ltrimstr(\"z\")"
+  },
+  "result" : "[\"abc\"]"
+}, {
+  "id" : "jq-splits-regex",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"a1b\" | splits(\"[0-9]\")]"
+  },
+  "result" : "[[\"a\",\"b\"]]"
+}, {
+  "id" : "jq-tojson-num",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "1.0 | tojson"
+  },
+  "result" : "[\"1\"]"
+}, {
+  "id" : "jq-tostring-num",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "1.0 | tostring"
+  },
+  "result" : "[\"1\"]"
+}, {
+  "id" : "jq-floatfmt",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".f | tostring"
+  },
+  "result" : "[\"1.5\"]"
+}, {
+  "id" : "jq-bigint",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "9007199254740993"
+  },
+  "result" : "[9007199254740993]"
+}, {
+  "id" : "jq-bigint-add",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "9007199254740993 + 1"
+  },
+  "result" : "[9007199254740994]"
+}, {
+  "id" : "jq-intdiv",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "7 / 2"
+  },
+  "result" : "[3.5]"
+}, {
+  "id" : "jq-sort-mixed",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,\"a\",null,true] | sort"
+  },
+  "result" : "[[null,true,1,\"a\"]]"
+}, {
+  "id" : "jq-unique-mixed",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,1.0] | unique"
+  },
+  "result" : "[[1]]"
+}, {
+  "id" : "jq-group-keys",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[{a:1},{a:1}] | group_by(.a) | length"
+  },
+  "result" : "[1]"
+}, {
+  "id" : "jq-to-entries-order",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "{b:1,a:2} | to_entries | map(.key)"
+  },
+  "result" : "[[\"b\",\"a\"]]"
+}, {
+  "id" : "jq-add-null",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[] | add"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-min-empty",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[] | min"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-has-idx",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,2] | has(1)"
+  },
+  "result" : "[true]"
+}, {
+  "id" : "jq-index-oob",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[9]"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-slice-neg",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".list[-2:]"
+  },
+  "result" : "[[1,2]]"
+}, {
+  "id" : "jq-string-slice",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".s[0:1]"
+  },
+  "result" : "[\"h\"]"
+}, {
+  "id" : "jq-obj-construct",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "{x: .a.b}"
+  },
+  "result" : "[{\"x\":42}]"
+}, {
+  "id" : "jq-obj-shorthand",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : ".a | {b}"
+  },
+  "result" : "[{\"b\":42}]"
+}, {
+  "id" : "jq-alt-error",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "(error(\"x\") // \"d\")"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-try-alt",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "try error(\"x\") catch \"c\""
+  },
+  "result" : "[\"c\"]"
+}, {
+  "id" : "jq-path-of",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[path(.a.b)]"
+  },
+  "result" : "[[[\"a\",\"b\"]]]"
+}, {
+  "id" : "jq-del-multi",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "del(.a,.s) | keys_unsorted"
+  },
+  "result" : "[[\"list\",\"t\",\"f\"]]"
+}, {
+  "id" : "jq-to-number-bad",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"z\" | tonumber"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-ascii-down-uni",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"É\" | ascii_downcase"
+  },
+  "result" : "[\"É\"]"
+}, {
+  "id" : "jq-at-base64d",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"YWI=\" | @base64d"
+  },
+  "result" : "[\"ab\"]"
+}, {
+  "id" : "jq-at-uri-uni",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"é\" | @uri"
+  },
+  "result" : "[\"%C3%A9\"]"
+}, {
+  "id" : "jq-input-line-number",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "input_line_number"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-ltrim",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\" a \" | ltrimstr(\" \")"
+  },
+  "result" : "[\"a \"]"
+}, {
+  "id" : "jq-splits-empty-re",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"ab\" | splits(\"\")]"
+  },
+  "result" : "[[\"\",\"a\",\"b\"]]"
+}, {
+  "id" : "jq-env-obj",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "$ENV | type"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-getpath-null",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "null | getpath([\"a\"])"
+  },
+  "result" : "[null]"
+}, {
+  "id" : "jq-limit-zero",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[limit(0; .list[])]"
+  },
+  "result" : "[[]]"
+}, {
+  "id" : "jq-first-empty",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[first(empty)]"
+  },
+  "result" : "[[]]"
+}, {
+  "id" : "jq-nan-sort",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[nan] | sort | length"
+  },
+  "result" : "[1]"
+}, {
+  "id" : "jq-infinite-tostring",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "infinite | tostring"
+  },
+  "result" : "[\"1.7976931348623157e+308\"]"
+}, {
+  "id" : "jq-abs",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "-1 | fabs"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-floor-str",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"1\" | floor"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-implode-bad",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[-1] | implode"
+  },
+  "result" : "[\"￿\"]"
+}, {
+  "id" : "jq-utf8len",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"é\" | utf8bytelength"
+  },
+  "result" : "[2]"
+}, {
+  "id" : "jq-splits-flags",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"aXb\" | splits(\"x\";\"i\")]"
+  },
+  "result" : "[[\"a\",\"b\"]]"
+}, {
+  "id" : "jq-indices",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"abcb\" | indices(\"b\")"
+  },
+  "result" : "[[1,3]]"
+}, {
+  "id" : "jq-indices-arr",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1,2,1] | indices(1)"
+  },
+  "result" : "[[0,2]]"
+}, {
+  "id" : "jq-walk-str",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "walk(if type==\"string\" then ascii_upcase else . end) | .s"
+  },
+  "result" : "[\"HI\"]"
+}, {
+  "id" : "jq-todate-num",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "0 | todateiso8601"
+  },
+  "result" : "[\"1970-01-01T00:00:00Z\"]"
+}, {
+  "id" : "jq-fromdate",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"1970-01-01T00:00:00Z\" | fromdateiso8601"
+  },
+  "result" : "[0]"
+}, {
+  "id" : "jq-strptime",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "\"1970-01-01T00:00:00Z\" | strptime(\"%Y-%m-%dT%H:%M:%SZ\") | length"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-gmtime",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "0 | gmtime | length"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-mktime",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[1970,0,1,0,0,0,0,0] | mktime"
+  },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a={b=42}, list=[3, 1, 2], s=hi, n=null, t=true, f=1.5}' with type 'java.util.LinkedHashMap' ({{ v | jq(e) }}:1)"
+  }
+}, {
+  "id" : "jq-splits-none",
+  "expr" : "{{ v | jq(e) }}",
+  "context" : {
+    "v" : {
+      "a" : {
+        "b" : 42
+      },
+      "list" : [ 3, 1, 2 ],
+      "s" : "hi",
+      "n" : null,
+      "t" : true,
+      "f" : 1.5
+    },
+    "e" : "[\"abc\" | splits(\"z\")]"
+  },
+  "result" : "[[\"abc\"]]"
+} ]
