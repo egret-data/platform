@@ -64,3 +64,23 @@ filter-chunk-not-list
 filter-distinct-not-list
 filter-values-not-map
 filter-number-not-string
+
+# W2 TASK 4 FIX ROUND, five more -- every one an EXCEPTION Kestra throws where
+# the first cut of these filters silently answered. Same discipline: each is
+# paired with a unit test in runners::filters that asserts egret's own message,
+# so what carries them is the test, not the mode.
+#
+#   filter-escapechar-map-null-value    -> escape_char_refuses_a_null_inside_a_container
+#   filter-escapechar-list-null-element -> escape_char_refuses_a_null_inside_a_container
+#   filter-chunk-size-truncated         -> chunk_narrows_its_size_to_an_int
+#   filter-indent-amount-overflow       -> indent_narrows_its_amount_to_an_int
+#   filter-number-int-overflow          -> number_int_really_is_thirty_two_bits
+#
+# The two escapeChar ones are the C1 defect: before the fix, a null inside a
+# map came out as the literal text `None` -- Python's spelling -- from a filter
+# whose `shell` mode exists to build command lines.
+filter-escapechar-map-null-value
+filter-escapechar-list-null-element
+filter-chunk-size-truncated
+filter-indent-amount-overflow
+filter-number-int-overflow

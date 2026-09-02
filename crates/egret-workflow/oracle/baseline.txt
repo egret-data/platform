@@ -8,8 +8,9 @@
 # One id per line. `#` starts a comment. Corpus order.
 #
 # Written by W2 Task 3 at 76 entries. Tasks 4-8 drive it to zero.
-# W2 Task 4 banked 21 (its whole filter batch) and added 2 permanent
-# divergences of its own, both documented below: 57.
+# W2 Task 4 banked 21 (its whole filter batch) and added permanent divergences
+# of its own, all documented below: 57, then 59 after its fix round added a
+# second and third row of the same className fact.
 
 
 # Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
@@ -99,13 +100,34 @@ op-range
 # UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
 coalesce-nested-absent
 
-# W2 TASK 4, DELIBERATE: `className` cannot be right for both. A whole number
-# from the CONTEXT is an `Integer` (Jackson's `convertValue` boxes it), and the
-# same number written as a template LITERAL is a `Long` -- minijinja has one
-# integer type and cannot tell them apart. `filter-classname-int` (the case a
-# real flow hits) passes; this one records the other half rather than leaving
-# it undiscovered. See runners::filters::java_class_name.
+# W2 TASK 4, DELIBERATE, three rows of one fact: egret cannot carry a value's
+# JAVA BOX TYPE without making the value unusable as a value.
+#
+# `className` reports `Integer` for a whole number that fits in an i32, `Double`
+# for any non-integer and `Long` only past 2^31. Kestra distinguishes more:
+#
+#   - a whole number from the CONTEXT is an Integer (Jackson's convertValue
+#     boxes it) and the same number as a template LITERAL is a Long;
+#   - `number(type='LONG')` and `number(type='FLOAT')` return Long and Float
+#     boxes regardless of magnitude.
+#
+# The first cut of this file said "minijinja has one integer type". THAT IS
+# WRONG: `ValueRepr` carries U64/I64/U128/I128 unnormalised, and this crate's
+# context deserialiser really does route a positive context integer through
+# visit_u64 while a literal is always I64. The honest reasons are that the
+# split is positive-vs-signed rather than context-vs-literal -- a NEGATIVE
+# context integer is I64 too, so keying on it would trade this line for a
+# wrong row on the commoner case -- and that minijinja exposes no public
+# accessor for the discriminant anyway.
+#
+# For the LONG/FLOAT pair the reason is different and simpler: carrying the box
+# would mean returning an opaque object, which is what BigDecimal/BigInteger
+# already are and why THOSE two now answer correctly (fixed in the fix round),
+# and it would stop the result being usable as a number -- the filter's whole
+# purpose. See runners::filters::java_class_name.
 filter-classname-literal-int
+filter-classname-of-long
+filter-classname-of-float
 
 # W2 TASK 4, DELIBERATE: `EscapeCharFilter.processMap` allocates a
 # `new HashMap<>()`, so Kestra LOSES a map's key order here -- `{"b":..,"a":..}`

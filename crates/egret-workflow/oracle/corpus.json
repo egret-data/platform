@@ -264,5 +264,37 @@
   {"id": "filter-string-map",                "expr": "{{ m | string }}",                                    "context": {"m": {"a": 1, "b": 2}}},
   {"id": "filter-string-nested",             "expr": "{{ m | string }}",                                    "context": {"m": {"a": [1, 2]}}},
   {"id": "filter-string-float",              "expr": "{{ f | string }}",                                    "context": {"f": 1e100}},
-  {"id": "filter-string-null",               "expr": "<{{ n | string }}>",                                  "context": {"n": null}}
+  {"id": "filter-string-null",               "expr": "<{{ n | string }}>",                                  "context": {"n": null}},
+  {"id": "filter-escapechar-map-null-value",   "expr": "{{ m | escapeChar(type='single') }}",                  "context": {"m": {"a": null}}, "compare": "error-class"},
+  {"id": "filter-escapechar-list-null-element","expr": "{{ list | escapeChar(type='single') }}",               "context": {"list": ["a", null]}, "compare": "error-class"},
+  {"id": "filter-escapechar-empty-list-no-type","expr": "{{ list | escapeChar }}",                             "context": {"list": []}},
+  {"id": "filter-escapechar-empty-map-no-type","expr": "{{ m | escapeChar }}",                                 "context": {"m": {}}},
+
+  {"id": "filter-chunk-size-truncated",        "expr": "{{ list | chunk(size=4294967296) }}",                  "context": {"list": [1, 2, 3]}, "compare": "error-class"},
+  {"id": "filter-chunk-size-fractional",       "expr": "{{ list | chunk(size=2.5) }}",                         "context": {"list": [1, 2, 3]}},
+  {"id": "filter-indent-amount-truncated",     "expr": "{{ s | indent(amount=-4294967296) }}",                 "context": {"s": "a\nb"}},
+  {"id": "filter-indent-amount-overflow",      "expr": "{{ s | indent(amount=2147483648) }}",                  "context": {"s": "a\nb"}, "compare": "error-class"},
+
+  {"id": "filter-number-biginteger-octal",     "expr": "{{ s | number(type='BIGINTEGER') }}",                  "context": {"s": "010"}},
+  {"id": "filter-number-biginteger-hex",       "expr": "{{ s | number(type='BIGINTEGER') }}",                  "context": {"s": "0xFF"}},
+  {"id": "filter-number-bigdecimal-exp",       "expr": "{{ s | number(type='BIGDECIMAL') }}",                  "context": {"s": "1e5"}},
+  {"id": "filter-number-bigdecimal-negexp",    "expr": "{{ s | number(type='BIGDECIMAL') }}",                  "context": {"s": "1E-3"}},
+  {"id": "filter-number-int-overflow",         "expr": "{{ s | number(type='INT') }}",                         "context": {"s": "3000000000"}, "compare": "error-class"},
+  {"id": "filter-number-default-hex",          "expr": "{{ s | number }}",                                     "context": {"s": "0xFF"}},
+  {"id": "filter-number-default-hex-wide",     "expr": "{{ s | number }}",                                     "context": {"s": "0xFFFFFFFFF"}},
+  {"id": "filter-number-double-suffix",        "expr": "{{ s | number(type='DOUBLE') }}",                      "context": {"s": "1.5f"}},
+  {"id": "filter-number-default-suffix",       "expr": "{{ s | number }}",                                     "context": {"s": "1.5f"}},
+
+  {"id": "filter-classname-bigdecimal",        "expr": "{{ s | number(type='BIGDECIMAL') | className }}",      "context": {"s": "1.50"}},
+  {"id": "filter-classname-biginteger",        "expr": "{{ s | number(type='BIGINTEGER') | className }}",      "context": {"s": "12"}},
+  {"id": "filter-classname-of-long",           "expr": "{{ s | number(type='LONG') | className }}",            "context": {"s": "42"}},
+  {"id": "filter-classname-of-float",          "expr": "{{ s | number(type='FLOAT') | className }}",           "context": {"s": "1.5"}},
+
+  {"id": "filter-distinct-map-key-order",      "expr": "{{ list | distinct }}",                                "context": {"list": [{"a": 1, "b": 2}, {"b": 2, "a": 1}]}},
+  {"id": "filter-distinct-nulls",              "expr": "{{ list | distinct }}",                                "context": {"list": [null, 1, null]}},
+
+  {"id": "filter-substringbefore-null-sep",    "expr": "{{ s | substringBefore(separator=sep) }}",             "context": {"s": "abc", "sep": null}},
+  {"id": "filter-substringafter-null-sep",     "expr": "<{{ s | substringAfter(separator=sep) }}>",            "context": {"s": "abc", "sep": null}},
+  {"id": "filter-substringbeforelast-null-sep","expr": "{{ s | substringBeforeLast(separator=sep) }}",         "context": {"s": "abc", "sep": null}},
+  {"id": "filter-substringafterlast-null-sep", "expr": "<{{ s | substringAfterLast(separator=sep) }}>",        "context": {"s": "abc", "sep": null}}
 ]

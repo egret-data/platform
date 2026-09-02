@@ -682,11 +682,15 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
 /// that stringifies a value for comparison against Kestra's own must come
 /// through here.
 ///
-/// A `none` becomes minijinja's `"none"`, not Java's `"null"` — but
-/// `InExpression` never reaches a stringification with a null operand (its
-/// first guard returns `false`), so the two engines cannot be made to
-/// disagree through this path. `isin-null-vs-none` pins that it is the guard,
-/// not the spelling, that answers.
+/// **This function is total, deliberately.** Its `None`/`Undefined` arm
+/// writes Java's `"null"`, not minijinja's `"None"`. `kestra_is_in` cannot
+/// reach it — its first guard answers `false` on a null operand, which is
+/// what `isin-null-vs-none` pins — but `runners::filters` can, and did: a
+/// null inside a map reaching `escapeChar` rendered the literal text `None`,
+/// Python's spelling, into what may be a shell command line. That was the
+/// THIRD appearance of the `Display` trap in this package: Task 3 fixed
+/// `kestra_is_in` by routing it through here, and here still ended in a
+/// `Display` fallthrough. Every filter Tasks 5-8 add inherits this function.
 pub(super) fn kestra_to_string(value: &MjValue) -> String {
     match value.kind() {
         ValueKind::Bool => (if value.is_true() { "true" } else { "false" }).to_string(),
@@ -705,7 +709,7 @@ pub(super) fn kestra_to_string(value: &MjValue) -> String {
         // go through different Java methods. `filter-string-list` pins it.
         ValueKind::Seq | ValueKind::Iterable => match value.try_iter() {
             Ok(items) => {
-                let rendered: Vec<String> = items.map(|item| java_element(&item)).collect();
+                let rendered: Vec<String> = items.map(|item| kestra_to_string(&item)).collect();
                 format!("[{}]", rendered.join(", "))
             }
             Err(_) => value.to_string(),
@@ -717,30 +721,21 @@ pub(super) fn kestra_to_string(value: &MjValue) -> String {
                 let rendered: Vec<String> = keys
                     .map(|key| {
                         let item = value.get_item(&key).unwrap_or_default();
-                        format!("{}={}", java_element(&key), java_element(&item))
+                        format!("{}={}", kestra_to_string(&key), kestra_to_string(&item))
                     })
                     .collect();
                 format!("{{{}}}", rendered.join(", "))
             }
             Err(_) => value.to_string(),
         },
+        // `String.valueOf(null)` is the four characters `null`. See this
+        // function's doc: without this arm a null falls through to `Display
+        // for Value` and comes out as Python's `None`.
+        ValueKind::None | ValueKind::Undefined => "null".to_string(),
+        // Everything else — strings, and the `Plain` objects
+        // `runners::filters` builds for Java's `BigDecimal`/`BigInteger` —
+        // has a `Display` that IS its Java `toString`.
         _ => value.to_string(),
-    }
-}
-
-/// An element inside a Java container's `toString`.
-///
-/// `AbstractCollection.toString` goes through `String.valueOf(element)`, so a
-/// null element is the four characters `null` -- not the empty string the
-/// top-level render rule produces, and not minijinja's `none`. Only reachable
-/// from inside a container: [`kestra_to_string`]'s own `None` arm is not this
-/// one, because `InExpression` returns `false` before it can stringify a null
-/// operand (see `isin-null-vs-none`).
-fn java_element(value: &MjValue) -> String {
-    if value.is_none() || value.is_undefined() {
-        "null".to_string()
-    } else {
-        kestra_to_string(value)
     }
 }
 

@@ -78,23 +78,28 @@ do. Keeping the set in its own short file makes adding one a one-line,
 reviewable diff instead of a field edit buried in a 138-entry JSON file — the
 same discipline `baseline.txt` applies to mismatches.
 
-20 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+25 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
 String/Number mix), the eight registered-but-null-backed functions,
-`raw-multiline`, the three `isin-*` entries where an absent variable
-raises, and W2 Task 4's four wrong-typed-input filter entries
+`raw-multiline`, the three `isin-*` entries where an absent variable raises,
+and **nine from W2 Task 4** — four wrong-typed inputs
 (`filter-chunk-not-list`, `filter-distinct-not-list`, `filter-values-not-map`,
-`filter-number-not-string`) — each of which is separately backed by a unit
-test in `runners::filters` asserting egret's **own** message, so the free pass
-is not what carries them. Note that marking an entry error-class does **not** make it pass: five
-of the 16 still mismatch, because egret *succeeds* where Kestra throws — which
-is a real divergence and stays visible.
+`filter-number-not-string`) and five exceptions its fix round found
+(`filter-escapechar-map-null-value`, `filter-escapechar-list-null-element`,
+`filter-chunk-size-truncated`, `filter-indent-amount-overflow`,
+`filter-number-int-overflow`). **Every one of the nine is separately backed by
+a unit test in `runners::filters` asserting egret's own message**, named
+alongside it in `error-class.txt`, so what carries them is the test and not
+the mode. Note that marking an entry error-class does **not** make it pass:
+five of the 25 still mismatch, because egret *succeeds* where Kestra throws —
+which is a real divergence and stays visible.
 
 ## `baseline.txt` — the ratchet
 
 `tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
-is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet (57 as
-of W2 Task 4; 76 of 138 at Task 3, 57 of 241 now), and the test fails in
-**both** directions:
+is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
+138 at W2 Task 3, 57 of 241 after Task 4, **59 of 268** after Task 4's fix
+round (which added 27 entries and two more baselined rows of one already-known
+`className` fact). The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -602,7 +607,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 241 entries)
+## Corpus (`corpus.json`, 268 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -658,10 +663,12 @@ match.
 - **2 test entries** for the one registered Pebble test (`json`): a
   true case and a false case, since a single-direction test proves nothing
   about the false branch.
-- **103 W2 Task 4 additions** (138 -> 241), the null / empty / wrong-typed /
-  boundary inputs of the 22 string and collection filters that task ported.
-  Their findings are the section "What W2 Task 4's 103 new entries measured"
-  below; 101 of the 103 pass, and the two that do not are recorded
+- **130 W2 Task 4 additions** (138 -> 241 -> 268), the null / empty /
+  wrong-typed / boundary inputs of the 22 string and collection filters that
+  task ported, plus 27 more from its fix round. Their findings are the two
+  sections "What W2 Task 4's 103 new entries measured" and "What W2 Task 4's
+  fix round measured" below. **117 of the 130 are compared by value and pass**;
+  nine are compared by error class (see above) and four are baselined
   divergences with their reasons in `baseline.txt`.
 - **30 W2 Task 3 additions** (the corpus went 108 -> 138 across three fix
   rounds), covering the three
@@ -729,6 +736,68 @@ golden file rather than reasoned about:
   `cafe-munster` (the accents decompose and the combining marks are dropped),
   but `中文 test` slugs to `test` — the CJK is not transliterated, it is
   deleted. `Straße` becomes `strae`.
+
+## What W2 Task 4's fix round measured (27 more entries)
+
+A review built its own 69-entry probe corpus and ran it through real Pebble and
+egret side by side. Everything below was then re-measured through *this*
+harness before any code moved.
+
+- **`escapeChar` on a null inside a container is a `NullPointerException`**,
+  in both container shapes: `Cannot invoke "Object.toString()" because "value"
+  is null` for a map, `… because "item" is null` for a list. egret was
+  emitting the literal text **`None`** there — Python's spelling, out of a
+  filter whose `shell` mode exists to build command lines. The root cause was
+  one level down, in `runners::env::kestra_to_string`, which still ended in a
+  `Display` fallthrough; that function is now total. **This was the third
+  appearance of the `Display` trap in this package**, after Task 3's
+  `kestra_is_in` (which was fixed by routing it *through* the function that
+  still had the bug).
+- **`intValue()` is a 32-bit narrowing and it changes answers.**
+  `chunk(size=4294967296)` is `chunk(size=0)` and Guava then throws;
+  `indent(amount=-4294967296)` is `indent(amount=0)` and returns the input
+  unchanged; `indent(amount=2147483648)` narrows to `-2147483648` and is
+  refused. That last one is a **bound, not only a fidelity point**: without
+  the narrowing the port reached `prefix.repeat(2_147_483_648)`, a 2 GiB
+  allocation from one template literal. Note `chunk` casts to `Number` (so
+  `chunk(size=2.5)` truncates to 2) while `indent` casts to `Long` (so
+  `indent(amount=2.5)` is a `ClassCastException`) — the two filters differ.
+- **`createBigInteger` has its own copy of the radix rules.** `"010" |
+  number(type='BIGINTEGER')` is `8` and `"0xFF"` is `255`, exactly as under
+  `type='INT'`. A port that implements the rules for one and not the other
+  answers the same string two ways depending on `type` — a silently wrong
+  number, which is the worst defect this fix round closed.
+- **`BigDecimal` renders as `toPlainString()`, not as its input text.**
+  `"1e5"` is `100000` and `"1E-3"` is `0.001`, while `"1.50"` keeps its
+  trailing zero. Keeping the raw string passes `"1.50"` only because that
+  string is already in plain notation.
+- **`number(type='INT')` really is 32 bits**: `"3000000000"` throws where
+  `type='LONG'` succeeds.
+- **`createNumber` checks the hex prefix BEFORE the trailing type qualifier.**
+  Testing for a trailing `f`/`d` first sends every hex string ending in a hex
+  `d` or `f` down the decimal branch. `"0xFF" | number` is `255`,
+  `"0xFFFFFFFFF" | number` is `68719476735` (the width rule promotes it to a
+  `Long`), and `"1.5f" | number(type='DOUBLE')` is `1.5` because
+  `Double.valueOf` accepts the suffix.
+- **`className` on a `BigDecimal`/`BigInteger`** is `java.math.BigDecimal` /
+  `java.math.BigInteger`. Those two are the *only* Java box types egret can
+  report correctly, because they are the only ones it represents as an opaque
+  object; `number(type='LONG')` and `number(type='FLOAT')` produce
+  `java.lang.Long` and `java.lang.Float` in Kestra and are baselined here with
+  that reason.
+- **`Map.equals` ignores key order**, so `distinct` folds
+  `[{"a":1,"b":2},{"b":2,"a":1}]` to one element — while `List.equals` is
+  order-dependent and `[[1,2],[2,1]]` stays two. A dedup key built from an
+  insertion-ordered stringification gets the map half wrong.
+- **A null separator is not an empty separator, and the four `substring*`
+  filters take four different fallbacks for it**: `substringBefore` returns the
+  whole input, `substringAfter` returns the empty string,
+  `substringBeforeLast` returns the whole input (its guard is `isEmpty`, which
+  folds null and empty together), `substringAfterLast` returns the empty
+  string. Erroring on a null separator loses all four.
+- **`escapeChar` validates `type` at the LEAF**, inside `escapeString`, so a
+  container with no leaf never consults it: `{{ [] | escapeChar }}` is `[]`
+  with no argument at all, and `{{ ['a'] | escapeChar }}` is an error.
 
 ### `string` was the second name minijinja had already bound
 
