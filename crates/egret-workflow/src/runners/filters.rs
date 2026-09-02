@@ -69,7 +69,7 @@ use minijinja::value::{Enumerator, Object, ObjectRepr, Rest, Value as MjValue, V
 use minijinja::{Environment, Error as MjError, ErrorKind};
 use unicode_normalization::UnicodeNormalization;
 
-use super::env::{kestra_to_string, write_java_double, OrderedMap};
+use super::env::{kestra_to_string, write_java_double, OrderedMap, MAX_OUTPUT_BYTES};
 
 /// Registers all 22 filters this task owns onto `env`.
 ///
@@ -936,6 +936,39 @@ impl IndentKind {
     }
 }
 
+/// The shared body of `indent` and `nindent`.
+///
+/// # A deliberate divergence: the padding is bounded before it is allocated
+///
+/// Kestra will attempt `indent(amount=2000000000)` — `prefix.repeat(amount)`
+/// on a 2-billion `int` — and fall over. **egret refuses it**, and that is a
+/// bound Kestra does not have, added on purpose:
+///
+/// - fidelity to Kestra is this programme's point, but it does not extend to
+///   reproducing a **resource-exhaustion vector**. A workflow's source is
+///   author-supplied and W3 renders it in a request path; "Kestra also falls
+///   over here" is not a reason for egret to fall over;
+/// - the same judgement was already made once, deliberately:
+///   [`super::rewrite`]'s `MAX_NESTING_DEPTH` is a limit Kestra does not have,
+///   because unbounded recursion aborts the process. Same class, same call;
+/// - an intermediate allocation three orders of magnitude past
+///   [`MAX_OUTPUT_BYTES`] defeats that cap's purpose. `CappedSink` measures
+///   what reaches the sink, so a cap that only sees what *survives* the
+///   allocation is not a cap.
+///
+/// **The bound is derived, not invented.** There is no second magic number:
+/// the result's size is exactly computable here (`separators × amount ×
+/// prefix.len()`, plus the input), so this compares that projection against
+/// the existing [`MAX_OUTPUT_BYTES`] and names the limit in the error. Nothing
+/// is allocated on the refusing path.
+///
+/// **No corpus entry pins it, and that is not an omission.** An entry that
+/// egret refuses is one Kestra either OOMs or answers with a multi-megabyte
+/// string: `amount=2000000000` would hang or exhaust the harness, and the
+/// largest value Kestra handles quickly (~2 MB of padding) would put a
+/// multi-megabyte golden into `golden.json`. `indent_refuses_to_allocate_past_the_output_cap`
+/// asserts the refusal instead, and `oracle/README.md` records why there is no
+/// golden for it.
 fn apply_indent(value: MjValue, rest: Rest<MjValue>, kind: IndentKind) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
@@ -990,6 +1023,31 @@ fn apply_indent(value: MjValue, rest: Rest<MjValue>, kind: IndentKind) -> Result
     };
 
     let newline = line_separator(&input);
+
+    // **A DELIBERATE DIVERGENCE: bounded before it allocates.** See this
+    // function's doc. The size of the result is exactly computable here, so
+    // the refusal happens instead of the allocation, never after it.
+    let separators = match kind {
+        IndentKind::Indent => input.matches(newline).count(),
+        // `(newLine + input).replace(...)` — the prepended separator is
+        // rewritten too, so there is one more.
+        IndentKind::Nindent => input.matches(newline).count() + 1,
+    };
+    let padding = separators
+        .saturating_mul(amount as usize)
+        .saturating_mul(prefix.len());
+    let projected = input
+        .len()
+        .saturating_add(newline.len())
+        .saturating_add(padding);
+    if projected > MAX_OUTPUT_BYTES {
+        return Err(pebble_error(format!(
+            "the '{}' filter would produce {projected} bytes, over the {MAX_OUTPUT_BYTES}-byte \
+             render limit",
+            kind.name()
+        )));
+    }
+
     let replacement = format!("{newline}{}", prefix.repeat(amount as usize));
     let out = match kind {
         IndentKind::Indent => input.replace(newline, &replacement),
@@ -1960,6 +2018,55 @@ mod tests {
             "abc"
         );
         assert_eq!(ok("{{ s | substringAfterLast(separator=sep) }}", cx), "");
+    }
+
+    /// **A bound Kestra does not have, and the one place this module
+    /// deliberately refuses where Kestra tries.**
+    ///
+    /// `indent(amount=2000000000)` is `prefix.repeat(2_000_000_000)` — 2 GiB
+    /// from one template literal, on author-supplied source, three orders of
+    /// magnitude past the render cap that is supposed to bound it. The
+    /// `intValue()` narrowing does not save it: 2000000000 is a perfectly
+    /// valid `int`. Nothing is allocated on the refusing path, which is what
+    /// the timing of this test would show if it were ever removed.
+    ///
+    /// No corpus entry can express this: Kestra either OOMs on it or, at the
+    /// largest size it survives, answers with a multi-megabyte golden. This
+    /// test is the whole pin. See `apply_indent`'s doc.
+    #[test]
+    fn indent_refuses_to_allocate_past_the_output_cap() {
+        // The wide-prefix case is FIRST on purpose. It reaches the same total
+        // from a small `amount`, which proves the bound is on the product --
+        // and it is the case that stays SAFE to run if the bound is ever
+        // removed: 1.2 MB allocates, where the two below would allocate 2 GiB
+        // and take the test process with them. A falsification run therefore
+        // fails here and stops.
+        for template in [
+            "{{ s | indent(amount=2, prefix=wide) }}",
+            "{{ s | indent(amount=2000000000) }}",
+            "{{ s | nindent(amount=2000000000) }}",
+        ] {
+            let message = err(
+                template,
+                &format!(r#"{{"s": "a\nb", "wide": "{}"}}"#, "-".repeat(600_000)),
+            );
+            // The FILTER's own message, not `RenderError::OutputTooLarge`'s
+            // ("rendered output exceeded 1048576 bytes"). The distinction is
+            // the whole claim: the output cap fires after the allocation, this
+            // fires instead of it.
+            assert!(
+                message.contains("filter would produce")
+                    && message.contains("over the 1048576-byte render limit"),
+                "{template} gave {message}"
+            );
+        }
+
+        // And an ordinary indent is untouched by it, so the bound is about
+        // the size and not about the filter.
+        assert_eq!(
+            ok("{{ s | indent(amount=2) }}", r#"{"s": "a\nb"}"#),
+            "a\n  b"
+        );
     }
 
     /// Minor: Kestra reaches `argsToType` only from inside `escapeString`, so

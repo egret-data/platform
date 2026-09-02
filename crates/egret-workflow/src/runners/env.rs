@@ -160,7 +160,13 @@ const RECURSION_LIMIT: usize = 64;
 /// which minijinja does not offer.
 ///
 /// [dataapi]: ../../../egret_dataapi/render/index.html
-const MAX_OUTPUT_BYTES: usize = 1 << 20;
+///
+/// **`runners::filters` derives its own pre-allocation bound from this.**
+/// `indent`/`nindent` can compute the size of their result before building it,
+/// so they refuse above this budget instead of allocating and then failing —
+/// see `runners::filters::apply_indent`. That is deliberately a bound Kestra
+/// does not have, for the same reason `rewrite::MAX_NESTING_DEPTH` is.
+pub(super) const MAX_OUTPUT_BYTES: usize = 1 << 20;
 
 /// `VariableRenderer.RAW_PATTERN`, copied character for character from
 /// `core/src/main/java/io/kestra/core/runners/VariableRenderer.java:23`:

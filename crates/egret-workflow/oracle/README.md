@@ -799,6 +799,32 @@ harness before any code moved.
   container with no leaf never consults it: `{{ [] | escapeChar }}` is `[]`
   with no argument at all, and `{{ ['a'] | escapeChar }}` is an error.
 
+### One behaviour here has NO golden, on purpose
+
+`indent`/`nindent` refuse when `separators x amount x prefix.len()` would push
+the result past `runners::env::MAX_OUTPUT_BYTES` (1 MiB). **Kestra does not
+refuse** — it will attempt `indent(amount=2000000000)`, a 2 GiB allocation from
+one template literal, and fall over. egret bounds it deliberately, on the same
+call as `rewrite`'s `MAX_NESTING_DEPTH` (also a limit Kestra lacks): fidelity
+does not extend to reproducing a resource-exhaustion vector in a renderer that
+W3 runs on author-supplied source in a request path, and an intermediate
+allocation three orders of magnitude past the output cap defeats that cap,
+which only measures what survives the allocation.
+
+The bound is **derived from the existing cap, not a second number**, and it is
+checked before anything is allocated.
+
+There is no corpus entry, and that is not an omission: the harness cannot
+produce a golden for it. At `amount=2000000000` Kestra OOMs or hangs; at the
+largest amount Kestra answers quickly, the golden would be a multi-megabyte
+string committed into `golden.json`. `runners::filters`'
+`indent_refuses_to_allocate_past_the_output_cap` is the pin instead. Its
+falsification is arranged to be safe — the 1.2 MB case runs first, so removing
+the bound fails the test there rather than allocating 2 GiB — and it asserts
+the *filter's* message, since `RenderError::OutputTooLarge` ("rendered output
+exceeded 1048576 bytes") is exactly the after-the-fact error the bound exists
+to pre-empt.
+
 ### `string` was the second name minijinja had already bound
 
 Task 3's addendum B2 named `indent` and `range`. **`string` is a third**, and
