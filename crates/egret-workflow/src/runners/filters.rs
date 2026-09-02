@@ -18,8 +18,11 @@
 //! `dateAdd`, `timestamp`, `timestampMicro`, `timestampMilli`,
 //! `timestampNano`) to Task 5, the four structured-data ones (`jq`, `toIon`,
 //! `toJson`, `yaml`) to Task 6, and the three constant-registered regex
-//! filters (`regexMatch`, `regexReplace`, `regexExtract`) are **not named by
-//! any of Tasks 4-6's briefs** — see `task-4-report.md`.
+//! filters (`regexMatch`, `regexReplace`, `regexExtract`) to Task 6 as well —
+//! its batch is "`jq`, `toIon`, `toJson`, `yaml`, **and any remaining**", and
+//! after Tasks 4 and 5 those three are what remains. They are the only
+//! `getFilters()` names no brief enumerates by hand, so 22 + 6 + 4 + 3 = 35
+//! is what closes the count.
 //!
 //! # Two of these names were already taken by minijinja
 //!

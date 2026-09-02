@@ -43,8 +43,9 @@ filter-tojson
 filter-yaml
 filter-toion
 
-# the three constant-registered filters (RegexMatchFilter.NAME etc.). NOT named
-# by any of Tasks 4-6's briefs -- see task-4-report.md's "unassigned" note.
+# the three constant-registered filters (RegexMatchFilter.NAME etc.), Task 6:
+# its batch is "jq, toIon, toJson, yaml, and any remaining", and after Tasks 4
+# and 5 these three are what remains. 22 + 6 + 4 + 3 = 35.
 filter-regexmatch
 filter-regexreplace
 filter-regexextract
