@@ -2880,6 +2880,16 @@ mod tests {
             .contains("Unknown pattern letter: o"));
         // …and a name made only of pattern letters really does format.
         assert_eq!(ok("{{ d | date('dd', timeZone='UTC') }}", d), "15");
+        // **The boundary**: the eighteen FORMATTERS names and the four styles
+        // are looked up BEFORE the fallthrough, so a name that IS in the maps
+        // never reaches the pattern compiler -- `sql_sec` would otherwise die
+        // on its `l`, which is not a pattern letter at all.
+        assert_eq!(
+            ok("{{ d | date('sql_sec', timeZone='UTC') }}", d),
+            "2024-01-15 10:30:00"
+        );
+        assert!(err("{{ d | date('sql_secx', timeZone='UTC') }}", d)
+            .contains("Unknown pattern letter: l"));
     }
 
     /// `convert`'s last branch is a hard `(String) input` cast, so anything
@@ -2901,6 +2911,25 @@ mod tests {
             err("{{ d | date('iso', timeZone='UTC') }}", r#"{"d": 1.5}"#)
                 .contains("class java.lang.Double cannot be cast to class java.lang.String")
         );
+        // **The boundary.** A whole number one step away is NOT refused -- it
+        // is the `Long` branch -- and neither is a string. An error-class
+        // entry pins only THAT egret refuses; without these two lines nothing
+        // pins WHICH inputs it refuses, which is exactly where `v` and the
+        // four legacy zone ids lived.
+        assert_eq!(
+            ok(
+                "{{ d | date('iso', timeZone='UTC') }}",
+                r#"{"d": 1705314600}"#
+            ),
+            "2024-01-15T10:30:00.000000Z"
+        );
+        assert_eq!(
+            ok(
+                "{{ d | date('iso', timeZone='UTC') }}",
+                r#"{"d": "2024-01-15T10:30:00Z"}"#
+            ),
+            "2024-01-15T10:30:00.000000Z"
+        );
     }
 
     #[test]
@@ -2909,9 +2938,26 @@ mod tests {
             r#"{"d": "not-a-date"}"#,
             r#"{"d": ""}"#,
             r#"{"d": "2024-02-30"}"#,
+            // One character past what the ISO grammar takes, in three
+            // different places -- the BOUNDARY, not just three bad strings.
+            r#"{"d": "2024-1-5"}"#,
+            r#"{"d": "2024-01-15T10:30:00+0700"}"#,
+            r#"{"d": "2024-01-15 10:30:00"}"#,
+            r#"{"d": "2024-01-15T10:30:00.1234567891Z"}"#,
         ] {
             let message = err("{{ d | date('iso', timeZone='UTC') }}", input);
             assert!(message.contains("could not be parsed"), "{message}");
+        }
+        // …and each one's accepted neighbour.
+        for input in [
+            r#"{"d": "2024-02-29"}"#,
+            r#"{"d": "2024-01-05"}"#,
+            r#"{"d": "2024-01-15T10:30:00+07:00"}"#,
+            r#"{"d": "2024-01-15T10:30:00"}"#,
+            r#"{"d": "2024-01-15T10:30:00.123456789Z"}"#,
+        ] {
+            render("{{ d | date('iso', timeZone='UTC') }}", input)
+                .unwrap_or_else(|e| panic!("{input} must parse: {e}"));
         }
     }
 
@@ -2943,6 +2989,23 @@ mod tests {
             .contains("No enum constant java.time.temporal.ChronoUnit.days"));
         assert!(err("{{ d | dateAdd(1, 'FORTNIGHTS', 'iso', 'UTC') }}", d)
             .contains("No enum constant java.time.temporal.ChronoUnit.FORTNIGHTS"));
+        // **The boundary.** An error-class entry pins only THAT egret
+        // refuses; its paired test has to pin WHICH inputs, or the refusal
+        // could quietly widen -- which is exactly where `v` and the four
+        // legacy zone ids lived. So: the same word in the enum's own
+        // spelling is accepted, and so is the one name with punctuation in
+        // it.
+        assert_eq!(
+            ok("{{ d | dateAdd(1, 'DAYS', 'uuuu-MM-dd', 'UTC') }}", d),
+            "2024-01-16"
+        );
+        assert_eq!(
+            ok(
+                "{{ d | dateAdd(1, 'HALF_DAYS', 'uuuu-MM-dd HH:mm', 'UTC') }}",
+                d
+            ),
+            "2024-01-15 22:30"
+        );
     }
 
     /// An absent `unit` is `ChronoUnit.valueOf(null)`, whose message is the
@@ -2953,6 +3016,16 @@ mod tests {
         let d = r#"{"d": "2024-01-15T10:30:00Z"}"#;
         assert!(
             err("{{ d | dateAdd(1, format='iso', timeZone='UTC') }}", d).contains("Name is null")
+        );
+        // **The boundary**: an explicitly-null `unit` is the same refusal,
+        // and supplying it by keyword rather than by position is not.
+        assert!(err("{{ d | dateAdd(1, null, 'iso', 'UTC') }}", d).contains("Name is null"));
+        assert_eq!(
+            ok(
+                "{{ d | dateAdd(1, unit='DAYS', format='uuuu-MM-dd', timeZone='UTC') }}",
+                d
+            ),
+            "2024-01-16"
         );
     }
 
@@ -3384,6 +3457,129 @@ mod tests {
             r#"{"d": "2024-13-01"}"#
         )
         .contains("could not be parsed"));
+    }
+
+    /// **The time-resolution cascade**: which fields make a time, and what
+    /// happens to the offset when none of them does.
+    ///
+    /// `Parsed.resolveTimeLenient` only produces a `LocalTime` when the
+    /// fields form a contiguous chain from the hour down, and
+    /// `AbstractDate.convert` then falls through to
+    /// `LocalDate.parse(...).atStartOfDay()` — **discarding the offset and
+    /// the zone with it**. So an `existingFormat` of `uuuu-MM-dd mm` answers
+    /// midnight and drops the minute. Fourteen of these were wrong before the
+    /// fix round's `existingFormat` sweep, all of them `OK -> OK`.
+    #[test]
+    fn only_a_contiguous_chain_of_time_fields_makes_a_time() {
+        let ef = |pattern: &str, input: &str| {
+            ok(
+                &format!(
+                    "{{{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', existingFormat='{pattern}') }}}}"
+                ),
+                &format!(r#"{{"d": "{input}"}}"#),
+            )
+        };
+        // hour, hour+minute, hour+minute+second: a time.
+        assert_eq!(ef("uuuu-MM-dd HH", "2024-01-15 10"), "2024-01-15 10:00:00");
+        assert_eq!(
+            ef("uuuu-MM-dd HH:mm", "2024-01-15 10:30"),
+            "2024-01-15 10:30:00"
+        );
+        // …and one link missing from the chain: NO time, midnight.
+        assert_eq!(ef("uuuu-MM-dd mm", "2024-01-15 30"), "2024-01-15 00:00:00");
+        assert_eq!(ef("uuuu-MM-dd ss", "2024-01-15 45"), "2024-01-15 00:00:00");
+        assert_eq!(
+            ef("uuuu-MM-dd HH ss", "2024-01-15 10 45"),
+            "2024-01-15 00:00:00"
+        );
+        // An hour-of-am-pm needs its `a`; with one it resolves, without one
+        // it does not. And an `a` on its own is the MIDDLE of its half-day.
+        assert_eq!(ef("uuuu-MM-dd hh", "2024-01-15 10"), "2024-01-15 00:00:00");
+        assert_eq!(
+            ef("uuuu-MM-dd hh a", "2024-01-15 10 PM"),
+            "2024-01-15 22:00:00"
+        );
+        assert_eq!(ef("uuuu-MM-dd a", "2024-01-15 AM"), "2024-01-15 06:00:00");
+        assert_eq!(ef("uuuu-MM-dd a", "2024-01-15 PM"), "2024-01-15 18:00:00");
+        // `A` and `N` carry a whole time in one field.
+        assert_eq!(
+            ef("uuuu-MM-dd A", "2024-01-15 37845123"),
+            "2024-01-15 10:30:45"
+        );
+        // **With no time, the parsed offset is discarded too** and the
+        // `timeZone` argument places the date -- so this is midnight UTC, not
+        // an instant in +07:00.
+        assert_eq!(
+            ef("uuuu-MM-dd XXX", "2024-01-15 +07:00"),
+            "2024-01-15 00:00:00"
+        );
+        // …and with a time it is not discarded. (Double-quoted, because the
+        // pattern carries a `'T'` literal of its own.)
+        assert_eq!(
+            ok(
+                r#"{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', existingFormat="uuuu-MM-dd'T'HH:mm:ssXXX") }}"#,
+                r#"{"d": "2024-01-15T10:30:00+07:00"}"#
+            ),
+            "2024-01-15 03:30:00"
+        );
+    }
+
+    /// An `existingFormat`'s fields are **range-checked on the way in**, and
+    /// each check has Java's own sentence.
+    ///
+    /// The boundary matters more than the message here: `KK` takes 11 and
+    /// refuses 12, `yyyy` takes 1 and refuses 0, and `uuuu` — one letter
+    /// away — takes both 0 and a negative year.
+    #[test]
+    fn an_existing_formats_fields_are_range_checked() {
+        let ef = |pattern: &str| {
+            format!(
+                "{{{{ d | date('uuuu-MM-dd HH:mm', timeZone='UTC', existingFormat='{pattern}') }}}}"
+            )
+        };
+        let ctx = |input: &str| format!(r#"{{"d": "{input}"}}"#);
+        assert!(err(&ef("uuuu-MM-dd KK:mm a"), &ctx("2024-01-15 12:30 PM"))
+            .contains("Invalid value for HourOfAmPm (valid values 0 - 11): 12"));
+        assert_eq!(
+            ok(&ef("uuuu-MM-dd KK:mm a"), &ctx("2024-01-15 11:30 PM")),
+            "2024-01-15 23:30"
+        );
+        assert!(err(&ef("yyyy-MM-dd"), &ctx("0000-01-15")).contains("Invalid value for YearOfEra"));
+        assert!(err(&ef("yyyy-MM-dd"), &ctx("-0044-01-15")).contains("Invalid value for YearOfEra"));
+        // One letter away, and both are fine: `u` is the proleptic year.
+        assert_eq!(
+            ok(&ef("uuuu-MM-dd"), &ctx("-0044-01-15")),
+            "-0044-01-15 00:00"
+        );
+        assert_eq!(
+            ok(&ef("uuuu-MM-dd"), &ctx("0000-01-15")),
+            "0000-01-15 00:00"
+        );
+    }
+
+    /// The offset letters are **count-specific and case-sensitive** on the
+    /// parse side, where the ISO path is neither.
+    ///
+    /// `XXX` is `+HH:MM` and takes nothing else — not `+07`, not a lowercase
+    /// `z` — while `X` takes `+07` and `Z` takes `+0700`. The first cut
+    /// routed all of them through the ISO offset parser, which accepts every
+    /// shape.
+    #[test]
+    fn an_existing_formats_offset_letters_are_count_specific() {
+        let ef = |pattern: &str| {
+            format!(
+                "{{{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', existingFormat='uuuu-MM-dd HH:mm {pattern}') }}}}"
+            )
+        };
+        let ctx = |input: &str| format!(r#"{{"d": "2024-01-15 10:30 {input}"}}"#);
+        assert!(err(&ef("XXX"), &ctx("+07")).contains("could not be parsed"));
+        assert!(err(&ef("XXX"), &ctx("z")).contains("could not be parsed"));
+        // The boundary: the shapes each count DOES take.
+        assert_eq!(ok(&ef("XXX"), &ctx("+07:00")), "2024-01-15 03:30:00");
+        assert_eq!(ok(&ef("X"), &ctx("+07")), "2024-01-15 03:30:00");
+        assert_eq!(ok(&ef("XXX"), &ctx("Z")), "2024-01-15 10:30:00");
+        assert_eq!(ok(&ef("Z"), &ctx("+0700")), "2024-01-15 03:30:00");
+        assert_eq!(ok(&ef("ZZZZ"), &ctx("GMT+07:00")), "2024-01-15 03:30:00");
     }
 
     /// The ISO literals `T` and `Z` are **case-insensitive** because the

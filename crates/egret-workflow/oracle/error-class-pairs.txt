@@ -104,3 +104,12 @@ filter-date-zone-offset-colon-placement         test:date_reproduces_javas_zone_
 filter-date-zone-offset-out-of-range            test:date_reproduces_javas_zone_offset_grammar
 filter-date-zone-legacy-three-letter            test:date_refuses_an_unknown_time_zone
 filter-date-format-rfc-1123-year-out-of-range   test:rfc_1123_refuses_a_year_it_cannot_print
+
+# --- W2 Task 5 fix round 2: the `existingFormat` parse sweep. Each of these
+# tests asserts a refused input AND its accepted neighbour, per the ruling
+# that a paired test must pin the boundary and not only the message.
+filter-date-existing-format-offset-xxx-needs-a-colon       test:an_existing_formats_offset_letters_are_count_specific
+filter-date-existing-format-offset-is-case-sensitive       test:an_existing_formats_offset_letters_are_count_specific
+filter-date-existing-format-hour-of-ampm-out-of-range      test:an_existing_formats_fields_are_range_checked
+filter-date-existing-format-year-of-era-cannot-be-zero     test:an_existing_formats_fields_are_range_checked
+filter-date-existing-format-year-of-era-cannot-be-negative test:an_existing_formats_fields_are_range_checked

@@ -51,6 +51,12 @@
 //! Everything else in the alphabet is arithmetic or a fixed English word and
 //! is ported. See [`Locale`] for the one other locale-shaped limit.
 //!
+//! **The PARSE side refuses the same three and no others**, deliberately: a
+//! letter egret can write, it can read. Kestra parses all three (it consumes
+//! and discards them), so those three are divergences on that side rather
+//! than on both. Everything else a pattern can contain is parseable, including
+//! the fields Java itself parses and then ignores.
+//!
 //! **This list is the whole refusal set, and it is now checked rather than
 //! recited.** The fix round's probe sweep pushes every ASCII letter at counts
 //! 1-11 through the real engine and through this module and differences the
@@ -1482,6 +1488,23 @@ impl Format {
     /// The `existingFormat` path: `ZonedDateTime.parse(text, formatter)` with
     /// Kestra's two fallbacks.
     ///
+    /// # The `locale` argument does NOT reach this side
+    ///
+    /// `AbstractDate.convert` calls `formatter(existingFormat)` with **no**
+    /// `.withLocale(…)`, while `AbstractDate.format` calls
+    /// `formatter(format).withLocale(locale).withZone(zone)`. Read off the
+    /// bytecode. So Kestra parses an `existingFormat` under
+    /// `Locale.getDefault(FORMAT)` — `en_VN` on the machine that generates
+    /// `golden.json` — whatever the template's `locale` argument says: an
+    /// `existingFormat` of `MMM d uuuu` with `locale='fr'` still wants the
+    /// English `Jan`.
+    ///
+    /// egret's parser is locale-INDEPENDENT (English names, and the week
+    /// fields consumed without meaning), which matches the pinned harness and
+    /// is a narrower behaviour rather than a different one. It is also why no
+    /// corpus entry may put `e`, `c`, `w`, `W` or `Y` inside an
+    /// `existingFormat`: their meaning there is the harness machine's region.
+    ///
     /// **The twelve `java.time` constants are refused as an `existingFormat`.**
     /// They are `DateTimeFormatterBuilder` compositions with no pattern
     /// spelling, and four of them (`iso_instant`, `iso_time`,
@@ -1729,6 +1752,28 @@ impl<'a> Scan<'a> {
         Some((value, taken))
     }
 
+    /// The same, in 64 bits. `N` (nano-of-day) reaches 8.6e13, which does not
+    /// fit the `u32` [`Scan::digits`] returns.
+    fn digits64(&mut self, min: usize, max: usize) -> Option<(u64, usize)> {
+        let start = self.at;
+        let mut value: u64 = 0;
+        while self.at - start < max {
+            match self.peek().and_then(|c| c.to_digit(10)) {
+                Some(d) => {
+                    value = value.checked_mul(10)?.checked_add(u64::from(d))?;
+                    self.at += 1;
+                }
+                None => break,
+            }
+        }
+        let taken = self.at - start;
+        if taken < min {
+            self.at = start;
+            return None;
+        }
+        Some((value, taken))
+    }
+
     fn fail(&self) -> String {
         format!(
             "Text '{}' could not be parsed at index {}",
@@ -1763,6 +1808,10 @@ struct Parsed {
     minute: Option<u32>,
     second: Option<u32>,
     nano: Option<u32>,
+    /// `A` and `N` — a whole time in one field, which is why they resolve
+    /// where a bare `m` or `s` does not.
+    milli_of_day: Option<u32>,
+    nano_of_day: Option<u64>,
     pm: Option<bool>,
     offset: Option<FixedOffset>,
     zone: Option<Zone>,
@@ -1819,19 +1868,81 @@ impl Parsed {
             (_, _, Some(ordinal)) => NaiveDate::from_yo_opt(year, ordinal).ok_or_else(invalid)?,
             _ => return Err(unable()),
         };
+        // ---------------------------------------------------------------
+        // The time, and **whether there is one at all**
+        // ---------------------------------------------------------------
+        //
+        // `Parsed.resolveTimeLenient` in SMART mode only produces a
+        // `LocalTime` when the fields form a CONTIGUOUS CHAIN from the hour
+        // down. Its shape, from the JDK:
+        //
+        // ```text
+        // hod + moh + som (+ nos)   -> a time
+        // hod + moh                 -> a time, seconds 0   (nos must be absent)
+        // hod                       -> a time, m/s/n 0     (som and nos absent)
+        // anything else             -> NO time
+        // ```
+        //
+        // That is not a detail: it decides whether `AbstractDate.convert`
+        // reaches `LocalDateTime.parse` at all, or falls through to
+        // `LocalDate.parse(...).atStartOfDay()`. So an `existingFormat` of
+        // `uuuu-MM-dd m` **silently discards the minute** and answers
+        // midnight, and `uuuu-MM-dd HH s` discards both the hour and the
+        // second. Measured across every time letter and every combination;
+        // the first cut built a time out of whatever it had and was wrong for
+        // fourteen of them.
         let hour = match (self.hour, self.hour_of_ampm, self.pm) {
-            (Some(h), _, _) => h,
-            (None, Some(h), Some(pm)) => (h % 12) + if pm { 12 } else { 0 },
-            (None, Some(h), None) => h,
-            (None, None, _) => 0,
+            (Some(hour), _, _) => Some(hour),
+            (None, Some(hour), Some(pm)) => Some(hour % 12 + if pm { 12 } else { 0 }),
+            // An `a` with no hour beside it resolves to the MIDDLE of its
+            // half-day: `AM` is 06:00 and `PM` is 18:00. Measured; there is no
+            // reading of the pattern that predicts it.
+            (None, None, Some(pm)) => Some(if pm { 18 } else { 6 }),
+            // An hour-of-am-pm with no `a` cannot become an hour-of-day, so
+            // there is no time.
+            (None, Some(_), None) => None,
+            (None, None, None) => None,
         };
-        let time = NaiveTime::from_hms_nano_opt(
-            hour,
-            self.minute.unwrap_or(0),
-            self.second.unwrap_or(0),
-            self.nano.unwrap_or(0),
-        )
-        .ok_or_else(|| format!("Text '{text}' could not be parsed: Invalid time"))?;
+        let bad_time = || format!("Text '{text}' could not be parsed: Invalid time");
+        let time = if let Some(nanos) = self.nano_of_day {
+            Some(
+                NaiveTime::from_num_seconds_from_midnight_opt(
+                    (nanos / 1_000_000_000) as u32,
+                    (nanos % 1_000_000_000) as u32,
+                )
+                .ok_or_else(bad_time)?,
+            )
+        } else if let Some(millis) = self.milli_of_day {
+            Some(
+                NaiveTime::from_num_seconds_from_midnight_opt(
+                    millis / 1_000,
+                    (millis % 1_000) * 1_000_000,
+                )
+                .ok_or_else(bad_time)?,
+            )
+        } else {
+            match (hour, self.minute, self.second, self.nano) {
+                (Some(h), Some(m), Some(s), n) => Some(
+                    NaiveTime::from_hms_nano_opt(h, m, s, n.unwrap_or(0)).ok_or_else(bad_time)?,
+                ),
+                (Some(h), Some(m), None, None) => {
+                    Some(NaiveTime::from_hms_opt(h, m, 0).ok_or_else(bad_time)?)
+                }
+                (Some(h), None, None, None) => {
+                    Some(NaiveTime::from_hms_opt(h, 0, 0).ok_or_else(bad_time)?)
+                }
+                _ => None,
+            }
+        };
+
+        // **With no time, the parsed offset and zone are DISCARDED too**, and
+        // the `timeZone` argument is what the date is placed in. That is the
+        // cascade, not a choice: `LocalDate.parse(...).atStartOfDay()` never
+        // saw them. `uuuu-MM-dd XXX` on `2024-01-15 Z` is midnight in
+        // `timeZone`, not an instant in `Z`.
+        let Some(time) = time else {
+            return Ok(Zdt::new(date.and_time(NaiveTime::MIN), zone.clone()));
+        };
         let local = date.and_time(time);
 
         match (self.offset, self.zone) {
@@ -2105,15 +2216,35 @@ fn parse_field(
 ) -> Result<(), String> {
     // A field written once parses one or two digits; written `n` times it
     // parses exactly `n`, which is what makes `yyyy` refuse a two-digit year.
-    let numeric = |scan: &mut Scan<'_>, natural: usize| -> Result<u32, String> {
+    //
+    // **The range check is `ChronoField.checkValidValue`, and it is not
+    // optional.** `KK:mm a` on `12:30 PM` is
+    // `Invalid value for HourOfAmPm (valid values 0 - 11): 12` in Kestra;
+    // without the check egret answered 12:30. Found by the fix round's
+    // `existingFormat` sweep, which fed each field a value one past its range.
+    let numeric = |scan: &mut Scan<'_>,
+                   natural: usize,
+                   field: &str,
+                   lo: u32,
+                   hi: u32|
+     -> Result<u32, String> {
         let (min, max) = if count == 1 {
             (1, natural)
         } else {
             (count, count)
         };
-        scan.digits(min, max)
+        let value = scan
+            .digits(min, max)
             .map(|(value, _)| value)
-            .ok_or_else(|| scan.fail())
+            .ok_or_else(|| scan.fail())?;
+        if !(lo..=hi).contains(&value) {
+            return Err(format!(
+                "Text '{}' could not be parsed: Invalid value for {field} (valid values {lo} - \
+                 {hi}): {value}",
+                scan.text
+            ));
+        }
+        Ok(value)
     };
     match letter {
         'y' | 'u' => {
@@ -2142,6 +2273,16 @@ fn parse_field(
             if letter == 'u' {
                 parsed.year = Some(value);
             } else {
+                // YearOfEra is 1-based and cannot be zero or negative, so
+                // `yyyy-MM-dd` refuses `-0044-01-15` and `0000-01-15` where
+                // `uuuu-MM-dd` takes both.
+                if value < 1 {
+                    return Err(format!(
+                        "Text '{}' could not be parsed: Invalid value for YearOfEra (valid values \
+                         1 - 999999999/1000000000): {value}",
+                        scan.text
+                    ));
+                }
                 parsed.year_of_era = Some(value);
             }
         }
@@ -2149,17 +2290,15 @@ fn parse_field(
         // negative proleptic year. `GG yyyy-MM-dd` on `AD 2024-01-15` parses
         // in Kestra, measured, and a first cut refused the letter outright.
         'G' => {
-            let index = if count >= 4 {
-                eat_one_of(scan, &["Anno Domini", "Before Christ"])
-            } else if count == 5 {
-                eat_one_of(scan, &["A", "B"])
-            } else {
-                eat_one_of(scan, &["AD", "BC"])
+            let index = match count {
+                5 => eat_one_of(scan, &["A", "B"]),
+                4 => eat_one_of(scan, &["Anno Domini", "Before Christ"]),
+                _ => eat_one_of(scan, &["AD", "BC"]),
             }
             .ok_or_else(|| scan.fail())?;
             parsed.era = Some(if index == 0 { 1 } else { 0 });
         }
-        'M' | 'L' if count <= 2 => parsed.month = Some(numeric(scan, 2)?),
+        'M' | 'L' if count <= 2 => parsed.month = Some(numeric(scan, 2, "MonthOfYear", 1, 12)?),
         'M' | 'L' if count == 3 || count == 4 => {
             let names: &[&str; 12] = if count == 3 {
                 &MONTHS_SHORT
@@ -2169,45 +2308,107 @@ fn parse_field(
             let index = eat_one_of(scan, names).ok_or_else(|| scan.fail())?;
             parsed.month = Some(index as u32 + 1);
         }
-        'd' => parsed.day = Some(numeric(scan, 2)?),
-        'D' => parsed.day_of_year = Some(numeric(scan, 3)?),
-        'H' => parsed.hour = Some(numeric(scan, 2)?),
-        'k' => parsed.hour = Some(numeric(scan, 2)? % 24),
-        'h' => parsed.hour_of_ampm = Some(numeric(scan, 2)? % 12),
-        'K' => parsed.hour_of_ampm = Some(numeric(scan, 2)?),
-        'm' => parsed.minute = Some(numeric(scan, 2)?),
-        's' => parsed.second = Some(numeric(scan, 2)?),
+        'd' => parsed.day = Some(numeric(scan, 2, "DayOfMonth", 1, 31)?),
+        'D' => parsed.day_of_year = Some(numeric(scan, 3, "DayOfYear", 1, 366)?),
+        'H' => parsed.hour = Some(numeric(scan, 2, "HourOfDay", 0, 23)?),
+        // `ClockHourOfDay`'s range is 1-24, but **SMART accepts 0** and reads
+        // it as hour 0 -- so `kk:mm` takes `00:30`. Measured.
+        'k' => parsed.hour = Some(numeric(scan, 2, "ClockHourOfDay", 0, 24)? % 24),
+        'h' => parsed.hour_of_ampm = Some(numeric(scan, 2, "ClockHourOfAmPm", 1, 12)? % 12),
+        'K' => parsed.hour_of_ampm = Some(numeric(scan, 2, "HourOfAmPm", 0, 11)?),
+        'm' => parsed.minute = Some(numeric(scan, 2, "MinuteOfHour", 0, 59)?),
+        's' => parsed.second = Some(numeric(scan, 2, "SecondOfMinute", 0, 59)?),
         'S' => {
             let value = scan.digits(count, count).ok_or_else(|| scan.fail())?.0;
             parsed.nano = Some(value * 10u32.pow(9 - count as u32));
+        }
+        // `A`, `N`, `n` and `g` are `appendValue(field, count, 19, …)` —
+        // **variable**-width, minimum `count`. Reading them at exactly `count`
+        // digits leaves the rest of the number as unparsed text.
+        'n' => {
+            let (value, _) = scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
+            parsed.nano = Some(u32::try_from(value).map_err(|_| scan.fail())?);
+        }
+        // `A` and `N` carry a whole time in one field, which is why an
+        // `existingFormat` of `uuuu-MM-dd A` resolves where `uuuu-MM-dd m`
+        // does not. See [`Parsed::build`].
+        'A' => {
+            let (value, _) = scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
+            parsed.milli_of_day = Some(u32::try_from(value).map_err(|_| scan.fail())?);
+        }
+        'N' => {
+            let (value, _) = scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
+            parsed.nano_of_day = Some(value);
         }
         'a' => {
             let index = eat_one_of(scan, &["AM", "PM"]).ok_or_else(|| scan.fail())?;
             parsed.pm = Some(index == 1);
         }
         // Day names carry no information the date does not already have;
-        // Java cross-checks them and egret consumes them.
-        'E' | 'e' | 'c' if count >= 3 => {
+        // Java cross-checks them and egret consumes them. **`E` is text at
+        // EVERY count** -- `E`, `EE` and `EEE` all print `Mon` -- which the
+        // first cut missed by requiring `count >= 3` for the whole group.
+        'E' | 'e' | 'c' if count == 5 => {
+            if eat_one_of(scan, &DAYS_NARROW).is_none() {
+                return Err(scan.fail());
+            }
+        }
+        'E' => {
             if eat_one_of(scan, &DAYS_FULL).is_none() && eat_one_of(scan, &DAYS_SHORT).is_none() {
                 return Err(scan.fail());
             }
         }
-        'e' | 'c' => {
-            numeric(scan, 1)?;
-        }
-        'X' | 'x' | 'Z' | 'O' => {
-            let mut probe = Parsed::default();
-            parse_iso_offset(scan, &mut probe)?;
-            if probe.offset.is_none() {
+        'e' | 'c' if count >= 3 => {
+            if eat_one_of(scan, &DAYS_FULL).is_none() && eat_one_of(scan, &DAYS_SHORT).is_none() {
                 return Err(scan.fail());
             }
-            parsed.offset = probe.offset;
+        }
+        // Consumed and IGNORED, exactly as Java resolves them: they add
+        // nothing a full date does not already carry. `e`/`c` and the week
+        // fields are additionally MACHINE-DEPENDENT in Kestra -- see
+        // [`Format::parse_text`] -- which is a second reason not to give them
+        // meaning here.
+        'e' | 'c' => {
+            numeric(scan, 1, "DayOfWeek", 1, 7)?;
+        }
+        'Q' | 'q' if count <= 2 => {
+            numeric(scan, 2, "QuarterOfYear", 1, 4)?;
+        }
+        'Q' | 'q' if count == 3 => {
+            if eat_one_of(scan, &["Q1", "Q2", "Q3", "Q4"]).is_none() {
+                return Err(scan.fail());
+            }
+        }
+        'Q' | 'q' if count == 4 => {
+            if eat_one_of(scan, &QUARTERS_FULL).is_none() {
+                return Err(scan.fail());
+            }
+        }
+        'Q' | 'q' => {
+            scan.digits(1, 1).ok_or_else(|| scan.fail())?;
+        }
+        'w' => {
+            numeric(scan, 2, "WeekOfWeekBasedYear", 1, 53)?;
+        }
+        'W' => {
+            numeric(scan, 1, "WeekOfMonth", 0, 6)?;
+        }
+        'F' => {
+            numeric(scan, 1, "AlignedWeekOfMonth", 1, 5)?;
+        }
+        'Y' | 'g' => {
+            let negative = scan.eat('-');
+            scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
+            let _ = negative;
+        }
+        'X' | 'x' | 'Z' | 'O' => {
+            parsed.offset = Some(parse_offset_field(letter, count, scan)?);
         }
         'V' => {
             let start = scan.at;
             while scan
                 .peek()
-                .is_some_and(|c| c.is_ascii_alphanumeric() || "/_+-.".contains(c))
+                .is_some_and(|c| c.is_ascii_alphanumeric() || "/_+-.:".contains(c))
             {
                 scan.at += 1;
             }
@@ -2216,14 +2417,105 @@ fn parse_field(
             parsed.offset = None;
             parsed.zone = Some(zone);
         }
+        // The same three letters the FORMAT side refuses, for the same
+        // reason: their text lives in a locale database. Keeping the two sets
+        // identical is deliberate -- a letter egret can write it can read.
         other => {
             return Err(format!(
                 "the 'date' filters cannot parse an 'existingFormat' containing pattern letter \
-                 '{other}'"
+                 '{other}': it needs the locale's zone/day-period names, which egret does not carry"
             ))
         }
     }
     Ok(())
+}
+
+/// `X`, `x`, `Z` and `O` on the PARSE side, where each count accepts its own
+/// shape and nothing else.
+///
+/// The first cut routed all four through the ISO offset parser, which accepts
+/// every shape — so `XXX` took `+07` and lowercase `z`, both of which Java
+/// refuses (`ofPattern` is case-sensitive, unlike the ISO constants).
+fn parse_offset_field(
+    letter: char,
+    count: usize,
+    scan: &mut Scan<'_>,
+) -> Result<FixedOffset, String> {
+    // `ZZZZ` and `O` are the LOCALIZED GMT forms; everything else is an
+    // ISO-8601 offset whose separator and width follow the count.
+    if letter == 'O' || (letter == 'Z' && count == 4) {
+        if !scan.eat('G') || !scan.eat('M') || !scan.eat('T') {
+            return Err(scan.fail());
+        }
+        if !matches!(scan.peek(), Some('+') | Some('-')) {
+            return Ok(FixedOffset::east_opt(0).expect("0 is a valid offset"));
+        }
+        // The hour is one digit under `O` (`GMT+7`) and two under `OOOO` /
+        // `ZZZZ` (`GMT+07:00`); a min of 1 and a max of 2 takes both.
+        return read_offset(scan, true, 2, true);
+    }
+    // `X` writes `Z` at a zero offset; `x` and `Z` never do.
+    if letter == 'X' && scan.eat('Z') {
+        return Ok(FixedOffset::east_opt(0).expect("0 is a valid offset"));
+    }
+    if letter == 'Z' && count == 5 && scan.eat('Z') {
+        return Ok(FixedOffset::east_opt(0).expect("0 is a valid offset"));
+    }
+    let (colon, minutes_optional) = match (letter, count) {
+        ('Z', 1..=3) => (false, false),
+        ('Z', _) => (true, false),
+        (_, 1) => (false, true),
+        (_, 2) => (false, false),
+        (_, 3) => (true, false),
+        (_, 4) => (false, false),
+        _ => (true, false),
+    };
+    read_offset(scan, colon, 2, minutes_optional)
+}
+
+/// Reads `±HH[[:]MM[[:]SS]]` with the separator and the hour width fixed by
+/// the caller.
+fn read_offset(
+    scan: &mut Scan<'_>,
+    colon: bool,
+    hour_width: usize,
+    minutes_optional: bool,
+) -> Result<FixedOffset, String> {
+    let sign = if scan.eat('-') {
+        -1
+    } else if scan.eat('+') {
+        1
+    } else {
+        return Err(scan.fail());
+    };
+    let (hours, _) = scan.digits(1, hour_width).ok_or_else(|| scan.fail())?;
+    let mut seconds = (hours * 3600) as i32;
+    let saved = scan.at;
+    let read_pair = |scan: &mut Scan<'_>| -> Option<u32> {
+        let saved = scan.at;
+        if colon && !scan.eat(':') {
+            scan.at = saved;
+            return None;
+        }
+        match scan.digits(2, 2) {
+            Some((value, _)) => Some(value),
+            None => {
+                scan.at = saved;
+                None
+            }
+        }
+    };
+    match read_pair(scan) {
+        Some(minutes) => {
+            seconds += (minutes * 60) as i32;
+            if let Some(secs) = read_pair(scan) {
+                seconds += secs as i32;
+            }
+        }
+        None if minutes_optional => scan.at = saved,
+        None => return Err(scan.fail()),
+    }
+    FixedOffset::east_opt(sign * seconds).ok_or_else(|| scan.fail())
 }
 
 /// Consumes the first of `names` that matches at the cursor, longest first so
@@ -2294,6 +2586,60 @@ mod tests {
             .and_then(|d| d.and_hms_opt(1, 30, 0))
             .expect("a real local time");
         assert_eq!(ny.resolve_local(overlap).1.local_minus_utc(), -4 * 3600);
+    }
+
+    /// **The alphabet is asserted against the ENGINE, not against a comment.**
+    ///
+    /// `oracle/letter-counts.txt` records, per ASCII letter, which counts
+    /// `DateTimeFormatter.ofPattern` accepts — generated by pushing every
+    /// letter at counts 1-11 through the real Pebble engine. This checks
+    /// [`letter_limits`] against it **in both directions**: a count the engine
+    /// takes must compile here, and a count it rejects must not.
+    ///
+    /// It exists because two rows were wrong and nothing noticed. `v` was
+    /// missing from the table entirely, so egret answered
+    /// `Unknown pattern letter: v` for a pattern Java compiles; and `B`
+    /// accepted counts 2 and 3 that Java rejects. Both were found by a
+    /// scratchpad script — which is not reproducible and not reviewable, so
+    /// the table it produced is committed and this is what reads it.
+    #[test]
+    fn the_pattern_alphabet_matches_the_engines_own() {
+        let fixture = include_str!("../../oracle/letter-counts.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (letter, counts) = line.split_once(' ').expect("`<letter> <counts>`");
+            let letter: char = letter.chars().next().expect("a letter");
+            let accepted: Vec<usize> = if counts.trim() == "-" {
+                Vec::new()
+            } else {
+                counts
+                    .split(',')
+                    .map(|c| c.trim().parse().expect("a count"))
+                    .collect()
+            };
+            rows += 1;
+            for count in 1..=11usize {
+                let pattern: String = std::iter::repeat_n(letter, count).collect();
+                let compiled = Pattern::parse(&pattern).is_ok();
+                assert_eq!(
+                    compiled,
+                    accepted.contains(&count),
+                    "`{pattern}`: the engine {} it, egret {} it",
+                    if accepted.contains(&count) {
+                        "takes"
+                    } else {
+                        "refuses"
+                    },
+                    if compiled { "takes" } else { "refuses" },
+                );
+            }
+        }
+        // Every ASCII letter, upper and lower, so a row cannot go missing.
+        assert_eq!(rows, 52, "the fixture must cover all 52 ASCII letters");
     }
 
     /// A pattern is parsed once into pieces, and the piece boundaries are

@@ -189,3 +189,29 @@ filter-date-zone-offset-colon-placement
 filter-date-zone-offset-out-of-range
 filter-date-zone-legacy-three-letter
 filter-date-format-rfc-1123-year-out-of-range
+
+# W2 TASK 5 FIX ROUND 2 -- five from the `existingFormat` PARSE sweep, which
+# is the surface fix round 1 named as its thinnest and left at 30 patterns
+# against one input each. This sweep is every pattern letter at every count
+# that formats, round-tripped through Java's own output, plus each field's
+# near-misses -- because a parser is only pinned by the inputs it must REFUSE.
+#
+# Per the fix round's second ruling, each paired test now asserts a BOUNDARY:
+# one input refused and one neighbouring input accepted. An error-class entry
+# pins THAT egret refuses and its test pins WHAT it says; neither pins WHICH
+# inputs, and that gap is exactly where `v` and the four legacy zone ids lived.
+#
+#   filter-date-existing-format-offset-xxx-needs-a-colon    -> an_existing_formats_offset_letters_are_count_specific
+#   filter-date-existing-format-offset-is-case-sensitive    -> an_existing_formats_offset_letters_are_count_specific
+#   filter-date-existing-format-hour-of-ampm-out-of-range   -> an_existing_formats_fields_are_range_checked
+#   filter-date-existing-format-year-of-era-cannot-be-zero  -> an_existing_formats_fields_are_range_checked
+#   filter-date-existing-format-year-of-era-cannot-be-negative -> an_existing_formats_fields_are_range_checked
+#
+# The two year ones are a boundary in the sharpest possible form: `yyyy`
+# refuses `0000-01-15` and `-0044-01-15` because YearOfEra starts at 1, and
+# `uuuu` -- one letter away -- takes both.
+filter-date-existing-format-offset-xxx-needs-a-colon
+filter-date-existing-format-offset-is-case-sensitive
+filter-date-existing-format-hour-of-ampm-out-of-range
+filter-date-existing-format-year-of-era-cannot-be-zero
+filter-date-existing-format-year-of-era-cannot-be-negative

@@ -1318,6 +1318,27 @@
   },
   "result" : "+10000-01-15T10:30:00.000000Z"
 }, {
+  "id" : "filter-date-format-iso-loses-the-era",
+  "expr" : "{{ d | date('iso', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "-0044-03-15T10:30:00Z"
+  },
+  "result" : "0045-03-15T10:30:00.000000Z"
+}, {
+  "id" : "filter-date-format-iso-instant-keeps-the-era",
+  "expr" : "{{ d | date('iso_instant', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "-0044-03-15T10:30:00Z"
+  },
+  "result" : "-0044-03-15T10:30:00Z"
+}, {
+  "id" : "filter-date-format-iso-local-date-keeps-the-era",
+  "expr" : "{{ d | date('iso_local_date', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "-0044-03-15T10:30:00Z"
+  },
+  "result" : "-0044-03-15"
+}, {
   "id" : "filter-date-format-sql-year-exceeds-pad",
   "expr" : "{{ d | date('sql', timeZone='UTC', locale='en') }}",
   "context" : {
@@ -1534,6 +1555,203 @@
   },
   "result" : "-0044-03-15"
 }, {
+  "id" : "filter-date-existing-format-hour-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10"
+  },
+  "result" : "2024-01-15 10:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-minute-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd mm\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 30"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-second-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd ss\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 45"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-hour-then-second",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH ss\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10 45"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-hour-minute",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30"
+  },
+  "result" : "2024-01-15 10:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd hh\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-with-ampm",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd hh a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10 PM"
+  },
+  "result" : "2024-01-15 22:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-ampm-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 AM"
+  },
+  "result" : "2024-01-15 06:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-ampm-alone-pm",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 PM"
+  },
+  "result" : "2024-01-15 18:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-milli-of-day",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd A\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 37845123"
+  },
+  "result" : "2024-01-15 10:30:45.123"
+}, {
+  "id" : "filter-date-existing-format-nano-of-day",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd N\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 37845123000000"
+  },
+  "result" : "2024-01-15 10:30:45.123"
+}, {
+  "id" : "filter-date-existing-format-nano-alone",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd n\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 123000000"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-of-day",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd kk:mm\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 24:30"
+  },
+  "result" : "2024-01-15 00:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-offset-without-a-time",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd XXX\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 +07:00"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-zone-without-a-time",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd VV\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 Asia/Tokyo"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-offset-with-a-time",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd'T'HH:mm:ssXXX\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00+07:00"
+  },
+  "result" : "2024-01-15 03:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-offset-xxx-needs-a-colon",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm XXX\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 +07"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-01-15 10:30 +07' could not be parsed at index 17"
+  }
+}, {
+  "id" : "filter-date-existing-format-offset-is-case-sensitive",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm XXX\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 z"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-01-15 10:30 z' could not be parsed at index 17"
+  }
+}, {
+  "id" : "filter-date-existing-format-offset-no-colon-form",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm Z\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 +0700"
+  },
+  "result" : "2024-01-15 03:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-localized-gmt-offset",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm ZZZZ\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 GMT+07:00"
+  },
+  "result" : "2024-01-15 03:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-hour-of-ampm-out-of-range",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd KK:mm a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 12:30 PM"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-01-15 12:30 PM' could not be parsed: Invalid value for HourOfAmPm (valid values 0 - 11): 12"
+  }
+}, {
+  "id" : "filter-date-existing-format-year-of-era-cannot-be-zero",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"yyyy-MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "0000-01-15"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '0000-01-15' could not be parsed: Invalid value for YearOfEra (valid values 1 - 999999999/1000000000): 0"
+  }
+}, {
+  "id" : "filter-date-existing-format-year-of-era-cannot-be-negative",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"yyyy-MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "-0044-01-15"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '-0044-01-15' could not be parsed: Invalid value for YearOfEra (valid values 1 - 999999999/1000000000): -44"
+  }
+}, {
+  "id" : "filter-date-existing-format-proleptic-year-can-be-negative",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "-0044-01-15"
+  },
+  "result" : "-0044-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-ignored-fields",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd Q E G\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 1 Mon AD"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-narrow-forms",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd EEEEE GGGGG QQQQQ\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 M A 1"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
   "id" : "filter-jq",
   "expr" : "{{ json | jq('.a.b') }}",
   "context" : {
@@ -1744,7 +1962,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T23:13:19.007121+07:00"
+  "result" : "2026-09-02T23:39:13.160636+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -1795,7 +2013,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "AJpU5PHG560baAAe9HRJ9R5eGaMuio0nGel5TFFWe4R9/Yat5AZpfQ=="
+  "result" : "dBYql9BKt+Q4GcsT21TZDMfmJmi+qjtBz02E1Y+XFc2IshwXAQVpLA=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -1829,17 +2047,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a062e5-7149-73fe-b2d4-429e742b9e61"
+  "result" : "01a062fd-285e-73b0-bfcb-789585c904e1"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "6dC0OGvKlApIEbG2UWPLRh"
+  "result" : "39JmMsAxzJoTE4rpY42TB3"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3ImN5Nf8dNINAZagqG4FNKk0LVg"
+  "result" : "3ImQEcLIL7kB6XLbjfBjeq0ElIK"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -1859,12 +2077,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "9"
+  "result" : "6"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "59298"
+  "result" : "60877"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -1885,7 +2103,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "g2LIGxNGoFAlycgUGALmg"
+  "result" : "oyCu7hdILMyDl8XfOiP45"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
