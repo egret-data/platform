@@ -688,15 +688,20 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
 /// that stringifies a value for comparison against Kestra's own must come
 /// through here.
 ///
-/// **This function is total, deliberately.** Its `None`/`Undefined` arm
-/// writes Java's `"null"`, not minijinja's `"None"`. `kestra_is_in` cannot
-/// reach it — its first guard answers `false` on a null operand, which is
-/// what `isin-null-vs-none` pins — but `runners::filters` can, and did: a
-/// null inside a map reaching `escapeChar` rendered the literal text `None`,
-/// Python's spelling, into what may be a shell command line. That was the
-/// THIRD appearance of the `Display` trap in this package: Task 3 fixed
-/// `kestra_is_in` by routing it through here, and here still ended in a
-/// `Display` fallthrough. Every filter Tasks 5-8 add inherits this function.
+/// **The `None` arm writes Java's `"null"`, not minijinja's `"None"`** —
+/// Python's spelling, which appears nowhere in Kestra's vocabulary and which
+/// `escapeChar(type='shell')` would once have interpolated into a command
+/// line. `kestra_is_in` cannot reach it (its first guard answers `false` on a
+/// null operand, which is what `isin-null-vs-none` pins), but the container
+/// arms above do, through `AbstractCollection.toString`'s `String.valueOf`.
+///
+/// **`Undefined` is NOT that arm, and the distinction is load-bearing.** A
+/// first cut of this fix folded the two together and broke five filters that
+/// had been correct — see the `None` arm's comment. `Object::toString()` on a
+/// null reference throws; `"null"` is the container element rule only.
+///
+/// Total over the kinds a Kestra expression can produce, which is narrower
+/// than total over `ValueKind`; see the fallthrough's comment for the residue.
 pub(super) fn kestra_to_string(value: &MjValue) -> String {
     match value.kind() {
         ValueKind::Bool => (if value.is_true() { "true" } else { "false" }).to_string(),
@@ -734,13 +739,32 @@ pub(super) fn kestra_to_string(value: &MjValue) -> String {
             }
             Err(_) => value.to_string(),
         },
-        // `String.valueOf(null)` is the four characters `null`. See this
-        // function's doc: without this arm a null falls through to `Display
-        // for Value` and comes out as Python's `None`.
-        ValueKind::None | ValueKind::Undefined => "null".to_string(),
-        // Everything else — strings, and the `Plain` objects
-        // `runners::filters` builds for Java's `BigDecimal`/`BigInteger` —
-        // has a `Display` that IS its Java `toString`.
+        // `String.valueOf(null)` is the four characters `null`, and that is an
+        // ELEMENT rule -- `AbstractCollection.toString` / `AbstractMap.
+        // toString` are the callers that reach it. `Object::toString()` on a
+        // null reference throws and never returns `"null"`, so this arm is
+        // about containers, not about a top-level value.
+        //
+        // **`Undefined` is deliberately NOT folded in here.** It was, briefly,
+        // and that broke five filters that had been right: Pebble's `null` is
+        // a real literal but minijinja has no such name, so `{{ null | … }}`
+        // arrives as an undefined, and Kestra renders it as nothing. Undefined
+        // falls through to `Display`, which writes the empty string -- which is
+        // what Kestra does. `runners::filters::is_java_null` is where an
+        // undefined is recognised as Pebble's null, at the filter's own
+        // `input == null` branch, which is the level Kestra makes the decision
+        // at too.
+        ValueKind::None => "null".to_string(),
+        // Everything else — strings, `Undefined` (see above), and the `Plain`
+        // objects `runners::filters` builds for Java's `BigDecimal`/
+        // `BigInteger` — has a `Display` that is either its Java `toString` or,
+        // for `Undefined`, the empty string Kestra renders for a null.
+        //
+        // `ValueKind::Bytes` and `ValueKind::Invalid` also land here and are
+        // the residue: nothing in this crate constructs either, no corpus
+        // entry reaches them, and their `Display` is minijinja's own. This
+        // function is total over the kinds a Kestra expression can produce,
+        // which is a narrower claim than total over `ValueKind`.
         _ => value.to_string(),
     }
 }

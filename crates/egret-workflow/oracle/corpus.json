@@ -296,5 +296,32 @@
   {"id": "filter-substringbefore-null-sep",    "expr": "{{ s | substringBefore(separator=sep) }}",             "context": {"s": "abc", "sep": null}},
   {"id": "filter-substringafter-null-sep",     "expr": "<{{ s | substringAfter(separator=sep) }}>",            "context": {"s": "abc", "sep": null}},
   {"id": "filter-substringbeforelast-null-sep","expr": "{{ s | substringBeforeLast(separator=sep) }}",         "context": {"s": "abc", "sep": null}},
-  {"id": "filter-substringafterlast-null-sep", "expr": "<{{ s | substringAfterLast(separator=sep) }}>",        "context": {"s": "abc", "sep": null}}
+  {"id": "filter-substringafterlast-null-sep", "expr": "<{{ s | substringAfterLast(separator=sep) }}>",        "context": {"s": "abc", "sep": null}},
+  {"id": "filter-string-literal-null",       "expr": "<{{ null | string }}>",                                "context": {}},
+  {"id": "filter-string-undefined-input",    "expr": "<{{ typo | string }}>",                                "context": {}},
+  {"id": "filter-slugify-literal-null",      "expr": "<{{ null | slugify }}>",                               "context": {}},
+  {"id": "filter-indent-literal-null",       "expr": "<{{ null | indent(amount=2) }}>",                      "context": {}},
+  {"id": "filter-substringbefore-literal-null","expr": "<{{ null | substringBefore(separator='-') }}>",      "context": {}},
+  {"id": "filter-escapechar-literal-null",   "expr": "<{{ null | escapeChar(type='single') }}>",             "context": {}},
+  {"id": "filter-distinct-literal-null",     "expr": "<{{ null | distinct }}>",                              "context": {}},
+  {"id": "filter-substringbefore-literal-null-sep","expr": "{{ s | substringBefore(separator=null) }}",      "context": {"s": "abc"}},
+  {"id": "filter-substringafter-literal-null-sep","expr": "<{{ s | substringAfter(separator=null) }}>",      "context": {"s": "abc"}},
+
+  {"id": "filter-indent-amount-at-max",      "expr": "<{{ s | indent(amount=10000) }}>",                     "context": {"s": "a\nb"}},
+  {"id": "filter-indent-amount-over-max",    "expr": "{{ s | indent(amount=10001) }}",                       "context": {"s": "a\nb"}, "compare": "error-class"},
+
+  {"id": "filter-number-plus-hex-default",   "expr": "{{ s | number }}",                                     "context": {"s": "+0xFF"}},
+  {"id": "filter-number-plus-hex-int",       "expr": "{{ s | number(type='INT') }}",                         "context": {"s": "+0xFF"}},
+  {"id": "filter-number-default-underflow",  "expr": "{{ s | number }}",                                     "context": {"s": "1E-400"}},
+  {"id": "filter-number-default-zero",       "expr": "{{ s | number }}",                                     "context": {"s": "0.0"}},
+  {"id": "filter-number-bigdecimal-wide-exp","expr": "{{ s | number(type='BIGDECIMAL') }}",                  "context": {"s": "1E-400"}},
+  {"id": "filter-number-type-not-string",    "expr": "{{ s | number(type=t) }}",                             "context": {"s": "12", "t": 5}, "compare": "error-class"},
+  {"id": "filter-number-type-null",          "expr": "{{ s | number(type=t) }}",                             "context": {"s": "12", "t": null}, "compare": "error-class"},
+
+  {"id": "filter-distinct-key-ambiguity-list","expr": "{{ list | distinct }}",                               "context": {"list": [["a,s:b"], ["a", "b"]]}},
+  {"id": "filter-distinct-key-ambiguity-map","expr": "{{ list | distinct }}",                                "context": {"list": [{"a": "b,c=s:d"}, {"a": "b", "c": "d"}]}},
+
+  {"id": "filter-indent-lfcr",               "expr": "{{ s | indent(amount=2) }}",                           "context": {"s": "a\n\rb"}},
+  {"id": "filter-indent-cr-only",            "expr": "{{ s | indent(amount=2) }}",                           "context": {"s": "a\rb"}},
+  {"id": "filter-nindent-cr-only",           "expr": "{{ s | nindent(amount=2) }}",                          "context": {"s": "a\rb"}}
 ]

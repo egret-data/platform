@@ -170,16 +170,39 @@ fn pebble_error(message: impl Into<String>) -> MjError {
     MjError::new(ErrorKind::InvalidOperation, message.into())
 }
 
-/// Is this value Kestra's `null`?
+/// Is this value Kestra's `null` at a filter's `input == null` branch?
 ///
-/// An **undefined** is deliberately not folded in here. `UndefinedBehavior::
-/// Strict` raises on a bare missing variable before a filter is reached, but
-/// minijinja does not apply that to a value that arrives through a function
-/// call, so returning the undefined unchanged keeps it raising at the point
-/// of use rather than silently becoming Kestra's null-input answer. Same
-/// reasoning as `super::env::kestra_is_in`.
+/// **An undefined counts, and that is measured rather than convenient.**
+/// Pebble's `null` is a real literal; minijinja has no such name, so
+/// `{{ null | distinct }}` reaches this crate as `ValueKind::Undefined`. Six
+/// corpus entries pin what Kestra answers for the literal
+/// (`filter-string-literal-null` and its siblings), and one of them —
+/// `filter-distinct-literal-null`, whose golden is `<null>` because `distinct`
+/// alone returns the *string* `"null"` — cannot be produced by any route that
+/// treats an undefined as "not null".
+///
+/// # What this costs, stated rather than hidden
+///
+/// egret cannot tell Pebble's `null` literal from a **typo'd variable** at a
+/// filter's input, and Kestra can: `{{ typo | string }}` is a
+/// `RootAttributeNotFoundException` there and renders empty here.
+/// `filter-string-undefined-input` is that entry, baselined.
+///
+/// **This is not a cost of the choice above.** Measured on minijinja 2.24:
+/// `UndefinedBehavior::Strict` raises for `{{ typo }}` but **not** for
+/// `{{ typo | string }}` — an undefined piped into a filter is simply passed
+/// in. So the typo renders empty either way, and the only thing the two routes
+/// differ on is whether the *literal* is answered correctly. The real fix is
+/// one layer up, in [`super::rewrite`]: translating Pebble's `null` literal to
+/// minijinja's `none` would make the literal a `None` and leave the typo an
+/// `Undefined`, and the filters could then keep them apart. That is a change
+/// to the rewriter's vocabulary, which is not this module's to make.
+///
+/// `super::env::kestra_is_in` is deliberately different: it is a *function*,
+/// its operands are not filter inputs, and returning the undefined unchanged
+/// is what keeps a typo inside an `isIn` from silently deciding a branch.
 fn is_java_null(value: &MjValue) -> bool {
-    value.is_none()
+    value.is_none() || value.is_undefined()
 }
 
 /// The `java.lang`/`java.util` class name Kestra would report for a value.
@@ -391,43 +414,98 @@ fn distinct(value: MjValue) -> Result<MjValue, MjError> {
 
 /// A canonical text key standing in for Java's `equals` on a list element.
 ///
-/// Three properties, each of which is a real `equals` rule rather than a
-/// convenience:
+/// Three properties, each a real `equals` rule rather than a convenience:
 ///
 /// - **kind-tagged**, because `Integer(1).equals("1")` is `false` and a
 ///   text-only key would collapse two elements a real `distinct()` keeps;
 /// - **maps are order-independent**, because `AbstractMap.equals` compares
 ///   entry sets: `[{"a":1,"b":2},{"b":2,"a":1}]` is ONE element in Kestra
-///   (`filter-distinct-map-key-order`). The first cut keyed on
-///   `kestra_to_string`, which is insertion-ordered, and kept both;
+///   (`filter-distinct-map-key-order`);
 /// - **lists stay order-dependent**, because `AbstractList.equals` is.
 ///
 /// A null element keys as `null` and dedups against another null, which is
 /// `filter-distinct-nulls` (`[null,1,null]` -> `[null,1]`, the null surviving
 /// in the output because `NON_NULL` does not apply to array elements).
+///
+/// # Every component is length-prefixed, and that is not tidiness
+///
+/// A first cut joined the pieces with bare `,`, `=` and `:` separators, so a
+/// *value containing those characters* could forge another element's key and
+/// `distinct` would **silently drop a row** — data loss, not a rendering
+/// difference. Measured: `[["a,s:b"], ["a","b"]]` collapsed to one element and
+/// `[{"a":"b,c=s:d"}, {"a":"b","c":"d"}]` did too, where Kestra keeps both.
+/// `filter-distinct-key-ambiguity-list` and `-map` are those two entries.
+///
+/// Length-prefixing (`<byte length>:<bytes>`) makes the encoding injective, so
+/// no content can be mistaken for structure. Sorting the map's parts happens
+/// *after* each part is already unambiguous, which is what keeps the
+/// order-independence from re-introducing the same hazard.
 fn equality_key(value: &MjValue) -> String {
+    let mut out = String::new();
+    write_equality_key(&mut out, value);
+    out
+}
+
+/// Appends `value`'s injective key to `out`.
+///
+/// `tag` distinguishes the Java types; every variable-length piece is written
+/// as `<len>:<bytes>` so concatenation cannot be ambiguous.
+fn write_equality_key(out: &mut String, value: &MjValue) {
+    fn piece(out: &mut String, text: &str) {
+        out.push_str(&text.len().to_string());
+        out.push(':');
+        out.push_str(text);
+    }
+
     match value.kind() {
-        ValueKind::None | ValueKind::Undefined => "null".to_string(),
-        ValueKind::Bool => format!("b:{}", kestra_to_string(value)),
-        ValueKind::Number => format!("n:{}", kestra_to_string(value)),
-        ValueKind::String => format!("s:{}", kestra_to_string(value)),
+        ValueKind::None | ValueKind::Undefined => out.push_str("N;"),
+        ValueKind::Bool => {
+            out.push_str("B;");
+            piece(out, &kestra_to_string(value));
+        }
+        ValueKind::Number => {
+            out.push_str("D;");
+            piece(out, &kestra_to_string(value));
+        }
+        ValueKind::String => {
+            out.push_str("S;");
+            piece(out, value.as_str().unwrap_or_default());
+        }
         ValueKind::Seq | ValueKind::Iterable => {
             let items = as_list(value).unwrap_or_default();
-            let parts: Vec<String> = items.iter().map(equality_key).collect();
-            format!("l:[{}]", parts.join(","))
+            out.push_str("L;");
+            out.push_str(&items.len().to_string());
+            out.push(';');
+            for item in &items {
+                write_equality_key(out, item);
+            }
         }
         ValueKind::Map => {
             let entries = as_map(value).unwrap_or_default();
+            // Each entry is keyed WHOLE and then sorted, so ordering happens
+            // between already-unambiguous strings.
             let mut parts: Vec<String> = entries
                 .iter()
-                .map(|(key, item)| format!("{key}={}", equality_key(item)))
+                .map(|(key, item)| {
+                    let mut part = String::new();
+                    piece(&mut part, key);
+                    write_equality_key(&mut part, item);
+                    part
+                })
                 .collect();
-            // `AbstractMap.equals` does not care about order; sorting here is
-            // what makes the key agree with it.
+            // `AbstractMap.equals` does not care about order.
             parts.sort();
-            format!("m:{{{}}}", parts.join(","))
+            out.push_str("M;");
+            out.push_str(&parts.len().to_string());
+            out.push(';');
+            for part in &parts {
+                piece(out, part);
+            }
         }
-        _ => format!("o:{}", kestra_to_string(value)),
+        _ => {
+            out.push_str("O;");
+            piece(out, &kestra_to_string(value));
+        }
     }
 }
 
@@ -861,7 +939,11 @@ fn escape_value(value: &MjValue, args: &Args) -> Result<MjValue, MjError> {
         }
         return Ok(MjValue::from(out));
     }
-    if is_java_null(value) || value.is_undefined() {
+    // Reached only from inside a container: `escape_char` answers a null
+    // *input* with null before calling this. Kestra's `else` branch is
+    // `escapeString(value.toString(), …)`, an NPE on a null map value or list
+    // element.
+    if is_java_null(value) {
         return Err(pebble_error(
             "Cannot invoke \"Object.toString()\" because the value is null",
         ));
@@ -936,39 +1018,61 @@ impl IndentKind {
     }
 }
 
+/// `AbstractIndent.MAX_AMOUNT` — **Kestra's own bound**, 10000.
+///
+/// Read off the artifact, because it is not in the checkout:
+/// `javap -p -c` on `AbstractIndent.class` in `io.kestra:core:2.0.0-rc13`
+/// shows `private static final int MAX_AMOUNT` with `ConstantValue: 10000`
+/// and an `ldc2_w // long 10000l` feeding
+/// `RenderLimits.ensureAtMost(JJLjava/lang/String;)V`, between the
+/// `amount >= 0` check and `prefix(args)`. Neither `RenderLimits` nor
+/// `MAX_AMOUNT` exists anywhere in the pinned `kestra` checkout at
+/// `96893b589`.
+///
+/// This is the same artifact-versus-checkout gap `oracle/README.md` records
+/// for `BoundedRangeFunction`, and the same rule applies: **the artifact is
+/// authoritative for behaviour, the checkout only for reading an
+/// implementation.** `RenderLimits` has exactly two call sites in the whole
+/// jar — this one and `BoundedRangeFunction` — confirmed by
+/// `grep -rla RenderLimits` over every extracted class. Nothing else in
+/// Kestra's expression language is bounded, which is why
+/// [`big_decimal_plain_string`]'s own limit is a divergence and this one is
+/// not.
+const MAX_INDENT_AMOUNT: i32 = 10000;
+
 /// The shared body of `indent` and `nindent`.
 ///
-/// # A deliberate divergence: the padding is bounded before it is allocated
+/// # Two limits, and only one of them is egret's
 ///
-/// Kestra will attempt `indent(amount=2000000000)` — `prefix.repeat(amount)`
-/// on a 2-billion `int` — and fall over. **egret refuses it**, and that is a
-/// bound Kestra does not have, added on purpose:
+/// **[`MAX_INDENT_AMOUNT`] is Kestra's**: `amount` above 10000 throws
+/// `RenderLimitExceededException`, with the message reproduced here word for
+/// word. `filter-indent-amount-at-max` and `filter-indent-amount-over-max`
+/// pin both sides of it.
 ///
-/// - fidelity to Kestra is this programme's point, but it does not extend to
-///   reproducing a **resource-exhaustion vector**. A workflow's source is
-///   author-supplied and W3 renders it in a request path; "Kestra also falls
-///   over here" is not a reason for egret to fall over;
-/// - the same judgement was already made once, deliberately:
-///   [`super::rewrite`]'s `MAX_NESTING_DEPTH` is a limit Kestra does not have,
-///   because unbounded recursion aborts the process. Same class, same call;
-/// - an intermediate allocation three orders of magnitude past
-///   [`MAX_OUTPUT_BYTES`] defeats that cap's purpose. `CappedSink` measures
-///   what reaches the sink, so a cap that only sees what *survives* the
-///   allocation is not a cap.
+/// **The [`MAX_OUTPUT_BYTES`] projection is egret's**, and it is a deliberate
+/// divergence — but a much narrower one than an earlier version of this
+/// comment claimed. Kestra bounds `amount`, **not** the product, so
+/// `indent(amount=10000, prefix=<100 chars>)` really does build a megabyte
+/// there. egret refuses when
+/// `separators × amount × prefix.len()` (plus the input, plus `nindent`'s
+/// prepended separator) would pass the render cap:
 ///
-/// **The bound is derived, not invented.** There is no second magic number:
-/// the result's size is exactly computable here (`separators × amount ×
-/// prefix.len()`, plus the input), so this compares that projection against
-/// the existing [`MAX_OUTPUT_BYTES`] and names the limit in the error. Nothing
-/// is allocated on the refusing path.
+/// - fidelity does not extend to reproducing a **resource-exhaustion
+///   vector**. A workflow's source is author-supplied and W3 renders it in a
+///   request path;
+/// - [`super::rewrite`]'s `MAX_NESTING_DEPTH` is the precedent — also a bound
+///   Kestra lacks, added because unbounded recursion aborts the process;
+/// - an allocation past [`MAX_OUTPUT_BYTES`] defeats a cap that only measures
+///   what *survives* the allocation.
 ///
-/// **No corpus entry pins it, and that is not an omission.** An entry that
-/// egret refuses is one Kestra either OOMs or answers with a multi-megabyte
-/// string: `amount=2000000000` would hang or exhaust the harness, and the
-/// largest value Kestra handles quickly (~2 MB of padding) would put a
-/// multi-megabyte golden into `golden.json`. `indent_refuses_to_allocate_past_the_output_cap`
-/// asserts the refusal instead, and `oracle/README.md` records why there is no
-/// golden for it.
+/// **The bound is derived, not invented**: no second constant, the size is
+/// computed exactly, and nothing is allocated on the refusing path.
+///
+/// The `prefix`-width case has no corpus entry, because the golden would be a
+/// multi-megabyte string in `golden.json`;
+/// `indent_refuses_to_allocate_past_the_output_cap` is its pin, and
+/// `oracle/README.md` says so. `MAX_INDENT_AMOUNT` needs no such excuse — its
+/// goldens are 10 KB and are committed.
 fn apply_indent(value: MjValue, rest: Rest<MjValue>, kind: IndentKind) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
@@ -1009,6 +1113,18 @@ fn apply_indent(value: MjValue, rest: Rest<MjValue>, kind: IndentKind) -> Result
         )));
     }
 
+    // `RenderLimits.ensureAtMost(amount, 10000, …)` — Kestra's OWN bound,
+    // after the `>= 0` check and before `prefix(args)` and `String.repeat`.
+    // See this function's doc for why it is read off the artifact and not the
+    // checkout.
+    if amount > MAX_INDENT_AMOUNT {
+        return Err(pebble_error(format!(
+            "The '{}' filter's 'amount' argument cannot exceed {MAX_INDENT_AMOUNT}, but {amount} \
+             was given.",
+            kind.name()
+        )));
+    }
+
     let prefix = match args.get("prefix", 1) {
         Some(prefix) => match prefix.as_str() {
             Some(prefix) => prefix.to_string(),
@@ -1036,9 +1152,15 @@ fn apply_indent(value: MjValue, rest: Rest<MjValue>, kind: IndentKind) -> Result
     let padding = separators
         .saturating_mul(amount as usize)
         .saturating_mul(prefix.len());
+    // `nindent` prepends one separator to the input; `indent` does not. The
+    // projection is the exact output length, not an upper bound.
+    let prepended = match kind {
+        IndentKind::Indent => 0,
+        IndentKind::Nindent => newline.len(),
+    };
     let projected = input
         .len()
-        .saturating_add(newline.len())
+        .saturating_add(prepended)
         .saturating_add(padding);
     if projected > MAX_OUTPUT_BYTES {
         return Err(pebble_error(format!(
@@ -1165,10 +1287,28 @@ fn number(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     };
 
     let args = Args::new(rest);
-    let kind = args
-        .get("type", 0)
-        .and_then(|t| t.as_str().map(str::to_string))
-        .unwrap_or_default();
+    // `(String) args.getOrDefault("type", "")` then `switch (type)`. The cast
+    // rejects a non-string, and the `switch` dereferences the result — so a
+    // null `type` is an NPE (`String.hashCode()` on null) and a numeric one a
+    // `ClassCastException`, neither of which quietly means "no type".
+    // `filter-number-type-not-string` and `filter-number-type-null`.
+    let kind = match args.get("type", 0) {
+        None => String::new(),
+        Some(kind) if is_java_null(&kind) => {
+            return Err(pebble_error(
+                "Cannot invoke \"String.hashCode()\" because the 'type' argument is null",
+            ))
+        }
+        Some(kind) => match kind.as_str() {
+            Some(text) => text.to_string(),
+            None => {
+                return Err(pebble_error(format!(
+                    "class {} cannot be cast to class java.lang.String",
+                    java_class_name(&kind)
+                )))
+            }
+        },
+    };
 
     match kind.as_str() {
         "INT" => create_integer(input),
@@ -1341,6 +1481,31 @@ fn big_decimal_plain_string(input: &str) -> Option<String> {
     // normalises the unscaled value, so leading zeros go — but a value of
     // zero keeps its scale, which is why `0.00` stays `0.00`.
     let scale = fraction.len() as i64 - i64::from(exponent);
+
+    // **A DELIBERATE DIVERGENCE, the same one `apply_indent` makes and for the
+    // same reason.** `toPlainString` writes `|scale|` zeros, and `exponent` is
+    // an `i32`, so the 12-byte source `"1E-10000000"` expands to ten million
+    // characters -- and `"1E-2000000000"` to two billion. Kestra really does
+    // build it: `RenderLimits` has exactly two call sites in the whole
+    // artifact (`AbstractIndent` and `BoundedRangeFunction`, confirmed by
+    // `grep -rla RenderLimits` over every extracted class), and `NumberFilter`
+    // is not one of them. So this is a bound Kestra lacks, refusing before the
+    // allocation rather than after it -- a cap that only measures what
+    // survives the allocation is not a cap.
+    //
+    // The projection is exact and derived from the same [`MAX_OUTPUT_BYTES`]
+    // as `apply_indent`'s: no second constant, nothing allocated on the
+    // refusing path. `filter-number-bigdecimal-wide-exp` (a 402-character
+    // result) is the largest case with a committed golden; the multi-megabyte
+    // ones cannot have one, for the reason `oracle/README.md` records.
+    let projected = digits
+        .len()
+        .saturating_add(scale.unsigned_abs() as usize)
+        .saturating_add(3);
+    if projected > MAX_OUTPUT_BYTES {
+        return None;
+    }
+
     let trimmed = digits.trim_start_matches('0');
     let coefficient = if trimmed.is_empty() { "0" } else { trimmed };
     let sign = if negative && coefficient != "0" {
@@ -1474,7 +1639,15 @@ fn create_number(input: &str) -> Result<MjValue, MjError> {
     let Ok(as_double) = java_float_text(input).parse::<f64>() else {
         return create_big_decimal(input);
     };
-    if !as_double.is_finite() {
+    // Java's own guards, both of which fall through to `createBigDecimal`:
+    // an infinite double, and a double that came out as **zero from a
+    // non-zero mantissa** — i.e. underflow. `"1E-400" | number` is not `0.0`,
+    // it is a 402-character `BigDecimal`, because the value did not survive
+    // the double. `filter-number-default-underflow` pins it, and
+    // `filter-number-default-zero` ("0.0" -> "0.0") pins the other side, where
+    // the mantissa really is zero and the double is kept.
+    let all_zeros = input.chars().all(|c| !c.is_ascii_digit() || c == '0');
+    if !as_double.is_finite() || (as_double == 0.0 && !all_zeros) {
         return create_big_decimal(input);
     }
     Ok(MjValue::from(as_double))
@@ -1494,13 +1667,23 @@ fn create_integral(input: &str) -> Result<MjValue, MjError> {
 
 /// The length of `createNumber`'s hex prefix, or `None`.
 ///
-/// Java's list is exactly `{"0x", "0X", "-0x", "-0X", "#", "-#"}` — note a
-/// leading `+` is **not** in it, so `"+0xFF" | number` does not take the hex
-/// branch even though `createInteger` would decode it.
+/// **commons-lang3 3.20.0**, which is what the harness's classpath carries —
+/// not the pre-3.12 form. 3.12 replaced the literal prefix list
+/// `{"0x","0X","-0x","-0X","#","-#"}` with an `offset` computed from a leading
+/// `+` **or** `-`, then `startsWith` over `{"0x","0X","#"}` at that offset. So
+/// a leading `+` takes the hex branch too.
+///
+/// Not cosmetic: `java_radix` already strips `+`, so with the old list
+/// `"+0xFF" | number` errored while `"+0xFF" | number(type='INT')` answered
+/// `255` — the same string, two answers depending on `type`, which is exactly
+/// the class of bug the shared [`java_radix`] was introduced to kill.
+/// `filter-number-plus-hex-default` and `-int` pin both halves.
 fn hex_prefix_len(input: &str) -> Option<usize> {
-    for prefix in ["0x", "0X", "-0x", "-0X", "#", "-#"] {
-        if input.starts_with(prefix) {
-            return Some(prefix.len());
+    let offset = usize::from(input.starts_with(['+', '-']));
+    let body = input.get(offset..)?;
+    for prefix in ["0x", "0X", "#"] {
+        if body.starts_with(prefix) {
+            return Some(offset + prefix.len());
         }
     }
     None
@@ -1794,10 +1977,50 @@ mod tests {
         );
     }
 
-    /// `getLineSeparator` tests CRLF before LF, so a CRLF document is
-    /// indented after the pair and not between the two characters.
+    /// `getLineSeparator`'s order, **through the filter** rather than through
+    /// the private helper.
+    ///
+    /// The helper-level test that used to stand here could not see the
+    /// separator being used at all: replacing `line_separator(&input)` with a
+    /// literal `"\n"` inside `apply_indent` — deleting CRLF/LFCR/CR detection
+    /// from both filters — left it green, and `filter-indent-crlf` cannot see
+    /// it either, because `"\r\n"` contains `"\n"` and the naive `replace`
+    /// lands in the same place. **LFCR and CR-only are the discriminating
+    /// inputs**, and they are corpus entries now as well
+    /// (`filter-indent-lfcr`, `filter-indent-cr-only`,
+    /// `filter-nindent-cr-only`).
     #[test]
-    fn indent_detects_the_line_separator_in_order() {
+    fn indent_uses_the_detected_line_separator() {
+        // CR-only: a `"\n"`-assuming implementation finds nothing to replace
+        // and returns the input untouched.
+        assert_eq!(
+            ok("{{ s | indent(amount=2) }}", r#"{"s": "a\rb"}"#),
+            "a\r  b"
+        );
+        assert_eq!(
+            ok("{{ s | nindent(amount=2) }}", r#"{"s": "a\rb"}"#),
+            "\r  a\r  b"
+        );
+        // LFCR: a `"\n"`-assuming implementation indents BETWEEN the two
+        // characters instead of after them.
+        assert_eq!(
+            ok("{{ s | indent(amount=2) }}", r#"{"s": "a\n\rb"}"#),
+            "a\n\r  b"
+        );
+        // CRLF, which `filter-indent-crlf` also covers, kept so the order of
+        // the first two tests is visible here as well.
+        assert_eq!(
+            ok("{{ s | indent(amount=2) }}", r#"{"s": "a\r\nb"}"#),
+            "a\r\n  b"
+        );
+    }
+
+    /// The helper's own table, kept beside the filter-level test above: it
+    /// documents the fallthrough case (`"ab"`), which no filter-level
+    /// assertion can distinguish because a `replace` of a separator the input
+    /// does not contain is a no-op either way.
+    #[test]
+    fn line_separator_detects_in_kestras_order() {
         assert_eq!(super::line_separator("a\r\nb"), "\r\n");
         assert_eq!(super::line_separator("a\n\rb"), "\n\r");
         assert_eq!(super::line_separator("a\nb"), "\n");
@@ -1832,20 +2055,46 @@ mod tests {
         assert!(!list.contains("None"), "{list}");
     }
 
-    /// The root cause, one level below `escapeChar`: `kestra_to_string` must
-    /// be total. Nothing reachable may come back as `None`, because every
-    /// filter Tasks 5-8 add inherits that function.
+    /// The root cause, one level below `escapeChar`: what
+    /// `kestra_to_string` writes for each kind a Kestra expression can
+    /// produce.
+    ///
+    /// **This asserts the VALUES, not the absence of `None`.** The
+    /// absence-only assertion that stood here was satisfied by any other
+    /// wrong spelling — returning `"nil"` left it green — and it is the only
+    /// pin on a function every filter Tasks 5-8 inherits. That weakness is
+    /// exactly what let the `Undefined` regression through: folding
+    /// `Undefined` into the `"null"` arm removed no `None` and broke five
+    /// filters.
     #[test]
-    fn no_filter_can_render_pythons_none() {
-        for template in [
-            "{{ list | string }}",
-            "{{ list }}",
-            "{{ list | distinct }}",
-            "{{ m | string }}",
-        ] {
-            let out = ok(template, r#"{"list": [1, null], "m": {"a": null}}"#);
-            assert!(!out.contains("None"), "{template} rendered {out:?}");
-        }
+    fn kestra_to_string_writes_javas_spellings_not_minijinjas() {
+        // A null INSIDE a container is `String.valueOf(null)` -> `null`.
+        assert_eq!(
+            ok("{{ list | string }}", r#"{"list": [1, null]}"#),
+            "[1, null]"
+        );
+        assert_eq!(ok("{{ m | string }}", r#"{"m": {"a": null}}"#), "{a=null}");
+        // The other two Java spellings this function exists for.
+        assert_eq!(
+            ok("{{ list | string }}", r#"{"list": [true, 1e100]}"#),
+            "[true, 1.0E100]"
+        );
+        // A null as the filter's own INPUT is Kestra's `return null`, which
+        // renders as nothing -- NOT the four characters `null`.
+        assert_eq!(ok("<{{ n | string }}>", r#"{"n": null}"#), "<>");
+        // And Pebble's `null` LITERAL, which reaches minijinja as an
+        // undefined, answers the same way. Folding that into the container
+        // rule is the regression this pins, filter by filter.
+        assert_eq!(ok("<{{ null | string }}>", "{}"), "<>");
+        assert_eq!(ok("<{{ null | slugify }}>", "{}"), "<>");
+        assert_eq!(ok("<{{ null | indent(amount=2) }}>", "{}"), "<>");
+        assert_eq!(ok("<{{ null | escapeChar(type='single') }}>", "{}"), "<>");
+        assert_eq!(
+            ok("<{{ null | substringBefore(separator='-') }}>", "{}"),
+            "<>"
+        );
+        // ...except `distinct`, which alone answers the STRING "null".
+        assert_eq!(ok("<{{ null | distinct }}>", "{}"), "<null>");
     }
 
     /// **I5.** `((Number) size).intValue()`. `4294967296` narrows to `0` and
@@ -2020,35 +2269,167 @@ mod tests {
         assert_eq!(ok("{{ s | substringAfterLast(separator=sep) }}", cx), "");
     }
 
-    /// **A bound Kestra does not have, and the one place this module
-    /// deliberately refuses where Kestra tries.**
+    /// **I-1.** A dedup key built by joining pieces with bare separators can
+    /// be forged by a value that contains those separators, and `distinct`
+    /// then **drops a row** — data loss, not a rendering difference. Both
+    /// shapes, because the map key and the list key were built by different
+    /// code paths.
+    #[test]
+    fn distinct_cannot_have_its_key_forged_by_content() {
+        assert_eq!(
+            ok(
+                "{{ list | distinct }}",
+                r#"{"list": [["a,s:b"], ["a", "b"]]}"#
+            ),
+            "[[\"a,s:b\"],[\"a\",\"b\"]]"
+        );
+        assert_eq!(
+            ok(
+                "{{ list | distinct }}",
+                r#"{"list": [{"a": "b,c=s:d"}, {"a": "b", "c": "d"}]}"#
+            ),
+            "[{\"a\":\"b,c=s:d\"},{\"a\":\"b\",\"c\":\"d\"}]"
+        );
+        // Still order-independent for maps, which is the property the
+        // length-prefixing had to preserve rather than replace.
+        assert_eq!(
+            ok(
+                "{{ list | distinct }}",
+                r#"{"list": [{"a": 1, "b": 2}, {"b": 2, "a": 1}]}"#
+            ),
+            "[{\"a\":1,\"b\":2}]"
+        );
+    }
+
+    /// **I-2.** The same unbounded allocation `indent` was given a bound for,
+    /// one screen away: `toPlainString` writes `|scale|` zeros and the
+    /// exponent is an `i32`, so `"1E-2000000000"` is a two-gigabyte string
+    /// from a 13-byte input.
     ///
-    /// `indent(amount=2000000000)` is `prefix.repeat(2_000_000_000)` — 2 GiB
-    /// from one template literal, on author-supplied source, three orders of
-    /// magnitude past the render cap that is supposed to bound it. The
-    /// `intValue()` narrowing does not save it: 2000000000 is a perfectly
-    /// valid `int`. Nothing is allocated on the refusing path, which is what
-    /// the timing of this test would show if it were ever removed.
+    /// Kestra really does build it — `RenderLimits` has exactly two call
+    /// sites in the artifact and `NumberFilter` is neither — so this is a
+    /// divergence, recorded as one. The 402-character case below is the
+    /// largest with a committed golden.
+    #[test]
+    fn bigdecimal_refuses_to_expand_past_the_output_cap() {
+        assert_eq!(
+            ok("{{ s | number(type='BIGDECIMAL') }}", r#"{"s": "1E-400"}"#).len(),
+            402
+        );
+        for input in ["1E-10000000", "1E-2000000000", "1E2000000000"] {
+            let cx = format!(r#"{{"s": "{input}"}}"#);
+            assert!(
+                render("{{ s | number(type='BIGDECIMAL') }}", &cx).is_err(),
+                "{input} was not refused"
+            );
+        }
+    }
+
+    /// **I-3.** commons-lang3 3.20's `createNumber` computes an offset from a
+    /// leading `+` or `-` and then tests `{"0x","0X","#"}`; the pre-3.12 form
+    /// was a literal prefix list with no `+`.
     ///
-    /// No corpus entry can express this: Kestra either OOMs on it or, at the
-    /// largest size it survives, answers with a multi-megabyte golden. This
-    /// test is the whole pin. See `apply_indent`'s doc.
+    /// The consequence is the bug I2 existed to kill: `java_radix` strips `+`,
+    /// so with the old list the same string answered `255` with a `type` and
+    /// errored without one.
+    #[test]
+    fn create_number_accepts_a_signed_hex_prefix() {
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "+0xFF"}"#), "255");
+        assert_eq!(
+            ok("{{ s | number(type='INT') }}", r#"{"s": "+0xFF"}"#),
+            "255"
+        );
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "-0xFF"}"#), "-255");
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "+#FF"}"#), "255");
+    }
+
+    /// `createNumber` falls through to `createBigDecimal` when the double
+    /// **underflowed to zero from a non-zero mantissa**, so `"1E-400"` keeps
+    /// all 400 places instead of becoming `0.0`. `"0.0"` is the other side:
+    /// the mantissa really is zero, so the double is kept.
+    #[test]
+    fn create_number_does_not_lose_a_value_that_underflows() {
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "1E-400"}"#).len(), 402);
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "0.0"}"#), "0.0");
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "0.000"}"#), "0.0");
+    }
+
+    /// `(String) args.getOrDefault("type", "")` then `switch (type)`: a
+    /// non-string `type` is a `ClassCastException` and a null one an NPE,
+    /// neither of which quietly means "no type given".
+    #[test]
+    fn number_reads_its_type_argument_strictly() {
+        assert!(err("{{ s | number(type=t) }}", r#"{"s": "12", "t": 5}"#)
+            .contains("cannot be cast to class java.lang.String"));
+        assert!(err("{{ s | number(type=t) }}", r#"{"s": "12", "t": null}"#)
+            .contains("because the 'type' argument is null"));
+        // Absent really is "no type given", and an UNRECOGNISED one falls
+        // through Java's `switch` to `createNumber` rather than erroring.
+        assert_eq!(ok("{{ s | number }}", r#"{"s": "12"}"#), "12");
+        assert_eq!(ok("{{ s | number(type='NOPE') }}", r#"{"s": "12"}"#), "12");
+    }
+
+    /// **Kestra's own bound**, `AbstractIndent.MAX_AMOUNT` = 10000, read off
+    /// the artifact (`javap -p -c` on `AbstractIndent.class`) because neither
+    /// it nor `RenderLimits` exists in the pinned checkout.
+    ///
+    /// This is fidelity, not a divergence: the message is Kestra's own text,
+    /// word for word, and `filter-indent-amount-at-max` /
+    /// `filter-indent-amount-over-max` commit both sides of the boundary.
+    #[test]
+    fn indent_reproduces_kestras_own_max_amount() {
+        for kind in ["indent", "nindent"] {
+            let message = err(
+                &format!("{{{{ s | {kind}(amount=10001) }}}}"),
+                r#"{"s": "a\nb"}"#,
+            );
+            assert_eq!(
+                message,
+                format!(
+                    "invalid operation: The '{kind}' filter's 'amount' argument cannot exceed \
+                     10000, but 10001 was given. (in <string>:1)"
+                )
+            );
+        }
+        // 10000 itself is allowed, so the comparison is `>` and not `>=`.
+        assert_eq!(
+            ok("{{ s | indent(amount=10000) }}", r#"{"s": "a\nb"}"#).len(),
+            3 + 10000
+        );
+    }
+
+    /// **A bound Kestra does NOT have, and much narrower than an earlier
+    /// version of this test claimed.**
+    ///
+    /// Kestra bounds `amount` (see above), not the product, so
+    /// `indent(amount=10000, prefix=<100 chars>)` really does build a megabyte
+    /// there. egret refuses when the projected size passes
+    /// `MAX_OUTPUT_BYTES`, because a cap that only measures what *survives*
+    /// the allocation is not a cap — the same call `rewrite`'s
+    /// `MAX_NESTING_DEPTH` makes.
+    ///
+    /// No corpus entry: the golden would be a multi-megabyte string in
+    /// `golden.json`. This test is the whole pin, and `oracle/README.md` says
+    /// so.
     #[test]
     fn indent_refuses_to_allocate_past_the_output_cap() {
-        // The wide-prefix case is FIRST on purpose. It reaches the same total
-        // from a small `amount`, which proves the bound is on the product --
-        // and it is the case that stays SAFE to run if the bound is ever
-        // removed: 1.2 MB allocates, where the two below would allocate 2 GiB
-        // and take the test process with them. A falsification run therefore
-        // fails here and stops.
+        // `amount` is inside Kestra's own limit in every case here, so what
+        // fires is egret's projection and not `MAX_INDENT_AMOUNT`.
         for template in [
             "{{ s | indent(amount=2, prefix=wide) }}",
-            "{{ s | indent(amount=2000000000) }}",
-            "{{ s | nindent(amount=2000000000) }}",
+            "{{ s | nindent(amount=2, prefix=wide) }}",
+            // 10000 x 110 = 1_100_000 > 1_048_576. At a 100-character
+            // prefix the product is 1_000_003 and BOTH engines allow it --
+            // the divergence band starts around 105, not at "a megabyte".
+            "{{ s | indent(amount=10000, prefix=wide_enough) }}",
         ] {
             let message = err(
                 template,
-                &format!(r#"{{"s": "a\nb", "wide": "{}"}}"#, "-".repeat(600_000)),
+                &format!(
+                    r#"{{"s": "a\nb", "wide": "{}", "wide_enough": "{}"}}"#,
+                    "-".repeat(600_000),
+                    "-".repeat(110)
+                ),
             );
             // The FILTER's own message, not `RenderError::OutputTooLarge`'s
             // ("rendered output exceeded 1048576 bytes"). The distinction is
@@ -2061,8 +2442,8 @@ mod tests {
             );
         }
 
-        // And an ordinary indent is untouched by it, so the bound is about
-        // the size and not about the filter.
+        // And an ordinary indent is untouched, so the bound is about the size
+        // and not about the filter.
         assert_eq!(
             ok("{{ s | indent(amount=2) }}", r#"{"s": "a\nb"}"#),
             "a\n  b"

@@ -517,7 +517,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T20:39:06.353019+07:00"
+  "result" : "2026-09-02T21:35:44.752786+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -568,7 +568,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "crqIFu4QWWKGjw0wb8NjnRjSZw2GQiWYO6/NdGu8P5LmjuPDbR05XQ=="
+  "result" : "ZURonNv8gHsnSxkOafaUpu5qIfXzAe1zyKOl7g//yWRWzLStp8R1rA=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -602,17 +602,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06258-4219-7afe-8ca5-14ef2aa14359"
+  "result" : "01a0628c-1d21-7117-8bd5-4fee63cbd8d4"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "385SNY9vH630wDnuUo0unf"
+  "result" : "3IfVW08OELhterq17DU9G1"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3Im4KZ4hR4Xcnc3HD2ryJtdIB7d"
+  "result" : "3ImBDZUeQJqIMpQjFWBqQ5oSPGC"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -637,7 +637,7 @@
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "49288"
+  "result" : "53346"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -658,7 +658,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "2e6Yq40OCx3tTnnDfr2eD"
+  "result" : "ujqDlQj7qTBzu1nLotWaQ"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -1971,4 +1971,169 @@
     "sep" : null
   },
   "result" : "<>"
+}, {
+  "id" : "filter-string-literal-null",
+  "expr" : "<{{ null | string }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-string-undefined-input",
+  "expr" : "<{{ typo | string }}>",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [typo] does not exist or can not be accessed and strict variables is set to true. (<{{ typo | string }}>:1)"
+  }
+}, {
+  "id" : "filter-slugify-literal-null",
+  "expr" : "<{{ null | slugify }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-indent-literal-null",
+  "expr" : "<{{ null | indent(amount=2) }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringbefore-literal-null",
+  "expr" : "<{{ null | substringBefore(separator='-') }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-escapechar-literal-null",
+  "expr" : "<{{ null | escapeChar(type='single') }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "filter-distinct-literal-null",
+  "expr" : "<{{ null | distinct }}>",
+  "context" : { },
+  "result" : "<null>"
+}, {
+  "id" : "filter-substringbefore-literal-null-sep",
+  "expr" : "{{ s | substringBefore(separator=null) }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-substringafter-literal-null-sep",
+  "expr" : "<{{ s | substringAfter(separator=null) }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-indent-amount-at-max",
+  "expr" : "<{{ s | indent(amount=10000) }}>",
+  "context" : {
+    "s" : "a\nb"
+  },
+  "result" : "<a\n                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                b>"
+}, {
+  "id" : "filter-indent-amount-over-max",
+  "expr" : "{{ s | indent(amount=10001) }}",
+  "context" : {
+    "s" : "a\nb"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.kestra.core.runners.pebble.RenderLimitExceededException: The 'indent' filter's 'amount' argument cannot exceed 10000, but 10001 was given. (?:?)"
+  }
+}, {
+  "id" : "filter-number-plus-hex-default",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "+0xFF"
+  },
+  "result" : "255"
+}, {
+  "id" : "filter-number-plus-hex-int",
+  "expr" : "{{ s | number(type='INT') }}",
+  "context" : {
+    "s" : "+0xFF"
+  },
+  "result" : "255"
+}, {
+  "id" : "filter-number-default-underflow",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "1E-400"
+  },
+  "result" : "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+}, {
+  "id" : "filter-number-default-zero",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "0.0"
+  },
+  "result" : "0.0"
+}, {
+  "id" : "filter-number-bigdecimal-wide-exp",
+  "expr" : "{{ s | number(type='BIGDECIMAL') }}",
+  "context" : {
+    "s" : "1E-400"
+  },
+  "result" : "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+}, {
+  "id" : "filter-number-type-not-string",
+  "expr" : "{{ s | number(type=t) }}",
+  "context" : {
+    "s" : "12",
+    "t" : 5
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class java.lang.Integer cannot be cast to class java.lang.String (java.lang.Integer and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-number-type-null",
+  "expr" : "{{ s | number(type=t) }}",
+  "context" : {
+    "s" : "12",
+    "t" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.NullPointerException: Cannot invoke \"String.hashCode()\" because \"<local8>\" is null"
+  }
+}, {
+  "id" : "filter-distinct-key-ambiguity-list",
+  "expr" : "{{ list | distinct }}",
+  "context" : {
+    "list" : [ [ "a,s:b" ], [ "a", "b" ] ]
+  },
+  "result" : "[[\"a,s:b\"],[\"a\",\"b\"]]"
+}, {
+  "id" : "filter-distinct-key-ambiguity-map",
+  "expr" : "{{ list | distinct }}",
+  "context" : {
+    "list" : [ {
+      "a" : "b,c=s:d"
+    }, {
+      "a" : "b",
+      "c" : "d"
+    } ]
+  },
+  "result" : "[{\"a\":\"b,c=s:d\"},{\"a\":\"b\",\"c\":\"d\"}]"
+}, {
+  "id" : "filter-indent-lfcr",
+  "expr" : "{{ s | indent(amount=2) }}",
+  "context" : {
+    "s" : "a\n\rb"
+  },
+  "result" : "a\n\r  b"
+}, {
+  "id" : "filter-indent-cr-only",
+  "expr" : "{{ s | indent(amount=2) }}",
+  "context" : {
+    "s" : "a\rb"
+  },
+  "result" : "a\r  b"
+}, {
+  "id" : "filter-nindent-cr-only",
+  "expr" : "{{ s | nindent(amount=2) }}",
+  "context" : {
+    "s" : "a\rb"
+  },
+  "result" : "\r  a\r  b"
 } ]

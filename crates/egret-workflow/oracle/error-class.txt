@@ -84,3 +84,18 @@ filter-escapechar-list-null-element
 filter-chunk-size-truncated
 filter-indent-amount-overflow
 filter-number-int-overflow
+
+# W2 TASK 4 FIX ROUND 3, three more. Same discipline; same pairing.
+#
+#   filter-indent-amount-over-max -> indent_reproduces_kestras_own_max_amount
+#   filter-number-type-not-string -> number_reads_its_type_argument_strictly
+#   filter-number-type-null       -> number_reads_its_type_argument_strictly
+#
+# filter-indent-amount-over-max is the ONE entry here whose golden egret
+# reproduces almost verbatim: `RenderLimitExceededException`'s message is
+# Kestra's own text and this port copies it word for word. Only the Java class
+# name and the template coordinates differ, which is precisely the residue
+# error-class exists for.
+filter-indent-amount-over-max
+filter-number-type-not-string
+filter-number-type-null

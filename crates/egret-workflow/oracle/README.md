@@ -78,28 +78,27 @@ do. Keeping the set in its own short file makes adding one a one-line,
 reviewable diff instead of a field edit buried in a 138-entry JSON file — the
 same discipline `baseline.txt` applies to mismatches.
 
-25 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+28 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
 String/Number mix), the eight registered-but-null-backed functions,
 `raw-multiline`, the three `isin-*` entries where an absent variable raises,
-and **nine from W2 Task 4** — four wrong-typed inputs
-(`filter-chunk-not-list`, `filter-distinct-not-list`, `filter-values-not-map`,
-`filter-number-not-string`) and five exceptions its fix round found
-(`filter-escapechar-map-null-value`, `filter-escapechar-list-null-element`,
-`filter-chunk-size-truncated`, `filter-indent-amount-overflow`,
-`filter-number-int-overflow`). **Every one of the nine is separately backed by
-a unit test in `runners::filters` asserting egret's own message**, named
-alongside it in `error-class.txt`, so what carries them is the test and not
-the mode. Note that marking an entry error-class does **not** make it pass:
-five of the 25 still mismatch, because egret *succeeds* where Kestra throws —
-which is a real divergence and stays visible.
+and **twelve from W2 Task 4** — four wrong-typed inputs, five exceptions its
+first fix round found, and three more from its third (`indent`'s own
+`MAX_AMOUNT`, and `number`'s two `type`-argument casts). **Every one of the
+twelve is separately backed by a unit test in `runners::filters` asserting
+egret's own message**, named alongside it in `error-class.txt`, so what carries
+them is the test and not the mode. Twelve is a lot, and it is a deliberate
+trade: each records an exception Kestra actually throws, which is worth having
+in `golden.json`, at the cost of an entry the ratchet cannot fail. Note that
+marking an entry error-class does **not** make it pass: five of the 28 still
+mismatch, because egret *succeeds* where Kestra throws — which is a real
+divergence and stays visible.
 
 ## `baseline.txt` — the ratchet
 
 `tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
 is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
-138 at W2 Task 3, 57 of 241 after Task 4, **59 of 268** after Task 4's fix
-round (which added 27 entries and two more baselined rows of one already-known
-`className` fact). The test fails in **both** directions:
+138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
+**60 of 291** after fix round 3. The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -607,7 +606,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 268 entries)
+## Corpus (`corpus.json`, 291 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -663,13 +662,13 @@ match.
 - **2 test entries** for the one registered Pebble test (`json`): a
   true case and a false case, since a single-direction test proves nothing
   about the false branch.
-- **130 W2 Task 4 additions** (138 -> 241 -> 268), the null / empty /
+- **153 W2 Task 4 additions** (138 -> 241 -> 268 -> 291), the null / empty /
   wrong-typed / boundary inputs of the 22 string and collection filters that
-  task ported, plus 27 more from its fix round. Their findings are the two
-  sections "What W2 Task 4's 103 new entries measured" and "What W2 Task 4's
-  fix round measured" below. **117 of the 130 are compared by value and pass**;
-  nine are compared by error class (see above) and four are baselined
-  divergences with their reasons in `baseline.txt`.
+  task ported, plus its three fix rounds. Their findings are the sections
+  "What W2 Task 4's 103 new entries measured", "What W2 Task 4's fix round
+  measured" and the three `###` sections after it. **136 of the 153 are
+  compared by value and pass**; twelve are compared by error class (see above)
+  and five are baselined divergences with their reasons in `baseline.txt`.
 - **30 W2 Task 3 additions** (the corpus went 108 -> 138 across three fix
   rounds), covering the three
   controller addenda that could not be written before the oracle existed:
@@ -757,11 +756,11 @@ harness before any code moved.
   `chunk(size=4294967296)` is `chunk(size=0)` and Guava then throws;
   `indent(amount=-4294967296)` is `indent(amount=0)` and returns the input
   unchanged; `indent(amount=2147483648)` narrows to `-2147483648` and is
-  refused. That last one is a **bound, not only a fidelity point**: without
-  the narrowing the port reached `prefix.repeat(2_147_483_648)`, a 2 GiB
-  allocation from one template literal. Note `chunk` casts to `Number` (so
-  `chunk(size=2.5)` truncates to 2) while `indent` casts to `Long` (so
-  `indent(amount=2.5)` is a `ClassCastException`) — the two filters differ.
+  refused. Note `chunk` casts to `Number` (so `chunk(size=2.5)` truncates to
+  2) while `indent` casts to `Long` (so `indent(amount=2.5)` is a
+  `ClassCastException`) — the two filters differ. (`indent`'s large-`amount`
+  case is additionally covered by Kestra's own `MAX_AMOUNT` = 10000, which
+  this note originally missed; see "`indent` has TWO limits" below.)
 - **`createBigInteger` has its own copy of the radix rules.** `"010" |
   number(type='BIGINTEGER')` is `8` and `"0xFF"` is `255`, exactly as under
   `type='INT'`. A port that implements the rules for one and not the other
@@ -799,31 +798,79 @@ harness before any code moved.
   container with no leaf never consults it: `{{ [] | escapeChar }}` is `[]`
   with no argument at all, and `{{ ['a'] | escapeChar }}` is an error.
 
-### One behaviour here has NO golden, on purpose
+### `indent` has TWO limits, and only one of them is egret's
 
-`indent`/`nindent` refuse when `separators x amount x prefix.len()` would push
-the result past `runners::env::MAX_OUTPUT_BYTES` (1 MiB). **Kestra does not
-refuse** — it will attempt `indent(amount=2000000000)`, a 2 GiB allocation from
-one template literal, and fall over. egret bounds it deliberately, on the same
-call as `rewrite`'s `MAX_NESTING_DEPTH` (also a limit Kestra lacks): fidelity
-does not extend to reproducing a resource-exhaustion vector in a renderer that
-W3 runs on author-supplied source in a request path, and an intermediate
-allocation three orders of magnitude past the output cap defeats that cap,
-which only measures what survives the allocation.
+**Kestra bounds `amount` at 10000.** `AbstractIndent.MAX_AMOUNT` is
+`ConstantValue: 10000`, fed to `RenderLimits.ensureAtMost` between the
+`amount >= 0` check and `prefix(args)`; `indent(amount=10001)` throws
+`RenderLimitExceededException: The 'indent' filter's 'amount' argument cannot
+exceed 10000, but 10001 was given.` **Neither `RenderLimits` nor `MAX_AMOUNT`
+exists anywhere in the pinned `kestra` checkout at `96893b589`** — this is the
+same artifact-versus-checkout gap recorded above for `BoundedRangeFunction`,
+and the same rule settles it: the artifact is authoritative for behaviour, the
+checkout only for reading an implementation. `filter-indent-amount-at-max` and
+`filter-indent-amount-over-max` commit both sides; the passing golden is 10 KB.
 
-The bound is **derived from the existing cap, not a second number**, and it is
-checked before anything is allocated.
+An earlier version of this section said Kestra had no bound here. It was
+written from the checkout without checking the artifact, which is exactly the
+mistake the `BoundedRangeFunction` note exists to prevent. `RenderLimits` has
+**exactly two call sites in the whole jar** — `AbstractIndent` and
+`BoundedRangeFunction` — confirmed by `grep -rla RenderLimits` over every
+extracted class. Nothing else in the expression language is bounded, which is
+what makes the two entries below divergences rather than fidelity.
 
-There is no corpus entry, and that is not an omission: the harness cannot
-produce a golden for it. At `amount=2000000000` Kestra OOMs or hangs; at the
-largest amount Kestra answers quickly, the golden would be a multi-megabyte
-string committed into `golden.json`. `runners::filters`'
-`indent_refuses_to_allocate_past_the_output_cap` is the pin instead. Its
-falsification is arranged to be safe — the 1.2 MB case runs first, so removing
-the bound fails the test there rather than allocating 2 GiB — and it asserts
-the *filter's* message, since `RenderError::OutputTooLarge` ("rendered output
-exceeded 1048576 bytes") is exactly the after-the-fact error the bound exists
-to pre-empt.
+### Two behaviours have NO golden, on purpose
+
+Both are egret refusing an allocation Kestra attempts. Both bound the
+projection against `runners::env::MAX_OUTPUT_BYTES` (1 MiB) — derived from the
+existing cap, not a second number — and refuse *before* allocating:
+
+- **`indent`/`nindent` on the `prefix` WIDTH.** Kestra bounds `amount`, not
+  the product, so `indent(amount=10000, prefix=<110 chars>)` really does build
+  1.1 MB there. (At a 100-character prefix the product is 1 000 003 bytes and
+  both engines allow it; the divergence band starts around 105, not "at a
+  megabyte".)
+- **`number(type='BIGDECIMAL')` on the EXPONENT.** `toPlainString` writes
+  `|scale|` zeros and the exponent is an `int`, so `"1E-2000000000"` is a
+  two-gigabyte string from a 13-byte input. `NumberFilter` is not one of
+  `RenderLimits`' two call sites, so Kestra genuinely builds it.
+
+The reasoning is the same in both cases and is the same call
+`rewrite`'s `MAX_NESTING_DEPTH` makes: fidelity does not extend to reproducing
+a resource-exhaustion vector in a renderer that W3 runs on author-supplied
+source in a request path, and an allocation orders of magnitude past the output
+cap defeats a cap that only measures what *survives* the allocation.
+
+Neither can have a golden. At the sizes that matter Kestra OOMs or hangs; at
+the largest size it survives quickly the golden would be a multi-megabyte
+string committed to `golden.json`. `runners::filters`'
+`indent_refuses_to_allocate_past_the_output_cap` and
+`bigdecimal_refuses_to_expand_past_the_output_cap` are the pins.
+`filter-number-bigdecimal-wide-exp` is the largest case that *does* have a
+golden, at 402 characters.
+
+### Pebble's `null` literal is a name minijinja does not have
+
+`{{ null | string }}` is a real literal in Pebble and renders as nothing.
+minijinja has no `null` name, so it arrives as an **undefined**, and so does a
+**typo'd variable** — which Kestra distinguishes sharply
+(`RootAttributeNotFoundException`).
+
+Measured on minijinja 2.24: `UndefinedBehavior::Strict` raises for
+`{{ typo }}` but **not** for `{{ typo | string }}`. An undefined piped into a
+filter is simply passed in. So the typo renders empty whatever the filters do,
+and the only thing left to decide is whether the *literal* is answered
+correctly. `runners::filters::is_java_null` therefore treats an undefined as
+Kestra's null, which is what makes the seven `*-literal-null` entries pass —
+including `filter-distinct-literal-null`, whose golden is `<null>` because
+`distinct` alone returns the string `"null"`, and which no other route can
+produce.
+
+`filter-string-undefined-input` is the divergence that remains, baselined. The
+real fix is one layer up: if `runners::rewrite` translated Pebble's `null`
+literal to minijinja's `none`, the literal would be a `None` and the typo would
+stay an `Undefined`, and the two could be told apart. That is a change to the
+rewriter's vocabulary.
 
 ### `string` was the second name minijinja had already bound
 
