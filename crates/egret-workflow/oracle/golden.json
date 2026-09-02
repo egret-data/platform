@@ -55,6 +55,7 @@
   "id" : "gt-mixed",
   "expr" : "{{ '2' > 10 }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than comparison ({{ '2' > 10 }}:1)"
   }
@@ -72,6 +73,7 @@
   "id" : "lt-mixed",
   "expr" : "{{ '2' < 10 }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ '2' < 10 }}:1)"
   }
@@ -89,6 +91,7 @@
   "id" : "lte-mixed",
   "expr" : "{{ '2' <= 10 }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than or equals comparison ({{ '2' <= 10 }}:1)"
   }
@@ -106,6 +109,7 @@
   "id" : "gte-mixed",
   "expr" : "{{ '2' >= 10 }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than or equals comparison ({{ '2' >= 10 }}:1)"
   }
@@ -513,7 +517,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T17:38:43.786911+07:00"
+  "result" : "2026-09-02T17:55:39.267811+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -530,6 +534,7 @@
   "id" : "function-secret",
   "expr" : "{{ secret(key='my-key') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [secret] does not exist. ({{ secret(key='my-key') }}:1)"
   }
@@ -537,6 +542,7 @@
   "id" : "function-kv",
   "expr" : "{{ kv(key='my-key') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [kv] does not exist. ({{ kv(key='my-key') }}:1)"
   }
@@ -544,6 +550,7 @@
   "id" : "function-read",
   "expr" : "{{ read(path='a/b.txt') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [read] does not exist. ({{ read(path='a/b.txt') }}:1)"
   }
@@ -551,6 +558,7 @@
   "id" : "function-fileuri",
   "expr" : "{{ fileURI(path='a/b.txt') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileURI] does not exist. ({{ fileURI(path='a/b.txt') }}:1)"
   }
@@ -560,7 +568,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "lbXWKsw7fxw6Ph1/xXFdAL7QdHj7Jie8TU7gXQ2Bn43yvpPThYDuug=="
+  "result" : "UhQ+hyTKWmbCmeQvimLNyHKcWC3TfMzAIZBizsf86Gs1GoCPvqS4Hw=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -594,17 +602,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a061b3-1e72-7b81-9e93-cd4558787601"
+  "result" : "01a061c2-9d48-7fa8-bab4-e66adea807b4"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "1Q6ZdqiP2FcLnkNWCdKXA"
+  "result" : "3M8h97gVd1jylgK55joJOA"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IliOQCimdmoXrhx8Uvxo1QhXW3"
+  "result" : "3IlkS8sF38NxBN6WP8iJLxaEnKw"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -616,6 +624,7 @@
   "id" : "function-filesize",
   "expr" : "{{ fileSize(path='a/b.txt') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileSize] does not exist. ({{ fileSize(path='a/b.txt') }}:1)"
   }
@@ -623,16 +632,17 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "4"
+  "result" : "9"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "54939"
+  "result" : "55960"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [fileExists] does not exist. ({{ fileExists(path='a/b.txt') }}:1)"
   }
@@ -640,6 +650,7 @@
   "id" : "function-isfileempty",
   "expr" : "{{ isFileEmpty(path='a/b.txt') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [isFileEmpty] does not exist. ({{ isFileEmpty(path='a/b.txt') }}:1)"
   }
@@ -647,7 +658,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "J0gBlLNEnR2fjkZZ2Egda"
+  "result" : "Zn2ihfnmpNS2Y8ctSHugh"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -663,6 +674,7 @@
   "id" : "function-http",
   "expr" : "{{ http(uri='https://example.com') }}",
   "context" : { },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Function or Macro [http] does not exist. ({{ http(uri='https://example.com') }}:1)"
   }
@@ -790,6 +802,7 @@
   "context" : {
     "var" : "V"
   },
+  "compare" : "error-class",
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.ParserException: Unexpected tag name \"raw\" ({% raw %}\n{{ var }}\n{% endraw %}:1)"
   }

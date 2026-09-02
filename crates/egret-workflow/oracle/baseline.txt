@@ -1,0 +1,117 @@
+# The oracle ratchet's baseline: entries that do not match egret's renderer yet.
+#
+# tests/oracle.rs fails if an id NOT listed here mismatches (a regression), and
+# ALSO fails if an id listed here now matches -- delete the line in the same
+# commit that fixes it. That second direction is what makes this a ratchet
+# rather than a suppression list.
+#
+# One id per line. `#` starts a comment. Corpus order.
+#
+# Written by W2 Task 3 at 76 entries. Tasks 4-8 drive it to zero.
+
+
+# Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
+gt-mixed
+
+# as gt-mixed
+lt-mixed
+lte-mixed
+gte-mixed
+
+# Pebble coerces and/or to a strict boolean; minijinja returns an operand. Needs kestra_and/kestra_or.
+coalesce-and
+
+# as coalesce-and
+coalesce-or
+
+# minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
+coalesce-is-not-null
+
+# filter not ported (Tasks 4-6)
+filter-chunk
+filter-classname
+filter-date
+filter-dateadd
+filter-timestamp
+filter-timestampmicro
+filter-timestampmilli
+filter-timestampnano
+filter-jq
+filter-escapechar
+filter-tojson
+filter-distinct
+filter-keys
+filter-number
+filter-urldecode
+filter-slugify
+filter-substringbefore
+filter-substringbeforelast
+filter-substringafter
+filter-substringafterlast
+filter-flatten
+
+# minijinja HAS `indent` with a different signature -- the name resolves to the WRONG thing, not to nothing. Override, do not assume.
+filter-indent
+
+# filter not ported (Tasks 4-6)
+filter-nindent
+filter-yaml
+filter-startswith
+filter-endswith
+filter-values
+filter-toion
+filter-sha1
+filter-sha512
+filter-md5
+filter-regexmatch
+filter-regexreplace
+filter-regexextract
+
+# function not ported (Tasks 7-8)
+function-now
+function-fromjson
+function-env
+function-encrypt
+function-decrypt
+function-yaml
+function-fetchcontext
+function-printcontext
+function-uuid
+function-id
+function-ksuid
+function-fromion
+function-randomint
+function-randomport
+function-nanoid
+function-taskswithstate
+
+# minijinja HAS `range`, positional-only and exclusive; Kestra's is kwargs and inclusive. Same trap as filter-indent.
+function-range
+
+# function not ported (Tasks 7-8)
+function-ispublicholiday
+function-isdayweekinmonth
+function-isweekend
+function-islastworkingday
+function-dayofweek
+function-hourofday
+function-dayofmonth
+function-monthofyear
+function-loopoutputs
+
+# Pebble test not ported
+test-json-true
+test-json-false
+
+# DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
+raw-multiline
+
+# no minijinja syntax for this operator (recorded divergence, task-3-report.md S6)
+op-equals
+op-contains
+op-contains-boxed-int
+op-contains-literal
+op-range
+
+# UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
+coalesce-nested-absent

@@ -74,9 +74,12 @@
 //! empties every typo'd variable in every flow.
 
 use std::collections::BTreeMap;
+use std::io;
 
-use minijinja::value::Value as MjValue;
-use minijinja::{AutoEscape, Environment, State, UndefinedBehavior};
+use minijinja::value::{Value as MjValue, ValueKind};
+use minijinja::{
+    AutoEscape, Environment, Error as MjError, ErrorKind as MjErrorKind, State, UndefinedBehavior,
+};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 
@@ -124,6 +127,24 @@ const FUEL: u64 = 50_000;
 /// [`MAX_RENDERING_AMOUNT`] (Kestra's re-render loop) and from
 /// `rewrite`'s `MAX_NESTING_DEPTH` (the rewriter's own parse recursion).
 const RECURSION_LIMIT: usize = 64;
+
+/// Cap on one render pass's output.
+///
+/// **Fuel is not a substitute and does not bound this.** Fuel counts
+/// instructions; `{{ 'a' * 999_999 }}` is a handful of instructions and a
+/// megabyte of output, and minijinja has no output-size limit of its own. The
+/// re-render loop makes it worse than the usual case rather than better: each
+/// of up to [`MAX_RENDERING_AMOUNT`] passes renders the *previous pass's
+/// output*, so a template that grows its own output compounds.
+///
+/// 1 MiB, the same number [`egret-dataapi`'s SQL renderer uses][dataapi] and
+/// for the same reason: a real `Property` is at most a few KB (a command line,
+/// a URI, a small JSON body), so this is three orders of magnitude of headroom
+/// and still bounded. Enforced by rendering into a sized sink rather than by
+/// checking afterwards, so the memory is never allocated in the first place.
+///
+/// [dataapi]: ../../../egret_dataapi/render/index.html
+const MAX_OUTPUT_BYTES: usize = 1 << 20;
 
 /// `VariableRenderer.RAW_PATTERN`, copied character for character from
 /// `core/src/main/java/io/kestra/core/runners/VariableRenderer.java:23`:
@@ -179,6 +200,16 @@ pub enum RenderError {
     /// `VariableRenderer`'s `IllegalVariableEvaluationException`.
     #[error("Too many rendering attempts")]
     TooManyRenderingAttempts,
+    /// One render pass produced more than [`MAX_OUTPUT_BYTES`]. Kestra has no
+    /// such limit; this is egret refusing to let author-supplied source
+    /// allocate without bound, in the same spirit as `rewrite`'s nesting
+    /// depth cap.
+    #[error("rendered output exceeded {limit} bytes")]
+    OutputTooLarge {
+        /// [`MAX_OUTPUT_BYTES`], named in the message so an author sees the
+        /// actual budget rather than being told only that they missed it.
+        limit: usize,
+    },
     /// The text rendered fine but is not a `T`. Carries the rendered text,
     /// because the author's mistake is almost always visible in it.
     #[error("rendered value {rendered:?} is not a valid {target}: {detail}")]
@@ -294,7 +325,112 @@ fn kestra_undefined_coalesce(_state: &State, left: MjValue, right: MjValue) -> M
     }
 }
 
-/// The render environment: strictness, limits, and the two coalescing
+/// `InExpression` — the `isIn` the rewriter emits calls to.
+///
+/// **Not minijinja's `in`.** Task 2 mapped `x isIn y` to `(x in y)`
+/// provisionally and was told the measurement belonged to Task 3; the
+/// measurement says the mapping is wrong in three separate ways.
+/// `InExpression.evaluate`
+/// (`core/src/main/java/io/kestra/core/runners/pebble/expression/InExpression.java`):
+///
+/// - a `null` on **either** side is `false`, before anything else;
+/// - a `Collection`/`Iterable` right-hand side is compared by
+///   **`Object::toString()` on both sides** — `1 isIn ['1','2']` is `true`;
+/// - a `Map` right-hand side matches a key **or a value** —
+///   `'v' isIn {'k':'v'}` is `true`, where minijinja's `in` checks keys only;
+/// - **any other** right-hand type is `false` — `'b' isIn 'abc'` is `false`,
+///   where minijinja's `in` does substring containment and says `true`.
+///
+/// All four rows are corpus entries (`isin`, `isin-number-in-strings`,
+/// `isin-map-value`, `isin-string-rhs`). The first agreed with minijinja's
+/// `in` by luck — same types on both sides, list right-hand — which is why the
+/// other three had to be added before this could be settled.
+///
+/// Stringifying with `MjValue::to_string` is the deliberate counterpart of
+/// Java's `toString()`: a minijinja string Displays as its own contents (no
+/// quotes), a number as its digits, a bool as `true`/`false` through this
+/// module's formatter rules. It is what makes the number-versus-string row
+/// work.
+fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue, MjError> {
+    if left.is_undefined() || left.is_none() || right.is_undefined() || right.is_none() {
+        return Ok(MjValue::from(false));
+    }
+
+    let needle = left.to_string();
+
+    match right.kind() {
+        ValueKind::Seq | ValueKind::Iterable => {
+            let mut items = right.try_iter()?;
+            Ok(MjValue::from(items.any(|item| item.to_string() == needle)))
+        }
+        ValueKind::Map => {
+            for key in right.try_iter()? {
+                if key.to_string() == needle {
+                    return Ok(MjValue::from(true));
+                }
+                if let Ok(value) = right.get_item(&key) {
+                    if value.to_string() == needle {
+                        return Ok(MjValue::from(true));
+                    }
+                }
+            }
+            Ok(MjValue::from(false))
+        }
+        // `InExpression`'s `default -> return false`. A string right-hand side
+        // lands here, which is the row minijinja's `in` gets backwards.
+        _ => Ok(MjValue::from(false)),
+    }
+}
+
+/// `JsonWriter.write(Object)` — Kestra's rendering of a value into output
+/// text, which is a different job from what any filter does and therefore
+/// belongs on the environment.
+///
+/// Read off `core/src/main/java/io/kestra/core/runners/pebble/JsonWriter.java`
+/// (lines 63-87), which is exactly four cases:
+///
+/// | value | Kestra | minijinja's default | this formatter |
+/// |---|---|---|---|
+/// | `null` | writes nothing (early `return`) | `None` | `""` |
+/// | `Map`/`Collection`/array | `MAPPER.writeValueAsString(o)` — compact JSON | `{"a": 1}` / `[1, 2]` (spaces) | compact JSON |
+/// | `Boolean` | `toString()` → `true`/`false` | `True`/`False` | `true`/`false` |
+/// | anything else | appended as-is | as-is | as-is |
+///
+/// Three of the four differ from minijinja's default, and none of the three is
+/// something a filter or function task could fix — `{{ list }}` names no
+/// filter at all. `serde_json::to_string` on a `minijinja::Value` is the
+/// counterpart of Jackson's compact writer: no spaces after `:` or `,`, which
+/// is what `filter-keys`'s golden `["a","b"]` and `function-fetchcontext`'s
+/// `{"x":1}` are.
+fn json_writer_formatter(
+    out: &mut minijinja::Output<'_>,
+    state: &State<'_, '_>,
+    value: &MjValue,
+) -> Result<(), MjError> {
+    if value.is_none() {
+        return Ok(());
+    }
+
+    match value.kind() {
+        ValueKind::Bool => {
+            out.write_str(if value.is_true() { "true" } else { "false" })?;
+            Ok(())
+        }
+        ValueKind::Seq | ValueKind::Map => {
+            let json = serde_json::to_string(value).map_err(|e| {
+                MjError::new(
+                    MjErrorKind::InvalidOperation,
+                    format!("value cannot be rendered as JSON: {e}"),
+                )
+            })?;
+            out.write_str(&json)?;
+            Ok(())
+        }
+        _ => minijinja::escape_formatter(out, state, value),
+    }
+}
+
+/// The render environment: strictness, limits, and the three operator
 /// functions [`rewrite`] emits calls to.
 ///
 /// Read the module doc before changing a line of this; every setting here is
@@ -334,23 +470,15 @@ pub fn environment() -> Environment<'static> {
     env.remove_global("debug");
     env.remove_filter("pprint");
 
-    // Pebble writes nothing for a `null` (`PrintNode` skips a null variable),
-    // and `VariableRenderer.render(String, Map)` turns a null result into
-    // `""`. minijinja renders `none` as the text `None`. This is the render
-    // layer's job, not a filter's, so it is fixed here.
-    //
-    // Note this deliberately does NOT touch boolean casing (minijinja `True`/
-    // `False` vs Pebble `true`/`false`), which is a known, separately-tracked
-    // divergence -- see `task-3-report.md`.
-    env.set_formatter(|out, state, value| {
-        if value.is_none() {
-            return Ok(());
-        }
-        minijinja::escape_formatter(out, state, value)
-    });
+    // The port of `JsonWriter.write(Object)` -- null, booleans and containers.
+    // See [`json_writer_formatter`] for the four-row table; three of the four
+    // differ from minijinja's default, and none of them is reachable from a
+    // filter or function, because `{{ list }}` names neither.
+    env.set_formatter(json_writer_formatter);
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
+    env.add_function("kestra_is_in", kestra_is_in);
 
     env
 }
@@ -400,10 +528,62 @@ fn render_once(
     let template = env
         .template_from_str(&rewritten)
         .map_err(|e| RenderError::Template(e.to_string()))?;
-    let rendered = template
-        .render(variables)
-        .map_err(|e| RenderError::Template(e.to_string()))?;
+    let mut sink = CappedSink::new(MAX_OUTPUT_BYTES);
+    let render_result = template.render_captured_to(variables, &mut sink);
+    // The sink's own flag is checked FIRST and unconditionally. minijinja
+    // wraps a writer failure in its own error, and deciding "was this the cap
+    // or a real template error?" by inspecting that error's text would be a
+    // guess; the sink knows.
+    if sink.overflowed {
+        return Err(RenderError::OutputTooLarge {
+            limit: MAX_OUTPUT_BYTES,
+        });
+    }
+    render_result.map_err(|e| RenderError::Template(e.to_string()))?;
+
+    let rendered = String::from_utf8(sink.buf).map_err(|e| RenderError::Template(e.to_string()))?;
     Ok(put_back_raw_tags(&replacers, &rendered))
+}
+
+/// An [`io::Write`] that refuses past a byte budget instead of growing.
+///
+/// The point is that the bytes are never allocated: checking the length of a
+/// finished `String` would mean having built the oversized `String` first,
+/// which is the allocation the cap exists to prevent.
+struct CappedSink {
+    buf: Vec<u8>,
+    limit: usize,
+    /// Set once the budget is exceeded. Read by [`render_once`] rather than
+    /// inferred from minijinja's wrapped error.
+    overflowed: bool,
+}
+
+impl CappedSink {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+            overflowed: false,
+        }
+    }
+}
+
+impl io::Write for CappedSink {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            self.overflowed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "rendered output exceeded the size cap",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// `VariableRenderer.replaceRawTags`: swap each raw region for a fresh UUID
@@ -499,6 +679,82 @@ mod tests {
     fn a_null_renders_as_the_empty_string() {
         assert_eq!(render("{{ n }}", json!({ "n": null })).unwrap(), "");
         assert_eq!(render("[{{ n }}]", json!({ "n": null })).unwrap(), "[]");
+    }
+
+    /// The other three rows of `JsonWriter.write(Object)`. Every one of them
+    /// differs from minijinja's default, and none is reachable from a filter
+    /// or function -- `{{ list }}` names neither -- which is why they live on
+    /// the environment.
+    ///
+    /// The container cases pin the ABSENCE of spaces specifically: minijinja
+    /// renders `[1, 2]` and `{"a": 1}`, Jackson's compact writer (and so every
+    /// container-valued golden in `oracle/golden.json`, e.g. `filter-keys`'s
+    /// `["a","b"]`) has no space after `,` or `:`.
+    #[test]
+    fn booleans_and_containers_render_the_way_jsonwriter_does() {
+        assert_eq!(render("{{ t }}", json!({ "t": true })).unwrap(), "true");
+        assert_eq!(render("{{ f }}", json!({ "f": false })).unwrap(), "false");
+        // Not via a variable: an expression that PRODUCES a boolean.
+        assert_eq!(render("{{ 2 > 10 }}", json!({})).unwrap(), "false");
+
+        assert_eq!(
+            render("{{ list }}", json!({ "list": [1, 2] })).unwrap(),
+            "[1,2]"
+        );
+        assert_eq!(
+            render("{{ obj }}", json!({ "obj": { "a": 1, "b": ["x"] } })).unwrap(),
+            r#"{"a":1,"b":["x"]}"#
+        );
+        // A scalar is still written as-is, not JSON-quoted.
+        assert_eq!(render("{{ s }}", json!({ "s": "ada" })).unwrap(), "ada");
+        assert_eq!(render("{{ n }}", json!({ "n": 42 })).unwrap(), "42");
+    }
+
+    /// `isIn` is `InExpression`, not minijinja's `in`. All four rows are also
+    /// corpus entries; they are here as well because the first one agrees with
+    /// minijinja's `in` by luck, and a reader who checks only that one would
+    /// conclude the mapping was fine.
+    #[test]
+    fn is_in_is_kestras_in_expression_not_minijinjas() {
+        // Same types, list right-hand: the case that agreed by luck.
+        assert_eq!(
+            render("{{ 'b' isIn ['a','b'] }}", json!({})).unwrap(),
+            "true"
+        );
+        // Stringified on both sides: minijinja's `in` says false here.
+        assert_eq!(render("{{ 1 isIn ['1','2'] }}", json!({})).unwrap(), "true");
+        // A map matches on VALUES as well as keys; minijinja checks keys only.
+        let m = json!({ "m": { "k": "v" } });
+        assert_eq!(render("{{ 'v' isIn m }}", m.clone()).unwrap(), "true");
+        assert_eq!(render("{{ 'k' isIn m }}", m).unwrap(), "true");
+        // Any other right-hand type is false; minijinja does substring.
+        assert_eq!(render("{{ 'b' isIn 'abc' }}", json!({})).unwrap(), "false");
+        // Either side null is false, before anything else.
+        assert_eq!(
+            render("{{ n isIn ['a'] }}", json!({ "n": null })).unwrap(),
+            "false"
+        );
+        assert_eq!(
+            render("{{ 'a' isIn n }}", json!({ "n": null })).unwrap(),
+            "false"
+        );
+    }
+
+    /// Fuel bounds instructions, not bytes. `'a' * n` is a handful of
+    /// instructions and an arbitrary number of bytes, so without the sink cap
+    /// this allocates ~8 MB from one short expression.
+    #[test]
+    fn an_oversized_render_is_refused_by_the_output_cap() {
+        let err = render("{{ 'a' * 8000000 }}", json!({})).unwrap_err();
+        assert_eq!(
+            err,
+            RenderError::OutputTooLarge {
+                limit: MAX_OUTPUT_BYTES
+            }
+        );
+        // And the budget itself is real: just under it still renders.
+        let ok = render("{{ 'a' * 1000 }}", json!({})).unwrap();
+        assert_eq!(ok.len(), 1000);
     }
 
     /// All three spellings `PebbleVariableRendererTest.raw` asserts, plus the

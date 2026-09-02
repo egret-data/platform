@@ -45,6 +45,57 @@ java -cp "target/classes:$CP" host.Oracle dump
 java -cp "target/classes:$CP" host.Oracle generate corpus.json golden.json
 ```
 
+## The corpus schema, and `compare`
+
+A corpus entry is `{"id", "expr", "context"}` plus one optional field:
+
+```json
+{"id": "function-secret", "expr": "{{ secret(key='x') }}", "context": {},
+ "compare": "error-class"}
+```
+
+`"compare": "error-class"` says: this entry's golden value is a **Java
+exception string**, which no Rust port can ever reproduce byte for byte, so
+`tests/oracle.rs` compares only that egret **also fails** — not what it says.
+The Java message stays in `golden.json` as documentation of what Kestra
+actually says. `Oracle.java` copies the field through verbatim.
+
+Two properties keep this from becoming a silent weakening of the oracle, and
+both are deliberate:
+
+- It is **marked in the corpus**, never inferred at comparison time from "the
+  golden happens to look like an error". A comparison that decides its own
+  strictness from the data it is comparing is not an instrument.
+- `tests/oracle.rs` **prints the marked ids with a count on every run**, pass
+  or fail, alongside the eight shape-compared non-deterministic ones.
+
+13 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+String/Number mix), the eight registered-but-null-backed functions, and
+`raw-multiline`. Note that marking an entry error-class does **not** make it
+pass: five of the 13 still mismatch, because egret *succeeds* where Kestra
+throws — which is a real divergence and stays visible.
+
+## `baseline.txt` — the ratchet
+
+`tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
+is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet (76 as
+of W2 Task 3), and the test fails in **both** directions:
+
+- an id **not** in the baseline mismatches — a regression;
+- an id **in** the baseline now matches — progress that must be banked by
+  deleting that line, in the same commit that earned it.
+
+The second direction is what makes it a ratchet rather than a suppression
+list: a task cannot make progress without shrinking the file, and cannot claim
+progress it did not make. A baseline id that is not in `golden.json` at all
+fails too, so a renamed corpus entry cannot leave a dead line behind. The
+current mismatch count prints on every run.
+
+Both directions were verified by deliberate breakage before this was
+committed: breaking `kestra_null_coalesce` produced `REGRESSION: 6`, and
+registering a working `json` test without editing the baseline produced
+`PROGRESS NOT BANKED: 2`.
+
 **A regenerated `golden.json` MUST be reviewed as a `git diff` before
 committing.** A changed value means either upstream Kestra changed (the
 pinned `2.0.0-rc13` artifact was bumped) or `corpus.json` changed — a human
@@ -259,9 +310,14 @@ has no parent BOM to inherit a version from.
   regression of (a coalesce search that does not recognise `is` as a
   boundary at all) → `A`, the left operand's own value).
 - **minijinja renders booleans as `True`/`False`; Pebble renders `true`/
-  `false`.** Pre-existing (not introduced by this rewrite, and this rewrite
-  cannot fix it — it is a rendering-format difference, not a syntax
-  question), affects exactly **27** corpus entries whose golden value is a
+  `false`.** **FIXED in W2 Task 3's fix round** — this is
+  `JsonWriter.write(Object)`'s behaviour, so it belongs to the environment's
+  value formatter (`runners::env::json_writer_formatter`), and no filter or
+  function task could have reached it: `{{ list }}` names neither. Measured
+  before and after: it moved the oracle from 102 mismatches to 87. The note
+  below is kept because the *inventory* is still useful.
+
+  Affects exactly **27** corpus entries whose golden value is a
   bare `"true"`/`"false"` (counted directly from `golden.json`, not
   estimated): `isin`, the full `gt-*`/`lt-*`/`lte-*`/`gte-*` family (12
   entries, including the three equality-boundary ones), `coalesce-and`,
@@ -270,9 +326,12 @@ has no parent BOM to inherit a version from.
   `filter-endswith`, `filter-regexmatch`, `function-ispublicholiday`,
   `function-isdayweekinmonth`, `function-isweekend`,
   `function-islastworkingday`, and both `test-json-*` entries.
-  Task 3 will hit all of them at once the first time it compares a rendered
-  minijinja boolean against a Pebble golden value — recorded here as a
-  known quantity in advance rather than a surprise discovered per-entry.
+  Of those 27, exactly **15** were failing on casing *alone* (the other 12
+  also fail on a missing filter or on the mixed-comparison throw), so the
+  formatter fix recovered 15. `JsonWriter` also compact-encodes `Map`s,
+  `Collection`s and arrays where minijinja writes `[1, 2]` / `{"a": 1}` with
+  spaces; that is in the same formatter, and it is why every container-valued
+  golden here has no space after `,` or `:`.
 - **`gt-mixed` throws, it doesn't coerce.** `{{ '2' > 10 }}` (`GreaterThanExpression`)
   only special-cases the case where *both* sides are `String`
   (`"b" > "a"` does a lexicographic compare); a `String`/`Number` mix falls
@@ -412,10 +471,11 @@ type. minijinja's `in` does none of the three. Measured:
 | `isin-string-rhs` | `{{ 'b' isIn 'abc' }}` | `false` | **`True`** (substring) |
 
 The existing `isin` entry agrees by luck — same types on both sides, list
-right-hand — and cannot separate the two. **The verdict is that `isIn` needs
-its own function**, `kestra_is_in`, the same shape as `kestra_null_coalesce`;
-`rewrite`'s current `x isIn y` -> `(x in y)` is wrong in three measurable
-ways.
+right-hand — and cannot separate the two. **Verdict: `isIn` needs its own
+function.** Implemented in Task 3's fix round: `rewrite` now emits
+`kestra_is_in((x), (y))` instead of `(x in y)`, and
+`runners::env::kestra_is_in` reproduces all four rows. All four entries
+match.
 
 ## Corpus (`corpus.json`, 122 entries)
 

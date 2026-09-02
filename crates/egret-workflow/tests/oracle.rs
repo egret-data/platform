@@ -1,35 +1,56 @@
 //! Differential oracle: renders `oracle/corpus.json`'s expressions through
 //! Kestra's real Pebble engine (committed as `oracle/golden.json` by the Java
 //! harness in `oracle/`, see `oracle/README.md`) and asserts that egret's own
-//! renderer agrees, byte for byte.
+//! renderer agrees.
 //!
-//! Task 1 built the harness and the golden file and left the comparison
-//! `#[ignore]`d, because egret had no renderer. Task 3 built the renderer
-//! (`egret_workflow::render_str`, `Property<T>::render`) and removed the
-//! ignore. **This test is expected to FAIL until Tasks 4-8 land the 35 filters
-//! and 34 functions.** Its failure message is those tasks' worklist: every
-//! mismatching id, with the golden value beside egret's.
+//! # This is a RATCHET, not a pass/fail
+//!
+//! 84 of 122 entries do not match yet, because Tasks 4-8 have not ported the
+//! filters and functions. A test that is simply red for five tasks measures
+//! nothing: a NEW mismatch would be invisible in the noise. So the currently
+//! mismatching ids are committed in `oracle/baseline.txt`, and this test fails
+//! in **both** directions:
+//!
+//! - an id that is **not** in the baseline mismatches — a regression;
+//! - an id that **is** in the baseline now matches — progress that has to be
+//!   banked by deleting that line, in the same commit that earned it.
+//!
+//! The second direction is what makes it a ratchet rather than a suppression
+//! list. A task cannot make progress without shrinking the file, and cannot
+//! claim progress it did not make. The current mismatch count is printed on
+//! every run, pass or fail, so the number never stops being visible.
+//!
+//! # Three comparison modes, all of them named in the output
+//!
+//! | mode | applies to | rule |
+//! |---|---|---|
+//! | exact | everything not below | byte equality. No trimming, no normalisation, no fuzzy matching. |
+//! | shape | the eight ids in [`NON_DETERMINISTIC`] | length / range / non-empty. They produce a different value on every render, by construction. |
+//! | error-class | entries the **corpus** marks `"compare": "error-class"` | egret must also fail. The message is not compared. |
+//!
+//! The error-class mode exists because a golden error value is a Java
+//! exception string (`io.pebbletemplates.pebble.error.PebbleException: …`)
+//! that no Rust port can ever reproduce byte for byte, so strict equality
+//! would make zero unreachable rather than merely distant. Two properties
+//! keep it from becoming a silent weakening: the mode is an explicit,
+//! reviewable property **of the corpus entry**, never inferred at comparison
+//! time from "the golden happens to look like an error"; and the ids are
+//! printed with a count on every run. The Java message stays in the golden
+//! file as documentation of what Kestra actually says.
 //!
 //! # How to read a failure
 //!
-//! The message groups nothing and sorts nothing — it is corpus order, which is
-//! operators, then filters, then functions, then tests, then Task 3's own
-//! additions. Three kinds of line appear, and they are not equally
+//! Three kinds of line appear in a mismatch report, and they are not equally
 //! interesting:
 //!
 //! - `unknown filter` / `unknown function` — not yet ported. Tasks 4-8.
-//! - a value that differs in *formatting* only (`True` vs `true`, `[1, 2]` vs
-//!   `[1,2]`) — a render-layer difference, not a missing filter. See
-//!   `task-3-report.md`.
 //! - a value that differs in *substance* — a real semantic divergence. Those
 //!   are the ones worth stopping for.
-//!
-//! # What is NOT compared
-//!
-//! [`NON_DETERMINISTIC`] names the eight entries that produce a different
-//! value on every render, by construction. They are never compared for value.
-//! Everything else is compared for exact byte equality: no trimming, no
-//! normalisation, no fuzzy matching.
+//! - `filter indent` / `range` complaining about an *argument* rather than
+//!   being unknown — minijinja has its own filter/function of that name with a
+//!   different signature. A port must override, not assume.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use egret_workflow::{render_str, RenderContext};
 use serde::Deserialize;
@@ -72,6 +93,21 @@ struct GoldenEntry {
     expr: String,
     context: Value,
     result: GoldenResult,
+    /// Copied through from `corpus.json` by the Java harness. Absent means
+    /// [`CompareMode::Exact`] — the weaker comparison is opt-in, per entry,
+    /// and visible in the corpus diff that introduces it.
+    #[serde(default)]
+    compare: CompareMode,
+}
+
+/// How one entry is compared. See this module's doc for why `ErrorClass`
+/// exists and what stops it becoming a silent weakening.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CompareMode {
+    #[default]
+    Exact,
+    ErrorClass,
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,11 +158,21 @@ fn shape_ok(id: &str, golden: &GoldenResult, actual: &Result<String, String>) ->
     }
 }
 
-/// Every golden entry, compared byte for byte against egret's renderer.
+/// The baseline: the ids that do not match yet.
 ///
-/// Driven entirely by the file's contents — there is no expected entry count
-/// here, because the corpus grows as filters and functions get ported and a
-/// hardcoded count would just be a second thing to update.
+/// One id per line; `#` starts a comment and blank lines are ignored. Deleting
+/// a line is how a task banks progress, and the test refuses to pass if a line
+/// is still there for an entry that now matches — see this module's doc.
+fn baseline() -> BTreeSet<String> {
+    include_str!("../oracle/baseline.txt")
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The ratchet. See this module's doc for the two directions it fails in.
 #[test]
 fn render_corpus_matches_golden() {
     let golden_json = include_str!("../oracle/golden.json");
@@ -134,19 +180,27 @@ fn render_corpus_matches_golden() {
         .expect("oracle/golden.json must parse as a JSON array of golden entries");
     assert!(!golden.is_empty(), "oracle/golden.json must not be empty");
 
+    let ids: BTreeSet<&str> = golden.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids.len(),
+        golden.len(),
+        "oracle/golden.json has duplicate ids"
+    );
+
     // A stale name on the exclusion list would silently stop excluding
     // anything, and the entry it was meant to cover would read as a real
-    // mismatch. Catch that here rather than in a confused reading of the
-    // output.
+    // mismatch. Catch that here rather than in a confused reading of output.
     for id in NON_DETERMINISTIC {
         assert!(
-            golden.iter().any(|e| e.id == *id),
+            ids.contains(id),
             "NON_DETERMINISTIC names {id}, which is not in oracle/golden.json"
         );
     }
 
-    let mut mismatches = Vec::new();
+    let mut mismatching = BTreeSet::new();
+    let mut detail: BTreeMap<String, String> = BTreeMap::new();
     let mut shape_checked = Vec::new();
+    let mut error_class = Vec::new();
 
     for entry in &golden {
         let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -159,9 +213,25 @@ fn render_corpus_matches_golden() {
         };
 
         let non_deterministic = NON_DETERMINISTIC.contains(&entry.id.as_str());
+
+        // An entry marked error-class whose golden is NOT an error would apply
+        // the weaker comparison to a value comparison, which is exactly the
+        // silent-weakening failure the mode is fenced against. That is a
+        // corpus bug, so it is an assertion, not a mismatch.
+        if entry.compare == CompareMode::ErrorClass {
+            assert!(
+                matches!(entry.result, GoldenResult::Err { .. }),
+                "{} is marked \"compare\": \"error-class\" but its golden value is not an error",
+                entry.id
+            );
+        }
+
         let matches = if non_deterministic {
             shape_checked.push(entry.id.clone());
             shape_ok(&entry.id, &entry.result, &actual_result)
+        } else if entry.compare == CompareMode::ErrorClass {
+            error_class.push(entry.id.clone());
+            actual_result.is_err()
         } else {
             match (&entry.result, &actual_result) {
                 (GoldenResult::Ok(expected), Ok(actual)) => expected == actual,
@@ -179,37 +249,88 @@ fn render_corpus_matches_golden() {
                 Ok(s) => format!("Ok({s:?})"),
                 Err(e) => format!("Err({e:?})"),
             };
-            let note = if non_deterministic {
-                " [SHAPE-CHECKED, not compared by value]"
-            } else {
-                ""
+            let note = match (non_deterministic, entry.compare) {
+                (true, _) => " [SHAPE-CHECKED, not compared by value]",
+                (false, CompareMode::ErrorClass) => " [ERROR-CLASS: egret must also fail]",
+                (false, CompareMode::Exact) => "",
             };
-            mismatches.push(format!(
-                "  {id}{note}: expr={expr:?} context={context}\n    expected: {expected_display}\n    actual:   {actual_display}",
-                id = entry.id,
-                expr = entry.expr,
-                context = entry.context,
-            ));
+            mismatching.insert(entry.id.clone());
+            detail.insert(
+                entry.id.clone(),
+                format!(
+                    "  {id}{note}: expr={expr:?} context={context}\n    expected: {expected_display}\n    actual:   {actual_display}",
+                    id = entry.id,
+                    expr = entry.expr,
+                    context = entry.context,
+                ),
+            );
         }
     }
 
-    // Printed unconditionally, pass or fail: the exclusions have to be visible
-    // in the output, or "the oracle is green" stops meaning what it looks like
-    // it means.
+    // Printed unconditionally, pass or fail. The count is the number Tasks 4-8
+    // drive to zero; the two exclusion lists have to stay visible or "the
+    // oracle is green" stops meaning what it looks like it means.
     println!(
-        "{} of {} entries are non-deterministic and were compared for SHAPE, not value: {}",
-        shape_checked.len(),
+        "oracle: {} of {} entries mismatch (baseline: {})",
+        mismatching.len(),
         golden.len(),
+        baseline().len()
+    );
+    println!(
+        "  {} compared for SHAPE, not value (non-deterministic): {}",
+        shape_checked.len(),
         shape_checked.join(", ")
     );
-
-    assert!(
-        mismatches.is_empty(),
-        "{} of {} golden entries did not match egret's renderer:\n{}",
-        mismatches.len(),
-        golden.len(),
-        mismatches.join("\n")
+    println!(
+        "  {} compared for ERROR CLASS, not message (corpus-marked): {}",
+        error_class.len(),
+        error_class.join(", ")
     );
+
+    let baseline = baseline();
+
+    let stale: Vec<&String> = baseline
+        .iter()
+        .filter(|id| !ids.contains(id.as_str()))
+        .collect();
+    let regressions: Vec<&String> = mismatching.difference(&baseline).collect();
+    let banked: Vec<&String> = baseline.difference(&mismatching).collect();
+
+    let mut failures = String::new();
+    if !stale.is_empty() {
+        failures.push_str(&format!(
+            "\noracle/baseline.txt names {} id(s) that are not in golden.json at all -- \
+             delete them: {stale:?}\n",
+            stale.len()
+        ));
+    }
+    if !regressions.is_empty() {
+        failures.push_str(&format!(
+            "\nREGRESSION: {} entr(y/ies) mismatch that were NOT in oracle/baseline.txt. \
+             Fix them, do not add them to the baseline:\n{}\n",
+            regressions.len(),
+            regressions
+                .iter()
+                .map(|id| detail[*id].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !banked.is_empty() {
+        failures.push_str(&format!(
+            "\nPROGRESS NOT BANKED: {} entr(y/ies) in oracle/baseline.txt now MATCH. \
+             Delete these lines from oracle/baseline.txt in the same commit that fixed \
+             them:\n  {}\n",
+            banked.len(),
+            banked
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ));
+    }
+
+    assert!(failures.is_empty(), "{failures}");
 }
 
 fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {

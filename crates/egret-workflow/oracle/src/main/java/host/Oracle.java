@@ -192,6 +192,17 @@ public final class Oracle {
             out.put("id", id);
             out.put("expr", expr);
             out.set("context", context.deepCopy());
+            // Carried through verbatim, never inferred. `compare` marks an
+            // entry whose golden value is an error and whose comparison in
+            // tests/oracle.rs is therefore "egret must also error", not
+            // "egret must produce this Java exception text" -- which no Rust
+            // port can ever do. Deciding that at comparison time from "the
+            // golden happens to look like an error" would make the weaker
+            // comparison invisible and self-applying; it is an explicit,
+            // reviewable property of the corpus entry instead.
+            if (entry.has("compare")) {
+                out.set("compare", entry.get("compare").deepCopy());
+            }
 
             Map<String, Object> variables = toMap(mapper, context);
 

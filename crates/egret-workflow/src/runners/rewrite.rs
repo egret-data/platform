@@ -1,8 +1,9 @@
 //! Rewrites Kestra's operator syntax into syntax minijinja can parse.
 //!
-//! minijinja has no `??`, `???`, or C-style ternary `? :`. It does have `in`
-//! (a candidate, provisional target for `isIn` — see below) and an inline
-//! `a if c else b` conditional. This module's `rewrite` turns Kestra source
+//! minijinja has no `??`, `???`, `isIn`, or C-style ternary `? :`. It does
+//! have an inline `a if c else b` conditional, and an `in` operator that was
+//! once a candidate target for `isIn` and has since been measured and
+//! rejected (see below). This module's `rewrite` turns Kestra source
 //! into minijinja source; it never evaluates anything, because it has no
 //! context to evaluate against — the values live in the caller's render call,
 //! not here.
@@ -54,10 +55,10 @@
 //! - *`{% raw %}`/`{% verbatim %}` are not a real, working capability to
 //!   port* — measured against the pinned Pebble jar, not assumed; see the
 //!   comment at the raw/verbatim handling that used to exist in [`rewrite`].
-//! - *`isIn` → `in` is provisional*; the four comparison operators are left
-//!   untouched entirely — both are Task 3 measurements this rewrite does
-//!   not attempt to settle. See "`isIn` — provisional" and "Comparison
-//!   operators are left alone" below.
+//! - *`isIn` is a function call*, `kestra_is_in`, not minijinja's `in` —
+//!   Task 3 measured the two and they disagree three ways. The four
+//!   comparison operators are still left untouched entirely. See
+//!   "`isIn` — settled" and "Comparison operators are left alone" below.
 //!
 //! # The two coalescing operators are not the same
 //!
@@ -123,14 +124,29 @@
 //! Everything else — identifiers, numbers, whitespace, dots, `|`, the
 //! untouched comparison operators — is copied through byte-for-byte.
 //!
-//! # `isIn` — provisional
+//! # `isIn` — settled: a function, not minijinja's `in`
 //!
-//! `x isIn y` is rewritten to `(x in y)`. Whether minijinja's `in` actually
-//! agrees with Kestra's `InExpression` on every operand pair (`InExpression`
-//! stringifies both sides via `Object::toString()` before comparing, which
-//! `in` may or may not do) is **not** decided here — it is Task 3's oracle
-//! measurement. If it disagrees, `isIn` becomes a third custom function,
-//! same shape as the two coalescing operators above.
+//! `x isIn y` is rewritten to `kestra_is_in((x), (y))`, the third custom
+//! function alongside the two coalescing ones.
+//!
+//! This module originally emitted `(x in y)` and said so provisionally,
+//! leaving the verdict to Task 3's oracle measurement. **Task 3 measured it
+//! and `in` lost**, in three separate ways — `InExpression.evaluate`
+//! stringifies both sides via `Object::toString()`, matches a `Map`'s values
+//! as well as its keys, and returns `false` for any right-hand side that is
+//! not a collection or a map:
+//!
+//! | corpus entry | expr | Kestra | minijinja `in` |
+//! |---|---|---|---|
+//! | `isin` | `{{ 'b' isIn ['a','b'] }}` | `true` | `true` (agrees) |
+//! | `isin-number-in-strings` | `{{ 1 isIn ['1','2'] }}` | `true` | **`false`** |
+//! | `isin-map-value` | `{{ 'v' isIn m }}` | `true` | **`false`** (keys only) |
+//! | `isin-string-rhs` | `{{ 'b' isIn 'abc' }}` | `false` | **`true`** (substring) |
+//!
+//! The `isin` entry that existed when this mapping was chosen agreed **by
+//! luck** — same types on both sides, list right-hand — and could not have
+//! separated the two. The other three were added in Task 3 for exactly that
+//! reason. Semantics live in `runners::env::kestra_is_in`.
 //!
 //! # Comparison operators are left alone
 //!
@@ -995,14 +1011,17 @@ fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError
                 Piece::Op(OpKind::UndefinedCoalesce, _) => {
                     format!("kestra_undefined_coalesce({left}, {right})")
                 }
-                // Provisional -- see this module's doc comment. Parens on
-                // BOTH sides, same reasoning as `or`/`and`/`contains` above
-                // -- `isIn`'s own precedence-30 boundary already stopped
-                // this splitting further, but a SURROUNDING tier-20
-                // operator (e.g. `a is defined isIn b`) needs `({left})` to
-                // be an atomic operand, not bare text an outer `is` could
-                // misparse into.
-                Piece::Op(OpKind::IsIn, _) => format!("(({left}) in ({right}))"),
+                // A call, not minijinja's `in` -- see this module's doc
+                // comment. The parens on both operands stay for the same
+                // reason they were there when this emitted `in`: `left` and
+                // `right` are already-resolved text that may contain
+                // operators, and a call argument is a whole expression
+                // position. A call is inherently atomic, so the SURROUNDING
+                // tier-20 concern the old comment described is now handled
+                // by the call syntax itself rather than by the outer parens.
+                Piece::Op(OpKind::IsIn, _) => {
+                    format!("kestra_is_in(({left}), ({right}))")
+                }
                 // The untouched comparison operators, recognised here only
                 // as a tier-30 boundary so a coalesce/isIn search does not
                 // cross them -- rendered back out exactly as-is, never
@@ -1503,7 +1522,10 @@ mod tests {
         // a version with the wrapping parens dropped entirely, since
         // neither substring check says anything about operand order or
         // grouping.
-        assert_eq!(rewrite_and_parse("{{ a isIn b }}"), "{{(( a ) in ( b ))}}");
+        assert_eq!(
+            rewrite_and_parse("{{ a isIn b }}"),
+            "{{kestra_is_in(( a ), ( b ))}}"
+        );
 
         // Not a regex: `isIn` inside a string literal survives untouched --
         // a global, quote-blind `str::replace("isIn", "in")` would corrupt
