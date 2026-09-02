@@ -78,18 +78,23 @@ do. Keeping the set in its own short file makes adding one a one-line,
 reviewable diff instead of a field edit buried in a 138-entry JSON file — the
 same discipline `baseline.txt` applies to mismatches.
 
-16 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
+20 entries carry it today: the four `*-mixed` comparisons (Pebble throws on a
 String/Number mix), the eight registered-but-null-backed functions,
-`raw-multiline`, and the three `isin-*` entries where an absent variable
-raises. Note that marking an entry error-class does **not** make it pass: five
+`raw-multiline`, the three `isin-*` entries where an absent variable
+raises, and W2 Task 4's four wrong-typed-input filter entries
+(`filter-chunk-not-list`, `filter-distinct-not-list`, `filter-values-not-map`,
+`filter-number-not-string`) — each of which is separately backed by a unit
+test in `runners::filters` asserting egret's **own** message, so the free pass
+is not what carries them. Note that marking an entry error-class does **not** make it pass: five
 of the 16 still mismatch, because egret *succeeds* where Kestra throws — which
 is a real divergence and stays visible.
 
 ## `baseline.txt` — the ratchet
 
 `tests/oracle.rs` is not a pass/fail test while Tasks 4-8 are outstanding; it
-is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet (76 as
-of W2 Task 3), and the test fails in **both** directions:
+is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet (57 as
+of W2 Task 4; 76 of 138 at Task 3, 57 of 241 now), and the test fails in
+**both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -597,7 +602,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 138 entries)
+## Corpus (`corpus.json`, 241 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -653,6 +658,11 @@ match.
 - **2 test entries** for the one registered Pebble test (`json`): a
   true case and a false case, since a single-direction test proves nothing
   about the false branch.
+- **103 W2 Task 4 additions** (138 -> 241), the null / empty / wrong-typed /
+  boundary inputs of the 22 string and collection filters that task ported.
+  Their findings are the section "What W2 Task 4's 103 new entries measured"
+  below; 101 of the 103 pass, and the two that do not are recorded
+  divergences with their reasons in `baseline.txt`.
 - **30 W2 Task 3 additions** (the corpus went 108 -> 138 across three fix
   rounds), covering the three
   controller addenda that could not be written before the oracle existed:
@@ -669,6 +679,73 @@ match.
   minijinja's `range(1, 3)` is `[1, 2]` — exclusive, and printed with spaces.
   Whoever ports `range` (Task 7's `BoundedRangeFunction`) owns both
   differences.
+
+## What W2 Task 4's 103 new entries measured (read before porting a filter)
+
+Task 4 added 103 corpus entries — the null, empty and wrong-typed input of
+each of its 22 filters — and regenerated. Ten of the answers are not what the
+filter's name suggests, and every one of them was read off the regenerated
+golden file rather than reasoned about:
+
+- **`distinct` on a null input returns the four-character STRING `"null"`.**
+  Every other filter in the batch returns Java `null` (which renders as
+  nothing); `DistinctFilter.java:24` returns `"null"`. `filter-distinct-null`
+  renders `<null>` where `filter-chunk-null` renders `<>`, from the same
+  wrapper. A port that "tidies" this up diverges.
+- **`escapeChar` silently loses a map's key order.** `processMap` allocates a
+  `new HashMap<>()`, so `{"b": …, "a": …}` comes back `{"a": …, "b": …}` —
+  Java hash-bucket order, which is neither the input's order nor sorted in
+  general. egret deliberately keeps insertion order and
+  `filter-escapechar-map-two-keys` is baselined as a permanent divergence:
+  matching would mean porting `String.hashCode`'s bucket layout to imitate a
+  bug. Note this is the **opposite** decision from `map-key-order`, where
+  Kestra preserves order and minijinja was the one sorting.
+- **`className` cannot be right for both a context value and a literal.**
+  A whole number from the context is `java.lang.Integer` (Jackson's
+  `convertValue` boxes it); the same number written in the template is
+  `java.lang.Long`. minijinja has one integer type. `filter-classname-int`
+  passes and `filter-classname-literal-int` is baselined — the same shape of
+  fact as `op-contains-boxed-int`, and from the same cause.
+- **`number` decodes, it does not parse.** `NumberUtils.createInteger` is
+  `Integer.decode`, so `"0x1F" | number(type='INT')` is **31** and
+  `"010" | number(type='INT')` is **8** — a leading zero is octal. Measured;
+  `filter-number-long-hex` additionally settles that `createLong` is
+  `Long.decode` and not `Long.valueOf`, which the two commons-lang3 spellings
+  do not otherwise distinguish.
+- **`number(type='FLOAT')` narrows to 32 bits and it shows.**
+  `"3.1415926535"` renders `3.1415927`, not `3.1415926535`. The no-`type`
+  heuristic hides this, because it only picks a `Float` when the `float` and
+  the `double` print the same string.
+- **`number(type='BIGDECIMAL')` keeps its scale**: `"1.50"` renders `1.50`,
+  which neither `f64` nor `i128` can hold. egret keeps the canonical text
+  (`runners::filters::BigNumber`).
+- **`keys` on a list returns its INDICES**, `[0,1,2]`, not its elements.
+- **`flatten` is one level only**: `[[1,[2]],3]` is `[1,[2],3]`.
+- **`substringBefore` and `substringBeforeLast` disagree about an empty
+  separator.** `'abc' | substringBefore(separator='')` is the empty string;
+  `'abc' | substringBeforeLast(separator='')` is `abc`. Both are
+  commons-lang3's, and no reading of the names predicts the split.
+- **`slugify` is ASCII-only after an NFD pass.** `Café Münster` slugs to
+  `cafe-munster` (the accents decompose and the combining marks are dropped),
+  but `中文 test` slugs to `test` — the CJK is not transliterated, it is
+  deleted. `Straße` becomes `strae`.
+
+### `string` was the second name minijinja had already bound
+
+Task 3's addendum B2 named `indent` and `range`. **`string` is a third**, and
+it is the sharper one: `{{ b | string }}` on a bool renders `True` through
+minijinja's built-in and `true` through Kestra's `StringFilter`, and
+`{{ m | string }}` renders `{"a": 1}` versus `{a=1}`. The pre-existing
+`filter-string` entry (`{{ 42 | string }}`) agreed **by luck** — same answer
+either way — so it was never baselined and nothing pointed at the name.
+`filter-string-bool`, `filter-string-map`, `filter-string-nested` and
+`filter-string-float` are the entries that separate them.
+
+The same finding has a second half. `{{ list }}` and `{{ list | string }}`
+render the **same list two different ways**: `[1,2]` through
+`JsonWriter.write(Object)` and `[1, 2]` through `AbstractCollection.toString`
+— with the space. `runners::env::kestra_to_string` grew `Seq`/`Map` arms for
+this; the JSON writer beside it is unchanged.
 
 ## What this harness does **not** reproduce
 

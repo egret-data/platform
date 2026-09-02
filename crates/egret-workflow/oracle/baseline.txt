@@ -8,6 +8,8 @@
 # One id per line. `#` starts a comment. Corpus order.
 #
 # Written by W2 Task 3 at 76 entries. Tasks 4-8 drive it to zero.
+# W2 Task 4 banked 21 (its whole filter batch) and added 2 permanent
+# divergences of its own, both documented below: 57.
 
 
 # Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
@@ -27,42 +29,22 @@ coalesce-or
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
 
-# filter not ported (Tasks 4-6)
-filter-chunk
-filter-classname
+# date/time filters, Task 5 (which owns javafmt.rs)
 filter-date
 filter-dateadd
 filter-timestamp
 filter-timestampmicro
 filter-timestampmilli
 filter-timestampnano
+
+# structured-data filters, Task 6
 filter-jq
-filter-escapechar
 filter-tojson
-filter-distinct
-filter-keys
-filter-number
-filter-urldecode
-filter-slugify
-filter-substringbefore
-filter-substringbeforelast
-filter-substringafter
-filter-substringafterlast
-filter-flatten
-
-# minijinja HAS `indent` with a different signature -- the name resolves to the WRONG thing, not to nothing. Override, do not assume.
-filter-indent
-
-# filter not ported (Tasks 4-6)
-filter-nindent
 filter-yaml
-filter-startswith
-filter-endswith
-filter-values
 filter-toion
-filter-sha1
-filter-sha512
-filter-md5
+
+# the three constant-registered filters (RegexMatchFilter.NAME etc.). NOT named
+# by any of Tasks 4-6's briefs -- see task-4-report.md's "unassigned" note.
 filter-regexmatch
 filter-regexreplace
 filter-regexextract
@@ -115,3 +97,18 @@ op-range
 
 # UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
 coalesce-nested-absent
+
+# W2 TASK 4, DELIBERATE: `className` cannot be right for both. A whole number
+# from the CONTEXT is an `Integer` (Jackson's `convertValue` boxes it), and the
+# same number written as a template LITERAL is a `Long` -- minijinja has one
+# integer type and cannot tell them apart. `filter-classname-int` (the case a
+# real flow hits) passes; this one records the other half rather than leaving
+# it undiscovered. See runners::filters::java_class_name.
+filter-classname-literal-int
+
+# W2 TASK 4, DELIBERATE: `EscapeCharFilter.processMap` allocates a
+# `new HashMap<>()`, so Kestra LOSES a map's key order here -- `{"b":..,"a":..}`
+# comes back `{"a":..,"b":..}`. egret keeps insertion order, like every other
+# map path in this crate. Matching would mean porting Java's hash-bucket
+# layout into egret to imitate a bug. See runners::filters::escape_char.
+filter-escapechar-map-two-keys

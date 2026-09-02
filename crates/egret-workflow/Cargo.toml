@@ -84,6 +84,30 @@ minijinja.workspace = true
 # no new transitive crates.
 regex.workspace = true
 
+# W2 Task 4: the `md5`/`sha1`/`sha512` filters are Kestra's `ShaBaseFilter`,
+# i.e. `MessageDigest.getInstance(...)` over the input's UTF-8 bytes, rendered
+# as lowercase hex. `sha2` and `hex` are already workspace dependencies;
+# `sha1` 0.10 is already a direct dependency of `egret-bin` and `md-5` 0.10 is
+# the same RustCrypto generation (`digest` 0.10) as `sha2` 0.10, so all four
+# share one `digest` rather than dragging in the 0.11 line beside it.
+#
+# There is deliberately no `sha256` filter: Kestra's `Md5Filter`/`Sha1Filter`/
+# `Sha512Filter` all carry a copy-pasted "implements the 'sha256' filter"
+# javadoc, but `Extension.getFilters()` registers only those three names.
+sha2.workspace = true
+sha1 = "0.10"
+md-5 = "0.10"
+hex.workspace = true
+
+# W2 Task 4: `slugify` is `io.kestra.core.utils.Slugify.of`, whose second step
+# is `Normalizer.normalize(s, Form.NFD)` -- that is what turns "Café" into
+# "cafe" rather than "caf", because the combining accent is only strippable by
+# the `[^\w-]` pass once decomposition has separated it from the base letter.
+# Already in this workspace's lock file at 0.1.25, so this adds a direct edge
+# and no new compilation. `oracle/corpus.json`'s `filter-slugify-accents` is
+# the entry that fails without it.
+unicode-normalization = "0.1"
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as

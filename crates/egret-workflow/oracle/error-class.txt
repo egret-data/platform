@@ -45,3 +45,22 @@ raw-multiline
 isin-undefined-left
 isin-undefined-right
 isin-missing-attr-left
+
+# W2 TASK 4, four wrong-typed-input entries. Their goldens are
+# `PebbleException` text and their only reproducible content is "Kestra
+# refuses this". Each is backed by a unit test in runners::filters that
+# asserts egret's OWN message for the same input, so the free pass is not
+# what is carrying them:
+#
+#   filter-chunk-not-list      -> chunk_rejects_a_non_list
+#   filter-distinct-not-list   -> distinct_rejects_a_non_list
+#   filter-values-not-map      -> values_rejects_a_non_map
+#   filter-number-not-string   -> number_rejects_a_non_string
+#
+# `distinct` and `chunk` are here for the same reason but say opposite things
+# about null: `chunk(null)` is null and `distinct(null)` is the STRING "null",
+# so the pair is what makes the asymmetry visible.
+filter-chunk-not-list
+filter-distinct-not-list
+filter-values-not-map
+filter-number-not-string

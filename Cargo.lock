@@ -957,7 +957,7 @@ dependencies = [
  "http 1.5.0",
  "http-body 1.1.0",
  "http-body-util",
- "md-5",
+ "md-5 0.11.0",
  "pin-project-lite",
  "sha1 0.11.0",
  "sha2 0.11.0",
@@ -3647,15 +3647,20 @@ dependencies = [
  "egret-test-db",
  "egret-workflow-api",
  "egret-workspace",
+ "hex",
+ "md-5 0.10.6",
  "minijinja",
  "regex",
  "serde",
  "serde_json",
  "serde_norway",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
  "tower",
+ "unicode-normalization",
  "utoipa",
  "uuid",
 ]
@@ -3856,9 +3861,9 @@ dependencies = [
 
 [[package]]
 name = "error-code"
-version = "3.4.0"
+version = "3.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
+checksum = "dea2df4cf52843e0452895c455a1a2cfbb842a1e7329671acf418fdc53ed4c59"
 
 [[package]]
 name = "etcetera"
@@ -6010,6 +6015,16 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
 
 [[package]]
 name = "md-5"
@@ -8636,7 +8651,7 @@ dependencies = [
  "hmac 0.13.0",
  "itoa",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "memchr",
  "rand 0.10.2",
  "serde",

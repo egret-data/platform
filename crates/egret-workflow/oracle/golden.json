@@ -517,7 +517,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T19:32:46.018152+07:00"
+  "result" : "2026-09-02T19:47:34.415196+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -568,7 +568,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "4yNBHqNq0Ndxpq/fdyXHFfKddt+vZRlPNudjhNJUD/UWp26okQ1frg=="
+  "result" : "rnkq1DEqMypdz3F4MIn/076NyVBEwEY/DtIaZyY7UslM9Q/o4CAvLg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -602,17 +602,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a0621b-8616-7fa8-84b6-9c51ff4f202f"
+  "result" : "01a06229-145c-77b3-8202-2930118e7c93"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "L1qZ2UBh2I6ai67ZyuWnX"
+  "result" : "6p39TMvPoxQJmXMhNahFef"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlwGPy0meFoa5JrkmC0uNEzGY9"
+  "result" : "3Ily41CO8MOHwEpPAD2znx3jAXP"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -632,12 +632,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "2"
+  "result" : "8"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "61492"
+  "result" : "62561"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -658,7 +658,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "Qhs4cSZ6NSufFTBXEMS2m"
+  "result" : "FUvzEeiFLkBeiWwO4D44J"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -1001,4 +1001,758 @@
     "n" : null
   },
   "result" : "false"
+}, {
+  "id" : "filter-chunk-bigger",
+  "expr" : "{{ list | chunk(size=10) }}",
+  "context" : {
+    "list" : [ 1, 2, 3 ]
+  },
+  "result" : "[[1,2,3]]"
+}, {
+  "id" : "filter-chunk-empty",
+  "expr" : "{{ list | chunk(size=2) }}",
+  "context" : {
+    "list" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-chunk-null",
+  "expr" : "<{{ n | chunk(size=2) }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-chunk-not-list",
+  "expr" : "{{ s | chunk(size=2) }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'chunk' filter can only be applied to List. Actual type was: java.lang.String ({{ s | chunk(size=2) }}:1)"
+  }
+}, {
+  "id" : "filter-classname-string",
+  "expr" : "{{ s | className }}",
+  "context" : {
+    "s" : "x"
+  },
+  "result" : "java.lang.String"
+}, {
+  "id" : "filter-classname-int",
+  "expr" : "{{ n | className }}",
+  "context" : {
+    "n" : 42
+  },
+  "result" : "java.lang.Integer"
+}, {
+  "id" : "filter-classname-long",
+  "expr" : "{{ n | className }}",
+  "context" : {
+    "n" : 4294967296
+  },
+  "result" : "java.lang.Long"
+}, {
+  "id" : "filter-classname-float",
+  "expr" : "{{ f | className }}",
+  "context" : {
+    "f" : 1.5
+  },
+  "result" : "java.lang.Double"
+}, {
+  "id" : "filter-classname-bool",
+  "expr" : "{{ b | className }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "java.lang.Boolean"
+}, {
+  "id" : "filter-classname-map",
+  "expr" : "{{ m | className }}",
+  "context" : {
+    "m" : {
+      "a" : 1
+    }
+  },
+  "result" : "java.util.LinkedHashMap"
+}, {
+  "id" : "filter-classname-literal-int",
+  "expr" : "{{ 42 | className }}",
+  "context" : { },
+  "result" : "java.lang.Long"
+}, {
+  "id" : "filter-classname-null",
+  "expr" : "<{{ n | className }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-distinct-strings",
+  "expr" : "{{ list | distinct }}",
+  "context" : {
+    "list" : [ "b", "a", "b" ]
+  },
+  "result" : "[\"b\",\"a\"]"
+}, {
+  "id" : "filter-distinct-empty",
+  "expr" : "{{ list | distinct }}",
+  "context" : {
+    "list" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-distinct-null",
+  "expr" : "<{{ n | distinct }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<null>"
+}, {
+  "id" : "filter-distinct-not-list",
+  "expr" : "{{ s | distinct }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Input must be a list, but received : java.lang.String ({{ s | distinct }}:1)"
+  }
+}, {
+  "id" : "filter-endswith-false",
+  "expr" : "{{ s | endsWith(value='x') }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-endswith-null",
+  "expr" : "{{ n | endsWith(value='a') }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-endswith-number",
+  "expr" : "{{ n | endsWith(value='34') }}",
+  "context" : {
+    "n" : 1234
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-endswith-empty-value",
+  "expr" : "{{ s | endsWith(value='') }}",
+  "context" : {
+    "s" : "hello"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-startswith-null",
+  "expr" : "{{ n | startsWith(value='a') }}",
+  "context" : {
+    "n" : null
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-startswith-number",
+  "expr" : "{{ n | startsWith(value='12') }}",
+  "context" : {
+    "n" : 1234
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-escapechar-double",
+  "expr" : "{{ s | escapeChar(type='double') }}",
+  "context" : {
+    "s" : "say \"hi\""
+  },
+  "result" : "say \\\"hi\\\""
+}, {
+  "id" : "filter-escapechar-shell",
+  "expr" : "{{ s | escapeChar(type='shell') }}",
+  "context" : {
+    "s" : "it's"
+  },
+  "result" : "it'\\''s"
+}, {
+  "id" : "filter-escapechar-uppercase-type",
+  "expr" : "{{ s | escapeChar(type='SHELL') }}",
+  "context" : {
+    "s" : "it's"
+  },
+  "result" : "it'\\''s"
+}, {
+  "id" : "filter-escapechar-list",
+  "expr" : "{{ list | escapeChar(type='single') }}",
+  "context" : {
+    "list" : [ "it's", "b" ]
+  },
+  "result" : "[\"it\\\\'s\",\"b\"]"
+}, {
+  "id" : "filter-escapechar-map",
+  "expr" : "{{ m | escapeChar(type='single') }}",
+  "context" : {
+    "m" : {
+      "a" : "it's"
+    }
+  },
+  "result" : "{\"a\":\"it\\\\'s\"}"
+}, {
+  "id" : "filter-escapechar-map-two-keys",
+  "expr" : "{{ m | escapeChar(type='single') }}",
+  "context" : {
+    "m" : {
+      "b" : "it's",
+      "a" : "x"
+    }
+  },
+  "result" : "{\"a\":\"x\",\"b\":\"it\\\\'s\"}"
+}, {
+  "id" : "filter-escapechar-number",
+  "expr" : "{{ n | escapeChar(type='single') }}",
+  "context" : {
+    "n" : 42
+  },
+  "result" : "42"
+}, {
+  "id" : "filter-escapechar-null",
+  "expr" : "<{{ n | escapeChar(type='single') }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-flatten-one-level",
+  "expr" : "{{ list | flatten }}",
+  "context" : {
+    "list" : [ [ 1, [ 2 ] ], 3 ]
+  },
+  "result" : "[1,[2],3]"
+}, {
+  "id" : "filter-flatten-mixed",
+  "expr" : "{{ list | flatten }}",
+  "context" : {
+    "list" : [ 1, [ 2, 3 ] ]
+  },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "filter-flatten-empty",
+  "expr" : "{{ list | flatten }}",
+  "context" : {
+    "list" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-flatten-null",
+  "expr" : "<{{ n | flatten }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-keys-list",
+  "expr" : "{{ list | keys }}",
+  "context" : {
+    "list" : [ 10, 20, 30 ]
+  },
+  "result" : "[0,1,2]"
+}, {
+  "id" : "filter-keys-empty-map",
+  "expr" : "{{ m | keys }}",
+  "context" : {
+    "m" : { }
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-keys-order",
+  "expr" : "{{ m | keys }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "[\"b\",\"a\"]"
+}, {
+  "id" : "filter-keys-null",
+  "expr" : "<{{ n | keys }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-values-order",
+  "expr" : "{{ m | values }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "[1,2]"
+}, {
+  "id" : "filter-values-nested",
+  "expr" : "{{ m | values }}",
+  "context" : {
+    "m" : {
+      "a" : {
+        "x" : 1
+      },
+      "b" : [ 1, 2 ]
+    }
+  },
+  "result" : "[{\"x\":1},[1,2]]"
+}, {
+  "id" : "filter-values-empty",
+  "expr" : "{{ m | values }}",
+  "context" : {
+    "m" : { }
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-values-null",
+  "expr" : "<{{ n | values }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-values-not-map",
+  "expr" : "{{ list | values }}",
+  "context" : {
+    "list" : [ 1, 2 ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'values' filter can only be applied to Map. Actual type was: java.util.ArrayList ({{ list | values }}:1)"
+  }
+}, {
+  "id" : "filter-indent-prefix",
+  "expr" : "{{ s | indent(amount=2, prefix='-') }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "line1\n--line2"
+}, {
+  "id" : "filter-indent-empty",
+  "expr" : "<{{ s | indent(amount=2) }}>",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-indent-zero",
+  "expr" : "{{ s | indent(amount=0) }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "line1\nline2"
+}, {
+  "id" : "filter-indent-single-line",
+  "expr" : "{{ s | indent(amount=2) }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-indent-crlf",
+  "expr" : "{{ s | indent(amount=2) }}",
+  "context" : {
+    "s" : "line1\r\nline2"
+  },
+  "result" : "line1\r\n  line2"
+}, {
+  "id" : "filter-indent-null",
+  "expr" : "<{{ n | indent(amount=2) }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-nindent-empty",
+  "expr" : "<{{ s | nindent(amount=2) }}>",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-nindent-single-line",
+  "expr" : "{{ s | nindent(amount=2) }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "\n  abc"
+}, {
+  "id" : "filter-nindent-prefix",
+  "expr" : "{{ s | nindent(amount=2, prefix='-') }}",
+  "context" : {
+    "s" : "line1\nline2"
+  },
+  "result" : "\n--line1\n--line2"
+}, {
+  "id" : "filter-number-long",
+  "expr" : "{{ s | number(type='LONG') }}",
+  "context" : {
+    "s" : "9999999999"
+  },
+  "result" : "9999999999"
+}, {
+  "id" : "filter-number-long-hex",
+  "expr" : "{{ s | number(type='LONG') }}",
+  "context" : {
+    "s" : "0x1F"
+  },
+  "result" : "31"
+}, {
+  "id" : "filter-number-float",
+  "expr" : "{{ s | number(type='FLOAT') }}",
+  "context" : {
+    "s" : "1.5"
+  },
+  "result" : "1.5"
+}, {
+  "id" : "filter-number-float-precision",
+  "expr" : "{{ s | number(type='FLOAT') }}",
+  "context" : {
+    "s" : "3.1415926535"
+  },
+  "result" : "3.1415927"
+}, {
+  "id" : "filter-number-double",
+  "expr" : "{{ s | number(type='DOUBLE') }}",
+  "context" : {
+    "s" : "3.1415926535"
+  },
+  "result" : "3.1415926535"
+}, {
+  "id" : "filter-number-default-int",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "42"
+  },
+  "result" : "42"
+}, {
+  "id" : "filter-number-default-decimal",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "3.14"
+  },
+  "result" : "3.14"
+}, {
+  "id" : "filter-number-default-precise",
+  "expr" : "{{ s | number }}",
+  "context" : {
+    "s" : "3.141592653589793"
+  },
+  "result" : "3.141592653589793"
+}, {
+  "id" : "filter-number-bigdecimal",
+  "expr" : "{{ s | number(type='BIGDECIMAL') }}",
+  "context" : {
+    "s" : "1.50"
+  },
+  "result" : "1.50"
+}, {
+  "id" : "filter-number-biginteger",
+  "expr" : "{{ s | number(type='BIGINTEGER') }}",
+  "context" : {
+    "s" : "123456789012345678901234567890"
+  },
+  "result" : "123456789012345678901234567890"
+}, {
+  "id" : "filter-number-negative",
+  "expr" : "{{ s | number(type='INT') }}",
+  "context" : {
+    "s" : "-7"
+  },
+  "result" : "-7"
+}, {
+  "id" : "filter-number-hex",
+  "expr" : "{{ s | number(type='INT') }}",
+  "context" : {
+    "s" : "0x1F"
+  },
+  "result" : "31"
+}, {
+  "id" : "filter-number-octal",
+  "expr" : "{{ s | number(type='INT') }}",
+  "context" : {
+    "s" : "010"
+  },
+  "result" : "8"
+}, {
+  "id" : "filter-number-null",
+  "expr" : "<{{ n | number(type='INT') }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-number-not-string",
+  "expr" : "{{ n | number(type='INT') }}",
+  "context" : {
+    "n" : 42
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'number' filter can only be applied to String. Actual type was: java.lang.Integer ({{ n | number(type='INT') }}:1)"
+  }
+}, {
+  "id" : "filter-slugify-accents",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "Café Münster"
+  },
+  "result" : "cafe-munster"
+}, {
+  "id" : "filter-slugify-underscores",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "snake_case_name"
+  },
+  "result" : "snake-case-name"
+}, {
+  "id" : "filter-slugify-multi-space",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "  Hello   World  "
+  },
+  "result" : "hello-world"
+}, {
+  "id" : "filter-slugify-empty",
+  "expr" : "<{{ s | slugify }}>",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-slugify-symbols",
+  "expr" : "<{{ s | slugify }}>",
+  "context" : {
+    "s" : "!!!"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-slugify-dashes",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "a---b"
+  },
+  "result" : "a-b"
+}, {
+  "id" : "filter-slugify-digits",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "Release 2.0"
+  },
+  "result" : "release-20"
+}, {
+  "id" : "filter-slugify-cjk",
+  "expr" : "{{ s | slugify }}",
+  "context" : {
+    "s" : "中文 test"
+  },
+  "result" : "test"
+}, {
+  "id" : "filter-slugify-null",
+  "expr" : "<{{ n | slugify }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringbefore-missing",
+  "expr" : "{{ s | substringBefore(separator='-') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-substringbefore-empty-sep",
+  "expr" : "<{{ s | substringBefore(separator='') }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringafter-missing",
+  "expr" : "<{{ s | substringAfter(separator='-') }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringafter-empty-sep",
+  "expr" : "{{ s | substringAfter(separator='') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-substringbeforelast-missing",
+  "expr" : "{{ s | substringBeforeLast(separator='-') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-substringbeforelast-empty-sep",
+  "expr" : "{{ s | substringBeforeLast(separator='') }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-substringafterlast-missing",
+  "expr" : "<{{ s | substringAfterLast(separator='-') }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringafterlast-trailing",
+  "expr" : "<{{ s | substringAfterLast(separator='-') }}>",
+  "context" : {
+    "s" : "a-b-"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringafterlast-empty-sep",
+  "expr" : "<{{ s | substringAfterLast(separator='') }}>",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-substringafter-number",
+  "expr" : "{{ n | substringAfter(separator='2') }}",
+  "context" : {
+    "n" : 1234
+  },
+  "result" : "34"
+}, {
+  "id" : "filter-substringbefore-null",
+  "expr" : "<{{ n | substringBefore(separator='-') }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-urldecode-plus",
+  "expr" : "{{ s | urldecode }}",
+  "context" : {
+    "s" : "a+b"
+  },
+  "result" : "a b"
+}, {
+  "id" : "filter-urldecode-percent",
+  "expr" : "{{ s | urldecode }}",
+  "context" : {
+    "s" : "100%25"
+  },
+  "result" : "100%"
+}, {
+  "id" : "filter-urldecode-utf8",
+  "expr" : "{{ s | urldecode }}",
+  "context" : {
+    "s" : "%E4%B8%AD"
+  },
+  "result" : "中"
+}, {
+  "id" : "filter-urldecode-plain",
+  "expr" : "{{ s | urldecode }}",
+  "context" : {
+    "s" : "abc"
+  },
+  "result" : "abc"
+}, {
+  "id" : "filter-urldecode-null",
+  "expr" : "<{{ n | urldecode }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-md5-empty",
+  "expr" : "{{ s | md5 }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "d41d8cd98f00b204e9800998ecf8427e"
+}, {
+  "id" : "filter-sha1-empty",
+  "expr" : "{{ s | sha1 }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+}, {
+  "id" : "filter-sha512-empty",
+  "expr" : "{{ s | sha512 }}",
+  "context" : {
+    "s" : ""
+  },
+  "result" : "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+}, {
+  "id" : "filter-md5-unicode",
+  "expr" : "{{ s | md5 }}",
+  "context" : {
+    "s" : "héllo"
+  },
+  "result" : "be50e8478cf24ff3595bc7307fb91b50"
+}, {
+  "id" : "filter-md5-null",
+  "expr" : "<{{ n | md5 }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "filter-string-bool",
+  "expr" : "{{ b | string }}",
+  "context" : {
+    "b" : true
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-string-list",
+  "expr" : "{{ list | string }}",
+  "context" : {
+    "list" : [ 1, 2 ]
+  },
+  "result" : "[1, 2]"
+}, {
+  "id" : "filter-string-map",
+  "expr" : "{{ m | string }}",
+  "context" : {
+    "m" : {
+      "a" : 1,
+      "b" : 2
+    }
+  },
+  "result" : "{a=1, b=2}"
+}, {
+  "id" : "filter-string-nested",
+  "expr" : "{{ m | string }}",
+  "context" : {
+    "m" : {
+      "a" : [ 1, 2 ]
+    }
+  },
+  "result" : "{a=[1, 2]}"
+}, {
+  "id" : "filter-string-float",
+  "expr" : "{{ f | string }}",
+  "context" : {
+    "f" : 1.0E100
+  },
+  "result" : "1.0E100"
+}, {
+  "id" : "filter-string-null",
+  "expr" : "<{{ n | string }}>",
+  "context" : {
+    "n" : null
+  },
+  "result" : "<>"
 } ]

@@ -85,6 +85,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::filters;
 use super::rewrite::{rewrite, RewriteError};
 
 /// `VariableRenderer.MAX_RENDERING_AMOUNT`. A render whose output is itself a
@@ -360,7 +361,7 @@ impl fmt::Display for RenderContext {
 /// Linear lookup is deliberate: a render context is a handful of top-level
 /// names and small nested objects, and a `Vec` is what keeps the order.
 #[derive(Debug, Clone, PartialEq)]
-struct OrderedMap(Vec<(String, MjValue)>);
+pub(super) struct OrderedMap(pub(super) Vec<(String, MjValue)>);
 
 impl Object for OrderedMap {
     fn repr(self: &Arc<Self>) -> ObjectRepr {
@@ -686,7 +687,7 @@ fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue
 /// first guard returns `false`), so the two engines cannot be made to
 /// disagree through this path. `isin-null-vs-none` pins that it is the guard,
 /// not the spelling, that answers.
-fn kestra_to_string(value: &MjValue) -> String {
+pub(super) fn kestra_to_string(value: &MjValue) -> String {
     match value.kind() {
         ValueKind::Bool => (if value.is_true() { "true" } else { "false" }).to_string(),
         ValueKind::Number if !value.is_integer() => match f64::try_from(value.clone()) {
@@ -697,7 +698,49 @@ fn kestra_to_string(value: &MjValue) -> String {
             }
             Err(_) => value.to_string(),
         },
+        // `AbstractCollection.toString`: square brackets, `", "` between
+        // elements -- WITH the space, unlike [`write_json`], which is the
+        // JSON writer and has none. `{{ list }}` is `[1,2]` and
+        // `{{ list | string }}` is `[1, 2]`, from the same list, because they
+        // go through different Java methods. `filter-string-list` pins it.
+        ValueKind::Seq | ValueKind::Iterable => match value.try_iter() {
+            Ok(items) => {
+                let rendered: Vec<String> = items.map(|item| java_element(&item)).collect();
+                format!("[{}]", rendered.join(", "))
+            }
+            Err(_) => value.to_string(),
+        },
+        // `AbstractMap.toString`: `{k=v, k2=v2}` -- an `=` and no quotes,
+        // which is nothing like minijinja's `{"a": 1}`. `filter-string-map`.
+        ValueKind::Map => match value.try_iter() {
+            Ok(keys) => {
+                let rendered: Vec<String> = keys
+                    .map(|key| {
+                        let item = value.get_item(&key).unwrap_or_default();
+                        format!("{}={}", java_element(&key), java_element(&item))
+                    })
+                    .collect();
+                format!("{{{}}}", rendered.join(", "))
+            }
+            Err(_) => value.to_string(),
+        },
         _ => value.to_string(),
+    }
+}
+
+/// An element inside a Java container's `toString`.
+///
+/// `AbstractCollection.toString` goes through `String.valueOf(element)`, so a
+/// null element is the four characters `null` -- not the empty string the
+/// top-level render rule produces, and not minijinja's `none`. Only reachable
+/// from inside a container: [`kestra_to_string`]'s own `None` arm is not this
+/// one, because `InExpression` returns `false` before it can stringify a null
+/// operand (see `isin-null-vs-none`).
+fn java_element(value: &MjValue) -> String {
+    if value.is_none() || value.is_undefined() {
+        "null".to_string()
+    } else {
+        kestra_to_string(value)
     }
 }
 
@@ -878,7 +921,7 @@ fn write_json_string(out: &mut String, s: &str) {
 /// break the tie differently down there. No corpus entry reaches it and no
 /// plausible flow does; recorded so the claim above is not read as
 /// unconditional.
-fn write_java_double(out: &mut String, x: f64) {
+pub(super) fn write_java_double(out: &mut String, x: f64) {
     if x.is_nan() {
         out.push_str("NaN");
         return;
@@ -985,6 +1028,14 @@ pub fn environment() -> Environment<'static> {
     // differ from minijinja's default, and none of them is reachable from a
     // filter or function, because `{{ list }}` names neither.
     env.set_formatter(json_writer_formatter);
+
+    // W2 Task 4's 22 string/collection filters. **Two of them, `indent` and
+    // `string`, OVERRIDE minijinja built-ins of the same name** -- those
+    // names resolve to minijinja's own answer rather than erroring as
+    // unknown, so nothing but the oracle would have noticed. See
+    // `super::filters`' module doc for the table of what each one answered
+    // before.
+    filters::register(&mut env);
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
