@@ -127,5 +127,18 @@
   {"id": "isin-map-value",         "expr": "{{ 'v' isIn m }}",                               "context": {"m": {"k": "v"}}},
   {"id": "isin-string-rhs",        "expr": "{{ 'b' isIn 'abc' }}",                           "context": {}},
 
-  {"id": "coalesce-nested-absent", "expr": "{{ obj.missing.deeper ?? 'fallback' }}",         "context": {"obj": {"a": 1}}}
+  {"id": "coalesce-nested-absent", "expr": "{{ obj.missing.deeper ?? 'fallback' }}",         "context": {"obj": {"a": 1}}},
+
+  {"id": "isin-undefined-left",    "expr": "{{ nothere isIn ['a'] }}",                        "context": {}, "compare": "error-class"},
+  {"id": "isin-undefined-right",   "expr": "{{ 'a' isIn nothere }}",                          "context": {}, "compare": "error-class"},
+  {"id": "isin-missing-attr-left", "expr": "{{ obj.missing isIn ['a'] }}",                    "context": {"obj": {"a": 1}}, "compare": "error-class"},
+
+  {"id": "map-key-order",          "expr": "{{ m }}",                                         "context": {"m": {"b": 1, "a": 2, "c": 3}}},
+  {"id": "map-nested-null",        "expr": "{{ m }}",                                         "context": {"m": {"a": null, "b": {"c": null, "d": 1}, "e": [null, 1]}}},
+  {"id": "map-top-level-null",     "expr": "{{ m }}",                                         "context": {"m": {"a": null}}},
+
+  {"id": "float-scalar-small",     "expr": "{{ f }}",                                         "context": {"f": 1.0}},
+  {"id": "float-scalar-huge",      "expr": "{{ f }}",                                         "context": {"f": 1e100}},
+  {"id": "float-list",             "expr": "{{ fs }}",                                        "context": {"fs": [1.0, 0.1, 2.5, 1e100, 1e-7, 12345678.0, 0.001, 0.0001, 9999999.0, -1.5]}},
+  {"id": "int-list",               "expr": "{{ ns }}",                                        "context": {"ns": [0, 1, -1, 1000000]}}
 ]

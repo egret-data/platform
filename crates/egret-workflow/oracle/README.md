@@ -89,7 +89,15 @@ The second direction is what makes it a ratchet rather than a suppression
 list: a task cannot make progress without shrinking the file, and cannot claim
 progress it did not make. A baseline id that is not in `golden.json` at all
 fails too, so a renamed corpus entry cannot leave a dead line behind. The
-current mismatch count prints on every run.
+current mismatch count prints on every run — but **libtest captures stdout on
+a passing test**, so run it as
+
+```bash
+cargo test -p egret-workflow --test oracle -- --nocapture
+```
+
+to actually see the count and the exclusion lists. Without `--nocapture`, a
+green run tells you nothing about how much of the corpus is still baselined.
 
 Both directions were verified by deliberate breakage before this was
 committed: breaking `kestra_null_coalesce` produced `REGRESSION: 6`, and
@@ -456,6 +464,66 @@ Three entries pin it: `op-contains` (strings, `true`),
 `op-contains-boxed-int` (context list, `false`), `op-contains-literal`
 (literal list, `true`). Whoever ports `contains` must reproduce all three or
 they have ported a *different*, more sensible operator.
+
+## Value formatting is the ENVIRONMENT's job, not a filter's (W2 Task 3)
+
+`JsonWriter.write(Object)`
+(`core/src/main/java/io/kestra/core/runners/pebble/JsonWriter.java:63-87`) is
+what turns a rendered value into output text, and **four** of its behaviours
+differ from minijinja's defaults. None of them is reachable from a filter or a
+function -- `{{ list }}` and `{{ flag }}` name neither -- so all four live in
+`runners::env::json_writer_formatter` / `write_json`:
+
+| value | Kestra | minijinja default | corpus entry |
+|---|---|---|---|
+| `null` | writes nothing | `None` | `undef-coalesce-null` |
+| boolean | `true` / `false` | `True` / `False` | 27 entries |
+| `Map`/`Collection`/array | compact JSON, **insertion order**, **null entries omitted** | `{"a": 1}` / `[1, 2]`, sorted, nulls kept | `map-key-order`, `map-nested-null`, `map-top-level-null` |
+| non-integer number | `Double.toString` | Rust's own float rendering | `float-list`, `float-scalar-huge` |
+
+Three of these were invisible until entries existed for them, because every
+*other* container- or float-valued golden also fails on a filter that is not
+ported yet. They were added deliberately rather than discovered thirty entries
+into Task 4.
+
+- **Key order** (`map-key-order`): `{"b":1,"a":2,"c":3}`, not sorted. Kestra's
+  variables are `LinkedHashMap`s. The layer that sorts on the egret side is
+  **minijinja's own `ValueMap`**, which is a `BTreeMap` unless minijinja's
+  `preserve_order` feature is on (it is not, and turning it on would be a
+  workspace-wide change affecting `egret-dataapi`). Measured directly:
+  `Value::from_serialize` on `{"b":1,"a":2,"c":3}` gives
+  `{"a":2,"b":1,"c":3}`. `serde_json` is **not** the culprit -- its own
+  `preserve_order` is already on in this workspace, transitively via `utoipa`
+  (workspace `Cargo.toml:61`) and `cedar-policy-core`, so a
+  `serde_json::Value` round-trip keeps the order. The fix is a local
+  order-preserving map object (`runners::env::OrderedMap`); no workspace
+  feature list was touched.
+- **Null omission is recursive, and asymmetric** (`map-nested-null`): the
+  mapper is `JsonInclude.Include.NON_NULL`, so
+  `{"a":null,"b":{"c":null,"d":1},"e":[null,1]}` renders
+  `{"b":{"d":1},"e":[null,1]}`. The **array element survives** -- `NON_NULL`
+  applies to object properties, not to sequence elements. An implementation
+  that strips nulls everywhere passes the map half of that entry and fails the
+  array half, which is why one entry carries both.
+- **Floats are `Double.toString`** (`float-list`): plain decimal with at least
+  one fractional digit for `1e-3 <= |d| < 1e7`, scientific otherwise --
+  `[1.0,0.1,2.5,1.0E100,1.0E-7,1.2345678E7,0.001,1.0E-4,9999999.0,-1.5]`.
+  Neither Rust's `{}` nor its `{:?}` produces that. Integers stay plain
+  (`int-list`).
+
+## `isIn` and an ABSENT variable are two different questions (W2 Task 3, fix round 2)
+
+`InExpression`'s first guard is `leftValue == null || rightValue == null ->
+false`. That is a Java **null**, which Pebble keeps strictly apart from an
+absent variable: under `strictVariables(true)`,
+`{{ nothere isIn ['a'] }}` throws `RootAttributeNotFoundException` and
+`{{ obj.missing isIn ['a'] }}` throws `AttributeNotFoundException`. Three
+entries pin it (`isin-undefined-left`, `isin-undefined-right`,
+`isin-missing-attr-left`), and they exist because porting `isIn` from an
+operator to a **function call** created the hazard: minijinja does not apply
+`UndefinedBehavior::Strict` to function arguments, so an undefined operand
+reaches the function instead of raising. Answering it `false` would let a
+typo'd variable inside an `isIn` silently decide a branch.
 
 ## `isIn` is not minijinja's `in` (W2 Task 3, addendum A3)
 

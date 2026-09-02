@@ -517,7 +517,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T17:55:39.267811+07:00"
+  "result" : "2026-09-02T18:54:01.903950+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -568,7 +568,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "UhQ+hyTKWmbCmeQvimLNyHKcWC3TfMzAIZBizsf86Gs1GoCPvqS4Hw=="
+  "result" : "Ejfsk57xy69tQzEWIycaEJlmQpp7DoD3SMmSb6z9QDDaDhuc5t/usg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -602,17 +602,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a061c2-9d48-7fa8-bab4-e66adea807b4"
+  "result" : "01a061f8-0f64-76cd-a3b5-4dc0efe220e5"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "3M8h97gVd1jylgK55joJOA"
+  "result" : "4LV44AO2JSYCvTtWc3ZsaA"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlkS8sF38NxBN6WP8iJLxaEnKw"
+  "result" : "3IlrYDpXh0x0YxU6N8tW4jt6thU"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -632,12 +632,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "9"
+  "result" : "8"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "55960"
+  "result" : "58990"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -658,7 +658,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "Zn2ihfnmpNS2Y8ctSHugh"
+  "result" : "ihmNyVnr3tIia15lC-54d"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -869,4 +869,94 @@
     }
   },
   "result" : "fallback"
+}, {
+  "id" : "isin-undefined-left",
+  "expr" : "{{ nothere isIn ['a'] }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [nothere] does not exist or can not be accessed and strict variables is set to true. ({{ nothere isIn ['a'] }}:1)"
+  }
+}, {
+  "id" : "isin-undefined-right",
+  "expr" : "{{ 'a' isIn nothere }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.RootAttributeNotFoundException: Root attribute [nothere] does not exist or can not be accessed and strict variables is set to true. ({{ 'a' isIn nothere }}:1)"
+  }
+}, {
+  "id" : "isin-missing-attr-left",
+  "expr" : "{{ obj.missing isIn ['a'] }}",
+  "context" : {
+    "obj" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.AttributeNotFoundException: Attribute [missing] of [java.util.LinkedHashMap] does not exist or can not be accessed and strict variables is set to true. ({{ obj.missing isIn ['a'] }}:1)"
+  }
+}, {
+  "id" : "map-key-order",
+  "expr" : "{{ m }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2,
+      "c" : 3
+    }
+  },
+  "result" : "{\"b\":1,\"a\":2,\"c\":3}"
+}, {
+  "id" : "map-nested-null",
+  "expr" : "{{ m }}",
+  "context" : {
+    "m" : {
+      "a" : null,
+      "b" : {
+        "c" : null,
+        "d" : 1
+      },
+      "e" : [ null, 1 ]
+    }
+  },
+  "result" : "{\"b\":{\"d\":1},\"e\":[null,1]}"
+}, {
+  "id" : "map-top-level-null",
+  "expr" : "{{ m }}",
+  "context" : {
+    "m" : {
+      "a" : null
+    }
+  },
+  "result" : "{}"
+}, {
+  "id" : "float-scalar-small",
+  "expr" : "{{ f }}",
+  "context" : {
+    "f" : 1.0
+  },
+  "result" : "1.0"
+}, {
+  "id" : "float-scalar-huge",
+  "expr" : "{{ f }}",
+  "context" : {
+    "f" : 1.0E100
+  },
+  "result" : "1.0E100"
+}, {
+  "id" : "float-list",
+  "expr" : "{{ fs }}",
+  "context" : {
+    "fs" : [ 1.0, 0.1, 2.5, 1.0E100, 1.0E-7, 1.2345678E7, 0.001, 1.0E-4, 9999999.0, -1.5 ]
+  },
+  "result" : "[1.0,0.1,2.5,1.0E100,1.0E-7,1.2345678E7,0.001,1.0E-4,9999999.0,-1.5]"
+}, {
+  "id" : "int-list",
+  "expr" : "{{ ns }}",
+  "context" : {
+    "ns" : [ 0, 1, -1, 1000000 ]
+  },
+  "result" : "[0,1,-1,1000000]"
 } ]

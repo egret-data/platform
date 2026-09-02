@@ -5,7 +5,7 @@
 //!
 //! # This is a RATCHET, not a pass/fail
 //!
-//! 84 of 122 entries do not match yet, because Tasks 4-8 have not ported the
+//! Most entries do not match yet, because Tasks 4-8 have not ported the
 //! filters and functions. A test that is simply red for five tasks measures
 //! nothing: a NEW mismatch would be invisible in the noise. So the currently
 //! mismatching ids are committed in `oracle/baseline.txt`, and this test fails
@@ -27,6 +27,24 @@
 //! | exact | everything not below | byte equality. No trimming, no normalisation, no fuzzy matching. |
 //! | shape | the eight ids in [`NON_DETERMINISTIC`] | length / range / non-empty. They produce a different value on every render, by construction. |
 //! | error-class | entries the **corpus** marks `"compare": "error-class"` | egret must also fail. The message is not compared. |
+//!
+//! **A renderer PANIC is a mismatch in every one of those modes, and it fails
+//! the test unconditionally** — the baseline does not cover it. A baselined id
+//! means "egret does not reproduce this value yet"; it never means "egret may
+//! crash here". A panic means the renderer could not run at all, and an
+//! instrument that reports success for a renderer that cannot run is the one
+//! failure this whole package exists to prevent. Proven, not asserted — see
+//! `a_panicking_renderer_is_a_mismatch_in_every_mode`, and the two probes in
+//! `task-3-report.md`'s fix-round-2 section.
+//!
+//! # `corpus.json` and `golden.json` must describe the same expressions
+//!
+//! Only `golden.json` is rendered here, so a corpus entry added without
+//! regenerating would be **silently never tested**, and an edited `expr` would
+//! keep being tested against the old expression while staying green. That is
+//! the one failure mode the ratchet cannot see, and it points straight at
+//! Tasks 4-6, which are told to add corpus entries first and regenerate
+//! second. `corpus_and_golden_describe_the_same_expressions` binds the two.
 //!
 //! The error-class mode exists because a golden error value is a Java
 //! exception string (`io.pebbletemplates.pebble.error.PebbleException: …`)
@@ -91,7 +109,11 @@ const NON_DETERMINISTIC: &[&str] = &[
 struct GoldenEntry {
     id: String,
     expr: String,
-    context: Value,
+    /// Parsed straight into [`RenderContext`], never through
+    /// `serde_json::Value`: serde visits map entries in document order and a
+    /// `serde_json::Value` would be a second chance to lose it. Its `Display`
+    /// writes the bindings back as ordered JSON for the mismatch report.
+    context: RenderContext,
     result: GoldenResult,
     /// Copied through from `corpus.json` by the Java harness. Absent means
     /// [`CompareMode::Exact`] — the weaker comparison is opt-in, per entry,
@@ -124,10 +146,37 @@ enum GoldenResult {
 /// `Property<T>::render` calls before converting. Errors are flattened to
 /// their `Display` because that is the only shape a differential comparison
 /// against a Java exception string can take.
-fn render_via_egret(expr: &str, context: &Value) -> Result<String, String> {
-    let cx = RenderContext::from_json_object(context)
-        .unwrap_or_else(|| panic!("corpus context must be a JSON object, got: {context}"));
-    render_str(expr, &cx).map_err(|e| e.to_string())
+fn render_via_egret(expr: &str, cx: &RenderContext) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_str(expr, cx))) {
+        Ok(Ok(rendered)) => Outcome::Ok(rendered),
+        Ok(Err(e)) => Outcome::Err(e.to_string()),
+        Err(panic) => Outcome::Panic(panic_message(panic)),
+    }
+}
+
+/// What egret's renderer did — with a **panic as its own case**.
+///
+/// Folding a panic into [`Outcome::Err`] is what made the oracle report
+/// success for a renderer that could not run: an error-class entry compares
+/// `is_err()`, and a shape-checked entry's `(Err, Err)` arm returned `true`
+/// unconditionally, so a `render_str` that panicked on the eight
+/// service-backed entries turned the whole suite green. A panic is a
+/// mismatch everywhere, and it says so in the report.
+#[derive(Debug)]
+enum Outcome {
+    Ok(String),
+    Err(String),
+    Panic(String),
+}
+
+impl Outcome {
+    fn display(&self) -> String {
+        match self {
+            Outcome::Ok(s) => format!("Ok({s:?})"),
+            Outcome::Err(e) => format!("Err({e:?})"),
+            Outcome::Panic(p) => format!("PANIC({p:?})"),
+        }
+    }
 }
 
 /// The shape check for [`NON_DETERMINISTIC`] entries: same kind of outcome as
@@ -136,11 +185,13 @@ fn render_via_egret(expr: &str, context: &Value) -> Result<String, String> {
 /// Deliberately weak on purpose and deliberately NOT reused for anything else.
 /// Today every one of these renders as an unknown-function error, since none
 /// of the eight is ported yet; the shapes below are what Task 7 has to satisfy.
-fn shape_ok(id: &str, golden: &GoldenResult, actual: &Result<String, String>) -> bool {
-    // Both must at least agree on succeeded-vs-failed.
+fn shape_ok(id: &str, golden: &GoldenResult, actual: &Outcome) -> bool {
+    // Both must at least agree on succeeded-vs-failed -- and a PANIC agrees
+    // with nothing. It used to fall into the `(Err, Err)` arm below and pass.
     let value = match (golden, actual) {
-        (GoldenResult::Ok(_), Ok(v)) => v,
-        (GoldenResult::Err { .. }, Err(_)) => return true,
+        (_, Outcome::Panic(_)) => return false,
+        (GoldenResult::Ok(_), Outcome::Ok(v)) => v,
+        (GoldenResult::Err { .. }, Outcome::Err(_)) => return true,
         _ => return false,
     };
 
@@ -156,6 +207,149 @@ fn shape_ok(id: &str, golden: &GoldenResult, actual: &Result<String, String>) ->
         "function-now" | "function-encrypt" => !value.is_empty(),
         other => unreachable!("{other} is on NON_DETERMINISTIC but has no shape check"),
     }
+}
+
+/// Does egret's outcome match this entry's golden, under the entry's mode?
+///
+/// Factored out of the differential test so the modes can be exercised
+/// directly — in particular so that "a panic is never a match" is a claim with
+/// a test behind it rather than a comment.
+fn entry_matches(entry: &GoldenEntry, actual: &Outcome) -> bool {
+    // Checked FIRST, before any mode is consulted, so no mode can be taught to
+    // forgive one. A panic means the renderer could not run; an instrument
+    // that reports success for that is worse than no instrument.
+    if matches!(actual, Outcome::Panic(_)) {
+        return false;
+    }
+
+    if NON_DETERMINISTIC.contains(&entry.id.as_str()) {
+        return shape_ok(&entry.id, &entry.result, actual);
+    }
+
+    if entry.compare == CompareMode::ErrorClass {
+        return matches!(actual, Outcome::Err(_));
+    }
+
+    match (&entry.result, actual) {
+        (GoldenResult::Ok(expected), Outcome::Ok(actual)) => expected == actual,
+        (GoldenResult::Err { error: expected }, Outcome::Err(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+/// **C1.** A renderer panic must be a mismatch in **every** mode.
+///
+/// This is not hypothetical. Before the [`Outcome`] type existed, a panic was
+/// flattened into `Err`, and two paths then accepted it: the error-class mode
+/// compares `is_err()`, and [`shape_ok`]'s `(Err, Err)` arm returned `true`
+/// unconditionally. A `render_str` that panicked on the eight service-backed
+/// entries turned the whole oracle **green**, with the printed counts
+/// unchanged — the instrument reporting success for a renderer that could not
+/// run at all.
+///
+/// Each mode below is checked with a golden this renderer would otherwise have
+/// satisfied, so the assertion fails if any mode is ever taught to forgive a
+/// panic again.
+#[test]
+fn a_panicking_renderer_is_a_mismatch_in_every_mode() {
+    let golden: Vec<GoldenEntry> = serde_json::from_str(include_str!("../oracle/golden.json"))
+        .expect("oracle/golden.json must parse");
+    let by_id = |id: &str| {
+        golden
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} must be in oracle/golden.json"))
+    };
+
+    let panic = Outcome::Panic("renderer exploded".to_string());
+
+    // Error-class: the mode that accepts any failure. `function-secret`'s
+    // golden is a PebbleException and egret's real `unknown function` error
+    // matches it, so this entry is the one a panic could hide behind.
+    let error_class = by_id("function-secret");
+    assert_eq!(error_class.compare, CompareMode::ErrorClass);
+    assert!(entry_matches(
+        error_class,
+        &Outcome::Err("unknown function".into())
+    ));
+    assert!(
+        !entry_matches(error_class, &panic),
+        "a panic must not satisfy an error-class entry"
+    );
+
+    // Shape: `shape_ok`'s (Err, Err) arm used to return true unconditionally.
+    let shaped = by_id("function-uuid");
+    assert!(NON_DETERMINISTIC.contains(&shaped.id.as_str()));
+    assert!(
+        !entry_matches(shaped, &panic),
+        "a panic must not satisfy a shape-checked entry"
+    );
+
+    // Value: never accepted a panic, pinned so it stays that way.
+    let exact = by_id("ternary");
+    assert_eq!(exact.compare, CompareMode::Exact);
+    assert!(
+        !entry_matches(exact, &panic),
+        "a panic must not satisfy an exact-comparison entry"
+    );
+}
+
+/// `corpus.json` and `golden.json` must describe the same expressions, in the
+/// same order.
+///
+/// Nothing else in this file reads `corpus.json` — the differential test
+/// renders `golden.json` — so without this a corpus entry added and never
+/// regenerated is **silently never tested**, and an edited `expr` keeps being
+/// checked against the old expression while the suite stays green. Neither
+/// the ratchet nor the mismatch count can see that: both are computed from
+/// `golden.json` alone.
+///
+/// This matters most for Tasks 4-6, whose brief tells them to add corpus
+/// entries FIRST and regenerate second. Forgetting the second step is the
+/// natural mistake, and it produces a green run.
+///
+/// The four fields compared are everything the harness copies through and the
+/// comparison depends on: `id`, `expr`, `context`, `compare`. The `result` is
+/// the harness's output and is deliberately not compared to anything.
+#[test]
+fn corpus_and_golden_describe_the_same_expressions() {
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Described {
+        id: String,
+        expr: String,
+        #[serde(default)]
+        context: serde_json::Map<String, Value>,
+        #[serde(default)]
+        compare: CompareMode,
+    }
+
+    let corpus: Vec<Described> = serde_json::from_str(include_str!("../oracle/corpus.json"))
+        .expect("oracle/corpus.json must parse as a JSON array");
+    let golden: Vec<Described> = serde_json::from_str(include_str!("../oracle/golden.json"))
+        .expect("oracle/golden.json must parse as a JSON array");
+
+    assert_eq!(
+        corpus.len(),
+        golden.len(),
+        "oracle/corpus.json has {} entries and oracle/golden.json has {} -- regenerate the \
+         golden file (see oracle/README.md)",
+        corpus.len(),
+        golden.len()
+    );
+
+    let mut drifted = Vec::new();
+    for (c, g) in corpus.iter().zip(golden.iter()) {
+        if c != g {
+            drifted.push(format!("  corpus: {c:?}\n  golden: {g:?}"));
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "{} corpus entr(y/ies) do not match oracle/golden.json -- regenerate the golden file \
+         (see oracle/README.md), and review the diff:\n{}",
+        drifted.len(),
+        drifted.join("\n")
+    );
 }
 
 /// The baseline: the ids that do not match yet.
@@ -201,16 +395,10 @@ fn render_corpus_matches_golden() {
     let mut detail: BTreeMap<String, String> = BTreeMap::new();
     let mut shape_checked = Vec::new();
     let mut error_class = Vec::new();
+    let mut panics = Vec::new();
 
     for entry in &golden {
-        let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            render_via_egret(&entry.expr, &entry.context)
-        }));
-
-        let actual_result: Result<String, String> = match actual {
-            Ok(inner) => inner,
-            Err(panic) => Err(panic_message(panic)),
-        };
+        let actual_result = render_via_egret(&entry.expr, &entry.context);
 
         let non_deterministic = NON_DETERMINISTIC.contains(&entry.id.as_str());
 
@@ -226,33 +414,28 @@ fn render_corpus_matches_golden() {
             );
         }
 
-        let matches = if non_deterministic {
+        let panicked = matches!(actual_result, Outcome::Panic(_));
+        if panicked {
+            panics.push(entry.id.clone());
+        } else if non_deterministic {
             shape_checked.push(entry.id.clone());
-            shape_ok(&entry.id, &entry.result, &actual_result)
         } else if entry.compare == CompareMode::ErrorClass {
             error_class.push(entry.id.clone());
-            actual_result.is_err()
-        } else {
-            match (&entry.result, &actual_result) {
-                (GoldenResult::Ok(expected), Ok(actual)) => expected == actual,
-                (GoldenResult::Err { error: expected }, Err(actual)) => expected == actual,
-                _ => false,
-            }
-        };
+        }
+
+        let matches = entry_matches(entry, &actual_result);
 
         if !matches {
             let expected_display = match &entry.result {
                 GoldenResult::Ok(s) => format!("Ok({s:?})"),
                 GoldenResult::Err { error } => format!("Err({error:?})"),
             };
-            let actual_display = match &actual_result {
-                Ok(s) => format!("Ok({s:?})"),
-                Err(e) => format!("Err({e:?})"),
-            };
-            let note = match (non_deterministic, entry.compare) {
-                (true, _) => " [SHAPE-CHECKED, not compared by value]",
-                (false, CompareMode::ErrorClass) => " [ERROR-CLASS: egret must also fail]",
-                (false, CompareMode::Exact) => "",
+            let actual_display = actual_result.display();
+            let note = match (panicked, non_deterministic, entry.compare) {
+                (true, _, _) => " [PANIC -- never a match, in any mode]",
+                (false, true, _) => " [SHAPE-CHECKED, not compared by value]",
+                (false, false, CompareMode::ErrorClass) => " [ERROR-CLASS: egret must also fail]",
+                (false, false, CompareMode::Exact) => "",
             };
             mismatching.insert(entry.id.clone());
             detail.insert(
@@ -286,6 +469,13 @@ fn render_corpus_matches_golden() {
         error_class.len(),
         error_class.join(", ")
     );
+    if !panics.is_empty() {
+        println!(
+            "  {} PANICKED and are mismatches regardless of mode: {}",
+            panics.len(),
+            panics.join(", ")
+        );
+    }
 
     let baseline = baseline();
 
@@ -297,6 +487,23 @@ fn render_corpus_matches_golden() {
     let banked: Vec<&String> = baseline.difference(&mismatching).collect();
 
     let mut failures = String::new();
+    // Unconditional, and NOT subject to the baseline. A baselined id means
+    // "egret does not reproduce this value yet"; it never means "egret may
+    // crash here". Without this, a panic on an already-baselined entry is
+    // reported in the printed summary and still exits 0 -- which is the same
+    // class of silence the [`Outcome::Panic`] variant was introduced to end.
+    if !panics.is_empty() {
+        failures.push_str(&format!(
+            "\nPANIC: the renderer panicked on {} entr(y/ies). A panic is never an acceptable \
+             outcome, baselined or not:\n{}\n",
+            panics.len(),
+            panics
+                .iter()
+                .map(|id| detail[id].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
     if !stale.is_empty() {
         failures.push_str(&format!(
             "\noracle/baseline.txt names {} id(s) that are not in golden.json at all -- \

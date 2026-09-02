@@ -249,7 +249,11 @@ public final class Oracle {
         }
 
         Object inline = expr;
-        for (int i = 0; i < 100; i++) {
+        // Inclusive: VariableRenderer.renderRecursively throws when
+        // renderingCount > MAX_RENDERING_AMOUNT and is first called with 0, so
+        // renderOnce runs at counts 0..=100 -- 101 passes, not 100. Matches
+        // runners::env::render_str's `0..=MAX_RENDERING_AMOUNT`.
+        for (int i = 0; i <= 100; i++) {
             Object result = renderOnce(engine, (String) inline, variables);
 
             if (result == null) {

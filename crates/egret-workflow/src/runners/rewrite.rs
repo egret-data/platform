@@ -1514,7 +1514,7 @@ mod tests {
     /// actually agrees with Kestra's `InExpression` on every operand pair is
     /// Task 3's oracle measurement -- this only pins the syntactic rewrite.
     #[test]
-    fn is_in_becomes_the_in_operator() {
+    fn is_in_becomes_a_kestra_is_in_call() {
         // Exact match: the earlier `out.contains(" in ")` /
         // `!out.contains("isIn")` pair is satisfied by
         // `format!("({right} in {left})")` too -- which INVERTS the
@@ -1525,6 +1525,44 @@ mod tests {
         assert_eq!(
             rewrite_and_parse("{{ a isIn b }}"),
             "{{kestra_is_in(( a ), ( b ))}}"
+        );
+
+        // Combined forms. Nothing pinned these before -- there was exactly
+        // ONE positive `isIn` test in this file -- so a change to the
+        // emitted call's shape could have broken `isIn` in composition
+        // while the single-operator test stayed green. Each of these was
+        // parse-checked by `rewrite_and_parse`, which is what makes them
+        // worth having rather than three more string assertions.
+        //
+        // `??` and `isIn` are the SAME tier (30), and Pebble's binary
+        // operators at one tier are left-associative -- which this module
+        // gets by splitting at the RIGHTMOST such operator. So whichever of
+        // the two is written second is the outer call, and the pair is not
+        // symmetric. Both directions are asserted because a rewrite that
+        // split leftmost would still pass one of them.
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b isIn c }}"),
+            "{{kestra_is_in((kestra_null_coalesce( a ,  b )), ( c ))}}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ a isIn b ?? c }}"),
+            "{{kestra_null_coalesce(kestra_is_in(( a ), ( b )),  c )}}"
+        );
+        // Lower-tier `and` is a boundary: neither `isIn` may swallow it.
+        assert_eq!(
+            rewrite_and_parse("{{ a isIn b and c isIn d }}"),
+            "{{(kestra_is_in(( a ), ( b ))) and (kestra_is_in(( c ), ( d )))}}"
+        );
+        // As a ternary condition, and inside a tag body -- the two positions
+        // where a bare `in` used to be at risk of colliding with the `for`
+        // tag's own `in` keyword. Now that the output is a call, it cannot.
+        assert_eq!(
+            rewrite_and_parse("{{ a isIn b ? 'y' : 'n' }}"),
+            "{{( 'y' ) if (kestra_is_in(( a ), ( b ))) else  'n' }}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{% if a isIn b %}y{% endif %}"),
+            "{% if kestra_is_in(( a ), ( b ))%}y{% endif %}"
         );
 
         // Not a regex: `isIn` inside a string literal survives untouched --

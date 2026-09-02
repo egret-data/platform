@@ -74,19 +74,27 @@
 //! empties every typo'd variable in every flow.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
+use std::sync::Arc;
 
-use minijinja::value::{Value as MjValue, ValueKind};
-use minijinja::{
-    AutoEscape, Environment, Error as MjError, ErrorKind as MjErrorKind, State, UndefinedBehavior,
-};
+use minijinja::value::{Enumerator, Object, ObjectRepr, Value as MjValue, ValueKind};
+use minijinja::{AutoEscape, Environment, Error as MjError, State, UndefinedBehavior};
 use regex::Regex;
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use super::rewrite::{rewrite, RewriteError};
 
 /// `VariableRenderer.MAX_RENDERING_AMOUNT`. A render whose output is itself a
 /// template renders again; this bounds that.
+///
+/// Note the arithmetic, because it is easy to be one out: Kestra's
+/// `renderRecursively(int renderingCount, ...)` throws when
+/// `renderingCount > MAX_RENDERING_AMOUNT` and is first called with `0`, so
+/// `renderOnce` runs at counts `0..=100` — **101 passes**, not 100. The loop
+/// below is `0..=MAX_RENDERING_AMOUNT` for that reason.
 pub const MAX_RENDERING_AMOUNT: usize = 100;
 
 /// Instruction budget for one render pass. Exhaustion is a clean minijinja
@@ -140,8 +148,15 @@ const RECURSION_LIMIT: usize = 64;
 /// 1 MiB, the same number [`egret-dataapi`'s SQL renderer uses][dataapi] and
 /// for the same reason: a real `Property` is at most a few KB (a command line,
 /// a URI, a small JSON body), so this is three orders of magnitude of headroom
-/// and still bounded. Enforced by rendering into a sized sink rather than by
-/// checking afterwards, so the memory is never allocated in the first place.
+/// and still bounded.
+///
+/// **What it does and does not bound.** It bounds *accumulated* output: the
+/// render stops the moment the total crosses the budget, which is what the
+/// re-render loop needs, since each pass renders the previous pass's output.
+/// It does **not** bound a single value's own allocation — `{{ 'a' * 8000000 }}`
+/// builds the whole 8 MB string inside minijinja's `s.repeat(n)` before the
+/// sink ever sees a byte. Bounding that would need a limit inside the engine,
+/// which minijinja does not offer.
 ///
 /// [dataapi]: ../../../egret_dataapi/render/index.html
 const MAX_OUTPUT_BYTES: usize = 1 << 20;
@@ -234,7 +249,7 @@ pub enum RenderError {
 /// W2 does not build an execution context — that is W3's job (see the crate
 /// doc). This type is the shape W3 will fill.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RenderContext(BTreeMap<String, JsonValue>);
+pub struct RenderContext(Vec<(String, MjValue)>);
 
 impl RenderContext {
     /// An empty context. A template that references any variable will fail
@@ -243,18 +258,39 @@ impl RenderContext {
         Self::default()
     }
 
-    /// Binds one top-level name.
+    /// Binds one top-level name, at the end of the current order.
+    ///
+    /// Rebinding an existing name replaces its value **in place**, keeping its
+    /// original position, which is what a `LinkedHashMap.put` does.
     pub fn insert(&mut self, key: impl Into<String>, value: JsonValue) -> &mut Self {
-        self.0.insert(key.into(), value);
+        let key = key.into();
+        let value = json_to_minijinja(&value);
+        match self.0.iter_mut().find(|(name, _)| *name == key) {
+            Some(slot) => slot.1 = value,
+            None => self.0.push((key, value)),
+        }
         self
     }
 
-    /// The bindings, for callers that need to inspect or extend them.
-    pub fn variables(&self) -> &BTreeMap<String, JsonValue> {
+    /// The bindings, in order, for callers that need to inspect them.
+    pub fn bindings(&self) -> &[(String, MjValue)] {
         &self.0
     }
 
     /// Builds a context from a JSON object.
+    ///
+    /// **Key order here is incidental, not guaranteed.** `serde_json::Map`
+    /// is an `IndexMap` only while `serde_json`'s `preserve_order` feature is
+    /// on, and in this workspace it is on **transitively** — `utoipa`
+    /// (workspace `Cargo.toml:61`) and `cedar-policy-core` both enable it, so
+    /// cargo's feature unification turns it on for everyone. Measured, not
+    /// assumed: `serde_json::from_str::<Value>(r#"{"b":1,"a":2}"#)`
+    /// round-trips as `{"b":1,"a":2}` in this tree.
+    ///
+    /// That is a dependency's decision, not this crate's, and it can change
+    /// without anything here changing. Use [`RenderContext::from_json_str`]
+    /// when order matters — which it does against Kestra, whose maps are
+    /// `LinkedHashMap`s (`oracle/corpus.json`'s `map-key-order`).
     ///
     /// Returns `None` for anything that is not an object: a template's
     /// variables are a name-to-value map and there is no sensible top-level
@@ -264,18 +300,222 @@ impl RenderContext {
     pub fn from_json_object(value: &JsonValue) -> Option<Self> {
         let object = value.as_object()?;
         Some(Self(
-            object.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            object
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+                .collect(),
         ))
     }
 
+    /// Builds a context from JSON **text**, preserving the order the keys
+    /// appear in — at every level, not just the top.
+    ///
+    /// This is the order-preserving entry point. serde's map visitor sees
+    /// entries in document order, so parsing straight into this type keeps
+    /// what `serde_json::Value` would already have thrown away.
+    pub fn from_json_str(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+
+    /// The context as one minijinja value: an order-preserving map object.
     fn to_minijinja(&self) -> MjValue {
-        MjValue::from_serialize(&self.0)
+        MjValue::from_object(OrderedMap(self.0.clone()))
+    }
+}
+
+/// Renders the bindings as JSON, in order, **including** nulls.
+///
+/// Diagnostics only (the oracle's mismatch report). Deliberately not the same
+/// as [`write_json`]'s `omit_nulls` mode: a debug line that hides the null a
+/// reader is trying to explain is worse than no debug line.
+impl fmt::Display for RenderContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = String::new();
+        write_json(&mut out, &self.to_minijinja(), false);
+        f.write_str(&out)
+    }
+}
+
+/// A minijinja map that iterates in **insertion** order.
+///
+/// Needed because **minijinja's own `ValueMap` is a `BTreeMap`** unless its
+/// `preserve_order` feature is on, and it is not (the workspace names six
+/// minijinja features and that is not one of them). Measured directly rather
+/// than inferred: `Value::from_serialize` on a `serde_json::Value` holding
+/// `{"b":1,"a":2,"c":3}` renders `{"a":2,"b":1,"c":3}`.
+///
+/// Note it is *only* minijinja that sorts here. `serde_json`'s own
+/// `preserve_order` is already on in this workspace, transitively via
+/// `utoipa` and `cedar-policy-core` — the same round-trip through
+/// `serde_json::Value` alone keeps `{"b":1,"a":2,"c":3}`. Turning
+/// minijinja's on would be a workspace-level feature change affecting
+/// `egret-dataapi`'s SQL renderer too, so the order-preserving map is local
+/// to this crate instead and **no workspace-level feature list was touched**.
+///
+/// Linear lookup is deliberate: a render context is a handful of top-level
+/// names and small nested objects, and a `Vec` is what keeps the order.
+#[derive(Debug, Clone, PartialEq)]
+struct OrderedMap(Vec<(String, MjValue)>);
+
+impl Object for OrderedMap {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Map
+    }
+
+    fn get_value(self: &Arc<Self>, key: &MjValue) -> Option<MjValue> {
+        let key = key.as_str()?;
+        self.0
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        Enumerator::Values(
+            self.0
+                .iter()
+                .map(|(name, _)| MjValue::from(name.clone()))
+                .collect(),
+        )
+    }
+
+    fn enumerator_len(self: &Arc<Self>) -> Option<usize> {
+        Some(self.0.len())
+    }
+}
+
+/// `serde_json::Value` -> `minijinja::Value`, mapping objects onto
+/// [`OrderedMap`] so everything downstream sees one map representation.
+///
+/// The order is whatever the `serde_json::Value` has, which for an object is
+/// sorted — see [`RenderContext::from_json_object`]. This exists so the
+/// convenience constructors keep working, not because it is the good path.
+fn json_to_minijinja(value: &JsonValue) -> MjValue {
+    match value {
+        JsonValue::Null => MjValue::from(()),
+        JsonValue::Bool(b) => MjValue::from(*b),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                MjValue::from(i)
+            } else if let Some(u) = n.as_u64() {
+                MjValue::from(u)
+            } else {
+                MjValue::from(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        JsonValue::String(s) => MjValue::from(s.clone()),
+        JsonValue::Array(items) => {
+            MjValue::from(items.iter().map(json_to_minijinja).collect::<Vec<_>>())
+        }
+        JsonValue::Object(map) => MjValue::from_object(OrderedMap(
+            map.iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+                .collect(),
+        )),
+    }
+}
+
+/// Deserialises straight into ordered `minijinja::Value`s, never through
+/// `serde_json::Value`.
+///
+/// serde hands a map visitor its entries in document order; going through
+/// `serde_json::Value` first would sort them before this code ever ran. That
+/// is the whole reason this visitor exists rather than a `From` impl.
+struct OrderedJson(MjValue);
+
+impl<'de> Deserialize<'de> for OrderedJson {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(OrderedJsonVisitor)
+    }
+}
+
+struct OrderedJsonVisitor;
+
+impl<'de> Visitor<'de> for OrderedJsonVisitor {
+    type Value = OrderedJson;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(())))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.visit_unit()
+    }
+
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(v)))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(v)))
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(v)))
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(v)))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(OrderedJson(MjValue::from(v.to_string())))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(OrderedJson(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(OrderedJson(MjValue::from(items)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut entries: Vec<(String, MjValue)> = Vec::new();
+        while let Some((key, OrderedJson(value))) = map.next_entry::<String, OrderedJson>()? {
+            entries.push((key, value));
+        }
+        Ok(OrderedJson(MjValue::from_object(OrderedMap(entries))))
+    }
+}
+
+impl<'de> Deserialize<'de> for RenderContext {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ContextVisitor;
+
+        impl<'de> Visitor<'de> for ContextVisitor {
+            type Value = RenderContext;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object of template variables")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut entries = Vec::new();
+                while let Some((key, OrderedJson(value))) =
+                    map.next_entry::<String, OrderedJson>()?
+                {
+                    entries.push((key, value));
+                }
+                Ok(RenderContext(entries))
+            }
+        }
+
+        d.deserialize_map(ContextVisitor)
     }
 }
 
 impl From<BTreeMap<String, JsonValue>> for RenderContext {
     fn from(map: BTreeMap<String, JsonValue>) -> Self {
-        Self(map)
+        Self(
+            map.iter()
+                .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
+                .collect(),
+        )
     }
 }
 
@@ -352,7 +592,28 @@ fn kestra_undefined_coalesce(_state: &State, left: MjValue, right: MjValue) -> M
 /// module's formatter rules. It is what makes the number-versus-string row
 /// work.
 fn kestra_is_in(_state: &State, left: MjValue, right: MjValue) -> Result<MjValue, MjError> {
-    if left.is_undefined() || left.is_none() || right.is_undefined() || right.is_none() {
+    // `InExpression`'s `leftValue == null || rightValue == null` guard, and
+    // ONLY that. It is about a Java `null`, which Pebble keeps distinct from
+    // an absent variable: `{{ nothere isIn ['a'] }}` throws
+    // `RootAttributeNotFoundException` under `strictVariables(true)` rather
+    // than returning `false` (`oracle/corpus.json`'s `isin-undefined-left`,
+    // `isin-undefined-right`, `isin-missing-attr-left`).
+    //
+    // **Do not add `is_undefined()` here.** minijinja does not apply
+    // `UndefinedBehavior::Strict` to function ARGUMENTS (see this module's
+    // strictness note), so moving `isIn` from an operator to a call means an
+    // undefined operand arrives here instead of raising. Swallowing it would
+    // make a typo'd variable inside an `isIn` silently decide a branch, which
+    // is strictly worse than the three divergences this function was written
+    // to fix. Returning the undefined unchanged is what makes it raise at the
+    // point of use, exactly as it would have as a bare operator.
+    if left.is_undefined() {
+        return Ok(left);
+    }
+    if right.is_undefined() {
+        return Ok(right);
+    }
+    if left.is_none() || right.is_none() {
         return Ok(MjValue::from(false));
     }
 
@@ -416,17 +677,196 @@ fn json_writer_formatter(
             out.write_str(if value.is_true() { "true" } else { "false" })?;
             Ok(())
         }
-        ValueKind::Seq | ValueKind::Map => {
-            let json = serde_json::to_string(value).map_err(|e| {
-                MjError::new(
-                    MjErrorKind::InvalidOperation,
-                    format!("value cannot be rendered as JSON: {e}"),
-                )
-            })?;
+        ValueKind::Seq | ValueKind::Map | ValueKind::Iterable => {
+            let mut json = String::new();
+            write_json(&mut json, value, true);
             out.write_str(&json)?;
             Ok(())
         }
+        // A non-integer number goes through `StringBuilder.append(double)` in
+        // `JsonWriter.writeSpecialized(double)`, i.e. `Double.toString`.
+        // minijinja's own float rendering is not that -- see
+        // [`write_java_double`].
+        ValueKind::Number if !value.is_integer() => {
+            let mut buf = String::new();
+            match f64::try_from(value.clone()) {
+                Ok(f) => write_java_double(&mut buf, f),
+                // A number that is neither an integer nor an f64 has no
+                // Java counterpart to imitate; render it as minijinja would
+                // rather than guess.
+                Err(_) => buf.push_str(&value.to_string()),
+            }
+            out.write_str(&buf)?;
+            Ok(())
+        }
         _ => minijinja::escape_formatter(out, state, value),
+    }
+}
+
+/// Writes `value` as JSON the way Jackson's `JacksonMapper.ofJson()` does.
+///
+/// Three things differ from `serde_json::to_string`, each measured against a
+/// corpus entry rather than assumed:
+///
+/// - **key order** is the map's own (insertion) order, not sorted --
+///   `map-key-order`: `{"b":1,"a":2,"c":3}`, not `{"a":2,"b":1,"c":3}`;
+/// - **null map entries are omitted, recursively**, because the mapper is
+///   configured `JsonInclude.Include.NON_NULL` -- `map-nested-null`:
+///   `{"a":null,"b":{"c":null,"d":1},"e":[null,1]}` renders
+///   `{"b":{"d":1},"e":[null,1]}`. Note the array element is **kept**:
+///   `NON_NULL` applies to object properties, not to sequence elements, and
+///   that entry exists to pin exactly that asymmetry;
+/// - **floats** use `Double.toString` -- see [`write_java_double`].
+///
+/// `omit_nulls` is `false` only for [`RenderContext`]'s `Display`, which is
+/// diagnostics and must not hide the null a reader is trying to explain.
+fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
+    match value.kind() {
+        ValueKind::Undefined | ValueKind::None => out.push_str("null"),
+        ValueKind::Bool => out.push_str(if value.is_true() { "true" } else { "false" }),
+        ValueKind::Number => {
+            if value.is_integer() {
+                out.push_str(&value.to_string());
+            } else {
+                match f64::try_from(value.clone()) {
+                    Ok(f) => write_java_double(out, f),
+                    Err(_) => out.push_str(&value.to_string()),
+                }
+            }
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            out.push('[');
+            let mut first = true;
+            if let Ok(items) = value.try_iter() {
+                for item in items {
+                    if !first {
+                        out.push(',');
+                    }
+                    first = false;
+                    write_json(out, &item, omit_nulls);
+                }
+            }
+            out.push(']');
+        }
+        ValueKind::Map => {
+            out.push('{');
+            let mut first = true;
+            if let Ok(keys) = value.try_iter() {
+                for key in keys {
+                    let Ok(item) = value.get_item(&key) else {
+                        continue;
+                    };
+                    if omit_nulls && (item.is_none() || item.is_undefined()) {
+                        continue;
+                    }
+                    if !first {
+                        out.push(',');
+                    }
+                    first = false;
+                    write_json_string(out, &key.to_string());
+                    out.push(':');
+                    write_json(out, &item, omit_nulls);
+                }
+            }
+            out.push('}');
+        }
+        // Strings, and anything else that has no JSON shape of its own.
+        _ => write_json_string(out, &value.to_string()),
+    }
+}
+
+/// A JSON string literal. Delegated to `serde_json` so the escape set is the
+/// library's and not a hand-rolled one; Jackson's default escaping is the
+/// same (quote, backslash, control characters, and non-ASCII left as UTF-8).
+fn write_json_string(out: &mut String, s: &str) {
+    match serde_json::to_string(s) {
+        Ok(quoted) => out.push_str(&quoted),
+        // `to_string` on a `&str` cannot fail; this arm keeps the writer
+        // total rather than panicking in a formatter.
+        Err(_) => {
+            out.push('"');
+            out.push('"');
+        }
+    }
+}
+
+/// Java's `Double.toString`, which is what `JsonWriter` reaches through
+/// `StringBuilder.append(double)`.
+///
+/// Two formats, chosen by magnitude, and neither is Rust's `{}` or `{:?}`:
+///
+/// - `1e-3 <= |d| < 1e7` -> plain decimal with **at least one** fractional
+///   digit: `1.0`, `0.1`, `0.001`, `9999999.0`, `-1.5`;
+/// - otherwise -> scientific, mantissa in `[1,10)` with at least one
+///   fractional digit, `E`, and a bare exponent: `1.0E100`, `1.0E-7`,
+///   `1.2345678E7`.
+///
+/// Every one of those is a value in `oracle/corpus.json`'s `float-list`,
+/// whose golden was produced by real Kestra; none of them is a guess about
+/// what Java does.
+///
+/// Rust's `{:e}` supplies the shortest round-tripping digits and the base-10
+/// exponent, which is the same digit sequence Java picks, so this only has to
+/// re-lay-out what that gives.
+fn write_java_double(out: &mut String, x: f64) {
+    if x.is_nan() {
+        out.push_str("NaN");
+        return;
+    }
+    if x.is_infinite() {
+        out.push_str(if x > 0.0 { "Infinity" } else { "-Infinity" });
+        return;
+    }
+
+    let sci = format!("{x:e}");
+    let (mantissa, exponent) = match sci.split_once('e') {
+        Some(parts) => parts,
+        None => {
+            out.push_str(&sci);
+            return;
+        }
+    };
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+
+    out.push_str(sign);
+
+    if (-3..7).contains(&exponent) {
+        if exponent < 0 {
+            out.push_str("0.");
+            for _ in 0..(-exponent - 1) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else {
+            let point = exponent as usize + 1;
+            if digits.len() <= point {
+                out.push_str(&digits);
+                for _ in 0..(point - digits.len()) {
+                    out.push('0');
+                }
+                out.push_str(".0");
+            } else {
+                out.push_str(&digits[..point]);
+                out.push('.');
+                out.push_str(&digits[point..]);
+            }
+        }
+    } else {
+        out.push_str(&digits[..1]);
+        out.push('.');
+        if digits.len() > 1 {
+            out.push_str(&digits[1..]);
+        } else {
+            out.push('0');
+        }
+        out.push('E');
+        out.push_str(&exponent.to_string());
     }
 }
 
@@ -490,6 +930,15 @@ pub fn environment() -> Environment<'static> {
 /// the re-render loop, the raw-region protection, the rewrite, and the strip
 /// of the raw markers. [`crate::models::Property::render`] is this plus a
 /// conversion.
+///
+/// # A note on cost
+///
+/// This builds a fresh [`environment`] on every call — registering the
+/// functions, removing the globals, setting the formatter — which is wasted
+/// work when a caller renders many properties against one context. It is
+/// deliberately not optimised here: W3 is what introduces bulk rendering (a
+/// task's whole property set at once), and that is where a shared, reused
+/// `Environment` belongs, with a clear owner for its lifetime.
 pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
     // `VariableRenderer.java:76-79`: "it's not a Pebble template so we
     // short-circuit rendering". Note the test is `{`, not `{{` -- a source
@@ -502,7 +951,8 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     let variables = cx.to_minijinja();
 
     let mut current = template.to_string();
-    for _ in 0..MAX_RENDERING_AMOUNT {
+    // Inclusive: see [`MAX_RENDERING_AMOUNT`]'s note on Kestra's off-by-one.
+    for _ in 0..=MAX_RENDERING_AMOUNT {
         let next = render_once(&env, &current, &variables)?;
         if next == current {
             return Ok(strip_raw_markers(&next));
@@ -547,9 +997,10 @@ fn render_once(
 
 /// An [`io::Write`] that refuses past a byte budget instead of growing.
 ///
-/// The point is that the bytes are never allocated: checking the length of a
-/// finished `String` would mean having built the oversized `String` first,
-/// which is the allocation the cap exists to prevent.
+/// This bounds *accumulated* output across a whole render, and stops at the
+/// first write that would cross the budget rather than building a finished
+/// oversized `String` and measuring it afterwards. It does not bound what a
+/// single expression allocates on its way here — see [`MAX_OUTPUT_BYTES`].
 struct CappedSink {
     buf: Vec<u8>,
     limit: usize,
@@ -605,6 +1056,14 @@ fn replace_raw_tags(source: &str) -> (String, Vec<(String, String)>) {
 
 /// `VariableRenderer.putBackRawTags`: substitute each placeholder back for the
 /// region it stood in for, markers and all.
+///
+/// This runs **after** [`render_once`]'s size check, so the string it returns
+/// can be larger than [`MAX_OUTPUT_BYTES`] — by the difference between a
+/// 36-byte UUID and the raw region it stands for. That is bounded by the
+/// source template's own length, not by anything an expression can generate,
+/// so it is not a resource-exhaustion path; but the cap's name promises a
+/// bound the return value of this function does not strictly satisfy, and
+/// that is worth knowing rather than discovering.
 fn put_back_raw_tags(replacers: &[(String, String)], rendered: &str) -> String {
     let mut out = rendered.to_string();
     for (placeholder, original) in replacers {
@@ -637,6 +1096,13 @@ mod tests {
     /// `coalesce-null` / `undef-coalesce-null` pair is the measured proof that
     /// collapsing the two is wrong, and this is that pair as a unit test so a
     /// regression does not have to wait for the oracle to be read.
+    ///
+    /// Mutation-checked, both directions, before this was committed: with
+    /// `kestra_null_coalesce` returning its LEFT operand unconditionally (the
+    /// implementation a reader might assume), the first assertion renders
+    /// `""` and this fails; with `kestra_undefined_coalesce` collapsed into
+    /// `kestra_null_coalesce`, the second renders `"fallback"` and this
+    /// fails.
     #[test]
     fn the_two_coalescing_operators_differ_on_a_present_null() {
         assert_eq!(
@@ -658,11 +1124,6 @@ mod tests {
         );
     }
 
-    /// Stub check: with `kestra_null_coalesce` returning its LEFT operand
-    /// unconditionally (the implementation a reader might assume), the first
-    /// assertion above renders `""` and fails. With `kestra_undefined_coalesce`
-    /// collapsed into `kestra_null_coalesce`, the second renders `"fallback"`
-    /// and fails. Both were run before this test was committed.
     #[test]
     fn a_missing_variable_is_an_error_not_an_empty_string() {
         let err = render("{{ nothere }}", json!({})).unwrap_err();
@@ -708,6 +1169,154 @@ mod tests {
         // A scalar is still written as-is, not JSON-quoted.
         assert_eq!(render("{{ s }}", json!({ "s": "ada" })).unwrap(), "ada");
         assert_eq!(render("{{ n }}", json!({ "n": 42 })).unwrap(), "42");
+    }
+
+    /// Renders from JSON **text**, so key order survives -- the only entry
+    /// point that can, and the one `tests/oracle.rs` uses.
+    fn render_ordered(template: &str, json: &str) -> Result<String, RenderError> {
+        let cx = RenderContext::from_json_str(json).expect("test context must be a JSON object");
+        render_str(template, &cx)
+    }
+
+    /// Kestra's variables are `LinkedHashMap`s and Jackson writes them in
+    /// insertion order; both `serde_json::Map` and minijinja's own `ValueMap`
+    /// are `BTreeMap`s by default, so without [`OrderedMap`] this renders the
+    /// keys sorted. `oracle/corpus.json`'s `map-key-order` is the golden.
+    ///
+    /// The context is parsed from TEXT on purpose: routing it through a
+    /// `serde_json::Value` first would sort the keys before this code ran, and
+    /// the test would pass against a broken implementation.
+    #[test]
+    fn map_keys_render_in_document_order_not_sorted() {
+        assert_eq!(
+            render_ordered("{{ m }}", r#"{"m": {"b": 1, "a": 2, "c": 3}}"#).unwrap(),
+            r#"{"b":1,"a":2,"c":3}"#
+        );
+        // Order survives being handed to the engine and coming back, which is
+        // not free: minijinja round-trips a context through `Serialize`.
+        assert_eq!(
+            render_ordered(
+                "{% for k in m %}{{ k }}{% endfor %}",
+                r#"{"m": {"b": 1, "a": 2}}"#
+            )
+            .unwrap(),
+            "ba"
+        );
+        // The `serde_json::Value` path happens to agree TODAY, because
+        // `serde_json`'s `preserve_order` is on transitively (utoipa,
+        // cedar-policy-core). That is a dependency's decision and could
+        // change under us, which is why the oracle uses `from_json_str`.
+        // Pinned as an observation, not as a guarantee.
+        assert_eq!(
+            render("{{ m }}", json!({ "m": { "b": 1, "a": 2, "c": 3 } })).unwrap(),
+            r#"{"b":1,"a":2,"c":3}"#
+        );
+        // What genuinely sorts is minijinja's own ValueMap, which is why
+        // `OrderedMap` exists. This is that layer, directly.
+        assert_eq!(
+            serde_json::to_string(&MjValue::from_serialize(
+                serde_json::from_str::<JsonValue>(r#"{"b":1,"a":2,"c":3}"#).unwrap()
+            ))
+            .unwrap(),
+            r#"{"a":2,"b":1,"c":3}"#
+        );
+    }
+
+    /// Jackson is configured `JsonInclude.Include.NON_NULL`, so a null map
+    /// entry is omitted -- at every level. A null **array element** is kept,
+    /// because `NON_NULL` is about object properties. `map-nested-null` exists
+    /// to pin exactly that asymmetry.
+    #[test]
+    fn null_map_entries_are_omitted_recursively_but_null_array_elements_are_not() {
+        assert_eq!(
+            render_ordered(
+                "{{ m }}",
+                r#"{"m": {"a": null, "b": {"c": null, "d": 1}, "e": [null, 1]}}"#
+            )
+            .unwrap(),
+            r#"{"b":{"d":1},"e":[null,1]}"#
+        );
+        assert_eq!(
+            render_ordered("{{ m }}", r#"{"m": {"a": null}}"#).unwrap(),
+            "{}"
+        );
+    }
+
+    /// `JsonWriter` reaches `Double.toString` through
+    /// `StringBuilder.append(double)`, which is neither Rust's `{}` nor its
+    /// `{:?}`. Every value here is in `oracle/corpus.json`'s `float-list`, so
+    /// every expected string below was produced by real Kestra.
+    #[test]
+    fn floats_render_the_way_java_double_tostring_does() {
+        assert_eq!(
+            render_ordered(
+                "{{ fs }}",
+                "{\"fs\": [1.0, 0.1, 2.5, 1e100, 1e-7, 12345678.0, 0.001, 0.0001, 9999999.0, -1.5]}"
+            )
+            .unwrap(),
+            "[1.0,0.1,2.5,1.0E100,1.0E-7,1.2345678E7,0.001,1.0E-4,9999999.0,-1.5]"
+        );
+        // Also at the top level, not only inside a container.
+        assert_eq!(render_ordered("{{ f }}", r#"{"f": 1.0}"#).unwrap(), "1.0");
+        assert_eq!(
+            render_ordered("{{ f }}", r#"{"f": 1e100}"#).unwrap(),
+            "1.0E100"
+        );
+        // Integers are not floats and must not grow a `.0`.
+        assert_eq!(
+            render_ordered("{{ ns }}", r#"{"ns": [0, 1, -1, 1000000]}"#).unwrap(),
+            "[0,1,-1,1000000]"
+        );
+    }
+
+    /// `write_java_double`'s two branches and their boundary, directly.
+    /// `1e-3 <= |d| < 1e7` is plain decimal; outside it is scientific.
+    #[test]
+    fn java_double_formatting_switches_at_the_documented_boundaries() {
+        let f = |x: f64| {
+            let mut s = String::new();
+            write_java_double(&mut s, x);
+            s
+        };
+        assert_eq!(f(0.0), "0.0");
+        assert_eq!(f(-0.0), "-0.0");
+        assert_eq!(f(0.001), "0.001");
+        assert_eq!(f(0.0009), "9.0E-4");
+        assert_eq!(f(9999999.0), "9999999.0");
+        assert_eq!(f(10000000.0), "1.0E7");
+        assert_eq!(f(1000000.0), "1000000.0");
+        assert_eq!(f(f64::NAN), "NaN");
+        assert_eq!(f(f64::INFINITY), "Infinity");
+        assert_eq!(f(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    /// **C2.** `isIn` became a function call, and minijinja does not apply
+    /// `UndefinedBehavior::Strict` to function arguments -- so without care an
+    /// undefined operand reaches `kestra_is_in` and gets answered `false`
+    /// instead of raising. That would let a typo'd variable silently decide a
+    /// branch, which is worse than the divergences the function fixed.
+    ///
+    /// All three rows are corpus entries whose golden is a Pebble
+    /// `RootAttributeNotFoundException` / `AttributeNotFoundException`.
+    #[test]
+    fn an_undefined_is_in_operand_raises_rather_than_answering_false() {
+        for source in [
+            "{{ nothere isIn ['a'] }}",
+            "{{ 'a' isIn nothere }}",
+            "{{ obj.missing isIn ['a'] }}",
+        ] {
+            let err = render(source, json!({ "obj": { "a": 1 } })).unwrap_err();
+            assert!(
+                matches!(err, RenderError::Template(ref m) if m.contains("undefined")),
+                "{source} must raise, got: {err:?}"
+            );
+        }
+        // A bound null is a different state and IS `false` -- that is
+        // `InExpression`'s own `leftValue == null` guard.
+        assert_eq!(
+            render("{{ n isIn ['a'] }}", json!({ "n": null })).unwrap(),
+            "false"
+        );
     }
 
     /// `isIn` is `InExpression`, not minijinja's `in`. All four rows are also
@@ -897,7 +1506,7 @@ mod tests {
         assert_eq!(
             RenderContext::from_json_object(&json!({ "a": 1 }))
                 .unwrap()
-                .variables()
+                .bindings()
                 .len(),
             1
         );
