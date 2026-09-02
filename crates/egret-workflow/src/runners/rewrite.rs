@@ -129,7 +129,36 @@ use thiserror::Error;
 pub enum RewriteError {
     #[error("unterminated string literal (opened with {quote:?}) in expression: {snippet}")]
     UnterminatedString { quote: char, snippet: String },
+    #[error(
+        "expression nested too deeply (limit {limit}, reached {depth}) -- refusing to keep \
+         recursing rather than risk a stack overflow"
+    )]
+    TooDeeplyNested { depth: usize, limit: usize },
 }
+
+/// The recursion-depth ceiling `expand`/`resolve_flat`/`resolve_pieces` share
+/// (one shared counter across all three, since they call each other
+/// mutually -- see their doc comments). `rewrite` is `pub`, re-exported at
+/// the crate root, and its input is user-supplied workflow source; without a
+/// bound, both a deeply parenthesized expression
+/// (`{{ ((((...))))}}`, walked by `expand`'s recursion into `resolve_flat`)
+/// and a very long flat operator chain
+/// (`{{ a ?? b ?? c ?? ... ?? z }}`, walked by `resolve_pieces`'s own
+/// rightmost-split-and-recurse-left pattern) can recurse arbitrarily deep.
+/// In Rust that is not a catchable error -- a real stack overflow aborts the
+/// whole process (`fatal runtime error: stack overflow`), and once Task 3
+/// wires rendering into a request path, that is a remote process abort from
+/// ordinary user input, not a contained one.
+///
+/// Measured (not assumed) before picking a number: nested parens crash
+/// somewhere between 2,000 and 5,000 levels on the default 8 MiB main
+/// thread stack, and between 1,000 and 5,000 on the 2 MiB stack tokio gives
+/// its worker threads -- the smaller, more realistic bound for a server
+/// process. `500` sits comfortably below even that narrower range (2x
+/// headroom to its lower edge) while still being far more nesting than any
+/// real Kestra expression plausibly needs -- a handful of levels is typical,
+/// a few dozen would already be unusual.
+const MAX_NESTING_DEPTH: usize = 500;
 
 /// Rewrites a Kestra expression template into one minijinja can parse.
 ///
@@ -616,7 +645,7 @@ enum OpKind {
 /// innermost first) into a single opaque [`Piece::Atom`], leaving only the
 /// tokens that are directly at this nesting level as [`Piece::Op`]s for
 /// [`resolve_pieces`] to act on.
-fn expand(tokens: &[Tok]) -> Result<Vec<Piece>, RewriteError> {
+fn expand(tokens: &[Tok], depth: usize) -> Result<Vec<Piece>, RewriteError> {
     let mut pieces = Vec::new();
     let mut i = 0usize;
 
@@ -625,7 +654,25 @@ fn expand(tokens: &[Tok]) -> Result<Vec<Piece>, RewriteError> {
             Tok::LParen(open) | Tok::LBracket(open) | Tok::LBrace(open) => {
                 match find_matching_close(tokens, i) {
                     Some(close_idx) => {
-                        let inner = resolve_flat(&tokens[i + 1..close_idx])?;
+                        // Checked HERE, before recursing, not only inside
+                        // `resolve_pieces` -- entering a paren/bracket/brace
+                        // group is one level deeper (see
+                        // `MAX_NESTING_DEPTH`'s doc), and `expand` calls
+                        // `resolve_flat` calls `expand` for each one, so for
+                        // `{{ ((((...))))}}` this mutual recursion walks
+                        // ALL THE WAY to the innermost group before
+                        // `resolve_pieces` (which only runs once `expand`
+                        // returns) ever gets a chance to check anything. A
+                        // check placed only in `resolve_pieces` would still
+                        // let the stack grow past the limit on the way down
+                        // -- it has to happen at the actual recursion site.
+                        if depth + 1 > MAX_NESTING_DEPTH {
+                            return Err(RewriteError::TooDeeplyNested {
+                                depth: depth + 1,
+                                limit: MAX_NESTING_DEPTH,
+                            });
+                        }
+                        let inner = resolve_flat(&tokens[i + 1..close_idx], depth + 1)?;
                         let close_text = tokens[close_idx].text();
                         pieces.push(Piece::Atom(format!("{open}{inner}{close_text}")));
                         i = close_idx + 1;
@@ -697,9 +744,9 @@ fn find_matching_close(tokens: &[Tok], open_idx: usize) -> Option<usize> {
 }
 
 /// Tokenizes and fully resolves one slice of expression source.
-fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
-    let pieces = expand(tokens)?;
-    Ok(resolve_pieces(&pieces))
+fn resolve_flat(tokens: &[Tok], depth: usize) -> Result<String, RewriteError> {
+    let pieces = expand(tokens, depth)?;
+    resolve_pieces(&pieces, depth)
 }
 
 /// Rewrites a flat (no unresolved parens/brackets/braces) sequence of pieces
@@ -791,25 +838,32 @@ fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
 ///    plain `{{ 'b' > 'a' }}` still reconstructs byte-for-byte instead of
 ///    being re-formatted through the tier-30 `{left} {op} {right}` shape for
 ///    no reason.
-fn resolve_pieces(pieces: &[Piece]) -> String {
+fn resolve_pieces(pieces: &[Piece], depth: usize) -> Result<String, RewriteError> {
+    if depth > MAX_NESTING_DEPTH {
+        return Err(RewriteError::TooDeeplyNested {
+            depth,
+            limit: MAX_NESTING_DEPTH,
+        });
+    }
+
     if let Some(segments) = split_on_top_level_commas(pieces) {
-        return segments
+        let resolved: Result<Vec<String>, RewriteError> = segments
             .into_iter()
-            .map(resolve_pieces)
-            .collect::<Vec<_>>()
-            .join(",");
+            .map(|s| resolve_pieces(s, depth + 1))
+            .collect();
+        return Ok(resolved?.join(","));
     }
 
     if let Some(colon_idx) = find_map_separator_colon(pieces) {
-        let key = resolve_pieces(&pieces[..colon_idx]);
-        let value = resolve_pieces(&pieces[colon_idx + 1..]);
-        return format!("{key}:{value}");
+        let key = resolve_pieces(&pieces[..colon_idx], depth + 1)?;
+        let value = resolve_pieces(&pieces[colon_idx + 1..], depth + 1)?;
+        return Ok(format!("{key}:{value}"));
     }
 
     if let Some((q_idx, colon_idx)) = find_ternary(pieces) {
-        let cond = resolve_pieces(&pieces[..q_idx]);
-        let then_branch = resolve_pieces(&pieces[q_idx + 1..colon_idx]);
-        let else_branch = resolve_pieces(&pieces[colon_idx + 1..]);
+        let cond = resolve_pieces(&pieces[..q_idx], depth + 1)?;
+        let then_branch = resolve_pieces(&pieces[q_idx + 1..colon_idx], depth + 1)?;
+        let else_branch = resolve_pieces(&pieces[colon_idx + 1..], depth + 1)?;
         // Parens on the then-branch, and defensively on the condition too.
         // Pebble's `parseTernaryExpression` parses the then-branch at full
         // expression precedence, so in real Pebble `a ? b ? c : d : e` means
@@ -823,7 +877,7 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
         // *valid* minijinja with *silently different* semantics rather than
         // failing loudly -- verified with `a=false, b=true`: Pebble gives
         // `e`, the unparenthesized form gave `c`.
-        return format!("({then_branch}) if ({cond}) else {else_branch}");
+        return Ok(format!("({then_branch}) if ({cond}) else {else_branch}"));
     }
 
     let has_rewritable_op = pieces.iter().any(|p| {
@@ -850,15 +904,15 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
         // `chained_or_splits_rightmost_for_left_associativity` below
         // depends on.
         if let Some(idx) = find_rightmost_word(pieces, "or") {
-            let left = resolve_pieces(&pieces[..idx]);
-            let right = resolve_pieces(&pieces[idx + 1..]);
-            return format!("({left}) or ({right})");
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
+            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
+            return Ok(format!("({left}) or ({right})"));
         }
 
         if let Some(idx) = find_rightmost_word(pieces, "and") {
-            let left = resolve_pieces(&pieces[..idx]);
-            let right = resolve_pieces(&pieces[idx + 1..]);
-            return format!("({left}) and ({right})");
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
+            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
+            return Ok(format!("({left}) and ({right})"));
         }
 
         // Tier 20: `is`/`is not`/`contains`, still lower precedence than
@@ -876,12 +930,9 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
         // `resolve_pieces` reconstructs verbatim, reproducing `is not`
         // correctly with no extra code.
         if let Some(idx) = find_rightmost_tier20(pieces) {
-            let word = match &pieces[idx] {
-                Piece::Atom(s) => s.as_str(),
-                _ => unreachable!("find_rightmost_tier20 only returns Atom indices"),
-            };
-            let left = resolve_pieces(&pieces[..idx]);
-            let right = resolve_pieces(&pieces[idx + 1..]);
+            let is_contains = matches!(&pieces[idx], Piece::Atom(s) if s == "contains");
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
+            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
             // `contains` is NORMAL (both sides general expressions): parens
             // on both sides, same reasoning and same associativity-proof
             // need as `or`/`and` above. `is`/`is not`'s right side is
@@ -891,24 +942,33 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
             // side needs no parens either, since the one-sided exclusion in
             // `find_rightmost_tier20` (not a rendering trick) is what keeps
             // an `is` node from ever incorrectly becoming the outer split.
-            if word == "contains" {
-                return format!("({left}) contains ({right})");
+            if is_contains {
+                return Ok(format!("({left}) contains ({right})"));
             }
-            return format!("{left} {word} {right}");
+            // Only ever `is` here -- `find_rightmost_tier20` returns just
+            // `is`/`contains`, and `contains` already returned above, so
+            // there is no third value to hold in a variable for.
+            return Ok(format!("{left} is {right}"));
         }
 
         if let Some(idx) = find_rightmost_tier30(pieces) {
-            let left = resolve_pieces(&pieces[..idx]);
-            let right = resolve_pieces(&pieces[idx + 1..]);
-            return match &pieces[idx] {
+            let left = resolve_pieces(&pieces[..idx], depth + 1)?;
+            let right = resolve_pieces(&pieces[idx + 1..], depth + 1)?;
+            return Ok(match &pieces[idx] {
                 Piece::Op(OpKind::NullCoalesce, _) => {
                     format!("kestra_null_coalesce({left}, {right})")
                 }
                 Piece::Op(OpKind::UndefinedCoalesce, _) => {
                     format!("kestra_undefined_coalesce({left}, {right})")
                 }
-                // Provisional -- see this module's doc comment.
-                Piece::Op(OpKind::IsIn, _) => format!("({left} in {right})"),
+                // Provisional -- see this module's doc comment. Parens on
+                // BOTH sides, same reasoning as `or`/`and`/`contains` above
+                // -- `isIn`'s own precedence-30 boundary already stopped
+                // this splitting further, but a SURROUNDING tier-20
+                // operator (e.g. `a is defined isIn b`) needs `({left})` to
+                // be an atomic operand, not bare text an outer `is` could
+                // misparse into.
+                Piece::Op(OpKind::IsIn, _) => format!("(({left}) in ({right}))"),
                 // The untouched comparison operators, recognised here only
                 // as a tier-30 boundary so a coalesce/isIn search does not
                 // cross them -- rendered back out exactly as-is, never
@@ -917,17 +977,17 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
                 Piece::Op(OpKind::Question | OpKind::Colon, _) => {
                     unreachable!("find_rightmost_tier30 never returns a ternary token")
                 }
-            };
+            });
         }
     }
 
-    pieces
+    Ok(pieces
         .iter()
         .map(|p| match p {
             Piece::Atom(s) => s.as_str(),
             Piece::Op(_, s) => s.as_str(),
         })
-        .collect()
+        .collect())
 }
 
 /// Splits `pieces` on every top-level `,` (there are none nested inside a
@@ -1070,17 +1130,33 @@ fn is_tier30_trigger(p: &Piece) -> bool {
 /// the ordinary rightmost-among-the-tier behavior every other step in this
 /// module uses, so it is never excluded here.
 fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
-    pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
-        Piece::Atom(s) if s == "contains" => Some(i),
-        Piece::Atom(s) if s == "is" => {
-            if pieces[i + 1..].iter().any(is_tier30_trigger) {
-                None
-            } else {
-                Some(i)
+    for (i, p) in pieces.iter().enumerate().rev() {
+        match p {
+            Piece::Atom(s) if s == "contains" => return Some(i),
+            Piece::Atom(s) if s == "is" => {
+                // A disqualified `is` (a tier-30 trigger follows it)
+                // suppresses the WHOLE tier-20 step here -- it must not
+                // fall through to keep searching further left, the way a
+                // plain `find_map` naturally would on `None`. Continuing
+                // risks landing on a DIFFERENT tier-20 word (typically
+                // `contains`) that is actually part of THIS `is`'s own
+                // left operand, not a sibling split point at this level.
+                // Measured: `{{ l contains x is defined ?? y }}` is
+                // `((l contains x) is defined) ?? y` in Pebble; the
+                // find_map version instead skipped the disqualified `is`
+                // and accepted the earlier `contains`, grouping `contains`
+                // as the OUTER operation and producing the `false` reading
+                // instead of Pebble's `true`.
+                return if pieces[i + 1..].iter().any(is_tier30_trigger) {
+                    None
+                } else {
+                    Some(i)
+                };
             }
+            _ => {}
         }
-        _ => None,
-    })
+    }
+    None
 }
 
 /// Finds the last (rightmost) precedence-30 boundary among `pieces` --
@@ -1111,7 +1187,7 @@ fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
 /// expression.
 fn rewrite_expression(inner: &str) -> Result<String, RewriteError> {
     let tokens = tokenize(inner)?;
-    resolve_flat(&tokens)
+    resolve_flat(&tokens, 0)
 }
 
 /// Tokenizes and rewrites the inside of one `{% %}` region as a tag body --
@@ -1155,9 +1231,9 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             let target: String = rest[..b_idx].iter().map(Tok::text).collect();
             let boundary_text = rest[b_idx].text();
             let value_tokens = &rest[b_idx + 1..];
-            let value_pieces = expand(value_tokens)?;
+            let value_pieces = expand(value_tokens, 0)?;
             let value_has_top_level_ternary = find_ternary(&value_pieces).is_some();
-            let value = resolve_pieces(&value_pieces);
+            let value = resolve_pieces(&value_pieces, 0)?;
             let value = value.trim();
             // `for`'s iterable needs the same whole-conditional parens as
             // `if`'s condition below, for the same reason (see there) --
@@ -1178,9 +1254,9 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             format!("{} {boundary_text} {value}", target.trim())
         }
         None => {
-            let pieces = expand(rest)?;
+            let pieces = expand(rest, 0)?;
             let has_top_level_ternary = find_ternary(&pieces).is_some();
-            let expr = resolve_pieces(&pieces);
+            let expr = resolve_pieces(&pieces, 0)?;
             let expr = expr.trim();
             // Whole-conditional parens, but ONLY when a top-level ternary
             // is actually present in `rest` -- checked via `find_ternary`
@@ -1404,7 +1480,7 @@ mod tests {
         // a version with the wrapping parens dropped entirely, since
         // neither substring check says anything about operand order or
         // grouping.
-        assert_eq!(rewrite_and_parse("{{ a isIn b }}"), "{{( a  in  b )}}");
+        assert_eq!(rewrite_and_parse("{{ a isIn b }}"), "{{(( a ) in ( b ))}}");
 
         // Not a regex: `isIn` inside a string literal survives untouched --
         // a global, quote-blind `str::replace("isIn", "in")` would corrupt
@@ -1576,6 +1652,23 @@ but there is one on the next: '";
         );
     }
 
+    /// `for`'s iterable-side ternary-parens fix (`{% for i in a ? b : c
+    /// %}` needs the same whole-conditional wrapping `{% if flag ? 1 : 0
+    /// %}` does, per `rewrite_tag_body`'s doc) had zero coverage: the
+    /// sibling test above uses `list ?? []`, which has no ternary in it at
+    /// all, so it cannot see this. Real Pebble renders `{% for i in a ? b :
+    /// c %}12{% endfor %}` as `12` regardless of which of `b`/`c` is
+    /// selected, and the unmutated rewrite already parses; the gap this
+    /// test closes is that nothing was pinning `value_has_top_level_
+    /// ternary`'s wrapping specifically.
+    #[test]
+    fn for_tag_iterable_ternary_is_wrapped_in_parens() {
+        assert_eq!(
+            rewrite_and_parse("{% for i in a ? b : c %}12{% endfor %}"),
+            "{% for i in (( b ) if ( a ) else  c)%}12{% endfor %}"
+        );
+    }
+
     /// A ternary inside a `{% if %}` tag: proves the tag-body path shares
     /// the same expression rewriter (including the I3 then-branch-parens
     /// fix) as a `{{ }}` region, not a separate, weaker implementation.
@@ -1702,6 +1795,26 @@ but there is one on the next: '";
         assert_eq!(out, "{{(kestra_null_coalesce( a ,  b )) contains ( c )}}");
     }
 
+    /// A disqualified `is` (a tier-30 trigger follows it) must suppress
+    /// the WHOLE tier-20 step, not just that one candidate --
+    /// `find_rightmost_tier20`'s doc comment has the full reasoning.
+    /// Measured against real Pebble: `{{ l contains x is defined ?? y }}`
+    /// is `true` (grouped `((l contains x) is defined) ?? y`); a version
+    /// that let the search continue past the disqualified `is` to accept
+    /// the earlier `contains` instead grouped `contains` as the OUTER
+    /// operation and produced Pebble's `false` reading. Routed through
+    /// `rewrite_shape_only`: `contains` cannot parse in minijinja under any
+    /// spelling (see that helper's doc), so this is latent -- provably the
+    /// correct SHAPE, not yet renderable -- until `contains` gets a real
+    /// minijinja translation.
+    #[test]
+    fn a_disqualified_is_suppresses_the_whole_tier20_step() {
+        assert_eq!(
+            rewrite_shape_only("{{ l contains x is defined ?? y }}"),
+            "{{kestra_null_coalesce( l contains x is defined ,  y )}}"
+        );
+    }
+
     /// `find_rightmost_tier20`'s rightmost-split direction, proven the same
     /// way `chained_or_splits_rightmost_for_left_associativity` proves it
     /// for `or`: three `contains`-chained, `??`-bearing operands. A
@@ -1710,6 +1823,18 @@ but there is one on the next: '";
     /// sibling test's doc for the full reasoning (identical here). Routed
     /// through `rewrite_shape_only` for the same reason as the sibling test
     /// above.
+    ///
+    /// **The expected value below cannot be validated against the oracle.**
+    /// Confirmed directly: real Pebble rejects this exact input --
+    /// `Contains operator can only be used on Collections, Maps and arrays.
+    /// Actual type was: java.lang.Boolean` -- because the INNER `contains`
+    /// (once evaluated) yields a boolean, and a boolean can never be the
+    /// left operand of Pebble's own `contains`. This test legitimately
+    /// proves the split direction this rewrite implements (a purely
+    /// syntactic property, checkable without evaluating anything), but its
+    /// specific three-`contains` shape is not itself valid Kestra input
+    /// Pebble could ever render, so there is no golden value to pin it
+    /// against and no corpus entry for it.
     #[test]
     fn chained_contains_splits_rightmost_for_left_associativity() {
         assert_eq!(
@@ -1771,6 +1896,23 @@ but there is one on the next: '";
         );
     }
 
+    /// `==` (above) and `equals` (`coalesce_does_not_swallow_across_equals_
+    /// or_contains`) were the only two of `is_tier30_trigger`'s six
+    /// comparison-operator entries with any coverage -- deleting any of the
+    /// other five (`!=`/`>`/`>=`/`<`/`<=`) individually left all 31 tests
+    /// green (round 3 fixed the NAMED mutant, `equals`, rather than the
+    /// class this belongs to). All five parse natively in minijinja (unlike
+    /// `equals`/`contains`), so this routes through `rewrite_and_parse` like
+    /// the `==` case, not `rewrite_shape_only`.
+    #[test]
+    fn coalesce_does_not_swallow_across_any_tier30_comparison() {
+        for op in ["!=", ">", ">=", "<", "<="] {
+            let expr = format!("{{{{ a ?? b {op} c }}}}");
+            let expected = format!("{{{{kestra_null_coalesce( a ,  b ) {op}  c }}}}");
+            assert_eq!(rewrite_and_parse(&expr), expected, "operator {op:?}");
+        }
+    }
+
     /// A plain comparison with no `??`/`???`/`isIn` anywhere must stay
     /// untouched, exactly as it did before tier-30 recognition existed --
     /// `find_rightmost_tier30` is gated on `has_rewritable_op` specifically
@@ -1802,6 +1944,36 @@ but there is one on the next: '";
         assert_eq!(
             rewrite_and_parse("{{ {'a': x ?? y}}}"),
             "{{ {'a':kestra_null_coalesce( x ,  y)}}}"
+        );
+    }
+
+    /// Unbounded recursion is not a catchable Rust error -- it aborts the
+    /// whole process (`fatal runtime error: stack overflow`), and `rewrite`
+    /// is `pub`, re-exported at the crate root, over user-supplied workflow
+    /// source. `MAX_NESTING_DEPTH`'s doc comment has the full measurement
+    /// (crashes measured between 1,000 and 5,000 levels on a 2 MiB stack);
+    /// 600 is comfortably past the 500 limit while staying far short of
+    /// that range, so this test cannot itself crash the test binary even if
+    /// the limit regressed to "checked, but too late" rather than "removed
+    /// entirely" (a real distinction -- see `expand`'s doc comment on why
+    /// the check has to happen AT the recursion site, not only inside
+    /// `resolve_pieces`, which found this exact bug in an earlier draft of
+    /// this fix: a check placed only in `resolve_pieces` still let `expand`
+    /// recurse all the way to the bottom of `{{ ((((...))))}}` before ever
+    /// firing, which does not protect a small stack at all, it just delays
+    /// the same crash by however many frames the recursion needed to reach
+    /// bottom). Confirmed by temporarily raising `MAX_NESTING_DEPTH` to
+    /// 100,000 and re-running this exact 600-level input: it succeeds
+    /// (`Ok`), which is exactly what would make this test's `unwrap_err()`
+    /// fail cleanly rather than crash -- restored afterwards.
+    #[test]
+    fn nesting_past_the_depth_limit_errors_instead_of_overflowing_the_stack() {
+        let n = 600;
+        let expr = format!("{{{{ {}a ?? b{}}}}}", "(".repeat(n), ")".repeat(n));
+        let err = rewrite(&expr).unwrap_err();
+        assert!(
+            matches!(err, RewriteError::TooDeeplyNested { .. }),
+            "{err:?}"
         );
     }
 

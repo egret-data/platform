@@ -199,32 +199,45 @@ has no parent BOM to inherit a version from.
   short-circuit semantics would return. minijinja's own `or`/`and` are
   exactly that Python/Jinja style: `or` returns whichever *operand* is
   truthy, `and` returns the FIRST falsy operand or the last one, never a
-  coerced boolean — confirmed by rendering both a correctly-shaped and a
-  wrongly-shaped rewrite of `coalesce-and` through a real minijinja
-  `Environment` with a `kestra_null_coalesce` matching
-  `NullCoalescingExpression`'s actual semantics (not just reasoned about by
-  hand): with `a=1, b=2, c=null, d="D"`, the correctly-shaped rewrite
-  renders `"D"` (minijinja's `and`, both operands truthy, returns the
-  RIGHT operand) and the wrongly-shaped one renders `"1"` — genuinely
-  discriminating BETWEEN the two rewrites — but Pebble's own golden value
-  for that same context is `"true"` (boolean-coerced), matching NEITHER.
-  This rewrite deliberately does not touch `or`/`and` syntax (same "leave
-  it alone, Task 3's problem" treatment as the comparison operators — see
-  `gt-mixed` below) — it only recognises them as precedence *boundaries* so
-  a coalesce search does not cross them (see `rewrite.rs`'s
-  `resolve_pieces` doc). So both entries are still useful for what Task 2
-  owns (did the rewrite put the boundary in the right place — confirmed,
-  both discriminate a wrong GROUPING from a correct one when rendered
-  through minijinja's actual `and`/`or`), but neither can be used, as-is,
-  to verify Task 2's rewrite against Pebble's golden value end-to-end —
-  that additionally needs whoever ports `or`/`and` semantics (likely via a
+  coerced boolean. This rewrite deliberately does not touch `or`/`and`
+  syntax (same "leave it alone, Task 3's problem" treatment as the
+  comparison operators — see `gt-mixed` below) — it only recognises them as
+  precedence *boundaries* so a coalesce search does not cross them (see
+  `rewrite.rs`'s `resolve_pieces` doc). Neither entry can be used, as-is, to
+  verify Task 2's rewrite against Pebble's golden value end-to-end — that
+  additionally needs whoever ports `or`/`and` semantics (likely via a
   `kestra_or`/`kestra_and` function wrapper, mirroring how `??`/`???` are
-  already handled). Recorded here rather than silently "fixed" by changing
-  either entry's context to a value that coincidentally matches Pebble
-  despite the underlying `and`/`or` semantics gap still being open, or
-  left to claim a property (`coalesce-and`'s context previously claimed to
-  discriminate the way `coalesce-eq`'s does — it does not, in the sense
-  that matters for an end-to-end render comparison) it does not have.
+  already handled).
+
+  **The two entries are NOT equally useful for the one thing Task 2 does
+  own — did the rewrite put the boundary in the right place — and an
+  earlier version of this note wrongly claimed they were.**
+  `coalesce-and` genuinely discriminates a correctly-shaped rewrite from a
+  wrongly-shaped one when both are rendered through minijinja's actual
+  `and` — confirmed, not reasoned about, with a real minijinja
+  `Environment` and a `kestra_null_coalesce` matching
+  `NullCoalescingExpression`'s actual semantics: with `a=1, b=2, c=null,
+  d="D"`, the correctly-shaped rewrite renders `"D"` and the wrongly-shaped
+  one renders `"1"`, genuinely different (Pebble's own golden for that
+  context is `"true"`, matching neither — the boolean-coercion gap above —
+  but the two REWRITES still separate from each other, which is what this
+  entry is for).
+
+  `coalesce-or` **cannot** discriminate its two rewrites this way, for ANY
+  context — not an unlucky choice, algebraically unachievable. With
+  minijinja's operand-returning `or`: if `a` is truthy, `(a or b) ?? c`
+  reduces to `a` and `a or (b ?? c)` also reduces to `a` (both short-circuit
+  on `a` before `b`/`c` matter); if `a` is falsy, both reduce to `b ?? c`
+  (the `or` in the wrong shape's `(a or b) ?? c` returns `b`, non-null,
+  since Pebble/Kestra's `??` only cares about null-ness and a boolean
+  `false` is not null — so the wrong shape reaches `b` too). Confirmed by
+  rendering both shapes through the same real minijinja `Environment` above
+  across four contexts (`a` truthy, `a` falsy-but-non-null, `a` null, and
+  a mix with `b` defined) — identical output in all four. `coalesce-or`
+  keeps its value as a record of Pebble's actual grouping/golden value; it
+  just cannot be used to catch a wrong-grouping REWRITE bug by rendering,
+  the same limitation `coalesce-is-not-null` (below) has for an unrelated
+  reason.
 - **`coalesce-is-not-null` can never be rendered once Task 3 wires up
   minijinja, for a naming reason unrelated to this rewrite.** minijinja has
   no test named `null` — confirmed directly: `{{ a is null }}` PARSES (the
@@ -248,9 +261,15 @@ has no parent BOM to inherit a version from.
 - **minijinja renders booleans as `True`/`False`; Pebble renders `true`/
   `false`.** Pre-existing (not introduced by this rewrite, and this rewrite
   cannot fix it — it is a rendering-format difference, not a syntax
-  question), affects roughly a dozen corpus entries whose golden value is a
-  bare boolean (`coalesce-eq`, `coalesce-is-defined`,
-  `coalesce-is-not-null`, the `gt-*`/`lt-*`/`lte-*`/`gte-*` family, etc.).
+  question), affects exactly **27** corpus entries whose golden value is a
+  bare `"true"`/`"false"` (counted directly from `golden.json`, not
+  estimated): `isin`, the full `gt-*`/`lt-*`/`lte-*`/`gte-*` family (12
+  entries, including the three equality-boundary ones), `coalesce-and`,
+  `coalesce-or`, `coalesce-eq`, `coalesce-is-defined`,
+  `coalesce-is-not-null`, `is-defined-then-coalesce`, `filter-startswith`,
+  `filter-endswith`, `filter-regexmatch`, `function-ispublicholiday`,
+  `function-isdayweekinmonth`, `function-isweekend`,
+  `function-islastworkingday`, and both `test-json-*` entries.
   Task 3 will hit all of them at once the first time it compares a rendered
   minijinja boolean against a Pebble golden value — recorded here as a
   known quantity in advance rather than a surprise discovered per-entry.
