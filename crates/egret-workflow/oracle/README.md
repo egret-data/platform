@@ -190,6 +190,28 @@ has no parent BOM to inherit a version from.
   a `List` of matches even for a single-value query, and that list, not its
   sole element, is what gets rendered. This was already known from an
   earlier spike; re-confirmed here.
+- **`coalesce-or`'s golden value (`"true"`) will not be reproduced by a
+  correct Task 2 rewrite once Task 3 wires up rendering, for a reason that
+  has nothing to do with the rewrite being wrong.** `{{ a or b ?? c }}`
+  (`a=false, b=null, c="c-value"`) renders `true` in real Pebble because
+  Pebble's `or` coerces its result to a strict boolean — confirmed
+  separately (not from this entry) by rendering `{{ a or b ?? c }}` with
+  the same context and observing `true`, not `"c-value"`, the operand `or`
+  would return under Python/Jinja-style short-circuit semantics.
+  minijinja's own `or` is exactly that Python/Jinja style: it returns
+  whichever *operand* is truthy, not a coerced boolean. This rewrite
+  deliberately does not touch `or`/`and` syntax (same "leave it alone,
+  Task 3's problem" treatment as the comparison operators — see `gt-mixed`
+  below) — it only recognises them as precedence *boundaries* so a
+  coalesce search does not cross them (see `rewrite.rs`'s `resolve_pieces`
+  doc). So a correctly-shaped rewrite of `coalesce-or` will still render
+  the *operand* `c-value` once Task 3 renders it through minijinja, not
+  `true` — a known, expected divergence for whoever ports `or`/`and`
+  semantics (likely via a `kestra_or`/`kestra_and` function wrapper,
+  mirroring how `??`/`???` are already handled), not a defect in this
+  entry or in Task 2's rewrite. Recorded here rather than silently
+  "fixed" by changing the entry to a value neither engine's `or` would
+  naturally produce.
 - **`gt-mixed` throws, it doesn't coerce.** `{{ '2' > 10 }}` (`GreaterThanExpression`)
   only special-cases the case where *both* sides are `String`
   (`"b" > "a"` does a lexicographic compare); a `String`/`Number` mix falls
@@ -253,9 +275,9 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 105 entries)
+## Corpus (`corpus.json`, 107 entries)
 
-- **34 operator cases**, taken verbatim from the task brief plus several
+- **36 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
   both operators, plus a plain present case), ternary (including nesting and
   the unparenthesized `a ? b ? c : d : e` form, which pins Pebble's
@@ -271,13 +293,20 @@ entry's non-deterministic output within the same run.
   `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
   `tag-if-ternary`, plus `tag-if-ternary-inverted` and the whitespace-control
   pair `tag-if-coalesce-trimmed`/`coalesce-trimmed-expr` for `{%- -%}`/
-  `{{- -}}`), and `coalesce-and`/`coalesce-or`/`coalesce-eq`, which pin
-  Pebble's precedence table (`Extension.java:81-87` puts `??`/`???`/`isIn` at
-  30, alongside `==`/`!=`/comparisons; `CoreExtension` puts `or` at 10 and
-  `and` at 15, both lower): `(a ?? b) and (c ?? d)`, `a or (b ?? c)`, and
-  `(a ?? b) == c` respectively, none of which a port that treats `??` as
-  swallowing everything up to the next `??`/`isIn` (ignoring lower- and
-  same-tier operators as boundaries) would reproduce.
+  `{{- -}}`), and five entries pinning Pebble's full binary-operator
+  precedence table (read out of the pinned jar's bytecode: `or`=10, `and`=15,
+  `is`/`contains`=20, `equals`/`==`/`!=`/comparisons=30, the same tier Kestra
+  registers `??`/`???`/`isIn` into at `Extension.java:81-87`) against `??`:
+  `coalesce-and` (`(a ?? b) and (c ?? d)`, context chosen so the wrong
+  grouping renders a DIFFERENT boolean, not merely a same-shaped one — see
+  "Surprising golden values" below for why the first context this entry
+  shipped with did not discriminate), `coalesce-or` (`a or (b ?? c)` — also
+  flagged below as a value Task 2's rewrite cannot reproduce once rendered,
+  for a reason unrelated to Task 2), `coalesce-eq` (`(a ?? b) == c`), and the
+  tier-20 pair `coalesce-is-defined`/`coalesce-is-not-null`
+  (`(a ?? b) is defined` / `(a ?? b) is not null`) — none of which a port
+  that treats `??` as swallowing everything up to the next `??`/`isIn`
+  (ignoring lower- and same-tier operators as boundaries) would reproduce.
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including

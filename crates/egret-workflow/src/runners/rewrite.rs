@@ -65,9 +65,11 @@
 //! matched longest-first (`???` before `??` before `?`; `==`/`!=`/`<=`/`>=`
 //! before their single-char prefix, so a lone `=` unambiguously means
 //! assignment, never half of `==`; `isIn` matched as a whole identifier, not
-//! a substring, so it never fires inside e.g. `thisIsInvalid`). Everything
-//! else — identifiers, numbers, whitespace, dots, `|`, the untouched
-//! comparison operators — is copied through byte-for-byte.
+//! a substring, so it never fires inside e.g. `isInvalid` -- which DOES
+//! contain the literal substring "isIn" (its first four characters), unlike
+//! a same-shaped-looking example that merely reads as if it should).
+//! Everything else — identifiers, numbers, whitespace, dots, `|`, the
+//! untouched comparison operators — is copied through byte-for-byte.
 //!
 //! # `isIn` — provisional
 //!
@@ -567,7 +569,12 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
                 }
                 let word = &src[start..i];
                 // Matched as a whole identifier, not a substring -- `isIn`
-                // must not fire inside e.g. `thisIsInvalid`.
+                // must not fire inside e.g. `isInvalid` -- which genuinely
+                // contains the literal substring "isIn" as its first four
+                // characters (confirmed: `"isIn" in "isInvalid"` -- unlike a
+                // same-shaped-looking name such as `thisIsInvalid`, which
+                // does not actually contain that substring at all, case
+                // included, and so would not have demonstrated anything).
                 if word == "isIn" {
                     toks.push(Tok::IsIn(word.to_string()));
                 } else {
@@ -717,20 +724,39 @@ fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
 ///    in parens on the way out; see the comment at the `format!` below for
 ///    why that parenthesization is not cosmetic.
 /// 4. Only when this slice actually contains a `??`/`???`/`isIn` somewhere
-///    (see `has_rewritable_op` below) -- Pebble's `CoreExtension` precedence
-///    table, lowest first: `or`=10, `and`=15, then a tier at 30 that Kestra
-///    registers `??`/`???`/`isIn` into *alongside*
-///    `==`/`!=`/`>`/`>=`/`<`/`<=` (`Extension.java:81-87`). `or`/`and` are
-///    hard boundaries a coalesce/`isIn` search must not cross (checked
-///    first, lowest precedence outermost); within a tier the *same*
-///    precedence as `??`/`???`/`isIn`, the untouched comparison operators
-///    still have to be recognised as fellow tier-30 boundaries (not
-///    rewritten, but not invisible either) or a coalesce search sees only
-///    its own three operators and swallows across `==`/`>`/etc. Measured:
-///    `{{ a ?? b and c ?? d }}` is `(a ?? b) and (c ?? d)` in Pebble, and
-///    `{{ a ?? b == c }}` is `(a ?? b) == c` -- see
-///    [`find_rightmost_or`]/[`find_rightmost_and`]/[`find_rightmost_tier30`]
-///    for how each is split.
+///    (see `has_rewritable_op` below) -- Pebble 4.1.2's full binary-operator
+///    precedence table, read out of the pinned jar's bytecode (not just the
+///    subset this rewrite acts on):
+///
+///    ```text
+///    or=10   and=15   is=20   contains=20   equals=30
+///    ==,!=,>,>=,<,<= =30   +,- =40   *,/,% =60
+///    | =100   ~ =110   .. =120   not,unary +/- =500
+///    ```
+///
+///    Kestra registers `??`/`???`/`isIn` at 30 (`Extension.java:81-87`),
+///    the same tier as `==`/`!=`/`>`/`>=`/`<`/`<=` and their word alias
+///    `equals`. Everything below 30 (`or`, `and`, `is`, `contains`) is a
+///    hard boundary a coalesce/`isIn` search must not cross, checked in
+///    ascending precedence order (lowest first, outermost) before the
+///    tier-30 search itself: `or`, then `and`, then `is`/`contains`
+///    together (same tier, so rightmost among either). Within tier 30
+///    itself, the untouched comparison operators (and `equals`) have to be
+///    recognised as fellow boundaries -- not rewritten, but not invisible
+///    either -- or a coalesce search sees only its own three operators and
+///    swallows straight across them. Everything at 40 and above (`+`/`-`
+///    through `not`) is invisible to this rewrite by construction: it is
+///    never tokenized as anything but ordinary text, so it can never be
+///    mistaken for a boundary and never needs its own step here -- it
+///    binds tighter than `??`/`???`/`isIn` regardless, so it always ends up
+///    correctly nested inside whichever operand it appears in.
+///
+///    Measured, not assumed: `{{ a ?? b and c ?? d }}` is `(a ?? b) and
+///    (c ?? d)` in Pebble; `{{ a ?? b == c }}` is `(a ?? b) == c`;
+///    `{{ a ?? b is defined }}` is `true`, not the left operand `a`'s own
+///    value -- see [`find_rightmost_word`] (used for `or`/`and`/tier-20),
+///    [`find_rightmost_word_among`] (tier-20's `is`/`contains` combined),
+///    and [`find_rightmost_tier30`] for how each is split.
 /// 5. Nothing left to resolve: reconstruct verbatim, using each remaining
 ///    `Op` piece's own original text (an operator with no matching partner,
 ///    e.g. a stray `:` with no preceding `?`, is left untouched rather than
@@ -785,16 +811,47 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
     });
 
     if has_rewritable_op {
+        // `or`/`and` wrap both sides in parens -- redundant for correctness
+        // (minijinja's `or`/`and` are already left-associative, same as
+        // Pebble's), but NOT cosmetic: with no wrapping at all, a rightmost
+        // split and a leftmost split of the SAME chain produce
+        // byte-identical flat text (`A or B or C` either way -- traced by
+        // hand for both directions before adding this), so nothing could
+        // tell a correct rightmost-split implementation apart from a wrong
+        // leftmost-split one by comparing strings. The parens make the
+        // actual split point -- and therefore the actual associativity --
+        // observable in the output, which is what
+        // `chained_or_splits_rightmost_for_left_associativity` below
+        // depends on.
         if let Some(idx) = find_rightmost_word(pieces, "or") {
             let left = resolve_pieces(&pieces[..idx]);
             let right = resolve_pieces(&pieces[idx + 1..]);
-            return format!("{left} or {right}");
+            return format!("({left}) or ({right})");
         }
 
         if let Some(idx) = find_rightmost_word(pieces, "and") {
             let left = resolve_pieces(&pieces[..idx]);
             let right = resolve_pieces(&pieces[idx + 1..]);
-            return format!("{left} and {right}");
+            return format!("({left}) and ({right})");
+        }
+
+        // Tier 20: `is`/`contains`, still lower precedence than the 30 tier
+        // `??`/`???`/`isIn` share with the comparison operators, so this
+        // must be checked before `find_rightmost_tier30` for the same
+        // reason `or`/`and` are checked before it. `is not TESTNAME` needs
+        // no special two-token handling here: splitting at the `is` alone
+        // leaves `not TESTNAME` as ordinary text on the right side, which
+        // `resolve_pieces` reconstructs verbatim (no operator of its own to
+        // rewrite in "not defined"/"not null"/etc), reproducing `is not`
+        // correctly with no extra code.
+        if let Some(idx) = find_rightmost_word_among(pieces, &["is", "contains"]) {
+            let word = match &pieces[idx] {
+                Piece::Atom(s) => s.as_str(),
+                _ => unreachable!("find_rightmost_word_among only returns Atom indices"),
+            };
+            let left = resolve_pieces(&pieces[..idx]);
+            let right = resolve_pieces(&pieces[idx + 1..]);
+            return format!("{left} {word} {right}");
         }
 
         if let Some(idx) = find_rightmost_tier30(pieces) {
@@ -917,20 +974,43 @@ fn find_rightmost_word(pieces: &[Piece], word: &str) -> Option<usize> {
     })
 }
 
+/// Like [`find_rightmost_word`], but matches any one of several words --
+/// used for `is`/`contains` (both tier 20 in Pebble's `CoreExtension`
+/// precedence table). Rightmost among ALL of them together, not rightmost
+/// of each searched separately, since they share one precedence tier and
+/// chain left-to-right the same way the tier-30 operators do (see
+/// [`find_rightmost_tier30`]).
+fn find_rightmost_word_among(pieces: &[Piece], words: &[&str]) -> Option<usize> {
+    pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
+        Piece::Atom(s) if words.contains(&s.as_str()) => Some(i),
+        _ => None,
+    })
+}
+
 /// Finds the last (rightmost) precedence-30 boundary among `pieces` --
 /// `??`/`???`/`isIn` (which this rewrite acts on) together with
-/// `==`/`!=`/`>`/`>=`/`<`/`<=` (which it recognises as fellow same-tier
-/// operators but never touches). Rightmost is correct for left-associative
-/// chaining among SAME-precedence operators regardless of which specific
-/// operator each occurrence is: `a ?? b == c` chains left-to-right through
-/// the tier exactly like `a - b + c` does through `+`/`-`'s shared tier in
-/// a conventional expression grammar, giving `(a ?? b) == c` -- confirmed
+/// `==`/`!=`/`>`/`>=`/`<`/`<=` AND their word alias `equals` (all of which
+/// it recognises as fellow same-tier operators but never touches).
+/// Rightmost is correct for left-associative chaining among
+/// SAME-precedence operators regardless of which specific operator each
+/// occurrence is: `a ?? b == c` chains left-to-right through the tier
+/// exactly like `a - b + c` does through `+`/`-`'s shared tier in a
+/// conventional expression grammar, giving `(a ?? b) == c` -- confirmed
 /// against real Pebble, not assumed (see `oracle/corpus.json`'s
 /// `coalesce-eq` entry).
 fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
     pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
         Piece::Op(OpKind::NullCoalesce | OpKind::UndefinedCoalesce | OpKind::IsIn, _) => Some(i),
-        Piece::Atom(s) if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=") => Some(i),
+        // `equals` is Pebble's word alias for `==` (same precedence, same
+        // tier) -- omitting it here would not silently misgroup anything
+        // (an unrecognised bare word is just inert text, same as any other
+        // identifier), but it WOULD let a coalesce search swallow straight
+        // across it exactly like the pre-fix `==` gap did.
+        Piece::Atom(s)
+            if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=" | "equals") =>
+        {
+            Some(i)
+        }
         _ => None,
     })
 }
@@ -982,7 +1062,10 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
         Some(b_idx) => {
             let target: String = rest[..b_idx].iter().map(Tok::text).collect();
             let boundary_text = rest[b_idx].text();
-            let value = resolve_flat(&rest[b_idx + 1..])?;
+            let value_tokens = &rest[b_idx + 1..];
+            let value_pieces = expand(value_tokens)?;
+            let value_has_top_level_ternary = find_ternary(&value_pieces).is_some();
+            let value = resolve_pieces(&value_pieces);
             let value = value.trim();
             // `for`'s iterable needs the same whole-conditional parens as
             // `if`'s condition below, for the same reason (see there) --
@@ -992,8 +1075,10 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             // %}` parses fine in minijinja without wrapping, because `set`'s
             // grammar already expects a full expression on the right of
             // `=`, unlike `if`'s condition-position and `for`'s
-            // iterable-position grammars.
-            let value = if keyword == "for" && !value.is_empty() {
+            // iterable-position grammars. Wrapped only when a top-level
+            // ternary is actually present (see the `None` branch below for
+            // why "unconditionally" was wrong).
+            let value = if keyword == "for" && value_has_top_level_ternary && !value.is_empty() {
                 format!("({value})")
             } else {
                 value.to_string()
@@ -1001,11 +1086,31 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             format!("{} {boundary_text} {value}", target.trim())
         }
         None => {
-            let expr = resolve_flat(rest)?;
+            let pieces = expand(rest)?;
+            let has_top_level_ternary = find_ternary(&pieces).is_some();
+            let expr = resolve_pieces(&pieces);
             let expr = expr.trim();
-            // Whole-conditional parens, unconditionally, for every tag
-            // that reaches this branch (`if`, `elseif`, `unless`, and any
-            // other tag whose entire remainder is one expression).
+            // Whole-conditional parens, but ONLY when a top-level ternary
+            // is actually present in `rest` -- checked via `find_ternary`
+            // on the un-resolved pieces, before `resolve_pieces` turns it
+            // into the `(...) if (...) else ...` shape that needs this
+            // wrapping in the first place. An EARLIER version of this
+            // branch wrapped unconditionally for every tag that reaches
+            // here, on the theory that a parenthesized function call or
+            // bare identifier is exactly as valid as the unparenthesized
+            // form -- true for `if`/`elseif`/`unless`, but that theory
+            // does not hold for every tag whose whole remainder is "one
+            // expression" in the sense this branch handles: `{% filter
+            // upper %}` is real Pebble (measured through the harness:
+            // renders `X` for input `x`), and `upper` there is a
+            // filter-chain name in filter-name position, not a general
+            // expression -- unconditionally wrapping it produced `{% filter
+            // (upper)%}`, which minijinja's `filter` tag grammar rejects
+            // ("unexpected '(', expected identifier"). Wrapping only when
+            // a ternary is actually present fixes `{% filter %}` (nothing
+            // to wrap, since `upper` has no top-level `?`) without losing
+            // the original `{% if flag ? 1 : 0 %}` fix (which does have
+            // one).
             //
             // Without this, a ternary spliced straight after the tag
             // keyword produces a real parse error, measured directly:
@@ -1015,16 +1120,13 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             // expected end of block") -- not a silent semantic drift like
             // I3's then-branch parens, a hard failure every time a
             // ternary appears inside `{% if %}`/`{% elseif %}`/`{% unless
-            // %}`. Wrapping the WHOLE rewritten condition in one extra
-            // pair of parens (harmless when it was not a ternary -- a
-            // parenthesized function call or bare identifier is exactly
-            // as valid as the unparenthesized form) resolves the
-            // ambiguity unconditionally rather than only when this
-            // function can tell in advance that a ternary is present.
+            // %}`.
             if expr.is_empty() {
                 String::new()
-            } else {
+            } else if has_top_level_ternary {
                 format!("({expr})")
+            } else {
+                expr.to_string()
             }
         }
     };
@@ -1247,7 +1349,7 @@ but there is one on the next: '";
             "{{ x | replace({'}}': 'x'}) }}"
         );
         let out = rewrite_and_parse("{% if x == 'a%}b' %}y{% endif %}");
-        assert_eq!(out, "{% if (x == 'a%}b')%}y{% endif %}");
+        assert_eq!(out, "{% if x == 'a%}b'%}y{% endif %}");
     }
 
     /// A comma is an operand boundary an operator must not cross: `f(x, a ??
@@ -1299,7 +1401,7 @@ but there is one on the next: '";
     #[test]
     fn if_tag_bodies_rewrite_their_condition() {
         let out = rewrite_and_parse("{% if a ?? b %}y{% endif %}");
-        assert_eq!(out, "{% if (kestra_null_coalesce( a ,  b ))%}y{% endif %}");
+        assert_eq!(out, "{% if kestra_null_coalesce( a ,  b )%}y{% endif %}");
     }
 
     /// `{% set %}`: the target left of `=` is a name, never rewritten; the
@@ -1339,7 +1441,7 @@ but there is one on the next: '";
         let out = rewrite_and_parse("{% for isIn in list ?? [] %}y{% endfor %}");
         assert_eq!(
             out,
-            "{% for isIn in (kestra_null_coalesce( list ,  [] ))%}y{% endfor %}"
+            "{% for isIn in kestra_null_coalesce( list ,  [] )%}y{% endfor %}"
         );
     }
 
@@ -1352,6 +1454,52 @@ but there is one on the next: '";
         assert_eq!(out, "{% if (( 'a' ) if ( flag ) else  'b')%}y{% endif %}");
     }
 
+    /// F1: `{% filter %}` is real Pebble (measured through the harness:
+    /// `{% filter upper %}x{% endfilter %}` renders `X`), and its body is a
+    /// filter-chain name in filter-name position, not a general expression
+    /// -- unconditionally wrapping tag bodies in parens (an earlier version
+    /// of this fix round did exactly that, to fix `{% if flag ? 1 : 0 %}`)
+    /// broke it: `{% filter (upper)%}` is not valid minijinja. Wrapping is
+    /// now conditional on an actual top-level ternary being present, which
+    /// `upper` never has, so this tag is untouched. Also proves the fix
+    /// still works when there IS an operator to rewrite inside the
+    /// `{% filter %}` block's body (a `{{ }}` region nested inside it,
+    /// unrelated to the tag's own name-position argument).
+    #[test]
+    fn filter_tag_bodies_are_not_wrapped_in_parens() {
+        assert_eq!(
+            rewrite_and_parse("{% filter upper %}x{% endfilter %}"),
+            "{% filter upper%}x{% endfilter %}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{% filter upper %}{{ a ?? b }}{% endfilter %}"),
+            "{% filter upper%}{{kestra_null_coalesce( a ,  b )}}{% endfilter %}"
+        );
+    }
+
+    /// F2: tier 20 (`is`/`contains`, both lower precedence than the 30
+    /// `??`/`???`/`isIn` share with the comparison operators) was missing
+    /// entirely -- measured against real Pebble: `{{ a ?? b is defined }}`
+    /// with `a="A", b="B"` renders `true` in Pebble (`(a ?? b) is defined`,
+    /// since `a` is non-null so `a ?? b` is `"A"`, which is defined), but
+    /// without a tier-20 boundary this rewrite's old coalesce search
+    /// swallowed `is defined` into the RIGHT operand, producing
+    /// `kestra_null_coalesce(a, b is defined)` -- which returns `a` itself
+    /// (`"A"`) once `a` turns out non-null, not `true`. `is not TESTNAME`
+    /// needs no special two-token handling: splitting at the bare `is`
+    /// alone leaves `not TESTNAME` as inert text on the right side.
+    #[test]
+    fn coalesce_does_not_swallow_across_is() {
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b is defined }}"),
+            "{{kestra_null_coalesce( a ,  b ) is  defined }}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b is not null }}"),
+            "{{kestra_null_coalesce( a ,  b ) is  not null }}"
+        );
+    }
+
     /// `??`/`???`/`isIn` must not swallow across a LOWER-precedence `and`/
     /// `or` -- Pebble's `CoreExtension` gives `or`=10, `and`=15, both below
     /// the 30 `??`/`???`/`isIn` share with the comparison operators. Not a
@@ -1362,11 +1510,31 @@ but there is one on the next: '";
     fn coalesce_does_not_swallow_across_and_or_or() {
         assert_eq!(
             rewrite_and_parse("{{ a ?? b and c ?? d }}"),
-            "{{kestra_null_coalesce( a ,  b ) and kestra_null_coalesce( c ,  d )}}"
+            "{{(kestra_null_coalesce( a ,  b )) and (kestra_null_coalesce( c ,  d ))}}"
         );
         assert_eq!(
             rewrite_and_parse("{{ a or b ?? c }}"),
-            "{{ a  or kestra_null_coalesce( b ,  c )}}"
+            "{{( a ) or (kestra_null_coalesce( b ,  c ))}}"
+        );
+    }
+
+    /// The sibling test above only ever has ONE `or` (and one `and`) per
+    /// assertion, so it cannot tell a rightmost split from a leftmost one --
+    /// traced by hand for both directions before writing this: with no
+    /// parens at all, `A or B or C` comes out byte-identical regardless of
+    /// which `or` is chosen as the split point (each direction's recursion
+    /// just reconstructs the same flat text). The parens `or`/`and` now
+    /// wrap their operands in specifically make the split point observable:
+    /// a rightmost split recurses on the LEFT side, producing a left-deep
+    /// `((A or B) or C)` shape; a leftmost split would instead recurse on
+    /// the right, producing right-deep `(A or (B or C))`. Chained three
+    /// deep, with a `??` in every operand so each one's own position in the
+    /// tree is independently visible in the output.
+    #[test]
+    fn chained_or_splits_rightmost_for_left_associativity() {
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? w or b ?? x or c ?? y }}"),
+            "{{((kestra_null_coalesce( a ,  w )) or (kestra_null_coalesce( b ,  x ))) or (kestra_null_coalesce( c ,  y ))}}"
         );
     }
 
@@ -1416,6 +1584,47 @@ but there is one on the next: '";
         assert_eq!(
             rewrite_and_parse("{{ {'a': x ?? y}}}"),
             "{{ {'a':kestra_null_coalesce( x ,  y)}}}"
+        );
+    }
+
+    /// Critical 3's fix (`split_whitespace_control`) had zero executable
+    /// coverage before this test -- only prose and two corpus entries the
+    /// oracle test does not yet run (`tests/oracle.rs` stays `#[ignore]`d
+    /// until Task 3). Proven load-bearing before writing the expected
+    /// value below, against all THREE mutations named in review: (1)
+    /// replacing the whole body with `return ("", content, "");` produces
+    /// `"{{kestra_null_coalesce(- a ,  b -)}}"` (both markers fused into
+    /// the coalesce's operands, the exact Critical-3 shape); (2) dropping
+    /// only the leading-marker branch (`let leading = "";`) produces
+    /// `"{{kestra_null_coalesce(- a ,  b )-}}"`; (3) dropping only the
+    /// trailing-marker branch (`let trailing = "";`) produces output that
+    /// does not even PARSE (`"{{-kestra_null_coalesce( a ,  b -)}}"`,
+    /// `unexpected ')'`). None of the three is the string asserted below.
+    /// All three restored before finalizing.
+    #[test]
+    fn whitespace_control_markers_survive_around_a_rewritten_expression() {
+        assert_eq!(
+            rewrite_and_parse("{{- a ?? b -}}"),
+            "{{-kestra_null_coalesce( a ,  b )-}}"
+        );
+    }
+
+    /// Same proof, for a `{%- -%}` tag, against the same three mutations:
+    /// (1) whole-body revert produces
+    /// `"{%- kestra_null_coalesce( if a ,  b -)%}y{%- endif -%}"` (leading
+    /// `-` read as the tag keyword, reproducing Critical 1's exact shape,
+    /// trailing `-%}` marker lost entirely and does not even parse); (2)
+    /// leading-only drop also fails to parse
+    /// (`"{%- kestra_null_coalesce( if a ,  b )-%}y{%- endif-%}"`,
+    /// `unknown statement kestra_null_coalesce`); (3) trailing-only drop
+    /// also fails to parse
+    /// (`"{%- if kestra_null_coalesce( a ,  b -)%}y{%- endif -%}"`,
+    /// `unexpected ')'`).
+    #[test]
+    fn whitespace_control_markers_survive_around_a_rewritten_tag() {
+        assert_eq!(
+            rewrite_and_parse("{%- if a ?? b -%}y{%- endif -%}"),
+            "{%- if kestra_null_coalesce( a ,  b )-%}y{%- endif -%}"
         );
     }
 }
