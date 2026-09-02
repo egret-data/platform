@@ -1374,6 +1374,12 @@ egret answer a machine-dependent question; giving them meaning would make egret
 answer it *differently* on another host. Refusing says so, and it is what egret
 did before round 2.
 
+**And the set is now a committed fixture, checked against the engine.**
+`refusal-sets.txt` records what the real engine does and what egret must do,
+per letter and per side; `runners::javafmt::the_refusal_sets_match_the_engines_own_per_side`
+asserts it in both directions and refuses a row that claims a divergence it
+does not have. See "The refusal sets" below.
+
 Kestra parses all eight, so all eight are divergences. **Four now have
 baselined corpus entries** (`filter-date-pattern-day-period` for the format
 side, and `-day-period-parse` / `-zone-name-parse` / `-generic-zone-parse` for
@@ -1468,3 +1474,56 @@ the pre-fix implementation** and 11 are their deliberate agreeing-side partners.
   the other half of fix round 1's fix, which had done only the writing, and
   without which an `iso` round trip of a year past 9999 failed on its second
   leg.
+
+## The refusal sets, and why they needed their own fixture
+
+`letter-counts.txt` covers whether a pattern **compiles**. It does not cover
+what happens next, and that is a different layer: `z` compiles and refuses at
+render, `w` compiles and refuses at parse. **That layer is where `v` and the
+four legacy zone ids lived** — both found by a reviewer running probes, neither
+by the suite, because what held them was prose. Prose does not fail.
+
+`refusal-sets.txt` is that layer's fixture: one row per letter per side,
+recording what the engine does (measured through the harness) and what egret
+must do, with a reason on every row where the two differ.
+`runners::javafmt::the_refusal_sets_match_the_engines_own_per_side` asserts it
+**bidirectionally**:
+
+- a letter egret refuses that the engine accepts fails, naming the letter and
+  the side;
+- a letter egret accepts that the engine refuses fails the same way;
+- a row whose outcomes **differ** must carry a reason, and a row whose outcomes
+  **agree** must not — so a divergence cannot be introduced silently, and a
+  refusal cannot claim to be one when the engine refuses too;
+- every letter that compiles per `letter-counts.txt` must appear on **both**
+  sides, so a new letter cannot enter the alphabet undeclared.
+
+**The two sides differ deliberately, and the file encodes the difference rather
+than flattening it.** egret refuses three letters when writing (`z`, `v`, `B` —
+CLDR text) and eight when reading (those three plus `w`, `W`, `Y`, `e`, `c` —
+resolved through the JVM's own region). Fix round 2 made the sets identical and
+wrote down "a letter egret can write, it can read"; fix round 3 broke that on
+purpose, and this file is where that decision now lives instead of in a
+paragraph that can drift.
+
+The parse-side samples are the engine's **own output** for the same instant, so
+a row can never fail for want of a well-formed input — the round-trip technique
+from fix round 2, used as the fixture's input generator. The five
+locale-resolved samples are formatted without an explicit locale, so the round
+trip is self-consistent on the harness machine; that is precisely the fact that
+makes them divergent, since under `locale='en'` the engine would write a value
+its own parser then rejects.
+
+**Writing the fixture found an undeclared divergence before its test existed.**
+`A` and `N` were cross-checked against the *assembled* time rather than field by
+field, so a round trip through the engine's own output — where `A` carries a
+millisecond that `ss` does not — raised a conflict Kestra does not raise. Java
+resolves `A`/`N` into hour/minute/second/nano and compares only the fields that
+were actually parsed. Fixed; `A` = 1 against `14:25:36` still conflicts, because
+there the hours differ.
+
+Verified by six deliberate breakages, each failing by name: widening the format
+refusal (`z` answering with tzdb's id), widening the parse refusal (`w`
+consumed rather than refused, as in fix round 2), narrowing a non-refusal (`O`
+refusing), deleting a divergent row's reason, deleting a row, and adding a
+reason to a row that has no divergence.

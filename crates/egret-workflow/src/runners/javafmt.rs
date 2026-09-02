@@ -1952,27 +1952,35 @@ impl Parsed {
                 ));
             }
         }
-        // `A` and `N` are a whole time; when the h/m/s/n chain also produced
-        // one, the two must agree.
-        if let Some(time) = time {
-            let nanos = u64::from(time.num_seconds_from_midnight()) * 1_000_000_000
-                + u64::from(time.nanosecond().min(999_999_999));
-            if let Some(millis) = self.milli_of_day {
-                if u64::from(millis) != nanos / 1_000_000 {
-                    return Err(conflict(text, "HourOfDay", time.hour(), millis / 3_600_000));
-                }
-            }
-            if let Some(nano_of_day) = self.nano_of_day {
-                if nano_of_day != nanos {
-                    return Err(conflict(
-                        text,
-                        "HourOfDay",
-                        time.hour(),
-                        nano_of_day / 3_600_000_000_000,
-                    ));
+        // `A` and `N` carry a whole time, and Java resolves each into
+        // HOUR/MINUTE/SECOND/NANO and then cross-checks **field by field,
+        // only against the fields that were actually parsed**.
+        //
+        // Comparing the assembled times instead is too strict, and the
+        // refusal-set fixture is what found it: `HH:mm:ss '|' A` round-tripped
+        // through the engine's own output carries a millisecond `A` has and
+        // `ss` does not, so egret raised a conflict where Kestra simply keeps
+        // the millisecond. `A` = 1 against `14:25:36` still conflicts, because
+        // there the HOURS differ.
+        let whole = self
+            .nano_of_day
+            .or_else(|| self.milli_of_day.map(|m| u64::from(m) * 1_000_000));
+        if let Some(nanos) = whole {
+            let seconds = nanos / 1_000_000_000;
+            for (parsed, derived, field) in [
+                (self.hour, (seconds / 3_600) as u32, "HourOfDay"),
+                (self.minute, ((seconds / 60) % 60) as u32, "MinuteOfHour"),
+                (self.second, (seconds % 60) as u32, "SecondOfMinute"),
+                (self.nano, (nanos % 1_000_000_000) as u32, "NanoOfSecond"),
+            ] {
+                if let Some(parsed) = parsed {
+                    if parsed != derived {
+                        return Err(conflict(text, field, parsed, derived));
+                    }
                 }
             }
         }
+        let _ = time;
         Ok(())
     }
 
@@ -2886,6 +2894,121 @@ mod tests {
         }
         // Every ASCII letter, upper and lower, so a row cannot go missing.
         assert_eq!(rows, 52, "the fixture must cover all 52 ASCII letters");
+    }
+
+    /// **The refusal sets are asserted against the ENGINE, per side, in both
+    /// directions.**
+    ///
+    /// [`the_pattern_alphabet_matches_the_engines_own`] covers only whether a
+    /// pattern *compiles*. `z` compiles and then refuses at render; `w`
+    /// compiles and then refuses at parse. That layer had no fixture, and it
+    /// is where `v` and the four legacy zone ids lived — both found by a
+    /// reviewer running probes, neither by the suite.
+    ///
+    /// `oracle/refusal-sets.txt` records, per letter and per side, what the
+    /// real engine does and what egret must do, with the engine column
+    /// measured through the harness. This checks:
+    ///
+    /// - egret's actual outcome equals the declared one, **naming the letter
+    ///   and the side** when it does not — so widening or narrowing a refusal
+    ///   fails by name;
+    /// - a row whose two outcomes differ carries a reason and a row whose
+    ///   outcomes agree does not — so a divergence cannot be added silently,
+    ///   and a refusal cannot claim to be one when the engine refuses too;
+    /// - every letter that compiles appears on **both** sides, so a new letter
+    ///   cannot enter the alphabet undeclared.
+    ///
+    /// The two sides differ deliberately — three refusals when writing, eight
+    /// when reading — and the file encodes that rather than flattening it.
+    /// Writing this fixture immediately found an undeclared divergence of its
+    /// own: `A` and `N` were cross-checked against the assembled time instead
+    /// of field by field, so a round trip through the engine's own output
+    /// raised a conflict Kestra does not.
+    #[test]
+    fn the_refusal_sets_match_the_engines_own_per_side() {
+        let alphabet = include_str!("../../oracle/letter-counts.txt");
+        let mut compiling: Vec<char> = Vec::new();
+        for line in alphabet.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (letter, counts) = line.split_once(' ').expect("`<letter> <counts>`");
+            // `p` is a pad and never stands alone; it has its own test.
+            if counts.trim() != "-" && letter != "p" {
+                compiling.push(letter.chars().next().expect("a letter"));
+            }
+        }
+
+        let fixture = include_str!("../../oracle/refusal-sets.txt");
+        let mut seen: Vec<(String, char)> = Vec::new();
+        for line in fixture.lines() {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 6, "six tab-separated columns: {line}");
+            let (side, pattern, engine, declared, sample, reason) =
+                (cols[0], cols[1], cols[2], cols[3], cols[4], cols[5]);
+            let letter = pattern.chars().next().expect("a pattern");
+            seen.push((side.to_string(), letter));
+
+            // A divergence must be explained, and a non-divergence must not
+            // pretend to be one.
+            if engine == declared {
+                assert_eq!(
+                    reason, "-",
+                    "{side} `{pattern}`: the engine and egret agree, so there is nothing to \
+                     explain -- a row that carries a reason here is claiming a divergence it \
+                     does not have"
+                );
+            } else {
+                assert!(
+                    reason.len() > 20,
+                    "{side} `{pattern}`: the engine says {engine} and egret says {declared}; a \
+                     divergence must say why, in the file"
+                );
+            }
+
+            let (template, context) = match side {
+                "format" => (
+                    format!("{{{{ d | date('{pattern}', timeZone='UTC', locale='en') }}}}"),
+                    r#"{"d": "2024-03-09T14:25:36.123Z"}"#.to_string(),
+                ),
+                "parse" => (
+                    format!(
+                        "{{{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', \
+                         existingFormat=\"uuuu-MM-dd HH:mm:ss '|' {pattern}\") }}}}"
+                    ),
+                    format!(r#"{{"d": "2024-03-09 14:25:36 | {sample}"}}"#),
+                ),
+                other => panic!("unknown side `{other}`"),
+            };
+            let cx = super::super::env::RenderContext::from_json_str(&context)
+                .expect("context must parse");
+            let actual = if super::super::env::render_str(&template, &cx).is_ok() {
+                "ok"
+            } else {
+                "refuse"
+            };
+            assert_eq!(
+                actual, declared,
+                "{side} `{pattern}`: the fixture declares {declared} and egret says {actual} \
+                 (the engine says {engine})"
+            );
+        }
+
+        // Both sides, every compiling letter, no gaps.
+        for letter in compiling {
+            for side in ["format", "parse"] {
+                assert!(
+                    seen.contains(&(side.to_string(), letter)),
+                    "`{letter}` compiles but has no {side} row: a letter cannot enter the \
+                     alphabet without declaring what egret does with it"
+                );
+            }
+        }
     }
 
     /// A pattern is parsed once into pieces, and the piece boundaries are
