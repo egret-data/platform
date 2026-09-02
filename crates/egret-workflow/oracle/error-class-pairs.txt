@@ -113,3 +113,15 @@ filter-date-existing-format-offset-is-case-sensitive       test:an_existing_form
 filter-date-existing-format-hour-of-ampm-out-of-range      test:an_existing_formats_fields_are_range_checked
 filter-date-existing-format-year-of-era-cannot-be-zero     test:an_existing_formats_fields_are_range_checked
 filter-date-existing-format-year-of-era-cannot-be-negative test:an_existing_formats_fields_are_range_checked
+
+# --- W2 Task 5 fix round 3. Each entry was shown to FAIL pre-fix before it
+# was written down; each paired test asserts the conflicting value AND the
+# agreeing one beside it.
+filter-date-existing-format-quarter-conflicts           test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-day-of-week-conflicts       test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-day-of-year-conflicts       test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-milli-of-day-conflicts      test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-repeated-field-conflicts    test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-clock-hour-of-ampm-thirteen test:smart_exempts_a_zero_clock_hour_but_not_a_thirteenth
+filter-date-existing-format-wide-year-needs-the-sign    test:a_wide_year_is_read_back_only_with_its_sign
+filter-date-existing-format-optional-year-absent        test:an_optional_section_that_fails_leaves_no_year

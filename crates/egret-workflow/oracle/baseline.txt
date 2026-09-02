@@ -240,3 +240,28 @@ filter-dateadd-past-egrets-date-range
 # filter-classname-literal-int. This line records that the `timestamp*` family
 # reaches it too.
 filter-timestamp-classname
+
+
+# W2 TASK 5 FIX ROUND 3, DELIBERATE: the CLDR refusals, at the counts Java
+# actually accepts.
+#
+# The three letters egret refuses -- `z`, `v`, `B` -- had been declared in the
+# module doc and the README, and `filter-date-pattern-zone-name` and
+# `-generic-zone-name` pinned two of them on the FORMAT side. Three holes were
+# left, and the third review found all three:
+#
+#   - `B`'s only entry was error-class at count 2, a count BOTH engines reject,
+#     so it was born matching and pinned nothing. `{{ d | date('B') }}` is
+#     `in the morning` in Kestra and a refusal here, and nothing said so.
+#   - Kestra PARSES all three (it consumes and discards them), so the
+#     parse-side refusals are divergences too. The README said they were
+#     "named as such"; they were named in prose and nowhere in the ratchet.
+#
+# All four are the same decision as `filter-date-pattern-zone-name` above:
+# their text lives in a locale database egret does not carry, and answering
+# plausibly is worse than refusing. What is new here is that the divergence is
+# now visible in the count rather than only in a paragraph.
+filter-date-pattern-day-period
+filter-date-existing-format-day-period-parse
+filter-date-existing-format-zone-name-parse
+filter-date-existing-format-generic-zone-parse

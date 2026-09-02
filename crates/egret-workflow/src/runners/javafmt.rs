@@ -68,6 +68,7 @@
 //! a baselined corpus entry, and named in `oracle/README.md`**, the way `z`
 //! was and `v` was not.
 
+use std::fmt;
 use std::fmt::Write as _;
 use std::str::FromStr;
 
@@ -467,7 +468,7 @@ impl Zdt {
             let instant = self
                 .instant()
                 .checked_add_signed(delta)
-                .ok_or_else(|| "long overflow".to_string())?;
+                .ok_or_else(|| out_of_chrono_range(delta.num_days() / 366))?;
             Ok(Zdt::from_instant(instant, self.zone.clone()))
         }
     }
@@ -564,31 +565,42 @@ impl ChronoUnit {
     /// Every other time-based unit is exact: `MICROS` and `MILLIS` use the
     /// same split-the-days trick with the *correct* divisors
     /// (`MICROS_PER_DAY`, `MILLIS_PER_DAY`), so they cancel.
+    /// # The amount is split into DAYS plus a remainder, and that is not a
+    /// micro-optimisation
+    ///
+    /// `LocalDateTime.plusSeconds` and friends are `plusWithOverflow(date,
+    /// …)`, which divides by the unit's count-per-day **before** multiplying
+    /// anything. A first cut multiplied the whole amount into nanoseconds, so
+    /// an `i64` overflowed at about ±292 years and
+    /// `dateAdd(10000000000, 'SECONDS')` said `long overflow` where Kestra
+    /// answers `2340-12-05` — a date **inside** what egret can represent. Six
+    /// of the sixteen units cliffed 900× short of the limit their own error
+    /// message claimed, and the message was Java's arithmetic-overflow
+    /// sentence for a case Java's arithmetic does not overflow on. Found by
+    /// the third review.
     fn to_time_delta(self, amount: i64) -> Result<chrono::TimeDelta, String> {
         let overflow = || "long overflow".to_string();
-        if self == ChronoUnit::HalfDays {
-            let days = amount / 256;
-            let hours = (amount % 256).checked_mul(12).ok_or_else(overflow)?;
-            let total = days
-                .checked_mul(24)
-                .and_then(|h| h.checked_add(hours))
-                .ok_or_else(overflow)?;
-            return total
-                .checked_mul(3_600 * 1_000_000_000)
-                .map(chrono::TimeDelta::nanoseconds)
-                .ok_or_else(overflow);
-        }
-        let nanos_each: i64 = match self {
-            ChronoUnit::Nanos => 1,
-            ChronoUnit::Micros => 1_000,
-            ChronoUnit::Millis => 1_000_000,
-            ChronoUnit::Seconds => 1_000_000_000,
-            ChronoUnit::Minutes => 60 * 1_000_000_000,
-            ChronoUnit::Hours => 3_600 * 1_000_000_000,
+        // (per-day, nanos-per-unit) — the divisor comes first, exactly as
+        // `plusWithOverflow` does it.
+        let (per_day, nanos_each): (i64, i64) = match self {
+            ChronoUnit::Nanos => (86_400 * 1_000_000_000, 1),
+            ChronoUnit::Micros => (86_400 * 1_000_000, 1_000),
+            ChronoUnit::Millis => (86_400 * 1_000, 1_000_000),
+            ChronoUnit::Seconds => (86_400, 1_000_000_000),
+            ChronoUnit::Minutes => (1_440, 60 * 1_000_000_000),
+            ChronoUnit::Hours => (24, 3_600 * 1_000_000_000),
+            // `HALF_DAYS` first goes through the JDK's own `/ 256` defect (see
+            // this type's doc), which yields a whole number of hours.
+            ChronoUnit::HalfDays => {
+                let hours = (amount / 256)
+                    .checked_mul(24)
+                    .and_then(|h| h.checked_add((amount % 256).checked_mul(12)?))
+                    .ok_or_else(overflow)?;
+                return delta_from(hours / 24, (hours % 24) * 3_600 * 1_000_000_000);
+            }
             _ => unreachable!("only time-based units reach to_time_delta"),
         };
-        let nanos = amount.checked_mul(nanos_each).ok_or_else(overflow)?;
-        Ok(chrono::TimeDelta::nanoseconds(nanos))
+        delta_from(amount / per_day, (amount % per_day) * nanos_each)
     }
 
     fn add_to_local(self, local: NaiveDateTime, amount: i64) -> Result<NaiveDateTime, String> {
@@ -706,6 +718,17 @@ fn month_count(local: NaiveDateTime) -> i64 {
     i64::from(local.year()) * 12 + i64::from(local.month0())
 }
 
+/// A whole number of days plus a sub-day remainder in nanoseconds, as a
+/// `TimeDelta` — or [`out_of_chrono_range`] when the span itself is more than
+/// a `TimeDelta` can hold. That is egret's limit and it says so; it is not
+/// `long overflow`, which is Java's arithmetic failing.
+fn delta_from(days: i64, nanos: i64) -> Result<chrono::TimeDelta, String> {
+    let range = || out_of_chrono_range(days / 366);
+    chrono::TimeDelta::try_days(days)
+        .and_then(|d| d.checked_add(&chrono::TimeDelta::nanoseconds(nanos)))
+        .ok_or_else(range)
+}
+
 fn plus_days(local: NaiveDateTime, amount: i64) -> Option<NaiveDateTime> {
     if amount >= 0 {
         local.checked_add_days(Days::new(u64::try_from(amount).ok()?))
@@ -773,7 +796,15 @@ fn letter_limits(letter: char) -> Option<(usize, usize)> {
         // a locale's week rules push into the neighbouring year, `Y` and `y`
         // disagree. 2023-12-31 is a Sunday, so under `en`'s Sunday-first
         // rules it is week 1 of `Y` = 2024 while `y` is still 2023.
-        'Y' => (1, 19),
+        //
+        // **And it is the one letter with NO upper bound.** `y` and `u` go
+        // through `appendValue(field, count, 19, …)` and stop at 19;
+        // `WeekBasedFieldPrinterParser` has no such cap, so `Y` × 20 is
+        // `00000000000000002024` in Kestra and was a refusal here. The output
+        // is still linear in the pattern's own length, so the bound argument
+        // in `runners::filters` survives -- but it survives for a different
+        // reason than it claimed, and the claim is corrected there.
+        'Y' => (1, usize::MAX),
         'W' | 'F' => (1, 1),
         'Q' | 'q' => (1, 5),
         'a' => (1, 1),
@@ -1812,12 +1843,139 @@ struct Parsed {
     /// where a bare `m` or `s` does not.
     milli_of_day: Option<u32>,
     nano_of_day: Option<u64>,
+    /// The fields Java parses **and cross-checks**: they contribute nothing a
+    /// full date does not already carry, but a value that disagrees with the
+    /// date is a `Conflict found`, not a shrug. See [`Parsed::cross_check`].
+    quarter: Option<u32>,
+    /// ISO day-of-week, 1 = Monday.
+    day_of_week: Option<u32>,
+    aligned_week_of_month: Option<u32>,
+    modified_julian_day: Option<i64>,
     pm: Option<bool>,
     offset: Option<FixedOffset>,
     zone: Option<Zone>,
 }
 
+/// `Parsed.updateCheckConflict` — the JDK's own message, and the mechanism
+/// behind two behaviours that look unrelated.
+///
+/// A field parsed twice with two different values conflicts, and a field
+/// **derived** from the resolved date that disagrees with the parsed one
+/// conflicts the same way. `java.base/java/time/format/Parsed.java` resolves
+/// every auxiliary field into the date and compares.
+fn conflict(
+    text: &str,
+    field: &str,
+    derived: impl fmt::Display,
+    parsed: impl fmt::Display,
+) -> String {
+    format!(
+        "Text '{text}' could not be parsed: Conflict found: Field {field} {derived} differs from \
+         {field} {parsed}"
+    )
+}
+
+/// Records a parsed value, refusing a **second, different** value for the same
+/// field. `uuuu-MM-dd HH:mm dd` on `2024-03-09 14:25 22` is a parse failure in
+/// Kestra; a first cut simply took the last occurrence and answered day 22.
+fn record<T: Copy + PartialEq + fmt::Display>(
+    slot: &mut Option<T>,
+    value: T,
+    text: &str,
+    field: &str,
+) -> Result<(), String> {
+    if let Some(existing) = *slot {
+        if existing != value {
+            return Err(conflict(text, field, existing, value));
+        }
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
 impl Parsed {
+    /// The auxiliary fields, checked against the date and time they were
+    /// parsed alongside.
+    ///
+    /// **W2 Task 5's fix round 2 wrote down that Java "parses and then
+    /// ignores" these. It does not** — and consuming them silently turned
+    /// thirteen probes from agreeing (both engines refused the letter) into
+    /// egret answering where Kestra throws, twice with a wrong *time*. The
+    /// third review measured that against the pre-fix commit.
+    ///
+    /// `w`, `W`, `Y`, `e` and `c` are **not** here and are refused at the
+    /// field instead: their resolution goes through `WeekFields.of(locale)`,
+    /// and `AbstractDate.convert` never passes the template's `locale` to the
+    /// parser — so their meaning is the JVM's own region (`WeekFields[MONDAY,1]`
+    /// appears verbatim in the harness's conflict messages). Answering them
+    /// would be answering a machine-dependent question.
+    fn cross_check(
+        &self,
+        text: &str,
+        date: NaiveDate,
+        time: Option<NaiveTime>,
+    ) -> Result<(), String> {
+        if let Some(quarter) = self.quarter {
+            let derived = date.month0() / 3 + 1;
+            if derived != quarter {
+                return Err(conflict(text, "QuarterOfYear", derived, quarter));
+            }
+        }
+        if let Some(dow) = self.day_of_week {
+            let derived = date.weekday().number_from_monday();
+            if derived != dow {
+                return Err(conflict(text, "DayOfWeek", derived, dow));
+            }
+        }
+        if let Some(doy) = self.day_of_year {
+            // Only a CHECK when the date came from month-and-day; when it did
+            // not, `build` used this as the date's own source.
+            if self.month.is_some() && self.day.is_some() && date.ordinal() != doy {
+                return Err(conflict(text, "DayOfYear", date.ordinal(), doy));
+            }
+        }
+        if let Some(week) = self.aligned_week_of_month {
+            let derived = (date.day() - 1) / 7 + 1;
+            if derived != week {
+                return Err(conflict(text, "AlignedWeekOfMonth", derived, week));
+            }
+        }
+        if let Some(mjd) = self.modified_julian_day {
+            let derived = date
+                .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).expect("a real date"))
+                .num_days()
+                + 40_587;
+            if derived != mjd {
+                return Err(format!(
+                    "Text '{text}' could not be parsed: Conflict found: Fields resolved to two \
+                     different dates"
+                ));
+            }
+        }
+        // `A` and `N` are a whole time; when the h/m/s/n chain also produced
+        // one, the two must agree.
+        if let Some(time) = time {
+            let nanos = u64::from(time.num_seconds_from_midnight()) * 1_000_000_000
+                + u64::from(time.nanosecond().min(999_999_999));
+            if let Some(millis) = self.milli_of_day {
+                if u64::from(millis) != nanos / 1_000_000 {
+                    return Err(conflict(text, "HourOfDay", time.hour(), millis / 3_600_000));
+                }
+            }
+            if let Some(nano_of_day) = self.nano_of_day {
+                if nano_of_day != nanos {
+                    return Err(conflict(
+                        text,
+                        "HourOfDay",
+                        time.hour(),
+                        nano_of_day / 3_600_000_000_000,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Kestra's three-step cascade, collapsed: a parse that produced an
     /// offset is a `ZonedDateTime`; one that produced a date and a time is a
     /// `LocalDateTime.atZone(zone)`; one that produced only a date is a
@@ -1894,16 +2052,41 @@ impl Parsed {
         let hour = match (self.hour, self.hour_of_ampm, self.pm) {
             (Some(hour), _, _) => Some(hour),
             (None, Some(hour), Some(pm)) => Some(hour % 12 + if pm { 12 } else { 0 }),
-            // An `a` with no hour beside it resolves to the MIDDLE of its
-            // half-day: `AM` is 06:00 and `PM` is 18:00. Measured; there is no
-            // reading of the pattern that predicts it.
-            (None, None, Some(pm)) => Some(if pm { 18 } else { 6 }),
+            // An `a` with **no time field parsed at all** resolves to the
+            // MIDDLE of its half-day: `AM` is 06:00 and `PM` is 18:00.
+            // Measured; nothing about the pattern predicts it.
+            //
+            // **"On its own" is the whole rule and a first cut dropped it.**
+            // `Parsed.resolveTimeLenient` guards the midpoint on hour, minute,
+            // second AND nano all being absent, so `uuuu MM dd mm a` on
+            // `2024 03 09 25 PM` is midnight in Kestra — the synthesised hour
+            // never happens, so the chain below never sees one — and was
+            // 18:25 here.
+            (None, None, Some(pm))
+                if self.minute.is_none() && self.second.is_none() && self.nano.is_none() =>
+            {
+                Some(if pm { 18 } else { 6 })
+            }
+            (None, None, Some(_)) => None,
             // An hour-of-am-pm with no `a` cannot become an hour-of-day, so
             // there is no time.
             (None, Some(_), None) => None,
             (None, None, None) => None,
         };
         let bad_time = || format!("Text '{text}' could not be parsed: Invalid time");
+        let chain = match (hour, self.minute, self.second, self.nano) {
+            (Some(h), Some(m), Some(s), n) => {
+                Some(NaiveTime::from_hms_nano_opt(h, m, s, n.unwrap_or(0)).ok_or_else(bad_time)?)
+            }
+            (Some(h), Some(m), None, None) => {
+                Some(NaiveTime::from_hms_opt(h, m, 0).ok_or_else(bad_time)?)
+            }
+            (Some(h), None, None, None) => {
+                Some(NaiveTime::from_hms_opt(h, 0, 0).ok_or_else(bad_time)?)
+            }
+            _ => None,
+        };
+        self.cross_check(text, date, chain)?;
         let time = if let Some(nanos) = self.nano_of_day {
             Some(
                 NaiveTime::from_num_seconds_from_midnight_opt(
@@ -1921,18 +2104,7 @@ impl Parsed {
                 .ok_or_else(bad_time)?,
             )
         } else {
-            match (hour, self.minute, self.second, self.nano) {
-                (Some(h), Some(m), Some(s), n) => Some(
-                    NaiveTime::from_hms_nano_opt(h, m, s, n.unwrap_or(0)).ok_or_else(bad_time)?,
-                ),
-                (Some(h), Some(m), None, None) => {
-                    Some(NaiveTime::from_hms_opt(h, m, 0).ok_or_else(bad_time)?)
-                }
-                (Some(h), None, None, None) => {
-                    Some(NaiveTime::from_hms_opt(h, 0, 0).ok_or_else(bad_time)?)
-                }
-                _ => None,
-            }
+            chain
         };
 
         // **With no time, the parsed offset and zone are DISCARDED too**, and
@@ -2253,8 +2425,14 @@ fn parse_field(
                 i32::from(scan.digits(2, 2).ok_or_else(|| scan.fail())?.0 as i16) + 2000
             } else {
                 let negative = scan.eat('-');
-                // Greedy, then hand `subsequent` digits back to the
-                // fixed-width fields that follow -- see [`subsequent_width`].
+                // **`SignStyle.EXCEEDS_PAD` reads back the way it writes**:
+                // a `+` is REQUIRED when the value needs more digits than the
+                // pad and forbidden otherwise. So `uuuu` takes `+10000` and
+                // `uuuuu` -- whose width already holds five digits -- does
+                // not. Without this an `iso` round trip of a year past 9999
+                // failed on its second leg, the other half of fix round 1's
+                // EXCEEDS_PAD fix.
+                let positive = !negative && scan.eat('+');
                 let start = scan.at;
                 let (_, taken) = scan.digits(count.max(1), 10).ok_or_else(|| scan.fail())?;
                 let keep = taken.saturating_sub(subsequent).max(count.max(1));
@@ -2264,6 +2442,9 @@ fn parse_field(
                 scan.at = start;
                 let value = scan.digits(keep, keep).ok_or_else(|| scan.fail())?.0;
                 let value = i32::try_from(value).map_err(|_| scan.fail())?;
+                if positive && (count < 4 || keep <= count) {
+                    return Err(scan.fail());
+                }
                 if negative {
                     -value
                 } else {
@@ -2271,7 +2452,7 @@ fn parse_field(
                 }
             };
             if letter == 'u' {
-                parsed.year = Some(value);
+                record(&mut parsed.year, value, scan.text, "Year")?;
             } else {
                 // YearOfEra is 1-based and cannot be zero or negative, so
                 // `yyyy-MM-dd` refuses `-0044-01-15` and `0000-01-15` where
@@ -2283,7 +2464,7 @@ fn parse_field(
                         scan.text
                     ));
                 }
-                parsed.year_of_era = Some(value);
+                record(&mut parsed.year_of_era, value, scan.text, "YearOfEra")?;
             }
         }
         // `G` — the era, which is what turns a `y` year-of-era into a
@@ -2298,7 +2479,10 @@ fn parse_field(
             .ok_or_else(|| scan.fail())?;
             parsed.era = Some(if index == 0 { 1 } else { 0 });
         }
-        'M' | 'L' if count <= 2 => parsed.month = Some(numeric(scan, 2, "MonthOfYear", 1, 12)?),
+        'M' | 'L' if count <= 2 => {
+            let value = numeric(scan, 2, "MonthOfYear", 1, 12)?;
+            record(&mut parsed.month, value, scan.text, "MonthOfYear")?;
+        }
         'M' | 'L' if count == 3 || count == 4 => {
             let names: &[&str; 12] = if count == 3 {
                 &MONTHS_SHORT
@@ -2306,18 +2490,43 @@ fn parse_field(
                 &MONTHS_FULL
             };
             let index = eat_one_of(scan, names).ok_or_else(|| scan.fail())?;
-            parsed.month = Some(index as u32 + 1);
+            record(
+                &mut parsed.month,
+                index as u32 + 1,
+                scan.text,
+                "MonthOfYear",
+            )?;
         }
-        'd' => parsed.day = Some(numeric(scan, 2, "DayOfMonth", 1, 31)?),
-        'D' => parsed.day_of_year = Some(numeric(scan, 3, "DayOfYear", 1, 366)?),
-        'H' => parsed.hour = Some(numeric(scan, 2, "HourOfDay", 0, 23)?),
+        'd' => {
+            let value = numeric(scan, 2, "DayOfMonth", 1, 31)?;
+            record(&mut parsed.day, value, scan.text, "DayOfMonth")?;
+        }
+        'D' => {
+            let value = numeric(scan, 3, "DayOfYear", 1, 366)?;
+            record(&mut parsed.day_of_year, value, scan.text, "DayOfYear")?;
+        }
+        'H' => {
+            let value = numeric(scan, 2, "HourOfDay", 0, 23)?;
+            record(&mut parsed.hour, value, scan.text, "HourOfDay")?;
+        }
         // `ClockHourOfDay`'s range is 1-24, but **SMART accepts 0** and reads
         // it as hour 0 -- so `kk:mm` takes `00:30`. Measured.
         'k' => parsed.hour = Some(numeric(scan, 2, "ClockHourOfDay", 0, 24)? % 24),
-        'h' => parsed.hour_of_ampm = Some(numeric(scan, 2, "ClockHourOfAmPm", 1, 12)? % 12),
+        // Same SMART exemption as `k` one line up, and it was missing here:
+        // `ClockHourOfAmPm`'s range is 1-12, but SMART accepts 0 and reads it
+        // as 0. `hh:mm a` on `00:30 AM` was byte-exact before fix round 2 and
+        // an error after it -- the one probe in 5528 that regressed from
+        // right to an error.
+        'h' => parsed.hour_of_ampm = Some(numeric(scan, 2, "ClockHourOfAmPm", 0, 12)? % 12),
         'K' => parsed.hour_of_ampm = Some(numeric(scan, 2, "HourOfAmPm", 0, 11)?),
-        'm' => parsed.minute = Some(numeric(scan, 2, "MinuteOfHour", 0, 59)?),
-        's' => parsed.second = Some(numeric(scan, 2, "SecondOfMinute", 0, 59)?),
+        'm' => {
+            let value = numeric(scan, 2, "MinuteOfHour", 0, 59)?;
+            record(&mut parsed.minute, value, scan.text, "MinuteOfHour")?;
+        }
+        's' => {
+            let value = numeric(scan, 2, "SecondOfMinute", 0, 59)?;
+            record(&mut parsed.second, value, scan.text, "SecondOfMinute")?;
+        }
         'S' => {
             let value = scan.digits(count, count).ok_or_else(|| scan.fail())?.0;
             parsed.nano = Some(value * 10u32.pow(9 - count as u32));
@@ -2348,58 +2557,90 @@ fn parse_field(
         // Java cross-checks them and egret consumes them. **`E` is text at
         // EVERY count** -- `E`, `EE` and `EEE` all print `Mon` -- which the
         // first cut missed by requiring `count >= 3` for the whole group.
-        'E' | 'e' | 'c' if count == 5 => {
-            if eat_one_of(scan, &DAYS_NARROW).is_none() {
-                return Err(scan.fail());
-            }
+        // `E` is the ISO day-of-week as text, and it is CROSS-CHECKED
+        // against the date -- `uuuu-MM-dd EEEE` on `2024-03-09 Monday` is a
+        // conflict, because that date is a Saturday.
+        'E' if count == 5 => {
+            let index = eat_one_of(scan, &DAYS_NARROW).ok_or_else(|| scan.fail())?;
+            record(
+                &mut parsed.day_of_week,
+                index as u32 + 1,
+                scan.text,
+                "DayOfWeek",
+            )?;
         }
         'E' => {
-            if eat_one_of(scan, &DAYS_FULL).is_none() && eat_one_of(scan, &DAYS_SHORT).is_none() {
-                return Err(scan.fail());
-            }
-        }
-        'e' | 'c' if count >= 3 => {
-            if eat_one_of(scan, &DAYS_FULL).is_none() && eat_one_of(scan, &DAYS_SHORT).is_none() {
-                return Err(scan.fail());
-            }
-        }
-        // Consumed and IGNORED, exactly as Java resolves them: they add
-        // nothing a full date does not already carry. `e`/`c` and the week
-        // fields are additionally MACHINE-DEPENDENT in Kestra -- see
-        // [`Format::parse_text`] -- which is a second reason not to give them
-        // meaning here.
-        'e' | 'c' => {
-            numeric(scan, 1, "DayOfWeek", 1, 7)?;
+            let index = eat_one_of(scan, &DAYS_FULL)
+                .or_else(|| eat_one_of(scan, &DAYS_SHORT))
+                .ok_or_else(|| scan.fail())?;
+            record(
+                &mut parsed.day_of_week,
+                index as u32 + 1,
+                scan.text,
+                "DayOfWeek",
+            )?;
         }
         'Q' | 'q' if count <= 2 => {
-            numeric(scan, 2, "QuarterOfYear", 1, 4)?;
+            let value = numeric(scan, 2, "QuarterOfYear", 1, 4)?;
+            record(&mut parsed.quarter, value, scan.text, "QuarterOfYear")?;
         }
         'Q' | 'q' if count == 3 => {
-            if eat_one_of(scan, &["Q1", "Q2", "Q3", "Q4"]).is_none() {
-                return Err(scan.fail());
-            }
+            let index = eat_one_of(scan, &["Q1", "Q2", "Q3", "Q4"]).ok_or_else(|| scan.fail())?;
+            record(
+                &mut parsed.quarter,
+                index as u32 + 1,
+                scan.text,
+                "QuarterOfYear",
+            )?;
         }
         'Q' | 'q' if count == 4 => {
-            if eat_one_of(scan, &QUARTERS_FULL).is_none() {
-                return Err(scan.fail());
-            }
+            let index = eat_one_of(scan, &QUARTERS_FULL).ok_or_else(|| scan.fail())?;
+            record(
+                &mut parsed.quarter,
+                index as u32 + 1,
+                scan.text,
+                "QuarterOfYear",
+            )?;
         }
         'Q' | 'q' => {
-            scan.digits(1, 1).ok_or_else(|| scan.fail())?;
-        }
-        'w' => {
-            numeric(scan, 2, "WeekOfWeekBasedYear", 1, 53)?;
-        }
-        'W' => {
-            numeric(scan, 1, "WeekOfMonth", 0, 6)?;
+            let (value, _) = scan.digits(1, 1).ok_or_else(|| scan.fail())?;
+            record(&mut parsed.quarter, value, scan.text, "QuarterOfYear")?;
         }
         'F' => {
-            numeric(scan, 1, "AlignedWeekOfMonth", 1, 5)?;
+            let value = numeric(scan, 1, "AlignedWeekOfMonth", 1, 5)?;
+            record(
+                &mut parsed.aligned_week_of_month,
+                value,
+                scan.text,
+                "AlignedWeekOfMonth",
+            )?;
         }
-        'Y' | 'g' => {
+        'g' => {
             let negative = scan.eat('-');
-            scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
-            let _ = negative;
+            let (value, _) = scan.digits64(count.max(1), 19).ok_or_else(|| scan.fail())?;
+            let value = i64::try_from(value).map_err(|_| scan.fail())?;
+            record(
+                &mut parsed.modified_julian_day,
+                if negative { -value } else { value },
+                scan.text,
+                "ModifiedJulianDay",
+            )?;
+        }
+        // **`w`, `W`, `Y`, `e` and `c` are refused, and that is a narrowing
+        // from fix round 2 rather than an omission.** All five resolve through
+        // `WeekFields.of(locale)`, and `AbstractDate.convert` never passes the
+        // template's `locale` to the parser -- the harness's own conflict
+        // messages read `WeekFields[MONDAY,1]`, which is the JVM's region and
+        // not the entry's argument. Consuming them silently (round 2) made
+        // egret answer a machine-dependent question; giving them meaning would
+        // make egret answer it *differently* on another host. Refusing says
+        // so.
+        'w' | 'W' | 'Y' | 'e' | 'c' => {
+            return Err(format!(
+                "the 'date' filters cannot parse an 'existingFormat' containing pattern letter \
+                 '{letter}': it resolves through the JVM's own locale, which Kestra does not pass \
+                 to the parser, so its meaning is the host's region"
+            ))
         }
         'X' | 'x' | 'Z' | 'O' => {
             parsed.offset = Some(parse_offset_field(letter, count, scan)?);
@@ -2414,7 +2655,12 @@ fn parse_field(
             }
             let id: String = scan.chars[start..scan.at].iter().collect();
             let zone = Zone::resolve(Some(&id))?;
-            parsed.offset = None;
+            // **The offset stays.** `ZonedDateTime.from` computes
+            // `INSTANT_SECONDS` from the parsed OFFSET and uses the zone for
+            // display only, so clearing it here moved the instant by the
+            // difference between the two -- seven hours for
+            // `+02:00 America/New_York` -- and only when the offset was parsed
+            // FIRST, which is why no single-letter round trip saw it.
             parsed.zone = Some(zone);
         }
         // The same three letters the FORMAT side refuses, for the same

@@ -215,3 +215,34 @@ filter-date-existing-format-offset-is-case-sensitive
 filter-date-existing-format-hour-of-ampm-out-of-range
 filter-date-existing-format-year-of-era-cannot-be-zero
 filter-date-existing-format-year-of-era-cannot-be-negative
+
+# W2 TASK 5 FIX ROUND 3 -- eight, and **every one was written before its fix
+# and shown to FAIL against the pre-fix implementation.** That is the rule the
+# third review imposed, and it is mutation discipline applied to corpus
+# selection: a sweep finds divergences, but nothing forces the ENTRY you write
+# afterwards to sit on one. Two reviews in a row found my new entries sitting
+# one variant away from the failure -- `Q E G` on values that agree, `KK` at 12
+# but not `hh` at 0, `DAYS` for a bug in the time-based units.
+#
+#   filter-date-existing-format-quarter-conflicts       -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-day-of-week-conflicts   -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-day-of-year-conflicts   -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-milli-of-day-conflicts  -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-repeated-field-conflicts-> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-clock-hour-of-ampm-thirteen -> smart_exempts_a_zero_clock_hour_but_not_a_thirteenth
+#   filter-date-existing-format-wide-year-needs-the-sign    -> a_wide_year_is_read_back_only_with_its_sign
+#   filter-date-existing-format-optional-year-absent        -> an_optional_section_that_fails_leaves_no_year
+#
+# The first five correct a claim W2 Task 5's fix round 2 wrote down and got
+# wrong: it said Java "parses and then ignores" `Q`, `q`, `w`, `W`, `F`, `Y`,
+# `g`, `E` and `G`. It does not. `Parsed.updateCheckConflict` resolves each into
+# a field and CROSS-CHECKS it against the date, and the same mechanism rejects
+# a field supplied twice with two values.
+filter-date-existing-format-quarter-conflicts
+filter-date-existing-format-day-of-week-conflicts
+filter-date-existing-format-day-of-year-conflicts
+filter-date-existing-format-milli-of-day-conflicts
+filter-date-existing-format-repeated-field-conflicts
+filter-date-existing-format-clock-hour-of-ampm-thirteen
+filter-date-existing-format-wide-year-needs-the-sign
+filter-date-existing-format-optional-year-absent

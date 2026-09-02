@@ -126,7 +126,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**56** entries carry it today, counted out of `golden.json` rather than added
+**64** entries carry it today, counted out of `golden.json` rather than added
 up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -135,7 +135,8 @@ from its third (`indent`'s own `MAX_AMOUNT`, and `number`'s two `type`-argument
 casts) — **fourteen from W2 Task 5** (eight of them the Java pattern compiler
 refusing a pattern), **nine more from Task 5's fix round**, which its probe
 sweep earned, and **five from its second round**, from the `existingFormat`
-parse sweep. **Every one of them is separately backed by a unit test in
+parse sweep, and **eight from its third**, every one of which was shown to
+fail against the pre-fix implementation before it was written down. **Every one of them is separately backed by a unit test in
 `runners::filters` asserting egret's own message**, named alongside it in
 `error-class.txt` and mechanically checked against `error-class-pairs.txt`, so
 what carries them is the test and not the mode.
@@ -144,7 +145,7 @@ That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
 entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
 whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 56 are *also* in `baseline.txt`, because
+does **not** make it pass: 5 of the 64 are *also* in `baseline.txt`, because
 egret *succeeds* where Kestra throws — a real divergence, and it stays
 visible.
 
@@ -154,8 +155,8 @@ visible.
 is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
 60 of 291 after fix round 3, 59 of 426 after W2 Task 5, 62 of 457 after that
-task's fix round, **62 of 486** after its second. The test fails in **both**
-directions:
+task's fix round, 62 of 486 after its second, **66 of 513** after its third.
+The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
 - an id **in** the baseline now matches — progress that must be banked by
@@ -666,7 +667,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 486 entries)
+## Corpus (`corpus.json`, 513 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -1250,6 +1251,8 @@ this list first, or they will read a moved golden as a regression in egret.
 | 2 | **`DistinctFilter` returns the four-character STRING `"null"` for a null input**, where every sibling filter returns Java `null` (which renders as nothing). | `javap -p -c DistinctFilter.class`: `ifnonnull 7 / ldc #7 // String null / areturn` | `filter-distinct-null` (renders `<null>` where `filter-chunk-null` renders `<>`) |
 | 3 | **Kestra's six `ofPattern` formats use `yyyy` (year-of-era) where they mean `uuuu`, so a BC date silently loses its era.** `iso` on `-0044-03-15` writes `0045-03-15T…` — a positive year with no era marker, which parses back as AD 45, a 2 069-year round-trip error. The twelve `java.time`-constant formats use `uuuu` and are correct. | `javap -p -c AbstractDate.class` static initialiser: `ldc #209 // String yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX` and its five siblings | `filter-date-format-iso-loses-the-era` against `filter-date-format-iso-instant-keeps-the-era` and `-iso-local-date-keeps-the-era` |
 
+| 4 | **`AbstractDate.convert`'s 19-digit branch throws away the milliseconds it just read.** It is `Instant.ofEpochMilli(l / 1_000_000).atZone(zone).withNano((int)(l % 1_000_000) * 1000)`, and `withNano` **replaces** the whole nanosecond field — so `ofEpochMilli`'s `.123` is discarded and `1705314600123456789` renders `.456789`, not `.123456789`. | `javap -p -c AbstractDate.class`, the `digitCount == 19` branch: `ldiv` by `1000000`, `Instant.ofEpochMilli`, `atZone`, then `ZonedDateTime.withNano` | `filter-date-epoch-nanos-truncating` |
+
 ### What is NOT on that list, and why the distinction matters
 
 **`LessThanExpression`'s `comparisonPebb` typo is recorded, not reproduced.**
@@ -1324,9 +1327,17 @@ fail and `convert` falls through to `LocalDate.parse(…).atStartOfDay()`. So:
   the number as unparsed text.
 - **`E` is text at every count** — `E`, `EE` and `EEE` all print `Mon` — and
   `EEEEE`, `GGGGG`, `QQQQQ` are the narrow forms.
-- **Java parses and then IGNORES `Q`, `q`, `w`, `W`, `F`, `Y`, `g`, `E` and
-  `G`**: they add nothing a full date does not already carry, and Java only
-  cross-checks them. egret consumes them the same way.
+- ~~**Java parses and then IGNORES `Q`, `q`, `w`, `W`, `F`, `Y`, `g`, `E` and
+  `G`**~~ — **this sentence was wrong, and acting on it cost thirteen
+  probes.** Java parses those letters and **CROSS-CHECKS** them:
+  `Parsed.updateCheckConflict` resolves each into a field and compares it
+  against the resolved date, so `uuuu-MM-dd Q` on `2024-03-09 4` is
+  `Conflict found: Field QuarterOfYear 1 differs from QuarterOfYear 4`. The
+  same mechanism refuses a field supplied twice with two values.
+  Consuming-and-discarding them (fix round 2) turned thirteen probes from
+  agreeing — both engines had refused the letter — into egret answering where
+  Kestra throws, twice with a wrong *time*. Corrected in fix round 3; see that
+  section below.
 
 ### The one thing `existingFormat` does that `format` does not
 
@@ -1349,15 +1360,111 @@ Two consequences, both standing rules:
   meaning), which matches the pinned harness and is a *narrower* behaviour than
   Kestra's rather than a different one.
 
-### What is still refused on the parse side, and why the set matches
+### What is still refused on the parse side
 
-`B`, `v` and `z` — **exactly the three letters the FORMAT side refuses**, for
-exactly the same reason: their text lives in a locale database. Keeping the two
-sets identical is deliberate — a letter egret can write, it can read. Kestra
-parses all three (it consumes and discards them), so those are divergences and
-are named as such.
+**`B`, `v` and `z`** — the three the FORMAT side refuses too, for the same
+reason: their text lives in a locale database.
 
-One further divergence has no entry and is recorded here instead: an optional
-section wrapping the year, `[uuuu-]MM-dd`, is refused by Java on `2024-01-15`
-and accepted here. Java's reason is not clear from the bytecode and the shape
-is vanishingly rare; it is written down rather than chased.
+**And, since fix round 3, `w`, `W`, `Y`, `e` and `c`.** All five resolve
+through `WeekFields.of(locale)`, and `AbstractDate.convert` passes the parser
+**no locale at all** (see the section just above), so their meaning is the
+JVM's own region — the harness's conflict messages read
+`WeekFields[MONDAY,1]` verbatim. Fix round 2 consumed them silently, which made
+egret answer a machine-dependent question; giving them meaning would make egret
+answer it *differently* on another host. Refusing says so, and it is what egret
+did before round 2.
+
+Kestra parses all eight, so all eight are divergences. **Four now have
+baselined corpus entries** (`filter-date-pattern-day-period` for the format
+side, and `-day-period-parse` / `-zone-name-parse` / `-generic-zone-parse` for
+the parse side); the locale-resolved five cannot have one, because an entry
+using them would not be reproducible on another host — the same rule
+`timeZone` and `locale` already carry. `runners::filters::
+the_locale_resolved_parse_fields_are_refused_rather_than_guessed` is their pin.
+
+**An earlier version of this section said these refusals were "named as
+such".** They were named in prose and nowhere in the ratchet: `B`'s only entry
+was error-class at a count *both* engines reject, so it was born matching and
+pinned nothing at all.
+
+~~One further divergence has no entry…~~ **That paragraph was wrong and is
+withdrawn.** It claimed `[uuuu-]MM-dd` was refused by Java on `2024-01-15`; it
+is not — Java accepts it, on every output format tried. The probe it came from
+was `01-15`, the input with **no** year, and I read the wrong index out of my
+own sweep. Both engines refuse that one, so there was never a divergence at
+all. `filter-date-existing-format-optional-year-absent` and
+`-optional-year-present` now pin both halves, and
+`an_optional_section_that_fails_leaves_no_year` is the paired test. A reviewer
+could not reproduce the claim because the claim named the wrong input.
+
+## W2 Task 5, fix round 3 — and the rule that finally breaks the pattern
+
+### An entry added for a defect must be shown to FAIL before the fix
+
+**This is now the rule for this corpus, and it is mutation discipline applied
+to entry selection.** Write the entry, run it against the *pre-fix*
+implementation, watch it fail, then fix. If it cannot be made to fail, it sits
+on a value where the two engines agree and it is decoration.
+
+It exists because two reviews in a row found the same shape — new entries
+sitting **one variant away** from the failure they were added for — after a
+sweep that was supposed to end it. A sweep finds divergences; nothing was
+forcing the *entry* written afterwards to sit on one. The instances, all
+measured:
+
+- `filter-date-existing-format-ignored-fields` used `Q E G` on `1 Mon AD`, and
+  2024-01-15 **is** a Monday in Q1 AD — so it passed no matter what egret did
+  with those letters. Its name encoded a belief that was false. Deleted, and
+  replaced by `-cross-checked-fields-agree` plus four conflicting siblings.
+- `filter-date-existing-format-hour-of-ampm-out-of-range` covered `KK` at 12
+  and not `hh` at 0 — the value that had actually regressed.
+- `filter-dateadd-past-egrets-date-range` used `DAYS` for a bug that lived in
+  the six **time-based** units.
+- The sharpest: `date_add_past_egrets_range_says_so_rather_than_claiming_overflow`
+  criticises its own predecessor, in its docstring, for "asserting exactly the
+  two extremes where the two engines happen to agree" — and then asserted only
+  `DAYS`, repeating the shape one unit over.
+
+Fix round 3's 28 entries were written first and run first: **17 failed against
+the pre-fix implementation** and 11 are their deliberate agreeing-side partners.
+
+### What round 3 fixed
+
+- **Java CROSS-CHECKS the fields it parses.** See the corrected bullet in the
+  round-2 section above. `Q`, `q`, `E`, `D`, `F` and `g` now resolve into the
+  date and are compared, and a field parsed twice with two values conflicts the
+  same way.
+- **An offset is no longer discarded when a zone id follows it.**
+  `ZonedDateTime.from` computes `INSTANT_SECONDS` from the parsed *offset* and
+  uses the zone for display; clearing the offset moved the instant by the
+  difference between them — seven hours for `+02:00 America/New_York` — and
+  only when the offset came **first**, which is why no single-letter round trip
+  saw it. `OK → OK`, and order-dependent.
+- **The AM/PM midpoint fires only when no time field was parsed at all.** The
+  round-2 note stated the rule correctly ("an `a` on its own"); the code
+  dropped the "on its own", so `uuuu MM dd mm a` on `2024 03 09 25 PM` was
+  18:25 here and is midnight in Kestra.
+- **SMART's zero-clock-hour exemption applies to `hh`, not only to `k`.**
+  `Parsed` has the same block twice and round 2 implemented it once.
+  `hh:mm a` on `00:30 AM` was byte-exact before round 2 and an error after —
+  the only probe in 5 528 that regressed from *right* to broken.
+- **The six time-based `dateAdd` units reach as far as the ten date-based
+  ones.** `LocalDateTime.plus` divides by the unit's count-per-day before
+  multiplying; a first cut multiplied the whole amount into nanoseconds and so
+  overflowed an `i64` at about ±292 years. `dateAdd(10000000000, 'SECONDS')`
+  said `long overflow` where Kestra answers `2340-12-05` — a date **inside**
+  what egret can represent, 900× short of the limit its own message claimed,
+  and reported with Java's arithmetic-overflow sentence for a case Java's
+  arithmetic does not overflow on.
+- **`Y` has no upper letter count.** `WeekBasedFieldPrinterParser` has no cap,
+  so `Y` × 20 is `00000000000000002024` in Kestra and was a refusal here. Note
+  the consequence for `no_date_filter_can_be_made_to_allocate_out_of_proportion`:
+  its claim that every surviving letter writes O(1) was **false upstream**, and
+  egret had been safe only by way of this bug. The bound survives on the
+  weaker, true statement — every letter writes at most `count` characters, so
+  output stays linear in the pattern's own length.
+- **A wide year is read back only with its sign.** `SignStyle.EXCEEDS_PAD`
+  parses the way it prints, so `uuuu` takes `+10000` and `uuuuu` does not —
+  the other half of fix round 1's fix, which had done only the writing, and
+  without which an `iso` round trip of a year past 9999 failed on its second
+  leg.

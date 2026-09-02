@@ -3068,9 +3068,17 @@ mod tests {
     /// have are already closed upstream:
     ///
     /// - a **repeated pattern letter** is capped by the JDK's own compiler
-    ///   (see [`date_reproduces_javas_pattern_letter_limits`]), and every
-    ///   letter that survives writes O(1) characters, so a pattern's output is
-    ///   linear in the pattern's own length;
+    ///   for all but one letter (see
+    ///   [`date_reproduces_javas_pattern_letter_limits`]). **`Y` is the
+    ///   exception and the first version of this claim was wrong about it**:
+    ///   `WeekBasedFieldPrinterParser` has no cap, so `Y` × 20 really does
+    ///   print twenty characters and `Y` × n prints n. The bound survives, but
+    ///   for a weaker reason than "every letter writes O(1)" — every letter
+    ///   writes at most `count` characters, so a pattern's output stays
+    ///   **linear in the pattern's own length**, which is what
+    ///   `MAX_OUTPUT_BYTES` already measures where it is written. Corrected by
+    ///   the third review, which also measured that egret had been safe here
+    ///   only by refusing `Y` past 19, i.e. by a bug;
     /// - a **huge `dateAdd` amount** is arithmetic, not allocation, and
     ///   overflows into an error long before it costs anything.
     ///
@@ -3083,6 +3091,13 @@ mod tests {
         assert!(
             err(&format!("{{{{ d | date('{huge}', timeZone='UTC') }}}}"), d)
                 .contains("The minimum width must be from 1 to 19 inclusive")
+        );
+        // `Y` is the one letter with NO cap upstream, so it is the one that
+        // has to be linear rather than refused: 4096 letters, 4096 characters.
+        let wide = "Y".repeat(4096);
+        assert_eq!(
+            ok(&format!("{{{{ d | date('{wide}', timeZone='UTC') }}}}"), d).len(),
+            4096
         );
         // The longest a pattern's output can be is a pad, and a pad's width is
         // the pattern's own length -- linear, so `MAX_OUTPUT_BYTES` already
@@ -3457,6 +3472,185 @@ mod tests {
             r#"{"d": "2024-13-01"}"#
         )
         .contains("could not be parsed"));
+    }
+
+    // -- W2 Task 5 fix round 3 -----------------------------------------
+    //
+    // Every corpus entry behind these was written BEFORE its fix and shown to
+    // FAIL against the pre-fix implementation. Two reviews in a row found new
+    // entries sitting one variant away from the failure they were added for --
+    // `Q E G` on values that agree, `KK` at 12 but not `hh` at 0, `DAYS` for a
+    // bug in the time-based units -- and demonstrating the failure first is
+    // the only thing that breaks that pattern.
+
+    /// **Java cross-checks the fields it parses; it does not ignore them.**
+    ///
+    /// `Parsed.updateCheckConflict` resolves each auxiliary field into the
+    /// date and compares. W2 Task 5's fix round 2 wrote down the opposite and
+    /// consumed nine letters silently, which turned thirteen probes from
+    /// *agreeing* (both engines refused the letter) into egret answering where
+    /// Kestra throws — twice with a wrong time.
+    ///
+    /// The same mechanism refuses a field supplied twice with two values.
+    #[test]
+    fn java_cross_checks_the_fields_it_parses() {
+        // 2024-03-09 is a Saturday in Q1: day-of-year 69, aligned week 2,
+        // modified Julian day 60378.
+        let day = r#"{"d": "2024-03-09 VALUE"}"#;
+        let ef = |pattern: &str| {
+            format!("{{{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='uuuu-MM-dd {pattern}') }}}}")
+        };
+        for (pattern, agrees, conflicts) in [
+            ("Q", "1", "4"),
+            ("EEEE", "Saturday", "Monday"),
+            ("DDD", "069", "300"),
+            ("F", "2", "5"),
+            ("g", "60378", "60000"),
+        ] {
+            // The value that AGREES is accepted…
+            assert_eq!(
+                ok(&ef(pattern), &day.replace("VALUE", agrees)),
+                "2024-03-09",
+                "`{pattern}` = {agrees} agrees with the date"
+            );
+            // …and the one beside it is a conflict. This is the pair the old
+            // `filter-date-existing-format-ignored-fields` entry could not
+            // have: it used `Q E G` on `1 Mon AD`, and 2024-01-15 *is* a
+            // Monday in Q1 AD.
+            let message = err(&ef(pattern), &day.replace("VALUE", conflicts));
+            assert!(message.contains("Conflict found"), "`{pattern}`: {message}");
+        }
+        // A field parsed twice must agree with itself.
+        assert_eq!(
+            ok(
+                "{{ d | date('uuuu-MM-dd HH:mm', timeZone='UTC', existingFormat='uuuu-MM-dd HH:mm dd') }}",
+                r#"{"d": "2024-03-09 14:25 09"}"#
+            ),
+            "2024-03-09 14:25"
+        );
+        assert!(err(
+            "{{ d | date('uuuu-MM-dd HH:mm', timeZone='UTC', existingFormat='uuuu-MM-dd HH:mm dd') }}",
+            r#"{"d": "2024-03-09 14:25 22"}"#
+        )
+        .contains("Conflict found"));
+        // `A` is a whole time, so it conflicts with an h/m/s that disagrees.
+        assert_eq!(
+            ok(
+                "{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', existingFormat='uuuu-MM-dd HH:mm:ss A') }}",
+                r#"{"d": "2024-03-09 14:25:36 51936000"}"#
+            ),
+            "2024-03-09 14:25:36"
+        );
+        assert!(err(
+            "{{ d | date('uuuu-MM-dd HH:mm:ss', timeZone='UTC', existingFormat='uuuu-MM-dd HH:mm:ss A') }}",
+            r#"{"d": "2024-03-09 14:25:36 1"}"#
+        )
+        .contains("Conflict found"));
+    }
+
+    /// `ResolverStyle.SMART` exempts a **zero** clock-hour, for `hh` as well
+    /// as for `k` — the same block twice in `Parsed`, and fix round 2
+    /// implemented it once.
+    ///
+    /// `hh:mm a` on `00:30 AM` was byte-exact before that round and an error
+    /// after it: the one probe in 5 528 that regressed from right to broken.
+    #[test]
+    fn smart_exempts_a_zero_clock_hour_but_not_a_thirteenth() {
+        let ef = "{{ d | date('uuuu-MM-dd HH:mm', timeZone='UTC', existingFormat='uuuu-MM-dd hh:mm a') }}";
+        assert_eq!(
+            ok(ef, r#"{"d": "2024-03-09 00:30 AM"}"#),
+            "2024-03-09 00:30"
+        );
+        assert_eq!(
+            ok(ef, r#"{"d": "2024-03-09 12:30 AM"}"#),
+            "2024-03-09 00:30"
+        );
+        // The exemption is 0, not "anything": 13 is still out of range.
+        assert!(err(ef, r#"{"d": "2024-03-09 13:30 AM"}"#)
+            .contains("Invalid value for ClockHourOfAmPm"));
+        // And `k` keeps its own, which is the block this was copied from.
+        assert_eq!(
+            ok(
+                "{{ d | date('uuuu-MM-dd HH:mm', timeZone='UTC', existingFormat='uuuu-MM-dd kk:mm') }}",
+                r#"{"d": "2024-03-09 24:30"}"#
+            ),
+            "2024-03-09 00:30"
+        );
+    }
+
+    /// `SignStyle.EXCEEDS_PAD` reads back the way it writes: the `+` is
+    /// **required** when the value needs more digits than the pad and
+    /// forbidden otherwise.
+    ///
+    /// Without it an `iso` round trip of a year past 9999 failed on its second
+    /// leg — the other half of fix round 1's EXCEEDS_PAD fix, which had only
+    /// done the writing.
+    #[test]
+    fn a_wide_year_is_read_back_only_with_its_sign() {
+        let ef = |pattern: &str| {
+            format!("{{{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='{pattern}') }}}}")
+        };
+        assert_eq!(
+            ok(&ef("uuuu-MM-dd"), r#"{"d": "+10000-01-15"}"#),
+            "+10000-01-15"
+        );
+        // `uuuuu` already holds five digits, so the sign is not expected.
+        assert!(err(&ef("uuuuu-MM-dd"), r#"{"d": "+10000-01-15"}"#).contains("could not be parsed"));
+        // The whole round trip, which is what this is for.
+        assert_eq!(
+            ok(
+                "{{ d | date('iso', timeZone='UTC', existingFormat='iso') }}",
+                r#"{"d": "+10000-01-15T10:30:00.000000Z"}"#
+            ),
+            "+10000-01-15T10:30:00.000000Z"
+        );
+    }
+
+    /// An optional section that fails leaves its fields **unset**, so
+    /// `[uuuu-]MM-dd` on `01-15` has no year and cannot make a date — while
+    /// the same pattern on `2024-01-15` does.
+    #[test]
+    fn an_optional_section_that_fails_leaves_no_year() {
+        let ef = "{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='[uuuu-]MM-dd') }}";
+        assert_eq!(ok(ef, r#"{"d": "2024-01-15"}"#), "2024-01-15");
+        assert!(err(ef, r#"{"d": "01-15"}"#).contains("could not be parsed"));
+    }
+
+    /// The five letters whose parse-side meaning is the **host's region**,
+    /// refused rather than answered.
+    ///
+    /// `w`, `W`, `Y`, `e` and `c` resolve through `WeekFields.of(locale)`, and
+    /// `AbstractDate.convert` never passes the template's `locale` to the
+    /// parser — the harness's own conflict messages read
+    /// `WeekFields[MONDAY,1]`, which is the JVM's region and not the entry's
+    /// argument. Fix round 2 consumed them silently, which made egret answer
+    /// a machine-dependent question; this refuses and says why.
+    ///
+    /// No corpus entry can hold this: an entry using those letters in an
+    /// `existingFormat` would not be reproducible on another host, which is
+    /// the same rule `timeZone` and `locale` already carry.
+    #[test]
+    fn the_locale_resolved_parse_fields_are_refused_rather_than_guessed() {
+        for letter in ['w', 'W', 'Y', 'e', 'c'] {
+            let message = err(
+                &format!(
+                    "{{{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='uuuu-MM-dd {letter}') }}}}"
+                ),
+                r#"{"d": "2024-03-09 2"}"#,
+            );
+            assert!(
+                message.contains("the host's region"),
+                "`{letter}`: {message}"
+            );
+        }
+        // The locale-INDEPENDENT neighbours are not refused.
+        assert_eq!(
+            ok(
+                "{{ d | date('uuuu-MM-dd', timeZone='UTC', existingFormat='uuuu-MM-dd F') }}",
+                r#"{"d": "2024-03-09 2"}"#
+            ),
+            "2024-03-09"
+        );
     }
 
     /// **The time-resolution cascade**: which fields make a time, and what

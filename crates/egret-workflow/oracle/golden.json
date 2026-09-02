@@ -1738,17 +1738,230 @@
   },
   "result" : "-0044-01-15 00:00:00.000"
 }, {
-  "id" : "filter-date-existing-format-ignored-fields",
-  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd Q E G\", locale='en') }}",
-  "context" : {
-    "d" : "2024-01-15 1 Mon AD"
-  },
-  "result" : "2024-01-15 00:00:00.000"
-}, {
   "id" : "filter-date-existing-format-narrow-forms",
   "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd EEEEE GGGGG QQQQQ\", locale='en') }}",
   "context" : {
     "d" : "2024-01-15 M A 1"
+  },
+  "result" : "2024-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-quarter-conflicts",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd Q\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 4"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 4' could not be parsed: Conflict found: Field QuarterOfYear 1 differs from QuarterOfYear 4 derived from 2024-03-09"
+  }
+}, {
+  "id" : "filter-date-existing-format-day-of-week-conflicts",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd EEEE\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 Monday"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 Monday' could not be parsed: Conflict found: Field DayOfWeek 6 differs from DayOfWeek 1 derived from 2024-03-09"
+  }
+}, {
+  "id" : "filter-date-existing-format-day-of-year-conflicts",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd DDD\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 300"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 300' could not be parsed: Conflict found: Field DayOfYear 69 differs from DayOfYear 300 derived from 2024-03-09"
+  }
+}, {
+  "id" : "filter-date-existing-format-milli-of-day-conflicts",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm:ss A\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 14:25:36 1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 14:25:36 1' could not be parsed: Conflict found: HourOfDay 14 differs from HourOfDay 0 while resolving  SecondOfDay"
+  }
+}, {
+  "id" : "filter-date-existing-format-cross-checked-fields-agree",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd Q EEE DDD F g\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 1 Sat 069 2 60378"
+  },
+  "result" : "2024-03-09 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-repeated-field-conflicts",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm dd\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 14:25 22"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 14:25 22' could not be parsed at index 17"
+  }
+}, {
+  "id" : "filter-date-existing-format-repeated-field-agrees",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm dd\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 14:25 09"
+  },
+  "result" : "2024-03-09 14:25:00.000"
+}, {
+  "id" : "filter-date-existing-format-offset-then-zone",
+  "expr" : "{{ d | date('iso_instant', timeZone='UTC', existingFormat='uuuu MM dd HH XXX VV', locale='en') }}",
+  "context" : {
+    "d" : "2024 03 09 14 +02:00 America/New_York"
+  },
+  "result" : "2024-03-09T12:00:00Z"
+}, {
+  "id" : "filter-date-existing-format-zone-then-offset",
+  "expr" : "{{ d | date('iso_instant', timeZone='UTC', existingFormat='uuuu MM dd HH VV XXX', locale='en') }}",
+  "context" : {
+    "d" : "2024 03 09 14 Asia/Tokyo +07:00"
+  },
+  "result" : "2024-03-09T07:00:00Z"
+}, {
+  "id" : "filter-date-existing-format-ampm-with-a-minute",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu MM dd mm a\", locale='en') }}",
+  "context" : {
+    "d" : "2024 03 09 25 PM"
+  },
+  "result" : "2024-03-09 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-ampm-with-a-nano",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu MM dd n a\", locale='en') }}",
+  "context" : {
+    "d" : "2024 03 09 500 PM"
+  },
+  "result" : "2024-03-09 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-ampm-with-an-hour",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu MM dd HH a\", locale='en') }}",
+  "context" : {
+    "d" : "2024 03 09 14 PM"
+  },
+  "result" : "2024-03-09 14:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-of-ampm-zero",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd hh:mm a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 00:30 AM"
+  },
+  "result" : "2024-03-09 00:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-of-ampm-twelve",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd hh:mm a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 12:30 AM"
+  },
+  "result" : "2024-03-09 00:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-clock-hour-of-ampm-thirteen",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd hh:mm a\", locale='en') }}",
+  "context" : {
+    "d" : "2024-03-09 13:30 AM"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '2024-03-09 13:30 AM' could not be parsed: Invalid value for ClockHourOfAmPm (valid values 1 - 12): 13"
+  }
+}, {
+  "id" : "filter-dateadd-seconds-far-future",
+  "expr" : "{{ d | dateAdd(10000000000, 'SECONDS', 'uuuu-MM-dd', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2340-12-05"
+}, {
+  "id" : "filter-dateadd-hours-far-future",
+  "expr" : "{{ d | dateAdd(5000000, 'HOURS', 'uuuu-MM-dd', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2594-06-08"
+}, {
+  "id" : "filter-dateadd-nanos-far-future",
+  "expr" : "{{ d | dateAdd(9000000000000000000, 'NANOS', 'uuuu-MM-dd', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2309-03-29"
+}, {
+  "id" : "filter-dateadd-micros-far-future",
+  "expr" : "{{ d | dateAdd(10000000000000000, 'MICROS', 'uuuu-MM-dd', 'UTC') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "2340-12-05"
+}, {
+  "id" : "filter-date-pattern-day-period",
+  "expr" : "{{ d | date('B|BBBB|BBBBB', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "in the morning|in the morning|in the morning"
+}, {
+  "id" : "filter-date-existing-format-day-period-parse",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm B\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 in the morning"
+  },
+  "result" : "2024-01-15 10:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-zone-name-parse",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm z\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 UTC"
+  },
+  "result" : "2024-01-15 10:30:00.000"
+}, {
+  "id" : "filter-date-existing-format-generic-zone-parse",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd HH:mm v\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15 10:30 UTC"
+  },
+  "result" : "2024-01-15 10:30:00.000"
+}, {
+  "id" : "filter-date-pattern-week-based-year-uncapped",
+  "expr" : "{{ d | date('YYYYYYYYYYYYYYYYYYYY', timeZone='UTC', locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15T10:30:00Z"
+  },
+  "result" : "00000000000000002024"
+}, {
+  "id" : "filter-date-existing-format-wide-year",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuu-MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15"
+  },
+  "result" : "+10000-01-15 00:00:00.000"
+}, {
+  "id" : "filter-date-existing-format-wide-year-needs-the-sign",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"uuuuu-MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "+10000-01-15"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '+10000-01-15' could not be parsed at index 0"
+  }
+}, {
+  "id" : "filter-date-existing-format-optional-year-absent",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"[uuuu-]MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "01-15"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.time.format.DateTimeParseException: Text '01-15' could not be parsed: Unable to obtain LocalDate from TemporalAccessor: {DayOfMonth=15, MonthOfYear=1},ISO of type java.time.format.Parsed"
+  }
+}, {
+  "id" : "filter-date-existing-format-optional-year-present",
+  "expr" : "{{ d | date('uuuu-MM-dd HH:mm:ss.SSS', timeZone='UTC', existingFormat=\"[uuuu-]MM-dd\", locale='en') }}",
+  "context" : {
+    "d" : "2024-01-15"
   },
   "result" : "2024-01-15 00:00:00.000"
 }, {
@@ -1962,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T23:39:13.160636+07:00"
+  "result" : "2026-09-03T00:19:33.947479+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2013,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "dBYql9BKt+Q4GcsT21TZDMfmJmi+qjtBz02E1Y+XFc2IshwXAQVpLA=="
+  "result" : "5T3gLMshuGjU1DbgXZIpWNMDRFzQb32qtO4wEBmYZQtCl6jaaTr9tA=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2047,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a062fd-285e-73b0-bfcb-789585c904e1"
+  "result" : "01a06322-186e-7a08-b767-1fbe6fecdfd5"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "39JmMsAxzJoTE4rpY42TB3"
+  "result" : "1mi7m1NBXEboeJkuvmOmzr"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3ImQEcLIL7kB6XLbjfBjeq0ElIK"
+  "result" : "3ImV8uFNDGxS8ChRdlWqG6blB95"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2082,7 +2295,7 @@
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "60877"
+  "result" : "63433"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2103,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "oyCu7hdILMyDl8XfOiP45"
+  "result" : "HxKehpopwZp8CbtOv9qp9"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
