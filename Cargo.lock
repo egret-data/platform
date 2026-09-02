@@ -3647,6 +3647,7 @@ dependencies = [
  "egret-test-db",
  "egret-workflow-api",
  "egret-workspace",
+ "minijinja",
  "serde",
  "serde_json",
  "serde_norway",

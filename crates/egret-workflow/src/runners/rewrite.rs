@@ -167,14 +167,40 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
 
         match find_region_close(expr, content_start, close)? {
             Some(close_start) => {
-                let inner = &expr[content_start..close_start];
+                let raw_inner = &expr[content_start..close_start];
+                let (leading_ws_ctrl, inner, trailing_ws_ctrl) =
+                    split_whitespace_control(raw_inner);
+
+                // NOTE: an earlier version of this match arm special-cased
+                // `{% raw %}...{% endraw %}` here, skipping its body
+                // entirely. Removed -- measured, not assumed, to be built on
+                // a false premise: `"raw"` is not a registered Pebble tag
+                // name at all (`{% raw %}` fails to PARSE in real Pebble
+                // 4.1.2 with `ParserException: Unexpected tag name "raw"`),
+                // Kestra's own `Extension.getTokenParsers()` returns `null`
+                // (it registers zero custom tags, confirmed reading the
+                // checkout), and Pebble's OWN differently-named `verbatim`
+                // tag -- confirmed via `javap` on the pinned
+                // `pebble-4.1.2.jar`, `VerbatimTokenParser.getTag()` returns
+                // `"verbatim"` -- does not actually suppress evaluation of
+                // its body in this Pebble version either: measured directly
+                // through the oracle harness, `{% verbatim %}{{ a ?? b
+                // }}{% endverbatim %}` with `a=null, b='should-not-appear'`
+                // renders `should-not-appear`, i.e. it evaluated the
+                // coalesce normally rather than treating it as literal
+                // text. There is no real Kestra/Pebble capability here to
+                // port faithfully -- special-casing either spelling would
+                // make this rewriter MORE correct than the engine it is
+                // porting, which is not the goal.
                 let rewritten = if open == "{{" {
                     rewrite_expression(inner)?
                 } else {
                     rewrite_tag_body(inner)?
                 };
                 out.push_str(open);
+                out.push_str(leading_ws_ctrl);
                 out.push_str(&rewritten);
+                out.push_str(trailing_ws_ctrl);
                 out.push_str(close);
                 i = close_start + close.len();
             }
@@ -197,21 +223,67 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
     Ok(out)
 }
 
+/// Splits a `-` whitespace-control marker off the front and/or back of a
+/// `{{ }}` / `{% %}` region's raw content (`Kestra`/Pebble/Jinja's
+/// `{{- ... -}}` / `{%- ... -%}` convention for trimming adjacent template
+/// whitespace). Returns `(leading, inner, trailing)` where `leading`/
+/// `trailing` are each `"-"` or `""`, and `inner` is what should actually be
+/// tokenized and rewritten -- the marker itself is never an operator and
+/// must never be handed to `tokenize` as content.
+///
+/// Measured without this: `{%- if a ?? b -%}` rewrote the leading `-` as if
+/// it were part of the tag body, reproducing Critical 1's exact shape
+/// (`{%- kestra_null_coalesce( if a ,  b -)%}`, `if` swallowed into the
+/// rewrite and the trailing `-%}` marker lost entirely) because
+/// `rewrite_tag_body`'s "first non-whitespace token is the keyword" logic
+/// took `-` itself as the keyword. Stripping the markers here, before either
+/// `rewrite_expression` or `rewrite_tag_body` ever sees the content, avoids
+/// that class of bug entirely rather than teaching both of those functions
+/// about a syntax marker that is not really part of either grammar.
+fn split_whitespace_control(content: &str) -> (&'static str, &str, &'static str) {
+    let mut inner = content;
+    let leading = if let Some(rest) = inner.strip_prefix('-') {
+        inner = rest;
+        "-"
+    } else {
+        ""
+    };
+    let trailing = if let Some(rest) = inner.strip_suffix('-') {
+        inner = rest;
+        "-"
+    } else {
+        ""
+    };
+    (leading, inner, trailing)
+}
+
 /// Scans forward from `start` for `close` (`"}}"` or `"%}"`), skipping over
-/// string-literal contents (bounded to this same tag -- see
-/// [`scan_string_literal_bounded`]) and brace-literal nesting, so neither a
-/// quoted `}}` nor a map literal's own closing `}` immediately followed by
-/// the region's `}}` can terminate the region early or late. Returns the
-/// byte offset where `close` begins, or `Ok(None)` if `close` never appears
-/// before the end of input.
+/// string-literal contents (line-bounded -- see [`scan_string_literal_line_bounded`])
+/// and brace-literal nesting, so a map literal's own closing `}` immediately
+/// followed by the region's `}}` cannot terminate the region early. Returns
+/// the byte offset where `close` begins, or `Ok(None)` if `close` never
+/// appears before the end of input.
+///
+/// **A string literal's content is never inspected for `close` at all** --
+/// only for its own closing quote (or a newline, or end of input; see
+/// [`scan_string_literal_line_bounded`]). A quoted `}}` (or `%}`) is exactly
+/// as inert as any other character inside a literal, matching real Pebble
+/// (`{{ 'a}}b' }}` renders `a}}b`; `{{ json | jq('{a: {b: .c}}') }}` is not
+/// contrived -- the same nested-object shape the corpus's `filter-jq` entry
+/// already exercises). An EARLIER version of this function bailed out the
+/// moment `close` appeared while scanning a string body, which broke exactly
+/// those cases -- a *terminated* literal that merely contains `close`-looking
+/// text became a hard `UnterminatedString` error. That bound has been
+/// removed; only [`scan_string_literal_line_bounded`]'s own newline/EOF bound
+/// remains, which is what keeps an accidental quote several lines away from
+/// "rescuing" a literal that never actually closes (see that function's doc).
 ///
 /// This is also where an unterminated string literal is actually caught for
 /// anything reachable through the public `rewrite` entry point: by the time
 /// a region's content is handed to `tokenize`, every quote inside it is
-/// already known to be balanced (bounded to this tag, not the rest of the
-/// document -- see below). `tokenize`'s own check stays as defense in depth
-/// (and documents the invariant), but it is this function's `Err` that a
-/// caller of `rewrite` actually observes for `{{ a ?? 'unterminated }}`.
+/// already known to be balanced. `tokenize`'s own check stays as defense in
+/// depth (and documents the invariant), but it is this function's `Err` that
+/// a caller of `rewrite` actually observes for `{{ a ?? 'unterminated }}`.
 fn find_region_close(src: &str, start: usize, close: &str) -> Result<Option<usize>, RewriteError> {
     let len = src.len();
     let mut i = start;
@@ -223,7 +295,7 @@ fn find_region_close(src: &str, start: usize, close: &str) -> Result<Option<usiz
         let c = src[i..].chars().next().expect("i < len");
         if c == '\'' || c == '"' {
             let str_start = i;
-            let (end, closed) = scan_string_literal_bounded(src, i, c, close);
+            let (end, closed) = scan_string_literal_line_bounded(src, i, c);
             if !closed {
                 return Err(RewriteError::UnterminatedString {
                     quote: c,
@@ -275,24 +347,33 @@ fn scan_string_literal(src: &str, start: usize, quote: char) -> (usize, bool) {
     (i, false)
 }
 
-/// Like [`scan_string_literal`], but additionally bounded by `close` (the
-/// enclosing tag's own `"}}"`/`"%}"`): the literal is considered
-/// unterminated the moment `close` appears before a matching quote does,
-/// regardless of whether some later, unrelated quote elsewhere in the
-/// document would otherwise have "closed" it. Without this bound, whether a
-/// broken literal inside one tag reports an error depends on accidents of
-/// unrelated later text (an apostrophe in a contraction, say) -- see this
-/// module's tests for the case that motivated it. Used only by
-/// [`find_region_close`], which is the only caller with a `close` to bound
-/// against.
-fn scan_string_literal_bounded(src: &str, start: usize, quote: char, close: &str) -> (usize, bool) {
+/// Like [`scan_string_literal`], but bounded by a newline: a literal that
+/// crosses a physical line without closing is treated as unterminated,
+/// rather than let some unrelated quote arbitrarily later in the document
+/// "rescue" it (this crate already assumes single-line Kestra expressions
+/// elsewhere -- see `oracle/README.md`'s note on `date`/`dateAdd`). Used
+/// only by [`find_region_close`].
+///
+/// **Deliberately does NOT bound by the enclosing tag's own `close`
+/// delimiter** -- an earlier version did, which broke every literal that
+/// legitimately contains `close`-looking text before its own closing quote
+/// (see [`find_region_close`]'s doc for the measured examples). Bounding by
+/// line is a narrower, correct middle ground: it still stops a literal like
+/// `{{ 'a` from silently absorbing an unrelated quote on some *later line*,
+/// while no longer misreading `{{ 'a}}b' }}` (closes on the SAME line, no
+/// newline crossed) as broken. A coincidental rescue quote on the exact same
+/// line as a genuinely unterminated literal (e.g. `{{ 'a }} it's fine`) is
+/// no longer caught by this bound specifically -- that narrower guarantee
+/// turned out to be unachievable without also breaking terminated literals
+/// containing `close`-like text, which is the more common, more real case.
+fn scan_string_literal_line_bounded(src: &str, start: usize, quote: char) -> (usize, bool) {
     let len = src.len();
     let mut i = start + quote.len_utf8();
     while i < len {
-        if src[i..].starts_with(close) {
+        let c = src[i..].chars().next().expect("i < len");
+        if c == '\n' {
             return (i, false);
         }
-        let c = src[i..].chars().next().expect("i < len");
         if c == '\\' {
             i += c.len_utf8();
             if i < len {
@@ -310,8 +391,19 @@ fn scan_string_literal_bounded(src: &str, start: usize, quote: char, close: &str
 }
 
 /// One lexical unit inside a `{{ }}` / `{% %}` region. Every token stores its
-/// own exact source text, so a region with nothing to rewrite reconstructs
-/// byte-for-byte identical to the input.
+/// own exact source text.
+///
+/// A `{{ }}` expression with nothing to rewrite reconstructs byte-for-byte
+/// identical to its input (verified directly by
+/// `an_operator_inside_a_string_literal_is_left_alone` and others). A
+/// `{% %}` tag body does NOT carry the same guarantee even when its
+/// value/iterable/condition side has nothing rewritable in it --
+/// `rewrite_tag_body` always inserts exactly one guaranteed space at the
+/// keyword/target/boundary/value junctions (and `.trim()`s each side)
+/// rather than preserving the original spacing there, specifically to avoid
+/// gluing the tag keyword to whatever follows it (`ifsome_call(...)` would
+/// otherwise tokenize as one identifier). See `rewrite_tag_body`'s own doc
+/// comment for the reasoning.
 #[derive(Debug, Clone)]
 enum Tok {
     Str(String),
@@ -624,15 +716,29 @@ fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
 ///    nesting. The then-branch (and defensively the condition) are wrapped
 ///    in parens on the way out; see the comment at the `format!` below for
 ///    why that parenthesization is not cosmetic.
-/// 4. `??`/`???`/`isIn`, split at the *rightmost* occurrence (Kestra
-///    registers all three at the same precedence with `Associativity.LEFT`,
-///    so `a ?? b ?? c` must become
-///    `kestra_null_coalesce(kestra_null_coalesce(a, b), c)`, which splitting
-///    at the last occurrence and recursing left produces).
+/// 4. Only when this slice actually contains a `??`/`???`/`isIn` somewhere
+///    (see `has_rewritable_op` below) -- Pebble's `CoreExtension` precedence
+///    table, lowest first: `or`=10, `and`=15, then a tier at 30 that Kestra
+///    registers `??`/`???`/`isIn` into *alongside*
+///    `==`/`!=`/`>`/`>=`/`<`/`<=` (`Extension.java:81-87`). `or`/`and` are
+///    hard boundaries a coalesce/`isIn` search must not cross (checked
+///    first, lowest precedence outermost); within a tier the *same*
+///    precedence as `??`/`???`/`isIn`, the untouched comparison operators
+///    still have to be recognised as fellow tier-30 boundaries (not
+///    rewritten, but not invisible either) or a coalesce search sees only
+///    its own three operators and swallows across `==`/`>`/etc. Measured:
+///    `{{ a ?? b and c ?? d }}` is `(a ?? b) and (c ?? d)` in Pebble, and
+///    `{{ a ?? b == c }}` is `(a ?? b) == c` -- see
+///    [`find_rightmost_or`]/[`find_rightmost_and`]/[`find_rightmost_tier30`]
+///    for how each is split.
 /// 5. Nothing left to resolve: reconstruct verbatim, using each remaining
 ///    `Op` piece's own original text (an operator with no matching partner,
 ///    e.g. a stray `:` with no preceding `?`, is left untouched rather than
-///    guessed at).
+///    guessed at). This is also where a slice with comparison operators but
+///    NO `??`/`???`/`isIn` ends up (step 4 is skipped entirely for it), so a
+///    plain `{{ 'b' > 'a' }}` still reconstructs byte-for-byte instead of
+///    being re-formatted through the tier-30 `{left} {op} {right}` shape for
+///    no reason.
 fn resolve_pieces(pieces: &[Piece]) -> String {
     if let Some(segments) = split_on_top_level_commas(pieces) {
         return segments
@@ -668,22 +774,51 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
         return format!("({then_branch}) if ({cond}) else {else_branch}");
     }
 
-    if let Some(idx) = find_rightmost_binary(pieces) {
-        let kind = match &pieces[idx] {
-            Piece::Op(kind, _) => *kind,
-            Piece::Atom(_) => unreachable!("find_rightmost_binary only returns Op indices"),
-        };
-        let left = resolve_pieces(&pieces[..idx]);
-        let right = resolve_pieces(&pieces[idx + 1..]);
-        return match kind {
-            OpKind::NullCoalesce => format!("kestra_null_coalesce({left}, {right})"),
-            OpKind::UndefinedCoalesce => format!("kestra_undefined_coalesce({left}, {right})"),
-            // Provisional -- see this module's doc comment.
-            OpKind::IsIn => format!("({left} in {right})"),
-            OpKind::Question | OpKind::Colon => {
-                unreachable!("find_rightmost_binary never returns a ternary token")
-            }
-        };
+    let has_rewritable_op = pieces.iter().any(|p| {
+        matches!(
+            p,
+            Piece::Op(
+                OpKind::NullCoalesce | OpKind::UndefinedCoalesce | OpKind::IsIn,
+                _
+            )
+        )
+    });
+
+    if has_rewritable_op {
+        if let Some(idx) = find_rightmost_word(pieces, "or") {
+            let left = resolve_pieces(&pieces[..idx]);
+            let right = resolve_pieces(&pieces[idx + 1..]);
+            return format!("{left} or {right}");
+        }
+
+        if let Some(idx) = find_rightmost_word(pieces, "and") {
+            let left = resolve_pieces(&pieces[..idx]);
+            let right = resolve_pieces(&pieces[idx + 1..]);
+            return format!("{left} and {right}");
+        }
+
+        if let Some(idx) = find_rightmost_tier30(pieces) {
+            let left = resolve_pieces(&pieces[..idx]);
+            let right = resolve_pieces(&pieces[idx + 1..]);
+            return match &pieces[idx] {
+                Piece::Op(OpKind::NullCoalesce, _) => {
+                    format!("kestra_null_coalesce({left}, {right})")
+                }
+                Piece::Op(OpKind::UndefinedCoalesce, _) => {
+                    format!("kestra_undefined_coalesce({left}, {right})")
+                }
+                // Provisional -- see this module's doc comment.
+                Piece::Op(OpKind::IsIn, _) => format!("({left} in {right})"),
+                // The untouched comparison operators, recognised here only
+                // as a tier-30 boundary so a coalesce/isIn search does not
+                // cross them -- rendered back out exactly as-is, never
+                // rewritten.
+                Piece::Atom(op) => format!("{left} {op} {right}"),
+                Piece::Op(OpKind::Question | OpKind::Colon, _) => {
+                    unreachable!("find_rightmost_tier30 never returns a ternary token")
+                }
+            };
+        }
     }
 
     pieces
@@ -768,12 +903,34 @@ fn find_ternary(pieces: &[Piece]) -> Option<(usize, usize)> {
     None
 }
 
-/// Finds the last (rightmost) `??`/`???`/`isIn` among `pieces` -- see
-/// [`resolve_pieces`] for why rightmost is the correct split point for
-/// left-associative operators.
-fn find_rightmost_binary(pieces: &[Piece]) -> Option<usize> {
+/// Finds the last (rightmost) top-level bare-word `word` (e.g. `"or"`)
+/// among `pieces` -- `or`/`and` are ordinary identifiers at the tokenizer
+/// level (same representation as any other bare word; matched here by exact
+/// text, same principle as `isIn` never being confused with a bare `in` --
+/// see `find_top_level_word`'s doc), and rightmost is the correct split
+/// point for left-associative chaining, same reasoning as
+/// [`find_rightmost_tier30`].
+fn find_rightmost_word(pieces: &[Piece], word: &str) -> Option<usize> {
+    pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
+        Piece::Atom(s) if s == word => Some(i),
+        _ => None,
+    })
+}
+
+/// Finds the last (rightmost) precedence-30 boundary among `pieces` --
+/// `??`/`???`/`isIn` (which this rewrite acts on) together with
+/// `==`/`!=`/`>`/`>=`/`<`/`<=` (which it recognises as fellow same-tier
+/// operators but never touches). Rightmost is correct for left-associative
+/// chaining among SAME-precedence operators regardless of which specific
+/// operator each occurrence is: `a ?? b == c` chains left-to-right through
+/// the tier exactly like `a - b + c` does through `+`/`-`'s shared tier in
+/// a conventional expression grammar, giving `(a ?? b) == c` -- confirmed
+/// against real Pebble, not assumed (see `oracle/corpus.json`'s
+/// `coalesce-eq` entry).
+fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
     pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
         Piece::Op(OpKind::NullCoalesce | OpKind::UndefinedCoalesce | OpKind::IsIn, _) => Some(i),
+        Piece::Atom(s) if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=") => Some(i),
         _ => None,
     })
 }
@@ -788,6 +945,15 @@ fn rewrite_expression(inner: &str) -> Result<String, RewriteError> {
 /// Tokenizes and rewrites the inside of one `{% %}` region as a tag body --
 /// not a single expression. See this module's doc ("`{{ }}` expressions vs.
 /// `{% %}` tags") for the shape.
+///
+/// Unlike `rewrite_expression`, this does NOT preserve exact original
+/// whitespace even when nothing is rewritten: every keyword/target/
+/// boundary/value junction gets exactly one inserted space (each side
+/// `.trim()`med first), never the original spacing verbatim. This is not
+/// cosmetic -- a tag keyword glued directly to what follows it re-tokenizes
+/// as one identifier (`ifsome_call(...)` is not `if` followed by an
+/// expression), so a guaranteed separator is required at those specific
+/// junctions regardless of what the source originally had there.
 fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
     let tokens = tokenize(body)?;
 
@@ -817,12 +983,53 @@ fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
             let target: String = rest[..b_idx].iter().map(Tok::text).collect();
             let boundary_text = rest[b_idx].text();
             let value = resolve_flat(&rest[b_idx + 1..])?;
-            format!("{} {boundary_text} {}", target.trim(), value.trim())
+            let value = value.trim();
+            // `for`'s iterable needs the same whole-conditional parens as
+            // `if`'s condition below, for the same reason (see there) --
+            // measured directly: `{% for i in a ? b : c %}` fails to parse
+            // the same way `{% if a ? b : c %}` does. `set`'s value does
+            // NOT need this -- measured separately: `{% set x = a ? b : c
+            // %}` parses fine in minijinja without wrapping, because `set`'s
+            // grammar already expects a full expression on the right of
+            // `=`, unlike `if`'s condition-position and `for`'s
+            // iterable-position grammars.
+            let value = if keyword == "for" && !value.is_empty() {
+                format!("({value})")
+            } else {
+                value.to_string()
+            };
+            format!("{} {boundary_text} {value}", target.trim())
         }
-        None => resolve_flat(rest)?,
+        None => {
+            let expr = resolve_flat(rest)?;
+            let expr = expr.trim();
+            // Whole-conditional parens, unconditionally, for every tag
+            // that reaches this branch (`if`, `elseif`, `unless`, and any
+            // other tag whose entire remainder is one expression).
+            //
+            // Without this, a ternary spliced straight after the tag
+            // keyword produces a real parse error, measured directly:
+            // `{% if flag ? 1 : 0 %}` rewrites (pre-fix) to
+            // `{% if ( 1 ) if ( flag ) else  0%}`, which minijinja's `if`
+            // statement grammar rejects outright ("unexpected identifier,
+            // expected end of block") -- not a silent semantic drift like
+            // I3's then-branch parens, a hard failure every time a
+            // ternary appears inside `{% if %}`/`{% elseif %}`/`{% unless
+            // %}`. Wrapping the WHOLE rewritten condition in one extra
+            // pair of parens (harmless when it was not a ternary -- a
+            // parenthesized function call or bare identifier is exactly
+            // as valid as the unparenthesized form) resolves the
+            // ambiguity unconditionally rather than only when this
+            // function can tell in advance that a ternary is present.
+            if expr.is_empty() {
+                String::new()
+            } else {
+                format!("({expr})")
+            }
+        }
     };
 
-    Ok(format!("{prefix} {}", rewritten.trim()))
+    Ok(format!("{prefix} {rewritten}"))
 }
 
 fn is_whitespace_tok(t: &Tok) -> bool {
@@ -838,6 +1045,15 @@ fn is_whitespace_tok(t: &Tok) -> bool {
 /// substring `isIn`, a different word); a bare `=` is only ever a single
 /// token here because `tokenize` groups `==` (and `!=`/`<=`/`>=`) as their
 /// own token first, so it can never be mistaken for half of `==`.
+///
+/// **Honesty note (a prior review flagged this exact gap elsewhere in the
+/// module and it applies here too):** the depth-tracking that skips a
+/// nested `in`/`=` (e.g. inside a `for` tag's iterable expression, `for x
+/// in f(y in z)`) and the `==`-grouping's role in keeping `=` unambiguous
+/// are both believed necessary by construction, but neither is currently
+/// exercised by a test that would fail if it were removed -- no corpus
+/// entry or unit test has a nested `in`/`=` inside a `for`/`set` boundary
+/// search. Documented as a known gap rather than claimed as verified.
 fn find_top_level_word(tokens: &[Tok], word: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, t) in tokens.iter().enumerate() {
@@ -855,13 +1071,31 @@ fn find_top_level_word(tokens: &[Tok], word: &str) -> Option<usize> {
 mod tests {
     use super::{rewrite, RewriteError};
 
+    /// Every rewrite test routes through this, not through `rewrite(...)
+    /// .unwrap()` directly: a test that asserts an exact string is worth
+    /// nothing if that string is not what it claims to be -- syntax
+    /// minijinja actually accepts. `Environment::template_from_str` only
+    /// parses (no function/filter needs registering for it to succeed;
+    /// name resolution is a render-time concern, not a parse-time one), so
+    /// this is a real, cheap parseability gate, not a render smoke test.
+    fn rewrite_and_parse(expr: &str) -> String {
+        let out = rewrite(expr).unwrap_or_else(|e| panic!("rewrite({expr:?}) failed: {e}"));
+        let env = minijinja::Environment::new();
+        if let Err(e) = env.template_from_str(&out) {
+            panic!(
+                "rewrite({expr:?}) produced output minijinja cannot parse:\n  {out:?}\nparse error: {e}"
+            );
+        }
+        out
+    }
+
     /// The rewriter must not touch an operator inside a string literal. A
     /// regex would; that is why this is a tokenizer.
     #[test]
     fn an_operator_inside_a_string_literal_is_left_alone() {
-        assert_eq!(rewrite("{{ 'a ?? b' }}").unwrap(), "{{ 'a ?? b' }}");
+        assert_eq!(rewrite_and_parse("{{ 'a ?? b' }}"), "{{ 'a ?? b' }}");
         assert_eq!(
-            rewrite(r#"{{ "x ? y : z" }}"#).unwrap(),
+            rewrite_and_parse(r#"{{ "x ? y : z" }}"#),
             r#"{{ "x ? y : z" }}"#
         );
     }
@@ -869,7 +1103,7 @@ mod tests {
     /// `???` must not be mistaken for `??` followed by `?`.
     #[test]
     fn the_longer_operator_wins() {
-        let out = rewrite("{{ a ??? b }}").unwrap();
+        let out = rewrite_and_parse("{{ a ??? b }}");
         assert!(
             out.contains("undefined"),
             "expected the undefined-coalescing form, got {out}"
@@ -883,7 +1117,7 @@ mod tests {
     /// have passed. Pinned to the exact output so both mistakes are caught.
     #[test]
     fn nested_ternaries_rewrite_innermost_first() {
-        let out = rewrite("{{ a ? (b ? 'x' : 'y') : 'z' }}").unwrap();
+        let out = rewrite_and_parse("{{ a ? (b ? 'x' : 'y') : 'z' }}");
         assert_eq!(
             out,
             "{{( (( 'x' ) if (b ) else  'y') ) if ( a ) else  'z' }}"
@@ -906,13 +1140,13 @@ mod tests {
     /// evaluates to the wrong branch.
     #[test]
     fn unparenthesized_nested_ternary_keeps_pebbles_grouping() {
-        let out = rewrite("{{ a ? b ? c : d : e }}").unwrap();
+        let out = rewrite_and_parse("{{ a ? b ? c : d : e }}");
         assert_eq!(out, "{{(( c ) if ( b ) else  d ) if ( a ) else  e }}");
     }
 
     #[test]
     fn text_outside_an_expression_is_untouched() {
-        assert_eq!(rewrite("literal ?? text").unwrap(), "literal ?? text");
+        assert_eq!(rewrite_and_parse("literal ?? text"), "literal ?? text");
     }
 
     /// `the_longer_operator_wins` above only pins the negative half (`???`
@@ -921,7 +1155,7 @@ mod tests {
     /// would still pass every other test in this module.
     #[test]
     fn double_question_mark_becomes_the_null_coalescing_call() {
-        let out = rewrite("{{ a ?? b }}").unwrap();
+        let out = rewrite_and_parse("{{ a ?? b }}");
         assert!(
             out.contains("kestra_null_coalesce("),
             "expected the null-coalescing call form, got {out}"
@@ -935,17 +1169,17 @@ mod tests {
     /// Task 3's oracle measurement -- this only pins the syntactic rewrite.
     #[test]
     fn is_in_becomes_the_in_operator() {
-        let out = rewrite("{{ a isIn b }}").unwrap();
+        let out = rewrite_and_parse("{{ a isIn b }}");
         assert!(out.contains(" in "), "{out}");
         assert!(!out.contains("isIn"), "{out}");
 
         // Not a regex: `isIn` inside a string literal survives untouched --
         // a global, quote-blind `str::replace("isIn", "in")` would corrupt
         // this, and nothing else in this module exercised that.
-        assert_eq!(rewrite("{{ 'a isIn b' }}").unwrap(), "{{ 'a isIn b' }}");
+        assert_eq!(rewrite_and_parse("{{ 'a isIn b' }}"), "{{ 'a isIn b' }}");
 
         // Same principle outside any `{{ }}`/`{% %}` region at all.
-        assert_eq!(rewrite("literal isIn text").unwrap(), "literal isIn text");
+        assert_eq!(rewrite_and_parse("literal isIn text"), "literal isIn text");
     }
 
     /// The rewriter's one error case: a string literal that never finds its
@@ -966,28 +1200,54 @@ mod tests {
         );
     }
 
-    /// The unterminated-string scan is bounded to the enclosing tag: whether
-    /// this reports an error must not depend on some unrelated apostrophe
-    /// (e.g. in a contraction) appearing later in the document, and an
-    /// operator inside a genuinely broken tag must never be silently passed
-    /// through unrewritten just because such an apostrophe happens to exist.
+    /// The unterminated-string scan is bounded by a physical line (see
+    /// `scan_string_literal_line_bounded`'s doc for the full reasoning): a
+    /// literal is unterminated only if it never finds its closing quote
+    /// before either a newline or the end of input.
     #[test]
-    fn an_unterminated_string_is_bounded_to_its_own_tag() {
+    fn an_unterminated_string_never_closes_before_a_newline_or_eof() {
         // No closing quote anywhere in the document at all.
         assert!(rewrite("{{ 'a }} its fine").is_err());
 
-        // A LATER apostrophe exists (in "it's"), but it must not "rescue" a
-        // literal that never closed within this tag.
-        assert!(rewrite("{{ 'a }} it's fine").is_err());
-
-        // The exact failure mode under review: an operator sitting before
-        // the broken literal must not be silently left unrewritten with no
-        // error, just because a later quote exists somewhere in the tail.
-        let err = rewrite("{{ a ?? 'x }} tail with ' quote and more").unwrap_err();
+        // A quote exists, but only on a LATER LINE -- must not rescue a
+        // literal that never closed on its own line. This is the part of
+        // the original concern (an unrelated quote elsewhere "rescuing" a
+        // broken literal) that a line bound can actually guarantee without
+        // also breaking terminated-same-line literals -- see the sibling
+        // test below for why a same-line rescue is no longer treated as an
+        // error (that narrower guarantee is not achievable at the same
+        // time as the fix below).
+        let multiline = "{{ a ?? 'x }} tail with no quote on this line
+but there is one on the next: '";
+        let err = rewrite(multiline).unwrap_err();
         assert!(
             matches!(err, RewriteError::UnterminatedString { .. }),
             "{err:?}"
         );
+    }
+
+    /// The positive counterpart Critical 2 found missing: a string literal
+    /// that DOES close, but merely contains text that looks like the
+    /// region's own close delimiter, must not be misdiagnosed as
+    /// unterminated. An earlier version of this rewriter bailed out the
+    /// moment `close` (`"}}"`/`"%}"`) appeared anywhere while scanning a
+    /// string's body -- which incidentally "fixed" the negative case in the
+    /// sibling test above, but broke every one of these, all real Pebble
+    /// input. The first is not contrived: a nested-object `jq` query is the
+    /// same shape the corpus's own `filter-jq` entry already exercises.
+    #[test]
+    fn a_string_literal_may_contain_the_regions_close_delimiter() {
+        assert_eq!(
+            rewrite_and_parse("{{ json | jq('{a: {b: .c}}') }}"),
+            "{{ json | jq('{a: {b: .c}}') }}"
+        );
+        assert_eq!(rewrite_and_parse("{{ 'a}}b' }}"), "{{ 'a}}b' }}");
+        assert_eq!(
+            rewrite_and_parse("{{ x | replace({'}}': 'x'}) }}"),
+            "{{ x | replace({'}}': 'x'}) }}"
+        );
+        let out = rewrite_and_parse("{% if x == 'a%}b' %}y{% endif %}");
+        assert_eq!(out, "{% if (x == 'a%}b')%}y{% endif %}");
     }
 
     /// A comma is an operand boundary an operator must not cross: `f(x, a ??
@@ -995,14 +1255,14 @@ mod tests {
     /// argument is `kestra_null_coalesce(x, a, b)`.
     #[test]
     fn commas_bound_operator_rewrites_inside_a_call() {
-        let out = rewrite("{{ f(x, a ?? b) }}").unwrap();
+        let out = rewrite_and_parse("{{ f(x, a ?? b) }}");
         assert_eq!(out, "{{ f(x,kestra_null_coalesce( a ,  b)) }}");
     }
 
     /// Same principle for a list literal's elements.
     #[test]
     fn commas_bound_operator_rewrites_inside_a_list() {
-        let out = rewrite("{{ [1, a ?? b] }}").unwrap();
+        let out = rewrite_and_parse("{{ [1, a ?? b] }}");
         assert_eq!(out, "{{ [1,kestra_null_coalesce( a ,  b)] }}");
     }
 
@@ -1011,7 +1271,7 @@ mod tests {
     /// own.
     #[test]
     fn a_ternary_argument_after_a_comma_still_resolves() {
-        let out = rewrite("{{ f(x, c ? a : b) }}").unwrap();
+        let out = rewrite_and_parse("{{ f(x, c ? a : b) }}");
         assert_eq!(out, "{{ f(x,( a ) if ( c ) else  b) }}");
     }
 
@@ -1020,7 +1280,7 @@ mod tests {
     /// is not confused by an inner map's colon.
     #[test]
     fn map_literals_do_not_confuse_the_ternary() {
-        let out = rewrite("{{ flag ? {'a': 1} : {'b': 2} }}").unwrap();
+        let out = rewrite_and_parse("{{ flag ? {'a': 1} : {'b': 2} }}");
         assert_eq!(out, "{{( {'a': 1} ) if ( flag ) else  {'b': 2} }}");
     }
 
@@ -1028,7 +1288,7 @@ mod tests {
     /// without the map's own key/colon syntax being swept into its operand.
     #[test]
     fn an_operator_inside_a_map_value_still_resolves() {
-        let out = rewrite("{{ {'k': a ?? b} }}").unwrap();
+        let out = rewrite_and_parse("{{ {'k': a ?? b} }}");
         assert_eq!(out, "{{ {'k':kestra_null_coalesce( a ,  b)} }}");
     }
 
@@ -1038,28 +1298,48 @@ mod tests {
     /// expression (which produced a parse error before this fix).
     #[test]
     fn if_tag_bodies_rewrite_their_condition() {
-        let out = rewrite("{% if a ?? b %}y{% endif %}").unwrap();
-        assert_eq!(out, "{% if kestra_null_coalesce( a ,  b )%}y{% endif %}");
+        let out = rewrite_and_parse("{% if a ?? b %}y{% endif %}");
+        assert_eq!(out, "{% if (kestra_null_coalesce( a ,  b ))%}y{% endif %}");
     }
 
     /// `{% set %}`: the target left of `=` is a name, never rewritten; the
     /// value right of `=` is rewritten normally.
+    ///
+    /// The target is deliberately `isIn`, not a plain `x`: with a target
+    /// that has nothing rewritable in it, a mutant that resolves the target
+    /// through `resolve_flat` instead of copying its token text verbatim
+    /// (i.e. deletes the boundary this test's name claims to prove)
+    /// produces byte-identical output and this test cannot tell the
+    /// difference. Confirmed by making that exact mutation locally
+    /// (`target: String = rest[..b_idx].iter().map(Tok::text).collect()` ->
+    /// `resolve_flat(&rest[..b_idx])?`) and re-running: the mutant turns the
+    /// lone `isIn` token into `(  in  )` (no left/right operand, so
+    /// `resolve_pieces`'s `isIn` case produces an empty-operand call) --
+    /// which does not just make `assert_eq!` fail, it fails to PARSE at all
+    /// (`rewrite_and_parse` panics), an even stronger kill than expected.
+    /// `isIn` is a perfectly ordinary identifier in minijinja, so this is
+    /// still realistic syntax, just an unusual variable name chosen to be
+    /// discriminating.
     #[test]
     fn set_tag_bodies_rewrite_only_the_value_side() {
-        let out = rewrite("{% set x = a ?? b %}").unwrap();
-        assert_eq!(out, "{% set x = kestra_null_coalesce( a ,  b )%}");
+        let out = rewrite_and_parse("{% set isIn = a ?? b %}");
+        assert_eq!(out, "{% set isIn = kestra_null_coalesce( a ,  b )%}");
     }
 
     /// `{% for %}`: the loop variable left of `in` is a name, never
     /// rewritten; the iterable right of `in` is rewritten normally. The
     /// tag's own `in` keyword must survive as plain syntax, not be mistaken
-    /// for this rewrite's `isIn` output.
+    /// for this rewrite's `isIn` output -- so the loop variable is
+    /// deliberately named `isIn` too (same reasoning and same mutant-catching
+    /// property as the `set` test above), doubling as proof that the tag's
+    /// structural `in` boundary search is not confused by a variable whose
+    /// name contains the substring `isIn`.
     #[test]
     fn for_tag_bodies_rewrite_only_the_iterable_side() {
-        let out = rewrite("{% for x in list ?? [] %}y{% endfor %}").unwrap();
+        let out = rewrite_and_parse("{% for isIn in list ?? [] %}y{% endfor %}");
         assert_eq!(
             out,
-            "{% for x in kestra_null_coalesce( list ,  [] )%}y{% endfor %}"
+            "{% for isIn in (kestra_null_coalesce( list ,  [] ))%}y{% endfor %}"
         );
     }
 
@@ -1068,7 +1348,74 @@ mod tests {
     /// fix) as a `{{ }}` region, not a separate, weaker implementation.
     #[test]
     fn a_ternary_inside_an_if_tag_resolves() {
-        let out = rewrite("{% if flag ? 'a' : 'b' %}y{% endif %}").unwrap();
-        assert_eq!(out, "{% if ( 'a' ) if ( flag ) else  'b'%}y{% endif %}");
+        let out = rewrite_and_parse("{% if flag ? 'a' : 'b' %}y{% endif %}");
+        assert_eq!(out, "{% if (( 'a' ) if ( flag ) else  'b')%}y{% endif %}");
+    }
+
+    /// `??`/`???`/`isIn` must not swallow across a LOWER-precedence `and`/
+    /// `or` -- Pebble's `CoreExtension` gives `or`=10, `and`=15, both below
+    /// the 30 `??`/`???`/`isIn` share with the comparison operators. Not a
+    /// regression from any round of this module; unchanged since Task 2's
+    /// first submission, and the same failure mode as I3 (valid minijinja,
+    /// silently different semantics) rather than a parse error.
+    #[test]
+    fn coalesce_does_not_swallow_across_and_or_or() {
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b and c ?? d }}"),
+            "{{kestra_null_coalesce( a ,  b ) and kestra_null_coalesce( c ,  d )}}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ a or b ?? c }}"),
+            "{{ a  or kestra_null_coalesce( b ,  c )}}"
+        );
+    }
+
+    /// `??` and `==` share the SAME precedence tier (30) with LEFT
+    /// associativity, so `a ?? b == c` chains left-to-right: `??` (leftmost)
+    /// groups first, `==` (rightmost) wraps it -- `(a ?? b) == c`, not
+    /// `a ?? (b == c)`. `find_rightmost_tier30` must recognise `==` as a
+    /// fellow-tier boundary (never rewriting it) for this to come out right;
+    /// without that, a coalesce search that only knows about its own three
+    /// operators swallows straight across it.
+    #[test]
+    fn coalesce_and_a_same_tier_comparison_chain_left_to_right() {
+        assert_eq!(
+            rewrite_and_parse("{{ a ?? b == c }}"),
+            "{{kestra_null_coalesce( a ,  b ) ==  c }}"
+        );
+    }
+
+    /// A plain comparison with no `??`/`???`/`isIn` anywhere must stay
+    /// untouched, exactly as it did before tier-30 recognition existed --
+    /// `find_rightmost_tier30` is gated on `has_rewritable_op` specifically
+    /// so recognising `==`/`>`/etc. as boundaries never turns into
+    /// reformatting an expression this rewrite has nothing to rewrite in.
+    #[test]
+    fn a_plain_comparison_with_no_coalesce_stays_untouched() {
+        assert_eq!(rewrite_and_parse("{{ 'b' > 'a' }}"), "{{ 'b' > 'a' }}");
+        assert_eq!(rewrite_and_parse("{{ a == b }}"), "{{ a == b }}");
+    }
+
+    /// I4's `}}` disambiguation (`find_region_close`'s `brace_depth`),
+    /// exercised specifically flush against the region's own close with no
+    /// separating space -- `{{ {'a': x ?? y}}}` has three `}` in a row: the
+    /// map's own close, then the region's `}}`. Without brace-depth
+    /// tracking the naive first `"}}"` match lands one character too early
+    /// (consuming the map's close as half of it) -- confirmed by deleting
+    /// `brace_depth == 0 &&` from `find_region_close` locally and
+    /// re-running just this test: the mutant does NOT silently stop
+    /// rewriting as originally guessed here before actually running it --
+    /// it mis-identifies the region boundary one character short, so the
+    /// truncated "inner" content (`{'a': x ?? y}}` missing its last `}`)
+    /// gets tokenized, rewritten, and re-assembled into a string minijinja
+    /// then rejects outright (`rewrite_and_parse` panics on the parse
+    /// error). Either way the mutant is killed; the actual failure mode is
+    /// louder than guessed, not quieter.
+    #[test]
+    fn a_map_literal_flush_against_the_regions_close_still_rewrites() {
+        assert_eq!(
+            rewrite_and_parse("{{ {'a': x ?? y}}}"),
+            "{{ {'a':kestra_null_coalesce( x ,  y)}}}"
+        );
     }
 }

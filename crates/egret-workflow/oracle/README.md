@@ -253,12 +253,15 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 99 entries)
+## Corpus (`corpus.json`, 105 entries)
 
-- **28 operator cases**, taken verbatim from the task brief plus three
+- **34 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
-  both operators, plus a plain present case), ternary (including nesting),
-  `isIn`, each of `>`/`>=`/`<`/`<=` across string/number/mixed operands
+  both operators, plus a plain present case), ternary (including nesting and
+  the unparenthesized `a ? b ? c : d : e` form, which pins Pebble's
+  `parseTernaryExpression` grouping empirically -- `a=false, b=true` gives
+  `"e"`, not the `"c"` a wrong right-associative reading would give), `isIn`,
+  each of `>`/`>=`/`<`/`<=` across string/number/mixed operands
   (`Extension.getBinaryOperators()` registers all four as separate classes —
   `GreaterThanExpression`, `GreaterThanEqualsExpression`, `LessThanExpression`,
   `LessThanEqualsExpression` — so each can diverge independently), three
@@ -266,19 +269,15 @@ entry's non-deterministic output within the same run.
   `=`-inclusive operators can reach, a literal `??`-looking substring inside a
   quoted string (proves a naive regex-based rewriter would corrupt it), three
   `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
-  `tag-if-ternary`) added after a review of the Task 2 rewriter found it was
-  only ever exercised against `{{ }}` — Pebble parses a `{% if %}`/`{% set
-  %}`/`{% for %}` tag's body as an expression too, and a tag-body-aware
-  rewrite needs its own oracle coverage, not just `{{ }}`'s — and
-  `unparenthesized-nested-ternary` (`{{ a ? b ? c : d : e }}`,
-  `a=false, b=true`), which empirically pins Pebble's
-  `parseTernaryExpression` grouping (`a ? (b ? c : d) : e`, giving `"e"`)
-  against the wrong right-associative reading a port could plausibly emit
-  instead (which would give `"c"`) — added after a review found the port's
-  own then-branch-parens fix was proven only by prose next to the code and a
-  test whose input (`a ? (b ? 'x' : 'y') : 'z'`) had its own source parens
-  making the grouping explicit, so the fix could regress with nothing in
-  this repository catching it.
+  `tag-if-ternary`, plus `tag-if-ternary-inverted` and the whitespace-control
+  pair `tag-if-coalesce-trimmed`/`coalesce-trimmed-expr` for `{%- -%}`/
+  `{{- -}}`), and `coalesce-and`/`coalesce-or`/`coalesce-eq`, which pin
+  Pebble's precedence table (`Extension.java:81-87` puts `??`/`???`/`isIn` at
+  30, alongside `==`/`!=`/comparisons; `CoreExtension` puts `or` at 10 and
+  `and` at 15, both lower): `(a ?? b) and (c ?? d)`, `a or (b ?? c)`, and
+  `(a ?? b) == c` respectively, none of which a port that treats `??` as
+  swallowing everything up to the next `??`/`isIn` (ignoring lower- and
+  same-tier operators as boundaries) would reproduce.
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including

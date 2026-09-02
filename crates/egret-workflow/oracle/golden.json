@@ -172,6 +172,57 @@
   },
   "result" : "e"
 }, {
+  "id" : "coalesce-and",
+  "expr" : "{{ a ?? b and c ?? d }}",
+  "context" : {
+    "a" : null,
+    "b" : true,
+    "c" : null,
+    "d" : false
+  },
+  "result" : "false"
+}, {
+  "id" : "coalesce-or",
+  "expr" : "{{ a or b ?? c }}",
+  "context" : {
+    "a" : false,
+    "b" : null,
+    "c" : "c-value"
+  },
+  "result" : "true"
+}, {
+  "id" : "coalesce-eq",
+  "expr" : "{{ a ?? b == c }}",
+  "context" : {
+    "a" : 10,
+    "b" : 99,
+    "c" : 10
+  },
+  "result" : "true"
+}, {
+  "id" : "tag-if-ternary-inverted",
+  "expr" : "{% if flag ? 0 : 1 %}yes{% else %}no{% endif %}",
+  "context" : {
+    "flag" : true
+  },
+  "result" : "no"
+}, {
+  "id" : "tag-if-coalesce-trimmed",
+  "expr" : "a\n{%- if a ?? b -%}\nyes\n{%- endif -%}\nb",
+  "context" : {
+    "a" : null,
+    "b" : true
+  },
+  "result" : "ayesb"
+}, {
+  "id" : "coalesce-trimmed-expr",
+  "expr" : " {{- a ?? b -}} ",
+  "context" : {
+    "a" : null,
+    "b" : "val"
+  },
+  "result" : "val"
+}, {
   "id" : "filter-chunk",
   "expr" : "{{ list | chunk(size=2) }}",
   "context" : {
@@ -438,7 +489,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T14:21:04.905581+07:00"
+  "result" : "2026-09-02T15:06:36.431088+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -485,7 +536,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "r2wHCT19fWpxEe0fCPS5fmb+vBdKQN+aRTRy3i1dRSHqNFuxY+5WWg=="
+  "result" : "eKx+G+CXRAHv59e1zTCusAdU7o5vS4FQ+hx9iqgYeMfrWq0FA90LuQ=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -519,17 +570,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a060fe-2ad6-7ccc-aaad-a2786fefeb12"
+  "result" : "01a06127-d8da-7e30-ba1b-ac501607a535"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "7Rp0Kzv217pmdFDHegmVHb"
+  "result" : "2mmpXBkRJN9tFarj5Ei2Qg"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlKMBdVdFqMb3kaBIDjDZ78k8a"
+  "result" : "3IlPtWAr1XDIaTTwwSMr8pupSks"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -548,12 +599,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "5"
+  "result" : "7"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "57912"
+  "result" : "60866"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -572,7 +623,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "LVJzpsk6CB3C1vZIbZ5JE"
+  "result" : "X_hCQ3lm-YeiUmU2Yd020"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",

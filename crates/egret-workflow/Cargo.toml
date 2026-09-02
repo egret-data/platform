@@ -68,6 +68,14 @@ async-trait.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+# runners::rewrite's tests parse every rewritten output through a real
+# minijinja Environment (not just assert a string) -- a test that pins a
+# shape minijinja rejects is worse than no test, since it certifies a bug.
+# Same version as the workspace's runtime minijinja (Cargo.toml:154), used
+# here only to parse, never to render (no functions/filters need registering
+# for `template_from_str` to succeed).
+minijinja.workspace = true
+
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.
 
