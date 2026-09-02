@@ -175,10 +175,10 @@
   "id" : "coalesce-and",
   "expr" : "{{ a ?? b and c ?? d }}",
   "context" : {
-    "a" : null,
-    "b" : true,
+    "a" : 1,
+    "b" : 2,
     "c" : null,
-    "d" : true
+    "d" : "D"
   },
   "result" : "true"
 }, {
@@ -210,6 +210,14 @@
 }, {
   "id" : "coalesce-is-not-null",
   "expr" : "{{ a ?? b is not null }}",
+  "context" : {
+    "a" : "A",
+    "b" : "B"
+  },
+  "result" : "true"
+}, {
+  "id" : "is-defined-then-coalesce",
+  "expr" : "{{ a is defined ?? b }}",
   "context" : {
     "a" : "A",
     "b" : "B"
@@ -505,7 +513,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T15:42:07.585509+07:00"
+  "result" : "2026-09-02T16:25:25.696200+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -552,7 +560,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "mydh9J9VdgpzEejlJ3XNdTpXgcxcj8VsTQ0MWPGxQ8v3I8xlWuV7KA=="
+  "result" : "regEsbc1aUbZSsd7NDJRcTuS2pMeizSXLIgmXnm3TqAs1JmfHFb/tQ=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -586,17 +594,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06148-5dab-7516-9ea0-711c56f59b8d"
+  "result" : "01a06170-028e-7639-bb3b-a75fec1117d5"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "2ku62FL3XS4hjYckqUtbrA"
+  "result" : "3YwsrTewoGVghzHxJl2IOo"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlUDMXabOkLErcUZAOVY9AwprX"
+  "result" : "3IlZTk0gd1uQoXQ0LBTiIdFUtU1"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -615,12 +623,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "7"
+  "result" : "6"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "63305"
+  "result" : "50002"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -639,7 +647,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "RHLT-ziIg-Y1qbksG9Xyc"
+  "result" : "kWQz6bZTQUsUN5LZD9Idf"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",

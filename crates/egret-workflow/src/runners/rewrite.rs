@@ -726,37 +726,63 @@ fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
 /// 4. Only when this slice actually contains a `??`/`???`/`isIn` somewhere
 ///    (see `has_rewritable_op` below) -- Pebble 4.1.2's full binary-operator
 ///    precedence table, read out of the pinned jar's bytecode (not just the
-///    subset this rewrite acts on):
+///    subset this rewrite acts on), WITH each operator's `BinaryOperatorType`
+///    (also read from the bytecode -- this is not cosmetic, see below):
 ///
 ///    ```text
-///    or=10   and=15   is=20   contains=20   equals=30
-///    ==,!=,>,>=,<,<= =30   +,- =40   *,/,% =60
-///    | =100   ~ =110   .. =120   not,unary +/- =500
+///    or=10 (NORMAL)         and=15 (NORMAL)
+///    is=20 (TEST)            is not=20 (TEST)          contains=20 (NORMAL)
+///    equals=30 (NORMAL)      ==,!=,>,>=,<,<= =30 (NORMAL)
+///    +,- =40 (NORMAL)        *,/,% =60 (NORMAL)
+///    | =100 (FILTER)         ~ =110 (NORMAL)            .. =120 (NORMAL)
+///    not,unary +/- =500 (UNARY)
 ///    ```
 ///
-///    Kestra registers `??`/`???`/`isIn` at 30 (`Extension.java:81-87`),
-///    the same tier as `==`/`!=`/`>`/`>=`/`<`/`<=` and their word alias
-///    `equals`. Everything below 30 (`or`, `and`, `is`, `contains`) is a
-///    hard boundary a coalesce/`isIn` search must not cross, checked in
-///    ascending precedence order (lowest first, outermost) before the
-///    tier-30 search itself: `or`, then `and`, then `is`/`contains`
-///    together (same tier, so rightmost among either). Within tier 30
-///    itself, the untouched comparison operators (and `equals`) have to be
-///    recognised as fellow boundaries -- not rewritten, but not invisible
-///    either -- or a coalesce search sees only its own three operators and
-///    swallows straight across them. Everything at 40 and above (`+`/`-`
-///    through `not`) is invisible to this rewrite by construction: it is
-///    never tokenized as anything but ordinary text, so it can never be
-///    mistaken for a boundary and never needs its own step here -- it
-///    binds tighter than `??`/`???`/`isIn` regardless, so it always ends up
-///    correctly nested inside whichever operand it appears in.
+///    `is not` is its OWN registered operator (not `is` followed by a
+///    separate `not`), same precedence and type as `is`. Kestra registers
+///    `??`/`???`/`isIn` at 30 (`Extension.java:81-87`), the same tier as
+///    `==`/`!=`/`>`/`>=`/`<`/`<=` and their word alias `equals`. Everything
+///    below 30 (`or`, `and`, `is`/`is not`, `contains`) is a hard boundary a
+///    coalesce/`isIn` search must not cross, checked in ascending precedence
+///    order (lowest first, outermost) before the tier-30 search itself:
+///    `or`, then `and`, then tier 20.
+///
+///    Tier 20 is NOT simply "rightmost among `is`/`is not`/`contains`, same
+///    as every other tier" -- `BinaryOperatorType` is why. `contains` is
+///    NORMAL (an ordinary binary operator, general expression on both
+///    sides), but `is`/`is not` are TEST: their right side is a fixed
+///    test-name-plus-optional-arguments grammar, parsed by
+///    `parseTestInvocationExpression()`, which never recurses back into the
+///    general expression parser. So `is`/`is not` can only ever extend
+///    LEFT, never right, regardless of what precedence follows them --
+///    [`find_rightmost_tier20`] implements this one-sided rule specifically
+///    (an earlier version treated `is` as ordinary/symmetric, which was a
+///    measured regression: `{{ a is defined ?? b }}` -- `(a is defined) ??
+///    b` in real Pebble -- rewrote to `a is kestra_null_coalesce(defined,
+///    b)`, hoisting the coalesce into test-name position, not valid
+///    minijinja at all).
+///
+///    Within tier 30 itself, the untouched comparison operators (and
+///    `equals`) have to be recognised as fellow boundaries -- not
+///    rewritten, but not invisible either -- or a coalesce search sees only
+///    its own three operators and swallows straight across them. Everything
+///    at 40 and above (`+`/`-` through `not`) is invisible to this rewrite
+///    by construction: it is never tokenized as anything but ordinary text,
+///    so it can never be mistaken for a boundary and never needs its own
+///    step here -- it binds tighter than `??`/`???`/`isIn` regardless, so
+///    it always ends up correctly nested inside whichever operand it
+///    appears in. (`|`'s FILTER type is recorded above for completeness of
+///    the table read from the bytecode; this rewrite does not act on it at
+///    all, filters already being ordinary `|` syntax minijinja shares.)
 ///
 ///    Measured, not assumed: `{{ a ?? b and c ?? d }}` is `(a ?? b) and
 ///    (c ?? d)` in Pebble; `{{ a ?? b == c }}` is `(a ?? b) == c`;
 ///    `{{ a ?? b is defined }}` is `true`, not the left operand `a`'s own
-///    value -- see [`find_rightmost_word`] (used for `or`/`and`/tier-20),
-///    [`find_rightmost_word_among`] (tier-20's `is`/`contains` combined),
-///    and [`find_rightmost_tier30`] for how each is split.
+///    value; `{{ a is defined ?? b }}` is `(a is defined) ?? b`, not
+///    `a is (defined ?? b)`; `{{ list contains a ?? b }}` is
+///    `list contains (a ?? b)` -- see [`find_rightmost_word`] (`or`/`and`),
+///    [`find_rightmost_tier20`] (`is`/`is not`/`contains`, one-sided for
+///    the TEST pair), and [`find_rightmost_tier30`] for how each is split.
 /// 5. Nothing left to resolve: reconstruct verbatim, using each remaining
 ///    `Op` piece's own original text (an operator with no matching partner,
 ///    e.g. a stray `:` with no preceding `?`, is left untouched rather than
@@ -835,22 +861,39 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
             return format!("({left}) and ({right})");
         }
 
-        // Tier 20: `is`/`contains`, still lower precedence than the 30 tier
-        // `??`/`???`/`isIn` share with the comparison operators, so this
-        // must be checked before `find_rightmost_tier30` for the same
-        // reason `or`/`and` are checked before it. `is not TESTNAME` needs
-        // no special two-token handling here: splitting at the `is` alone
-        // leaves `not TESTNAME` as ordinary text on the right side, which
-        // `resolve_pieces` reconstructs verbatim (no operator of its own to
-        // rewrite in "not defined"/"not null"/etc), reproducing `is not`
+        // Tier 20: `is`/`is not`/`contains`, still lower precedence than
+        // the 30 tier `??`/`???`/`isIn` share with the comparison
+        // operators, so this must be checked before `find_rightmost_tier30`
+        // for the same reason `or`/`and` are checked before it -- EXCEPT
+        // `is`/`is not` are `BinaryOperatorType.TEST`, not `NORMAL` like
+        // `contains`: their right side is a fixed test-name (plus optional
+        // arguments) grammar, never a general expression, so precedence 20
+        // governs only how far an `is` node reaches LEFT, never right --
+        // see `find_rightmost_tier20`'s doc for the measured regression
+        // this asymmetry fixes. `is not TESTNAME` needs no special
+        // two-token handling: splitting at the bare `is` alone leaves
+        // `not TESTNAME` as ordinary text on the right side, which
+        // `resolve_pieces` reconstructs verbatim, reproducing `is not`
         // correctly with no extra code.
-        if let Some(idx) = find_rightmost_word_among(pieces, &["is", "contains"]) {
+        if let Some(idx) = find_rightmost_tier20(pieces) {
             let word = match &pieces[idx] {
                 Piece::Atom(s) => s.as_str(),
-                _ => unreachable!("find_rightmost_word_among only returns Atom indices"),
+                _ => unreachable!("find_rightmost_tier20 only returns Atom indices"),
             };
             let left = resolve_pieces(&pieces[..idx]);
             let right = resolve_pieces(&pieces[idx + 1..]);
+            // `contains` is NORMAL (both sides general expressions): parens
+            // on both sides, same reasoning and same associativity-proof
+            // need as `or`/`and` above. `is`/`is not`'s right side is
+            // wrapped in NEITHER -- `a is (defined)` is not the same
+            // grammar position as a general expression and minijinja's own
+            // test-invocation syntax does not accept parens there; its left
+            // side needs no parens either, since the one-sided exclusion in
+            // `find_rightmost_tier20` (not a rendering trick) is what keeps
+            // an `is` node from ever incorrectly becoming the outer split.
+            if word == "contains" {
+                return format!("({left}) contains ({right})");
+            }
             return format!("{left} {word} {right}");
         }
 
@@ -974,15 +1017,68 @@ fn find_rightmost_word(pieces: &[Piece], word: &str) -> Option<usize> {
     })
 }
 
-/// Like [`find_rightmost_word`], but matches any one of several words --
-/// used for `is`/`contains` (both tier 20 in Pebble's `CoreExtension`
-/// precedence table). Rightmost among ALL of them together, not rightmost
-/// of each searched separately, since they share one precedence tier and
-/// chain left-to-right the same way the tier-30 operators do (see
-/// [`find_rightmost_tier30`]).
-fn find_rightmost_word_among(pieces: &[Piece], words: &[&str]) -> Option<usize> {
+/// True for a piece this rewrite treats as a tier-30 boundary
+/// (`??`/`???`/`isIn`, or the untouched `==`/`!=`/`>`/`>=`/`<`/`<=`/
+/// `equals`) -- shared by [`find_rightmost_tier20`] (to disqualify an `is`
+/// candidate that one of these follows) and [`find_rightmost_tier30`]
+/// itself.
+fn is_tier30_trigger(p: &Piece) -> bool {
+    matches!(
+        p,
+        Piece::Op(
+            OpKind::NullCoalesce | OpKind::UndefinedCoalesce | OpKind::IsIn,
+            _
+        )
+    ) || matches!(
+        p,
+        Piece::Atom(s) if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=" | "equals")
+    )
+}
+
+/// Finds the rightmost tier-20 boundary (`is`/`is not`/`contains`) among
+/// `pieces` -- but, unlike every other precedence step in this module, NOT
+/// simply "rightmost among all occurrences of these words."
+///
+/// Read from Pebble 4.1.2's `CoreExtension` bytecode directly (not assumed
+/// from precedence numbers alone): `is`/`is not` are
+/// `BinaryOperatorType.TEST`; `contains` is `BinaryOperatorType.NORMAL`.
+/// `ExpressionParser.parseExpression(int)` dispatches a TEST operator to
+/// `parseTestInvocationExpression()`, whose right side is a fixed
+/// test-name-plus-optional-arguments grammar -- NEVER a recursive call back
+/// into the general expression parser. So precedence 20 governs only how
+/// far an `is`/`is not` node's LEFT operand reaches (exactly like every
+/// other tier here); its right side can never absorb anything, regardless
+/// of what precedence that following content has.
+///
+/// This asymmetry was measured as a real regression, not a hypothetical:
+/// treating `is` as an ordinary symmetric tier-20 boundary (as an earlier
+/// version of this rewrite did) turns `{{ a is defined ?? b }}` --
+/// `(a is defined) ?? b` in real Pebble -- into
+/// `a is kestra_null_coalesce(defined, b)`, hoisting the following coalesce
+/// into TEST-NAME position, which is not valid minijinja at all
+/// (`unknown test: kestra_null_coalesce`). Fixed by disqualifying an `is`
+/// candidate whenever a tier-30 trigger (see [`is_tier30_trigger`]) appears
+/// anywhere to its right in this slice -- `find_map`'s "keep searching on
+/// `None`" is what lets a disqualified `is` fall through to a further-left,
+/// still-eligible one, or to no tier-20 match at all (deferring to
+/// [`find_rightmost_tier30`], which then correctly becomes the OUTER split,
+/// with the disqualified `is` ending up embedded in whichever operand it
+/// falls into once that split recurses).
+///
+/// `contains` needs none of this -- confirmed against the harness,
+/// `{{ list contains a ?? b }}` groups as `list contains (a ?? b)`, exactly
+/// the ordinary rightmost-among-the-tier behavior every other step in this
+/// module uses, so it is never excluded here.
+fn find_rightmost_tier20(pieces: &[Piece]) -> Option<usize> {
     pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
-        Piece::Atom(s) if words.contains(&s.as_str()) => Some(i),
+        Piece::Atom(s) if s == "contains" => Some(i),
+        Piece::Atom(s) if s == "is" => {
+            if pieces[i + 1..].iter().any(is_tier30_trigger) {
+                None
+            } else {
+                Some(i)
+            }
+        }
         _ => None,
     })
 }
@@ -999,20 +1095,16 @@ fn find_rightmost_word_among(pieces: &[Piece], words: &[&str]) -> Option<usize> 
 /// against real Pebble, not assumed (see `oracle/corpus.json`'s
 /// `coalesce-eq` entry).
 fn find_rightmost_tier30(pieces: &[Piece]) -> Option<usize> {
-    pieces.iter().enumerate().rev().find_map(|(i, p)| match p {
-        Piece::Op(OpKind::NullCoalesce | OpKind::UndefinedCoalesce | OpKind::IsIn, _) => Some(i),
-        // `equals` is Pebble's word alias for `==` (same precedence, same
-        // tier) -- omitting it here would not silently misgroup anything
-        // (an unrecognised bare word is just inert text, same as any other
-        // identifier), but it WOULD let a coalesce search swallow straight
-        // across it exactly like the pre-fix `==` gap did.
-        Piece::Atom(s)
-            if matches!(s.as_str(), "==" | "!=" | ">" | ">=" | "<" | "<=" | "equals") =>
-        {
-            Some(i)
-        }
-        _ => None,
-    })
+    // `equals` (Pebble's word alias for `==`, same tier) is folded into
+    // `is_tier30_trigger` -- omitting it would not silently misgroup
+    // anything on its own (an unrecognised bare word is just inert text),
+    // but it would let a coalesce search swallow straight across it exactly
+    // like the pre-fix `==` gap did.
+    pieces
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, p)| is_tier30_trigger(p).then_some(i))
 }
 
 /// Tokenizes and rewrites the inside of one `{{ }}` region as a single
@@ -1191,6 +1283,28 @@ mod tests {
         out
     }
 
+    /// Asserts the rewritten STRING only, deliberately bypassing the
+    /// minijinja parse gate `rewrite_and_parse` enforces everywhere else in
+    /// this module. This exists for exactly one, narrow reason: `equals`
+    /// and `contains`, as bare infix words, are not valid minijinja syntax
+    /// under ANY spelling -- confirmed directly against
+    /// `Environment::template_from_str` (`{{ a equals b }}` and
+    /// `{{ a contains b }}` both fail with "unexpected identifier, expected
+    /// end of variable block"), independent of this rewrite entirely. That
+    /// means `rewrite_and_parse` would panic at the parse gate on BOTH a
+    /// correct and a wrong rewrite of any expression using either word,
+    /// telling you nothing about whether the rewrite got the boundary in
+    /// the right place -- the one thing this helper is for asserting.
+    ///
+    /// This is NOT a general escape hatch from the parse gate. Every other
+    /// test in this module routes through `rewrite_and_parse`, and a new
+    /// use of this helper should come with the same justification as the
+    /// ones below: the word involved has no minijinja spelling at all, so
+    /// parseability cannot be the thing under test here -- shape is.
+    fn rewrite_shape_only(expr: &str) -> String {
+        rewrite(expr).unwrap_or_else(|e| panic!("rewrite({expr:?}) failed: {e}"))
+    }
+
     /// The rewriter must not touch an operator inside a string literal. A
     /// regex would; that is why this is a tokenizer.
     #[test]
@@ -1205,12 +1319,24 @@ mod tests {
     /// `???` must not be mistaken for `??` followed by `?`.
     #[test]
     fn the_longer_operator_wins() {
-        let out = rewrite_and_parse("{{ a ??? b }}");
-        assert!(
-            out.contains("undefined"),
-            "expected the undefined-coalescing form, got {out}"
+        // Exact match, not `.contains("undefined")` /
+        // `!.contains("null_coalesce")`: those substring checks pass for
+        // TWO wrong implementations that were never actually ruled out --
+        // reversing the operands
+        // (`kestra_undefined_coalesce(right, left)`, silently swapping the
+        // primary value and its missing-attribute fallback) and emitting a
+        // nonexistent function name like `kestra_undefined_coalesce_x`
+        // (still contains "undefined", still excludes "null_coalesce").
+        // `??`'s own test
+        // (`double_question_mark_becomes_the_null_coalescing_call`) has
+        // long been pinned this loosely too, but THAT operator is also
+        // exact-match-pinned everywhere else in this module (swapping its
+        // operands alone kills roughly a dozen other tests); `???` had no
+        // exact-string assertion anywhere until this one.
+        assert_eq!(
+            rewrite_and_parse("{{ a ??? b }}"),
+            "{{kestra_undefined_coalesce( a ,  b )}}"
         );
-        assert!(!out.contains("null_coalesce"), "{out}");
     }
 
     /// Replaces a weaker, counting-based assertion (`.matches(" if
@@ -1271,9 +1397,14 @@ mod tests {
     /// Task 3's oracle measurement -- this only pins the syntactic rewrite.
     #[test]
     fn is_in_becomes_the_in_operator() {
-        let out = rewrite_and_parse("{{ a isIn b }}");
-        assert!(out.contains(" in "), "{out}");
-        assert!(!out.contains("isIn"), "{out}");
+        // Exact match: the earlier `out.contains(" in ")` /
+        // `!out.contains("isIn")` pair is satisfied by
+        // `format!("({right} in {left})")` too -- which INVERTS the
+        // operator (`x isIn list` silently becoming `list in x`) -- and by
+        // a version with the wrapping parens dropped entirely, since
+        // neither substring check says anything about operand order or
+        // grouping.
+        assert_eq!(rewrite_and_parse("{{ a isIn b }}"), "{{( a  in  b )}}");
 
         // Not a regex: `isIn` inside a string literal survives untouched --
         // a global, quote-blind `str::replace("isIn", "in")` would corrupt
@@ -1494,9 +1625,96 @@ but there is one on the next: '";
             rewrite_and_parse("{{ a ?? b is defined }}"),
             "{{kestra_null_coalesce( a ,  b ) is  defined }}"
         );
+        // `is not none`, not `is not null` -- disclosure, not a silent
+        // substitution: minijinja has no `null` test at all (it parses --
+        // "null" is just an identifier in test-name position -- but fails
+        // at RENDER with `unknown test: test null is unknown`; confirmed
+        // directly). `oracle/corpus.json`'s `coalesce-is-not-null` keeps
+        // real Pebble's actual test name (`null`) since the corpus records
+        // real Kestra source, not minijinja spelling -- see
+        // `oracle/README.md`'s note on why that entry cannot discriminate
+        // at render time either, for the same underlying reason. This unit
+        // test uses `none` specifically so it exercises a name that will
+        // ALSO still mean something once Task 3 renders it, unlike `null`.
         assert_eq!(
-            rewrite_and_parse("{{ a ?? b is not null }}"),
-            "{{kestra_null_coalesce( a ,  b ) is  not null }}"
+            rewrite_and_parse("{{ a ?? b is not none }}"),
+            "{{kestra_null_coalesce( a ,  b ) is  not none }}"
+        );
+    }
+
+    /// I1 regression: `is`/`is not` are `BinaryOperatorType.TEST` in
+    /// Pebble, not `NORMAL` -- their right side is a fixed test-name
+    /// grammar, never a general expression, so (unlike every other
+    /// precedence tier this module handles) they must never be chosen as
+    /// the split point when a tier-30 trigger FOLLOWS them: `a is defined`
+    /// cannot absorb `?? b` into its test-name slot. Measured against real
+    /// Pebble: `{{ a is defined ?? b }}` groups as `(a is defined) ?? b`,
+    /// not `a is (defined ?? b)`. An earlier version of this rewrite
+    /// treated `is` as an ordinary symmetric tier-20 boundary (correct for
+    /// `contains`, wrong for `is`/`is not`), which turned this exact input
+    /// into `a is kestra_null_coalesce(defined, b)` -- `unknown test:
+    /// kestra_null_coalesce`, a hard parse-time-adjacent failure, not a
+    /// silent drift.
+    #[test]
+    fn is_never_absorbs_a_following_coalesce() {
+        assert_eq!(
+            rewrite_and_parse("{{ a is defined ?? b }}"),
+            "{{kestra_null_coalesce( a is defined ,  b )}}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ a is not none ?? b }}"),
+            "{{kestra_null_coalesce( a is not none ,  b )}}"
+        );
+    }
+
+    /// `contains` is `BinaryOperatorType.NORMAL` (unlike `is`/`is not`),
+    /// confirmed against the harness: `{{ list contains a ?? b }}` groups
+    /// as `list contains (a ?? b)`, ordinary rightmost-among-the-tier
+    /// behavior, no left-only restriction needed. Routed through
+    /// `rewrite_shape_only`, not `rewrite_and_parse`: `contains`, as a bare
+    /// infix word, is not valid minijinja syntax under any spelling (see
+    /// that helper's doc) -- this asserts the REWRITE'S shape, which is
+    /// independently correct regardless of whether minijinja can parse the
+    /// word `contains` itself.
+    ///
+    /// Also pins two mutations, both confirmed live (mutated and re-run,
+    /// not assumed) before finalizing this test:
+    ///
+    /// - Dropping `"equals"` from `find_rightmost_tier30`'s atom set
+    ///   changes the FIRST assertion's output to
+    ///   `"{{kestra_null_coalesce( a ,  b equals c )}}"` (the coalesce
+    ///   swallows straight across `equals`, same failure class as the
+    ///   pre-fix `==` gap).
+    /// - Hardcoding the WRONG word in the `contains` branch (i.e. the bug
+    ///   "emits a hardcoded word instead of the matched one" actually looks
+    ///   like now that `contains` has its own branch -- it renders as
+    ///   `is` there, not as the shared `{word}` fallback below it, which is
+    ///   only ever reached with `word == "is"` since `contains` returns
+    ///   early) changes the SECOND assertion's output to
+    ///   `"{{(kestra_null_coalesce( a ,  b )) is ( c )}}"`.
+    #[test]
+    fn coalesce_does_not_swallow_across_equals_or_contains() {
+        assert_eq!(
+            rewrite_shape_only("{{ a ?? b equals c }}"),
+            "{{kestra_null_coalesce( a ,  b ) equals  c }}"
+        );
+        let out = rewrite_shape_only("{{ a ?? b contains c }}");
+        assert_eq!(out, "{{(kestra_null_coalesce( a ,  b )) contains ( c )}}");
+    }
+
+    /// `find_rightmost_tier20`'s rightmost-split direction, proven the same
+    /// way `chained_or_splits_rightmost_for_left_associativity` proves it
+    /// for `or`: three `contains`-chained, `??`-bearing operands. A
+    /// rightmost split recurses on the LEFT side (left-deep parens); a
+    /// leftmost split would recurse on the right (right-deep) -- see that
+    /// sibling test's doc for the full reasoning (identical here). Routed
+    /// through `rewrite_shape_only` for the same reason as the sibling test
+    /// above.
+    #[test]
+    fn chained_contains_splits_rightmost_for_left_associativity() {
+        assert_eq!(
+            rewrite_shape_only("{{ w contains x ?? y contains z }}"),
+            "{{(( w ) contains (kestra_null_coalesce( x ,  y ))) contains ( z )}}"
         );
     }
 

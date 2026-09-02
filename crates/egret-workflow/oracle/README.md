@@ -190,28 +190,70 @@ has no parent BOM to inherit a version from.
   a `List` of matches even for a single-value query, and that list, not its
   sole element, is what gets rendered. This was already known from an
   earlier spike; re-confirmed here.
-- **`coalesce-or`'s golden value (`"true"`) will not be reproduced by a
-  correct Task 2 rewrite once Task 3 wires up rendering, for a reason that
-  has nothing to do with the rewrite being wrong.** `{{ a or b ?? c }}`
-  (`a=false, b=null, c="c-value"`) renders `true` in real Pebble because
-  Pebble's `or` coerces its result to a strict boolean — confirmed
-  separately (not from this entry) by rendering `{{ a or b ?? c }}` with
-  the same context and observing `true`, not `"c-value"`, the operand `or`
-  would return under Python/Jinja-style short-circuit semantics.
-  minijinja's own `or` is exactly that Python/Jinja style: it returns
-  whichever *operand* is truthy, not a coerced boolean. This rewrite
-  deliberately does not touch `or`/`and` syntax (same "leave it alone,
-  Task 3's problem" treatment as the comparison operators — see `gt-mixed`
-  below) — it only recognises them as precedence *boundaries* so a
-  coalesce search does not cross them (see `rewrite.rs`'s `resolve_pieces`
-  doc). So a correctly-shaped rewrite of `coalesce-or` will still render
-  the *operand* `c-value` once Task 3 renders it through minijinja, not
-  `true` — a known, expected divergence for whoever ports `or`/`and`
-  semantics (likely via a `kestra_or`/`kestra_and` function wrapper,
-  mirroring how `??`/`???` are already handled), not a defect in this
-  entry or in Task 2's rewrite. Recorded here rather than silently
-  "fixed" by changing the entry to a value neither engine's `or` would
-  naturally produce.
+- **`coalesce-or` and `coalesce-and`'s golden values will not be reproduced
+  by a correctly-shaped Task 2 rewrite once Task 3 wires up rendering, for a
+  reason that has nothing to do with the rewrite's boundary logic being
+  wrong.** Pebble's `or`/`and` coerce their result to a strict boolean —
+  confirmed directly: `{{ a or b ?? c }}` (`a=false, b=null, c="c-value"`)
+  renders `true`, not the operand `"c-value"` that Python/Jinja-style
+  short-circuit semantics would return. minijinja's own `or`/`and` are
+  exactly that Python/Jinja style: `or` returns whichever *operand* is
+  truthy, `and` returns the FIRST falsy operand or the last one, never a
+  coerced boolean — confirmed by rendering both a correctly-shaped and a
+  wrongly-shaped rewrite of `coalesce-and` through a real minijinja
+  `Environment` with a `kestra_null_coalesce` matching
+  `NullCoalescingExpression`'s actual semantics (not just reasoned about by
+  hand): with `a=1, b=2, c=null, d="D"`, the correctly-shaped rewrite
+  renders `"D"` (minijinja's `and`, both operands truthy, returns the
+  RIGHT operand) and the wrongly-shaped one renders `"1"` — genuinely
+  discriminating BETWEEN the two rewrites — but Pebble's own golden value
+  for that same context is `"true"` (boolean-coerced), matching NEITHER.
+  This rewrite deliberately does not touch `or`/`and` syntax (same "leave
+  it alone, Task 3's problem" treatment as the comparison operators — see
+  `gt-mixed` below) — it only recognises them as precedence *boundaries* so
+  a coalesce search does not cross them (see `rewrite.rs`'s
+  `resolve_pieces` doc). So both entries are still useful for what Task 2
+  owns (did the rewrite put the boundary in the right place — confirmed,
+  both discriminate a wrong GROUPING from a correct one when rendered
+  through minijinja's actual `and`/`or`), but neither can be used, as-is,
+  to verify Task 2's rewrite against Pebble's golden value end-to-end —
+  that additionally needs whoever ports `or`/`and` semantics (likely via a
+  `kestra_or`/`kestra_and` function wrapper, mirroring how `??`/`???` are
+  already handled). Recorded here rather than silently "fixed" by changing
+  either entry's context to a value that coincidentally matches Pebble
+  despite the underlying `and`/`or` semantics gap still being open, or
+  left to claim a property (`coalesce-and`'s context previously claimed to
+  discriminate the way `coalesce-eq`'s does — it does not, in the sense
+  that matters for an end-to-end render comparison) it does not have.
+- **`coalesce-is-not-null` can never be rendered once Task 3 wires up
+  minijinja, for a naming reason unrelated to this rewrite.** minijinja has
+  no test named `null` — confirmed directly: `{{ a is null }}` PARSES (the
+  test-invocation grammar accepts any identifier in test-name position) but
+  fails at render with `unknown test: test null is unknown`; minijinja's
+  equivalent test is spelled `none` (`{{ a is none }}` renders correctly).
+  This entry keeps real Pebble's actual test name (`null`) because the
+  corpus records real Kestra source, not minijinja's own vocabulary —
+  translating test/filter *names* between the two engines is Task 3's job,
+  not this rewrite's (which only ever reshapes operator *syntax*, never
+  touches names). So, like `coalesce-and`/`coalesce-or` above, this entry
+  cannot currently be used for an end-to-end render comparison — a
+  correctly-shaped AND a wrongly-shaped rewrite of it both fail with the
+  identical `unknown test: null` error, discriminating nothing at that
+  layer — though it remains a valid record of what real Pebble does with
+  this Kestra source. `coalesce-is-defined` has no such problem: `defined`
+  is a real, working minijinja test name, and it genuinely discriminates
+  (correct rewrite → `true`; the grouping this entry was added to catch a
+  regression of (a coalesce search that does not recognise `is` as a
+  boundary at all) → `A`, the left operand's own value).
+- **minijinja renders booleans as `True`/`False`; Pebble renders `true`/
+  `false`.** Pre-existing (not introduced by this rewrite, and this rewrite
+  cannot fix it — it is a rendering-format difference, not a syntax
+  question), affects roughly a dozen corpus entries whose golden value is a
+  bare boolean (`coalesce-eq`, `coalesce-is-defined`,
+  `coalesce-is-not-null`, the `gt-*`/`lt-*`/`lte-*`/`gte-*` family, etc.).
+  Task 3 will hit all of them at once the first time it compares a rendered
+  minijinja boolean against a Pebble golden value — recorded here as a
+  known quantity in advance rather than a surprise discovered per-entry.
 - **`gt-mixed` throws, it doesn't coerce.** `{{ '2' > 10 }}` (`GreaterThanExpression`)
   only special-cases the case where *both* sides are `String`
   (`"b" > "a"` does a lexicographic compare); a `String`/`Number` mix falls
@@ -275,9 +317,9 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 107 entries)
+## Corpus (`corpus.json`, 108 entries)
 
-- **36 operator cases**, taken verbatim from the task brief plus several
+- **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
   both operators, plus a plain present case), ternary (including nesting and
   the unparenthesized `a ? b ? c : d : e` form, which pins Pebble's
@@ -293,20 +335,30 @@ entry's non-deterministic output within the same run.
   `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
   `tag-if-ternary`, plus `tag-if-ternary-inverted` and the whitespace-control
   pair `tag-if-coalesce-trimmed`/`coalesce-trimmed-expr` for `{%- -%}`/
-  `{{- -}}`), and five entries pinning Pebble's full binary-operator
-  precedence table (read out of the pinned jar's bytecode: `or`=10, `and`=15,
-  `is`/`contains`=20, `equals`/`==`/`!=`/comparisons=30, the same tier Kestra
-  registers `??`/`???`/`isIn` into at `Extension.java:81-87`) against `??`:
-  `coalesce-and` (`(a ?? b) and (c ?? d)`, context chosen so the wrong
-  grouping renders a DIFFERENT boolean, not merely a same-shaped one — see
-  "Surprising golden values" below for why the first context this entry
-  shipped with did not discriminate), `coalesce-or` (`a or (b ?? c)` — also
-  flagged below as a value Task 2's rewrite cannot reproduce once rendered,
-  for a reason unrelated to Task 2), `coalesce-eq` (`(a ?? b) == c`), and the
-  tier-20 pair `coalesce-is-defined`/`coalesce-is-not-null`
-  (`(a ?? b) is defined` / `(a ?? b) is not null`) — none of which a port
-  that treats `??` as swallowing everything up to the next `??`/`isIn`
-  (ignoring lower- and same-tier operators as boundaries) would reproduce.
+  `{{- -}}`), and six entries pinning Pebble's full binary-operator
+  precedence table (read out of the pinned jar's bytecode: `or`=10 (NORMAL),
+  `and`=15 (NORMAL), `is`/`is not`=20 (TEST), `contains`=20 (NORMAL),
+  `equals`/`==`/`!=`/comparisons=30 (NORMAL), the same tier Kestra registers
+  `??`/`???`/`isIn` into at `Extension.java:81-87`) against `??`:
+  `coalesce-and` (`(a ?? b) and (c ?? d)`, context chosen so a correctly- vs.
+  wrongly-shaped REWRITE render to different values through minijinja's
+  actual `and` — see "Surprising golden values" below for why this and its
+  own golden value are two different, both-worth-knowing things),
+  `coalesce-or` (`a or (b ?? c)` — same class of caveat, see below),
+  `coalesce-eq` (`(a ?? b) == c`), the tier-20 pair
+  `coalesce-is-defined`/`coalesce-is-not-null` (`(a ?? b) is defined` /
+  `(a ?? b) is not null` — `coalesce-is-not-null` carries the same
+  render-time caveat as `coalesce-and`/`coalesce-or`, see below, for an
+  unrelated reason: minijinja's `null` test is spelled `none`), and
+  `is-defined-then-coalesce` (`{{ a is defined ?? b }}`, `(a is defined) ??
+  b` — the asymmetric side of `is`/`is not`: this operator can only ever
+  extend LEFT, confirmed both against the harness for Pebble's own grouping
+  and against a real minijinja render of this rewrite's actual output,
+  which matches the golden value exactly, modulo the boolean-casing note
+  below) — none of which a port that treats `??` as swallowing everything
+  up to the next `??`/`isIn` (ignoring lower- and same-tier operators as
+  boundaries, or treating `is`/`is not` as symmetric like every other tier)
+  would reproduce.
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including
