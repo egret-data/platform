@@ -19,6 +19,16 @@ never run automatically.
   `io.kestra:core:2.0.0-rc13` and `io.pebbletemplates:pebble:4.1.2` (see
   "Kestra checkout vs. Maven artifact" below for why the Pebble version is
   pinned explicitly rather than inherited).
+- A Unix-family OS (macOS or Linux), not Windows.
+  `io.kestra.core.runners.pebble.filters.YamlFilter` configures its Jackson
+  `YAMLFactory` with `YAMLGenerator.Feature.USE_PLATFORM_LINE_BREAKS` set to
+  `true` (confirmed by decompiling the class's static initializer —
+  `javap -p -c` shows an `iconst_1` pushed immediately before that
+  `configure` call), so the `filter-yaml` entry's golden value is only
+  reproducible on a platform whose line separator is `\n`. Regenerating on
+  Windows would silently flip that one value to `\r\n` with no real semantic
+  drift behind the byte change — the same class of environment-dependence as
+  the JDK and timezone pins in this file.
 
 ## Regenerating
 
@@ -243,13 +253,19 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 83 entries)
+## Corpus (`corpus.json`, 95 entries)
 
-- **12 operator cases**, taken verbatim from the task brief: the `??`/`???`
-  pair (5 entries covering null vs. absent on both operators, plus a plain
-  present case), ternary (including nesting), `isIn`, `>` across
-  string/number/mixed operands, and a literal `??`-looking substring inside a
-  quoted string (proves a naive regex-based rewriter would corrupt it).
+- **24 operator cases**, taken verbatim from the task brief plus a follow-up
+  fix: the `??`/`???` pair (5 entries covering null vs. absent on both
+  operators, plus a plain present case), ternary (including nesting), `isIn`,
+  each of `>`/`>=`/`<`/`<=` across string/number/mixed operands (`Extension
+  .getBinaryOperators()` registers all four as separate classes —
+  `GreaterThanExpression`, `GreaterThanEqualsExpression`, `LessThanExpression`,
+  `LessThanEqualsExpression` — so each can diverge independently), three
+  equality-boundary cases (`'a' >= 'a'`, `'a' <= 'a'`, `2 >= 2`) that only the
+  `=`-inclusive operators can reach, and a literal `??`-looking substring
+  inside a quoted string (proves a naive regex-based rewriter would corrupt
+  it).
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including

@@ -59,6 +59,72 @@
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than comparison ({{ '2' > 10 }}:1)"
   }
 }, {
+  "id" : "lt-strings",
+  "expr" : "{{ 'b' < 'a' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "lt-numbers",
+  "expr" : "{{ 2 < 10 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "lt-mixed",
+  "expr" : "{{ '2' < 10 }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than comparisonPebb ({{ '2' < 10 }}:1)"
+  }
+}, {
+  "id" : "lte-strings",
+  "expr" : "{{ 'b' <= 'a' }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "lte-numbers",
+  "expr" : "{{ 2 <= 10 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "lte-mixed",
+  "expr" : "{{ '2' <= 10 }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform less than or equals comparison ({{ '2' <= 10 }}:1)"
+  }
+}, {
+  "id" : "gte-strings",
+  "expr" : "{{ 'b' >= 'a' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "gte-numbers",
+  "expr" : "{{ 2 >= 10 }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "gte-mixed",
+  "expr" : "{{ '2' >= 10 }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Could not perform greater than or equals comparison ({{ '2' >= 10 }}:1)"
+  }
+}, {
+  "id" : "gte-strings-eq",
+  "expr" : "{{ 'a' >= 'a' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "lte-strings-eq",
+  "expr" : "{{ 'a' <= 'a' }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "gte-numbers-eq",
+  "expr" : "{{ 2 >= 2 }}",
+  "context" : { },
+  "result" : "true"
+}, {
   "id" : "op-inside-string",
   "expr" : "{{ 'a ?? b' }}",
   "context" : { },
@@ -338,7 +404,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T10:47:58.445856+07:00"
+  "result" : "2026-09-02T13:49:10.574334+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -385,7 +451,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "JAcIRQQtHcGZ/HNmX2bcKx/lEUYsspxZFEVW3+Zvd5vhvDRHwcTOMg=="
+  "result" : "HquwEV6pGBMfYIsyBZmi6pXFSFWRQpgU6yWiyCa3vfZgqhjR481vGQ=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -419,17 +485,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a0603b-0f9c-760c-91ab-861c8d216f4a"
+  "result" : "01a060e0-f4fe-7f2c-a41a-1057e40e3a81"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "1CMZWiDU0Cj3c1y0z8CnXY"
+  "result" : "7g7VABlIIKMQHbJAT81Op3"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IkuRMkX2jsED2R1UsjqsvSQJUM"
+  "result" : "3IlGTdvk2mjcNsD9UWqqp7eKURX"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -448,12 +514,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "1"
+  "result" : "8"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "52901"
+  "result" : "55618"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -472,7 +538,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "hyo_peKNGO81wUBPA7RAW"
+  "result" : "juOREUexsjhHZ7_pwRZxQ"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
