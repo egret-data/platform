@@ -1,0 +1,203 @@
+# JAVA REGEX vs egret: what each construct actually ANSWERS, per subject.
+#
+# A 265-probe sweep of Java's pattern language against the RAW `regex` crate
+# found 101 divergences, and the dangerous half raised nothing on either side:
+# `\d` matched an Arabic-Indic digit, `\v` did not match a newline, `(?i)k`
+# matched the Kelvin sign, `c$` did not match before a trailing newline. That
+# is why `runners::javare` exists.
+#
+# This file is that sweep's answer layer, committed so the claim "nothing is
+# silent" can be RE-CHECKED rather than re-asserted. Four tab-separated
+# columns plus a reason:
+#
+#   pattern <TAB> subject <TAB> java <TAB> egret <TAB> reason
+#
+# `java` is `true`/`false` (the value `regexMatch` renders) or `error`, taken
+# from the Java harness. `egret` is the same, or `refused` -- egret declining a
+# construct Kestra accepts, which is a DIFFERENT thing from an error and is
+# spelled `Unsupported regex` rather than `Invalid regex`.
+#
+# `runners::javare::the_regex_classes_match_the_engine` asserts it
+# bidirectionally, exactly as `refusal-sets.txt` is asserted:
+#
+#   - a row where the two columns differ must carry a reason, and a row where
+#     they agree must not, so a divergence cannot be introduced silently and a
+#     refusal cannot claim to be one when the engine refuses too;
+#   - **a row whose `egret` column is `true` or `false` and differs from
+#     `java` fails outright** -- that is the silent class, and there is no
+#     reason that makes one acceptable.
+#
+# Escapes are JSON's (`\t`, `\n`, `\u00e9`), because a tab-separated file
+# cannot carry a literal tab and a subject can.
+
+[a-z&&b]	a	false	false	-
+[a-z&&b]	b	true	true	-
+[a-z&&b]	c	false	false	-
+[a-z&&b&&c]	a	false	false	-
+[a-z&&b&&c]	b	false	false	-
+[a-z&&b&&c]	c	false	false	-
+[a-z&&[b]&&[c]]	b	false	false	-
+[a-z&&[b]&&[c]]	c	false	false	-
+[a-c&&a-b&&b-c]	a	false	false	-
+[a-c&&a-b&&b-c]	b	true	true	-
+[a-c&&a-b&&b-c]	c	false	false	-
+[&&a]	a	true	true	-
+[&&a]	b	false	false	-
+[&&]	a	error	error	-
+[a&&]	a	true	true	-
+[a-z&&[^bc]]	a	true	true	-
+[a-z&&[^bc]]	b	false	false	-
+[a-z&&[^bc]]	c	false	false	-
+[[a-z]&&[^bc]]	a	true	true	-
+[[a-z]&&[^bc]]	b	false	false	-
+[[a-z]&&[^bc]]	c	false	false	-
+[^a-z&&b]	a	true	true	-
+[^a-z&&b]	b	false	false	-
+[^a-z&&b]	1	true	true	-
+[[a][b][c]]	a	true	true	-
+[[a][b][c]]	b	true	true	-
+[[a][b][c]]	c	true	true	-
+[[a][b][c]]	d	false	false	-
+[a[b]c]	a	true	true	-
+[a[b]c]	b	true	true	-
+[a[b]c]	c	true	true	-
+[\\d&&[^5]]	4	true	true	-
+[\\d&&[^5]]	5	false	false	-
+[a-z&&\\w]	a	true	true	-
+[a-z&&\\w]	1	false	false	-
+[]a]	]	true	true	-
+[]a]	a	true	true	-
+[^]a]	]	false	false	-
+[^]a]	b	true	true	-
+[a-]	a	true	true	-
+[a-]	-	true	true	-
+[-a]	a	true	true	-
+[-a]	-	true	true	-
+[a\\-z]	-	true	true	-
+[a\\-z]	b	false	false	-
+[\\x41-\\x43]	B	true	true	-
+[\\x41-\\x43]	D	false	false	-
+[\\Qa+b\\E]	+	true	true	-
+[\\Qa+b\\E]	a	true	true	-
+[\\Qa+b\\E]	q	false	false	-
+[\\p{Alpha}&&[^b]]	a	true	true	-
+[\\p{Alpha}&&[^b]]	b	false	false	-
+[\\p{L}]	é	true	true	-
+[\\p{L}]	1	false	false	-
+(?i)\\p{Lower}	A	true	true	-
+(?i)\\p{Lower}	a	true	true	-
+(?i)\\p{Lower}	É	false	false	-
+(?i)\\p{Upper}	a	true	true	-
+(?i)\\p{Upper}	A	true	true	-
+(?i)\\p{Alpha}	A	true	true	-
+(?i)\\p{Alpha}	1	false	false	-
+(?i)[a-c]	B	true	true	-
+(?i)[a-c]	b	true	true	-
+(?i)[a-c]	D	false	false	-
+(?i)[Z-a]	z	true	true	-
+(?i)[Z-a]	Z	true	true	-
+(?i)[Z-a]	a	true	true	-
+(?i)[Z-a]	_	true	true	-
+(?i)[A-Z]	a	true	true	-
+(?i)[A-Z]	z	true	true	-
+(?i)[^a-c]	B	false	false	-
+(?i)[^a-c]	d	true	true	-
+(?i)[a-z0-9]	A	true	true	-
+(?i)[a-z0-9]	5	true	true	-
+(?i)k	K	true	true	-
+(?i)k	k	true	true	-
+(?i)k	K	false	false	-
+(?iu)k	K	true	true	-
+(?iu)k	K	true	true	-
+(?iu)é	É	true	true	-
+(?i)é	É	false	false	-
+(?i)[é]	É	false	false	-
+(?i)ss	ß	false	false	-
+(?i)ss	SS	true	true	-
+(?i)\\Qab\\E	AB	true	true	-
+(?i)(?-i:ab)	AB	false	false	-
+(?i)(?-i:ab)	ab	true	true	-
+(?i)\\w	A	true	true	-
+(?i)\\p{XDigit}	F	true	true	-
+(?i)\\p{XDigit}	f	true	true	-
+(?i)\\p{XDigit}	G	false	false	-
+(?d)a.b	ab	true	true	-
+(?d)a.b	a\nb	false	false	-
+(?d)a.b	a\rb	true	true	-
+(?dm)^b	a\rb	false	false	-
+(?dm)^b	a\nb	true	true	-
+(?dm)b$	b\ra	false	false	-
+(?dm)b$	b\na	true	true	-
+(?m)^b	a\rb	true	true	-
+(?m)^b	a\nb	true	true	-
+(?m)^b	ab	true	refused	the crate breaks lines on \n and \r\n only; U+0085 is a line terminator to Java and the subject has one
+(?m)b$	b\ra	true	true	-
+(?m)b$	b\na	true	true	-
+(?s)a.b	a\nb	true	true	-
+(?s)a.b	a\rb	true	true	-
+(?x)[a b]	 	false	false	-
+(?x)[a b]	a	true	true	-
+(?x)[a b]	b	true	true	-
+(?x)a b	ab	true	true	-
+(?x)a b	a b	false	false	-
+(?x)a#c\nb	ab	true	true	-
+(?x)a#c\nb	acb	false	false	-
+(?x)[a#b]	#	error	error	-
+(?x)[a#b]	a	error	error	-
+(?U)a+	aaa	true	true	-
+(?U)\\w	é	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\w	a	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\bcafé\\b	le café noir	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\d	٣	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\d	5	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\s	 	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\s	 	true	refused	(?U) redefines \d \w \s and \b to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i:a)b	Ab	true	true	-
+(?i:a)b	ab	true	true	-
+(?-i)a	A	false	false	-
+(?-i)a	a	true	true	-
+a(?i)b	aB	true	true	-
+a(?i)b	AB	false	false	-
+\\X	a	true	refused	a grapheme cluster; the crate has no such construct and no way to spell one
+\\N{LATIN SMALL LETTER A}	a	true	refused	a codepoint named by its Unicode name; no name table is in this dependency tree
+\\p{all}	a	true	true	-
+\\p{IsAlphabetic}	a	true	true	-
+\\p{IsAlphabetic}	1	false	false	-
+\\p{IsWhite_Space}	 	true	true	-
+\\p{IsWhite_Space}	a	false	false	-
+\\p{Sc}	$	true	true	-
+\\p{Sc}	a	false	false	-
+\\p{IsHan}	中	true	true	-
+\\p{IsHan}	a	false	false	-
+\\x{1F600}	😀	true	true	-
+[\\x{1F600}]	😀	true	true	-
+\\ud83d\\ude00	😀	true	true	-
+\\u0041	A	true	true	-
+\\R	\r\n	true	true	-
+\\R	\n	true	true	-
+\\R		true	true	-
+\\h	\t	true	true	-
+\\h	 	true	true	-
+\\h	a	false	false	-
+\\v	\n	true	true	-
+\\v	\u000b	true	true	-
+a**	aaa	error	error	-
+a*+	aaa	true	refused	a possessive quantifier; the crate's engine does not backtrack and cannot express one
+a{	a{	error	error	-
+a{,3}	a{,3}	error	error	-
+a{2,1}	aa	error	error	-
+a{2}	aa	true	true	-
+(?<name>a)	a	true	true	-
+(?<λ>a)	a	error	error	-
+(?<1a>a)	a	error	error	-
+(?<na_me>a)	a	error	error	-
+\\Z	a	true	true	-
+a\\Z	a	true	true	-
+()	a	true	true	-
+(|a)	a	true	true	-
+a|	b	true	true	-
+[^\\W]	a	true	true	-
+[^\\W]	 	false	false	-
+\\cA	\u0001	true	true	-
+\\0101	A	true	true	-
+\\e	\u001b	true	true	-

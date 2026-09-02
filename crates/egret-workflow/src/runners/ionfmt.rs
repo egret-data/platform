@@ -7,22 +7,34 @@
 //! # Why this is hand-written and not `ion-rs`
 //!
 //! W2 Task 6's brief names `ion-rs` 1.0. It was tried first and it cannot
-//! produce this output, measured on `ion-rs` 1.0.1 against the same value:
+//! produce this output. Measured on `ion-rs` 1.0.1, the same value through
+//! **all three** public `TextFormat`s (`Compact`, `Lines`, `Pretty`), via
+//! `Element::encode_as(WriteConfig::<v1_0::Text>::new(...))`:
 //!
-//! | | Kestra (`golden.json`) | `ion-rs` 1.0.1 |
+//! | | Kestra (`golden.json`) | `ion-rs` 1.0.1, every format |
 //! |---|---|---|
 //! | `{a:1}` | `{a:1}` | `{a: 1}` — a space after every `:` and `,` |
-//! | a list in a sequence writer | `[1,2]` | `[1, 2, ]` — a trailing comma |
+//! | a list | `[1,2]` | `[1, 2, ]` — a trailing comma, structs too |
 //! | `1e100` | `1.0e100` | `1e100` |
 //! | `"a\x01b"` | `"a\x01b"` | the raw control byte, unescaped |
 //!
-//! and none of it is configurable: `ion_rs::Writer`, `ValueWriter` and the
-//! `v1_0::Text` encoding's layout options are `pub(crate)` in 1.0.1, so the
-//! only public route is `Element::to_string` / `encode_as`, which is what
-//! produced the table above. Post-processing that into Kestra's form would be
-//! a second serialiser wrapped around the first. This module is the first one
-//! instead, and every rule in it is read off the harness (see
-//! `oracle/README.md`, "What W2 Task 6's sweeps measured").
+//! **An earlier version of this note said the writer types are `pub(crate)`.
+//! That was wrong**: `WriteConfig`, `TextFormat` and `v1_0::Text` are all
+//! public on default features, and `Writer`/`TextWriter_1_0` are behind the
+//! opt-in `experimental-reader-writer` feature — which the macro spells as
+//! `pub(crate)` when the feature is off, and which is what the compiler error
+//! that produced the claim actually meant. The claim was a "does not expose"
+//! sentence written from one error message rather than from the crate, which
+//! is the mistake `oracle/README.md`'s C9 rule exists to prevent, aimed at a
+//! Rust crate instead of a Java one.
+//!
+//! **The decision is unchanged, and now rests on the measurement above rather
+//! than on the visibility**: no public format produces Kestra's layout, and
+//! enabling the experimental feature does not change the four rows.
+//! Post-processing that into Kestra's form would be a second serialiser
+//! wrapped around the first. This module is the first one instead, and every
+//! rule in it is read off the harness (see `oracle/README.md`, "What W2
+//! Task 6's sweeps measured").
 //!
 //! # `toIon` keeps null map values and `toJson` does not
 //!
@@ -84,10 +96,24 @@ pub(super) fn write_ion(out: &mut String, value: &MjValue) {
             }
             out.push('}');
         }
-        // Strings, and the `BigDecimal`/`BigInteger` objects `super::filters`
-        // builds, which are `ValueKind::Plain` and whose `Display` is their
-        // Java text. Matching `super::env::write_json`'s own catch-all rather
-        // than inventing a second rule for them.
+        // A `BigDecimal`/`BigInteger` is a number here too, and Ion spells a
+        // decimal's exponent with `d` rather than `E`:
+        // `'1E3' | number(type='BIGDECIMAL') | toIon` is `1d3`, measured.
+        // Quoting it as a string -- which an earlier cut did, justifying
+        // itself by matching `write_json`'s catch-all, which had the same
+        // bug -- is not a near miss: `1d3` is a number and `"1000"` is text.
+        _ if super::filters::big_number_text(value).is_some() => {
+            let text = super::filters::big_number_text(value).expect("checked");
+            match text.split_once('E') {
+                Some((mantissa, exponent)) => {
+                    out.push_str(mantissa);
+                    out.push('d');
+                    out.push_str(exponent.strip_prefix('+').unwrap_or(exponent));
+                }
+                None => out.push_str(&text),
+            }
+        }
+        // Strings.
         _ => write_ion_string(out, &value.to_string()),
     }
 }
@@ -200,7 +226,11 @@ fn is_ion_identifier(s: &str) -> bool {
     if s.len() > 1 && s.starts_with('$') && s[1..].bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    if matches!(s, "null" | "true" | "false" | "nan") || s.starts_with("null.") {
+    // Ion's typed nulls (`null.int`, `null.list`, …) need no clause of their
+    // own: a `.` is not an identifier character, so the loop below rejects
+    // them anyway. An earlier cut carried `s.starts_with("null.")` here and
+    // it was unreachable.
+    if matches!(s, "null" | "true" | "false" | "nan") {
         return false;
     }
     let mut chars = s.chars();

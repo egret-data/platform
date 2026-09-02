@@ -329,3 +329,16 @@ filter-jq-division-by-zero
 # does not round-trip back to the input either, so there is no value here to
 # be faithful to.
 filter-yaml-next-line-character-folds
+
+# --- W2 Task 6, fix round 1. Two more refusals, both places Kestra ANSWERS.
+#
+# jaq's parser is recursive descent with no depth limit: 171 nested brackets
+# overflow a 2 MiB stack -- a tokio worker's -- and a stack overflow is
+# SIGABRT, which `catch_unwind` does not see and `tests/oracle.rs`'s panic
+# guard therefore cannot report. `runners::jqsandbox` bounds the source's
+# nesting at 64 before the loader is called; Kestra parses 2000 levels fine.
+filter-jq-deeply-nested-source
+# A jq `def` can call itself, directly or through another definition, and
+# nothing egret can read from the source bounds that -- `def f: f; f` is two
+# words. Refused by name; Kestra answers it. See `runners::jqsandbox`.
+filter-jq-user-definition

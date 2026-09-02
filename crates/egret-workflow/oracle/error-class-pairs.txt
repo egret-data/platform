@@ -142,3 +142,14 @@ filter-regexreplace-trailing-dollar     test:a_bad_replacement_reference_is_repo
 filter-regexextract-group-out-of-range  test:a_bad_group_argument_is_reported
 filter-regexextract-negative-group      test:a_bad_group_argument_is_reported
 filter-regexextract-group-not-a-number  test:a_bad_group_argument_is_reported
+
+# --- W2 Task 6, fix round 1.
+filter-regexmatch-all-empty-intersection           test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-comment-eats-the-class           test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-quantifier-on-a-quantifier       test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-unclosed-repetition              test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-repetition-without-a-lower-bound test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-non-latin-group-name             test:a_pattern_java_rejects_is_rejected_here_too
+filter-jq-environment-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
+filter-jq-service-log-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
+filter-jq-host-timezone-is-withheld                test:the_host_reading_jq_natives_are_refused_by_name

@@ -31,6 +31,7 @@ mod filters;
 mod ionfmt;
 mod javafmt;
 mod javare;
+mod jqsandbox;
 pub mod rewrite;
 mod yamlfmt;
 

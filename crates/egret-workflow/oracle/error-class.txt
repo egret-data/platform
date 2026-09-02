@@ -286,3 +286,29 @@ filter-regexreplace-missing-replacement
 filter-regexextract-group-out-of-range
 filter-regexextract-negative-group
 filter-regexextract-group-not-a-number
+
+# --- W2 Task 6, fix round 1. Four more, all measured to throw in Kestra too.
+#
+#   filter-regexmatch-all-empty-intersection   -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-comment-eats-the-class   -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-quantifier-on-a-quantifier -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-unclosed-repetition      -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-repetition-without-a-lower-bound -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-non-latin-group-name     -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-jq-environment-is-withheld          -> the_host_reading_jq_natives_are_refused_by_name
+#   filter-jq-service-log-is-withheld          -> the_host_reading_jq_natives_are_refused_by_name
+#   filter-jq-host-timezone-is-withheld        -> the_host_reading_jq_natives_are_refused_by_name
+#
+# The six regex ones are patterns Java itself REFUSES and the `regex` crate
+# accepts -- `a**`, `a{`, `a{,3}`, `[&&]`, `(?x)[a#b]`, `(?<λ>a)`. egret
+# answering them would be the silent class in the other direction: a flow that
+# works here and fails in Kestra.
+filter-regexmatch-all-empty-intersection
+filter-regexmatch-comment-eats-the-class
+filter-regexmatch-quantifier-on-a-quantifier
+filter-regexmatch-unclosed-repetition
+filter-regexmatch-repetition-without-a-lower-bound
+filter-regexmatch-non-latin-group-name
+filter-jq-environment-is-withheld
+filter-jq-service-log-is-withheld
+filter-jq-host-timezone-is-withheld

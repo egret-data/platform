@@ -65,10 +65,13 @@ mvn -q compile
 CP=$(mvn -q dependency:build-classpath -Dmdep.outputFile=/dev/stdout | tail -1)
 
 # Step 2: what the built engine actually registers (filters/functions/tests + counts)
-java -cp "target/classes:$CP" host.Oracle dump
+# NOTE: `"$JAVA_HOME/bin/java"`, not bare `java` -- exporting JAVA_HOME does
+# not change what `java` resolves to, and the machine default is JDK 21, which
+# fails with `UnsupportedClassVersionError` on Kestra 2.x's version-69 classes.
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle dump
 
 # Step 4: render corpus.json -> golden.json
-java -cp "target/classes:$CP" host.Oracle generate corpus.json golden.json
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate corpus.json golden.json
 ```
 
 ## The corpus schema, and `compare`
@@ -116,7 +119,7 @@ So the pairing is committed and asserted by
 
 | justification | what is checked |
 |---|---|
-| `test:<name>` | `<name>` is a `#[test] fn` that **exists** in `src/runners/`, found by scanning the committed source with `include_str!` |
+| `test:<name>` | `<name>` is a `#[test] fn` that **exists** in `src/runners/`, found by scanning the committed source with `include_str!`. The scanned list is a `const` and the directory is not, so `every_runners_module_is_scanned_for_declared_tests` asserts they are the same set — it was three files while this sentence said the directory, which would have rejected a real `javafmt` test as nonexistent |
 | `baselined` | the id really is in `baseline.txt`, so it is not born matching at all and the ratchet already holds it |
 | `unported:<task>` | nothing is ported behind it; the **set** of these must equal `UNPORTED_ERROR_CLASS` in `tests/oracle.rs`, so a ninth cannot be added without editing a test |
 
@@ -126,7 +129,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**78** entries carry it today, counted out of `golden.json` rather than added
+**87** entries carry it today, counted out of `golden.json` rather than added
 up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -139,7 +142,8 @@ parse sweep, and **eight from its third**, every one of which was shown to
 fail against the pre-fix implementation before it was written down, and
 **fourteen from W2 Task 6** (four `jq` argument and query failures, four
 regex-argument ones, three replacement-string ones and three `group`-argument
-ones). **Every one of them is separately backed by a unit test in
+ones), and **nine from its fix round** (six patterns Java itself rejects and
+the `regex` crate accepts, and the three withheld jq natives). **Every one of them is separately backed by a unit test in
 `runners::filters` asserting egret's own message**, named alongside it in
 `error-class.txt` and mechanically checked against `error-class-pairs.txt`, so
 what carries them is the test and not the mode.
@@ -148,7 +152,7 @@ That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
 entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
 whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 78 are *also* in `baseline.txt`, because
+does **not** make it pass: 5 of the 87 are *also* in `baseline.txt`, because
 egret *succeeds* where Kestra throws — a real divergence, and it stays
 visible.
 
@@ -159,9 +163,11 @@ is a ratchet. `oracle/baseline.txt` lists the ids that do not match yet: 76 of
 138 at W2 Task 3, 57 of 241 after Task 4, 59 of 268 after its fix round,
 60 of 291 after fix round 3, 59 of 426 after W2 Task 5, 62 of 457 after that
 task's fix round, 62 of 486 after its second, 66 of 513 after its third,
-**76 of 632** after W2 Task 6 -- which BANKED seven (its whole batch of
+76 of 632 after W2 Task 6 -- which BANKED seven (its whole batch of
 filters) and RECORDED seventeen, every one of them a place the two engines
-answer differently rather than a filter that is not ported.
+answer differently rather than a filter that is not ported -- and **78 of
+673** after that task's fix round, which added two more refusals and no
+mismatch it did not declare.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -673,7 +679,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 632 entries)
+## Corpus (`corpus.json`, 673 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -1537,7 +1543,7 @@ consumed rather than refused, as in fix round 2), narrowing a non-refusal (`O`
 refusing), deleting a divergent row's reason, deleting a row, and adding a
 reason to a row that has no divergence.
 
-## What W2 Task 6's 116 new entries measured (read before touching `jq`, `toJson`, `toIon`, `yaml` or the three `regex*` filters)
+## What W2 Task 6's 119 new entries measured (read before touching `jq`, `toJson`, `toIon`, `yaml` or the three `regex*` filters)
 
 Task 6 ported the last seven filters — the four structured-data ones (`jq`,
 `toIon`, `toJson`, `yaml`) and the three registered through a constant
@@ -1868,3 +1874,206 @@ now has 35 `add_filter` calls against them.
 flow reaches **minijinja's own `replace`** in egret and Pebble's built-in in
 Kestra, and neither is Kestra's class. Worth knowing before Task 8 reconciles
 the built-in surface.
+
+## W2 Task 6, fix round 1 — three vectors that end the process, and thirteen silent regex classes
+
+A review of the port ran its own sweeps and found three things the task's own
+sweeps had not, plus a set of counting errors. Everything below was
+re-measured here before it was believed.
+
+### Two ways a jq expression takes the process with it
+
+Neither is a wrong answer; both are "the service is gone", from a template.
+
+- **The parser overflows the stack.** `jaq`'s loader is recursive descent with
+  no depth limit: **692** nested `[` on the 8 MiB main stack and **171 on a
+  2 MiB one — a tokio worker's — i.e. a template about 360 bytes long.** `[`,
+  `(` and `{a:` all reach it. A stack overflow is `SIGABRT`, not a panic, so
+  `catch_unwind` does not see it and `tests/oracle.rs`'s panic guard cannot
+  report it — reproduced here by watching the probe binary die with signal 6.
+  Kestra parses 2000 levels without complaint.
+- **The evaluator has no budget of any kind.** `grep fuel|budget|steps` over
+  `jaq-core` 3.1 finds nothing, and minijinja's own `FUEL` does not apply
+  because the whole jq program runs inside one filter call. The first cut
+  counted bytes **as outputs were emitted**, which bounds a generator that
+  emits and nothing else: `[repeat(1)]`, `reduce repeat(1) as $x (0; .+1)`,
+  `until(false; .)`, `[while(true; .)]` and `def f: f; f` produce their first
+  output never and walked straight past it. The doc said "the output is
+  bounded" and the test asserted `is_err()`, which **passed the implementation
+  that shipped** — an `is_err()` cannot tell "the bound fired" from "`repeat`
+  is not registered".
+
+`runners::jqsandbox` is the answer to both, and it is built on the only two
+places `jaq` lets a caller stand — the definition list and the native list:
+
+| bound | what it is | what it stops |
+|---|---|---|
+| `MAX_SOURCE_DEPTH` = 64 | a scanner over the source, **before** the loader | the parser overflow, with a 2.6× margin on the measured 171 |
+| `MAX_SOURCE_BYTES` = 1 MiB | source length | the parse cost itself |
+| `BOUNDED_DEFS` | `repeat`, `recurse` ×3, `while`, `until` and `range` **replaced in place** with depth-counting versions | the whole recursion family, `..`, `paths`, `walk` and `leaf_paths` included, since every one of them is defined on `recurse` |
+| refusing a user `def` | by name, in the scanner | `def f: f; f`, which is two words and which no bound above touches; mutual recursion cannot be read out of the text |
+| the emitted-byte cap | unchanged | a generator that does emit |
+
+**`MAX_STEPS` is 65 536, and two ceilings meet there.** The output cap bounds
+*useful* steps at `MAX_OUTPUT_BYTES / 2` = 524 288, because an emitted value
+costs at least two characters. Time bounds *tolerable* steps lower: measured,
+`[repeat(1)]` spends **3.3 s** at 1 048 576 steps and **0.2 s** at 65 536. The
+lower one wins, and the deepest recursion in this package's own jq sweep is in
+single digits.
+
+**Replacing a definition has to happen IN PLACE**, and `splice` asserts it
+rather than assuming it: everything above the group is what it needs (`error`,
+`select`, `empty`) and everything below it needs the group. Appending would
+leave `paths` resolving `jaq`'s unbounded `recurse`; prepending would leave
+`error` undefined. A `jaq` bump that renames, re-arities or separates one of
+them fails the assertion.
+
+### Withholding a native is not enough on its own
+
+`jaq-std/src/defs.jq` lines 3-9 say `def stderr: (stderr_empty as $x | .), .;`
+and `def halt: halt(0);`. Dropping `stderr_empty/0` or `halt/1` therefore makes
+the **whole standard library** fail to compile, and every jq call fails
+whatever the author wrote — measured, because the first cut of this module did
+exactly that and `{{ x | jq('.a') }}` broke along with `env`. So the six
+user-visible names stay and their **bodies** become refusals that say why.
+
+Six natives are withheld, and **Kestra's `jackson-jq` at `Versions.JQ_1_6` has
+none of them**, so withholding is fidelity as well as the obvious call:
+
+| withheld | why |
+|---|---|
+| `env` | `std::env::vars()` — the whole process environment |
+| `debug`, `stderr` | write arbitrary author text into the service log; `egret-bin` installs `LogTracer` |
+| `localtime`, `strflocaltime` | `jiff::tz::TimeZone::system()` — the host's timezone |
+| `halt` | reaches `std::process::exit` through `jaq_core::unwrap_valr` |
+
+**And the guard is an ALLOW-list, because a deny-list is fail-open.**
+`jaq-std = "3.0"` is a caret range, so a `cargo update` to 3.1 can register a
+native no deny-list mentions. `ALLOWED_NATIVES` is the 108 egret runs,
+committed, and `the_allow_list_covers_every_native_jaq_registers` fails if the
+three crates ever register a name that is on neither list.
+
+### Java regex: thirteen more classes, nine of them silent
+
+A 357-probe sweep with **every pattern and subject passed through the
+context** — so the known string-literal lexer divergence cannot contaminate it
+— found thirteen classes the first cut answered differently. Nine raised
+nothing on either side:
+
+| pattern | subject | Java | egret, before |
+|---|---|---|---|
+| `[a-z&&b&&c]` | `c` | false | **true** |
+| `[&&a]` | `a` | true | **false** |
+| `(?i)\p{Lower}` | `A` | true | **false** |
+| `(?i)[^a-c]` | `B` | false | **true** |
+| `(?i)[Z-a]` | `z` | true | **false** |
+| `(?U)\bcafé\b` | `le café noir` | true | **false** |
+| `(?dm)^b` | `a\rb` | false | **true** |
+| `(?x)[a b]` | `" "` | false | **true** |
+| `'aab' \| regexReplace('a*','-')` | | `--b-` | **`-b-`** |
+
+Four more were the other direction: egret **answering** where Java raises
+(`a**`, `a{`, `a{,3}`, `[&&]`, `(?x)[a#b]`, `(?<λ>a)`) or **refusing** what
+Kestra accepts (`\X`, `\N{…}`, `\p{all}`, a surrogate pair, `[\Qa+b\E]`).
+
+Five of them are worth reading for the shape of the mistake:
+
+- **`&&` is what separates operands, and the parser did not know it.** The
+  tail after the first `&&` was read as ONE operand, so `[a-z&&b&&c]` became
+  `a-z` intersected with the *set* `{b, &, c}`. Java's `&&` chain is
+  left-associative intersection of every operand, and an empty operand is
+  IGNORED (`[&&a]` is `[a]`) while all-empty is a syntax error.
+- **`(?i)` is now folded by asking the engine.** Java's `CASE_INSENSITIVE`
+  without `UNICODE_CASE` matches `c` against class `C` iff `c ∈ C` **or**
+  `swapAsciiCase(c) ∈ C`, whatever `C` is. So the class is written once,
+  compiled, and the 52 ASCII letters are tested against it. A member-rewriting
+  fold cannot do this: `[Z-a]` spans `[`, `\`, `]`, `^`, `_` and `` ` `` and
+  has no mirrored range, and `\p{Lower}` has no members to rewrite at all.
+- **The fold happens BEFORE the negation.** `(?i)[^a-c]` does not match `B`:
+  the fold closes `a-c` into `a-cA-C` and the negation then excludes both
+  cases. Closing the negated class instead — which the first cut did — matched
+  `B`.
+- **`(?U)`'s refusal named `\b` while the guard did not cover it.** The
+  message at the `\d`/`\w`/`\s` arm read "which redefines \d, \w, \s and \b"
+  and the `'b'`/`'B'` arms had no `unicode_classes` check at all. The
+  refusal message and the guard now come from one constant.
+- **`Matcher.replaceAll` is not `captures_iter`.** The crate's iterator
+  suppresses an empty match abutting the previous match's end; Java's matcher
+  takes it and then advances one character. Reverting the fix to
+  `if false && whole.is_empty()` does **not** reproduce the old behaviour — it
+  is an infinite loop, which is how that was found.
+
+**`oracle/regex-classes.txt` is that sweep, committed.** 171 rows of
+`pattern / subject / java / egret / reason`, asserted bidirectionally by
+`runners::javare::the_regex_classes_match_the_engine`, with one rule the
+`refusal-sets.txt` fixture does not need: **a row whose `egret` column is a
+boolean and differs from `java` fails outright.** That is the silent class,
+and no reason excuses one — the only acceptable divergence is a refusal that
+says so. It exists because the claim it checks ("after the translation nothing
+is silent") was made once as a sentence and was false. A sentence cannot fail.
+
+Twelve constructs are refused by name: lookahead, lookbehind, atomic groups,
+possessive quantifiers, backreferences, `\G`, `\b{g}`, Unicode blocks,
+`\p{java…}`, `(?U)` where it redefines a class or a boundary, `\X`, and
+`\N{…}`.
+
+### `oracle/jq-surface.txt`, and why "five is what is left" was wrong
+
+The first round recorded FIVE jq divergences and wrote "five entries record
+what is left". A 191-expression differential finds **twenty-one**. Two are now
+fixed and nineteen are recorded, each with a reason, in a fixture
+`runners::jqsandbox::the_jq_surface_matches_the_engine` re-runs.
+
+The two fixed are `scan` at both arities, and they are the ones that would
+have reached a flow: `jaq-std/defs.jq` says `def scan(re): scan(re; "");` — no
+`g` flag — so `"a1b2" | [scan("[0-9]")]` was `["1"]` here and is `["1","2"]`
+in Kestra and in jq 1.6. With a capture group jq yields the captures and jaq
+yielded the whole match. Both engines answered without error.
+
+### `BigDecimal` was a STRING in three writers, one of them the environment's
+
+`'1.50' | number(type='BIGDECIMAL') | toJson` was `"1.50"` here and is `1.50`
+in Kestra. So was `toIon`, and so was **`{{ [x] }}`** — `runners::env`'s own
+`write_json`, with no filter involved. All three end in a catch-all that
+treats an unrecognised value as text, and a `BigNumber` is `ValueKind::Plain`.
+
+Fixing it turned up a second fact: **a `BigDecimal` has two spellings and both
+are reachable from a template.** `toPlainString()` is what a bare `{{ x }}`
+renders and `toString()` is what a serialiser writes, and they differ whenever
+the scale is negative or the adjusted exponent is below -6. `'1E3'` is `1000`
+bare, `1E+3` through `toJson` and `yaml`, and **`1d3` through `toIon`**, which
+spells a decimal exponent with `d`. `BigNumber` now carries both.
+
+### Three `yamlfmt` bugs, and two entries that MASKED them
+
+Worse than the one-variant-away entries earlier rounds found: those masked
+nothing.
+
+- **The literal-block indentation indicator is RELATIVE, and SnakeYAML always
+  writes `2`.** egret wrote the absolute column, so past depth 4 it emitted
+  `|10-` — and the indicator is a single digit 1-9, so **the output was not
+  valid YAML for any reader**. `filter-yaml-literal-block-indent-indicator`
+  used a root scalar, where the relative and absolute values coincide.
+- **The simple-key limit counts UTF-16 code units**, because SnakeYAML compares
+  against `String.length()`. 64 astral characters is a 128-unit key and is
+  NOT simple. Both existing entries were pure ASCII — exactly where the two
+  candidate rules agree.
+- **YAML's four named escapes were missing**: `\N` (U+0085), `\_` (U+00A0),
+  `\L` (U+2028), `\P` (U+2029). The last three matter for more than looks: a
+  raw one inside a double-quoted scalar is a line break to a YAML 1.1 reader,
+  so the output read back as a different string.
+
+### The counting, corrected
+
+Three figures in the first round's report and in this file were wrong, and the
+right ones come out of the files:
+
+- **119 entries were added in round 1**, not 118, and this file said 116 —
+  written before the last two went in. The corpus is **673** after this round.
+- **The `keep_trailing_newline` reversion fails 27 entries** on the current
+  corpus, not the 18 first reported. The first measurement was taken against a
+  smaller corpus and was not re-taken when it grew.
+- **`filter-yaml-scalar-keeps-its-newline` did not discriminate its own fix.**
+  It was written `<{{ s | yaml }}>`, and the `>` after the value is what stops
+  minijinja trimming the newline — so the entry passed either way. It is now
+  a bare `{{ s | yaml }}` and it fails under the reversion.

@@ -58,6 +58,13 @@ use super::env::write_java_double;
 /// is exactly the off-by-one a reader of that source would get wrong — an
 /// earlier cut of this file said 128 and the sweep caught it on the one probe
 /// that sits on the boundary.
+///
+/// **The unit is a UTF-16 code unit**, because the constant is compared
+/// against `String.length()`. An astral character counts as two: 64 emoji is
+/// a 64-character, 128-unit key, and it is NOT simple. Every ASCII probe
+/// agrees under either reading, which is why
+/// `filter-yaml-key-at-the-simple-limit` could not tell them apart and
+/// `filter-yaml-astral-key-counts-utf16-units` can.
 const MAX_SIMPLE_KEY_LENGTH: usize = 127;
 
 /// Jackson's `_writeScalar` indent, i.e. `DumperOptions.setIndent`'s default.
@@ -198,6 +205,12 @@ fn write_scalar(out: &mut String, value: &MjValue, block_indent: usize) {
         }
         ValueKind::Map => out.push_str("{}"),
         ValueKind::Seq | ValueKind::Iterable => out.push_str("[]"),
+        // A `BigDecimal`/`BigInteger` is a number and is written unquoted, in
+        // its `toString` spelling -- `1E+3`, not the `1000` a bare `{{ x }}`
+        // renders. See `super::filters::big_number_text`.
+        _ if super::filters::big_number_text(value).is_some() => {
+            out.push_str(&super::filters::big_number_text(value).expect("checked"));
+        }
         _ => write_string_scalar(out, &value.to_string(), block_indent),
     }
 }
@@ -482,6 +495,15 @@ fn write_double_quoted(out: &mut String, s: &str) {
             '\u{07}' => out.push_str("\\a"),
             '\0' => out.push_str("\\0"),
             '\u{1b}' => out.push_str("\\e"),
+            // YAML's four NAMED escapes beyond the C-like ones. The last
+            // three matter for more than looks: a raw U+0085, U+2028 or
+            // U+2029 inside a double-quoted scalar is a LINE BREAK to a YAML
+            // 1.1 reader, so writing them literally produces output that
+            // reads back as a different string.
+            '\u{85}' => out.push_str("\\N"),
+            '\u{a0}' => out.push_str("\\_"),
+            '\u{2028}' => out.push_str("\\L"),
+            '\u{2029}' => out.push_str("\\P"),
             c if is_non_printable(c) => out.push_str(&format!("\\x{:02x}", c as u32)),
             c => out.push(c),
         }
@@ -501,7 +523,18 @@ fn write_double_quoted(out: &mut String, s: &str) {
 fn write_literal_block(out: &mut String, s: &str, indent: usize) {
     out.push('|');
     if s.starts_with(' ') || s.starts_with('\n') {
-        out.push_str(&indent.to_string());
+        // **The indicator is RELATIVE, and SnakeYAML always writes 2.** It is
+        // how much further the body is indented than the block's parent, not
+        // where the body sits on the page. Writing the absolute column was
+        // wrong everywhere except at the root, where the two coincide -- and
+        // past depth 4 it emitted `|10-`, which is not valid YAML at all,
+        // because the indicator is a single digit 1-9.
+        //
+        // `filter-yaml-literal-block-indent-indicator` used a ROOT scalar and
+        // so could not tell the two rules apart;
+        // `filter-yaml-literal-block-indicator-is-relative` is the entry that
+        // can.
+        out.push('2');
     }
     match s.strip_suffix('\n') {
         None => out.push('-'),
@@ -552,7 +585,7 @@ fn key_repr(key: &str) -> String {
 
 /// Can this key go on the same line as its value?
 fn is_simple_key(key: &str) -> bool {
-    !key.is_empty() && key.chars().count() <= MAX_SIMPLE_KEY_LENGTH && !key.contains('\n')
+    !key.is_empty() && key.encode_utf16().count() <= MAX_SIMPLE_KEY_LENGTH && !key.contains('\n')
 }
 
 #[cfg(test)]

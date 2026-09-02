@@ -2175,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-03T01:57:13.162212+07:00"
+  "result" : "2026-09-03T04:20:51.692601+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2226,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "ljRxlC18F25Nfej0FZ62nD72OVaki6ShDnrGM19znsRYgrvr9uhQ4A=="
+  "result" : "lbpj2vinJgaqUjHiqFrIwFNRd66D8gsK1hBWCvHgGx44h4jSh6n8Vg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2260,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a0637b-8017-7ade-bd23-e5110f370029"
+  "result" : "01a063ff-023d-7f3f-9e62-dec5bae8b7ca"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "6032J3W5xPlyPt829vUbvk"
+  "result" : "5sTbgeROvrjQEpcFFpQvbm"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3Imh1ElXOWKD44cKDMONFMHMEij"
+  "result" : "3ImyU8gNn0XdsWHPgfgtPJRF5zK"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2290,12 +2290,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "4"
+  "result" : "1"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "52275"
+  "result" : "61812"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2316,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "qowM7ObselkGysGVTp9vz"
+  "result" : "3GamPdaTJdOLjC-pZRzrW"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -3989,11 +3989,11 @@
   "result" : "<null>"
 }, {
   "id" : "filter-yaml-scalar-keeps-its-newline",
-  "expr" : "<{{ s | yaml }}>",
+  "expr" : "{{ s | yaml }}",
   "context" : {
     "s" : "a"
   },
-  "result" : "<a\n>"
+  "result" : "a\n"
 }, {
   "id" : "filter-yaml-map-null-value",
   "expr" : "{{ m | yaml }}",
@@ -4778,4 +4778,354 @@
     "s" : "ab"
   },
   "result" : "a  b\n"
+}, {
+  "id" : "filter-yaml-literal-block-indicator-is-relative",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "a" : {
+        "b" : {
+          "c" : "\nxy"
+        }
+      }
+    }
+  },
+  "result" : "a:\n  b:\n    c: |2-\n\n      xy\n"
+}, {
+  "id" : "filter-yaml-literal-block-indicator-in-a-sequence",
+  "expr" : "{{ l | yaml }}",
+  "context" : {
+    "l" : [ [ {
+      "a" : "\nx"
+    } ] ]
+  },
+  "result" : " -\n   -\n    a: |2-\n\n      x\n"
+}, {
+  "id" : "filter-yaml-astral-key-counts-utf16-units",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00" : 1
+    }
+  },
+  "result" : "? \uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\n: 1\n"
+}, {
+  "id" : "filter-yaml-astral-key-under-the-limit",
+  "expr" : "{{ m | yaml }}",
+  "context" : {
+    "m" : {
+      "\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00" : 1
+    }
+  },
+  "result" : "\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00\uD83D\uDE00: 1\n"
+}, {
+  "id" : "filter-yaml-named-escapes",
+  "expr" : "{{ l | yaml }}",
+  "context" : {
+    "l" : [ "ab,", "a b,", "a b,", "a b," ]
+  },
+  "result" : " - \"a\\Nb,\"\n - \"a\\Lb,\"\n - \"a\\Pb,\"\n - \"a\\_b,\"\n"
+}, {
+  "id" : "filter-regexmatch-intersection-chain",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "b",
+    "p" : "[a-z&&b&&c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-empty-intersection-operand",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-all-empty-intersection",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "[&&]"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '[&&]': Bad class syntax ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-case-insensitive-property",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "A",
+    "p" : "(?i)\\p{Lower}"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-case-insensitive-negated-class",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "B",
+    "p" : "(?i)[^a-c]"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-case-insensitive-range-across-the-alphabet",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "z",
+    "p" : "(?i)[Z-a]"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-unix-lines-anchor",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a\rb",
+    "p" : "(?dm)^b"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-comments-inside-a-class",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : " ",
+    "p" : "(?x)[a b]"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexmatch-comment-eats-the-class",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?x)[a#b]"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?x)[a#b]': Unclosed character class ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-quoted-literal-in-a-class",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "+",
+    "p" : "[\\Qa+b\\E]"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-every-codepoint-property",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "\\p{all}"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-surrogate-pair",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "\uD83D\uDE00",
+    "p" : "\\ud83d\\ude00"
+  },
+  "result" : "true"
+}, {
+  "id" : "filter-regexmatch-quantifier-on-a-quantifier",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "aaa",
+    "p" : "a**"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a**': Dangling meta character '*' ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-unclosed-repetition",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a{",
+    "p" : "a{"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{': Illegal repetition ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-repetition-without-a-lower-bound",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "a{,3}"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex 'a{,3}': Illegal repetition ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-non-latin-group-name",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "a",
+    "p" : "(?<λ>a)"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid regex '(?<λ>a)': capturing group name does not start with a Latin letter ({{ s | regexMatch(regex=p) }}:1)"
+  }
+}, {
+  "id" : "filter-regexmatch-boundary-is-ascii-from-a-variable",
+  "expr" : "{{ s | regexMatch(regex=p) }}",
+  "context" : {
+    "s" : "le café noir",
+    "p" : "\\bcafé\\b"
+  },
+  "result" : "false"
+}, {
+  "id" : "filter-regexreplace-empty-match-after-a-match",
+  "expr" : "{{ s | regexReplace(regex=p, replacement='-') }}",
+  "context" : {
+    "s" : "aab",
+    "p" : "a*"
+  },
+  "result" : "--b-"
+}, {
+  "id" : "filter-regexreplace-empty-match-between-letters",
+  "expr" : "{{ s | regexReplace(regex=p, replacement='-') }}",
+  "context" : {
+    "s" : "abc",
+    "p" : "b*"
+  },
+  "result" : "-a--c-"
+}, {
+  "id" : "filter-tojson-bigdecimal",
+  "expr" : "{{ '1.50' | number(type='BIGDECIMAL') | toJson }}",
+  "context" : { },
+  "result" : "1.50"
+}, {
+  "id" : "filter-toion-bigdecimal",
+  "expr" : "{{ '1.50' | number(type='BIGDECIMAL') | toIon }}",
+  "context" : { },
+  "result" : "1.50"
+}, {
+  "id" : "filter-toion-bigdecimal-exponent",
+  "expr" : "{{ '1E3' | number(type='BIGDECIMAL') | toIon }}",
+  "context" : { },
+  "result" : "1d3"
+}, {
+  "id" : "filter-tojson-bigdecimal-exponent",
+  "expr" : "{{ '1E3' | number(type='BIGDECIMAL') | toJson }}",
+  "context" : { },
+  "result" : "1E+3"
+}, {
+  "id" : "filter-yaml-bigdecimal-exponent",
+  "expr" : "{{ '1E3' | number(type='BIGDECIMAL') | yaml }}",
+  "context" : { },
+  "result" : "1E+3\n"
+}, {
+  "id" : "filter-tojson-biginteger",
+  "expr" : "{{ '0xFF' | number(type='BIGINTEGER') | toJson }}",
+  "context" : { },
+  "result" : "255"
+}, {
+  "id" : "bignumber-in-a-list",
+  "expr" : "{{ ['1.50' | number(type='BIGDECIMAL')] }}",
+  "context" : { },
+  "result" : "[1.50]"
+}, {
+  "id" : "filter-jq-scan-is-global",
+  "expr" : "{{ s | jq('[scan(\"[0-9]\")]') }}",
+  "context" : {
+    "s" : "\"a1b2\""
+  },
+  "result" : "[[\"1\",\"2\"]]"
+}, {
+  "id" : "filter-jq-scan-with-a-capture-group",
+  "expr" : "{{ s | jq('[scan(\"([0-9])\")]') }}",
+  "context" : {
+    "s" : "\"a1b2\""
+  },
+  "result" : "[[[\"1\"],[\"2\"]]]"
+}, {
+  "id" : "filter-jq-user-definition",
+  "expr" : "{{ json | jq('def f: . + 1; .a | f') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[2]"
+}, {
+  "id" : "filter-jq-deeply-nested-source",
+  "expr" : "{{ json | jq(e) }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    },
+    "e" : "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+  },
+  "result" : "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+}, {
+  "id" : "filter-jq-bounded-range-still-works",
+  "expr" : "{{ json | jq('[range(3)]') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[[0,1,2]]"
+}, {
+  "id" : "filter-jq-bounded-recurse-still-works",
+  "expr" : "{{ json | jq('[..] | length') }}",
+  "context" : {
+    "json" : {
+      "a" : {
+        "b" : 1
+      }
+    }
+  },
+  "result" : "[3]"
+}, {
+  "id" : "filter-jq-bounded-until-still-works",
+  "expr" : "{{ json | jq('.a | until(. > 2; . + 1)') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "result" : "[3]"
+}, {
+  "id" : "filter-jq-environment-is-withheld",
+  "expr" : "{{ json | jq('env') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('env') }}:1)"
+  }
+}, {
+  "id" : "filter-jq-service-log-is-withheld",
+  "expr" : "{{ json | jq('debug') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('debug') }}:1)"
+  }
+}, {
+  "id" : "filter-jq-host-timezone-is-withheld",
+  "expr" : "{{ json | jq('localtime') }}",
+  "context" : {
+    "json" : {
+      "a" : 1
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to parse jq value '{a=1}' with type 'java.util.LinkedHashMap' ({{ json | jq('localtime') }}:1)"
+  }
 } ]

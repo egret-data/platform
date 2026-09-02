@@ -464,10 +464,20 @@ const UNPORTED_ERROR_CLASS: &[&str] = &[
 /// the allowlist are, so the check is against the committed text rather than
 /// against a runtime registry libtest does not expose to another binary.
 fn declared_test_names() -> BTreeSet<String> {
+    // **Every module in `src/runners/`.** The list used to be three files
+    // while `oracle/README.md` said "in `src/runners/`", so a pairing naming
+    // a `javafmt` test would have been rejected as nonexistent while
+    // existing. `every_runners_module_is_scanned_for_declared_tests` is what
+    // keeps this list and the directory the same.
     const SOURCES: &[&str] = &[
-        include_str!("../src/runners/filters.rs"),
         include_str!("../src/runners/env.rs"),
+        include_str!("../src/runners/filters.rs"),
+        include_str!("../src/runners/ionfmt.rs"),
+        include_str!("../src/runners/javafmt.rs"),
+        include_str!("../src/runners/javare.rs"),
+        include_str!("../src/runners/jqsandbox.rs"),
         include_str!("../src/runners/rewrite.rs"),
+        include_str!("../src/runners/yamlfmt.rs"),
     ];
 
     let mut names = BTreeSet::new();
@@ -515,6 +525,34 @@ fn declared_test_names() -> BTreeSet<String> {
 ///
 /// An error-class entry added without a pair fails here **by name**, the way a
 /// stale baseline line already does.
+/// The `test:` scan must cover every module in `src/runners/`, or a pairing
+/// naming a real test in an unscanned file is rejected as nonexistent.
+///
+/// The list is a `const` and the directory is not, so nothing but this
+/// notices when a module is added — as four were in W2 Task 6.
+#[test]
+fn every_runners_module_is_scanned_for_declared_tests() {
+    let mut on_disk: Vec<String> =
+        std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runners"))
+            .expect("src/runners must be readable")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                (name.ends_with(".rs") && name != "mod.rs").then_some(name)
+            })
+            .collect();
+    on_disk.sort();
+
+    let scanned = include_str!("oracle.rs");
+    for module in &on_disk {
+        assert!(
+            scanned.contains(&format!("include_str!(\"../src/runners/{module}\")")),
+            "`src/runners/{module}` is not in `declared_test_names`' SOURCES, so a \
+             `test:` pairing naming one of its tests would be rejected as nonexistent"
+        );
+    }
+    assert_eq!(on_disk.len(), 8, "a module was added or removed");
+}
+
 #[test]
 fn every_error_class_entry_is_paired_with_something_that_can_fail() {
     let pairs: Vec<(String, String)> = include_str!("../oracle/error-class-pairs.txt")

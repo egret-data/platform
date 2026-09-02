@@ -1,0 +1,215 @@
+# THE jq SURFACE: what Kestra's `jackson-jq` answers and what egret's `jaq`
+# answers, for 191 expressions.
+#
+# `jaq` is a different implementation of the same language, and the
+# differences run BOTH ways: filters Kestra has that jaq does not (`@csv`,
+# `@tsv`, `leaf_paths`), filters jaq has that Kestra's `Versions.JQ_1_6` does
+# not (`todate`, `strftime`, `repeat`, `gmtime`, `mktime`, `fabs`,
+# `strptime`, and `1 / 0`), and a handful of silent disagreements.
+#
+# This file exists because an earlier round of this task recorded FIVE of them
+# and wrote "five entries record what is left", which read as *five is what is
+# left*. There were 21. A prose count cannot fail; this can.
+#
+# Five tab-separated columns:
+#
+#   expression <TAB> input <TAB> kestra <TAB> egret <TAB> reason
+#
+# `kestra` and `egret` are the rendered value, or `error`, or -- egret only --
+# `refused`, which is egret declining something Kestra runs and saying so.
+# A row whose columns differ must carry a reason; a row whose columns agree
+# must not. `runners::jqsandbox::the_jq_surface_matches_the_engine` asserts
+# both, and re-runs every expression.
+#
+# Escapes are JSON's, because a tab-separated file cannot carry a literal tab.
+.	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	-
+.a	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42}]	[{\"b\":42}]	-
+.a.b	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[42]	[42]	-
+.nope	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.nope.deeper	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.a?	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42}]	[{\"b\":42}]	-
+.[\"a\"]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42}]	[{\"b\":42}]	-
+.list[]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3,1,2]	[3,1,2]	-
+.[]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42},[3,1,2],\"hi\",true,1.5]	[{\"b\":42},[3,1,2],\"hi\",true,1.5]	-
+.list[0]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3]	[3]	-
+.list[-1]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[2]	[2]	-
+.list[0:2]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[3,1]]	[[3,1]]	-
+keys	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"f\",\"list\",\"s\",\"t\"]]	[[\"a\",\"f\",\"list\",\"s\",\"t\"]]	-
+keys_unsorted	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"list\",\"s\",\"t\",\"f\"]]	[[\"a\",\"list\",\"s\",\"t\",\"f\"]]	-
+.list | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3]	[3]	-
+.s | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[2]	[2]	-
+.a | type	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"object\"]	[\"object\"]	-
+.list | .[]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3,1,2]	[3,1,2]	-
+.list | map(. + 1)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[4,2,3]]	[[4,2,3]]	-
+.list[] | select(. > 1)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3,2]	[3,2]	-
+.nope // \"dflt\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"dflt\"]	[\"dflt\"]	-
+.a | to_entries	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[{\"key\":\"b\",\"value\":42}]]	[[{\"key\":\"b\",\"value\":42}]]	-
+[{key:\"k\",value:1}] | from_entries	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"k\":1}]	[{\"k\":1}]	-
+.a | with_entries(.value += 1)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":43}]	[{\"b\":43}]	-
+.list | add	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[6]	[6]	-
+.list | any(. > 2)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+.list | all(. > 0)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+.list | sort	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2,3]]	[[1,2,3]]	-
+[{x:2},{x:1}] | sort_by(.x)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[{\"x\":1},{\"x\":2}]]	[[{\"x\":1},{\"x\":2}]]	-
+[1,1,2] | group_by(.)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[[1,1],[2]]]	[[[1,1],[2]]]	-
+[1,1,2] | unique	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2]]	[[1,2]]	-
+[[1,[2]],3] | flatten	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2,3]]	[[1,2,3]]	-
+.list | reverse	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[2,1,3]]	[[2,1,3]]	-
+.list | [min, max]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,3]]	[[1,3]]	-
+[range(3)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[0,1,2]]	[[0,1,2]]	-
+[range(1;4)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2,3]]	[[1,2,3]]	-
+.a | tostring	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"{\\\"b\\\":42}\"]	[\"{\\\"b\\\":42}\"]	-
+\"42\" | tonumber	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[42]	[42]	-
+.a | tojson	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"{\\\"b\\\":42}\"]	[\"{\\\"b\\\":42}\"]	-
+\"{\\\"z\\\":1}\" | fromjson	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"z\":1}]	[{\"z\":1}]	-
+\"AB\" | ascii_downcase	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"ab\"]	[\"ab\"]	-
+\"abc\" | ltrimstr(\"a\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"bc\"]	[\"bc\"]	-
+\"abc\" | startswith(\"a\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"a,b\" | split(\",\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"b\"]]	[[\"a\",\"b\"]]	-
+[\"a\",\"b\"] | join(\"-\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"a-b\"]	[\"a-b\"]	-
+\"abc\" | test(\"b\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"ABC\" | test(\"b\";\"i\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"abc\" | [match(\"b\").offset]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1]]	[[1]]	-
+\"a1\" | capture(\"(?<d>[0-9])\") | .d	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1\"]	[\"1\"]	-
+\"abc\" | sub(\"b\";\"X\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"aXc\"]	[\"aXc\"]	-
+\"aba\" | gsub(\"a\";\"X\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"XbX\"]	[\"XbX\"]	-
+[\"a,b\" | splits(\",\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"b\"]]	[[\"a\",\"b\"]]	-
+\"v=\\(.a.b)\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"v=42\"]	[\"v=42\"]	-
+\"ab\" | @base64	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"YWI=\"]	[\"YWI=\"]	-
+.a | @json	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"{\\\"b\\\":42}\"]	[\"{\\\"b\\\":42}\"]	-
+[[1,2]] | .[] | @csv	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1,2\"]	error	jaq-std has no @csv; Kestra's jackson-jq does
+[[1,2]] | .[] | @tsv	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1\\t2\"]	error	jaq-std has no @tsv; Kestra's jackson-jq does
+\"a b\" | @uri	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"a%20b\"]	[\"a%20b\"]	-
+\"a b\" | @sh	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"'a b'\"]	[\"'a b'\"]	-
+\"<a>\" | @html	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"&lt;a&gt;\"]	[\"&lt;a&gt;\"]	-
+.a | @text	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"{\\\"b\\\":42}\"]	[\"{\\\"b\\\":42}\"]	-
+if .a.b > 1 then \"big\" else \"small\" end	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"big\"]	[\"big\"]	-
+try error(\"boom\") catch .	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"boom\"]	[\"boom\"]	-
+error(\"boom\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+reduce .list[] as $x (0; . + $x)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[6]	[6]	-
+[foreach .list[] as $x (0; . + $x)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[3,4,6]]	[[3,4,6]]	-
+def f: . + 1; .a.b | f	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[43]	refused	a user-defined function can recurse and nothing egret reads from the source bounds that; see runners::jqsandbox
+.a.b as $x | $x + 1	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[43]	[43]	-
+.a.b |= . + 1	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"a\":{\"b\":43},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	[{\"a\":{\"b\":43},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	-
+.a.b = 7	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"a\":{\"b\":7},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	[{\"a\":{\"b\":7},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	-
+.nope //= \"d\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5,\"nope\":\"d\"}]	[{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5,\"nope\":\"d\"}]	-
+del(.a)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"list\":[3,1,2],\"s\":\"hi\",\"t\":true,\"f\":1.5}]	[{\"f\":1.5,\"list\":[3,1,2],\"s\":\"hi\",\"t\":true}]	jaq's del rebuilds the object SORTED; jackson-jq keeps insertion order, and Kestra's writer renders that order
+.a | has(\"b\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"b\" | in({b:1})	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+.s | contains(\"h\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"h\" | inside(\"hi\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+[paths]	{\"a\":{\"b\":1}}	[[[\"a\"],[\"a\",\"b\"]]]	[[[\"a\"],[\"a\",\"b\"]]]	-
+getpath([\"a\",\"b\"])	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[42]	[42]	-
+setpath([\"z\"];1)	{\"a\":1}	[{\"a\":1,\"z\":1}]	[{\"a\":1,\"z\":1}]	-
+[leaf_paths]	{\"a\":{\"b\":1}}	[[[\"a\",\"b\"]]]	error	jaq-std has no leaf_paths; Kestra's jackson-jq does
+[..] | length	{\"a\":{\"b\":1}}	[3]	[3]	-
+$ENV | type	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+env | type	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+now | type	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"number\"]	[\"number\"]	-
+input_line_number	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+[limit(2; .list[])]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[3,1]]	[[3,1]]	-
+[first(.list[]), last(.list[])]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[3,2]]	[[3,2]]	-
+[.list[] | until(. > 2; . + 1)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[3,3,3]]	[[3,3,3]]	-
+[1 | while(. < 4; . + 1)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2,3]]	[[1,2,3]]	-
+[limit(3; 1 | repeat(. + 1))]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[[2,2,2]]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+0 | todate	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[\"1970-01-01T00:00:00Z\"]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+0 | strftime(\"%Y\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[\"1970\"]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+65 | [.] | implode	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"A\"]	[\"A\"]	-
+\"ab\" | explode	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[97,98]]	[[97,98]]	-
+[\"\" | splits(\",\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"\"]]	[[\"\"]]	-
+[.a | tostream] | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+walk(if type == \"number\" then . + 1 else . end) | .a.b	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[43]	[43]	-
+input	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+debug	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	refused	-
+halt	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	refused	-
+getpath([\"x\",\"y\"])	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.a, .s	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42},\"hi\"]	[{\"b\":42},\"hi\"]	-
+empty	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[]	[]	-
+false | not	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+1 / 0	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[\"Infinity\"]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+\"a\" + \"b\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"ab\"]	[\"ab\"]	-
+{a:1} + {b:2}	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"a\":1,\"b\":2}]	[{\"a\":1,\"b\":2}]	-
+1 + \"a\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+.n.x	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.s[]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+.a[	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+no_such_function	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+9007199254740993	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[9007199254740993]	[9007199254740993]	-
+.f	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[1.5]	[1.5]	-
+.n	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.t	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+.list[]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3,1,2]	[3,1,2]	-
+.a	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42}]	[{\"b\":42}]	-
+{}	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{}]	[{}]	-
+nan | isnan	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+infinite	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"Infinity\"]	[\"Infinity\"]	-
+.	\"{\\\"a\\\":1}\"	[{\"a\":1}]	[{\"a\":1}]	-
+.	\"42\"	[42]	[42]	-
+.	\"\\\"x\\\"\"	[\"x\"]	[\"x\"]	-
+.	\"abc\"	error	error	-
+.	\"\"	[null]	[null]	-
+.	\"1 2\"	[1]	[1]	-
+.	7	[7]	[7]	-
+.	true	[true]	[true]	-
+.[]	[1,2]	[1,2]	[1,2]	-
+.	1.5	[1.5]	[1.5]	-
+.	\"null\"	[null]	[null]	-
+\"a1b2\" | [scan(\"[0-9]\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"1\",\"2\"]]	[[\"1\",\"2\"]]	-
+\"a1b2\" | [scan(\"([0-9])\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[[\"1\"],[\"2\"]]]	[[[\"1\"],[\"2\"]]]	-
+[\"a,b,c\" | splits(\",\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"b\",\"c\"]]	[[\"a\",\"b\",\"c\"]]	-
+\"aba\" | sub(\"a\";\"X\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"Xba\"]	[\"Xba\"]	-
+\"a1\" | gsub(\"(?<d>[0-9])\";\"<\\(.d)>\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"a<1>\"]	[\"a<1>\"]	-
+\"AB\" | test(\"ab\";\"i\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+\"aa\" | [match(\"a\";\"g\").offset]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[0,1]]	[[0,1]]	-
+getpath([\"a\",\"b\"])	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[42]	[42]	-
+\"abc\" | ltrimstr(\"z\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"abc\"]	[\"abc\"]	-
+[\"a1b\" | splits(\"[0-9]\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"b\"]]	[[\"a\",\"b\"]]	-
+1.0 | tojson	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1\"]	[\"1.0\"]	jaq-json prints a whole float as 1.0 and jackson-jq prints 1; the value type is jaq's and cannot be wrapped without losing jaq-json's half of the standard library
+1.0 | tostring	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1\"]	[\"1.0\"]	jaq-json prints a whole float as 1.0 and jackson-jq prints 1; the value type is jaq's and cannot be wrapped without losing jaq-json's half of the standard library
+.f | tostring	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1.5\"]	[\"1.5\"]	-
+9007199254740993	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[9007199254740993]	[9007199254740993]	-
+9007199254740993 + 1	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[9007199254740994]	[9007199254740994]	-
+7 / 2	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[3.5]	[3.5]	-
+[1,\"a\",null,true] | sort	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[null,true,1,\"a\"]]	[[null,true,1,\"a\"]]	-
+[1,1.0] | unique	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1]]	[[1]]	-
+[{a:1},{a:1}] | group_by(.a) | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[1]	[1]	-
+{b:1,a:2} | to_entries | map(.key)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"b\",\"a\"]]	[[\"b\",\"a\"]]	-
+[] | add	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+[] | min	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+[1,2] | has(1)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[true]	[true]	-
+.list[9]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+.list[-2:]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,2]]	[[1,2]]	-
+.s[0:1]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"h\"]	[\"h\"]	-
+{x: .a.b}	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"x\":42}]	[{\"x\":42}]	-
+.a | {b}	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[{\"b\":42}]	[{\"b\":42}]	-
+(error(\"x\") // \"d\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+try error(\"x\") catch \"c\"	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"c\"]	[\"c\"]	-
+[path(.a.b)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[[\"a\",\"b\"]]]	[[[\"a\",\"b\"]]]	-
+del(.a,.s) | keys_unsorted	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"list\",\"t\",\"f\"]]	[[\"f\",\"list\",\"t\"]]	jaq's del rebuilds the object SORTED; jackson-jq keeps insertion order, and Kestra's writer renders that order
+\"z\" | tonumber	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+\"É\" | ascii_downcase	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"É\"]	[\"É\"]	-
+\"YWI=\" | @base64d	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"ab\"]	[\"ab\"]	-
+\"é\" | @uri	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"%C3%A9\"]	[\"%C3%A9\"]	-
+input_line_number	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+\" a \" | ltrimstr(\" \")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"a \"]	[\"a \"]	-
+[\"ab\" | splits(\"\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"\",\"a\",\"b\"]]	[[\"\",\"a\",\"b\",\"\"]]	jaq's splits on an empty pattern yields one more empty piece than jackson-jq's
+$ENV | type	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+null | getpath([\"a\"])	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[null]	[null]	-
+[limit(0; .list[])]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[]]	[[]]	-
+[first(empty)]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[]]	[[]]	-
+[nan] | sort | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[1]	[1]	-
+infinite | tostring	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1.7976931348623157e+308\"]	[\"Infinity\"]	jackson-jq prints the largest double where jaq prints Infinity
+-1 | fabs	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[1.0]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+\"1\" | floor	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	error	-
+[-1] | implode	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"￿\"]	[\"\\u0001\"]	the two engines substitute different replacement characters for a codepoint that is not one
+\"é\" | utf8bytelength	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[2]	[2]	-
+[\"aXb\" | splits(\"x\";\"i\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"a\",\"b\"]]	[[\"a\",\"b\"]]	-
+\"abcb\" | indices(\"b\")	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[1,3]]	[[1,3]]	-
+[1,2,1] | indices(1)	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[0,2]]	[[0,2]]	-
+walk(if type==\"string\" then ascii_upcase else . end) | .s	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"HI\"]	[\"HI\"]	-
+0 | todateiso8601	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[\"1970-01-01T00:00:00Z\"]	[\"1970-01-01T00:00:00Z\"]	-
+\"1970-01-01T00:00:00Z\" | fromdateiso8601	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[0]	[0]	-
+\"1970-01-01T00:00:00Z\" | strptime(\"%Y-%m-%dT%H:%M:%SZ\") | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[8]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+0 | gmtime | length	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[8]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+[1970,0,1,0,0,0,0,0] | mktime	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	error	[0]	jaq has this filter and Kestra's jackson-jq at Versions.JQ_1_6 does not, so egret answers where Kestra throws
+[\"abc\" | splits(\"z\")]	{\"a\":{\"b\":42},\"list\":[3,1,2],\"s\":\"hi\",\"n\":null,\"t\":true,\"f\":1.5}	[[\"abc\"]]	[[\"abc\"]]	-

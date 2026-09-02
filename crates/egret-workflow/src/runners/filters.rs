@@ -104,6 +104,7 @@ use super::env::{kestra_to_string, write_java_double, write_json, OrderedMap, MA
 use super::ionfmt::write_ion;
 use super::javafmt::{self, ChronoUnit, Format, Locale as JavaLocale, Zdt, Zone};
 use super::javare;
+use super::jqsandbox;
 use super::yamlfmt::to_yaml;
 
 /// Registers all 35 of Kestra's filters onto `env`.
@@ -1286,7 +1287,14 @@ fn line_separator(input: &str) -> &'static str {
 /// Pebble does not meaningfully support it either.
 #[derive(Debug)]
 struct BigNumber {
+    /// `toPlainString()`: what a **bare** `{{ x }}` renders, measured.
     text: String,
+    /// `toString()`: what a **serialiser** writes. The two differ whenever the
+    /// scale is negative or the adjusted exponent is below -6, so
+    /// `'1E3' | number(type='BIGDECIMAL')` is `1000` bare and `1E+3` through
+    /// `toJson`. One value, two spellings, and an earlier cut carried only the
+    /// first — which is why every serialiser quoted it as a STRING.
+    canonical: String,
     class_name: &'static str,
 }
 
@@ -1309,6 +1317,22 @@ fn big_number_class(value: &MjValue) -> Option<&'static str> {
     value
         .downcast_object_ref::<BigNumber>()
         .map(|big| big.class_name)
+}
+
+/// `BigDecimal.toString()` / `BigInteger.toString()` for a [`BigNumber`], or
+/// `None` for anything else.
+///
+/// **This is what a serialiser must write, and it is a NUMBER, not a string.**
+/// `super::env::write_json`, `super::ionfmt` and `super::yamlfmt` all end in a
+/// catch-all that treats an unrecognised value as text, and a `BigNumber` is
+/// `ValueKind::Plain`, so all three quoted it:
+/// `'1.50' | number(type='BIGDECIMAL') | toJson` was `"1.50"` here and is
+/// `1.50` in Kestra. `{{ [x] }}` was wrong for the same reason and is not a
+/// filter's doing at all.
+pub(super) fn big_number_text(value: &MjValue) -> Option<String> {
+    value
+        .downcast_object_ref::<BigNumber>()
+        .map(|big| big.canonical.clone())
 }
 
 /// `NumberFilter` — `NumberUtils.create*`, selected by the `type` argument.
@@ -1489,23 +1513,31 @@ fn create_big_decimal(input: &str) -> Result<MjValue, MjError> {
     if input.trim_start().starts_with("--") {
         return Err(pebble_error(format!("{input} is not a valid number.")));
     }
-    let text = big_decimal_plain_string(input).ok_or_else(|| {
+    let (text, canonical) = big_decimal_strings(input).ok_or_else(|| {
         pebble_error(format!(
             "Character array is missing \"exponent\" symbol: {input}"
         ))
     })?;
     Ok(MjValue::from_object(BigNumber {
         text,
+        canonical,
         class_name: "java.math.BigDecimal",
     }))
 }
 
-/// `new BigDecimal(str).toPlainString()`, on the decimal text itself.
+/// `new BigDecimal(str)`, as the two strings Java can print it with:
+/// `toPlainString()` and `toString()`.
 ///
-/// A `BigDecimal` is an unscaled integer plus a scale; `toPlainString` lays
-/// that out without an exponent. Returns `None` when `str` is not a valid
-/// `BigDecimal` literal, which is a `NumberFormatException` in Java.
-fn big_decimal_plain_string(input: &str) -> Option<String> {
+/// A `BigDecimal` is an unscaled integer plus a scale. `toPlainString` always
+/// lays that out without an exponent; `toString` uses scientific notation when
+/// the scale is **negative** or the adjusted exponent is below **-6**, which
+/// is the javadoc's own rule. So `1E3` is `1000` one way and `1E+3` the
+/// other, and both are reachable from a template: the first from `{{ x }}`,
+/// the second from `{{ x | toJson }}`.
+///
+/// Returns `None` when `str` is not a valid `BigDecimal` literal, which is a
+/// `NumberFormatException` in Java.
+fn big_decimal_strings(input: &str) -> Option<(String, String)> {
     let (negative, body) = match input.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, input.strip_prefix('+').unwrap_or(input)),
@@ -1569,29 +1601,42 @@ fn big_decimal_plain_string(input: &str) -> Option<String> {
         ""
     };
 
-    if scale == 0 {
-        return Some(format!("{sign}{coefficient}"));
-    }
-    if scale < 0 {
+    let plain = if scale == 0 {
+        format!("{sign}{coefficient}")
+    } else if scale < 0 {
         if coefficient == "0" {
-            return Some("0".to_string());
+            "0".to_string()
+        } else {
+            let zeros = "0".repeat((-scale) as usize);
+            format!("{sign}{coefficient}{zeros}")
         }
-        let zeros = "0".repeat((-scale) as usize);
-        return Some(format!("{sign}{coefficient}{zeros}"));
-    }
-
-    let adjusted = coefficient.len() as i64 - scale;
-    if adjusted > 0 {
-        let at = adjusted as usize;
-        Some(format!(
-            "{sign}{}.{}",
-            &coefficient[..at],
-            &coefficient[at..]
-        ))
     } else {
-        let zeros = "0".repeat((-adjusted) as usize);
-        Some(format!("{sign}0.{zeros}{coefficient}"))
-    }
+        let adjusted = coefficient.len() as i64 - scale;
+        if adjusted > 0 {
+            let at = adjusted as usize;
+            format!("{sign}{}.{}", &coefficient[..at], &coefficient[at..])
+        } else {
+            let zeros = "0".repeat((-adjusted) as usize);
+            format!("{sign}0.{zeros}{coefficient}")
+        }
+    };
+
+    // `toString`'s rule, from `BigDecimal`'s javadoc: plain when the scale is
+    // non-negative AND the adjusted exponent is at least -6; scientific
+    // otherwise, with the point after the first digit and a SIGNED exponent.
+    let adjusted_exponent = coefficient.len() as i64 - 1 - scale;
+    let canonical = if scale >= 0 && adjusted_exponent >= -6 {
+        plain.clone()
+    } else if coefficient.len() == 1 {
+        format!("{sign}{coefficient}E{adjusted_exponent:+}")
+    } else {
+        format!(
+            "{sign}{}.{}E{adjusted_exponent:+}",
+            &coefficient[..1],
+            &coefficient[1..]
+        )
+    };
+    Some((plain, canonical))
 }
 
 /// `NumberUtils.createBigInteger` — **with the same radix rules as
@@ -1629,6 +1674,7 @@ fn create_big_integer(input: &str) -> Result<MjValue, MjError> {
         signed.to_string()
     };
     Ok(MjValue::from_object(BigNumber {
+        canonical: text.clone(),
         text,
         class_name: "java.math.BigInteger",
     }))
@@ -2234,7 +2280,10 @@ fn jq(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         }
     };
 
-    let outputs = run_jq(&expression, input).map_err(|_| failed())?;
+    let outputs = run_jq(&expression, input).map_err(|e| match e {
+        JqFailure::Failed => failed(),
+        JqFailure::Refused(message) => pebble_error(message),
+    })?;
     Ok(MjValue::from(outputs))
 }
 
@@ -2277,46 +2326,93 @@ fn jq(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// could fit in the output anyway, so refusing here rather than after the
 /// allocation costs no reachable behaviour. Same call as `indent`'s prefix
 /// bound and `rewrite`'s nesting depth.
-fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, ()> {
+fn run_jq(expression: &str, input: jaq_json::Val) -> Result<Vec<MjValue>, JqFailure> {
+    // Before the loader, because the loader is what overflows the stack.
+    jqsandbox::check_source(expression).map_err(|e| JqFailure::Refused(e.0))?;
+
     let program = jaq_core::load::File {
         code: expression,
         path: (),
     };
-    let defs = jaq_core::defs()
-        .chain(jaq_std::defs())
-        .chain(jaq_json::defs());
-    let funs = jaq_core::funs()
-        .chain(jaq_std::funs())
-        .chain(jaq_json::funs())
-        .filter(|fun| fun.0 != "env");
+
+    // `jqsandbox` owns both lists: jaq's own unbounded `repeat`/`recurse`/
+    // `while`/`until`/`range` definitions are spliced out for bounded ones,
+    // and the native list is an allow-list with six host-reading names
+    // replaced by refusals. Read that module before changing either.
+    let defs = jqsandbox::definitions();
+    let funs = jqsandbox::natives();
+
     let loader = jaq_core::load::Loader::new(defs);
     let arena = jaq_core::load::Arena::default();
-    let modules = loader.load(&arena, program).map_err(|_| ())?;
+    let modules = loader
+        .load(&arena, program)
+        .map_err(|_| JqFailure::Failed)?;
     let filter = jaq_core::Compiler::default()
         .with_funs(funs)
         .compile(modules)
-        .map_err(|_| ())?;
+        .map_err(|_| JqFailure::Failed)?;
 
-    let ctx = jaq_core::Ctx::<jaq_core::data::JustLut<jaq_json::Val>>::new(
-        &filter.lut,
-        jaq_core::Vars::new([]),
-    );
+    let ctx = jaq_core::Ctx::<jqsandbox::Data>::new(&filter.lut, jaq_core::Vars::new([]));
     let mut outputs = Vec::new();
     let mut bytes = 0usize;
     for result in filter.id.run((ctx, input)) {
         // Never `unwrap_valr`: see this function's doc. A halt and an error
         // are both just "this jq program failed", which is the only thing
         // `JqFilter`'s catch-all reports either.
-        let value = result.map_err(|_| ())?;
+        // A jq runtime error is Kestra's catch-all sentence -- except when it
+        // is EGRET's own bound talking. `runners::jqsandbox` writes every one
+        // of its refusals with a `jq: ` prefix precisely so it can be told
+        // apart here, the same line `runners::javare` draws between
+        // `Invalid regex` and `Unsupported regex`. Without this the bound
+        // fires and the author is told their data could not be parsed.
+        let value = result.map_err(|exn| match exn.get_err() {
+            Ok(error) => {
+                // jq's `error(msg)` carries the message as a VALUE, and a
+                // string value's `Display` is its JSON form -- quotes
+                // included. Measured, not assumed: the text arriving here is
+                // `"\"jq: repeat exceeded ...\""`.
+                let message = error.to_string();
+                let unquoted = message.trim_matches('"');
+                if unquoted.starts_with(EGRET_JQ_PREFIX) {
+                    JqFailure::Refused(unquoted.to_string())
+                } else {
+                    JqFailure::Failed
+                }
+            }
+            // A halt. Never `unwrap_valr`, which would `process::exit`.
+            Err(_) => JqFailure::Failed,
+        })?;
         bytes = bytes
             .saturating_add(value.to_string().len())
             .saturating_add(1);
+        // This bounds a generator that EMITS. It is not the bound that stops
+        // `[repeat(1)]` -- that one never reaches here, and
+        // `runners::jqsandbox` is what stops it.
         if bytes > MAX_OUTPUT_BYTES {
-            return Err(());
+            return Err(JqFailure::Failed);
         }
         outputs.push(jaq_value(value));
     }
     Ok(outputs)
+}
+
+/// The marker every refusal `runners::jqsandbox` writes begins with, so a
+/// bound firing is not reported as the author's data being unparseable.
+const EGRET_JQ_PREFIX: &str = "jq: ";
+
+/// Why a jq call did not produce a value.
+///
+/// The two are reported differently on purpose. Kestra collapses every runtime
+/// failure into one sentence about the *input*, and egret reproduces that --
+/// but a program egret **refuses** is not a Kestra failure at all, and saying
+/// "Unable to parse jq value …" about it would blame the author's data for
+/// egret's own limit. `runners::javare` draws the same line between
+/// `Invalid regex` and `Unsupported regex`.
+enum JqFailure {
+    /// Kestra fails here too, with the message `jq` reports.
+    Failed,
+    /// egret refused the query; Kestra would have run it.
+    Refused(String),
 }
 
 /// One `jaq_json::Val` as a minijinja value.
@@ -4432,6 +4528,44 @@ mod tests {
         );
     }
 
+    /// Patterns **Java itself refuses** and the `regex` crate accepts.
+    ///
+    /// This is the silent class in the other direction, and it is the one a
+    /// port is least likely to look for: a flow that works in egret and fails
+    /// in Kestra. All six were found by the same 357-probe sweep that found
+    /// the nine silent ones, and all six answered here before it.
+    #[test]
+    fn a_pattern_java_rejects_is_rejected_here_too() {
+        for (pattern, subject) in [
+            // A quantifier is not something a quantifier can apply to.
+            ("a**", "aaa"),
+            // A `{` is NEVER a literal in Java; the crate reads all three of
+            // these as literal braces.
+            ("a{", "a{"),
+            ("a{,3}", "a{,3}"),
+            ("{", "{"),
+            // An intersection needs an operand on at least one side.
+            ("[&&]", "a"),
+            // Under `(?x)` the `#` starts a comment that eats the `]`.
+            ("(?x)[a#b]", "a"),
+            // Java's group names are Latin letters and digits.
+            ("(?<\u{3bb}>a)", "a"),
+        ] {
+            let message = err(
+                "{{ s | regexMatch(regex=p) }}",
+                &format!(
+                    "{{\"s\": {}, \"p\": {}}}",
+                    serde_json_string(subject),
+                    serde_json_string(pattern)
+                ),
+            );
+            assert!(
+                message.contains("Invalid regex"),
+                "{pattern:?}: Java refuses this and egret answered {message:?}"
+            );
+        }
+    }
+
     /// A construct Kestra ACCEPTS and egret refuses must say so in its own
     /// words. These are the entries in `baseline.txt`, not in
     /// `error-class.txt`: Kestra succeeds, so there is no error class to
@@ -4503,18 +4637,109 @@ mod tests {
         assert!(render("{{ m | jq('halt_error') }}", r#"{"m": {"a": 1}}"#).is_err());
     }
 
-    /// An infinite jq generator is refused rather than collected until the
-    /// process dies. Kestra collects into an `ArrayList` and OOMs; the bound
-    /// here is `MAX_OUTPUT_BYTES`, the same 1 MiB ceiling `runners::env`
-    /// already caps a whole render at, so nothing that could have survived
-    /// the render is lost.
+    /// A jq program that never terminates is refused, **and the refusal says
+    /// which bound fired**.
     ///
-    /// Like the `halt` test above, the observable claim is that this
-    /// TERMINATES.
+    /// The previous version of this test asserted only `is_err()`, which
+    /// passed the implementation that shipped: `[repeat(1)]` never emits an
+    /// output, so the byte counter it was supposed to exercise was never
+    /// touched, and an `is_err()` cannot tell "the bound fired" from "`repeat`
+    /// is not registered". Every case below names the bound in its message,
+    /// so a bound that stops firing fails here.
+    ///
+    /// The first four are the programs a review found walking past the byte
+    /// counter unbounded; the fifth is the parser, which aborts rather than
+    /// unwinds and so cannot be caught at all once it starts.
     #[test]
-    fn an_infinite_jq_generator_is_bounded() {
-        assert!(render("{{ m | jq('1 | repeat(. + 1)') }}", r#"{"m": {"a": 1}}"#).is_err());
-        assert!(render("{{ m | jq('range(1e12)') }}", r#"{"m": {"a": 1}}"#).is_err());
+    fn a_nonterminating_jq_program_is_refused_by_a_named_bound() {
+        for (program, needle) in [
+            ("[repeat(1)]", "repeat exceeded"),
+            ("reduce repeat(1) as $x (0; .+1)", "repeat exceeded"),
+            ("until(false; .)", "until exceeded"),
+            ("[while(true; .)]", "while exceeded"),
+            ("[recurse(.)]", "recurse exceeded"),
+            ("[range(1e12)]", "range exceeded"),
+            ("[range(0;1e12;1)]", "range exceeded"),
+        ] {
+            let message = err(
+                "{{ m | jq(e) }}",
+                &format!(
+                    "{{\"m\": {{\"a\": 1}}, \"e\": {}}}",
+                    serde_json_string(program)
+                ),
+            );
+            assert!(
+                message.contains(needle),
+                "{program}: {message:?} does not name the bound"
+            );
+        }
+    }
+
+    /// A jq source deep enough to overflow jaq's recursive-descent parser is
+    /// refused **before** the parser runs.
+    ///
+    /// This one cannot be written as "assert it errors": a stack overflow is
+    /// `SIGABRT`, so a run that reaches the parser takes the whole test binary
+    /// with it and reports a signal rather than a failure. The assertion that
+    /// this call RETURNS is the claim.
+    #[test]
+    fn a_deeply_nested_jq_source_is_refused_before_the_parser_sees_it() {
+        for (open, close) in [('[', ']'), ('(', ')')] {
+            let program: String = std::iter::repeat_n(open, 2000)
+                .chain(std::iter::once('1'))
+                .chain(std::iter::repeat_n(close, 2000))
+                .collect();
+            let message = err(
+                "{{ m | jq(e) }}",
+                &format!(
+                    "{{\"m\": {{\"a\": 1}}, \"e\": {}}}",
+                    serde_json_string(&program)
+                ),
+            );
+            assert!(message.contains("nests more than"), "{message:?}");
+        }
+    }
+
+    /// The six natives that read or write the host, each refused by name.
+    ///
+    /// `jq_cannot_read_the_process_environment` covers `env` with a canary;
+    /// this covers the shape for all six, and asserts the two `debug`/`stderr`
+    /// ones in particular, since those write into the service log and
+    /// `egret-bin` installs `LogTracer`.
+    #[test]
+    fn the_host_reading_jq_natives_are_refused_by_name() {
+        for (program, needle) in [
+            ("debug", "'debug' is not available"),
+            ("stderr", "'stderr' is not available"),
+            ("halt", "'halt' is not available"),
+            ("halt_error", "'halt_error' is not available"),
+        ] {
+            let message = err(
+                "{{ m | jq(e) }}",
+                &format!(
+                    "{{\"m\": {{\"a\": 1}}, \"e\": {}}}",
+                    serde_json_string(program)
+                ),
+            );
+            assert!(message.contains(needle), "{program}: {message:?}");
+        }
+        // These three have no definition referencing them, so dropping the
+        // native is enough and jq reports its own "undefined filter".
+        for program in ["env", "localtime", "0 | strflocaltime(\"%Z\")"] {
+            assert!(render(
+                "{{ m | jq(e) }}",
+                &format!(
+                    "{{\"m\": {{\"a\": 1}}, \"e\": {}}}",
+                    serde_json_string(program)
+                ),
+            )
+            .is_err());
+        }
+    }
+
+    /// A jq string, for the tests above that build a context by hand.
+    fn serde_json_string(s: &str) -> String {
+        serde_json::to_string(s).expect("a &str always serialises")
     }
 
     /// The three filters that answer a null input with something other than

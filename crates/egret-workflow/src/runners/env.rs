@@ -910,6 +910,14 @@ pub(super) fn write_json(out: &mut String, value: &MjValue, omit_nulls: bool) {
             }
             out.push('}');
         }
+        // A `BigDecimal`/`BigInteger` is a NUMBER, and it is `ValueKind::Plain`
+        // -- so without this arm it fell into the catch-all below and was
+        // quoted as a string. `{{ [x] }}` on a `number(type='BIGDECIMAL')` was
+        // `["1.50"]` here and is `[1.50]` in Kestra, and no filter was
+        // involved. See `super::filters::big_number_text`.
+        _ if super::filters::big_number_text(value).is_some() => {
+            out.push_str(&super::filters::big_number_text(value).expect("checked"));
+        }
         // Strings, and anything else that has no JSON shape of its own.
         _ => write_json_string(out, &value.to_string()),
     }

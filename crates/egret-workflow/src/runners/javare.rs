@@ -91,6 +91,17 @@ use regex::{Regex, RegexBuilder};
 ///
 /// `Pattern`'s javadoc calls these "line terminators" and they are what `.`
 /// excludes, what `$` may sit in front of, and what `\R` matches.
+/// The one refusal `(?U)` earns, in one place because it is raised from
+/// three.
+///
+/// `(?U)` (UNICODE_CHARACTER_CLASS) redefines `\d`, `\w`, `\s` **and `\b`**.
+/// An earlier cut guarded the first three and not `\b` — while the message
+/// itself named `\b` — so `(?U)\bcafé\b` silently answered `false` where
+/// Java answers `true`. The message and the guard now come from the same
+/// constant.
+const UNICODE_CLASSES_REFUSAL: &str =
+    "'(?U)' (UNICODE_CHARACTER_CLASS), which redefines \\d, \\w, \\s and \\b";
+
 const LINE_TERMINATORS: &[char] = ['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}'].as_slice();
 
 /// A compiled Java pattern, plus what the translation had to remember about
@@ -104,6 +115,10 @@ pub(super) struct JavaRegex {
     /// `\n` and (with `crlf`) `\r\n`/`\r`; Java also splits on `\u0085`,
     /// `\u2028` and `\u2029`.
     line_anchor: bool,
+    /// Every line anchor in the pattern was under `(?d)` (UNIX_LINES), where
+    /// Java's only line terminator is `\n` -- so the crate's `crlf` is OFF
+    /// and no subject needs refusing.
+    unix_lines: bool,
 }
 
 /// Why a Java pattern could not be used.
@@ -137,14 +152,22 @@ impl JavaRegex {
     /// all never reaches either, and a haystack with ordinary content never
     /// trips either.
     pub(super) fn check_haystack(&self, haystack: &str) -> Result<(), JavaRegexError> {
-        if self.end_of_input_anchor && haystack.ends_with(LINE_TERMINATORS) {
+        let terminators: &[char] = if self.unix_lines {
+            &['\n']
+        } else {
+            LINE_TERMINATORS
+        };
+        if self.end_of_input_anchor && haystack.ends_with(terminators) {
             return Err(JavaRegexError::Unsupported(
                 "an end-of-input '$' or '\\Z' against a subject that ends with a line terminator \
                  (Java matches before that terminator and egret's engine cannot)"
                     .to_string(),
             ));
         }
-        if self.line_anchor && haystack.contains(['\u{85}', '\u{2028}', '\u{2029}']) {
+        if self.line_anchor
+            && !self.unix_lines
+            && haystack.contains(['\u{85}', '\u{2028}', '\u{2029}'])
+        {
             return Err(JavaRegexError::Unsupported(
                 "a multi-line '^' or '$' against a subject containing U+0085, U+2028 or U+2029 \
                  (Java breaks lines on those and egret's engine does not)"
@@ -188,15 +211,42 @@ impl JavaRegex {
         self.check_haystack(haystack)
             .map_err(|e| ReplacementError(e.to_string()))?;
 
+        // **`captures_iter` is not `Matcher.find()` in a loop.** The crate's
+        // iterator suppresses an empty match that abuts the previous match's
+        // end; Java's matcher takes it and then advances by one character.
+        // The difference is a whole replacement:
+        //
+        // | expression | Java | `captures_iter` |
+        // |---|---|---|
+        // | `'aab' \| regexReplace('a*', '-')` | `--b-` | `-b-` |
+        // | `'abc' \| regexReplace('b*', '-')` | `-a--c-` | `-a-c-` |
+        //
+        // Neither side errors, so this is the silent class. The loop below is
+        // `Matcher.appendReplacement`'s: search from `from`, append the gap,
+        // expand, and step one character on when the match was empty.
         let mut out = String::new();
-        let mut last = 0;
-        for caps in self.regex.captures_iter(haystack) {
+        let mut appended = 0;
+        let mut from = 0;
+        while from <= haystack.len() {
+            let Some(caps) = self.regex.captures_at(haystack, from) else {
+                break;
+            };
             let whole = caps.get(0).expect("group 0 always participates");
-            out.push_str(&haystack[last..whole.start()]);
+            out.push_str(&haystack[appended..whole.start()]);
             expand_replacement(&mut out, replacement, &caps, self.group_count())?;
-            last = whole.end();
+            appended = whole.end();
+            from = if whole.is_empty() {
+                // One CHARACTER, not one byte: `from` is a byte index into a
+                // `&str` and slicing it mid-codepoint panics.
+                match haystack[whole.end()..].chars().next() {
+                    Some(c) => whole.end() + c.len_utf8(),
+                    None => break,
+                }
+            } else {
+                whole.end()
+            };
         }
-        out.push_str(&haystack[last..]);
+        out.push_str(&haystack[appended..]);
         Ok(out)
     }
 }
@@ -318,14 +368,20 @@ fn expand_replacement(
 pub(super) fn compile(pattern: &str) -> Result<JavaRegex, JavaRegexError> {
     let mut translator = Translator::new(pattern);
     let translated = translator.translate()?;
+    // `(?d)` (UNIX_LINES) makes `\n` Java's ONLY line terminator, so the
+    // crate's `crlf` mode -- which additionally breaks on `\r\n` and `\r` --
+    // is exactly wrong under it. A pattern that mixes the two spellings has
+    // no single setting and is refused rather than answered under one of them.
+    let unix_lines = translator.anchors_are_unix_lines.unwrap_or_default();
     let mut builder = RegexBuilder::new(&translated);
     builder.multi_line(translator.saw_multiline_anchor);
-    builder.crlf(translator.saw_multiline_anchor);
+    builder.crlf(translator.saw_multiline_anchor && !unix_lines);
     match builder.build() {
         Ok(regex) => Ok(JavaRegex {
             regex,
             end_of_input_anchor: translator.saw_end_of_input_anchor,
             line_anchor: translator.saw_multiline_anchor,
+            unix_lines,
         }),
         // Reached for a pattern that translated cleanly and the crate still
         // refuses -- in practice its compiled-size limit, which is a bound
@@ -362,6 +418,13 @@ struct Translator {
     stack: Vec<Flags>,
     saw_end_of_input_anchor: bool,
     saw_multiline_anchor: bool,
+    /// Whether the pattern's line anchors were written under `(?d)`. `None`
+    /// until the first one; a second one that disagrees is refused.
+    anchors_are_unix_lines: Option<bool>,
+    /// Whether the token just emitted can take a quantifier. Java rejects
+    /// `a**` and a bare `{`; the crate accepts the first and reads the second
+    /// as a literal.
+    quantifiable: bool,
 }
 
 impl Translator {
@@ -373,6 +436,8 @@ impl Translator {
             stack: Vec::new(),
             saw_end_of_input_anchor: false,
             saw_multiline_anchor: false,
+            anchors_are_unix_lines: None,
+            quantifiable: false,
         }
     }
 
@@ -402,6 +467,7 @@ impl Translator {
             match c {
                 '(' => {
                     self.pos += 1;
+                    self.quantifiable = false;
                     self.group(&mut out)?;
                 }
                 ')' => {
@@ -410,21 +476,26 @@ impl Translator {
                         .stack
                         .pop()
                         .ok_or_else(|| self.syntax("Unmatched closing ')'"))?;
+                    self.quantifiable = true;
                     out.push(')');
                 }
                 '[' => {
                     self.pos += 1;
                     let class = self.parse_class()?;
-                    write_class(&mut out, &class, self.flags);
+                    write_class(&mut out, &class, self.flags)?;
+                    self.quantifiable = true;
                 }
                 '.' => {
                     self.pos += 1;
+                    self.quantifiable = true;
                     out.push_str(self.dot());
                 }
                 '^' => {
                     self.pos += 1;
+                    self.quantifiable = false;
                     if self.flags.multiline {
                         self.saw_multiline_anchor = true;
+                        self.record_line_mode()?;
                         out.push('^');
                     } else {
                         out.push_str("\\A");
@@ -432,39 +503,54 @@ impl Translator {
                 }
                 '$' => {
                     self.pos += 1;
+                    self.quantifiable = false;
                     if self.flags.multiline {
                         self.saw_multiline_anchor = true;
+                        self.record_line_mode()?;
                         out.push('$');
                     } else {
                         self.saw_end_of_input_anchor = true;
+                        self.record_line_mode()?;
                         out.push_str("\\z");
                     }
                 }
                 '\\' => {
                     self.pos += 1;
+                    // An escape is quantifiable unless it is an anchor, which
+                    // `escape` says by leaving the flag alone.
+                    self.quantifiable = true;
                     self.escape(&mut out)?;
                 }
                 '*' | '+' | '?' => {
+                    // Java: a quantifier needs something to quantify, and a
+                    // quantifier is not something to quantify. `a**` is
+                    // `Dangling meta character` there and the crate accepts
+                    // it, so this is a silent divergence without the check.
+                    if !self.quantifiable {
+                        return Err(self.syntax(&format!("Dangling meta character '{c}'")));
+                    }
                     self.pos += 1;
+                    self.quantifiable = false;
                     out.push(c);
                     self.quantifier_suffix(&mut out)?;
                 }
                 '{' => {
-                    // Only a well-formed `{n}`/`{n,}`/`{n,m}` is a quantifier;
-                    // anything else is a literal brace, exactly as in Java.
-                    match self.repetition() {
-                        Some(text) => {
-                            out.push_str(&text);
-                            self.quantifier_suffix(&mut out)?;
-                        }
-                        None => {
-                            self.pos += 1;
-                            out.push_str("\\{");
-                        }
+                    // **A `{` is never a literal in Java.** `a{`, `a{,3}` and
+                    // a bare `{` are all `PatternSyntaxException`; the crate
+                    // reads every one of them as a literal brace. Measured.
+                    let Some(text) = self.repetition() else {
+                        return Err(self.syntax("Illegal repetition"));
+                    };
+                    if !self.quantifiable {
+                        return Err(self.syntax("Dangling meta character '{'"));
                     }
+                    self.quantifiable = false;
+                    out.push_str(&text);
+                    self.quantifier_suffix(&mut out)?;
                 }
                 '|' => {
                     self.pos += 1;
+                    self.quantifiable = false;
                     out.push('|');
                 }
                 ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}' if self.flags.comments => {
@@ -479,6 +565,7 @@ impl Translator {
                 }
                 c => {
                     self.pos += 1;
+                    self.quantifiable = true;
                     write_literal(&mut out, c, self.flags);
                 }
             }
@@ -487,6 +574,26 @@ impl Translator {
             return Err(JavaRegexError::Syntax("Unclosed group".to_string()));
         }
         Ok(out)
+    }
+
+    /// Records whether this pattern's line anchors are `(?d)` ones.
+    ///
+    /// `(?d)` changes what `^`, `$` and `\Z` mean, and the crate expresses
+    /// that as a whole-pattern `crlf` setting. A pattern that anchors under
+    /// both spellings has no single setting, so it is refused rather than
+    /// answered under one of them.
+    fn record_line_mode(&mut self) -> Result<(), JavaRegexError> {
+        match self.anchors_are_unix_lines {
+            None => {
+                self.anchors_are_unix_lines = Some(self.flags.unix_lines);
+                Ok(())
+            }
+            Some(previous) if previous == self.flags.unix_lines => Ok(()),
+            Some(_) => Err(self.unsupported(
+                "a pattern whose line anchors are under both '(?d)' and the default line \
+                 terminators (the two need different whole-pattern settings)",
+            )),
+        }
     }
 
     /// `.`, expanded so the line-terminator set is Java's and not the crate's.
@@ -585,9 +692,13 @@ impl Translator {
                         }
                         let name: String = self.chars[start..self.pos].iter().collect();
                         self.pos += 1;
+                        // Java's own rule, and its own error text: a Latin
+                        // letter then Latin letters and digits. An earlier cut
+                        // used `char::is_alphabetic`, which accepts `(?<λ>a)`
+                        // where Java raises.
                         let mut name_chars = name.chars();
-                        let valid = name_chars.next().is_some_and(char::is_alphabetic)
-                            && name_chars.all(char::is_alphanumeric);
+                        let valid = name_chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                            && name_chars.all(|c| c.is_ascii_alphanumeric());
                         if !valid {
                             return Err(self.syntax(
                                 "capturing group name does not start with a Latin letter",
@@ -655,9 +766,7 @@ impl Translator {
         match c {
             'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => {
                 if self.flags.unicode_classes && matches!(c, 'd' | 'D' | 'w' | 'W' | 's' | 'S') {
-                    return Err(self.unsupported(
-                        "'(?U)' (UNICODE_CHARACTER_CLASS), which redefines \\d, \\w, \\s and \\b",
-                    ));
+                    return Err(self.unsupported(UNICODE_CLASSES_REFUSAL));
                 }
                 out.push_str(perl_class(c));
                 Ok(())
@@ -672,23 +781,46 @@ impl Translator {
                 if self.peek() == Some('{') {
                     return Err(self.unsupported("'\\b{g}' (a grapheme-cluster boundary)"));
                 }
+                // `(?U)` makes this a UNICODE boundary. The guard was missing
+                // here and present three lines above, which is exactly the
+                // shape of defect a doc that names the guard hides.
+                if self.flags.unicode_classes {
+                    return Err(self.unsupported(UNICODE_CLASSES_REFUSAL));
+                }
+                self.quantifiable = false;
                 out.push_str("(?-u:\\b)");
                 Ok(())
             }
             'B' => {
+                if self.flags.unicode_classes {
+                    return Err(self.unsupported(UNICODE_CLASSES_REFUSAL));
+                }
+                self.quantifiable = false;
                 out.push_str("(?-u:\\B)");
                 Ok(())
             }
+            // A grapheme cluster. The crate has no such construct and no way
+            // to spell one; Java accepts it, so this is a refusal and not a
+            // syntax error.
+            'X' => Err(self.unsupported("'\\X' (a grapheme cluster)")),
+            // `\N{NAME}` is a codepoint by its Unicode NAME. The crate's
+            // `\p{name=…}` does not exist and no name table is in this
+            // dependency tree.
+            'N' => Err(self.unsupported("'\\N{…}' (a codepoint named by its Unicode name)")),
             'A' => {
+                self.quantifiable = false;
                 out.push_str("\\A");
                 Ok(())
             }
             'z' => {
+                self.quantifiable = false;
                 out.push_str("\\z");
                 Ok(())
             }
             'Z' => {
+                self.quantifiable = false;
                 self.saw_end_of_input_anchor = true;
+                self.record_line_mode()?;
                 out.push_str("\\z");
                 Ok(())
             }
@@ -762,7 +894,28 @@ impl Translator {
                 }
                 self.fixed_hex(2)
             }
-            'u' => self.fixed_hex(4),
+            'u' => {
+                let high = self.fixed_hex_value(4)?;
+                // A Java pattern is UTF-16 source, so an astral codepoint is
+                // written as a SURROGATE PAIR: `\ud83d\ude00` is one emoji.
+                // Neither half is a `char` on its own.
+                if (0xd800..0xdc00).contains(&high)
+                    && self.peek() == Some('\\')
+                    && self.chars.get(self.pos + 1) == Some(&'u')
+                {
+                    let mark = self.pos;
+                    self.pos += 2;
+                    match self.fixed_hex_value(4) {
+                        Ok(low) if (0xdc00..0xe000).contains(&low) => {
+                            let combined = 0x10000 + ((high - 0xd800) << 10) + (low - 0xdc00);
+                            return char::from_u32(combined)
+                                .ok_or_else(|| self.syntax("Illegal surrogate pair"));
+                        }
+                        _ => self.pos = mark,
+                    }
+                }
+                char::from_u32(high).ok_or_else(|| self.syntax("Illegal Unicode escape sequence"))
+            }
             'c' => {
                 let Some(c) = self.next() else {
                     return Err(self.syntax("Illegal control escape sequence"));
@@ -780,6 +933,13 @@ impl Translator {
     }
 
     fn fixed_hex(&mut self, width: usize) -> Result<char, JavaRegexError> {
+        let n = self.fixed_hex_value(width)?;
+        char::from_u32(n).ok_or_else(|| self.syntax("Illegal hexadecimal escape sequence"))
+    }
+
+    /// The scalar value, before it is checked for being a `char` — a lone
+    /// surrogate is not one and has to survive long enough to be paired.
+    fn fixed_hex_value(&mut self, width: usize) -> Result<u32, JavaRegexError> {
         let start = self.pos;
         for _ in 0..width {
             if !self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
@@ -788,9 +948,8 @@ impl Translator {
             self.pos += 1;
         }
         let digits: String = self.chars[start..self.pos].iter().collect();
-        let n = u32::from_str_radix(&digits, 16)
-            .map_err(|_| self.syntax("Illegal hexadecimal escape sequence"))?;
-        char::from_u32(n).ok_or_else(|| self.syntax("Illegal hexadecimal escape sequence"))
+        u32::from_str_radix(&digits, 16)
+            .map_err(|_| self.syntax("Illegal hexadecimal escape sequence"))
     }
 
     /// `\p{…}` / `\P{…}`, with Java's name vocabulary rather than the crate's.
@@ -803,18 +962,10 @@ impl Translator {
                     JavaRegexError::Syntax(format!("Unknown character property name {{{name}}}"))
                 }
             })?;
-        // A POSIX class comes back as a bracket expression, which cannot be
-        // negated by flipping `\p` to `\P`; wrapping it in a negated class is
-        // the spelling that works for both shapes.
-        if negated {
-            out.push_str("[^");
-            out.push_str(&translated);
-            out.push(']');
-        } else {
-            out.push('[');
-            out.push_str(&translated);
-            out.push(']');
-        }
+        // Through the same writer a `[...]` goes through, so `(?i)\p{Lower}`
+        // gets the ASCII fold that makes it match `A`. Writing the brackets
+        // here directly is what made it not.
+        emit_class(out, &translated, negated, self.flags);
         Ok(())
     }
 
@@ -842,18 +993,24 @@ impl Translator {
         }
     }
 
-    /// A `[...]` class, parsed structurally so `(?i)` can be expanded into it
-    /// and so `&&` nesting survives.
+    /// A `[...]` class.
+    ///
+    /// Java's grammar is `[ ^? union ( && union )* ]`, and the `&&` chain is
+    /// **left-associative intersection of every operand**. An earlier cut read
+    /// the whole tail after the first `&&` as one operand, so `[a-z&&b&&c]`
+    /// became `a-z` intersected with the *set* `{b, &, c}` and matched `b` —
+    /// which Java does not. `&&` is what separates operands here.
     fn parse_class(&mut self) -> Result<ClassAst, JavaRegexError> {
         let mut class = ClassAst::default();
         if self.peek() == Some('^') {
             self.pos += 1;
             class.negated = true;
         }
+        let mut operand: Vec<ClassItem> = Vec::new();
         // A `]` in first position is a literal `]`, in Java as in POSIX.
         if self.peek() == Some(']') {
             self.pos += 1;
-            class.items.push(ClassItem::Char(']'));
+            operand.push(ClassItem::Char(']'));
         }
         loop {
             let Some(c) = self.peek() else {
@@ -861,37 +1018,44 @@ impl Translator {
                     "Unclosed character class".to_string(),
                 ));
             };
+            // `(?x)` ignores whitespace INSIDE a class too, and a `#` there
+            // starts a comment. Both measured: `(?x)[a b]` does not match a
+            // space, and `(?x)[a#b]` is an unclosed class in Java because the
+            // comment eats the `]`.
+            if self.flags.comments {
+                if c.is_whitespace() {
+                    self.pos += 1;
+                    continue;
+                }
+                if c == '#' {
+                    while self.peek().is_some_and(|c| c != '\n') {
+                        self.pos += 1;
+                    }
+                    continue;
+                }
+            }
             match c {
                 ']' => {
                     self.pos += 1;
+                    class.operands.push(operand);
+                    // Java IGNORES an empty operand -- `[&&a]` is `[a]` --
+                    // and rejects a class whose operands are all empty.
+                    class.operands.retain(|o| !o.is_empty());
+                    if class.operands.is_empty() {
+                        return Err(self.syntax("Bad class syntax"));
+                    }
                     return Ok(class);
+                }
+                '&' if self.chars.get(self.pos + 1) == Some(&'&') => {
+                    self.pos += 2;
+                    class.operands.push(std::mem::take(&mut operand));
                 }
                 '[' => {
                     self.pos += 1;
                     let nested = self.parse_class()?;
-                    class.items.push(ClassItem::Nested(Box::new(nested)));
+                    operand.push(ClassItem::Nested(Box::new(nested)));
                 }
-                '&' if self.chars.get(self.pos + 1) == Some(&'&') => {
-                    self.pos += 2;
-                    let rest = if self.peek() == Some('[') {
-                        self.pos += 1;
-                        self.parse_class()?
-                    } else {
-                        // `[a-z&&b]` -- the right side is the remaining
-                        // members up to the closing bracket.
-                        let mut implicit = ClassAst::default();
-                        while self.peek().is_some_and(|c| c != ']') {
-                            let item = self.class_member()?;
-                            implicit.items.push(item);
-                        }
-                        implicit
-                    };
-                    class.intersect.push(rest);
-                }
-                _ => {
-                    let item = self.class_member()?;
-                    class.items.push(item);
-                }
+                _ => operand.push(self.class_member()?),
             }
         }
     }
@@ -909,7 +1073,11 @@ impl Translator {
             };
             match e {
                 'd' | 'D' | 'w' | 'W' | 's' | 'S' | 'h' | 'H' | 'v' | 'V' => {
-                    return Ok(ClassItem::Shorthand(perl_class(e)))
+                    if self.flags.unicode_classes && matches!(e, 'd' | 'D' | 'w' | 'W' | 's' | 'S')
+                    {
+                        return Err(self.unsupported(UNICODE_CLASSES_REFUSAL));
+                    }
+                    return Ok(ClassItem::Shorthand(perl_class(e)));
                 }
                 'p' | 'P' => {
                     let name = self.property_name()?;
@@ -922,6 +1090,20 @@ impl Translator {
                         })?;
                     return Ok(ClassItem::Property(e == 'P', translated));
                 }
+                // `[\Qa+b\E]` is three literal members. Java allows it and an
+                // earlier cut rejected it as an unknown escape.
+                'Q' => {
+                    let mut members = Vec::new();
+                    while let Some(c) = self.next() {
+                        if c == '\\' && self.peek() == Some('E') {
+                            self.pos += 1;
+                            break;
+                        }
+                        members.push(ClassItem::Char(c));
+                    }
+                    return Ok(ClassItem::Quoted(members));
+                }
+                'E' => return Ok(ClassItem::Quoted(Vec::new())),
                 '1'..='9' => return Err(self.unsupported("'\\1'..'\\9' (a backreference)")),
                 _ => self.char_escape(e)?,
             }
@@ -953,12 +1135,11 @@ impl Translator {
     }
 }
 
-/// A parsed `[...]`.
+/// A parsed `[...]`: a negation and one or more `&&`-separated operands.
 #[derive(Debug, Default)]
 struct ClassAst {
     negated: bool,
-    items: Vec<ClassItem>,
-    intersect: Vec<ClassAst>,
+    operands: Vec<Vec<ClassItem>>,
 }
 
 #[derive(Debug)]
@@ -970,53 +1151,134 @@ enum ClassItem {
     Shorthand(&'static str),
     /// `\p{…}` / `\P{…}`: (negated, body).
     Property(bool, String),
+    /// `\Q…\E` inside a class: its characters, as members.
+    Quoted(Vec<ClassItem>),
     Nested(Box<ClassAst>),
 }
 
-fn write_class(out: &mut String, class: &ClassAst, flags: Flags) {
+/// Writes a class, folding ASCII case into it when `(?i)` is on.
+fn write_class(out: &mut String, class: &ClassAst, flags: Flags) -> Result<(), JavaRegexError> {
+    emit_class(out, &class_inner(class, flags), class.negated, flags);
+    Ok(())
+}
+
+/// Writes one class from its inner text, applying Java's ASCII case fold.
+///
+/// **The fold is computed by asking the engine, not by rewriting the
+/// members.** Java's `CASE_INSENSITIVE` without `UNICODE_CASE` matches a
+/// character `c` against a class `C` iff `c ∈ C` **or**
+/// `swapAsciiCase(c) ∈ C`, whatever `C` is — a range, a property, an
+/// intersection. So the class is written once, compiled, and the 52 ASCII
+/// letters are tested against it; the ones whose other case is in the class
+/// are added.
+///
+/// That is exact where a member-rewriting fold was not: `(?i)\p{Lower}`
+/// matches `A`, `(?i)\p{Upper}` matches `a`, and `(?i)[Z-a]` matches `z` —
+/// the last because a range spanning `[`, `\`, `]`, `^`, `_` and `` ` `` has
+/// no mirrored range at all.
+///
+/// **The fold happens BEFORE the negation, and that is measured.**
+/// `(?i)[^a-c]` does **not** match `B` in Java: the fold closes `a-c` into
+/// `a-cA-C` and the negation then excludes both cases. Closing the negated
+/// class instead — which an earlier cut did — matched `B` and was silently
+/// wrong.
+fn emit_class(out: &mut String, inner: &str, negated: bool, flags: Flags) {
+    let extras = if flags.case_insensitive && !flags.unicode_case {
+        ascii_case_extras(inner)
+    } else {
+        String::new()
+    };
+    match (negated, extras.is_empty()) {
+        (false, true) => {
+            out.push('[');
+            out.push_str(inner);
+            out.push(']');
+        }
+        // An alternation rather than `[inner extras]`, because `inner` can be
+        // an intersection (`a-z&&[^c]`) and appending to one of those would
+        // land inside the right-hand operand.
+        (false, false) => {
+            out.push_str("(?:[");
+            out.push_str(inner);
+            out.push_str("]|[");
+            out.push_str(&extras);
+            out.push_str("])");
+        }
+        (true, true) => {
+            out.push_str("[^");
+            out.push_str(inner);
+            out.push(']');
+        }
+        (true, false) => {
+            out.push_str("[^[");
+            out.push_str(inner);
+            out.push_str("][");
+            out.push_str(&extras);
+            out.push_str("]]");
+        }
+    }
+}
+
+/// The class's members as the crate spells them, with no brackets, no
+/// negation and no case folding.
+fn class_inner(class: &ClassAst, flags: Flags) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for operand in &class.operands {
+        if !first {
+            out.push_str("&&");
+            out.push('[');
+        }
+        for item in operand {
+            write_class_item(&mut out, item, flags);
+        }
+        if !first {
+            out.push(']');
+        }
+        first = false;
+    }
+    out
+}
+
+/// The class as the crate spells it, brackets and negation included. Used
+/// where a class is nested inside another one.
+fn class_body(class: &ClassAst, flags: Flags) -> String {
+    let mut out = String::new();
     out.push('[');
     if class.negated {
         out.push('^');
     }
-    if class.items.is_empty() && class.intersect.is_empty() {
-        // The crate rejects an empty class; Java's `[]` is a syntax error
-        // too, so this only guards a class that is nothing but `&&`.
-        out.push_str("\\x00-\\x{10FFFF}");
-    }
-    for item in &class.items {
-        write_class_item(out, item, flags);
-    }
-    for nested in &class.intersect {
-        out.push_str("&&");
-        write_class(out, nested, flags);
-    }
+    out.push_str(&class_inner(class, flags));
     out.push(']');
+    out
+}
+
+/// The ASCII letters a `(?i)` class must also accept.
+///
+/// Compiles the class as written and asks it about the other case of each of
+/// the 52 letters. A class the crate cannot compile yields nothing — the
+/// caller is about to fail on it anyway, and guessing here would be worse.
+fn ascii_case_extras(inner: &str) -> String {
+    let Ok(probe) = Regex::new(&format!("^(?:[{inner}])$")) else {
+        return String::new();
+    };
+    let mut extras = String::new();
+    for c in ('a'..='z').chain('A'..='Z') {
+        let other = ascii_case_counterpart(c).expect("every letter has one");
+        if probe.is_match(&other.to_string()) && !probe.is_match(&c.to_string()) {
+            write_class_char(&mut extras, c);
+        }
+    }
+    extras
 }
 
 fn write_class_item(out: &mut String, item: &ClassItem, flags: Flags) {
-    let fold = flags.case_insensitive && !flags.unicode_case;
     match item {
-        ClassItem::Char(c) => {
-            write_class_char(out, *c);
-            if fold {
-                if let Some(other) = ascii_case_counterpart(*c) {
-                    write_class_char(out, other);
-                }
-            }
-        }
+        ClassItem::Char(c) => write_class_char(out, *c),
         ClassItem::Range(a, b) => {
             write_class_char(out, *a);
             out.push('-');
             write_class_char(out, *b);
-            if fold {
-                // Java folds the ASCII letters inside the range; the mirrored
-                // range is what expresses that without folding anything else.
-                if let Some((lo, hi)) = mirrored_ascii_range(*a, *b) {
-                    write_class_char(out, lo);
-                    out.push('-');
-                    write_class_char(out, hi);
-                }
-            }
         }
         ClassItem::Shorthand(text) => out.push_str(text),
         ClassItem::Property(negated, body) => {
@@ -1030,7 +1292,12 @@ fn write_class_item(out: &mut String, item: &ClassItem, flags: Flags) {
                 out.push(']');
             }
         }
-        ClassItem::Nested(nested) => write_class(out, nested, flags),
+        ClassItem::Quoted(members) => {
+            for member in members {
+                write_class_item(out, member, flags);
+            }
+        }
+        ClassItem::Nested(nested) => out.push_str(&class_body(nested, flags)),
     }
 }
 
@@ -1091,21 +1358,6 @@ fn ascii_case_counterpart(c: char) -> Option<char> {
     }
 }
 
-/// The ASCII-letter part of `a..b`, mirrored to the other case.
-fn mirrored_ascii_range(a: char, b: char) -> Option<(char, char)> {
-    let (lo, hi) = (a as u32, b as u32);
-    for (start, end, delta) in [(97u32, 122u32, -32i32), (65, 90, 32)] {
-        let from = lo.max(start);
-        let to = hi.min(end);
-        if from <= to {
-            let mirrored_lo = char::from_u32((from as i32 + delta) as u32)?;
-            let mirrored_hi = char::from_u32((to as i32 + delta) as u32)?;
-            return Some((mirrored_lo, mirrored_hi));
-        }
-    }
-    None
-}
-
 /// Java's predefined classes, spelled out. Each is a bracket expression so it
 /// can be spliced into a class as well as used alone.
 ///
@@ -1158,6 +1410,11 @@ fn translate_property(name: &str) -> Option<String> {
     };
     if let Some(posix) = posix {
         return Some(posix.to_string());
+    }
+
+    // Java's own name for "every codepoint".
+    if name == "all" {
+        return Some("\\x00-\\x{10FFFF}".to_string());
     }
 
     // A one- or two-letter general category, which both engines spell the
@@ -1220,6 +1477,89 @@ mod tests {
     /// produced; every one of them is the OPPOSITE of what the `regex` crate
     /// answers for the untranslated pattern, which is what makes this test
     /// able to fail if the translation is removed.
+    /// **The sweep, as a fixture.** `oracle/regex-classes.txt` records what
+    /// Java answers for 171 (pattern, subject) pairs and what egret must
+    /// answer, and this asserts both directions.
+    ///
+    /// It exists because the claim it checks — "after the translation nothing
+    /// is silent" — was made once as a sentence and was **false**: a review
+    /// found thirteen classes the sentence had not been checked against,
+    /// nine of them silent. A sentence cannot fail; this can.
+    ///
+    /// Three rules, and the third is the point:
+    ///
+    /// - a row whose two columns DIFFER must carry a reason;
+    /// - a row whose columns AGREE must not, so a refusal cannot claim a
+    ///   divergence it does not have;
+    /// - **a row whose `egret` column is a boolean and differs from `java`
+    ///   fails outright.** That is the silent class, and no reason excuses
+    ///   one — the only acceptable divergence is a refusal that says so.
+    #[test]
+    fn the_regex_classes_match_the_engine() {
+        let fixture = include_str!("../../oracle/regex-classes.txt");
+        let mut rows = 0;
+        for line in fixture.lines() {
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(cols.len(), 5, "five tab-separated columns: {line}");
+            let (pattern, subject, java, declared, reason) = (
+                unescape(cols[0]),
+                unescape(cols[1]),
+                cols[2],
+                cols[3],
+                cols[4],
+            );
+            rows += 1;
+
+            if java == declared {
+                assert_eq!(
+                    reason, "-",
+                    "`{pattern}` on {subject:?}: the engine and egret agree, so there is nothing \
+                     to explain"
+                );
+            } else {
+                assert!(
+                    declared == "refused" || declared == "error",
+                    "`{pattern}` on {subject:?}: Java answers {java} and egret answers \
+                     {declared}. A DIFFERENT ANSWER is the silent class this module exists to \
+                     eliminate; the only acceptable divergence is a refusal."
+                );
+                assert!(
+                    reason.len() > 20,
+                    "`{pattern}` on {subject:?}: the engine says {java} and egret says \
+                     {declared}; a divergence must say why, in the file"
+                );
+            }
+
+            let actual = match compile(&pattern) {
+                Err(JavaRegexError::Unsupported(_)) => "refused".to_string(),
+                Err(JavaRegexError::Syntax(_)) => "error".to_string(),
+                Ok(re) => match re.is_match(&subject) {
+                    Ok(true) => "true".to_string(),
+                    Ok(false) => "false".to_string(),
+                    Err(JavaRegexError::Unsupported(_)) => "refused".to_string(),
+                    Err(_) => "error".to_string(),
+                },
+            };
+            assert_eq!(
+                actual, declared,
+                "`{pattern}` on {subject:?}: the file says egret answers {declared} and it \
+                 answers {actual}"
+            );
+        }
+        assert_eq!(rows, 171, "the fixture lost rows");
+    }
+
+    /// JSON's escapes, which is what the fixture uses so a tab-separated file
+    /// can carry a subject containing a tab.
+    fn unescape(field: &str) -> String {
+        serde_json::from_str::<String>(&format!("\"{field}\"")).unwrap_or_else(|e| {
+            panic!("{field:?} is not a JSON string body: {e}");
+        })
+    }
+
     #[test]
     fn the_predefined_classes_are_ascii_the_way_javas_are() {
         assert!(!matches(r"\d", "٣"));
@@ -1444,10 +1784,21 @@ mod tests {
         );
     }
 
+    /// `(?x)` ignores whitespace and comments **inside a character class as
+    /// well**, which is the half this test used to omit while being named for
+    /// the whole feature: `(?x)[a b]` does not match a space in Java, and
+    /// `(?x)[a#b]` is an unclosed class there because the comment eats the
+    /// `]`. Both were wrong here and the test passed.
     #[test]
     fn comments_mode_drops_whitespace_and_comments() {
         assert!(matches("(?x) a b  # comment\n", "ab"));
         assert!(!matches("(?x) a b  # comment\n", "a b"));
+        assert!(matches("(?x)[a b]", "a"));
+        assert!(!matches("(?x)[a b]", " "));
+        assert!(matches!(
+            compile("(?x)[a#b]"),
+            Err(JavaRegexError::Syntax(_))
+        ));
     }
 
     #[test]
