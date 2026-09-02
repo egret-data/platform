@@ -2415,6 +2415,15 @@ fn run_jq_on_this_thread(expression: &str, input: JqInput) -> Result<Vec<JqOut>,
             // A halt. Never `unwrap_valr`, which would `process::exit`.
             Err(_) => JqFailure::Failed,
         })?;
+        // **Before anything touches it.** `to_string()` below, `jq_out`
+        // after it, `jaq_value` back on the caller's thread and the DROP of
+        // all three are recursive over this value; the caller's thread is a
+        // 2 MiB tokio worker and none of `runners::jqsandbox`'s other bounds
+        // reaches this axis. `too_deep` is itself iterative, because a
+        // recursive depth check is the same overflow one function earlier.
+        if jqsandbox::too_deep(&value) {
+            return Err(JqFailure::Refused(jqsandbox::too_deep_message()));
+        }
         bytes = bytes
             .saturating_add(value.to_string().len())
             .saturating_add(1);
@@ -4628,6 +4637,10 @@ mod tests {
             ("(?x)[a#b]", "a"),
             // Java's group names are Latin letters and digits.
             ("(?<\u{3bb}>a)", "a"),
+            // Two runs of `&` where the first is odd and at least 3.
+            ("[a&&&b&&&c]", "a"),
+            ("[a&&&b&&&c&&&d]", "a"),
+            ("[&&&a&&&b]", "a"),
         ] {
             let message = err(
                 "{{ s | regexMatch(regex=p) }}",
@@ -4753,6 +4766,56 @@ mod tests {
         }
     }
 
+    /// **A value at the depth limit renders on a 2 MiB stack — a tokio
+    /// worker's — through every writer that recurses over it.**
+    ///
+    /// This is the other half of `MAX_VALUE_DEPTH`'s derivation, and it is
+    /// the half that matters in production: the depth check runs on the jq
+    /// thread, but `jaq_value`, the DROP of the value, and every serialiser
+    /// run on the CALLER's thread, whose stack egret does not choose.
+    ///
+    /// The claim is that these calls RETURN. A stack overflow is `SIGABRT`,
+    /// so a failure here takes the test binary with it and reports a signal.
+    ///
+    /// Measured cost per level, by bisecting the depth that overflows a
+    /// thread of a given size and confirming it is linear in that size:
+    /// `kestra_to_string` 1.346 KiB, `write_ion` 1.049, `write_json` 1.018,
+    /// `to_yaml` 0.391. At the worst of those, 128 levels is 172 KiB — a
+    /// twelvefold margin on 2 MiB.
+    #[test]
+    fn a_value_at_the_depth_limit_renders_on_a_tokio_workers_stack() {
+        let deep = format!(
+            "reduce range({}) as $i (.;[.])",
+            crate::runners::jqsandbox::MAX_VALUE_DEPTH - 1
+        );
+        let worker = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                for suffix in ["", " | toJson", " | toIon", " | yaml", " | string"] {
+                    let template = format!("{{{{ v | jq(e){suffix} }}}}");
+                    let context = format!("{{\"v\": 1, \"e\": {}}}", serde_json_string(&deep));
+                    let rendered = ok(&template, &context);
+                    assert!(
+                        rendered.len() > crate::runners::jqsandbox::MAX_VALUE_DEPTH,
+                        "{suffix}: {} is too short to be the deep value",
+                        rendered.len()
+                    );
+                }
+                // And one level deeper is refused rather than rendered.
+                let deeper = format!(
+                    "reduce range({}) as $i (.;[.])",
+                    crate::runners::jqsandbox::MAX_VALUE_DEPTH
+                );
+                let message = err(
+                    "{{ v | jq(e) }}",
+                    &format!("{{\"v\": 1, \"e\": {}}}", serde_json_string(&deeper)),
+                );
+                assert!(message.contains("nests more than"), "{message:?}");
+            })
+            .expect("spawn");
+        worker.join().expect("the 2 MiB worker must not overflow");
+    }
+
     /// A jq source big enough to overflow jaq's parser is refused **before**
     /// the parser runs, for every recursive construct — not for the two the
     /// review happened to name.
@@ -4766,7 +4829,8 @@ mod tests {
     /// assertion that these calls RETURN is the claim.
     #[test]
     fn every_deep_jq_source_is_refused_before_the_parser_sees_it() {
-        let n = 4000;
+        // Derived from the cap, so the test stays right if the cap moves.
+        let n = crate::runners::jqsandbox::MAX_SOURCE_BYTES + 1;
         for program in [
             "-".repeat(n) + "1",
             "[".repeat(n) + "1" + &"]".repeat(n),

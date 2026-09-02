@@ -364,3 +364,27 @@ filter-regexmatch-unicode-classes-over-posix
 # there; the crate's multi-line `^` matches at position 0. Refused rather than
 # answered, in `runners::javare::check_haystack`.
 filter-regexmatch-multiline-anchor-on-an-empty-subject
+
+# --- W2 Task 6, fix round 3. Four more, on a THIRD axis.
+#
+# `MAX_SOURCE_BYTES` bounds the source and `MAX_STEPS`/`MAX_RUN` bound the
+# evaluation; neither bounds the DEPTH of the value jq builds.
+# `jq('reduce range(1400) as $i (.;[.])')` is a 40-byte source that evaluates
+# in 0.04 s and builds a 1400-deep value -- and every one of egret's own value
+# writers recurses over it, on the CALLER's thread, which in production is a
+# 2 MiB tokio worker. `runners::jqsandbox::MAX_VALUE_DEPTH` refuses past 128,
+# which is `serde_json`'s own recursion limit and therefore what already
+# bounds the other way a value enters this crate. Kestra renders these.
+filter-jq-result-past-the-depth-limit
+filter-jq-deep-object-result
+# 200 nested brackets is inside the source cap and produces a 200-deep value,
+# so this entry is now refused for the DEPTH, not the length. It matched
+# briefly when the cap was the only bound.
+filter-jq-deeply-nested-source
+
+# `(?iu)` over a class that MIXES an ASCII-only property with a literal needs
+# a per-member fold: Java folds the literal with Unicode and the property with
+# ASCII. One character class cannot carry two folds, and splitting it into an
+# alternation would be wrong in the presence of `&&`. 14 rows of a 7182-probe
+# sweep; `(?iu)` over a mixed class is not something a flow writes.
+filter-regexmatch-unicode-case-over-a-mixed-class

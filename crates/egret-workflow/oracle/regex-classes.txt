@@ -200,3 +200,1700 @@ a|	b	true	true	-
 \\cA	\u0001	true	true	-
 \\0101	A	true	true	-
 \\e	\u001b	true	true	-
+(?i)\\p{Alpha}	a	true	true	-
+(?i)\\p{Alpha}	é	false	false	-
+(?i)\\p{Alpha}	ſ	false	false	-
+(?i)\\p{Alpha}	K	true	true	-
+(?i)\\p{Alpha}	ς	false	false	-
+(?i)\\p{Alpha}	к	false	false	-
+(?i)\\p{Alpha}	٣	false	false	-
+(?i)\\p{Alpha}	 	false	false	-
+(?i)[\\p{Alpha}x]	a	true	true	-
+(?i)[\\p{Alpha}x]	A	true	true	-
+(?i)[\\p{Alpha}x]	é	false	false	-
+(?i)[\\p{Alpha}x]	ſ	false	false	-
+(?i)[\\p{Alpha}x]	K	true	true	-
+(?i)[\\p{Alpha}x]	ς	false	false	-
+(?i)[\\p{Alpha}x]	к	false	false	-
+(?i)[\\p{Alpha}x]	٣	false	false	-
+(?i)[\\p{Alpha}x]	 	false	false	-
+(?u)\\p{Alpha}	a	true	true	-
+(?u)\\p{Alpha}	A	true	true	-
+(?u)\\p{Alpha}	é	false	false	-
+(?u)\\p{Alpha}	ſ	false	false	-
+(?u)\\p{Alpha}	K	true	true	-
+(?u)\\p{Alpha}	ς	false	false	-
+(?u)\\p{Alpha}	к	false	false	-
+(?u)\\p{Alpha}	٣	false	false	-
+(?u)\\p{Alpha}	 	false	false	-
+(?u)[\\p{Alpha}x]	a	true	true	-
+(?u)[\\p{Alpha}x]	A	true	true	-
+(?u)[\\p{Alpha}x]	é	false	false	-
+(?u)[\\p{Alpha}x]	ſ	false	false	-
+(?u)[\\p{Alpha}x]	K	true	true	-
+(?u)[\\p{Alpha}x]	ς	false	false	-
+(?u)[\\p{Alpha}x]	к	false	false	-
+(?u)[\\p{Alpha}x]	٣	false	false	-
+(?u)[\\p{Alpha}x]	 	false	false	-
+(?iu)\\p{Alpha}	a	true	true	-
+(?iu)\\p{Alpha}	A	true	true	-
+(?iu)\\p{Alpha}	é	false	false	-
+(?iu)\\p{Alpha}	ſ	false	false	-
+(?iu)\\p{Alpha}	K	true	true	-
+(?iu)\\p{Alpha}	ς	false	false	-
+(?iu)\\p{Alpha}	к	false	false	-
+(?iu)\\p{Alpha}	٣	false	false	-
+(?iu)\\p{Alpha}	 	false	false	-
+(?iu)[\\p{Alpha}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Alpha}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alpha}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alpha}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Alnum}	a	true	true	-
+(?i)\\p{Alnum}	A	true	true	-
+(?i)\\p{Alnum}	é	false	false	-
+(?i)\\p{Alnum}	ſ	false	false	-
+(?i)\\p{Alnum}	K	true	true	-
+(?i)\\p{Alnum}	ς	false	false	-
+(?i)\\p{Alnum}	к	false	false	-
+(?i)\\p{Alnum}	٣	false	false	-
+(?i)\\p{Alnum}	 	false	false	-
+(?i)[\\p{Alnum}x]	a	true	true	-
+(?i)[\\p{Alnum}x]	A	true	true	-
+(?i)[\\p{Alnum}x]	é	false	false	-
+(?i)[\\p{Alnum}x]	ſ	false	false	-
+(?i)[\\p{Alnum}x]	K	true	true	-
+(?i)[\\p{Alnum}x]	ς	false	false	-
+(?i)[\\p{Alnum}x]	к	false	false	-
+(?i)[\\p{Alnum}x]	٣	false	false	-
+(?i)[\\p{Alnum}x]	 	false	false	-
+(?u)\\p{Alnum}	a	true	true	-
+(?u)\\p{Alnum}	A	true	true	-
+(?u)\\p{Alnum}	é	false	false	-
+(?u)\\p{Alnum}	ſ	false	false	-
+(?u)\\p{Alnum}	K	true	true	-
+(?u)\\p{Alnum}	ς	false	false	-
+(?u)\\p{Alnum}	к	false	false	-
+(?u)\\p{Alnum}	٣	false	false	-
+(?u)\\p{Alnum}	 	false	false	-
+(?u)[\\p{Alnum}x]	a	true	true	-
+(?u)[\\p{Alnum}x]	A	true	true	-
+(?u)[\\p{Alnum}x]	é	false	false	-
+(?u)[\\p{Alnum}x]	ſ	false	false	-
+(?u)[\\p{Alnum}x]	K	true	true	-
+(?u)[\\p{Alnum}x]	ς	false	false	-
+(?u)[\\p{Alnum}x]	к	false	false	-
+(?u)[\\p{Alnum}x]	٣	false	false	-
+(?u)[\\p{Alnum}x]	 	false	false	-
+(?iu)\\p{Alnum}	a	true	true	-
+(?iu)\\p{Alnum}	A	true	true	-
+(?iu)\\p{Alnum}	é	false	false	-
+(?iu)\\p{Alnum}	ſ	false	false	-
+(?iu)\\p{Alnum}	K	true	true	-
+(?iu)\\p{Alnum}	ς	false	false	-
+(?iu)\\p{Alnum}	к	false	false	-
+(?iu)\\p{Alnum}	٣	false	false	-
+(?iu)\\p{Alnum}	 	false	false	-
+(?iu)[\\p{Alnum}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alnum}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Alnum}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Alnum}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alnum}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Alnum}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alnum}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Graph}	a	true	true	-
+(?i)\\p{Graph}	A	true	true	-
+(?i)\\p{Graph}	é	false	false	-
+(?i)\\p{Graph}	ſ	false	false	-
+(?i)\\p{Graph}	K	true	true	-
+(?i)\\p{Graph}	ς	false	false	-
+(?i)\\p{Graph}	к	false	false	-
+(?i)\\p{Graph}	٣	false	false	-
+(?i)\\p{Graph}	 	false	false	-
+(?i)[\\p{Graph}x]	a	true	true	-
+(?i)[\\p{Graph}x]	A	true	true	-
+(?i)[\\p{Graph}x]	é	false	false	-
+(?i)[\\p{Graph}x]	ſ	false	false	-
+(?i)[\\p{Graph}x]	K	true	true	-
+(?i)[\\p{Graph}x]	ς	false	false	-
+(?i)[\\p{Graph}x]	к	false	false	-
+(?i)[\\p{Graph}x]	٣	false	false	-
+(?i)[\\p{Graph}x]	 	false	false	-
+(?u)\\p{Graph}	a	true	true	-
+(?u)\\p{Graph}	A	true	true	-
+(?u)\\p{Graph}	é	false	false	-
+(?u)\\p{Graph}	ſ	false	false	-
+(?u)\\p{Graph}	K	true	true	-
+(?u)\\p{Graph}	ς	false	false	-
+(?u)\\p{Graph}	к	false	false	-
+(?u)\\p{Graph}	٣	false	false	-
+(?u)\\p{Graph}	 	false	false	-
+(?u)[\\p{Graph}x]	a	true	true	-
+(?u)[\\p{Graph}x]	A	true	true	-
+(?u)[\\p{Graph}x]	é	false	false	-
+(?u)[\\p{Graph}x]	ſ	false	false	-
+(?u)[\\p{Graph}x]	K	true	true	-
+(?u)[\\p{Graph}x]	ς	false	false	-
+(?u)[\\p{Graph}x]	к	false	false	-
+(?u)[\\p{Graph}x]	٣	false	false	-
+(?u)[\\p{Graph}x]	 	false	false	-
+(?iu)\\p{Graph}	a	true	true	-
+(?iu)\\p{Graph}	A	true	true	-
+(?iu)\\p{Graph}	é	false	false	-
+(?iu)\\p{Graph}	ſ	false	false	-
+(?iu)\\p{Graph}	K	true	true	-
+(?iu)\\p{Graph}	ς	false	false	-
+(?iu)\\p{Graph}	к	false	false	-
+(?iu)\\p{Graph}	٣	false	false	-
+(?iu)\\p{Graph}	 	false	false	-
+(?iu)[\\p{Graph}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Graph}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Graph}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Graph}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Graph}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Graph}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Graph}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Print}	a	true	true	-
+(?i)\\p{Print}	A	true	true	-
+(?i)\\p{Print}	é	false	false	-
+(?i)\\p{Print}	ſ	false	false	-
+(?i)\\p{Print}	K	true	true	-
+(?i)\\p{Print}	ς	false	false	-
+(?i)\\p{Print}	к	false	false	-
+(?i)\\p{Print}	٣	false	false	-
+(?i)\\p{Print}	 	true	true	-
+(?i)[\\p{Print}x]	a	true	true	-
+(?i)[\\p{Print}x]	A	true	true	-
+(?i)[\\p{Print}x]	é	false	false	-
+(?i)[\\p{Print}x]	ſ	false	false	-
+(?i)[\\p{Print}x]	K	true	true	-
+(?i)[\\p{Print}x]	ς	false	false	-
+(?i)[\\p{Print}x]	к	false	false	-
+(?i)[\\p{Print}x]	٣	false	false	-
+(?i)[\\p{Print}x]	 	true	true	-
+(?u)\\p{Print}	a	true	true	-
+(?u)\\p{Print}	A	true	true	-
+(?u)\\p{Print}	é	false	false	-
+(?u)\\p{Print}	ſ	false	false	-
+(?u)\\p{Print}	K	true	true	-
+(?u)\\p{Print}	ς	false	false	-
+(?u)\\p{Print}	к	false	false	-
+(?u)\\p{Print}	٣	false	false	-
+(?u)\\p{Print}	 	true	true	-
+(?u)[\\p{Print}x]	a	true	true	-
+(?u)[\\p{Print}x]	A	true	true	-
+(?u)[\\p{Print}x]	é	false	false	-
+(?u)[\\p{Print}x]	ſ	false	false	-
+(?u)[\\p{Print}x]	K	true	true	-
+(?u)[\\p{Print}x]	ς	false	false	-
+(?u)[\\p{Print}x]	к	false	false	-
+(?u)[\\p{Print}x]	٣	false	false	-
+(?u)[\\p{Print}x]	 	true	true	-
+(?iu)\\p{Print}	a	true	true	-
+(?iu)\\p{Print}	A	true	true	-
+(?iu)\\p{Print}	é	false	false	-
+(?iu)\\p{Print}	ſ	false	false	-
+(?iu)\\p{Print}	K	true	true	-
+(?iu)\\p{Print}	ς	false	false	-
+(?iu)\\p{Print}	к	false	false	-
+(?iu)\\p{Print}	٣	false	false	-
+(?iu)\\p{Print}	 	true	true	-
+(?iu)[\\p{Print}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Print}x]	 	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Print}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Print}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Print}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Print}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Print}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Upper}	é	false	false	-
+(?i)\\p{Upper}	ſ	false	false	-
+(?i)\\p{Upper}	K	true	true	-
+(?i)\\p{Upper}	ς	false	false	-
+(?i)\\p{Upper}	к	false	false	-
+(?i)\\p{Upper}	٣	false	false	-
+(?i)\\p{Upper}	 	false	false	-
+(?i)[\\p{Upper}x]	a	true	true	-
+(?i)[\\p{Upper}x]	A	true	true	-
+(?i)[\\p{Upper}x]	é	false	false	-
+(?i)[\\p{Upper}x]	ſ	false	false	-
+(?i)[\\p{Upper}x]	K	true	true	-
+(?i)[\\p{Upper}x]	ς	false	false	-
+(?i)[\\p{Upper}x]	к	false	false	-
+(?i)[\\p{Upper}x]	٣	false	false	-
+(?i)[\\p{Upper}x]	 	false	false	-
+(?u)\\p{Upper}	a	false	false	-
+(?u)\\p{Upper}	A	true	true	-
+(?u)\\p{Upper}	é	false	false	-
+(?u)\\p{Upper}	ſ	false	false	-
+(?u)\\p{Upper}	K	true	true	-
+(?u)\\p{Upper}	ς	false	false	-
+(?u)\\p{Upper}	к	false	false	-
+(?u)\\p{Upper}	٣	false	false	-
+(?u)\\p{Upper}	 	false	false	-
+(?u)[\\p{Upper}x]	a	false	false	-
+(?u)[\\p{Upper}x]	A	true	true	-
+(?u)[\\p{Upper}x]	é	false	false	-
+(?u)[\\p{Upper}x]	ſ	false	false	-
+(?u)[\\p{Upper}x]	K	true	true	-
+(?u)[\\p{Upper}x]	ς	false	false	-
+(?u)[\\p{Upper}x]	к	false	false	-
+(?u)[\\p{Upper}x]	٣	false	false	-
+(?u)[\\p{Upper}x]	 	false	false	-
+(?iu)\\p{Upper}	a	true	true	-
+(?iu)\\p{Upper}	A	true	true	-
+(?iu)\\p{Upper}	é	false	false	-
+(?iu)\\p{Upper}	ſ	false	false	-
+(?iu)\\p{Upper}	K	true	true	-
+(?iu)\\p{Upper}	ς	false	false	-
+(?iu)\\p{Upper}	к	false	false	-
+(?iu)\\p{Upper}	٣	false	false	-
+(?iu)\\p{Upper}	 	false	false	-
+(?iu)[\\p{Upper}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Upper}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Upper}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Upper}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Upper}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Upper}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Upper}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Lower}	é	false	false	-
+(?i)\\p{Lower}	ſ	false	false	-
+(?i)\\p{Lower}	K	true	true	-
+(?i)\\p{Lower}	ς	false	false	-
+(?i)\\p{Lower}	к	false	false	-
+(?i)\\p{Lower}	٣	false	false	-
+(?i)\\p{Lower}	 	false	false	-
+(?i)[\\p{Lower}x]	a	true	true	-
+(?i)[\\p{Lower}x]	A	true	true	-
+(?i)[\\p{Lower}x]	é	false	false	-
+(?i)[\\p{Lower}x]	ſ	false	false	-
+(?i)[\\p{Lower}x]	K	true	true	-
+(?i)[\\p{Lower}x]	ς	false	false	-
+(?i)[\\p{Lower}x]	к	false	false	-
+(?i)[\\p{Lower}x]	٣	false	false	-
+(?i)[\\p{Lower}x]	 	false	false	-
+(?u)\\p{Lower}	a	true	true	-
+(?u)\\p{Lower}	A	false	false	-
+(?u)\\p{Lower}	é	false	false	-
+(?u)\\p{Lower}	ſ	false	false	-
+(?u)\\p{Lower}	K	false	false	-
+(?u)\\p{Lower}	ς	false	false	-
+(?u)\\p{Lower}	к	false	false	-
+(?u)\\p{Lower}	٣	false	false	-
+(?u)\\p{Lower}	 	false	false	-
+(?u)[\\p{Lower}x]	a	true	true	-
+(?u)[\\p{Lower}x]	A	false	false	-
+(?u)[\\p{Lower}x]	é	false	false	-
+(?u)[\\p{Lower}x]	ſ	false	false	-
+(?u)[\\p{Lower}x]	K	false	false	-
+(?u)[\\p{Lower}x]	ς	false	false	-
+(?u)[\\p{Lower}x]	к	false	false	-
+(?u)[\\p{Lower}x]	٣	false	false	-
+(?u)[\\p{Lower}x]	 	false	false	-
+(?iu)\\p{Lower}	a	true	true	-
+(?iu)\\p{Lower}	A	true	true	-
+(?iu)\\p{Lower}	é	false	false	-
+(?iu)\\p{Lower}	ſ	false	false	-
+(?iu)\\p{Lower}	K	true	true	-
+(?iu)\\p{Lower}	ς	false	false	-
+(?iu)\\p{Lower}	к	false	false	-
+(?iu)\\p{Lower}	٣	false	false	-
+(?iu)\\p{Lower}	 	false	false	-
+(?iu)[\\p{Lower}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Lower}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Lower}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Lower}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	ς	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	к	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Punct}	a	false	false	-
+(?i)\\p{Punct}	A	false	false	-
+(?i)\\p{Punct}	é	false	false	-
+(?i)\\p{Punct}	ſ	false	false	-
+(?i)\\p{Punct}	K	false	false	-
+(?i)\\p{Punct}	ς	false	false	-
+(?i)\\p{Punct}	к	false	false	-
+(?i)\\p{Punct}	٣	false	false	-
+(?i)\\p{Punct}	 	false	false	-
+(?i)[\\p{Punct}x]	a	false	false	-
+(?i)[\\p{Punct}x]	A	false	false	-
+(?i)[\\p{Punct}x]	é	false	false	-
+(?i)[\\p{Punct}x]	ſ	false	false	-
+(?i)[\\p{Punct}x]	K	false	false	-
+(?i)[\\p{Punct}x]	ς	false	false	-
+(?i)[\\p{Punct}x]	к	false	false	-
+(?i)[\\p{Punct}x]	٣	false	false	-
+(?i)[\\p{Punct}x]	 	false	false	-
+(?u)\\p{Punct}	a	false	false	-
+(?u)\\p{Punct}	A	false	false	-
+(?u)\\p{Punct}	é	false	false	-
+(?u)\\p{Punct}	ſ	false	false	-
+(?u)\\p{Punct}	K	false	false	-
+(?u)\\p{Punct}	ς	false	false	-
+(?u)\\p{Punct}	к	false	false	-
+(?u)\\p{Punct}	٣	false	false	-
+(?u)\\p{Punct}	 	false	false	-
+(?u)[\\p{Punct}x]	a	false	false	-
+(?u)[\\p{Punct}x]	A	false	false	-
+(?u)[\\p{Punct}x]	é	false	false	-
+(?u)[\\p{Punct}x]	ſ	false	false	-
+(?u)[\\p{Punct}x]	K	false	false	-
+(?u)[\\p{Punct}x]	ς	false	false	-
+(?u)[\\p{Punct}x]	к	false	false	-
+(?u)[\\p{Punct}x]	٣	false	false	-
+(?u)[\\p{Punct}x]	 	false	false	-
+(?iu)\\p{Punct}	a	false	false	-
+(?iu)\\p{Punct}	A	false	false	-
+(?iu)\\p{Punct}	é	false	false	-
+(?iu)\\p{Punct}	ſ	false	false	-
+(?iu)\\p{Punct}	K	false	false	-
+(?iu)\\p{Punct}	ς	false	false	-
+(?iu)\\p{Punct}	к	false	false	-
+(?iu)\\p{Punct}	٣	false	false	-
+(?iu)\\p{Punct}	 	false	false	-
+(?iu)[\\p{Punct}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Punct}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Punct}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Punct}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Punct}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Punct}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Punct}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Digit}	a	false	false	-
+(?i)\\p{Digit}	A	false	false	-
+(?i)\\p{Digit}	é	false	false	-
+(?i)\\p{Digit}	ſ	false	false	-
+(?i)\\p{Digit}	K	false	false	-
+(?i)\\p{Digit}	ς	false	false	-
+(?i)\\p{Digit}	к	false	false	-
+(?i)\\p{Digit}	٣	false	false	-
+(?i)\\p{Digit}	 	false	false	-
+(?i)[\\p{Digit}x]	a	false	false	-
+(?i)[\\p{Digit}x]	A	false	false	-
+(?i)[\\p{Digit}x]	é	false	false	-
+(?i)[\\p{Digit}x]	ſ	false	false	-
+(?i)[\\p{Digit}x]	K	false	false	-
+(?i)[\\p{Digit}x]	ς	false	false	-
+(?i)[\\p{Digit}x]	к	false	false	-
+(?i)[\\p{Digit}x]	٣	false	false	-
+(?i)[\\p{Digit}x]	 	false	false	-
+(?u)\\p{Digit}	a	false	false	-
+(?u)\\p{Digit}	A	false	false	-
+(?u)\\p{Digit}	é	false	false	-
+(?u)\\p{Digit}	ſ	false	false	-
+(?u)\\p{Digit}	K	false	false	-
+(?u)\\p{Digit}	ς	false	false	-
+(?u)\\p{Digit}	к	false	false	-
+(?u)\\p{Digit}	٣	false	false	-
+(?u)\\p{Digit}	 	false	false	-
+(?u)[\\p{Digit}x]	a	false	false	-
+(?u)[\\p{Digit}x]	A	false	false	-
+(?u)[\\p{Digit}x]	é	false	false	-
+(?u)[\\p{Digit}x]	ſ	false	false	-
+(?u)[\\p{Digit}x]	K	false	false	-
+(?u)[\\p{Digit}x]	ς	false	false	-
+(?u)[\\p{Digit}x]	к	false	false	-
+(?u)[\\p{Digit}x]	٣	false	false	-
+(?u)[\\p{Digit}x]	 	false	false	-
+(?iu)\\p{Digit}	a	false	false	-
+(?iu)\\p{Digit}	A	false	false	-
+(?iu)\\p{Digit}	é	false	false	-
+(?iu)\\p{Digit}	ſ	false	false	-
+(?iu)\\p{Digit}	K	false	false	-
+(?iu)\\p{Digit}	ς	false	false	-
+(?iu)\\p{Digit}	к	false	false	-
+(?iu)\\p{Digit}	٣	false	false	-
+(?iu)\\p{Digit}	 	false	false	-
+(?iu)[\\p{Digit}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Digit}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Digit}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Digit}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Digit}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Digit}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Digit}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Space}	a	false	false	-
+(?i)\\p{Space}	A	false	false	-
+(?i)\\p{Space}	é	false	false	-
+(?i)\\p{Space}	ſ	false	false	-
+(?i)\\p{Space}	K	false	false	-
+(?i)\\p{Space}	ς	false	false	-
+(?i)\\p{Space}	к	false	false	-
+(?i)\\p{Space}	٣	false	false	-
+(?i)\\p{Space}	 	true	true	-
+(?i)[\\p{Space}x]	a	false	false	-
+(?i)[\\p{Space}x]	A	false	false	-
+(?i)[\\p{Space}x]	é	false	false	-
+(?i)[\\p{Space}x]	ſ	false	false	-
+(?i)[\\p{Space}x]	K	false	false	-
+(?i)[\\p{Space}x]	ς	false	false	-
+(?i)[\\p{Space}x]	к	false	false	-
+(?i)[\\p{Space}x]	٣	false	false	-
+(?i)[\\p{Space}x]	 	true	true	-
+(?u)\\p{Space}	a	false	false	-
+(?u)\\p{Space}	A	false	false	-
+(?u)\\p{Space}	é	false	false	-
+(?u)\\p{Space}	ſ	false	false	-
+(?u)\\p{Space}	K	false	false	-
+(?u)\\p{Space}	ς	false	false	-
+(?u)\\p{Space}	к	false	false	-
+(?u)\\p{Space}	٣	false	false	-
+(?u)\\p{Space}	 	true	true	-
+(?u)[\\p{Space}x]	a	false	false	-
+(?u)[\\p{Space}x]	A	false	false	-
+(?u)[\\p{Space}x]	é	false	false	-
+(?u)[\\p{Space}x]	ſ	false	false	-
+(?u)[\\p{Space}x]	K	false	false	-
+(?u)[\\p{Space}x]	ς	false	false	-
+(?u)[\\p{Space}x]	к	false	false	-
+(?u)[\\p{Space}x]	٣	false	false	-
+(?u)[\\p{Space}x]	 	true	true	-
+(?iu)\\p{Space}	a	false	false	-
+(?iu)\\p{Space}	A	false	false	-
+(?iu)\\p{Space}	é	false	false	-
+(?iu)\\p{Space}	ſ	false	false	-
+(?iu)\\p{Space}	K	false	false	-
+(?iu)\\p{Space}	ς	false	false	-
+(?iu)\\p{Space}	к	false	false	-
+(?iu)\\p{Space}	٣	false	false	-
+(?iu)\\p{Space}	 	true	true	-
+(?iu)[\\p{Space}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Space}x]	 	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Space}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Space}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Space}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Space}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Space}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Blank}	a	false	false	-
+(?i)\\p{Blank}	A	false	false	-
+(?i)\\p{Blank}	é	false	false	-
+(?i)\\p{Blank}	ſ	false	false	-
+(?i)\\p{Blank}	K	false	false	-
+(?i)\\p{Blank}	ς	false	false	-
+(?i)\\p{Blank}	к	false	false	-
+(?i)\\p{Blank}	٣	false	false	-
+(?i)\\p{Blank}	 	true	true	-
+(?i)[\\p{Blank}x]	a	false	false	-
+(?i)[\\p{Blank}x]	A	false	false	-
+(?i)[\\p{Blank}x]	é	false	false	-
+(?i)[\\p{Blank}x]	ſ	false	false	-
+(?i)[\\p{Blank}x]	K	false	false	-
+(?i)[\\p{Blank}x]	ς	false	false	-
+(?i)[\\p{Blank}x]	к	false	false	-
+(?i)[\\p{Blank}x]	٣	false	false	-
+(?i)[\\p{Blank}x]	 	true	true	-
+(?u)\\p{Blank}	a	false	false	-
+(?u)\\p{Blank}	A	false	false	-
+(?u)\\p{Blank}	é	false	false	-
+(?u)\\p{Blank}	ſ	false	false	-
+(?u)\\p{Blank}	K	false	false	-
+(?u)\\p{Blank}	ς	false	false	-
+(?u)\\p{Blank}	к	false	false	-
+(?u)\\p{Blank}	٣	false	false	-
+(?u)\\p{Blank}	 	true	true	-
+(?u)[\\p{Blank}x]	a	false	false	-
+(?u)[\\p{Blank}x]	A	false	false	-
+(?u)[\\p{Blank}x]	é	false	false	-
+(?u)[\\p{Blank}x]	ſ	false	false	-
+(?u)[\\p{Blank}x]	K	false	false	-
+(?u)[\\p{Blank}x]	ς	false	false	-
+(?u)[\\p{Blank}x]	к	false	false	-
+(?u)[\\p{Blank}x]	٣	false	false	-
+(?u)[\\p{Blank}x]	 	true	true	-
+(?iu)\\p{Blank}	a	false	false	-
+(?iu)\\p{Blank}	A	false	false	-
+(?iu)\\p{Blank}	é	false	false	-
+(?iu)\\p{Blank}	ſ	false	false	-
+(?iu)\\p{Blank}	K	false	false	-
+(?iu)\\p{Blank}	ς	false	false	-
+(?iu)\\p{Blank}	к	false	false	-
+(?iu)\\p{Blank}	٣	false	false	-
+(?iu)\\p{Blank}	 	true	true	-
+(?iu)[\\p{Blank}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Blank}x]	 	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Blank}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{Blank}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Blank}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{Blank}	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	a	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	A	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	٣	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Blank}x]	 	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{XDigit}	a	true	true	-
+(?i)\\p{XDigit}	A	true	true	-
+(?i)\\p{XDigit}	é	false	false	-
+(?i)\\p{XDigit}	ſ	false	false	-
+(?i)\\p{XDigit}	K	false	false	-
+(?i)\\p{XDigit}	ς	false	false	-
+(?i)\\p{XDigit}	к	false	false	-
+(?i)\\p{XDigit}	٣	false	false	-
+(?i)\\p{XDigit}	 	false	false	-
+(?i)[\\p{XDigit}x]	a	true	true	-
+(?i)[\\p{XDigit}x]	A	true	true	-
+(?i)[\\p{XDigit}x]	é	false	false	-
+(?i)[\\p{XDigit}x]	ſ	false	false	-
+(?i)[\\p{XDigit}x]	K	false	false	-
+(?i)[\\p{XDigit}x]	ς	false	false	-
+(?i)[\\p{XDigit}x]	к	false	false	-
+(?i)[\\p{XDigit}x]	٣	false	false	-
+(?i)[\\p{XDigit}x]	 	false	false	-
+(?u)\\p{XDigit}	a	true	true	-
+(?u)\\p{XDigit}	A	true	true	-
+(?u)\\p{XDigit}	é	false	false	-
+(?u)\\p{XDigit}	ſ	false	false	-
+(?u)\\p{XDigit}	K	false	false	-
+(?u)\\p{XDigit}	ς	false	false	-
+(?u)\\p{XDigit}	к	false	false	-
+(?u)\\p{XDigit}	٣	false	false	-
+(?u)\\p{XDigit}	 	false	false	-
+(?u)[\\p{XDigit}x]	a	true	true	-
+(?u)[\\p{XDigit}x]	A	true	true	-
+(?u)[\\p{XDigit}x]	é	false	false	-
+(?u)[\\p{XDigit}x]	ſ	false	false	-
+(?u)[\\p{XDigit}x]	K	false	false	-
+(?u)[\\p{XDigit}x]	ς	false	false	-
+(?u)[\\p{XDigit}x]	к	false	false	-
+(?u)[\\p{XDigit}x]	٣	false	false	-
+(?u)[\\p{XDigit}x]	 	false	false	-
+(?iu)\\p{XDigit}	a	true	true	-
+(?iu)\\p{XDigit}	A	true	true	-
+(?iu)\\p{XDigit}	é	false	false	-
+(?iu)\\p{XDigit}	ſ	false	false	-
+(?iu)\\p{XDigit}	K	false	false	-
+(?iu)\\p{XDigit}	ς	false	false	-
+(?iu)\\p{XDigit}	к	false	false	-
+(?iu)\\p{XDigit}	٣	false	false	-
+(?iu)\\p{XDigit}	 	false	false	-
+(?iu)[\\p{XDigit}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{XDigit}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{XDigit}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)\\p{XDigit}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{XDigit}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)\\p{XDigit}	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	A	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	ς	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	к	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	٣	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{XDigit}x]	 	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?i)\\p{Cntrl}	a	false	false	-
+(?i)\\p{Cntrl}	A	false	false	-
+(?i)\\p{Cntrl}	é	false	false	-
+(?i)\\p{Cntrl}	ſ	false	false	-
+(?i)\\p{Cntrl}	K	false	false	-
+(?i)\\p{Cntrl}	ς	false	false	-
+(?i)\\p{Cntrl}	к	false	false	-
+(?i)\\p{Cntrl}	٣	false	false	-
+(?i)\\p{Cntrl}	 	false	false	-
+(?i)[\\p{Cntrl}x]	a	false	false	-
+(?i)[\\p{Cntrl}x]	A	false	false	-
+(?i)[\\p{Cntrl}x]	é	false	false	-
+(?i)[\\p{Cntrl}x]	ſ	false	false	-
+(?i)[\\p{Cntrl}x]	K	false	false	-
+(?i)[\\p{Cntrl}x]	ς	false	false	-
+(?i)[\\p{Cntrl}x]	к	false	false	-
+(?i)[\\p{Cntrl}x]	٣	false	false	-
+(?i)[\\p{Cntrl}x]	 	false	false	-
+(?u)\\p{Cntrl}	a	false	false	-
+(?u)\\p{Cntrl}	A	false	false	-
+(?u)\\p{Cntrl}	é	false	false	-
+(?u)\\p{Cntrl}	ſ	false	false	-
+(?u)\\p{Cntrl}	K	false	false	-
+(?u)\\p{Cntrl}	ς	false	false	-
+(?u)\\p{Cntrl}	к	false	false	-
+(?u)\\p{Cntrl}	٣	false	false	-
+(?u)\\p{Cntrl}	 	false	false	-
+(?u)[\\p{Cntrl}x]	a	false	false	-
+(?u)[\\p{Cntrl}x]	A	false	false	-
+(?u)[\\p{Cntrl}x]	é	false	false	-
+(?u)[\\p{Cntrl}x]	ſ	false	false	-
+(?u)[\\p{Cntrl}x]	K	false	false	-
+(?u)[\\p{Cntrl}x]	ς	false	false	-
+(?u)[\\p{Cntrl}x]	к	false	false	-
+(?u)[\\p{Cntrl}x]	٣	false	false	-
+(?u)[\\p{Cntrl}x]	 	false	false	-
+(?iu)\\p{Cntrl}	a	false	false	-
+(?iu)\\p{Cntrl}	A	false	false	-
+(?iu)\\p{Cntrl}	é	false	false	-
+(?iu)\\p{Cntrl}	ſ	false	false	-
+(?iu)\\p{Cntrl}	K	false	false	-
+(?iu)\\p{Cntrl}	ς	false	false	-
+(?iu)\\p{Cntrl}	к	false	false	-
+(?iu)\\p{Cntrl}	٣	false	false	-
+(?iu)\\p{Cntrl}	 	false	false	-
+(?iu)[\\p{Cntrl}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Cntrl}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{Cntrl}	a	false	false	-
+(?U)\\p{Cntrl}	A	false	false	-
+(?U)\\p{Cntrl}	é	false	false	-
+(?U)\\p{Cntrl}	ſ	false	false	-
+(?U)\\p{Cntrl}	K	false	false	-
+(?U)\\p{Cntrl}	ς	false	false	-
+(?U)\\p{Cntrl}	к	false	false	-
+(?U)\\p{Cntrl}	٣	false	false	-
+(?U)\\p{Cntrl}	 	false	false	-
+(?U)[\\p{Cntrl}x]	a	false	false	-
+(?U)[\\p{Cntrl}x]	A	false	false	-
+(?U)[\\p{Cntrl}x]	é	false	false	-
+(?U)[\\p{Cntrl}x]	ſ	false	false	-
+(?U)[\\p{Cntrl}x]	K	false	false	-
+(?U)[\\p{Cntrl}x]	ς	false	false	-
+(?U)[\\p{Cntrl}x]	к	false	false	-
+(?U)[\\p{Cntrl}x]	٣	false	false	-
+(?U)[\\p{Cntrl}x]	 	false	false	-
+(?iU)\\p{Cntrl}	a	false	false	-
+(?iU)\\p{Cntrl}	A	false	false	-
+(?iU)\\p{Cntrl}	é	false	false	-
+(?iU)\\p{Cntrl}	ſ	false	false	-
+(?iU)\\p{Cntrl}	K	false	false	-
+(?iU)\\p{Cntrl}	ς	false	false	-
+(?iU)\\p{Cntrl}	к	false	false	-
+(?iU)\\p{Cntrl}	٣	false	false	-
+(?iU)\\p{Cntrl}	 	false	false	-
+(?iU)[\\p{Cntrl}x]	a	false	false	-
+(?iU)[\\p{Cntrl}x]	A	false	false	-
+(?iU)[\\p{Cntrl}x]	é	false	false	-
+(?iU)[\\p{Cntrl}x]	ſ	false	false	-
+(?iU)[\\p{Cntrl}x]	K	false	false	-
+(?iU)[\\p{Cntrl}x]	ς	false	false	-
+(?iU)[\\p{Cntrl}x]	к	false	false	-
+(?iU)[\\p{Cntrl}x]	٣	false	false	-
+(?iU)[\\p{Cntrl}x]	 	false	false	-
+(?i)\\p{ASCII}	a	true	true	-
+(?i)\\p{ASCII}	A	true	true	-
+(?i)\\p{ASCII}	é	false	false	-
+(?i)\\p{ASCII}	ſ	false	false	-
+(?i)\\p{ASCII}	K	true	true	-
+(?i)\\p{ASCII}	ς	false	false	-
+(?i)\\p{ASCII}	к	false	false	-
+(?i)\\p{ASCII}	٣	false	false	-
+(?i)\\p{ASCII}	 	true	true	-
+(?i)[\\p{ASCII}x]	a	true	true	-
+(?i)[\\p{ASCII}x]	A	true	true	-
+(?i)[\\p{ASCII}x]	é	false	false	-
+(?i)[\\p{ASCII}x]	ſ	false	false	-
+(?i)[\\p{ASCII}x]	K	true	true	-
+(?i)[\\p{ASCII}x]	ς	false	false	-
+(?i)[\\p{ASCII}x]	к	false	false	-
+(?i)[\\p{ASCII}x]	٣	false	false	-
+(?i)[\\p{ASCII}x]	 	true	true	-
+(?u)\\p{ASCII}	a	true	true	-
+(?u)\\p{ASCII}	A	true	true	-
+(?u)\\p{ASCII}	é	false	false	-
+(?u)\\p{ASCII}	ſ	false	false	-
+(?u)\\p{ASCII}	K	true	true	-
+(?u)\\p{ASCII}	ς	false	false	-
+(?u)\\p{ASCII}	к	false	false	-
+(?u)\\p{ASCII}	٣	false	false	-
+(?u)\\p{ASCII}	 	true	true	-
+(?u)[\\p{ASCII}x]	a	true	true	-
+(?u)[\\p{ASCII}x]	A	true	true	-
+(?u)[\\p{ASCII}x]	é	false	false	-
+(?u)[\\p{ASCII}x]	ſ	false	false	-
+(?u)[\\p{ASCII}x]	K	true	true	-
+(?u)[\\p{ASCII}x]	ς	false	false	-
+(?u)[\\p{ASCII}x]	к	false	false	-
+(?u)[\\p{ASCII}x]	٣	false	false	-
+(?u)[\\p{ASCII}x]	 	true	true	-
+(?iu)\\p{ASCII}	a	true	true	-
+(?iu)\\p{ASCII}	A	true	true	-
+(?iu)\\p{ASCII}	é	false	false	-
+(?iu)\\p{ASCII}	ſ	false	false	-
+(?iu)\\p{ASCII}	K	true	true	-
+(?iu)\\p{ASCII}	ς	false	false	-
+(?iu)\\p{ASCII}	к	false	false	-
+(?iu)\\p{ASCII}	٣	false	false	-
+(?iu)\\p{ASCII}	 	true	true	-
+(?iu)[\\p{ASCII}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{ASCII}x]	 	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)\\p{ASCII}	a	true	true	-
+(?U)\\p{ASCII}	A	true	true	-
+(?U)\\p{ASCII}	é	false	false	-
+(?U)\\p{ASCII}	ſ	false	false	-
+(?U)\\p{ASCII}	K	true	true	-
+(?U)\\p{ASCII}	ς	false	false	-
+(?U)\\p{ASCII}	к	false	false	-
+(?U)\\p{ASCII}	٣	false	false	-
+(?U)\\p{ASCII}	 	true	true	-
+(?U)[\\p{ASCII}x]	a	true	true	-
+(?U)[\\p{ASCII}x]	A	true	true	-
+(?U)[\\p{ASCII}x]	é	false	false	-
+(?U)[\\p{ASCII}x]	ſ	false	false	-
+(?U)[\\p{ASCII}x]	K	true	true	-
+(?U)[\\p{ASCII}x]	ς	false	false	-
+(?U)[\\p{ASCII}x]	к	false	false	-
+(?U)[\\p{ASCII}x]	٣	false	false	-
+(?U)[\\p{ASCII}x]	 	true	true	-
+(?iU)\\p{ASCII}	a	true	true	-
+(?iU)\\p{ASCII}	A	true	true	-
+(?iU)\\p{ASCII}	é	false	false	-
+(?iU)\\p{ASCII}	ſ	false	false	-
+(?iU)\\p{ASCII}	K	true	true	-
+(?iU)\\p{ASCII}	ς	false	false	-
+(?iU)\\p{ASCII}	к	false	false	-
+(?iU)\\p{ASCII}	٣	false	false	-
+(?iU)\\p{ASCII}	 	true	true	-
+(?iU)[\\p{ASCII}x]	a	true	true	-
+(?iU)[\\p{ASCII}x]	A	true	true	-
+(?iU)[\\p{ASCII}x]	é	false	false	-
+(?iU)[\\p{ASCII}x]	ſ	false	false	-
+(?iU)[\\p{ASCII}x]	K	true	true	-
+(?iU)[\\p{ASCII}x]	ς	false	false	-
+(?iU)[\\p{ASCII}x]	к	false	false	-
+(?iU)[\\p{ASCII}x]	٣	false	false	-
+(?iU)[\\p{ASCII}x]	 	true	true	-
+(?i)\\p{L}	a	true	true	-
+(?i)\\p{L}	A	true	true	-
+(?i)\\p{L}	é	true	true	-
+(?i)\\p{L}	ſ	true	true	-
+(?i)\\p{L}	K	true	true	-
+(?i)\\p{L}	ς	true	true	-
+(?i)\\p{L}	к	true	true	-
+(?i)\\p{L}	٣	false	false	-
+(?i)\\p{L}	 	false	false	-
+(?i)[\\p{L}x]	a	true	true	-
+(?i)[\\p{L}x]	A	true	true	-
+(?i)[\\p{L}x]	é	true	true	-
+(?i)[\\p{L}x]	ſ	true	true	-
+(?i)[\\p{L}x]	K	true	true	-
+(?i)[\\p{L}x]	ς	true	true	-
+(?i)[\\p{L}x]	к	true	true	-
+(?i)[\\p{L}x]	٣	false	false	-
+(?i)[\\p{L}x]	 	false	false	-
+(?u)\\p{L}	a	true	true	-
+(?u)\\p{L}	A	true	true	-
+(?u)\\p{L}	é	true	true	-
+(?u)\\p{L}	ſ	true	true	-
+(?u)\\p{L}	K	true	true	-
+(?u)\\p{L}	ς	true	true	-
+(?u)\\p{L}	к	true	true	-
+(?u)\\p{L}	٣	false	false	-
+(?u)\\p{L}	 	false	false	-
+(?u)[\\p{L}x]	a	true	true	-
+(?u)[\\p{L}x]	A	true	true	-
+(?u)[\\p{L}x]	é	true	true	-
+(?u)[\\p{L}x]	ſ	true	true	-
+(?u)[\\p{L}x]	K	true	true	-
+(?u)[\\p{L}x]	ς	true	true	-
+(?u)[\\p{L}x]	к	true	true	-
+(?u)[\\p{L}x]	٣	false	false	-
+(?u)[\\p{L}x]	 	false	false	-
+(?iu)\\p{L}	a	true	true	-
+(?iu)\\p{L}	A	true	true	-
+(?iu)\\p{L}	é	true	true	-
+(?iu)\\p{L}	ſ	true	true	-
+(?iu)\\p{L}	K	true	true	-
+(?iu)\\p{L}	ς	true	true	-
+(?iu)\\p{L}	к	true	true	-
+(?iu)\\p{L}	٣	false	false	-
+(?iu)\\p{L}	 	false	false	-
+(?iu)[\\p{L}x]	a	true	true	-
+(?iu)[\\p{L}x]	A	true	true	-
+(?iu)[\\p{L}x]	é	true	true	-
+(?iu)[\\p{L}x]	ſ	true	true	-
+(?iu)[\\p{L}x]	K	true	true	-
+(?iu)[\\p{L}x]	ς	true	true	-
+(?iu)[\\p{L}x]	к	true	true	-
+(?iu)[\\p{L}x]	٣	false	false	-
+(?iu)[\\p{L}x]	 	false	false	-
+(?U)\\p{L}	a	true	true	-
+(?U)\\p{L}	A	true	true	-
+(?U)\\p{L}	é	true	true	-
+(?U)\\p{L}	ſ	true	true	-
+(?U)\\p{L}	K	true	true	-
+(?U)\\p{L}	ς	true	true	-
+(?U)\\p{L}	к	true	true	-
+(?U)\\p{L}	٣	false	false	-
+(?U)\\p{L}	 	false	false	-
+(?U)[\\p{L}x]	a	true	true	-
+(?U)[\\p{L}x]	A	true	true	-
+(?U)[\\p{L}x]	é	true	true	-
+(?U)[\\p{L}x]	ſ	true	true	-
+(?U)[\\p{L}x]	K	true	true	-
+(?U)[\\p{L}x]	ς	true	true	-
+(?U)[\\p{L}x]	к	true	true	-
+(?U)[\\p{L}x]	٣	false	false	-
+(?U)[\\p{L}x]	 	false	false	-
+(?iU)\\p{L}	a	true	true	-
+(?iU)\\p{L}	A	true	true	-
+(?iU)\\p{L}	é	true	true	-
+(?iU)\\p{L}	ſ	true	true	-
+(?iU)\\p{L}	K	true	true	-
+(?iU)\\p{L}	ς	true	true	-
+(?iU)\\p{L}	к	true	true	-
+(?iU)\\p{L}	٣	false	false	-
+(?iU)\\p{L}	 	false	false	-
+(?iU)[\\p{L}x]	a	true	true	-
+(?iU)[\\p{L}x]	A	true	true	-
+(?iU)[\\p{L}x]	é	true	true	-
+(?iU)[\\p{L}x]	ſ	true	true	-
+(?iU)[\\p{L}x]	K	true	true	-
+(?iU)[\\p{L}x]	ς	true	true	-
+(?iU)[\\p{L}x]	к	true	true	-
+(?iU)[\\p{L}x]	٣	false	false	-
+(?iU)[\\p{L}x]	 	false	false	-
+(?i)\\p{Lu}	a	true	true	-
+(?i)\\p{Lu}	A	true	true	-
+(?i)\\p{Lu}	é	true	true	-
+(?i)\\p{Lu}	ſ	true	true	-
+(?i)\\p{Lu}	K	true	true	-
+(?i)\\p{Lu}	ς	true	true	-
+(?i)\\p{Lu}	к	true	true	-
+(?i)\\p{Lu}	٣	false	false	-
+(?i)\\p{Lu}	 	false	false	-
+(?i)[\\p{Lu}x]	a	true	true	-
+(?i)[\\p{Lu}x]	A	true	true	-
+(?i)[\\p{Lu}x]	é	true	true	-
+(?i)[\\p{Lu}x]	ſ	true	true	-
+(?i)[\\p{Lu}x]	K	true	true	-
+(?i)[\\p{Lu}x]	ς	true	true	-
+(?i)[\\p{Lu}x]	к	true	true	-
+(?i)[\\p{Lu}x]	٣	false	false	-
+(?i)[\\p{Lu}x]	 	false	false	-
+(?u)\\p{Lu}	a	false	false	-
+(?u)\\p{Lu}	A	true	true	-
+(?u)\\p{Lu}	é	false	false	-
+(?u)\\p{Lu}	ſ	false	false	-
+(?u)\\p{Lu}	K	true	true	-
+(?u)\\p{Lu}	ς	false	false	-
+(?u)\\p{Lu}	к	false	false	-
+(?u)\\p{Lu}	٣	false	false	-
+(?u)\\p{Lu}	 	false	false	-
+(?u)[\\p{Lu}x]	a	false	false	-
+(?u)[\\p{Lu}x]	A	true	true	-
+(?u)[\\p{Lu}x]	é	false	false	-
+(?u)[\\p{Lu}x]	ſ	false	false	-
+(?u)[\\p{Lu}x]	K	true	true	-
+(?u)[\\p{Lu}x]	ς	false	false	-
+(?u)[\\p{Lu}x]	к	false	false	-
+(?u)[\\p{Lu}x]	٣	false	false	-
+(?u)[\\p{Lu}x]	 	false	false	-
+(?iu)\\p{Lu}	a	true	true	-
+(?iu)\\p{Lu}	A	true	true	-
+(?iu)\\p{Lu}	é	true	true	-
+(?iu)\\p{Lu}	ſ	true	true	-
+(?iu)\\p{Lu}	K	true	true	-
+(?iu)\\p{Lu}	ς	true	true	-
+(?iu)\\p{Lu}	к	true	true	-
+(?iu)\\p{Lu}	٣	false	false	-
+(?iu)\\p{Lu}	 	false	false	-
+(?iu)[\\p{Lu}x]	a	true	true	-
+(?iu)[\\p{Lu}x]	A	true	true	-
+(?iu)[\\p{Lu}x]	é	true	true	-
+(?iu)[\\p{Lu}x]	ſ	true	true	-
+(?iu)[\\p{Lu}x]	K	true	true	-
+(?iu)[\\p{Lu}x]	ς	true	true	-
+(?iu)[\\p{Lu}x]	к	true	true	-
+(?iu)[\\p{Lu}x]	٣	false	false	-
+(?iu)[\\p{Lu}x]	 	false	false	-
+(?U)\\p{Lu}	a	false	false	-
+(?U)\\p{Lu}	A	true	true	-
+(?U)\\p{Lu}	é	false	false	-
+(?U)\\p{Lu}	ſ	false	false	-
+(?U)\\p{Lu}	K	true	true	-
+(?U)\\p{Lu}	ς	false	false	-
+(?U)\\p{Lu}	к	false	false	-
+(?U)\\p{Lu}	٣	false	false	-
+(?U)\\p{Lu}	 	false	false	-
+(?U)[\\p{Lu}x]	a	false	false	-
+(?U)[\\p{Lu}x]	A	true	true	-
+(?U)[\\p{Lu}x]	é	false	false	-
+(?U)[\\p{Lu}x]	ſ	false	false	-
+(?U)[\\p{Lu}x]	K	true	true	-
+(?U)[\\p{Lu}x]	ς	false	false	-
+(?U)[\\p{Lu}x]	к	false	false	-
+(?U)[\\p{Lu}x]	٣	false	false	-
+(?U)[\\p{Lu}x]	 	false	false	-
+(?iU)\\p{Lu}	a	true	true	-
+(?iU)\\p{Lu}	A	true	true	-
+(?iU)\\p{Lu}	é	true	true	-
+(?iU)\\p{Lu}	ſ	true	true	-
+(?iU)\\p{Lu}	K	true	true	-
+(?iU)\\p{Lu}	ς	true	true	-
+(?iU)\\p{Lu}	к	true	true	-
+(?iU)\\p{Lu}	٣	false	false	-
+(?iU)\\p{Lu}	 	false	false	-
+(?iU)[\\p{Lu}x]	a	true	true	-
+(?iU)[\\p{Lu}x]	A	true	true	-
+(?iU)[\\p{Lu}x]	é	true	true	-
+(?iU)[\\p{Lu}x]	ſ	true	true	-
+(?iU)[\\p{Lu}x]	K	true	true	-
+(?iU)[\\p{Lu}x]	ς	true	true	-
+(?iU)[\\p{Lu}x]	к	true	true	-
+(?iU)[\\p{Lu}x]	٣	false	false	-
+(?iU)[\\p{Lu}x]	 	false	false	-
+(?i)\\p{Ll}	a	true	true	-
+(?i)\\p{Ll}	A	true	true	-
+(?i)\\p{Ll}	é	true	true	-
+(?i)\\p{Ll}	ſ	true	true	-
+(?i)\\p{Ll}	K	true	true	-
+(?i)\\p{Ll}	ς	true	true	-
+(?i)\\p{Ll}	к	true	true	-
+(?i)\\p{Ll}	٣	false	false	-
+(?i)\\p{Ll}	 	false	false	-
+(?i)[\\p{Ll}x]	a	true	true	-
+(?i)[\\p{Ll}x]	A	true	true	-
+(?i)[\\p{Ll}x]	é	true	true	-
+(?i)[\\p{Ll}x]	ſ	true	true	-
+(?i)[\\p{Ll}x]	K	true	true	-
+(?i)[\\p{Ll}x]	ς	true	true	-
+(?i)[\\p{Ll}x]	к	true	true	-
+(?i)[\\p{Ll}x]	٣	false	false	-
+(?i)[\\p{Ll}x]	 	false	false	-
+(?u)\\p{Ll}	a	true	true	-
+(?u)\\p{Ll}	A	false	false	-
+(?u)\\p{Ll}	é	true	true	-
+(?u)\\p{Ll}	ſ	true	true	-
+(?u)\\p{Ll}	K	false	false	-
+(?u)\\p{Ll}	ς	true	true	-
+(?u)\\p{Ll}	к	true	true	-
+(?u)\\p{Ll}	٣	false	false	-
+(?u)\\p{Ll}	 	false	false	-
+(?u)[\\p{Ll}x]	a	true	true	-
+(?u)[\\p{Ll}x]	A	false	false	-
+(?u)[\\p{Ll}x]	é	true	true	-
+(?u)[\\p{Ll}x]	ſ	true	true	-
+(?u)[\\p{Ll}x]	K	false	false	-
+(?u)[\\p{Ll}x]	ς	true	true	-
+(?u)[\\p{Ll}x]	к	true	true	-
+(?u)[\\p{Ll}x]	٣	false	false	-
+(?u)[\\p{Ll}x]	 	false	false	-
+(?iu)\\p{Ll}	a	true	true	-
+(?iu)\\p{Ll}	A	true	true	-
+(?iu)\\p{Ll}	é	true	true	-
+(?iu)\\p{Ll}	ſ	true	true	-
+(?iu)\\p{Ll}	K	true	true	-
+(?iu)\\p{Ll}	ς	true	true	-
+(?iu)\\p{Ll}	к	true	true	-
+(?iu)\\p{Ll}	٣	false	false	-
+(?iu)\\p{Ll}	 	false	false	-
+(?iu)[\\p{Ll}x]	a	true	true	-
+(?iu)[\\p{Ll}x]	A	true	true	-
+(?iu)[\\p{Ll}x]	é	true	true	-
+(?iu)[\\p{Ll}x]	ſ	true	true	-
+(?iu)[\\p{Ll}x]	K	true	true	-
+(?iu)[\\p{Ll}x]	ς	true	true	-
+(?iu)[\\p{Ll}x]	к	true	true	-
+(?iu)[\\p{Ll}x]	٣	false	false	-
+(?iu)[\\p{Ll}x]	 	false	false	-
+(?U)\\p{Ll}	a	true	true	-
+(?U)\\p{Ll}	A	false	false	-
+(?U)\\p{Ll}	é	true	true	-
+(?U)\\p{Ll}	ſ	true	true	-
+(?U)\\p{Ll}	K	false	false	-
+(?U)\\p{Ll}	ς	true	true	-
+(?U)\\p{Ll}	к	true	true	-
+(?U)\\p{Ll}	٣	false	false	-
+(?U)\\p{Ll}	 	false	false	-
+(?U)[\\p{Ll}x]	a	true	true	-
+(?U)[\\p{Ll}x]	A	false	false	-
+(?U)[\\p{Ll}x]	é	true	true	-
+(?U)[\\p{Ll}x]	ſ	true	true	-
+(?U)[\\p{Ll}x]	K	false	false	-
+(?U)[\\p{Ll}x]	ς	true	true	-
+(?U)[\\p{Ll}x]	к	true	true	-
+(?U)[\\p{Ll}x]	٣	false	false	-
+(?U)[\\p{Ll}x]	 	false	false	-
+(?iU)\\p{Ll}	a	true	true	-
+(?iU)\\p{Ll}	A	true	true	-
+(?iU)\\p{Ll}	é	true	true	-
+(?iU)\\p{Ll}	ſ	true	true	-
+(?iU)\\p{Ll}	K	true	true	-
+(?iU)\\p{Ll}	ς	true	true	-
+(?iU)\\p{Ll}	к	true	true	-
+(?iU)\\p{Ll}	٣	false	false	-
+(?iU)\\p{Ll}	 	false	false	-
+(?iU)[\\p{Ll}x]	a	true	true	-
+(?iU)[\\p{Ll}x]	A	true	true	-
+(?iU)[\\p{Ll}x]	é	true	true	-
+(?iU)[\\p{Ll}x]	ſ	true	true	-
+(?iU)[\\p{Ll}x]	K	true	true	-
+(?iU)[\\p{Ll}x]	ς	true	true	-
+(?iU)[\\p{Ll}x]	к	true	true	-
+(?iU)[\\p{Ll}x]	٣	false	false	-
+(?iU)[\\p{Ll}x]	 	false	false	-
+(?i)\\p{Nd}	a	false	false	-
+(?i)\\p{Nd}	A	false	false	-
+(?i)\\p{Nd}	é	false	false	-
+(?i)\\p{Nd}	ſ	false	false	-
+(?i)\\p{Nd}	K	false	false	-
+(?i)\\p{Nd}	ς	false	false	-
+(?i)\\p{Nd}	к	false	false	-
+(?i)\\p{Nd}	٣	true	true	-
+(?i)\\p{Nd}	 	false	false	-
+(?i)[\\p{Nd}x]	a	false	false	-
+(?i)[\\p{Nd}x]	A	false	false	-
+(?i)[\\p{Nd}x]	é	false	false	-
+(?i)[\\p{Nd}x]	ſ	false	false	-
+(?i)[\\p{Nd}x]	K	false	false	-
+(?i)[\\p{Nd}x]	ς	false	false	-
+(?i)[\\p{Nd}x]	к	false	false	-
+(?i)[\\p{Nd}x]	٣	true	true	-
+(?i)[\\p{Nd}x]	 	false	false	-
+(?u)\\p{Nd}	a	false	false	-
+(?u)\\p{Nd}	A	false	false	-
+(?u)\\p{Nd}	é	false	false	-
+(?u)\\p{Nd}	ſ	false	false	-
+(?u)\\p{Nd}	K	false	false	-
+(?u)\\p{Nd}	ς	false	false	-
+(?u)\\p{Nd}	к	false	false	-
+(?u)\\p{Nd}	٣	true	true	-
+(?u)\\p{Nd}	 	false	false	-
+(?u)[\\p{Nd}x]	a	false	false	-
+(?u)[\\p{Nd}x]	A	false	false	-
+(?u)[\\p{Nd}x]	é	false	false	-
+(?u)[\\p{Nd}x]	ſ	false	false	-
+(?u)[\\p{Nd}x]	K	false	false	-
+(?u)[\\p{Nd}x]	ς	false	false	-
+(?u)[\\p{Nd}x]	к	false	false	-
+(?u)[\\p{Nd}x]	٣	true	true	-
+(?u)[\\p{Nd}x]	 	false	false	-
+(?iu)\\p{Nd}	a	false	false	-
+(?iu)\\p{Nd}	A	false	false	-
+(?iu)\\p{Nd}	é	false	false	-
+(?iu)\\p{Nd}	ſ	false	false	-
+(?iu)\\p{Nd}	K	false	false	-
+(?iu)\\p{Nd}	ς	false	false	-
+(?iu)\\p{Nd}	к	false	false	-
+(?iu)\\p{Nd}	٣	true	true	-
+(?iu)\\p{Nd}	 	false	false	-
+(?iu)[\\p{Nd}x]	a	false	false	-
+(?iu)[\\p{Nd}x]	A	false	false	-
+(?iu)[\\p{Nd}x]	é	false	false	-
+(?iu)[\\p{Nd}x]	ſ	false	false	-
+(?iu)[\\p{Nd}x]	K	false	false	-
+(?iu)[\\p{Nd}x]	ς	false	false	-
+(?iu)[\\p{Nd}x]	к	false	false	-
+(?iu)[\\p{Nd}x]	٣	true	true	-
+(?iu)[\\p{Nd}x]	 	false	false	-
+(?U)\\p{Nd}	a	false	false	-
+(?U)\\p{Nd}	A	false	false	-
+(?U)\\p{Nd}	é	false	false	-
+(?U)\\p{Nd}	ſ	false	false	-
+(?U)\\p{Nd}	K	false	false	-
+(?U)\\p{Nd}	ς	false	false	-
+(?U)\\p{Nd}	к	false	false	-
+(?U)\\p{Nd}	٣	true	true	-
+(?U)\\p{Nd}	 	false	false	-
+(?U)[\\p{Nd}x]	a	false	false	-
+(?U)[\\p{Nd}x]	A	false	false	-
+(?U)[\\p{Nd}x]	é	false	false	-
+(?U)[\\p{Nd}x]	ſ	false	false	-
+(?U)[\\p{Nd}x]	K	false	false	-
+(?U)[\\p{Nd}x]	ς	false	false	-
+(?U)[\\p{Nd}x]	к	false	false	-
+(?U)[\\p{Nd}x]	٣	true	true	-
+(?U)[\\p{Nd}x]	 	false	false	-
+(?iU)\\p{Nd}	a	false	false	-
+(?iU)\\p{Nd}	A	false	false	-
+(?iU)\\p{Nd}	é	false	false	-
+(?iU)\\p{Nd}	ſ	false	false	-
+(?iU)\\p{Nd}	K	false	false	-
+(?iU)\\p{Nd}	ς	false	false	-
+(?iU)\\p{Nd}	к	false	false	-
+(?iU)\\p{Nd}	٣	true	true	-
+(?iU)\\p{Nd}	 	false	false	-
+(?iU)[\\p{Nd}x]	a	false	false	-
+(?iU)[\\p{Nd}x]	A	false	false	-
+(?iU)[\\p{Nd}x]	é	false	false	-
+(?iU)[\\p{Nd}x]	ſ	false	false	-
+(?iU)[\\p{Nd}x]	K	false	false	-
+(?iU)[\\p{Nd}x]	ς	false	false	-
+(?iU)[\\p{Nd}x]	к	false	false	-
+(?iU)[\\p{Nd}x]	٣	true	true	-
+(?iU)[\\p{Nd}x]	 	false	false	-
+[a&b&c]	a	true	true	-
+[a&b&c]	b	true	true	-
+[a&b&c]	c	true	true	-
+[a&b&c]	&	true	true	-
+[a&b&&c]	a	false	false	-
+[a&b&&c]	b	false	false	-
+[a&b&&c]	c	false	false	-
+[a&b&&c]	&	false	false	-
+[a&b&&&c]	a	true	true	-
+[a&b&&&c]	b	true	true	-
+[a&b&&&c]	c	true	true	-
+[a&b&&&c]	&	true	true	-
+[a&b&&&&c]	a	false	false	-
+[a&b&&&&c]	b	false	false	-
+[a&b&&&&c]	c	false	false	-
+[a&b&&&&c]	&	false	false	-
+[a&b&&&&&c]	a	true	true	-
+[a&b&&&&&c]	b	true	true	-
+[a&b&&&&&c]	c	true	true	-
+[a&b&&&&&c]	&	true	true	-
+[a&b&&&&&&c]	a	false	false	-
+[a&b&&&&&&c]	b	false	false	-
+[a&b&&&&&&c]	c	false	false	-
+[a&b&&&&&&c]	&	false	false	-
+[a&&b&c]	a	false	false	-
+[a&&b&c]	b	false	false	-
+[a&&b&c]	c	false	false	-
+[a&&b&c]	&	false	false	-
+[a&&b&&c]	a	false	false	-
+[a&&b&&c]	b	false	false	-
+[a&&b&&c]	c	false	false	-
+[a&&b&&c]	&	false	false	-
+[a&&b&&&c]	a	false	false	-
+[a&&b&&&c]	b	false	false	-
+[a&&b&&&c]	c	false	false	-
+[a&&b&&&c]	&	false	false	-
+[a&&b&&&&c]	a	false	false	-
+[a&&b&&&&c]	b	false	false	-
+[a&&b&&&&c]	c	false	false	-
+[a&&b&&&&c]	&	false	false	-
+[a&&b&&&&&c]	a	false	false	-
+[a&&b&&&&&c]	b	false	false	-
+[a&&b&&&&&c]	c	false	false	-
+[a&&b&&&&&c]	&	false	false	-
+[a&&b&&&&&&c]	a	false	false	-
+[a&&b&&&&&&c]	b	false	false	-
+[a&&b&&&&&&c]	c	false	false	-
+[a&&b&&&&&&c]	&	false	false	-
+[a&&&b&c]	a	true	true	-
+[a&&&b&c]	b	true	true	-
+[a&&&b&c]	c	true	true	-
+[a&&&b&c]	&	true	true	-
+[a&&&b&&c]	a	false	false	-
+[a&&&b&&c]	b	false	false	-
+[a&&&b&&c]	c	false	false	-
+[a&&&b&&c]	&	false	false	-
+[a&&&b&&&c]	a	error	error	-
+[a&&&b&&&c]	b	error	error	-
+[a&&&b&&&c]	c	error	error	-
+[a&&&b&&&c]	&	error	error	-
+[a&&&b&&&&c]	a	error	error	-
+[a&&&b&&&&c]	b	error	error	-
+[a&&&b&&&&c]	c	error	error	-
+[a&&&b&&&&c]	&	error	error	-
+[a&&&b&&&&&c]	a	error	error	-
+[a&&&b&&&&&c]	b	error	error	-
+[a&&&b&&&&&c]	c	error	error	-
+[a&&&b&&&&&c]	&	error	error	-
+[a&&&b&&&&&&c]	a	error	error	-
+[a&&&b&&&&&&c]	b	error	error	-
+[a&&&b&&&&&&c]	c	error	error	-
+[a&&&b&&&&&&c]	&	error	error	-
+[a&&&&b&c]	a	false	false	-
+[a&&&&b&c]	b	false	false	-
+[a&&&&b&c]	c	false	false	-
+[a&&&&b&c]	&	false	false	-
+[a&&&&b&&c]	a	false	false	-
+[a&&&&b&&c]	b	false	false	-
+[a&&&&b&&c]	c	false	false	-
+[a&&&&b&&c]	&	false	false	-
+[a&&&&b&&&c]	a	false	false	-
+[a&&&&b&&&c]	b	false	false	-
+[a&&&&b&&&c]	c	false	false	-
+[a&&&&b&&&c]	&	false	false	-
+[a&&&&b&&&&c]	a	false	false	-
+[a&&&&b&&&&c]	b	false	false	-
+[a&&&&b&&&&c]	c	false	false	-
+[a&&&&b&&&&c]	&	false	false	-
+[a&&&&b&&&&&c]	a	false	false	-
+[a&&&&b&&&&&c]	b	false	false	-
+[a&&&&b&&&&&c]	c	false	false	-
+[a&&&&b&&&&&c]	&	false	false	-
+[a&&&&b&&&&&&c]	a	false	false	-
+[a&&&&b&&&&&&c]	b	false	false	-
+[a&&&&b&&&&&&c]	c	false	false	-
+[a&&&&b&&&&&&c]	&	false	false	-
+[a&&&&&b&c]	a	true	true	-
+[a&&&&&b&c]	b	true	true	-
+[a&&&&&b&c]	c	true	true	-
+[a&&&&&b&c]	&	true	true	-
+[a&&&&&b&&c]	a	false	false	-
+[a&&&&&b&&c]	b	false	false	-
+[a&&&&&b&&c]	c	false	false	-
+[a&&&&&b&&c]	&	false	false	-
+[a&&&&&b&&&c]	a	error	error	-
+[a&&&&&b&&&c]	b	error	error	-
+[a&&&&&b&&&c]	c	error	error	-
+[a&&&&&b&&&c]	&	error	error	-
+[a&&&&&b&&&&c]	a	error	error	-
+[a&&&&&b&&&&c]	b	error	error	-
+[a&&&&&b&&&&c]	c	error	error	-
+[a&&&&&b&&&&c]	&	error	error	-
+[a&&&&&b&&&&&c]	a	error	error	-
+[a&&&&&b&&&&&c]	b	error	error	-
+[a&&&&&b&&&&&c]	c	error	error	-
+[a&&&&&b&&&&&c]	&	error	error	-
+[a&&&&&b&&&&&&c]	a	error	error	-
+[a&&&&&b&&&&&&c]	b	error	error	-
+[a&&&&&b&&&&&&c]	c	error	error	-
+[a&&&&&b&&&&&&c]	&	error	error	-
+[a&&&&&&b&c]	a	false	false	-
+[a&&&&&&b&c]	b	false	false	-
+[a&&&&&&b&c]	c	false	false	-
+[a&&&&&&b&c]	&	false	false	-
+[a&&&&&&b&&c]	a	false	false	-
+[a&&&&&&b&&c]	b	false	false	-
+[a&&&&&&b&&c]	c	false	false	-
+[a&&&&&&b&&c]	&	false	false	-
+[a&&&&&&b&&&c]	a	false	false	-
+[a&&&&&&b&&&c]	b	false	false	-
+[a&&&&&&b&&&c]	c	false	false	-
+[a&&&&&&b&&&c]	&	false	false	-
+[a&&&&&&b&&&&c]	a	false	false	-
+[a&&&&&&b&&&&c]	b	false	false	-
+[a&&&&&&b&&&&c]	c	false	false	-
+[a&&&&&&b&&&&c]	&	false	false	-
+[a&&&&&&b&&&&&c]	a	false	false	-
+[a&&&&&&b&&&&&c]	b	false	false	-
+[a&&&&&&b&&&&&c]	c	false	false	-
+[a&&&&&&b&&&&&c]	&	false	false	-
+[a&&&&&&b&&&&&&c]	a	false	false	-
+[a&&&&&&b&&&&&&c]	b	false	false	-
+[a&&&&&&b&&&&&&c]	c	false	false	-
+[a&&&&&&b&&&&&&c]	&	false	false	-
+[a&b]	a	true	true	-
+[a&b]	b	true	true	-
+[a&b]	c	false	false	-
+[a&b]	&	true	true	-
+[a&&b]	a	false	false	-
+[a&&b]	b	false	false	-
+[a&&b]	c	false	false	-
+[a&&b]	&	false	false	-
+[a&&&b]	a	true	true	-
+[a&&&b]	b	true	true	-
+[a&&&b]	c	false	false	-
+[a&&&b]	&	true	true	-
+[a&&&&b]	a	false	false	-
+[a&&&&b]	b	false	false	-
+[a&&&&b]	c	false	false	-
+[a&&&&b]	&	false	false	-
+[a&&&&&b]	a	true	true	-
+[a&&&&&b]	b	true	true	-
+[a&&&&&b]	c	false	false	-
+[a&&&&&b]	&	true	true	-
+[a&&&&&&b]	a	false	false	-
+[a&&&&&&b]	b	false	false	-
+[a&&&&&&b]	c	false	false	-
+[a&&&&&&b]	&	false	false	-
+[a&&&&&&&b]	a	true	true	-
+[a&&&&&&&b]	b	true	true	-
+[a&&&&&&&b]	c	false	false	-
+[a&&&&&&&b]	&	true	true	-

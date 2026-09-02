@@ -324,3 +324,14 @@ filter-jq-host-timezone-is-withheld
 # egret's is a bound rather than a crash.
 filter-regexmatch-ampersands-only
 filter-jq-source-past-the-cap
+
+# --- W2 Task 6, fix round 3.
+#
+#   filter-regexmatch-two-odd-ampersand-runs -> a_pattern_java_rejects_is_rejected_here_too
+#
+# `[a&&&b&&&c]` is `Bad intersection syntax` in Java -- two runs of `&` where
+# the first is odd and at least 3 -- and the `regex` crate accepts it. The
+# rule is derived from 43 measured patterns, not from the one example: a
+# single `&&&` run is a UNION (`[a&&&b]` is `[ab&]`), `&&&&` is an
+# intersection, and `[a&&&&b&&&&c]` is legal.
+filter-regexmatch-two-odd-ampersand-runs

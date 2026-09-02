@@ -148,10 +148,15 @@ pub(super) const MAX_STEPS: usize = 65536;
 ///
 /// Explicit rather than inherited: a 2 MiB tokio worker and an 8 MiB main
 /// thread give the same source wildly different room, and a bound that
-/// depends on the caller is not a bound. 64 MiB of thread stack is reserved
-/// address space, committed lazily, and the cap below keeps the amount
-/// actually touched to a fraction of it.
-pub(super) const JQ_STACK_BYTES: usize = 64 * 1024 * 1024;
+/// depends on the caller is not a bound.
+///
+/// **256 MiB, because the cap is derived from it and a smaller cap cut real
+/// programs.** A thread stack is reserved address space committed lazily, so
+/// the number costs nothing until it is touched, and what can actually be
+/// touched is [`MAX_SOURCE_BYTES`] x [`WORST_STACK_PER_SOURCE_BYTE`] = about
+/// 43 MiB, only ever by a deliberately pathological source. Raising the stack
+/// is the right lever here; shaving [`PARSE_STACK_MARGIN`] is not.
+pub(super) const JQ_STACK_BYTES: usize = 256 * 1024 * 1024;
 
 /// The worst measured parser stack cost per byte of jq source, over every
 /// recursive construct found: `-`×N, at **9.99 KiB per byte** on a 2 MiB
@@ -166,10 +171,12 @@ const WORST_STACK_PER_SOURCE_BYTE: usize = 10 * 1024;
 const PARSE_STACK_MARGIN: usize = 6;
 
 /// The length [`check_source`] allows, **derived** rather than chosen:
-/// 64 MiB / 10 KiB / 6 = 1092 bytes.
+/// 256 MiB / 10 KiB / 6 = 4369 bytes.
 ///
-/// The arithmetic is here so it can be re-derived. It is small, and it has to
-/// be: at 10 KiB of stack per byte, a 1 MiB source would need 10 GiB.
+/// The arithmetic is here so it can be re-derived. An earlier cut derived
+/// 1092 from a 64 MiB stack and that refused a realistic 1 352-byte jq
+/// pipeline Kestra runs — a functional cut with no fidelity behind it. The
+/// lever is the stack, not the margin.
 pub(super) const MAX_SOURCE_BYTES: usize =
     JQ_STACK_BYTES / WORST_STACK_PER_SOURCE_BYTE / PARSE_STACK_MARGIN;
 
@@ -193,6 +200,37 @@ pub(super) const MAX_VALUE_LENGTH: usize = super::env::MAX_OUTPUT_BYTES;
 
 /// The name of the per-step guard [`BOUNDED_DEFS`] calls.
 pub(super) const TICK: &str = "__egret_tick";
+
+/// How deeply nested a value may be when it leaves the jq thread.
+///
+/// **This is a third bound, on a third axis, and the first two do not touch
+/// it.** `MAX_SOURCE_BYTES` bounds the source; `MAX_STEPS` and `MAX_RUN`
+/// bound the evaluation; neither bounds the DEPTH of the value jq builds.
+/// `jq('reduce range(1400) as $i (.;[.])')` is a 40-byte source that
+/// evaluates in 0.04 s and builds a 1 400-deep value, and every one of
+/// egret's own value writers is recursive over it.
+///
+/// **128 is `serde_json`'s own recursion limit**, which is what already
+/// bounds the *other* way a value enters this crate — a context deeper than
+/// that fails to parse. Using the same number gives one invariant instead of
+/// two: **no value anywhere in this crate is more than
+/// `MAX_VALUE_DEPTH` deep.**
+///
+/// It is also far inside what the recursion can afford. Measured, by
+/// bisecting the depth that overflows a thread of a given size, and linear in
+/// that size:
+///
+/// | writer | KiB of stack per level |
+/// |---|---:|
+/// | `runners::env::kestra_to_string` | **1.346** |
+/// | `runners::ionfmt::write_ion` | 1.049 |
+/// | `runners::env::write_json` | 1.018 |
+/// | `runners::yamlfmt::to_yaml` | 0.391 |
+///
+/// At the worst of those, 128 levels need 172 KiB — a **twelvefold** margin
+/// on the 2 MiB stack a tokio worker gives the caller, which is the thread
+/// that runs every one of them.
+pub(super) const MAX_VALUE_DEPTH: usize = 128;
 
 /// Why a jq program was refused before it ran.
 ///
@@ -628,6 +666,41 @@ fn contains_word(source: &str, word: &str) -> bool {
     })
 }
 
+/// The depth of a jq value, **computed iteratively**, capped at
+/// [`MAX_VALUE_DEPTH`] + 1.
+///
+/// Iteratively because the thing it is guarding against is recursion over
+/// this value: a recursive depth check is the same overflow one function
+/// earlier. The explicit stack holds `(value, depth)` pairs and never grows
+/// past the number of nodes at the current frontier.
+///
+/// It stops as soon as the limit is exceeded, so a value 65 536 deep costs
+/// 129 steps, not 65 536.
+pub(super) fn too_deep(value: &Val) -> bool {
+    let mut stack: Vec<(&Val, usize)> = vec![(value, 1)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > MAX_VALUE_DEPTH {
+            return true;
+        }
+        match value {
+            Val::Arr(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Val::Obj(entries) => {
+                stack.extend(entries.values().map(|item| (item, depth + 1)));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The message [`too_deep`] earns.
+pub(super) fn too_deep_message() -> String {
+    format!(
+        "jq: the result nests more than {MAX_VALUE_DEPTH} levels deep, which is what every \
+         value writer in egret recurses over"
+    )
+}
+
 /// The per-step deadline [`BOUNDED_DEFS`] calls, as a native.
 ///
 /// Identity on the way through; it raises once the run has taken longer than
@@ -856,7 +929,8 @@ mod tests {
                     <= JQ_STACK_BYTES
             )
         };
-        for (name, program) in shapes(4000) {
+        // Derived from the cap, so the test stays right if the cap moves.
+        for (name, program) in shapes(MAX_SOURCE_BYTES + 1) {
             let refused = check_source(&program).expect_err("a 4000-deep program is refused");
             assert!(
                 refused.0.contains("egret's limit is"),

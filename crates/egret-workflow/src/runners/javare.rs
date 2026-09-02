@@ -997,15 +997,17 @@ impl Translator {
                     JavaRegexError::Syntax(format!("Unknown character property name {{{name}}}"))
                 }
             })?;
-        // Through the same writer a `[...]` goes through, so `(?i)\p{Lower}`
-        // gets the ASCII fold that makes it match `A`. Writing the brackets
-        // here directly is what made it not.
+        // Through the same writer a `[...]` goes through. A bare property's
+        // fold is decided by the property alone: an ASCII-only one never
+        // takes the Unicode fold, `(?u)` or not.
+        let ascii_only = is_ascii_only_property(&name);
         emit_class(
             out,
             &translated,
             negated,
             self.flags,
-            !is_ascii_only_property(&name),
+            !ascii_only,
+            ascii_only,
         );
         Ok(())
     }
@@ -1048,6 +1050,9 @@ impl Translator {
             class.negated = true;
         }
         let mut operand: Vec<ClassItem> = Vec::new();
+        // Set by a run of an ODD number of `&` at least 3 long; a later run
+        // that contains a no-op is then a syntax error. See the `&` arm.
+        let mut after_an_odd_run = false;
         // A `]` in first position is a literal `]`, in Java as in POSIX.
         if self.peek() == Some(']') {
             self.pos += 1;
@@ -1088,22 +1093,48 @@ impl Translator {
                     return Ok(class);
                 }
                 '&' if self.chars.get(self.pos + 1) == Some(&'&') => {
-                    // **An `&&` whose right operand would be empty is a
-                    // NO-OP, not an empty intersection.** Java's `clazz()`
-                    // reads the right side `while (ch != ']' && ch != '&')`,
-                    // so `[a&&&b]` leaves it null, the `&&` does nothing, and
-                    // the third `&` is a literal: the class is `a`, `&`, `b`.
-                    // Measured over eleven `&`-runs; an earlier cut read
-                    // `&b` as the right operand and answered the empty set.
-                    let right_is_empty =
-                        matches!(self.chars.get(self.pos + 2), Some('&') | Some(']') | None);
-                    self.pos += 2;
-                    if right_is_empty {
-                        // ... and with an empty LEFT as well, Java has
-                        // nothing to union and throws. `[&&&]` and `[&&&&]`.
+                    // **A run of `&` is read as a whole**, because what Java
+                    // does with it depends on the run's LENGTH and on whether
+                    // an earlier run was odd. Measured over 43 patterns
+                    // (`[a&^k b]` for k in 1..7, and `[a&^k1 b&^k2 c]` for
+                    // k1,k2 in 1..6):
+                    //
+                    // | k | what the run is |
+                    // |---|---|
+                    // | 1 | a literal `&` |
+                    // | 2 | an intersection |
+                    // | 3 | a no-op `&&` and a literal `&` |
+                    // | 4 | a no-op `&&` and an intersection |
+                    // | odd | (k-1)/2 no-ops and a literal `&` |
+                    // | even | k/2-1 no-ops and an intersection |
+                    //
+                    // and **a run containing a no-op is `Bad intersection
+                    // syntax` if an earlier run was ODD and at least 3** —
+                    // `[a&&&b&&&c]` throws while `[a&&&&b&&&&c]` and
+                    // `[a&&&&&b]` do not. Counting no-ops alone was wrong in
+                    // both directions.
+                    let mut run = 0usize;
+                    while self.chars.get(self.pos) == Some(&'&') {
+                        self.pos += 1;
+                        run += 1;
+                    }
+                    let odd = run % 2 == 1;
+                    let no_ops = if odd { (run - 1) / 2 } else { run / 2 - 1 };
+                    if no_ops > 0 {
+                        // With an empty LEFT as well, Java has nothing to
+                        // union and throws. `[&&&]`, `[&&&&]`, `[&&&a&&&b]`.
                         if operand.is_empty() && class.operands.is_empty() {
                             return Err(self.syntax("Bad class syntax"));
                         }
+                        if after_an_odd_run {
+                            return Err(self.syntax("Bad intersection syntax"));
+                        }
+                    }
+                    if odd && run >= 3 {
+                        after_an_odd_run = true;
+                    }
+                    if odd {
+                        operand.push(ClassItem::Char('&'));
                     } else {
                         class.operands.push(std::mem::take(&mut operand));
                     }
@@ -1231,12 +1262,32 @@ enum ClassItem {
 
 /// Writes a class, folding ASCII case into it when `(?i)` is on.
 fn write_class(out: &mut String, class: &ClassAst, flags: Flags) -> Result<(), JavaRegexError> {
+    // A class that MIXES an ASCII-only property with anything else needs a
+    // PER-MEMBER fold under `(?iu)`: Java folds the literal with Unicode and
+    // the property with ASCII. One class-level choice cannot express that,
+    // and splitting the class into an alternation would be wrong in the
+    // presence of `&&`. Refused rather than answered under either fold --
+    // 14 rows of a 7 182-probe sweep, and `(?iu)` over a mixed class is not
+    // something a flow writes.
+    if flags.case_insensitive
+        && flags.unicode_case
+        && class_has_ascii_only_property(class)
+        && !class_is_only_ascii_properties(class)
+    {
+        return Err(JavaRegexError::Unsupported(
+            "'(?iu)' over a class that mixes an ASCII-only property (\\p{Alpha} and its family) \
+             with anything else -- Java folds the two halves differently and a single class \
+             cannot"
+                .to_string(),
+        ));
+    }
     emit_class(
         out,
         &class_inner(class, flags),
         class.negated,
         flags,
         class_has_property(class),
+        class_is_only_ascii_properties(class),
     );
     Ok(())
 }
@@ -1255,6 +1306,45 @@ fn class_has_property(class: &ClassAst) -> bool {
             .any(|m| matches!(m, ClassItem::Property(_, _, true))),
         _ => false,
     })
+}
+
+/// Is this class **nothing but** ASCII-only properties?
+///
+/// Such a class keeps the ASCII fold even under `(?u)`: Java's `(?u)` is
+/// `UNICODE_CASE`, which widens the folding of literals and ranges, and does
+/// **not** widen a POSIX property — only `(?U)` does that, and `(?U)` is
+/// refused. Measured: `(?iu)\p{Alpha}` does not match `ſ` or `\u212a`, while
+/// `(?iu)k` matches `\u212a`.
+///
+/// This is the same over-fold as the bare-`(?i)` one, re-entering through the
+/// `(?u)` dimension — the fixture had `(?iu)` on a LITERAL and never on a
+/// property.
+fn class_has_ascii_only_property(class: &ClassAst) -> bool {
+    class.operands.iter().flatten().any(|item| match item {
+        ClassItem::Property(_, _, unicode) => !unicode,
+        ClassItem::Nested(nested) => class_has_ascii_only_property(nested),
+        ClassItem::Quoted(members) => members
+            .iter()
+            .any(|m| matches!(m, ClassItem::Property(_, _, false))),
+        _ => false,
+    })
+}
+
+fn class_is_only_ascii_properties(class: &ClassAst) -> bool {
+    let mut any = false;
+    for item in class.operands.iter().flatten() {
+        match item {
+            ClassItem::Property(_, _, false) => any = true,
+            ClassItem::Nested(nested) => {
+                if !class_is_only_ascii_properties(nested) {
+                    return false;
+                }
+                any = true;
+            }
+            _ => return false,
+        }
+    }
+    any
 }
 
 /// Writes one class from its inner text, applying **whichever of Java's two
@@ -1285,8 +1375,19 @@ fn class_has_property(class: &ClassAst) -> bool {
 /// **The fold happens BEFORE the negation.** `(?i)[^a-c]` does not match `B`
 /// in Java: the fold closes `a-c` into `a-cA-C` and the negation then
 /// excludes both cases.
-fn emit_class(out: &mut String, inner: &str, negated: bool, flags: Flags, has_property: bool) {
-    if flags.case_insensitive && (has_property || flags.unicode_case) {
+fn emit_class(
+    out: &mut String,
+    inner: &str,
+    negated: bool,
+    flags: Flags,
+    has_unicode_property: bool,
+    only_ascii_properties: bool,
+) {
+    // `(?u)` widens the fold of literals and ranges; it does NOT widen an
+    // ASCII-only property. So a class that is nothing but those keeps the
+    // ASCII fold even under `(?iu)`.
+    let unicode_fold = has_unicode_property || (flags.unicode_case && !only_ascii_properties);
+    if flags.case_insensitive && unicode_fold {
         out.push_str("(?i:[");
         if negated {
             out.push('^');
@@ -1622,8 +1723,13 @@ mod tests {
     /// answers for the untranslated pattern, which is what makes this test
     /// able to fail if the translation is removed.
     /// **The sweep, as a fixture.** `oracle/regex-classes.txt` records what
-    /// Java answers for 171 (pattern, subject) pairs and what egret must
+    /// Java answers for 1 868 (pattern, subject) pairs and what egret must
     /// answer, and this asserts both directions.
+    ///
+    /// It was 171 rows and sampled where the answers agree — `(?iu)` on a
+    /// LITERAL and never on a property, one `&&&` run and never two. Both
+    /// gaps leaked a silent class. It is now a cross-product along those two
+    /// dimensions.
     ///
     /// It exists because the claim it checks — "after the translation nothing
     /// is silent" — was made once as a sentence and was **false**: a review
@@ -1693,7 +1799,7 @@ mod tests {
                  answers {actual}"
             );
         }
-        assert_eq!(rows, 171, "the fixture lost rows");
+        assert_eq!(rows, 1868, "the fixture lost rows");
     }
 
     /// The fixture's `java` column must be what the **committed harness

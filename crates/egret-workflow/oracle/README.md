@@ -129,7 +129,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**89** entries carry it today, counted out of `golden.json` rather than added
+**90** entries carry it today, counted out of `golden.json` rather than added
 up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -152,7 +152,7 @@ That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
 entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
 whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 89 are *also* in `baseline.txt`, because
+does **not** make it pass: 5 of the 90 are *also* in `baseline.txt`, because
 egret *succeeds* where Kestra throws — a real divergence, and it stays
 visible.
 
@@ -166,7 +166,7 @@ task's fix round, 62 of 486 after its second, 66 of 513 after its third,
 76 of 632 after W2 Task 6 -- which BANKED seven (its whole batch of
 filters) and RECORDED seventeen, every one of them a place the two engines
 answer differently rather than a filter that is not ported -- and 78 of
-673 after that task's fix round, and **82 of 693** after its second.
+673 after that task's fix round, 82 of 693 after its second, and **86 of 706** after its third.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -678,7 +678,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 693 entries)
+## Corpus (`corpus.json`, 706 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -2263,3 +2263,128 @@ which is what `filter-yaml-next-line-character-folds` records.
 U+2028 or U+2029 in a scalar is a line break to a YAML 1.1 reader, so Kestra's
 own plain-scalar output does not round trip. Escaping is what avoids it, and
 Kestra does not escape.
+
+## W2 Task 6, fix round 3 — the THIRD axis, and where egret itself recurses
+
+A reviewer aborted the process with a 40-byte template:
+
+```
+{{ v | jq('reduce range(1400) as $i (.;[.])') }}   ->  SIGABRT
+```
+
+Three orders of magnitude inside `MAX_SOURCE_BYTES`, 0.04 s of evaluation so
+the deadline never fires, and `reduce` is not one of the definitions
+`BOUNDED_DEFS` replaces. **Both existing bounds were on the wrong axis.**
+`MAX_SOURCE_BYTES` bounds the source; `MAX_STEPS` and `MAX_RUN` bound the
+evaluation; neither bounds the **depth of the value jq builds**, and every one
+of egret's own value writers recurses over that.
+
+**This was the fourth time a bound had been placed where the last exploit was
+rather than where the recursion is.** So, before fixing it: every place egret
+recurses on a value, and what bounds each.
+
+| recursion | thread | bounded by |
+|---|---|---|
+| `jaq_json::Val::to_string()` (the byte cap) | jq | the depth check, which runs first |
+| `runners::filters::jq_out` | jq | the depth check |
+| `jaq_json::Val`'s `Drop` | jq | `JQ_STACK_BYTES`, 256 MiB |
+| `jaq_json::read::parse_single` (the input) | jq | `serde_json`'s own 128 limit upstream of it |
+| `runners::filters::jaq_value` | **caller** | the depth check |
+| `JqOut`'s and `minijinja::Value`'s `Drop` | **caller** | the depth check |
+| `runners::env::write_json` | **caller** | the depth check, or `serde_json`'s 128 for a context value |
+| `runners::ionfmt::write_ion` | **caller** | as above |
+| `runners::yamlfmt::write_map`/`write_seq` | **caller** | as above |
+| `runners::env::kestra_to_string` | **caller** | as above |
+| `runners::env::json_to_minijinja` | **caller** | `serde_json`'s 128 |
+| `runners::filters::write_equality_key` (`distinct`) | **caller** | as above |
+| `runners::filters::escape_value` (`escapeChar`) | **caller** | as above |
+
+**Nine of the thirteen are on the CALLER's thread**, which in production is a
+2 MiB tokio worker and which `JQ_STACK_BYTES` does not touch — the module's
+own comment said so ("the conversion happens back on the caller's thread") and
+the bound was placed as though it did not.
+
+### `MAX_VALUE_DEPTH` = 128, and why that number
+
+The check runs **on the jq thread, before anything touches the value**, so
+nothing deep ever crosses back; and it is **iterative**, because a recursive
+depth check is the same overflow one function earlier.
+
+128 is **`serde_json`'s own recursion limit**, which is what already bounds the
+other way a value enters this crate — a context deeper than that fails to
+parse. One invariant instead of two: *no value anywhere in this crate is more
+than `MAX_VALUE_DEPTH` deep.*
+
+It is also far inside what the recursion can afford. Measured by bisecting the
+depth that overflows a thread of a given size, and linear in that size:
+
+| writer | KiB of stack per level |
+|---|---:|
+| `kestra_to_string` | **1.346** |
+| `write_ion` | 1.049 |
+| `write_json` | 1.018 |
+| `to_yaml` | 0.391 |
+
+128 levels at the worst of those is 172 KiB — a **twelvefold** margin on 2 MiB.
+`a_value_at_the_depth_limit_renders_on_a_tokio_workers_stack` renders a
+max-depth value through every writer on a real 2 MiB thread, because that is
+the configuration the claim is about.
+
+**`__egret_guard` was measuring the wrong dimension.** Its test is
+`. >= "" and length > 1048576`; every node of a `[.]`-nest has length 1, so it
+is a **breadth** guard and the attack is **depth**. It stays — a single
+enormous step is a real shape — but it was never going to catch this.
+
+### The source cap was cutting real programs, and the lever is the stack
+
+A 1 352-byte pipeline Kestra runs was refused. A thread stack is reserved
+address space committed lazily, so `JQ_STACK_BYTES` is now **256 MiB** and
+`MAX_SOURCE_BYTES` follows it to **4 369 bytes**, with `PARSE_STACK_MARGIN`
+untouched at 6. What can actually be touched is cap × 10 KiB ≈ 43 MiB, and
+only by a deliberately pathological source.
+
+### The over-fold came back through `(?u)`
+
+`(?iu)\p{Alpha}` on `ſ` and `\u212a`: Kestra false, egret true, both booleans,
+no error. `emit_class`'s condition was
+`has_property || flags.unicode_case`, and for an ASCII-only property
+`has_property` is false while `|| flags.unicode_case` still selected the
+Unicode fold. **Java's `(?u)` is `UNICODE_CASE` and does not widen a POSIX
+property — only `(?U)` does.** The round-2 fixture had `(?iu)` on a LITERAL
+and never on a fold-preimage.
+
+A class that **mixes** an ASCII-only property with anything else needs a
+per-member fold under `(?iu)` — Java folds the two halves differently — and one
+character class cannot carry two. Refused, 14 rows of a 7 182-probe sweep.
+
+### `&&` runs: the rule is the run LENGTH, and an earlier ODD run
+
+Round 2 derived the single-run rule correctly and then generalised it wrongly
+by counting no-ops. Measured over 43 patterns (`[a&^k b]` for k in 1..7 and
+`[a&^k1 b&^k2 c]` for k1,k2 in 1..6):
+
+| k | what the run is |
+|---|---|
+| 1 | a literal `&` |
+| 2 | an intersection |
+| odd | (k-1)/2 no-ops and a literal `&` |
+| even | k/2-1 no-ops and an intersection |
+
+and a run containing a no-op is **`Bad intersection syntax` if an earlier run
+was odd and at least 3**. `[a&&&b&&&c]` throws; `[a&&&&b&&&&c]` and
+`[a&&&&&b]` do not. Counting no-ops was wrong in both directions.
+
+### The probe corpus is wider along the two dimensions that leaked
+
+`regex-classes.txt` went from 171 rows to **1 868**: every Java POSIX name and
+four categories × `(?i)`/`(?u)`/`(?iu)`/`(?U)`/`(?iU)` × bare, in a class, and
+in a MIXED class; plus every `&`-run pair from 1 to 6. The regeneration path
+was already there — the gap was the corpus's width, not the mechanism.
+
+### After the fix: 30 adversarial programs, no abort and no hang
+
+Deep values through every filter, deep objects, deep-and-wide, many deep
+results, `paths`/`walk`/`tostream`/`setpath`/`getpath` over deep values, a
+100 000-bracket JSON string input, a 65 536-element output, a catastrophic
+regex, a 100 kB `regexReplace`, and a source at and past the cap. **Nothing
+took more than 0.8 s and nothing aborted.**
