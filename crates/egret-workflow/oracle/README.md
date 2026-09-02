@@ -253,9 +253,9 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 98 entries)
+## Corpus (`corpus.json`, 99 entries)
 
-- **27 operator cases**, taken verbatim from the task brief plus two
+- **28 operator cases**, taken verbatim from the task brief plus three
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
   both operators, plus a plain present case), ternary (including nesting),
   `isIn`, each of `>`/`>=`/`<`/`<=` across string/number/mixed operands
@@ -264,12 +264,21 @@ entry's non-deterministic output within the same run.
   `LessThanEqualsExpression` — so each can diverge independently), three
   equality-boundary cases (`'a' >= 'a'`, `'a' <= 'a'`, `2 >= 2`) that only the
   `=`-inclusive operators can reach, a literal `??`-looking substring inside a
-  quoted string (proves a naive regex-based rewriter would corrupt it), and
-  three `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
+  quoted string (proves a naive regex-based rewriter would corrupt it), three
+  `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
   `tag-if-ternary`) added after a review of the Task 2 rewriter found it was
   only ever exercised against `{{ }}` — Pebble parses a `{% if %}`/`{% set
   %}`/`{% for %}` tag's body as an expression too, and a tag-body-aware
-  rewrite needs its own oracle coverage, not just `{{ }}`'s.
+  rewrite needs its own oracle coverage, not just `{{ }}`'s — and
+  `unparenthesized-nested-ternary` (`{{ a ? b ? c : d : e }}`,
+  `a=false, b=true`), which empirically pins Pebble's
+  `parseTernaryExpression` grouping (`a ? (b ? c : d) : e`, giving `"e"`)
+  against the wrong right-associative reading a port could plausibly emit
+  instead (which would give `"c"`) — added after a review found the port's
+  own then-branch-parens fix was proven only by prose next to the code and a
+  test whose input (`a ? (b ? 'x' : 'y') : 'z'`) had its own source parens
+  making the grouping explicit, so the fix could regress with nothing in
+  this repository catching it.
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including

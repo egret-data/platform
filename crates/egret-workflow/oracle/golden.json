@@ -161,6 +161,17 @@
   },
   "result" : "yes"
 }, {
+  "id" : "unparenthesized-nested-ternary",
+  "expr" : "{{ a ? b ? c : d : e }}",
+  "context" : {
+    "a" : false,
+    "b" : true,
+    "c" : "c",
+    "d" : "d",
+    "e" : "e"
+  },
+  "result" : "e"
+}, {
   "id" : "filter-chunk",
   "expr" : "{{ list | chunk(size=2) }}",
   "context" : {
@@ -427,7 +438,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-02T14:14:00.219373+07:00"
+  "result" : "2026-09-02T14:21:04.905581+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -474,7 +485,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "QlQojVCtcsz3Pl7BJn8/txGtRe6peTqo9twaFsPoIrZarFZ7fPJEIw=="
+  "result" : "r2wHCT19fWpxEe0fCPS5fmb+vBdKQN+aRTRy3i1dRSHqNFuxY+5WWg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -508,17 +519,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a060f7-afe9-74d0-b77c-ae0eee0e80fd"
+  "result" : "01a060fe-2ad6-7ccc-aaad-a2786fefeb12"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "K8N755T6G0B2Nkk4UtM4i"
+  "result" : "7Rp0Kzv217pmdFDHegmVHb"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3IlJUwILzTrLykqoeL5P9tdP0Gi"
+  "result" : "3IlKMBdVdFqMb3kaBIDjDZ78k8a"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -537,12 +548,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "2"
+  "result" : "5"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "57055"
+  "result" : "57912"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -561,7 +572,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "B43_TT0REcNZ4Ikm0hfrG"
+  "result" : "LVJzpsk6CB3C1vZIbZ5JE"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",

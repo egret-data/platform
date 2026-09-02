@@ -890,6 +890,26 @@ mod tests {
         );
     }
 
+    /// The UNPARENTHESIZED form of the same nesting -- `nested_ternaries_
+    /// rewrite_innermost_first` above uses `a ? (b ? 'x' : 'y') : 'z'`,
+    /// whose source parens already make the grouping explicit and so would
+    /// still pass even without the I3 then-branch-parens fix. This is the
+    /// exact input the I3 finding was about
+    /// (`a ? b ? c : d : e`, `a=false, b=true`: Pebble's own
+    /// `parseTernaryExpression` grouping gives `a ? (b ? c : d) : e`, so
+    /// with `a` false the result is `e`; the bug this module used to have,
+    /// before wrapping the then-branch in parens, silently re-parsed this in
+    /// minijinja as `c if b else (d if a else e)`, giving `c` instead --
+    /// confirmed by deleting the parens at the `format!` in `resolve_pieces`
+    /// and re-running this exact input: the output changed from the string
+    /// below to `"{{ c  if  b  else  d  if  a  else  e }}"`, which
+    /// evaluates to the wrong branch.
+    #[test]
+    fn unparenthesized_nested_ternary_keeps_pebbles_grouping() {
+        let out = rewrite("{{ a ? b ? c : d : e }}").unwrap();
+        assert_eq!(out, "{{(( c ) if ( b ) else  d ) if ( a ) else  e }}");
+    }
+
     #[test]
     fn text_outside_an_expression_is_untouched() {
         assert_eq!(rewrite("literal ?? text").unwrap(), "literal ?? text");
