@@ -253,19 +253,23 @@ ciphertext generated once (via a throwaway harness against the same fixed
 key used in `function-encrypt`'s entry) rather than depending on that other
 entry's non-deterministic output within the same run.
 
-## Corpus (`corpus.json`, 95 entries)
+## Corpus (`corpus.json`, 98 entries)
 
-- **24 operator cases**, taken verbatim from the task brief plus a follow-up
-  fix: the `??`/`???` pair (5 entries covering null vs. absent on both
-  operators, plus a plain present case), ternary (including nesting), `isIn`,
-  each of `>`/`>=`/`<`/`<=` across string/number/mixed operands (`Extension
-  .getBinaryOperators()` registers all four as separate classes —
+- **27 operator cases**, taken verbatim from the task brief plus two
+  follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
+  both operators, plus a plain present case), ternary (including nesting),
+  `isIn`, each of `>`/`>=`/`<`/`<=` across string/number/mixed operands
+  (`Extension.getBinaryOperators()` registers all four as separate classes —
   `GreaterThanExpression`, `GreaterThanEqualsExpression`, `LessThanExpression`,
   `LessThanEqualsExpression` — so each can diverge independently), three
   equality-boundary cases (`'a' >= 'a'`, `'a' <= 'a'`, `2 >= 2`) that only the
-  `=`-inclusive operators can reach, and a literal `??`-looking substring
-  inside a quoted string (proves a naive regex-based rewriter would corrupt
-  it).
+  `=`-inclusive operators can reach, a literal `??`-looking substring inside a
+  quoted string (proves a naive regex-based rewriter would corrupt it), and
+  three `{% %}` tag-body cases (`tag-if-coalesce`, `tag-set-coalesce`,
+  `tag-if-ternary`) added after a review of the Task 2 rewriter found it was
+  only ever exercised against `{{ }}` — Pebble parses a `{% if %}`/`{% set
+  %}`/`{% for %}` tag's body as an expression too, and a tag-body-aware
+  rewrite needs its own oracle coverage, not just `{{ }}`'s.
 - **35 filter entries**, one per registered filter name, each exercising the
   filter's primary documented behavior with a small, readable context.
 - **34 function entries**, one per registered function name (including

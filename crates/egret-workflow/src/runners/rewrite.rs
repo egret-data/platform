@@ -42,8 +42,8 @@
 //!
 //! # Why a tokenizer, not a regex
 //!
-//! Three things defeat a string-substitution rewrite, and all three are live
-//! corpus entries (`oracle/corpus.json`):
+//! Things that defeat a string-substitution rewrite, and are live corpus
+//! entries (`oracle/corpus.json`) or measured review findings:
 //!
 //! - `??` (or `? ... :`) can appear *inside a string literal* —
 //!   `{{ 'a ?? b' }}` must render `a ?? b` unchanged, not
@@ -54,14 +54,20 @@
 //! - Ternaries nest, with or without parens (`a ? (b ? 'x' : 'y') : 'z'`),
 //!   and Kestra's ternary (like Java's) is right-associative
 //!   (`a ? b : c ? d : e` is `a ? b : (c ? d : e)`).
+//! - `,` inside a call/list/map is not an operand boundary a naive split on
+//!   an operator would respect — `f(x, a ?? b)` must rewrite the second
+//!   *argument*, not swallow `x` into the coalesce's left operand.
+//! - `{'k': v}` map literals use `:`, the same character the ternary uses,
+//!   and nest inside `{{ }}` alongside `(`/`[` groups.
 //!
 //! So this module tokenizes: string literals (both quote styles, with
-//! backslash escapes), `(`/`)`/`[`/`]` for nesting, and the four operators
-//! matched longest-first (`???` before `??` before `?`; `isIn` matched as a
-//! whole identifier, not a substring, so it never fires inside e.g.
-//! `thisIsInvalid`). Everything else — identifiers, numbers, whitespace,
-//! commas, dots, `|`, `=`, the untouched comparison operators — is copied
-//! through byte-for-byte.
+//! backslash escapes), `(`/`)`/`[`/`]`/`{`/`}` for nesting, and the operators
+//! matched longest-first (`???` before `??` before `?`; `==`/`!=`/`<=`/`>=`
+//! before their single-char prefix, so a lone `=` unambiguously means
+//! assignment, never half of `==`; `isIn` matched as a whole identifier, not
+//! a substring, so it never fires inside e.g. `thisIsInvalid`). Everything
+//! else — identifiers, numbers, whitespace, dots, `|`, the untouched
+//! comparison operators — is copied through byte-for-byte.
 //!
 //! # `isIn` — provisional
 //!
@@ -83,7 +89,28 @@
 //! String/Number mix that default cannot compare (`oracle/golden.json`'s
 //! `gt-mixed`, `{{ '2' > 10 }}`, is captured as an `error`, not a coerced
 //! value). Whether minijinja's own `>` agrees with any of this is Task 3's
-//! measurement to make, not this rewrite's to guess at.
+//! measurement to make, not this rewrite's to guess at. `==`/`!=`/`<=`/`>=`
+//! are tokenized as single units purely so a bare `=` (see `{% set %}` below)
+//! is never ambiguous with the first half of `==` -- they are not otherwise
+//! acted on.
+//!
+//! # `{{ }}` expressions vs. `{% %}` tags
+//!
+//! A `{{ }}` region's entire content is one expression — [`rewrite_expression`]
+//! tokenizes and resolves it as such.
+//!
+//! A `{% %}` tag's body is *not* one expression: it opens with a keyword
+//! (`if`, `set`, `for`, `endif`, ...) that is never itself an operand, and
+//! two of Pebble's tags have their own structural keyword splitting the
+//! body in two: `{% set x = <expr> %}` (the target(s) left of `=` are names,
+//! not rewritten; the value right of `=` is) and
+//! `{% for x in <expr> %}` (the loop variable(s) left of `in` are names; the
+//! iterable right of `in` is). [`rewrite_tag_body`] skips the leading
+//! keyword, and for `for`/`set` specifically, further finds that keyword's
+//! own top-level boundary token (a bare `in`/`=`, not nested inside a
+//! group) before rewriting only the value/iterable side. Every other tag
+//! (`if`, `elseif`, `unless`, `endif`, `else`, ...) has its entire remainder
+//! rewritten as one expression, same as a `{{ }}` region.
 
 use thiserror::Error;
 
@@ -108,6 +135,10 @@ pub enum RewriteError {
 /// more `{{ ... }}` / `{% ... %}` regions. Only the insides of those regions
 /// are tokenized and rewritten; everything else (including a bare `??` that
 /// never appears inside `{{ }}`/`{% %}` at all) is copied through unchanged.
+/// A `{{ }}` region is rewritten as one expression
+/// ([`rewrite_expression`]); a `{% %}` region is rewritten as a tag body
+/// ([`rewrite_tag_body`]) — see this module's doc for why those are not the
+/// same job.
 pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
     let mut out = String::with_capacity(expr.len());
     let len = expr.len();
@@ -137,7 +168,11 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
         match find_region_close(expr, content_start, close)? {
             Some(close_start) => {
                 let inner = &expr[content_start..close_start];
-                let rewritten = rewrite_expression(inner)?;
+                let rewritten = if open == "{{" {
+                    rewrite_expression(inner)?
+                } else {
+                    rewrite_tag_body(inner)?
+                };
                 out.push_str(open);
                 out.push_str(&rewritten);
                 out.push_str(close);
@@ -163,39 +198,51 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
 }
 
 /// Scans forward from `start` for `close` (`"}}"` or `"%}"`), skipping over
-/// string-literal contents so a quoted `}}` can never terminate the region
-/// early. Returns the byte offset where `close` begins, or `Ok(None)` if
-/// `close` never appears before the end of input.
+/// string-literal contents (bounded to this same tag -- see
+/// [`scan_string_literal_bounded`]) and brace-literal nesting, so neither a
+/// quoted `}}` nor a map literal's own closing `}` immediately followed by
+/// the region's `}}` can terminate the region early or late. Returns the
+/// byte offset where `close` begins, or `Ok(None)` if `close` never appears
+/// before the end of input.
 ///
 /// This is also where an unterminated string literal is actually caught for
-/// anything reachable through the public `rewrite` entry point: skipping a
-/// string's contents to look past it for `close` uses the same
-/// [`scan_string_literal`] `tokenize` uses, so by the time a region's
-/// content is handed to `tokenize`, every quote inside it is already known
-/// to be balanced. `tokenize`'s own check stays as defense in depth (and
-/// documents the invariant), but it is this function's `Err` that a caller
-/// of `rewrite` actually observes for `{{ a ?? 'unterminated }}` — the
-/// quote-skip here runs off the end of the entire input looking for a match,
-/// discovers there is none, and reports the error before ever reaching
-/// `close_start`, `}}` or not.
+/// anything reachable through the public `rewrite` entry point: by the time
+/// a region's content is handed to `tokenize`, every quote inside it is
+/// already known to be balanced (bounded to this tag, not the rest of the
+/// document -- see below). `tokenize`'s own check stays as defense in depth
+/// (and documents the invariant), but it is this function's `Err` that a
+/// caller of `rewrite` actually observes for `{{ a ?? 'unterminated }}`.
 fn find_region_close(src: &str, start: usize, close: &str) -> Result<Option<usize>, RewriteError> {
     let len = src.len();
     let mut i = start;
+    let mut brace_depth = 0i32;
     while i < len {
-        if src[i..].starts_with(close) {
+        if brace_depth == 0 && src[i..].starts_with(close) {
             return Ok(Some(i));
         }
         let c = src[i..].chars().next().expect("i < len");
         if c == '\'' || c == '"' {
             let str_start = i;
-            let (end, closed) = scan_string_literal(src, i, c);
+            let (end, closed) = scan_string_literal_bounded(src, i, c, close);
             if !closed {
                 return Err(RewriteError::UnterminatedString {
                     quote: c,
-                    snippet: src[str_start..].to_string(),
+                    snippet: src[str_start..end].to_string(),
                 });
             }
             i = end;
+            continue;
+        }
+        if c == '{' {
+            brace_depth += 1;
+            i += c.len_utf8();
+            continue;
+        }
+        if c == '}' {
+            if brace_depth > 0 {
+                brace_depth -= 1;
+            }
+            i += c.len_utf8();
             continue;
         }
         i += c.len_utf8();
@@ -228,6 +275,40 @@ fn scan_string_literal(src: &str, start: usize, quote: char) -> (usize, bool) {
     (i, false)
 }
 
+/// Like [`scan_string_literal`], but additionally bounded by `close` (the
+/// enclosing tag's own `"}}"`/`"%}"`): the literal is considered
+/// unterminated the moment `close` appears before a matching quote does,
+/// regardless of whether some later, unrelated quote elsewhere in the
+/// document would otherwise have "closed" it. Without this bound, whether a
+/// broken literal inside one tag reports an error depends on accidents of
+/// unrelated later text (an apostrophe in a contraction, say) -- see this
+/// module's tests for the case that motivated it. Used only by
+/// [`find_region_close`], which is the only caller with a `close` to bound
+/// against.
+fn scan_string_literal_bounded(src: &str, start: usize, quote: char, close: &str) -> (usize, bool) {
+    let len = src.len();
+    let mut i = start + quote.len_utf8();
+    while i < len {
+        if src[i..].starts_with(close) {
+            return (i, false);
+        }
+        let c = src[i..].chars().next().expect("i < len");
+        if c == '\\' {
+            i += c.len_utf8();
+            if i < len {
+                let escaped = src[i..].chars().next().expect("i < len");
+                i += escaped.len_utf8();
+            }
+            continue;
+        }
+        i += c.len_utf8();
+        if c == quote {
+            return (i, true);
+        }
+    }
+    (i, false)
+}
+
 /// One lexical unit inside a `{{ }}` / `{% %}` region. Every token stores its
 /// own exact source text, so a region with nothing to rewrite reconstructs
 /// byte-for-byte identical to the input.
@@ -238,13 +319,16 @@ enum Tok {
     RParen(String),
     LBracket(String),
     RBracket(String),
+    LBrace(String),
+    RBrace(String),
     NullCoalesce(String),
     UndefinedCoalesce(String),
     Question(String),
     Colon(String),
     IsIn(String),
     /// Identifiers, numbers, whitespace, and any other punctuation this
-    /// rewrite does not act on (`.`, `,`, `|`, `=`, `>`, `<`, etc).
+    /// rewrite does not act on (`.`, `,`, `|`, `>`, `<`, `==`, `!=`, `<=`,
+    /// `>=`, a bare `=`, etc).
     Text(String),
 }
 
@@ -256,6 +340,8 @@ impl Tok {
             | Tok::RParen(s)
             | Tok::LBracket(s)
             | Tok::RBracket(s)
+            | Tok::LBrace(s)
+            | Tok::RBrace(s)
             | Tok::NullCoalesce(s)
             | Tok::UndefinedCoalesce(s)
             | Tok::Question(s)
@@ -310,6 +396,14 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
                 toks.push(Tok::RBracket("]".to_string()));
                 i += 1;
             }
+            '{' => {
+                toks.push(Tok::LBrace("{".to_string()));
+                i += 1;
+            }
+            '}' => {
+                toks.push(Tok::RBrace("}".to_string()));
+                i += 1;
+            }
             '?' => {
                 // Longest-match-first: `???` must never be read as `??`
                 // followed by a bare `?`.
@@ -327,6 +421,47 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
             ':' => {
                 toks.push(Tok::Colon(":".to_string()));
                 i += 1;
+            }
+            // `==`/`!=`/`<=`/`>=` grouped as single tokens -- longest-match,
+            // same principle as `???`/`??`/`?` -- purely so a standalone `=`
+            // (the `{% set x = ... %}` boundary) is never ambiguous with
+            // half of `==`. Not otherwise acted on: comparison operators are
+            // left alone (see module doc).
+            '=' => {
+                if src[i..].starts_with("==") {
+                    toks.push(Tok::Text("==".to_string()));
+                    i += 2;
+                } else {
+                    toks.push(Tok::Text("=".to_string()));
+                    i += 1;
+                }
+            }
+            '!' => {
+                if src[i..].starts_with("!=") {
+                    toks.push(Tok::Text("!=".to_string()));
+                    i += 2;
+                } else {
+                    toks.push(Tok::Text("!".to_string()));
+                    i += 1;
+                }
+            }
+            '<' => {
+                if src[i..].starts_with("<=") {
+                    toks.push(Tok::Text("<=".to_string()));
+                    i += 2;
+                } else {
+                    toks.push(Tok::Text("<".to_string()));
+                    i += 1;
+                }
+            }
+            '>' => {
+                if src[i..].starts_with(">=") {
+                    toks.push(Tok::Text(">=".to_string()));
+                    i += 2;
+                } else {
+                    toks.push(Tok::Text(">".to_string()));
+                    i += 1;
+                }
             }
             c if c.is_alphanumeric() || c == '_' => {
                 let start = i;
@@ -358,8 +493,12 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
 }
 
 /// A flattened unit at one nesting level: either verbatim text (including a
-/// fully-resolved, already-rewritten parenthesized/bracketed group) or one of
-/// the five operator tokens this rewrite acts on.
+/// fully-resolved, already-rewritten parenthesized/bracketed/braced group)
+/// or one of the operator tokens this rewrite acts on. A `,` (used to find
+/// top-level argument/element/pair boundaries) and a map-literal `:` are
+/// both plain `Atom`s -- see [`split_on_top_level_commas`] and
+/// [`find_map_separator_colon`], which recognise them by their exact text
+/// rather than needing their own `OpKind`.
 enum Piece {
     Atom(String),
     Op(OpKind, String),
@@ -374,9 +513,9 @@ enum OpKind {
     Colon,
 }
 
-/// Resolves every `(...)`/`[...]` group in `tokens` (recursively, innermost
-/// first) into a single opaque [`Piece::Atom`], leaving only the tokens that
-/// are directly at this nesting level as [`Piece::Op`]s for
+/// Resolves every `(...)`/`[...]`/`{...}` group in `tokens` (recursively,
+/// innermost first) into a single opaque [`Piece::Atom`], leaving only the
+/// tokens that are directly at this nesting level as [`Piece::Op`]s for
 /// [`resolve_pieces`] to act on.
 fn expand(tokens: &[Tok]) -> Result<Vec<Piece>, RewriteError> {
     let mut pieces = Vec::new();
@@ -384,24 +523,26 @@ fn expand(tokens: &[Tok]) -> Result<Vec<Piece>, RewriteError> {
 
     while i < tokens.len() {
         match &tokens[i] {
-            Tok::LParen(open) | Tok::LBracket(open) => match find_matching_close(tokens, i) {
-                Some(close_idx) => {
-                    let inner = resolve_flat(&tokens[i + 1..close_idx])?;
-                    let close_text = tokens[close_idx].text();
-                    pieces.push(Piece::Atom(format!("{open}{inner}{close_text}")));
-                    i = close_idx + 1;
-                }
-                // Unmatched opener: leave the rest of this level untouched
-                // rather than guess where it was meant to close.
-                None => {
-                    for t in &tokens[i..] {
-                        pieces.push(Piece::Atom(t.text().to_string()));
+            Tok::LParen(open) | Tok::LBracket(open) | Tok::LBrace(open) => {
+                match find_matching_close(tokens, i) {
+                    Some(close_idx) => {
+                        let inner = resolve_flat(&tokens[i + 1..close_idx])?;
+                        let close_text = tokens[close_idx].text();
+                        pieces.push(Piece::Atom(format!("{open}{inner}{close_text}")));
+                        i = close_idx + 1;
                     }
-                    i = tokens.len();
+                    // Unmatched opener: leave the rest of this level untouched
+                    // rather than guess where it was meant to close.
+                    None => {
+                        for t in &tokens[i..] {
+                            pieces.push(Piece::Atom(t.text().to_string()));
+                        }
+                        i = tokens.len();
+                    }
                 }
-            },
+            }
             // An unmatched closer (no opener) is passed through as-is.
-            Tok::RParen(s) | Tok::RBracket(s) => {
+            Tok::RParen(s) | Tok::RBracket(s) | Tok::RBrace(s) => {
                 pieces.push(Piece::Atom(s.clone()));
                 i += 1;
             }
@@ -436,15 +577,15 @@ fn expand(tokens: &[Tok]) -> Result<Vec<Piece>, RewriteError> {
 }
 
 /// Finds the token index that closes the opener at `open_idx`, counting
-/// `(`/`[` as +1 depth and `)`/`]` as -1 (bracket *kind* is not cross-checked
-/// -- malformed mismatched brackets are not this rewrite's concern; the
-/// parser it feeds will reject them).
+/// `(`/`[`/`{` as +1 depth and `)`/`]`/`}` as -1 (bracket *kind* is not
+/// cross-checked -- malformed mismatched brackets are not this rewrite's
+/// concern; the parser it feeds will reject them).
 fn find_matching_close(tokens: &[Tok], open_idx: usize) -> Option<usize> {
     let mut depth = 0i32;
     for (j, t) in tokens.iter().enumerate().skip(open_idx) {
         match t {
-            Tok::LParen(_) | Tok::LBracket(_) => depth += 1,
-            Tok::RParen(_) | Tok::RBracket(_) => {
+            Tok::LParen(_) | Tok::LBracket(_) | Tok::LBrace(_) => depth += 1,
+            Tok::RParen(_) | Tok::RBracket(_) | Tok::RBrace(_) => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(j);
@@ -462,26 +603,69 @@ fn resolve_flat(tokens: &[Tok]) -> Result<String, RewriteError> {
     Ok(resolve_pieces(&pieces))
 }
 
-/// Rewrites a flat (no unresolved parens/brackets) sequence of pieces into
-/// minijinja source.
+/// Rewrites a flat (no unresolved parens/brackets/braces) sequence of pieces
+/// into minijinja source.
 ///
-/// Ternary is resolved before the binary operators: it is checked first, and
-/// its condition/then/else slices are each resolved recursively, so
-/// `a ?? b ? c : d` (coalesce binding tighter than ternary, the usual
-/// C-like precedence) correctly becomes `c if kestra_null_coalesce(a, b) else
-/// d`, not the other way around. Nested ternaries resolve innermost first
-/// because a parenthesized inner ternary is already a finished [`Piece::Atom`]
-/// string by the time this function ever sees it (via [`expand`]), and an
-/// unparenthesized right-nested one (`a ? b : c ? d : e`) falls out of taking
-/// the *first* `?` and its depth-matched `:`, leaving the remainder (which
-/// still contains the inner ternary) to this same function, recursively, as
-/// the `else` branch.
+/// In priority order:
+///
+/// 1. A top-level `,` splits into independent segments (each resolved
+///    recursively, rejoined with `,`) -- a call's arguments, a list's
+///    elements, a map's pairs. Checked first because a comma is a syntactic
+///    boundary no operator below may cross: `f(x, a ?? b)` must rewrite the
+///    *second argument*, not swallow `x` into the coalesce's left operand.
+/// 2. Within a comma-free segment, a `:` that appears before any `?` (or
+///    with no `?` at all) is a map literal's key/value separator, not a
+///    ternary's -- a ternary's own `:` always follows its own `?`. Splits
+///    into key (left, resolved for consistency though normally inert) and
+///    value (right, resolved -- this is where `{'k': a ?? b}` gets its `??`
+///    rewritten without the map syntax around it being swept in).
+/// 3. Ternary: the first (leftmost) top-level `?` and its depth-matched `:`
+///    -- see [`find_ternary`]'s doc for how that handles right-associative
+///    nesting. The then-branch (and defensively the condition) are wrapped
+///    in parens on the way out; see the comment at the `format!` below for
+///    why that parenthesization is not cosmetic.
+/// 4. `??`/`???`/`isIn`, split at the *rightmost* occurrence (Kestra
+///    registers all three at the same precedence with `Associativity.LEFT`,
+///    so `a ?? b ?? c` must become
+///    `kestra_null_coalesce(kestra_null_coalesce(a, b), c)`, which splitting
+///    at the last occurrence and recursing left produces).
+/// 5. Nothing left to resolve: reconstruct verbatim, using each remaining
+///    `Op` piece's own original text (an operator with no matching partner,
+///    e.g. a stray `:` with no preceding `?`, is left untouched rather than
+///    guessed at).
 fn resolve_pieces(pieces: &[Piece]) -> String {
+    if let Some(segments) = split_on_top_level_commas(pieces) {
+        return segments
+            .into_iter()
+            .map(resolve_pieces)
+            .collect::<Vec<_>>()
+            .join(",");
+    }
+
+    if let Some(colon_idx) = find_map_separator_colon(pieces) {
+        let key = resolve_pieces(&pieces[..colon_idx]);
+        let value = resolve_pieces(&pieces[colon_idx + 1..]);
+        return format!("{key}:{value}");
+    }
+
     if let Some((q_idx, colon_idx)) = find_ternary(pieces) {
         let cond = resolve_pieces(&pieces[..q_idx]);
         let then_branch = resolve_pieces(&pieces[q_idx + 1..colon_idx]);
         let else_branch = resolve_pieces(&pieces[colon_idx + 1..]);
-        return format!("{then_branch} if {cond} else {else_branch}");
+        // Parens on the then-branch, and defensively on the condition too.
+        // Pebble's `parseTernaryExpression` parses the then-branch at full
+        // expression precedence, so in real Pebble `a ? b ? c : d : e` means
+        // `a ? (b ? c : d) : e`. `find_ternary`'s depth counter gets that
+        // grouping right -- but minijinja's inline-if has no grouping
+        // construct of its own for the then-branch (only its else-chain is
+        // naturally right-associative, which already matches Pebble for
+        // free): an unparenthesized nested conditional emitted there
+        // re-parses with the wrong `if`/`else` binding to the wrong
+        // condition. This was the one bug in this module that produced
+        // *valid* minijinja with *silently different* semantics rather than
+        // failing loudly -- verified with `a=false, b=true`: Pebble gives
+        // `e`, the unparenthesized form gave `c`.
+        return format!("({then_branch}) if ({cond}) else {else_branch}");
     }
 
     if let Some(idx) = find_rightmost_binary(pieces) {
@@ -489,12 +673,6 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
             Piece::Op(kind, _) => *kind,
             Piece::Atom(_) => unreachable!("find_rightmost_binary only returns Op indices"),
         };
-        // Rightmost split for left-associativity: Kestra registers `??`,
-        // `???`, and `isIn` all at the same precedence (30) with
-        // `Associativity.LEFT`, so `a ?? b ?? c` must become
-        // `kestra_null_coalesce(kestra_null_coalesce(a, b), c)`, which
-        // splitting at the *last* occurrence and recursing on the left
-        // produces.
         let left = resolve_pieces(&pieces[..idx]);
         let right = resolve_pieces(&pieces[idx + 1..]);
         return match kind {
@@ -508,10 +686,6 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
         };
     }
 
-    // No operator left at this level: reconstruct verbatim. Any `Op` piece
-    // still present here is an operator with no matching partner (e.g. a
-    // stray `:` with no preceding `?`) -- left untouched, using its own
-    // original source text, rather than guessed at.
     pieces
         .iter()
         .map(|p| match p {
@@ -519,6 +693,52 @@ fn resolve_pieces(pieces: &[Piece]) -> String {
             Piece::Op(_, s) => s.as_str(),
         })
         .collect()
+}
+
+/// Splits `pieces` on every top-level `,` (there are none nested inside a
+/// group by construction -- [`expand`] has already collapsed every
+/// `(...)`/`[...]`/`{...}` into one opaque atom, so any comma piece seen
+/// here is genuinely at this exact nesting level). Returns `None` if there
+/// is no top-level comma at all, so a comma-free slice does not recurse
+/// through this branch pointlessly.
+fn split_on_top_level_commas(pieces: &[Piece]) -> Option<Vec<&[Piece]>> {
+    let comma_positions: Vec<usize> = pieces
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| match p {
+            Piece::Atom(s) if s == "," => Some(i),
+            _ => None,
+        })
+        .collect();
+    if comma_positions.is_empty() {
+        return None;
+    }
+    let mut segments = Vec::with_capacity(comma_positions.len() + 1);
+    let mut start = 0usize;
+    for &pos in &comma_positions {
+        segments.push(&pieces[start..pos]);
+        start = pos + 1;
+    }
+    segments.push(&pieces[start..]);
+    Some(segments)
+}
+
+/// Finds a map literal's key/value `:` -- distinguished from a ternary's `:`
+/// by position alone: a ternary's `:` always follows its own `?`, so a `:`
+/// that appears with no `?` before it in this (already comma-isolated)
+/// slice cannot be one.
+fn find_map_separator_colon(pieces: &[Piece]) -> Option<usize> {
+    let first_colon = pieces
+        .iter()
+        .position(|p| matches!(p, Piece::Op(OpKind::Colon, _)));
+    let first_question = pieces
+        .iter()
+        .position(|p| matches!(p, Piece::Op(OpKind::Question, _)));
+    match (first_colon, first_question) {
+        (Some(c), None) => Some(c),
+        (Some(c), Some(q)) if c < q => Some(c),
+        _ => None,
+    }
 }
 
 /// Finds the first (leftmost) `?` and its depth-matched `:` among `pieces`.
@@ -558,10 +778,77 @@ fn find_rightmost_binary(pieces: &[Piece]) -> Option<usize> {
     })
 }
 
-/// Tokenizes and rewrites the inside of one `{{ }}` / `{% %}` region.
+/// Tokenizes and rewrites the inside of one `{{ }}` region as a single
+/// expression.
 fn rewrite_expression(inner: &str) -> Result<String, RewriteError> {
     let tokens = tokenize(inner)?;
     resolve_flat(&tokens)
+}
+
+/// Tokenizes and rewrites the inside of one `{% %}` region as a tag body --
+/// not a single expression. See this module's doc ("`{{ }}` expressions vs.
+/// `{% %}` tags") for the shape.
+fn rewrite_tag_body(body: &str) -> Result<String, RewriteError> {
+    let tokens = tokenize(body)?;
+
+    let Some(keyword_idx) = tokens.iter().position(|t| !is_whitespace_tok(t)) else {
+        // Nothing but whitespace (or fully empty), e.g. `{%  %}`. No
+        // keyword, nothing to rewrite.
+        return Ok(tokens.iter().map(Tok::text).collect());
+    };
+
+    let keyword = tokens[keyword_idx].text().to_string();
+    let prefix: String = tokens[..=keyword_idx].iter().map(Tok::text).collect();
+    let rest = &tokens[keyword_idx + 1..];
+
+    // Only `for` and `set` have a further structural boundary splitting
+    // their body into a name-list side (never rewritten) and an
+    // expression side (rewritten). Every other tag -- `if`, `elseif`,
+    // `unless`, `endif`, `else`, ... -- has its whole remainder rewritten as
+    // one expression, same as a `{{ }}` region.
+    let boundary = match keyword.as_str() {
+        "for" => find_top_level_word(rest, "in"),
+        "set" => find_top_level_word(rest, "="),
+        _ => None,
+    };
+
+    let rewritten = match boundary {
+        Some(b_idx) => {
+            let target: String = rest[..b_idx].iter().map(Tok::text).collect();
+            let boundary_text = rest[b_idx].text();
+            let value = resolve_flat(&rest[b_idx + 1..])?;
+            format!("{} {boundary_text} {}", target.trim(), value.trim())
+        }
+        None => resolve_flat(rest)?,
+    };
+
+    Ok(format!("{prefix} {}", rewritten.trim()))
+}
+
+fn is_whitespace_tok(t: &Tok) -> bool {
+    let s = t.text();
+    !s.is_empty() && s.chars().all(char::is_whitespace)
+}
+
+/// Finds the first occurrence of `Tok::Text(word)` at the top nesting level
+/// of `tokens` (not inside a `(`/`[`/`{` group) -- used by
+/// [`rewrite_tag_body`] to find `for`'s `in` and `set`'s `=` boundary. A
+/// bare `in` is a plain word token (never confused with this rewrite's
+/// `isIn` output, which `tokenize` only ever produces from the source
+/// substring `isIn`, a different word); a bare `=` is only ever a single
+/// token here because `tokenize` groups `==` (and `!=`/`<=`/`>=`) as their
+/// own token first, so it can never be mistaken for half of `==`.
+fn find_top_level_word(tokens: &[Tok], word: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, t) in tokens.iter().enumerate() {
+        match t {
+            Tok::LParen(_) | Tok::LBracket(_) | Tok::LBrace(_) => depth += 1,
+            Tok::RParen(_) | Tok::RBracket(_) | Tok::RBrace(_) => depth -= 1,
+            Tok::Text(s) if depth == 0 && s == word => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -590,12 +877,17 @@ mod tests {
         assert!(!out.contains("null_coalesce"), "{out}");
     }
 
+    /// Replaces a weaker, counting-based assertion (`.matches(" if
+    /// ").count() == 2`) that a swapped condition/then-branch, or the
+    /// missing-then-branch-parens bug this module used to have, would also
+    /// have passed. Pinned to the exact output so both mistakes are caught.
     #[test]
     fn nested_ternaries_rewrite_innermost_first() {
         let out = rewrite("{{ a ? (b ? 'x' : 'y') : 'z' }}").unwrap();
-        // Both conditionals survive, and no `?` or `:` is left as an operator.
-        assert_eq!(out.matches(" if ").count(), 2, "{out}");
-        assert!(!out.contains(" ? "), "{out}");
+        assert_eq!(
+            out,
+            "{{( (( 'x' ) if (b ) else  'y') ) if ( a ) else  'z' }}"
+        );
     }
 
     #[test]
@@ -626,6 +918,14 @@ mod tests {
         let out = rewrite("{{ a isIn b }}").unwrap();
         assert!(out.contains(" in "), "{out}");
         assert!(!out.contains("isIn"), "{out}");
+
+        // Not a regex: `isIn` inside a string literal survives untouched --
+        // a global, quote-blind `str::replace("isIn", "in")` would corrupt
+        // this, and nothing else in this module exercised that.
+        assert_eq!(rewrite("{{ 'a isIn b' }}").unwrap(), "{{ 'a isIn b' }}");
+
+        // Same principle outside any `{{ }}`/`{% %}` region at all.
+        assert_eq!(rewrite("literal isIn text").unwrap(), "literal isIn text");
     }
 
     /// The rewriter's one error case: a string literal that never finds its
@@ -644,5 +944,111 @@ mod tests {
             matches!(err, RewriteError::UnterminatedString { quote: '\'', .. }),
             "{err:?}"
         );
+    }
+
+    /// The unterminated-string scan is bounded to the enclosing tag: whether
+    /// this reports an error must not depend on some unrelated apostrophe
+    /// (e.g. in a contraction) appearing later in the document, and an
+    /// operator inside a genuinely broken tag must never be silently passed
+    /// through unrewritten just because such an apostrophe happens to exist.
+    #[test]
+    fn an_unterminated_string_is_bounded_to_its_own_tag() {
+        // No closing quote anywhere in the document at all.
+        assert!(rewrite("{{ 'a }} its fine").is_err());
+
+        // A LATER apostrophe exists (in "it's"), but it must not "rescue" a
+        // literal that never closed within this tag.
+        assert!(rewrite("{{ 'a }} it's fine").is_err());
+
+        // The exact failure mode under review: an operator sitting before
+        // the broken literal must not be silently left unrewritten with no
+        // error, just because a later quote exists somewhere in the tail.
+        let err = rewrite("{{ a ?? 'x }} tail with ' quote and more").unwrap_err();
+        assert!(
+            matches!(err, RewriteError::UnterminatedString { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// A comma is an operand boundary an operator must not cross: `f(x, a ??
+    /// b)` is a two-argument call, not one call whose (wrong-arity) sole
+    /// argument is `kestra_null_coalesce(x, a, b)`.
+    #[test]
+    fn commas_bound_operator_rewrites_inside_a_call() {
+        let out = rewrite("{{ f(x, a ?? b) }}").unwrap();
+        assert_eq!(out, "{{ f(x,kestra_null_coalesce( a ,  b)) }}");
+    }
+
+    /// Same principle for a list literal's elements.
+    #[test]
+    fn commas_bound_operator_rewrites_inside_a_list() {
+        let out = rewrite("{{ [1, a ?? b] }}").unwrap();
+        assert_eq!(out, "{{ [1,kestra_null_coalesce( a ,  b)] }}");
+    }
+
+    /// A ternary as a later argument must not be glued to an earlier one by
+    /// the comma-boundary fix -- each argument still resolves fully on its
+    /// own.
+    #[test]
+    fn a_ternary_argument_after_a_comma_still_resolves() {
+        let out = rewrite("{{ f(x, c ? a : b) }}").unwrap();
+        assert_eq!(out, "{{ f(x,( a ) if ( c ) else  b) }}");
+    }
+
+    /// A map literal's `:` must not be mistaken for a ternary's `:`, and a
+    /// map literal must nest like `(`/`[` so an outer ternary's own `?`/`:`
+    /// is not confused by an inner map's colon.
+    #[test]
+    fn map_literals_do_not_confuse_the_ternary() {
+        let out = rewrite("{{ flag ? {'a': 1} : {'b': 2} }}").unwrap();
+        assert_eq!(out, "{{( {'a': 1} ) if ( flag ) else  {'b': 2} }}");
+    }
+
+    /// An operator inside a map literal's *value* must still be rewritten,
+    /// without the map's own key/colon syntax being swept into its operand.
+    #[test]
+    fn an_operator_inside_a_map_value_still_resolves() {
+        let out = rewrite("{{ {'k': a ?? b} }}").unwrap();
+        assert_eq!(out, "{{ {'k':kestra_null_coalesce( a ,  b)} }}");
+    }
+
+    /// `{% if %}` tag bodies must be rewritten as an expression, not left
+    /// alone (a documented capability that must not silently do nothing)
+    /// and not treated as if the leading `if` keyword were part of the
+    /// expression (which produced a parse error before this fix).
+    #[test]
+    fn if_tag_bodies_rewrite_their_condition() {
+        let out = rewrite("{% if a ?? b %}y{% endif %}").unwrap();
+        assert_eq!(out, "{% if kestra_null_coalesce( a ,  b )%}y{% endif %}");
+    }
+
+    /// `{% set %}`: the target left of `=` is a name, never rewritten; the
+    /// value right of `=` is rewritten normally.
+    #[test]
+    fn set_tag_bodies_rewrite_only_the_value_side() {
+        let out = rewrite("{% set x = a ?? b %}").unwrap();
+        assert_eq!(out, "{% set x = kestra_null_coalesce( a ,  b )%}");
+    }
+
+    /// `{% for %}`: the loop variable left of `in` is a name, never
+    /// rewritten; the iterable right of `in` is rewritten normally. The
+    /// tag's own `in` keyword must survive as plain syntax, not be mistaken
+    /// for this rewrite's `isIn` output.
+    #[test]
+    fn for_tag_bodies_rewrite_only_the_iterable_side() {
+        let out = rewrite("{% for x in list ?? [] %}y{% endfor %}").unwrap();
+        assert_eq!(
+            out,
+            "{% for x in kestra_null_coalesce( list ,  [] )%}y{% endfor %}"
+        );
+    }
+
+    /// A ternary inside a `{% if %}` tag: proves the tag-body path shares
+    /// the same expression rewriter (including the I3 then-branch-parens
+    /// fix) as a `{{ }}` region, not a separate, weaker implementation.
+    #[test]
+    fn a_ternary_inside_an_if_tag_resolves() {
+        let out = rewrite("{% if flag ? 'a' : 'b' %}y{% endif %}").unwrap();
+        assert_eq!(out, "{% if ( 'a' ) if ( flag ) else  'b'%}y{% endif %}");
     }
 }

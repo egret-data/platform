@@ -81,13 +81,21 @@ Rejected, with reasons:
 
 ### 3.1 The rewrite must tokenize, not regex
 
-`a ?? b` → `a | kestra_null_coalesce(b)` and the ternary → `a if c else b` are simple as *transforms*
+`a ?? b` → `kestra_null_coalesce(a, b)` and the ternary → `a if c else b` are simple as *transforms*
 and dangerous as *string substitutions*: `??` inside a string literal, nested ternaries, and `???`
 overlapping `??` all break a regex. The rewriter reads the expression as tokens — string literals,
 parens, operators — and rewrites at the AST-ish level.
 
 Its correctness is not asserted; it is **measured** by §4, including for every expression in the corpus
 that contains an operator inside a string literal.
+
+`kestra_null_coalesce`/`kestra_undefined_coalesce` are plain function calls, not filters (`a |
+kestra_null_coalesce(b)`), because Kestra registers `??`/`???` as *operators* with lazy right-side
+evaluation, and neither a minijinja filter nor a minijinja function receives an unevaluated argument —
+there is no "don't evaluate the right side unless needed" hook a text-only rewrite can reach into
+either way. The call form was chosen for Task 2 because the brief that shaped it described the target
+as "calls to two custom functions"; giving them the actual short-circuit/missing-attribute semantics is
+whichever later task registers them, not this rewrite.
 
 ### 3.2 Dependencies
 

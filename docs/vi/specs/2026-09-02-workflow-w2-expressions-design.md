@@ -81,13 +81,21 @@ xác là thứ oracle ở §4 sinh ra để trả lời, cho cả bốn toán t�
 
 ### 3.1 Bộ viết lại phải tokenize, không được regex
 
-`a ?? b` → `a | kestra_null_coalesce(b)` và ternary → `a if c else b` là **phép biến đổi** đơn giản
+`a ?? b` → `kestra_null_coalesce(a, b)` và ternary → `a if c else b` là **phép biến đổi** đơn giản
 nhưng là **phép thay chuỗi** nguy hiểm: `??` bên trong chuỗi ký tự, ternary lồng nhau, và `???` chồng
 lên `??` đều phá vỡ một regex. Bộ viết lại đọc biểu thức theo token — chuỗi ký tự, ngoặc, toán tử — và
 viết lại ở mức gần-AST.
 
 Tính đúng đắn của nó không được khẳng định mà được **đo** bởi §4, gồm cả mọi biểu thức trong corpus có
 toán tử nằm bên trong một chuỗi ký tự.
+
+`kestra_null_coalesce`/`kestra_undefined_coalesce` là lời gọi hàm thuần, không phải filter (`a |
+kestra_null_coalesce(b)`), vì Kestra đăng ký `??`/`???` như *toán tử* với vế phải được đánh giá lười,
+mà cả filter lẫn function của minijinja đều không nhận tham số chưa được đánh giá — không có móc "chỉ
+đánh giá vế phải khi cần" nào mà một bộ viết lại chỉ-dựa-trên-văn-bản chạm tới được, dù chọn hình thức
+nào. Dạng lời gọi được chọn cho Task 2 vì brief định hình nó mô tả đích đến là "lời gọi tới hai hàm tuỳ
+biến"; việc trao cho chúng ngữ nghĩa short-circuit/thuộc-tính-thiếu thật sự thuộc về task sau nào đăng
+ký chúng, không phải bộ viết lại này.
 
 ### 3.2 Phụ thuộc
 

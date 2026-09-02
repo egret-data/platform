@@ -23,6 +23,9 @@
   {"id": "gte-numbers-eq",        "expr": "{{ 2 >= 2 }}",                        "context": {}},
   {"id": "op-inside-string",      "expr": "{{ 'a ?? b' }}",                      "context": {}},
   {"id": "nested-ternary",        "expr": "{{ a ? (b ? 'x' : 'y') : 'z' }}",     "context": {"a": true, "b": false}},
+  {"id": "tag-if-coalesce",       "expr": "{% if a ?? b %}yes{% else %}no{% endif %}",  "context": {"a": null, "b": true}},
+  {"id": "tag-set-coalesce",      "expr": "{% set x = a ?? b %}{{ x }}",         "context": {"a": null, "b": "fallback"}},
+  {"id": "tag-if-ternary",        "expr": "{% if flag ? 1 : 0 %}yes{% else %}no{% endif %}", "context": {"flag": true}},
 
   {"id": "filter-chunk",              "expr": "{{ list | chunk(size=2) }}",                              "context": {"list": [1, 2, 3, 4, 5]}},
   {"id": "filter-classname",          "expr": "{{ list | className }}",                                  "context": {"list": [1, 2, 3]}},
