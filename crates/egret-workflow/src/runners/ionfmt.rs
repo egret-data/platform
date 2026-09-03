@@ -111,7 +111,18 @@ pub(super) fn write_ion(out: &mut String, value: &MjValue) {
                     out.push('d');
                     out.push_str(exponent.strip_prefix('+').unwrap_or(exponent));
                 }
-                None => out.push_str(&text),
+                // **A scale-0 `BigDecimal` still needs a `.`**, because Ion
+                // spells a decimal with a `.` or a `d` and an integer with
+                // neither. Measured: `'1' | number(type='BIGDECIMAL') | toIon`
+                // is `1.`, and this wrote `1` — a decimal that reads back as
+                // an int. A `BigInteger` takes no dot, which is why the class
+                // is consulted rather than the text alone.
+                None => {
+                    out.push_str(&text);
+                    if super::filters::is_big_decimal(value) && !text.contains('.') {
+                        out.push('.');
+                    }
+                }
             }
         }
         // Strings.
@@ -272,32 +283,41 @@ fn is_ion_identifier(s: &str) -> bool {
 ///
 /// | construct | Kestra | egret |
 /// |---|---|---|
-/// | `a::1` (an annotation) | the string `a::1` | **refused** |
-/// | `[a::1, 2]` | throws | **refused** |
-/// | `{{ aGVsbG8= }}` (a blob) | `"aGVsbG8="`, the base64 text | **refused** |
-/// | `{{ "clob" }}` | `"Y2xvYg=="`, base64 of the bytes | **refused** |
-/// | `2024-01-01T00:00:00Z`, `2024T` | `2024-01-01` | **refused** |
+/// | `{{ aGVsbG8= }}` (a blob) | `"aGVsbG8="` — a `byte[]`, base64 on output | **refused** |
+/// | `{{ "clob" }}` | `"Y2xvYg=="` — base64 of the bytes | **refused** |
+/// | `2024-01-01T00:00:00Z`, `2024T` | `2024-01-01`, a `java.time.LocalDate` | **refused** |
 ///
-/// None of them has a `minijinja::Value` that means the same thing, and
-/// `write_ion` never emits one, so nothing egret writes can produce them. Each
-/// is refused **by name** — the same call `javafmt` makes for the three CLDR
+/// None has a `minijinja::Value` that means the same thing, and `write_ion`
+/// emits none of them, so nothing egret writes can produce one. Each is
+/// refused **by name** — the same call `javafmt` makes for the three CLDR
 /// pattern letters, and the only kind of divergence this crate's own rule
 /// allows. A timestamp in particular would otherwise become a string, which
-/// reads back as a different type with no error anywhere.
+/// reads back as a different type with no error anywhere. All three are
+/// corpus entries rather than prose.
 ///
-/// S-expressions are **not** on that list any more: Kestra reads `(1 2)` as
-/// `[1,2]`, `(a b)` as `["a","b"]` and `(+ 1 2)` as `["+",1,2]`, so this
+/// **Annotations are not on this list, and getting them off it took two
+/// corrections.** The first cut SKIPPED them, on the sentence quoted above;
+/// the second REFUSED them, on a replacement sentence — "Kestra throws for one
+/// inside a container" — that was wrong in exactly the same way. It does not:
+/// `[a::1, 2] | length` is `2` and `{f:a::1} | className` is
+/// `java.util.LinkedHashMap`. See [`IonReader::annotated`].
+///
+/// S-expressions were on that list and are not any more: Kestra reads `(1 2)`
+/// as `[1,2]`, `(a b)` as `["a","b"]` and `(+ 1 2)` as `["+",1,2]`, so this
 /// reader does too.
 ///
-/// # One divergence that is not a refusal
+/// # `d` is a decimal and `e` is a float, and the difference is a Java class
 ///
-/// **A decimal is a `Double` here and a `BigDecimal` in Kestra.** `1.` and
-/// `0.` render as `1` and `0` there and `1.0`/`0.0` here, `1d3` is `1000`
-/// there and `1000.0` here, and `1.50` keeps its trailing zero there and not
-/// here. `write_ion` always writes a float (`2.5e0`), so no round trip through
-/// this crate reaches it — only hand-written Ion does. Recorded rather than
-/// fixed, because carrying `BigDecimal`'s scale means returning
-/// `filters::BigNumber` from a second module.
+/// Measured over fourteen literals, four ways each: `1d2` is `100` and
+/// `java.math.BigDecimal`, `1E2` is `100.0` and `java.lang.Double`. Reading
+/// the first family as an `f64` loses the scale — `1.50` came back `1.5` and
+/// `1d2 | toIon` came back `100e0` — so a decimal is a
+/// [`super::filters::big_decimal`].
+///
+/// An earlier version of this doc recorded that as a divergence and excused it
+/// with "no round trip through this crate reaches it — only hand-written Ion
+/// does". `{{ fromIon('1d2') | toIon }}` is a round trip through this crate
+/// and it reached it.
 ///
 /// # Bounded, because a struct nests
 ///
@@ -305,7 +325,7 @@ fn is_ion_identifier(s: &str) -> bool {
 /// it, on the render thread. The bound is [`jqsandbox::MAX_VALUE_DEPTH`], the
 /// crate's one value-depth invariant, rather than a fifth number: *no value
 /// anywhere in this crate is more than `MAX_VALUE_DEPTH` deep*.
-pub(super) fn read_ion(text: &str) -> Result<Vec<MjValue>, String> {
+pub(super) fn read_ion(text: &str, all_rows: bool) -> Result<Vec<MjValue>, String> {
     let mut reader = IonReader {
         rest: text,
         depth: 0,
@@ -313,15 +333,36 @@ pub(super) fn read_ion(text: &str) -> Result<Vec<MjValue>, String> {
     };
     let mut values = Vec::new();
     reader.skip_ignorable();
-    // `$ion_1_0` is the version marker, not a value.
-    if let Some(rest) = reader.rest.strip_prefix("$ion_1_0") {
-        if !starts_identifier_char(rest) {
-            reader.rest = rest;
-            reader.skip_ignorable();
+    // `$ion_1_0` is the version marker, not a value. `$ion_1_01` is a version
+    // this reader does not speak, and Kestra throws
+    // `UnsupportedIonVersionException` rather than reading it as a symbol.
+    if let Some(rest) = reader.rest.strip_prefix("$ion_1_") {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || !digits.is_empty() && starts_identifier_char(&rest[digits.len()..])
+        {
+            return Err(format!(
+                "unsupported ion version marker: $ion_1_{}",
+                rest.split_whitespace().next().unwrap_or("")
+            ));
         }
+        if digits != "0" {
+            return Err(format!("unsupported ion version marker: $ion_1_{digits}"));
+        }
+        reader.rest = &rest[digits.len()..];
+        reader.skip_ignorable();
     }
     while !reader.rest.is_empty() {
         values.push(reader.value()?);
+        // **Stop at the first value unless the caller asked for all of them.**
+        // `FileSerde.readAll(...).take(1).findFirst()` never looks at the
+        // tail, so `fromIon('1 /*c')` is `1` and `fromIon('1 +5')` is `1` —
+        // both were errors here the moment this reader grew refusals, because
+        // it parsed the whole document eagerly and then took `rows[0]`.
+        // `allRows=true` is `toList()` and DOES read the tail: measured, every
+        // one of those documents throws there.
+        if !all_rows {
+            return Ok(values);
+        }
         reader.skip_ignorable();
     }
     if reader.unterminated_comment {
@@ -390,17 +431,16 @@ impl IonReader<'_> {
     }
 
     fn value(&mut self) -> Result<MjValue, String> {
-        // Annotations (`sym::value`) are refused, not skipped. See this
-        // module's doc: Kestra does NOT drop them.
+        // An annotated value (`sym::value`) becomes its own SOURCE TEXT. See
+        // this module's doc: Jackson hands back an opaque `IonValue` whose
+        // `toString()` is that text, so `[a::1, 2]` really is a two-element
+        // list whose first element renders `a::1`.
         let save = self.rest;
         if let Ok(Some(_)) = self.symbol_like() {
             let annotated = self.rest.trim_start().starts_with("::");
             self.rest = save;
             if annotated {
-                return self.fail(
-                    "egret does not read an ion annotation; Kestra answers the annotated \
-                     text for a bare one and throws for one inside a container",
-                );
+                return self.annotated();
             }
         } else {
             self.rest = save;
@@ -422,6 +462,64 @@ impl IonReader<'_> {
             }
             Some(_) => self.bare(),
         }
+    }
+
+    /// An annotated value, as the text it was written with.
+    ///
+    /// Measured, and it is the correction to a correction: the first cut of
+    /// this reader SKIPPED annotations on the strength of a "Kestra does"
+    /// sentence written without running one, and answered `1` for `a::1`; the
+    /// second REFUSED them, on a replacement sentence ("throws for one inside
+    /// a container") that was wrong in the same way. What Kestra actually
+    /// does, across fifteen probed forms:
+    ///
+    /// | source | Kestra renders | `className` |
+    /// |---|---|---|
+    /// | `a::1` | `a::1` | `com.amazon.ion.impl.lite.IonIntLite` |
+    /// | `a::"s"` | `a::"s"` | `IonStringLite` |
+    /// | `a::{b:1}` | `a::{b:1}` | `IonStructLite` |
+    /// | `[a::1, 2]` | (throws) | `java.util.ArrayList`, `length` 2, `[1]` is 2 |
+    ///
+    /// So the annotated value is an opaque object, the CONTAINER is a normal
+    /// list or map, and only stringifying a container that holds one fails —
+    /// as a Jackson serialiser artifact whose message is not even stable
+    /// across JVM runs (`Document nesting depth (1001) exceeds the maximum`
+    /// once, `Direct self-reference leading to cycle` twice, on the same jar
+    /// and the same corpus).
+    ///
+    /// Carrying it as text gets the container right, gets the bare render
+    /// right, and leaves the divergences in `oracle/baseline.txt` rather than
+    /// poisoning a whole document for one exotic element. The internal Amazon
+    /// class name is deliberately **not** reproduced: `oracle/README.md`'s own
+    /// rule excludes "an internal class name" from what a port copies.
+    fn annotated(&mut self) -> Result<MjValue, String> {
+        let start = self.rest;
+        // Consume `sym::` runs, then the value they decorate, so the slice
+        // this returns is exactly what was written.
+        loop {
+            let save = self.rest;
+            let Ok(Some(_)) = self.symbol_like() else {
+                self.rest = save;
+                break;
+            };
+            self.skip_ignorable();
+            match self.rest.strip_prefix("::") {
+                Some(rest) => {
+                    self.rest = rest;
+                    self.skip_ignorable();
+                }
+                None => {
+                    self.rest = save;
+                    break;
+                }
+            }
+        }
+        // The decorated value is parsed and thrown away: it is what tells this
+        // where the annotated text ENDS, and parsing it is also what keeps a
+        // malformed one (`1 abc::`) an error rather than a symbol.
+        let _ = self.value()?;
+        let consumed = start.len() - self.rest.len();
+        Ok(MjValue::from(start[..consumed].trim_end().to_string()))
     }
 
     /// An s-expression, which Jackson reads as a **list**: `(1 2)` is `[1,2]`,
@@ -789,12 +887,29 @@ fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
             Err(_) => Err(format!("ion integer out of range: {token}")),
         });
     }
-    // A decimal's `d`/`D` exponent, and the bare-`.` form Ion also calls a
-    // decimal. Both become an `f64` here; see this module's doc for the one
-    // divergence that costs.
-    let normalised = cleaned.replacen(['d', 'D'], "e", 1);
-    let value: f64 = normalised.parse().ok()?;
-    Some(Ok(MjValue::from(if negative { -value } else { value })))
+    // **A `d`/`D` exponent or a `.` makes it a DECIMAL, which is a
+    // `java.math.BigDecimal` — an `e`/`E` exponent makes it a float.**
+    // Measured: `1d2` is `100` and `java.math.BigDecimal`, `1E2` is `100.0`
+    // and `java.lang.Double`. An `f64` for the first loses the scale, so
+    // `1.50` came back `1.5` and `1d2 | toIon` came back `100e0` instead of
+    // `1d2`.
+    let signed = if negative {
+        format!("-{cleaned}")
+    } else {
+        cleaned.clone()
+    };
+    if signed.contains(['d', 'D']) || signed.contains('.') {
+        // Java's `BigDecimal(String)` spells the exponent `E` and has no
+        // trailing-dot form; Ion's `1.` is a scale-0 decimal.
+        let java = signed.replacen(['d', 'D'], "E", 1);
+        let java = java.strip_suffix('.').unwrap_or(&java).to_string();
+        return Some(
+            super::filters::big_decimal(&java)
+                .ok_or_else(|| format!("not an ion decimal: {token}")),
+        );
+    }
+    let value: f64 = signed.parse().ok()?;
+    Some(Ok(MjValue::from(value)))
 }
 
 /// The narrowest integer that holds `magnitude`, so

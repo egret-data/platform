@@ -1525,6 +1525,33 @@ fn create_big_decimal(input: &str) -> Result<MjValue, MjError> {
     }))
 }
 
+/// A `BigDecimal` built from text that is already in Java's spelling.
+///
+/// W2 Task 7's Ion reader needs this: `1d2`, `1.50` and `1.` are **decimals**
+/// in Ion and `java.math.BigDecimal` in Kestra, so representing them as `f64`
+/// loses the scale — `1.50` came back `1.5`, `1d2` came back `100.0`, and
+/// `1d2 | toIon` came back `100e0` instead of `1d2`. `None` for text Java
+/// would reject.
+pub(super) fn big_decimal(input: &str) -> Option<MjValue> {
+    let (text, canonical) = big_decimal_strings(input)?;
+    Some(MjValue::from_object(BigNumber {
+        text,
+        canonical,
+        class_name: "java.math.BigDecimal",
+    }))
+}
+
+/// Is this value a `BigDecimal` rather than a `BigInteger`?
+///
+/// [`super::ionfmt::write_ion`] needs the difference: Ion spells a decimal
+/// with a `.` or a `d` and an integer with neither, so a scale-0
+/// `BigDecimal` is `1.` and a `BigInteger` is `1`. Measured —
+/// `'1' | number(type='BIGDECIMAL') | toIon` is `1.`, which the first cut of
+/// that writer wrote as `1`.
+pub(super) fn is_big_decimal(value: &MjValue) -> bool {
+    big_number_class(value) == Some("java.math.BigDecimal")
+}
+
 /// `new BigDecimal(str)`, as the two strings Java can print it with:
 /// `toPlainString()` and `toString()`.
 ///

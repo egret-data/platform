@@ -390,18 +390,18 @@ filter-regexmatch-unicode-case-over-a-mixed-class
 # --- W2 Task 7, fix round 1: ten divergences the first cut could not see,
 # every one measured through the harness rather than reasoned about.
 
-# DELIBERATE: Jackson does NOT drop an Ion annotation -- `fromIon('a::1')` is
-# the string `a::1` there. egret refuses instead of answering `1`, which is
-# what an earlier cut did on the strength of a "Kestra does" sentence written
-# without running one. A refusal is the only divergence this crate's rules
-# allow; `[a::1, 2]`, which Kestra throws on, is error-class rather than here.
-function-fromion-annotation
 
-# Three more members of the already-recorded YAML 1.1-vs-1.2 plain-scalar
-# class (see `function-yaml-yes-is-a-boolean-or-not`). Listed rather than left
-# to a sentence, so the class's EXTENT fails loudly if `serde_norway` moves.
+# Two more members of the already-recorded YAML 1.1-vs-1.2 plain-scalar class
+# (see `function-yaml-yes-is-a-boolean-or-not`). Listed rather than left to a
+# sentence, so the class's EXTENT fails loudly if `serde_norway` moves.
 function-yaml-underscore-separated-number
 function-yaml-off-is-a-boolean
+
+# NOT that class, and an earlier version of this file said it was -- two
+# committed control files giving one id two different causes. `1e300` is a
+# `Double` on BOTH engines; `1e400` stays a string here only because
+# `serde_norway` declines to produce a non-finite `f64`, which is the same
+# fact `runners::functions::BoundedVisitor::visit_f64` documents.
 function-yaml-huge-exponent
 
 # DELIBERATE: `serde_json` rejects an out-of-range exponent in its own parser,
@@ -426,11 +426,52 @@ function-yaml-tab-after-a-key
 # Kestra only NULL-checks it, and an earlier cut refused a BLANK one.
 function-ispublicholiday-blank-country
 
-# KNOWN, and pre-existing rather than this batch's: `filters::Args` ignores a
-# named argument a function does not declare and an extra positional one,
-# where Pebble throws `The following named argument does not exist` and
-# `The argument at position N is not allowed`. The `date` filter has always
-# done this; Task 7 widened the surface by 19 functions, so it is recorded
-# here rather than left in prose.
+# KNOWN, pre-existing, and CRATE-WIDE rather than this function's:
+# `filters::Args` ignores a named argument the callee does not declare and an
+# extra positional one, where Pebble throws `The following named argument does
+# not exist` and `The argument at position N is not allowed`. Every one of the
+# 35 filters and 19 functions has it -- the `date` filter always did -- so
+# these two entries stand for all of them, and the same regression in another
+# name would not be visible here. `dayOfWeek` is the sample, not the case.
 function-dayofweek-unknown-named-argument
 function-dayofweek-extra-positional-argument
+
+# --- W2 Task 7, fix round 2: the annotated-value class, and three Ion types
+# egret refuses. Every row measured through the harness.
+
+# DELIBERATE: an annotated value is an opaque `IonValue` in Kestra, whose
+# `className` is `com.amazon.ion.impl.lite.IonIntLite`. egret carries it as its
+# own source text, so the class is `java.lang.String`. `oracle/README.md`'s own
+# rule excludes "an internal class name" from what a port copies -- the same
+# call `filter-classname-of-long` makes.
+function-fromion-annotation-class
+
+# DELIBERATE: Ion's own `toString()` NORMALISES the value it decorates --
+# `a::'x'` is `a::x` and `a::0x10` is `a::16`. egret keeps the source text,
+# which is right for every other probed form (`a::1`, `a::"s"`, `a::1.5`,
+# `a::1d2`, `a::1e0`, `a::true`, `a::null`, `a::{b:1}`, `a::-1`,
+# `a::null.int`, `a::b::1`) and wrong for these two.
+function-fromion-annotation-normalises-a-symbol
+function-fromion-annotation-normalises-a-radix
+
+# DELIBERATE: a serialiser refuses an `IonValue` in Kestra; egret writes the
+# text it is carrying. Same for `toIon`, `yaml` and `jq`; one entry stands for
+# the class, because the message is the same sentence with a different word.
+function-fromion-annotation-through-tojson
+
+# DELIBERATE: a blob and a clob are `byte[]` in Kestra and base64 on output
+# (`[B` is the className); a timestamp is a `java.time.LocalDate`. None has a
+# `minijinja::Value` that means the same thing and `write_ion` emits none of
+# them, so all three are refused by name. Recorded as ENTRIES rather than
+# prose, which is this file's own rule and which fix round 1 applied to `yaml`
+# and not to these.
+function-fromion-blob
+function-fromion-clob
+function-fromion-timestamp
+
+# DELIBERATE: an annotated value is an opaque `IonValue` in Kestra, so
+# `fromIon('a::1') == 'a::1'` is FALSE there and true here, where it is the
+# string it renders as. The same fact as the className row above, seen through
+# `==` instead; both are the price of carrying it as text rather than as a
+# fourth opaque object type.
+function-fromion-annotation-is-not-a-string

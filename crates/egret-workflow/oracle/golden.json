@@ -2175,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-03T11:30:10.306913+07:00"
+  "result" : "2026-09-03T12:22:35.802702+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2226,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "Izp4gjEgeasZ0MrikVz9tBqADPzjBmt4fgB4sCn8MdPhGdHVSPY8qA=="
+  "result" : "Qf1AvYqg6nXdA90LPLbxno20wqnADQJPZtNnlRs1V/D/Ncnk5Kqpwg=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2260,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06588-0dd1-7655-a8bd-5b59eff3ca2e"
+  "result" : "01a065b8-0cee-7670-a6eb-574536c7b2e4"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "46vmP3TKeG0shG7nA0VuaP"
+  "result" : "6LpCLdqJvaAtoFOhCrjFza"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3InohC7nft6sb4Z0ar8nCGrKbmm"
+  "result" : "3Inv4RrAF2S10Qcbfbf1CQUFg4o"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2290,12 +2290,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "8"
+  "result" : "6"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "61051"
+  "result" : "61457"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2316,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "XeBIsFRfEZef_E2lnRMPN"
+  "result" : "zOpyYmPRWDC7p62nRdH7q"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -6512,14 +6512,6 @@
     "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.UnknownSymbolException) Unknown symbol text for $0\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion='$0') }}:1)"
   }
 }, {
-  "id" : "function-fromion-annotation-in-a-list",
-  "expr" : "{{ fromIon(ion='[a::1, 2]') }}",
-  "context" : { },
-  "compare" : "error-class",
-  "result" : {
-    "error" : "com.fasterxml.jackson.databind.JsonMappingException: Document nesting depth (1001) exceeds the maximum allowed (1000, from `StreamWriteConstraints.getMaxNestingDepth()`) (through reference chain: com.amazon.ion.impl.lite.IonIntLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"]->com.amazon.ion.impl.lite.IonLoaderLite[\"system\"]->com.amazon.ion.impl.lite.IonSystemLite[\"loader\"])"
-  }
-}, {
   "id" : "function-fromion-comment-abutting-a-value",
   "expr" : "{{ fromIon(ion='1//c') }}",
   "context" : { },
@@ -6677,4 +6669,245 @@
   "result" : {
     "error" : "io.pebbletemplates.pebble.error.PebbleException: The argument at position 2 is not allowed. Only 1 argument(s) are allowed. ({{ dayOfWeek('2024-01-08', 'x') }}:1)"
   }
+}, {
+  "id" : "function-fromion-stops-before-an-unterminated-comment",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "1 /*c"
+  },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-stops-before-a-bad-number",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "1 +5"
+  },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-stops-before-an-annotation",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "1 a::1"
+  },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-stops-before-a-null",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "1 null"
+  },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-stops-after-a-container",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "[1,2] /*c"
+  },
+  "result" : "[1,2]"
+}, {
+  "id" : "function-fromion-does-not-stop-before-a-first-null",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "null 1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: t is null in sink.next(t) ({{ fromIon(ion=i) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-does-not-stop-before-a-first-bad-value",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "007 1"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.impl.IonReaderTextRawTokensX$IonReaderTextTokenException) Invalid leading zero in number: 007 at line 1 offset 5\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion=i) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-all-rows-reads-the-tail",
+  "expr" : "{{ fromIon(ion=i, allRows=true) }}",
+  "context" : {
+    "i" : "1 +5"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.impl.IonReaderTextRawX$IonReaderTextParsingException) Syntax error at line 1 offset 3: invalid syntax [state:STATE_BEFORE_ANNOTATION_DATAGRAM on token:TOKEN_SYMBOL_OPERATOR]\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion=i, allRows=true) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-all-rows-reads-a-tail-comment",
+  "expr" : "{{ fromIon(ion=i, allRows=true) }}",
+  "context" : {
+    "i" : "1 /*c"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.impl.IonReaderTextRawTokensX$IonReaderTextTokenException) bad character [-1, \"\\xffffffff\"] encountered where a token was supposed to start  at line 1 offset 6\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion=i, allRows=true) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-annotation-list-length",
+  "expr" : "{{ fromIon(ion='[a::1, 2]') | length }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-fromion-annotation-list-element",
+  "expr" : "{{ fromIon(ion='[a::1, 2]')[1] }}",
+  "context" : { },
+  "result" : "2"
+}, {
+  "id" : "function-fromion-annotation-struct-class",
+  "expr" : "{{ fromIon(ion='{f:a::1}') | className }}",
+  "context" : { },
+  "result" : "java.util.LinkedHashMap"
+}, {
+  "id" : "function-fromion-annotation-struct-field",
+  "expr" : "{{ fromIon(ion='{f:a::1}').f }}",
+  "context" : { },
+  "result" : "a::1"
+}, {
+  "id" : "function-fromion-annotation-nested",
+  "expr" : "{{ fromIon(ion='[[a::1]]')[0][0] }}",
+  "context" : { },
+  "result" : "a::1"
+}, {
+  "id" : "function-fromion-annotation-of-a-struct",
+  "expr" : "{{ fromIon(ion='a::{b:1}') }}",
+  "context" : { },
+  "result" : "a::{b:1}"
+}, {
+  "id" : "function-fromion-annotation-doubled",
+  "expr" : "{{ fromIon(ion='a::b::1') }}",
+  "context" : { },
+  "result" : "a::b::1"
+}, {
+  "id" : "function-fromion-annotation-through-string",
+  "expr" : "{{ fromIon(ion='a::1') | string }}",
+  "context" : { },
+  "result" : "a::1"
+}, {
+  "id" : "function-fromion-annotation-class",
+  "expr" : "{{ fromIon(ion='a::1') | className }}",
+  "context" : { },
+  "result" : "com.amazon.ion.impl.lite.IonIntLite"
+}, {
+  "id" : "function-fromion-annotation-normalises-a-symbol",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "a::'x'"
+  },
+  "result" : "a::x"
+}, {
+  "id" : "function-fromion-annotation-normalises-a-radix",
+  "expr" : "{{ fromIon(ion='a::0x10') }}",
+  "context" : { },
+  "result" : "a::16"
+}, {
+  "id" : "function-fromion-annotation-through-tojson",
+  "expr" : "{{ fromIon(ion='a::1') | toJson }}",
+  "context" : { },
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Unable to transform to json value 'a::1' with type 'com.amazon.ion.impl.lite.IonIntLite' ({{ fromIon(ion='a::1') | toJson }}:1)"
+  }
+}, {
+  "id" : "function-fromion-decimal-exponent",
+  "expr" : "{{ fromIon(ion='1d2') }}",
+  "context" : { },
+  "result" : "100"
+}, {
+  "id" : "function-fromion-decimal-exponent-class",
+  "expr" : "{{ fromIon(ion='1d2') | className }}",
+  "context" : { },
+  "result" : "java.math.BigDecimal"
+}, {
+  "id" : "function-fromion-decimal-exponent-round-trip",
+  "expr" : "{{ fromIon(ion='1d2') | toIon }}",
+  "context" : { },
+  "result" : "1d2"
+}, {
+  "id" : "function-fromion-decimal-exponent-through-tojson",
+  "expr" : "{{ fromIon(ion='1d2') | toJson }}",
+  "context" : { },
+  "result" : "1E+2"
+}, {
+  "id" : "function-fromion-decimal-keeps-its-scale",
+  "expr" : "{{ fromIon(ion='1.50') }}",
+  "context" : { },
+  "result" : "1.50"
+}, {
+  "id" : "function-fromion-decimal-negative-zero",
+  "expr" : "{{ fromIon(ion='-0.0') }}",
+  "context" : { },
+  "result" : "0.0"
+}, {
+  "id" : "function-fromion-decimal-scale-zero",
+  "expr" : "{{ fromIon(ion='1.') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-decimal-scale-zero-round-trip",
+  "expr" : "{{ fromIon(ion='1.') | toIon }}",
+  "context" : { },
+  "result" : "1."
+}, {
+  "id" : "function-fromion-decimal-wide",
+  "expr" : "{{ fromIon(ion='12345678901234567890.5') }}",
+  "context" : { },
+  "result" : "12345678901234567890.5"
+}, {
+  "id" : "function-fromion-float-is-a-double",
+  "expr" : "{{ fromIon(ion='1E2') }}",
+  "context" : { },
+  "result" : "100.0"
+}, {
+  "id" : "function-fromion-float-is-a-double-class",
+  "expr" : "{{ fromIon(ion='1E2') | className }}",
+  "context" : { },
+  "result" : "java.lang.Double"
+}, {
+  "id" : "function-fromion-float-round-trip",
+  "expr" : "{{ fromIon(ion='1E2') | toIon }}",
+  "context" : { },
+  "result" : "100e0"
+}, {
+  "id" : "filter-number-bigdecimal-scale-zero-to-ion",
+  "expr" : "{{ '1' | number(type='BIGDECIMAL') | toIon }}",
+  "context" : { },
+  "result" : "1."
+}, {
+  "id" : "function-fromion-blob",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "{{ aGVsbG8= }}"
+  },
+  "result" : "\"aGVsbG8=\""
+}, {
+  "id" : "function-fromion-clob",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "{{ \"clob\" }}"
+  },
+  "result" : "\"Y2xvYg==\""
+}, {
+  "id" : "function-fromion-timestamp",
+  "expr" : "{{ fromIon(ion='2024-01-01T00:00:00Z') }}",
+  "context" : { },
+  "result" : "2024-01-01"
+}, {
+  "id" : "function-fromion-unsupported-version-marker",
+  "expr" : "{{ fromIon(ion='$ion_1_01') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.UnsupportedIonVersionException) Unsupported Ion version $ion_1_01\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion='$ion_1_01') }}:1)"
+  }
+}, {
+  "id" : "function-fromion-version-marker",
+  "expr" : "{{ fromIon(ion='$ion_1_0 1') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-fromion-annotation-is-not-a-string",
+  "expr" : "{{ fromIon(ion='a::1') == 'a::1' }}",
+  "context" : { },
+  "result" : "false"
 } ]

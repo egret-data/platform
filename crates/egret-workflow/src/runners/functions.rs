@@ -192,9 +192,16 @@ fn from_ion(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         .get("allRows", 1)
         .is_some_and(|flag| flag.kind() == ValueKind::Bool && flag.is_true());
 
-    let rows = read_ion(text).map_err(|e| pebble_error(format!("Invalid ion: {e}")))?;
-    // `sink.next(t)` refuses a null element, which is what makes the string
-    // `null` an error rather than an empty result.
+    // **`all_rows` decides how much of the document is even PARSED.**
+    // `findFirst()` is `take(1)`, so Kestra never looks past the first value:
+    // `fromIon('1 /*c')` and `fromIon('1 +5')` are both `1` there, and were
+    // errors here the moment this reader grew refusals. `toList()` does read
+    // the tail, and every one of those documents throws under `allRows=true`.
+    // Measured, both ways, over fourteen documents.
+    let rows = read_ion(text, all_rows).map_err(|e| pebble_error(format!("Invalid ion: {e}")))?;
+    // `sink.next(t)` refuses a null element. Over a lazily-limited `rows` this
+    // is exactly "the first value is null", which is what `fromIon('null 1')`
+    // throws on and `fromIon('1 null')` does not.
     if rows.iter().any(is_java_null) {
         return Err(pebble_error("Invalid ion: t is null in sink.next(t)"));
     }
@@ -1624,6 +1631,14 @@ mod tests {
     /// and answered `7`, `5`, `$0` and `[1,2]`. Over-acceptance is the one
     /// kind of divergence this crate's rules do not allow — a refusal that
     /// says so is fine, a plausible wrong answer is not.
+    ///
+    /// **Every source here is the bad token ON ITS OWN, and that is the whole
+    /// point of the test above it.** The first cut of these entries and this
+    /// test used only whole-document sources, which passed the correct
+    /// implementation *and* the one that applied every refusal to the whole
+    /// document — see
+    /// [`from_ion_reads_one_value_and_never_looks_at_the_tail`], which is the
+    /// variant they were all one step away from.
     #[test]
     fn the_ion_reader_refuses_what_ion_itself_forbids() {
         for (source, why) in [
@@ -1636,6 +1651,8 @@ mod tests {
             ("$12", "symbol ID"),
             ("[1,,2]", "unexpected character"),
             ("{,}", "an ion field name"),
+            ("$ion_1_01", "unsupported ion version marker"),
+            ("$ion_1_1 1", "unsupported ion version marker"),
         ] {
             let message = render(
                 "{{ fromIon(ion=i) }}",
@@ -1651,6 +1668,7 @@ mod tests {
         );
         assert_eq!(ok("{{ fromIon(ion='0.5') }}"), "0.5");
         assert_eq!(ok("{{ fromIon(ion='+inf') }}"), "Infinity");
+        assert_eq!(ok("{{ fromIon(ion='$ion_1_0 1') }}"), "1");
         // Both i64 ends, which an `i64`-only magnitude parse refused.
         assert_eq!(
             ok("{{ fromIon(ion='-9223372036854775808') }}"),
@@ -1662,13 +1680,77 @@ mod tests {
         );
     }
 
+    /// **`FileSerde.readAll(…).findFirst()` is `take(1)`: Kestra never parses
+    /// past the first value, and `allRows=true` (`toList()`) parses all of
+    /// them.** Measured both ways over fourteen documents.
+    ///
+    /// This reader parsed the whole document eagerly and then took `rows[0]`,
+    /// which was harmless while it accepted nearly everything and became
+    /// thirteen regressions the moment fix round 1 gave it six refusals: a
+    /// valid value followed by a bad token answered the bad token's error.
+    ///
+    /// Every entry written for those refusals was a document consisting only
+    /// of the bad token, so each passed the correct implementation and the
+    /// broken one alike. **The variant they were all one step away from is
+    /// simply a valid value in front**, and that is what this asserts.
+    #[test]
+    fn from_ion_reads_one_value_and_never_looks_at_the_tail() {
+        for (source, expected) in [
+            ("1 /*c", "1"),
+            ("1 +5", "1"),
+            ("1 a::1", "1"),
+            ("1 null", "1"),
+            ("1 007", "1"),
+            ("1 $0", "1"),
+            ("1 [1,,2]", "1"),
+            ("1 2 007", "1"),
+            ("1 (", "1"),
+            ("1 abc::", "1"),
+            ("[1,2] /*c", "[1,2]"),
+            ("{a:1} /*c", r#"{"a":1}"#),
+        ] {
+            assert_eq!(
+                render(
+                    "{{ fromIon(ion=i) }}",
+                    &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
+                )
+                .unwrap_or_else(|e| panic!("{source}: {e}")),
+                expected,
+                "{source}"
+            );
+        }
+
+        // A bad FIRST value is still an error -- laziness stops at one value,
+        // it does not skip one.
+        for source in ["null 1", "007 1", "+5 1"] {
+            render(
+                "{{ fromIon(ion=i) }}",
+                &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
+            )
+            .expect_err("a bad FIRST value is still an error");
+        }
+
+        // `allRows=true` is `toList()`, which DOES read the tail.
+        for source in ["1 /*c", "1 +5", "1 007", "1 [1,,2]"] {
+            render(
+                "{{ fromIon(ion=i, allRows=true) }}",
+                &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
+            )
+            .expect_err("allRows reads the tail");
+        }
+        assert_eq!(
+            render("{{ fromIon(ion=i, allRows=true) }}", r#"{"i": "1 2 3"}"#).unwrap(),
+            "[1,2,3]"
+        );
+    }
+
     /// A `/*` with no `*/` mapped to end-of-input, so a **truncated** document
     /// rendered as nothing. Kestra says `Corrupt content to decode`.
     ///
-    /// The line-comment form is not the same case and must keep working:
-    /// `1 // c` and `1//c` are both `1` on both engines, and a document that
-    /// is only a comment is an EMPTY stream, which is null rather than an
-    /// error.
+    /// **The distinction the first version of this test named and did not
+    /// draw**: it probed only `/* nope`, so it passed the implementation that
+    /// applied the refusal to a document whose first value was already
+    /// complete. `1 /*c` is `1`, because nothing ever reads that far.
     #[test]
     fn an_unterminated_ion_comment_is_corrupt_not_an_empty_document() {
         let message = render("{{ fromIon(ion=i) }}", r#"{"i": "/* nope"}"#)
@@ -1676,6 +1758,16 @@ mod tests {
         assert!(
             message.contains("unterminated ion block comment"),
             "{message}"
+        );
+        // The same document with a complete value in front of it is that
+        // value, on both engines.
+        assert_eq!(
+            render("{{ fromIon(ion=i) }}", r#"{"i": "1 /*c"}"#).unwrap(),
+            "1"
+        );
+        assert_eq!(
+            render("{{ fromIon(ion=i) }}", r#"{"i": "/* c */ 1 /*c"}"#).unwrap(),
+            "1"
         );
 
         assert_eq!(ok("{{ fromIon(ion='1//c') }}"), "1");
@@ -1688,26 +1780,123 @@ mod tests {
         assert_eq!(ok("<{{ fromIon(ion='') }}>"), "<>");
     }
 
-    /// **The module doc used to say Jackson drops annotations. It does not.**
-    /// `fromIon('a::1')` is the string `a::1` in Kestra and
-    /// `fromIon('[a::1, 2]')` throws; the annotation-skipping loop that
-    /// sentence justified answered `1` and `[1,2]`. Refused now, by name.
+    /// **The second unmeasured claim about annotations in two rounds.** Round
+    /// 1 corrected "Jackson drops them" to "Kestra throws for one inside a
+    /// container" — and that is false too: `[a::1, 2] | length` is `2`,
+    /// `[a::1, 2][1]` is `2`, and `{f:a::1} | className` is
+    /// `java.util.LinkedHashMap`. Only *stringifying* a container that holds
+    /// one fails, as a Jackson serialiser artifact whose message is not even
+    /// stable between JVM runs.
+    ///
+    /// The lesson is not about annotations: **the correction inherited the
+    /// method that produced the error.** Rewriting a claim that was wrong for
+    /// lack of measurement is the moment to measure. Fifteen forms were probed
+    /// for this one.
     #[test]
-    fn the_ion_reader_refuses_an_annotation_rather_than_dropping_it() {
-        for source in ["a::1", "abc::1", "[a::1, 2]", "{a: b::1}"] {
-            let message = render(
-                "{{ fromIon(ion=i) }}",
-                &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
-            )
-            .expect_err("must be refused");
-            assert!(
-                message.contains("egret does not read an ion annotation"),
-                "{source}: {message}"
-            );
-        }
-        // A bare symbol is not an annotation and must still read.
+    fn an_annotated_value_is_its_own_text_and_its_container_is_a_container() {
+        // The value carries its own source text, which is what Kestra renders.
+        assert_eq!(ok("{{ fromIon(ion='a::1') }}"), "a::1");
+        assert_eq!(ok("{{ fromIon(ion='a::b::1') }}"), "a::b::1");
+        assert_eq!(ok("{{ fromIon(ion='a::{b:1}') }}"), "a::{b:1}");
+        assert_eq!(ok("{{ fromIon(ion='a::1') | string }}"), "a::1");
+
+        // And the CONTAINER is an ordinary container. These three were the
+        // wrong answers the refusal produced.
+        assert_eq!(ok("{{ fromIon(ion='[a::1, 2]') | length }}"), "2");
+        assert_eq!(ok("{{ fromIon(ion='[a::1, 2]')[1] }}"), "2");
+        assert_eq!(
+            ok("{{ fromIon(ion='{f:a::1}') | className }}"),
+            "java.util.LinkedHashMap"
+        );
+        assert_eq!(ok("{{ fromIon(ion='{f:a::1}').f }}"), "a::1");
+        assert_eq!(ok("{{ fromIon(ion='[[a::1]]')[0][0] }}"), "a::1");
+        assert_eq!(
+            ok("{{ fromIon(ion='{f:a::1,g:2}') | keys }}"),
+            r#"["f","g"]"#
+        );
+
+        // **The one thing that cannot be a corpus entry.** Stringifying a
+        // container that HOLDS an annotated value throws in Kestra, and the
+        // message is not stable between JVM runs -- on the same jar and the
+        // same corpus, three fresh runs gave `Document nesting depth (1001)
+        // exceeds the maximum` once and `Direct self-reference leading to
+        // cycle` twice. A golden that changes on regeneration is worse than
+        // none, so this is the pin instead, and `oracle/README.md` says why.
+        assert_eq!(ok("{{ fromIon(ion='[a::1, 2]') }}"), r#"["a::1",2]"#);
+        assert_eq!(ok("{{ fromIon(ion='{f:a::1}') }}"), r#"{"f":"a::1"}"#);
+        assert_eq!(ok("{{ fromIon(ion='a::[1]') }}"), "a::[1]");
+
+        // A malformed annotation is still an error: the decorated value is
+        // parsed, which is what says where the text ends.
+        assert!(render("{{ fromIon(ion=i) }}", r#"{"i": "abc::"}"#).is_err());
+        // A bare symbol is not an annotation.
         assert_eq!(ok("{{ fromIon(ion='abc') }}"), "abc");
         assert_eq!(ok("{{ fromIon(ion='{a:b}') }}"), r#"{"a":"b"}"#);
+    }
+
+    /// **Ion's `d` exponent and its bare `.` make a `java.math.BigDecimal`;
+    /// its `e` exponent makes a `java.lang.Double`.** Measured across fourteen
+    /// literals, four ways each.
+    ///
+    /// An `f64` for the first family loses the scale, and the sentence that
+    /// excused it said "no round trip through this crate reaches it — only
+    /// hand-written Ion does". `{{ fromIon('1d2') | toIon }}` is a round trip
+    /// through this crate that reaches it: `1d2` in Kestra, `100e0` here.
+    #[test]
+    fn an_ion_decimal_is_a_big_decimal_and_an_ion_float_is_a_double() {
+        for (source, plain, class, ion) in [
+            ("1d2", "100", "java.math.BigDecimal", "1d2"),
+            (
+                "1d20",
+                "100000000000000000000",
+                "java.math.BigDecimal",
+                "1d20",
+            ),
+            ("1d-2", "0.01", "java.math.BigDecimal", "0.01"),
+            ("1.50", "1.50", "java.math.BigDecimal", "1.50"),
+            ("-1.50", "-1.50", "java.math.BigDecimal", "-1.50"),
+            ("100d-2", "1.00", "java.math.BigDecimal", "1.00"),
+            ("0.001", "0.001", "java.math.BigDecimal", "0.001"),
+            ("1.", "1", "java.math.BigDecimal", "1."),
+            ("0.", "0", "java.math.BigDecimal", "0."),
+            ("1d0", "1", "java.math.BigDecimal", "1."),
+            // `BigDecimal` has no negative zero.
+            ("-0.0", "0.0", "java.math.BigDecimal", "0.0"),
+            (
+                "12345678901234567890.5",
+                "12345678901234567890.5",
+                "java.math.BigDecimal",
+                "12345678901234567890.5",
+            ),
+            // An `e` exponent is a FLOAT, and stays one.
+            ("1E2", "100.0", "java.lang.Double", "100e0"),
+            ("1e0", "1.0", "java.lang.Double", "1e0"),
+        ] {
+            let cx = format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap());
+            assert_eq!(
+                render("{{ fromIon(ion=i) }}", &cx).unwrap(),
+                plain,
+                "{source}"
+            );
+            assert_eq!(
+                render("{{ fromIon(ion=i) | className }}", &cx).unwrap(),
+                class,
+                "{source}"
+            );
+            assert_eq!(
+                render("{{ fromIon(ion=i) | toIon }}", &cx).unwrap(),
+                ion,
+                "{source} through toIon"
+            );
+        }
+        assert_eq!(ok("{{ fromIon(ion='1d2') | toJson }}"), "1E+2");
+        // The pre-existing writer bug the decimal work exposed: a scale-0
+        // `BigDecimal` needs Ion's `.`, or it reads back as an integer.
+        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') | toIon }}"), "1.");
+        assert_eq!(
+            ok("{{ '1.50' | number(type='BIGDECIMAL') | toIon }}"),
+            "1.50"
+        );
     }
 
     /// `serde_norway` deserialises a source with no content to a **unit**,

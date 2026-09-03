@@ -456,9 +456,6 @@ function-fromion-empty-list-element
 # A TRUNCATED document rendered as NOTHING, which is the silent-wrong-answer
 # class -- `skip_ignorable` mapped an unterminated `/*` to end-of-input.
 function-fromion-unterminated-comment
-# Annotations are NOT dropped by Jackson, which is what the module doc used to
-# claim without measuring. Kestra throws for one inside a container.
-function-fromion-annotation-in-a-list
 
 # `yaml('')`, `yaml('   ')` and `yaml('# c')` answered NULL, which renders as
 # nothing. Jackson throws `No content to map due to end-of-input`.
@@ -469,3 +466,20 @@ function-yaml-comment-only-document
 # `alphabet` is measured in UTF-16 code units (`String.toCharArray().length`),
 # so 200 astral characters is 400 units and is past the 256 bound.
 function-nanoid-astral-alphabet
+
+# --- W2 Task 7, fix round 2.
+#
+# `fromIon` is LAZY: `findFirst()` is `take(1)`, so a bad token AFTER the first
+# value is never seen. These two are bad at the FIRST value, which is where a
+# refusal belongs -- and they are the entries the first cut's refusals should
+# have had, since every one of those was a document consisting only of the bad
+# token and so passed the eager implementation too.
+function-fromion-does-not-stop-before-a-first-null
+function-fromion-does-not-stop-before-a-first-bad-value
+# `allRows=true` is `toList()` and DOES read the tail. Measured, both ways.
+function-fromion-all-rows-reads-the-tail
+function-fromion-all-rows-reads-a-tail-comment
+
+# `$ion_1_01` is a version this reader does not speak; Kestra throws
+# `UnsupportedIonVersionException` where egret answered the symbol `$ion_1_01`.
+function-fromion-unsupported-version-marker

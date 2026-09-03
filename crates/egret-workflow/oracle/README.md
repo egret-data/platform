@@ -100,8 +100,12 @@ both are deliberate:
 
 **The set is committed as `error-class.txt`** and asserted to equal the
 corpus's markers exactly, because error-class comparison is a *free pass*: such
-an entry matches on any failure at all, so it is born matching, never enters
-`baseline.txt`, and can never fail. A task that could not reproduce a filter
+an entry matches on any failure at all, so it is born matching and cannot fail
+**for the reason it was written** — a refusal that becomes a different refusal
+is invisible. It is not literally unfailable, and an earlier version of this
+sentence ("never enters `baseline.txt`, and can never fail") was wrong about
+that: **five ids are in this file AND in `baseline.txt`**, because such an
+entry still fails when egret *succeeds* where Kestra threw. A task that could not reproduce a filter
 could mark its entry error-class and turn the oracle green on work it did not
 do. Keeping the set in its own short file makes adding one a one-line,
 reviewable diff instead of a field edit buried in a 291-entry JSON file — the
@@ -129,7 +133,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**147** entries carry it today, counted out of `golden.json` rather than added
+**151** entries carry it today, counted out of `golden.json` rather than added
 up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -169,8 +173,9 @@ answer differently rather than a filter that is not ported -- and 78 of
 673 after that task's fix round, 82 of 693 after its second, 86 of 706 after its
 third, 70 of 855 after W2 Task 7 -- which BANKED eighteen (its whole batch of
 pure functions) and RECORDED two, both places the two YAML scalar resolvers
-disagree -- and **80 of 892** after that task's fix round, which recorded ten
-divergences that had no entry at all.
+disagree -- 80 of 892 after that task's fix round, which recorded ten
+divergences that had no entry at all, and **87 of 931** after its second, which
+fixed thirteen regressions and recorded nine more of the same kind.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -682,7 +687,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 892 entries)
+## Corpus (`corpus.json`, 931 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -3216,11 +3221,11 @@ exist` in Pebble and answers here; a third positional argument throws
 always done it — but Task 7 widened the surface by nineteen functions, so it is
 two corpus entries now rather than a sentence.
 
-The other divergence that is not a refusal: **an Ion decimal is a `Double` here
-and a `BigDecimal` in Kestra**, so `1.` and `0.` are `1` and `0` there and
-`1.0`/`0.0` here, `1d3` is `1000` there and `1000.0` here, and `1.50` keeps its
-trailing zero there. `write_ion` always writes a float (`2.5e0`), so no round
-trip through this crate reaches it — only hand-written Ion does.
+The other divergence that is not a refusal **was** an Ion decimal read as a
+`Double`, and the sentence excusing it — "no round trip through this crate
+reaches it, only hand-written Ion does" — was falsified by
+`{{ fromIon('1d2') | toIon }}`, which is a round trip through this crate and
+answered `100e0` against Kestra's `1d2`. Fixed in fix round 2; see below.
 
 ### The attack, re-run against the fix
 
@@ -3232,3 +3237,177 @@ round's whole sweep. **Nothing panicked, nothing hung, and the slowest row is
 mutations — the ksuid prefix, the randomPort fake, the duplicate-key rule, the
 Ion leading zero, the unterminated comment, the empty YAML document — are each
 killed by a named test.
+
+## W2 Task 7, fix round 2 — one bug in three costumes, and a correction that inherited its error's method
+
+A second review of 330 probes verified fix round 1 broadly — C1's de-duplication
+agrees **98/98** across all three readers times nine ways of touching the
+result, the two pre-dating `env.rs` visitors agree 11/11, the `OrderedMap`
+index agrees **146/146** across its threshold, and there is no new quadratic
+anywhere (80 000-field Ion 161 ms, a 100 000-key map through every writer
+≤ 405 ms, 500 000 top-level values 407 ms).
+
+It also found that fix round 1 had introduced thirteen regressions, and the
+shape they share is the one this file keeps writing down.
+
+### `fromIon` is LAZY, and six new refusals turned that into thirteen wrong answers
+
+`FileSerde.readAll(…).findFirst()` is `take(1)`: **Kestra never parses past the
+first value.** This reader parsed the whole document eagerly and then took
+`rows[0]`, which was harmless while it accepted nearly everything. Measured
+over fourteen documents:
+
+| | Kestra | before round 1 | after round 1 |
+|---|---|---|---|
+| `fromIon('1 /*c')` | `1` | `1` | unterminated ion block comment |
+| `fromIon('1 +5')` | `1` | `1` | ion forbids a leading `+` |
+| `fromIon('1 a::1')` | `1` | `1` | does not read an ion annotation |
+| `fromIon('1 null')` | `1` | `1` | `t is null in sink.next(t)` |
+| `fromIon('[1,2] /*c')` | `[1,2]` | `[1,2]` | as above |
+
+**The unterminated-comment fix was right about the defect and wrong about its
+scope**: a truncated document really does render as nothing, but only when no
+complete value precedes the comment. `/* nope` is an error; `1 /*c` is `1`.
+
+`allRows=true` is `toList()` and **does** read the tail — every one of those
+documents throws there. Both halves are now corpus entries.
+
+> **Every entry written for round 1's six refusals was a document consisting
+> only of the bad token**, so each passed the correct implementation and the
+> broken one alike. The variant they were all one step away from is simply *a
+> valid value in front*. That is the "one variant away" pattern from W2 Task 5's
+> fix round 3, and it has now cost this package four rounds.
+
+And the correct shape was **already in the same commit**: round 1's new
+multi-document `yaml()` read is lazy — `yaml('a: 1\n---\nb:\tc')` is `{"a":1}`
+on both engines even though the second document is a scanner error. One reader
+in one commit was lazy and the other was eager. That is the second time this
+task the knowledge was in the diff.
+
+### The second unmeasured claim about annotations, in two rounds, in one file
+
+Round 1 was raised *because* an `ionfmt` "Kestra does" sentence had been written
+without running one ("Jackson's `IonParser` drops them"). The replacement
+sentence — *"Kestra throws for one inside a container"* — is wrong in the same
+way, and it went into three committed places. Measured:
+
+| | Kestra | after round 1 |
+|---|---|---|
+| `fromIon('[a::1, 2]') \| length` | `2` | error |
+| `fromIon('[a::1, 2]')[1]` | `2` | error |
+| `fromIon('{f:a::1}') \| className` | `java.util.LinkedHashMap` | error |
+
+> **The lesson is not about annotations. The correction inherited the method
+> that produced the error.** Rewriting a claim that was wrong for lack of
+> measurement is the moment to measure.
+
+What Jackson actually does, across fifteen probed forms: an **annotated value**
+is an opaque `IonValue` whose `toString()` is its Ion text, and its
+**container** is an ordinary `ArrayList`/`LinkedHashMap`. Only *stringifying* a
+container that holds one fails.
+
+egret now carries an annotated value as its own **source text**. That gets the
+container right, gets the bare render right (`a::1`, `a::b::1`, `a::{b:1}`,
+`a::"s"`, `a::null.int`, `a::-1` — every probed form but two), and leaves four
+narrow divergences in `baseline.txt` instead of poisoning a whole document for
+one exotic element:
+
+- `className` is `java.lang.String` against
+  `com.amazon.ion.impl.lite.IonIntLite` — and this file's own rule excludes
+  "an internal class name" from what a port copies, the same call
+  `filter-classname-of-long` makes;
+- `fromIon('a::1') == 'a::1'` is `true` here and `false` there;
+- Ion's `toString()` **normalises** what it decorates: `a::'x'` is `a::x` and
+  `a::0x10` is `a::16`. egret keeps the source text;
+- a serialiser refuses an `IonValue` in Kestra and writes the text here.
+
+### The ninth non-deterministic entry, which the instrument had predicted
+
+Round 1's `function-fromion-annotation-in-a-list` had a **Jackson serialiser
+artifact** for a golden, and it is not stable: on the same jar and the same
+corpus, three fresh JVM runs gave `Document nesting depth (1001) exceeds the
+maximum` once and `Direct self-reference leading to cycle` twice. It was
+error-class, so the ratchet could not see it — but the regeneration gate would
+have produced a permanent spurious diff line, and `tests/oracle.rs`'s own doc
+says a ninth such id "showing up is visible as new information about the
+corpus". It showed up and nobody looked.
+
+**It is deleted rather than added to `NON_DETERMINISTIC`**, and replaced with
+the three stable expressions above, which is what it should have been. The
+whole-container stringification it stood for cannot be a corpus entry at all —
+a golden that changes on regeneration is worse than none — so it is pinned by
+`runners::functions::an_annotated_value_is_its_own_text_and_its_container_is_a_container`
+instead.
+
+### An Ion `d` is a decimal and an `e` is a float, and the difference is a Java class
+
+Measured over fourteen literals, four ways each:
+
+| | Kestra | before |
+|---|---|---|
+| `fromIon('1d2')` | `100`, `java.math.BigDecimal` | `100.0`, Double |
+| `fromIon('1.50')` | `1.50` | `1.5` |
+| `fromIon('-0.0')` | `0.0` (`BigDecimal` has no negative zero) | `-0.0` |
+| `fromIon('1d2') \| toIon` | `1d2` | `100e0` |
+| `fromIon('1E2')` | `100.0`, `java.lang.Double` | (agreed) |
+
+An `f64` loses the scale. Ion decimals now go through
+`filters::big_decimal`, and the sentence that excused the old behaviour —
+*"no round trip through this crate reaches it, only hand-written Ion does"* —
+is falsified by the last row, which **is** a round trip through this crate.
+
+It exposed a pre-existing bug in the writer beside it: **a scale-0
+`BigDecimal` needs Ion's `.`**, or it reads back as an integer.
+`'1' | number(type='BIGDECIMAL') | toIon` is `1.` and this wrote `1`, on a path
+that predates Task 7 entirely. `filter-number-bigdecimal-scale-zero-to-ion` is
+the entry.
+
+### Three more, from the same review
+
+- **`$ion_1_01` is `UnsupportedIonVersionException`**, not the symbol
+  `$ion_1_01`. One more over-acceptance, refused.
+- **Blobs, clobs and timestamps were divergences recorded only in prose.** This
+  file's own rule is that a divergence gets an entry because a sentence cannot
+  fail, and round 1 applied that rule to `yaml` and not to these. All three are
+  entries now, with what Kestra actually answers: a blob and a clob are
+  `byte[]` (`[B`) and base64 on output, and a timestamp is a
+  `java.time.LocalDate`.
+- **`function-yaml-huge-exponent` was filed under the wrong cause.**
+  `baseline.txt` had it with `1_000` and `off` as the YAML 1.1-vs-1.2
+  plain-scalar class; it is not that class. `1e300` is a `Double` on **both**
+  engines, and `1e400` stays a string here only because `serde_norway` declines
+  to produce a non-finite `f64`. Two committed control files were giving one id
+  two different causes.
+
+### Three tests that passed the implementation that shipped
+
+All three probed only whole-document sources, which is exactly the shape the
+eager reader could not fail:
+
+- `an_unterminated_ion_comment_is_corrupt_not_an_empty_document` probed only
+  `/* nope`, while its own doc comment named the distinction ("a *truncated*
+  document") its assertions did not draw;
+- `the_ion_reader_refuses_an_annotation_rather_than_dropping_it` used four
+  sources that were entirely the annotated shape, so it passed an
+  implementation that refuses any document containing `::` anywhere;
+- `the_ion_reader_refuses_what_ion_itself_forbids` had nine, all
+  whole-document.
+
+Each now carries the valid-value-in-front variant. **Fourteen corpus entries
+fail against the build that shipped round 1**, verified by rebuilding it
+(eager reader plus the annotation refusal) and running the ratchet against it.
+
+### And the mode's own description was overstated
+
+`error-class` comparison "is born matching, never enters `baseline.txt`, and can
+never fail" — the last two clauses are false, and this file has said them since
+W2 Task 4. **Five ids are in `error-class.txt` and in `baseline.txt`**, because
+such an entry still fails when egret *succeeds* where Kestra threw. What is
+true is narrower and is what the pairing fixture exists for: it cannot fail *for
+the reason it was written*.
+
+Also corrected: the `Args` divergence (an unknown named argument and an extra
+positional one are ignored here and throw in Pebble) is **crate-wide**, not
+`dayOfWeek`'s. Every one of the 35 filters and 19 functions has it; the two
+entries are a sample standing for all of them, and `baseline.txt` now says so
+rather than implying one function is the case.
