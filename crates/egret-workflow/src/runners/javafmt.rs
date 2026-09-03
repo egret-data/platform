@@ -750,6 +750,40 @@ fn plus_months(local: NaiveDateTime, amount: i64) -> Option<NaiveDateTime> {
 // ---------------------------------------------------------------------------
 
 /// One piece of a parsed Java pattern.
+/// What one level of an optional section costs the stack.
+///
+/// `parse_pieces` recurses once per `[`, over a pattern a flow author
+/// supplies through `existingFormat`. Measured by bisecting the depth that
+/// overflows the 128 MiB render thread: **848 bytes a level**, 158 242 levels
+/// deep.
+const WORST_STACK_PER_OPTIONAL_LEVEL: usize = 848;
+
+/// How much of the render stack the date parser may claim: a quarter, the
+/// same share `rewrite::MAX_EXPRESSION_BYTES` takes, and for the same reason
+/// -- it is not the only thing on that stack.
+const OPTIONAL_STACK_MARGIN: usize = 4;
+
+/// How deeply `[` may nest in a pattern.
+///
+/// **Derived, not chosen**: 134 217 728 / 848 / 4 = **39 568**.
+///
+/// The enumeration in `oracle/README.md` used to certify this file as having
+/// "no nesting construct", which was wrong: `[...]` is one, `parse_pieces`
+/// recurses through it, and nothing bounded the depth. Two separate defects
+/// lived behind that sentence -- this recursion, and an O(n^2) forward scan
+/// for the matching `]` that made a 80 KB pattern take 12.8 s (see
+/// [`Piece::OptionalStart`]).
+///
+/// **Java's own limit is far lower and egret does not copy it.** Measured
+/// through the harness: Kestra parses 1 000 nested sections and throws
+/// `java.lang.StackOverflowError` at 5 000. A `StackOverflowError` is a
+/// catchable `Error` in Java and an abort in Rust, so matching that boundary
+/// would mean refusing patterns for no reason other than that a JVM stack
+/// happened to run out. This cap is above anything Kestra can parse, so it
+/// never refuses what Kestra accepts, and it is below what would abort.
+const MAX_OPTIONAL_DEPTH: usize =
+    super::env::RENDER_STACK_BYTES / WORST_STACK_PER_OPTIONAL_LEVEL / OPTIONAL_STACK_MARGIN;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Piece {
     /// Literal text, with the quoting already resolved.
@@ -765,7 +799,16 @@ enum Piece {
     /// is available; a `ZonedDateTime` has all of them, so for **formatting**
     /// these are transparent. They still have to be recognised, because `]`
     /// without a `[` is an error and `[`/`]` are not literal characters.
-    OptionalStart,
+    ///
+    /// **The payload is the distance to the matching `OptionalEnd`**, counted
+    /// in pieces from this one, and it is resolved once while the pattern is
+    /// parsed. It used to be found by scanning forward at parse-of-the-TEXT
+    /// time, once per level per attempt, which made parsing a nested pattern
+    /// quadratic: 20 000 levels took 3.2 s and 40 000 took 12.8 s -- four
+    /// times the work for twice the input, which is the signature. A relative
+    /// distance survives the `&pieces[i + 1..end]` slicing that the parser
+    /// recurses through, where an absolute index would not.
+    OptionalStart(usize),
     OptionalEnd,
 }
 
@@ -855,6 +898,7 @@ impl Pattern {
         let chars: Vec<char> = pattern.chars().collect();
         let mut pieces = Vec::new();
         let mut depth = 0usize;
+        let mut opens: Vec<usize> = Vec::new();
         let mut i = 0usize;
         while i < chars.len() {
             let c = chars[i];
@@ -946,7 +990,18 @@ impl Pattern {
                 }
                 '[' => {
                     depth += 1;
-                    pieces.push(Piece::OptionalStart);
+                    // **Bounded here because `parse_pieces` recurses once per
+                    // level over text a flow author supplies.** See
+                    // `MAX_OPTIONAL_DEPTH`.
+                    if depth > MAX_OPTIONAL_DEPTH {
+                        return Err(format!(
+                            "Pattern nests optional sections more than {MAX_OPTIONAL_DEPTH} deep"
+                        ));
+                    }
+                    opens.push(pieces.len());
+                    // Patched with the real distance when the `]` is found;
+                    // an unclosed `[` keeps this and is rejected below.
+                    pieces.push(Piece::OptionalStart(0));
                     i += 1;
                 }
                 ']' => {
@@ -956,6 +1011,9 @@ impl Pattern {
                         );
                     }
                     depth -= 1;
+                    let start = opens.pop().expect("depth > 0 means an open section");
+                    let end = pieces.len();
+                    pieces[start] = Piece::OptionalStart(end - start);
                     pieces.push(Piece::OptionalEnd);
                     i += 1;
                 }
@@ -983,7 +1041,7 @@ impl Pattern {
         let mut pad: Option<usize> = None;
         for piece in &self.pieces {
             match piece {
-                Piece::OptionalStart | Piece::OptionalEnd => {}
+                Piece::OptionalStart(_) | Piece::OptionalEnd => {}
                 Piece::Pad(width) => {
                     pad = Some(*width);
                     continue;
@@ -2301,8 +2359,10 @@ impl Pattern {
                 // An optional section is attempted and rolled back whole --
                 // both the cursor and the fields, so a half-matched section
                 // cannot leave a stale value behind.
-                Piece::OptionalStart => {
-                    let end = matching_end(pieces, i);
+                // The distance was resolved when the pattern was parsed; a
+                // forward scan here is what made this quadratic.
+                Piece::OptionalStart(distance) => {
+                    let end = (i + distance).min(pieces.len());
                     let saved_at = scan.at;
                     let saved = parsed.clone();
                     if self
@@ -2368,23 +2428,6 @@ fn fixed_parse_width(letter: char, count: usize) -> Option<usize> {
         }
         _ => None,
     }
-}
-
-fn matching_end(pieces: &[Piece], start: usize) -> usize {
-    let mut depth = 0usize;
-    for (i, piece) in pieces.iter().enumerate().skip(start) {
-        match piece {
-            Piece::OptionalStart => depth += 1,
-            Piece::OptionalEnd => {
-                depth -= 1;
-                if depth == 0 {
-                    return i;
-                }
-            }
-            _ => {}
-        }
-    }
-    pieces.len()
 }
 
 fn parse_field(
@@ -3028,5 +3071,103 @@ mod tests {
                 count: 1
             }]
         );
+    }
+
+    /// **`[...]` is a nesting construct, and for one round the enumeration in
+    /// `oracle/README.md` said this file had none.**
+    ///
+    /// Two defects lived behind that sentence, and this pins both.
+    ///
+    /// The first is depth: `parse_pieces` recurses once per level over a
+    /// pattern that arrives as `existingFormat`, from a context value, with
+    /// no length cap anywhere on the way in. At 160 000 it overflowed the
+    /// 128 MiB render thread.
+    ///
+    /// The second is time: the matching `]` used to be found by scanning
+    /// forward at parse time, once per level, which is O(depth^2). Measured
+    /// on the shipped render path, before and after resolving the distance
+    /// once while the PATTERN is parsed:
+    ///
+    /// | depth | before | after |
+    /// |---:|---:|---:|
+    /// | 10 000 | 833 ms | 9 ms |
+    /// | 20 000 | 3 223 ms | 15 ms |
+    /// | 40 000 | 12 774 ms | 29 ms |
+    ///
+    /// Four times the work for twice the input, before; twice, after. The
+    /// per-level `parsed.clone()` was suspected too and is NOT the quadratic
+    /// term -- it is a fixed-size struct, and removing only the scan made the
+    /// whole thing linear, which is the evidence.
+    #[test]
+    fn optional_sections_are_bounded_and_their_matching_end_is_resolved_once() {
+        // Derived from the render stack, not chosen. If either side moves,
+        // this states which.
+        assert_eq!(WORST_STACK_PER_OPTIONAL_LEVEL, 848);
+        assert_eq!(
+            MAX_OPTIONAL_DEPTH,
+            crate::runners::env::RENDER_STACK_BYTES
+                / WORST_STACK_PER_OPTIONAL_LEVEL
+                / OPTIONAL_STACK_MARGIN
+        );
+        assert_eq!(MAX_OPTIONAL_DEPTH, 39_568);
+
+        // **The distance is resolved while the pattern is parsed.** This is
+        // the mechanism that removes the scan; a return to scanning would
+        // have to take the payload with it.
+        let pattern = Pattern::parse("[[yyyy]MM]dd").expect("parses");
+        let distances: Vec<usize> = pattern
+            .pieces
+            .iter()
+            .filter_map(|p| match p {
+                Piece::OptionalStart(d) => Some(*d),
+                _ => None,
+            })
+            .collect();
+        // `[ [ yyyy ] MM ] dd` -- the outer spans 5 pieces, the inner 2.
+        assert_eq!(distances, vec![5, 2]);
+
+        // At the cap it still parses; one deeper is refused rather than
+        // recursed into.
+        let at = format!(
+            "{}yyyy{}",
+            "[".repeat(MAX_OPTIONAL_DEPTH),
+            "]".repeat(MAX_OPTIONAL_DEPTH)
+        );
+        assert!(Pattern::parse(&at).is_ok());
+        let past = format!(
+            "{}yyyy{}",
+            "[".repeat(MAX_OPTIONAL_DEPTH + 1),
+            "]".repeat(MAX_OPTIONAL_DEPTH + 1)
+        );
+        assert!(Pattern::parse(&past)
+            .expect_err("past the cap")
+            .contains("nests optional sections more than"));
+
+        // **And it is linear.** 40 000 levels took 12.8 s with the scan and
+        // 29 ms without; 39 000 is the same order and fits under the cap. A
+        // second is a 30x margin over the fixed cost and a 400x margin under
+        // the quadratic one, so it catches a regression without flaking under
+        // load.
+        //
+        // On a thread of `RENDER_STACK_BYTES`, because that is the stack the
+        // cap is derived from: a libtest thread's 8 MiB holds 9 900 of these
+        // levels, so running it inline would abort the binary rather than
+        // measure anything. That makes this a pin on that constant as well.
+        std::thread::Builder::new()
+            .stack_size(crate::runners::env::RENDER_STACK_BYTES)
+            .spawn(|| {
+                let deep = format!("{}yyyy{}", "[".repeat(39_000), "]".repeat(39_000));
+                let start = std::time::Instant::now();
+                let parsed = Pattern::parse(&deep).expect("parses");
+                let _ = parsed.parse_text("2024", &Zone::resolve(Some("UTC")).expect("utc"));
+                assert!(
+                    start.elapsed() < std::time::Duration::from_secs(1),
+                    "39 000 optional sections took {:?}; the forward scan is back",
+                    start.elapsed()
+                );
+            })
+            .expect("a render-sized thread")
+            .join()
+            .expect("no abort");
     }
 }

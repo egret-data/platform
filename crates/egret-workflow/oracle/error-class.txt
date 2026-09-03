@@ -354,3 +354,14 @@ filter-regexmatch-class-nesting-in-a-template-literal
 # `(?x)[a & ]`: Java's `unread()` backs up one position after a whitespace
 # skip, so the `]` is eaten as a class member and the class never closes.
 filter-regexmatch-comments-ampersand-unclosed
+
+# Fix round 5. Kestra answers all four of these with a bare
+# `java.lang.StackOverflowError: null` -- a catchable Error there, an abort
+# here -- so only the error CLASS can be compared. egret refuses each with a
+# message naming its bound, and `runners::rewrite::tests::a_region_long_...`
+# and `runners::javafmt::tests::optional_sections_are_bounded_...` assert
+# egret's own messages.
+template-unary-minus-chain-past-the-cap
+template-not-chain-past-the-cap
+template-attribute-chain-past-the-cap
+filter-date-optional-sections-past-the-cap

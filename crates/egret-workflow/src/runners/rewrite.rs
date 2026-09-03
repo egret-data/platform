@@ -202,7 +202,57 @@ pub enum RewriteError {
          recursing rather than risk a stack overflow"
     )]
     TooDeeplyNested { depth: usize, limit: usize },
+    #[error(
+        "expression too long ({bytes} bytes, limit {limit}) -- one `{{{{ }}}}` region this long \
+         can nest the template parser deeper than the render stack holds"
+    )]
+    ExpressionTooLong { bytes: usize, limit: usize },
 }
+
+/// What one byte of an expression can cost the **template parser's** stack.
+///
+/// **This is a different parser from the one [`MAX_NESTING_DEPTH`] guards.**
+/// That counter is this rewriter's own recursion over brackets and operator
+/// chains; this bounds `minijinja`'s expression parser, which egret does not
+/// own and which recurses over constructs the bracket counter never sees.
+/// Measured by bisecting the depth that overflows the 128 MiB render thread:
+///
+/// | construct | source bytes per level | stack per level | stack per SOURCE byte |
+/// |---|---:|---:|---:|
+/// | `{{ ---…---0 }}` unary minus | 1 | 832 | **832** |
+/// | `{{ not not …true }}` | 1 | 832 | **832** |
+/// | `{{ v.a.a…a }}` attribute chain | 2 | 1 472 | 736 |
+/// | `{{ ((((…)))) }}` parens | 1 | — | already refused by [`MAX_NESTING_DEPTH`] |
+///
+/// Every level of every one of these consumes at least one byte of the
+/// region, so **the region's length is an upper bound on the parser's depth**
+/// and 832 is the worst cost per byte. Unary minus reached `SIGABRT` at
+/// 170 000 bytes — on the thread egret sizes — so sizing the thread was not
+/// enough on its own.
+const WORST_STACK_PER_EXPRESSION_BYTE: usize = 832;
+
+/// How much of the render stack one region may claim: a quarter.
+///
+/// The region is not the only thing on that stack — this rewriter, the
+/// evaluator, the filters and every value writer share it — and the cost per
+/// byte was measured on one construct rather than proven over the grammar.
+const EXPRESSION_STACK_MARGIN: usize = 4;
+
+/// The longest a single `{{ }}` or `{% %}` region may be.
+///
+/// **Derived, not chosen**, the same way `jqsandbox::MAX_SOURCE_BYTES` is:
+/// the render's stack, divided by what a byte can cost it, divided by the
+/// margin. At 128 MiB that is 134 217 728 / 832 / 4 = **40 329 bytes** for one
+/// region.
+///
+/// It is a length cap, which for a *template* would be the wrong instrument —
+/// a 40 KB SQL body with three variables in it is an ordinary flow, and
+/// refusing it would be a bug. This is a cap on **one region's insides**,
+/// where the SQL body is not: the text outside `{{ }}` is copied through and
+/// never counted. A real expression is tens of bytes; the largest in the
+/// 726-entry corpus is far under a hundred.
+pub const MAX_EXPRESSION_BYTES: usize =
+    super::env::RENDER_STACK_BYTES / WORST_STACK_PER_EXPRESSION_BYTE / EXPRESSION_STACK_MARGIN;
 
 /// The recursion-depth ceiling `expand`/`resolve_flat`/`resolve_pieces` share
 /// (one shared counter across all three, since they call each other
@@ -244,15 +294,27 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
     let mut i = 0usize;
 
     loop {
-        let next_expr = expr[i..].find("{{");
-        let next_stmt = expr[i..].find("{%");
-        let found = match (next_expr, next_stmt) {
-            (None, None) => None,
-            (Some(e), None) => Some((e, "}}")),
-            (None, Some(s)) => Some((s, "%}")),
-            (Some(e), Some(s)) if e <= s => Some((e, "}}")),
-            (Some(_), Some(s)) => Some((s, "%}")),
-        };
+        // **One scan for the earlier of the two openers, not one scan each.**
+        // `expr[i..].find("{%")` on a template that contains no `{%` at all
+        // reads to the END every time round the loop, so a template that is
+        // nothing but `{{ }}` regions cost O(regions x length): 5 000 regions
+        // took 0.23 s, 10 000 took 0.87 s, 20 000 took 3.3 s and 40 000 took
+        // 13.5 s -- four times the work for twice the input. 200 000 regions,
+        // a 1.4 MB template, took **5.5 minutes**. Scanning for `{` once and
+        // deciding from the next byte is linear, and picks the same
+        // delimiter: the two openers cannot start at the same index, so
+        // "earliest, `{{` winning a tie" and "first match while scanning"
+        // agree.
+        let found = expr[i..].match_indices('{').find_map(|(rel, _)| {
+            let rest = &expr[i + rel..];
+            if rest.starts_with("{{") {
+                Some((rel, "}}"))
+            } else if rest.starts_with("{%") {
+                Some((rel, "%}"))
+            } else {
+                None
+            }
+        });
 
         let Some((rel, close)) = found else {
             out.push_str(&expr[i..]);
@@ -283,6 +345,17 @@ pub fn rewrite(expr: &str) -> Result<String, RewriteError> {
                 // the coalesce normally, rather than treating it as
                 // literal text). Special-casing either spelling would make
                 // this rewriter MORE correct than the engine it ports.
+                // **Before the rewriter or the parser walks it.** The
+                // bound is on the region's LENGTH because every level of
+                // every recursive construct in the template grammar eats at
+                // least one byte of it -- see `MAX_EXPRESSION_BYTES`.
+                let significant = significant_bytes(inner);
+                if significant > MAX_EXPRESSION_BYTES {
+                    return Err(RewriteError::ExpressionTooLong {
+                        bytes: significant,
+                        limit: MAX_EXPRESSION_BYTES,
+                    });
+                }
                 let rewritten = if open == "{{" {
                     rewrite_expression(inner)?
                 } else {
@@ -365,6 +438,39 @@ fn split_whitespace_control(content: &str) -> (&'static str, &str, &'static str)
 /// check stays as defense in depth (and documents the invariant), but it is
 /// this function's `Err` that a caller of `rewrite` actually observes for
 /// `{{ a ?? 'unterminated }}`.
+/// The bytes of a region that can actually make the template parser recurse.
+///
+/// **A string literal is ONE token however long it is**, so its interior
+/// cannot add a level and must not be counted. Counting it would refuse
+/// `{{ 'a very long literal…' | upper }}` for a length that costs the parser
+/// nothing -- and did: a date test passes a 100 000-character pattern as a
+/// literal, which is a real shape a flow can write.
+///
+/// Everything else is counted, whether or not it could nest, because the
+/// claim only needs to be an UPPER bound on the depth: every recursion level
+/// in the grammar consumes at least one token, and every token outside a
+/// string literal is at least one byte.
+fn significant_bytes(inner: &str) -> usize {
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < inner.len() {
+        let c = inner[i..].chars().next().expect("i < len");
+        if c == '\'' || c == '"' {
+            let (end, _closed) = scan_string_literal_line_bounded(inner, i, c);
+            // The whole literal is one token. An UNTERMINATED one is counted
+            // the same way: `rewrite_expression` raises on it a moment later,
+            // and counting it as one token cannot under-count the depth of a
+            // region that is about to be refused anyway.
+            count += 1;
+            i = end;
+            continue;
+        }
+        count += c.len_utf8();
+        i += c.len_utf8();
+    }
+    count
+}
+
 fn find_region_close(src: &str, start: usize, close: &str) -> Result<Option<usize>, RewriteError> {
     let len = src.len();
     let mut i = start;
@@ -1381,7 +1487,10 @@ fn find_top_level_word(tokens: &[Tok], word: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite, RewriteError};
+    use super::{
+        rewrite, RewriteError, EXPRESSION_STACK_MARGIN, MAX_EXPRESSION_BYTES,
+        WORST_STACK_PER_EXPRESSION_BYTE,
+    };
 
     /// Every rewrite test routes through this, not through `rewrite(...)
     /// .unwrap()` directly: a test that asserts an exact string is worth
@@ -2098,6 +2207,119 @@ but there is one on the next: '";
         assert_eq!(
             rewrite_and_parse("{%- if a ?? b -%}y{%- endif -%}"),
             "{%- if kestra_null_coalesce( a ,  b )-%}y{%- endif -%}"
+        );
+    }
+
+    /// **`minijinja`'s parser overflows the render thread, and sizing the
+    /// thread is not what stops it.**
+    ///
+    /// `MAX_NESTING_DEPTH` counts this rewriter's own recursion over brackets
+    /// and operator chains. It never sees a unary-minus run, a `not` run or
+    /// an attribute chain, and each of those recurses in the template
+    /// parser at **one byte a level**. Measured on the shipped path, on the
+    /// 128 MiB render thread:
+    ///
+    /// | construct | result |
+    /// |---|---|
+    /// | `{{ ---…---0 }}` | `SIGABRT` at 170 000, deterministic |
+    /// | `{{ not not …true }}` | `SIGABRT` at 170 000 |
+    /// | `{{ v.a.a…a }}` | `SIGABRT` at 100 000 |
+    /// | `{{ v \| lower \| … }}` | caught by minijinja's own parse fuel |
+    /// | `{{ ((((…)))) }}` | caught by `MAX_NESTING_DEPTH` |
+    ///
+    /// The filter chain is the case the engine already defends and the one an
+    /// earlier round cited when deferring this; the two that abort cost
+    /// almost no fuel per level and slip past it.
+    #[test]
+    fn a_region_long_enough_to_overflow_the_template_parser_is_refused() {
+        // Derived from the render stack, not chosen.
+        assert_eq!(WORST_STACK_PER_EXPRESSION_BYTE, 832);
+        assert_eq!(
+            MAX_EXPRESSION_BYTES,
+            super::super::env::RENDER_STACK_BYTES
+                / WORST_STACK_PER_EXPRESSION_BYTE
+                / EXPRESSION_STACK_MARGIN
+        );
+        assert_eq!(MAX_EXPRESSION_BYTES, 40_329);
+
+        // At the cap it is rewritten; one byte past it is refused. Either
+        // side alone admits an off-by-one.
+        let at = format!("{{{{ {} }}}}", "-".repeat(MAX_EXPRESSION_BYTES - 2));
+        assert!(rewrite(&at).is_ok());
+        let past = format!("{{{{ {} }}}}", "-".repeat(MAX_EXPRESSION_BYTES - 1));
+        assert!(matches!(
+            rewrite(&past),
+            Err(RewriteError::ExpressionTooLong { .. })
+        ));
+
+        // Every construct that aborted, at the size that aborted.
+        for region in [
+            format!("{{{{ {}0 }}}}", "-".repeat(200_000)),
+            format!("{{{{ {}true }}}}", "not ".repeat(200_000)),
+            format!("{{{{ v{} }}}}", ".a".repeat(200_000)),
+            // A tag body takes the same cap: `{% if %}` reaches the same
+            // parser.
+            format!("{{% if {}0 %}}x{{% endif %}}", "-".repeat(200_000)),
+        ] {
+            assert!(
+                matches!(
+                    rewrite(&region),
+                    Err(RewriteError::ExpressionTooLong { .. })
+                ),
+                "{}… was not refused",
+                &region[..20]
+            );
+        }
+
+        // **A string literal is one token, and counting its interior would
+        // refuse real flows.** A date test passes a 100 000-character pattern
+        // this way, and a long literal costs the parser no depth at all.
+        let literal = format!("{{{{ '{}' | upper }}}}", "a".repeat(200_000));
+        assert!(rewrite(&literal).is_ok());
+        // Including a literal made ENTIRELY of the character that aborts.
+        let minus_literal = format!("{{{{ '{}' | upper }}}}", "-".repeat(200_000));
+        assert!(rewrite(&minus_literal).is_ok());
+
+        // **And the shape a length cap on the TEMPLATE would have broken:**
+        // a 50 KB body with many small regions in it. The text outside
+        // `{{ }}` is never counted.
+        let body = format!(
+            "{}{}",
+            "SELECT * FROM t WHERE x = 1 AND y = 2; -- padding\n".repeat(1_000),
+            "{{ v }}".repeat(50)
+        );
+        assert!(body.len() > 40_000);
+        assert!(rewrite(&body).is_ok());
+    }
+
+    /// **A template that is nothing but `{{ }}` regions used to be quadratic
+    /// in the number of them**, because the loop asked for the next `{%`
+    /// separately and a template with none read to the end every time round.
+    ///
+    /// | regions | before | after |
+    /// |---:|---:|---:|
+    /// | 10 000 | 869 ms | 23 ms |
+    /// | 40 000 | 13 480 ms | 94 ms |
+    /// | 200 000 | **331 572 ms** | 449 ms |
+    ///
+    /// Five and a half minutes for a 1.4 MB template, all of it inside
+    /// `rewrite` rather than the engine — it was found by attacking the round
+    /// 5 fix rather than by reading the diff, on the same axis as the two
+    /// bounds that round added.
+    ///
+    /// 20 seconds is a 44x margin over the linear cost and a 16x margin under
+    /// the quadratic one, which catches a regression without flaking under
+    /// the parallel load that the suite runs at.
+    #[test]
+    fn many_small_regions_are_linear_in_the_templates_length() {
+        let source = "{{ v }}".repeat(200_000);
+        let start = std::time::Instant::now();
+        let rewritten = rewrite(&source).expect("rewrites");
+        assert_eq!(rewritten, source, "a plain variable is copied through");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "200 000 regions took {:?}; the second scan is back",
+            start.elapsed()
         );
     }
 }

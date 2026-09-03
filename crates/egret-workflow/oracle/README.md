@@ -2413,8 +2413,26 @@ recursive descent.
 ### Every recursive descent over author-controlled input
 
 Author-controlled means: the template text, a filter argument, or a context
-value. "Render thread" is `render_str`'s own thread since this round; before
+value. "Render thread" is `render_str`'s own thread since fix round 4; before
 it, every one of these ran on a 2 MiB tokio worker.
+
+**What this table is, and what it is not.** It is a living artifact validated
+by *search*, not by construction: nothing derives it from the grammar or the
+call graph, and no tool checks it. **Five successive review sweeps each found
+an axis the previous round did not cover** — the jq parser, the jq value
+depth, the regex class parser, `minijinja`'s expression parser, and the date
+formatter's optional sections — and the fifth found a row here that was
+**affirmatively wrong**: `javafmt` was certified as having "no nesting
+construct" while `[...]` was one, recursing unbounded and quadratically. That
+is not the table failing. It is what adversarial search against a large
+surface looks like, and it is the reason the table exists rather than a reason
+to distrust it.
+
+So: **a reader who adds a recursive descent must add a row AND attack it.**
+A row asserting a bound that nobody tried to break is the exact shape of the
+error this table already made once. The bounds below each have a test that
+fails when the bound is removed — verified by removing it, not by asserting
+it — and that is the standard a new row has to meet.
 
 | descent | input | thread | bounded by |
 |---|---|---|---|
@@ -2423,8 +2441,8 @@ it, every one of these ran on a 2 MiB tokio worker.
 | `javare::class_text` / `write_class_item` (AST walk) | pattern text | render | the same parse bound: the AST cannot be deeper than the parse |
 | `javare::class_has_property`, `class_has_ascii_only_property`, `class_is_only_ascii_properties` | pattern text | render | as above |
 | `ClassAst`'s `Drop` | pattern text | render | as above — and it unwinds the same tree, so it is on the same budget |
-| `minijinja`'s expression parser and evaluator | **template text** | render | **NOTHING egret owns.** See below. |
-| `rewrite::expand` (nested `{{ }}` and `{% %}`) | template text | render | `MAX_NESTING_DEPTH` = 500 |
+| `minijinja`'s expression parser and evaluator | **template text** | render | `rewrite::MAX_EXPRESSION_BYTES` = 40 329 significant bytes per region |
+| `rewrite::expand`, `rewrite::resolve_flat` and `rewrite::resolve_pieces` — mutually recursive, and `resolve_pieces` recurses on OPERATOR SPLITTING as well as on region nesting | template text | render | `MAX_NESTING_DEPTH` = 500, **one budget shared by all three** |
 | `serde_json`'s parser (a context value) | context | caller | its own 128, which admits 126 levels under a variable |
 | `jaq`'s parser (a jq program) | filter argument | jq | `MAX_SOURCE_BYTES`, derived from `JQ_STACK_BYTES` |
 | `jaq_json::Val::to_string`, `filters::jq_out` | jq result | jq | `MAX_VALUE_DEPTH`, checked first |
@@ -2432,38 +2450,133 @@ it, every one of these ran on a 2 MiB tokio worker.
 | `filters::jaq_value`, `JqOut`'s and `MjValue`'s `Drop` | jq result | render | `MAX_VALUE_DEPTH` |
 | `env::write_json`, `ionfmt::write_ion`, `yamlfmt::write_map`/`write_seq`, `env::kestra_to_string`, `env::json_to_minijinja` | any value | render | `MAX_VALUE_DEPTH`, or `serde_json`'s 128 for a context value |
 | `filters::write_equality_key` (`distinct`), `filters::escape_value` (`escapeChar`) | any value | render | as above |
-| `javafmt`'s formatter tree | format string | render | the format string's own length; no nesting construct |
+| `javafmt::Pattern::parse_pieces` over `[...]` optional sections | **format string**, from `existingFormat` | render | `javafmt::MAX_OPTIONAL_DEPTH` = 39 568 |
+| `javafmt`'s other formatter walking | format string | render | the format string's own length; no nesting construct |
 
-### The one that is still open, with its numbers
+### The template parser: what round 4 deferred, and why the deferral was wrong
 
-**minijinja's own parser and evaluator recurse over the template text and
-egret bounds neither.** Measured, on the 128 MiB render thread, with
-`{{ v | lower | lower | ... }}`:
+Round 4 disclosed this descent, deferred it, and **named the wrong trigger**.
+The example cited was `{{ v | lower | lower | … }}`, which is the case
+`minijinja` already defends: its parse fuel stops the chain cleanly. Two
+constructs cost almost no fuel per level and slip past it. Re-measured on the
+shipped path:
 
-| filters in one expression | Kestra | egret |
-|---:|---|---|
-| 2 000 | `a` | `a` |
-| 5 000 | `java.lang.StackOverflowError` | `a` |
-| 20 000 | `java.lang.StackOverflowError` | `a` |
-| 30 000 | `java.lang.StackOverflowError` | `a` |
-| 50 000 | `java.lang.StackOverflowError` | `engine ran out of fuel` |
-| 100 000 | `java.lang.StackOverflowError` | **SIGABRT** |
+| trigger | source bytes per level | stack per level | result |
+|---|---:|---:|---|
+| `{{ ---…---0 }}` unary minus | 1 | 832 | **`SIGABRT` at 170 000** |
+| `{{ not not …true }}` | 1 | 832 | **`SIGABRT` at 170 000** |
+| `{{ v.a.a…a }}` attribute chain | 2 | 1 472 | **`SIGABRT` at 100 000** |
+| `{{ v \| lower \| … }}` | 8 | — | parse fuel catches it |
+| `{{ ((((…)))) }}` | 1 | — | `MAX_NESTING_DEPTH` catches it |
 
-Two things follow, and they point in opposite directions. Kestra dies at 5 000
-where egret still answers, so egret is the more capable engine over the whole
-range a flow could plausibly use — a cap anywhere above 5 000 costs nothing in
-fidelity. But Java's stack overflow is a catchable `Error` and Rust's is
-`SIGABRT`, so where Kestra returns a message and keeps serving, egret at
-100 000 takes the worker down.
+The panic is `thread 'egret-render' … has overflowed its stack`. **It
+overflows the thread egret sized**, which is the part that matters: "bound the
+thread, not the site" does not contain this one. 128 MiB is itself
+overflowable by ~170 KB of single-byte characters, and `render_str` is `pub`,
+reached from `Property::render` with no length cap in `property.rs`,
+`spec/validate.rs` or `publish.rs`.
 
-It is **not fixed here**, and the reason is that the obvious cheap bound is
-wrong. Depth is bounded by template LENGTH, so a length cap would close it —
-and would also refuse a 40 KB SQL body with three variables in it, which is an
-ordinary flow. A correct bound has to count nesting, which means parsing the
-expression, which belongs with `rewrite`'s parse layer rather than with a
-filter batch. **W3 should take it there.** What this round did do is raise the
-floor: the same template aborted at 1 600 filters before the render thread
-existed, and now needs sixty times as many.
+**The bound is `rewrite::MAX_EXPRESSION_BYTES`**, derived the way
+`jqsandbox::MAX_SOURCE_BYTES` is: 134 217 728 / 832 / 4 = **40 329**. Every
+recursion level in the template grammar consumes at least one token, and every
+token outside a string literal is at least one byte, so a region's length is
+an upper bound on the parser's depth.
+
+Round 4 also said a length cap would be the wrong instrument because it would
+refuse a 40 KB SQL body with three variables in it. That was right about a cap
+on the TEMPLATE and does not apply to a cap on **one region's insides**: the
+SQL body is the text between the regions, and it is never counted. Two shapes
+make the difference concrete, and both are pinned:
+
+- `{{ '<200 000 characters>' | upper }}` renders. A string literal is one
+  token however long it is, so `significant_bytes` counts it as one — and a
+  date test really does pass a 100 000-character pattern that way.
+- a 50 KB body with fifty small `{{ v }}` regions renders, unchanged.
+
+### The date formatter's optional sections, which the table had certified safe
+
+`oracle/README.md` used to read: *"`javafmt`'s formatter tree | format string
+| render | the format string's own length; **no nesting construct**"*. `[...]`
+is a nesting construct. Two defects lived behind that sentence.
+
+**Time.** `parse_pieces` found the matching `]` by scanning forward, once per
+level per attempt — O(remaining) inside O(depth), so O(depth²). Measured on
+the shipped render path:
+
+| depth | before | after |
+|---:|---:|---:|
+| 10 000 | 833 ms | 9 ms |
+| 20 000 | 3 223 ms | 15 ms |
+| 40 000 | 12 774 ms | 29 ms |
+| 200 000 | killed at >2 min | refused in 17 ms |
+
+Four times the work for twice the input, before; twice, after. The matching
+end is now resolved **once, while the pattern is parsed**, and carried in
+`Piece::OptionalStart(distance)` as a distance **relative** to the start —
+which is what survives the `&pieces[i + 1..end]` slicing the parser recurses
+through, where an absolute index would not. The per-level `parsed.clone()` was
+suspected of being part of it and is not: it is a fixed-size struct, and
+removing only the scan made the whole thing linear.
+
+**Depth.** The recursion itself was unbounded and overflowed the render thread
+at 160 000. `javafmt::MAX_OPTIONAL_DEPTH` is derived the same way as the
+others: 134 217 728 / 848 / 4 = **39 568**.
+
+**Kestra's own limit is far lower, and egret does not copy it.** Measured
+through the harness: Kestra parses 1 000 nested sections and throws
+`java.lang.StackOverflowError` at 5 000. A `StackOverflowError` is a catchable
+`Error` in Java and an abort in Rust, so matching that boundary would refuse
+patterns for no reason but that a JVM stack ran out. The cap sits above
+anything Kestra can parse and below what would abort.
+
+### A third quadratic, found by attacking the round-5 fix
+
+Neither Critical, and on the same axis as both: **`rewrite` itself was
+quadratic in the number of regions.** The loop asked for the next `{{` and the
+next `{%` separately, and `find("{%")` on a template containing no `{%` at all
+reads to the end — once per region.
+
+| regions (7 bytes each) | before | after |
+|---:|---:|---:|
+| 10 000 | 869 ms | 23 ms |
+| 40 000 | 13 480 ms | 94 ms |
+| 200 000 (1.4 MB) | **331 572 ms** | 449 ms |
+
+Five and a half minutes, entirely inside `rewrite` — the engine had not been
+reached. It terminates, so it is not an abort, but a template a flow author
+can write should not burn a worker for five minutes. One scan for `{`, deciding
+from the next byte, is linear and picks the same delimiter: the two openers
+cannot begin at the same index, so "earliest, `{{` winning a tie" and "first
+match while scanning" agree.
+
+Worth noting for what it says about the method: this was **not** on the list.
+It is not a recursion at all, so no row of the enumeration covered it, and no
+review round had raised it. It turned up because the round's last step was to
+attack the fix rather than to reason about it — which is the argument for
+making that step mandatory rather than a courtesy.
+
+### A note for W3, so this is not rediscovered
+
+Five rounds have each found one more unbounded recursive descent over author
+input, and each was closed with a per-construct cap. The caps are correct and
+each is pinned, but the *pattern* has a limit: every one of them is a promise
+that a human enumerated every descent correctly, and the enumeration was
+already wrong once about `javafmt`.
+
+At the point where this goes on a request path, the right answer stops being
+another cap and becomes **a supervisor that survives a crash** — a render
+that runs where a stack overflow costs a request rather than the process. That
+is an architecture decision for the package that puts rendering behind an
+endpoint, not for a filter batch, and it is written here so W3 inherits the
+reasoning rather than rediscovering it. What W3 should know:
+
+- a Rust stack overflow is `SIGABRT`: `catch_unwind` does not see it, and no
+  amount of `Result` plumbing changes that;
+- the render already runs on its own thread, so moving it behind a process or
+  a supervised worker is a smaller step than it looks;
+- the five caps are cheap and should stay either way — they turn an abort into
+  a message, which is what a flow author needs to see regardless of who
+  supervises the process.
 
 ### What the eighth sweep found, and what the report may no longer say
 
