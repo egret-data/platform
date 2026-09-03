@@ -656,3 +656,13 @@ filter-format-c-conversion
 # recorded class as `filter-regexmatch-lookahead`.
 filter-split-lookahead
 
+# --- W2 Task 8, fix round 3.
+#
+# `%t`/`%T` is Java's date family. `runners::javaformat` refuses it by name
+# along with `c`, `g`, `a` and `h` -- but a NULL argument reaches Kestra's
+# string path before its date path, so `'%tY' | format(null)` ANSWERS `null`
+# there and is refused here. Under-acceptance, and the entry exists because
+# the round before rendered `nullY`: the null arm sat in front of the refusal
+# and `parse_spec` consumed only one of the family's two characters.
+filter-format-date-family-refused
+

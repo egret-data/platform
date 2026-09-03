@@ -920,28 +920,82 @@ fn java_is_whitespace(c: char) -> bool {
 /// The code points where `Character.toTitleCase(char)` is neither the
 /// character's single-character uppercase nor the character itself.
 ///
-/// **The doc that dismissed this as "one character wide" was wrong twice.**
-/// The Latin digraphs have a distinct title case and the first cut returned
-/// the UPPER case — `'\u{1c6}x' | capitalize` is `\u{1c5}x` on Kestra and was
-/// `\u{1c4}x` here — and the Greek iota-subscript family upper-cases to *two*
-/// characters, where `Character.toTitleCase(char)` returns a single
-/// precomposed one (`\u{1f80}` to `\u{1f88}`) and the first cut, falling back
-/// to "unchanged", returned the input.
+/// **85, not 35, and the 35 was wrong for a structural reason worth keeping.**
+/// The first cut derived this from a fixture dumped as "every code point whose
+/// title case is not itself" — which is blind, by construction, to a code
+/// point whose title case IS itself while its uppercase is not. Those take the
+/// uppercase fallback and come out wrong, and there are 50 of them: the four
+/// **already**-title-case digraphs `\u{1c5} \u{1c8} \u{1cb} \u{1f2}` — so the
+/// half of the family the first cut fixed was `\u{1c6}` to `\u{1c5}` and the
+/// half it broke was `\u{1c5}` to `\u{1c5}` — plus the whole Georgian
+/// Mkhedruli block, 46 code points that upper-case to Mtavruli and title-case
+/// to themselves.
 ///
-/// 35 code points, and they are **derived, not asserted**: Java's whole
-/// `toTitleCase` map over the BMP is 1 149 entries, of which 1 114 are exactly
-/// the single-character uppercase; these are the rest.
-/// `title_case_matches_the_jvm_over_every_code_point_it_maps` checks all 1 149
-/// against the JVM's own dump, so the derivation cannot rot silently.
+/// The fixture is now the **union** of both maps (`toTitleCase(c) != c` OR
+/// `toUpperCase(c) != c`), 1 199 rows, and
+/// `title_case_matches_the_jvm_over_every_code_point_it_maps` walks all of
+/// them — including the rows where the title case is the character, which is
+/// exactly where the bug lived and exactly what the old fixture could not
+/// contain.
 const JAVA_TITLE_CASE: &[(char, char)] = &[
     ('\u{01c4}', '\u{01c5}'),
+    ('\u{01c5}', '\u{01c5}'),
     ('\u{01c6}', '\u{01c5}'),
     ('\u{01c7}', '\u{01c8}'),
+    ('\u{01c8}', '\u{01c8}'),
     ('\u{01c9}', '\u{01c8}'),
     ('\u{01ca}', '\u{01cb}'),
+    ('\u{01cb}', '\u{01cb}'),
     ('\u{01cc}', '\u{01cb}'),
     ('\u{01f1}', '\u{01f2}'),
+    ('\u{01f2}', '\u{01f2}'),
     ('\u{01f3}', '\u{01f2}'),
+    ('\u{10d0}', '\u{10d0}'),
+    ('\u{10d1}', '\u{10d1}'),
+    ('\u{10d2}', '\u{10d2}'),
+    ('\u{10d3}', '\u{10d3}'),
+    ('\u{10d4}', '\u{10d4}'),
+    ('\u{10d5}', '\u{10d5}'),
+    ('\u{10d6}', '\u{10d6}'),
+    ('\u{10d7}', '\u{10d7}'),
+    ('\u{10d8}', '\u{10d8}'),
+    ('\u{10d9}', '\u{10d9}'),
+    ('\u{10da}', '\u{10da}'),
+    ('\u{10db}', '\u{10db}'),
+    ('\u{10dc}', '\u{10dc}'),
+    ('\u{10dd}', '\u{10dd}'),
+    ('\u{10de}', '\u{10de}'),
+    ('\u{10df}', '\u{10df}'),
+    ('\u{10e0}', '\u{10e0}'),
+    ('\u{10e1}', '\u{10e1}'),
+    ('\u{10e2}', '\u{10e2}'),
+    ('\u{10e3}', '\u{10e3}'),
+    ('\u{10e4}', '\u{10e4}'),
+    ('\u{10e5}', '\u{10e5}'),
+    ('\u{10e6}', '\u{10e6}'),
+    ('\u{10e7}', '\u{10e7}'),
+    ('\u{10e8}', '\u{10e8}'),
+    ('\u{10e9}', '\u{10e9}'),
+    ('\u{10ea}', '\u{10ea}'),
+    ('\u{10eb}', '\u{10eb}'),
+    ('\u{10ec}', '\u{10ec}'),
+    ('\u{10ed}', '\u{10ed}'),
+    ('\u{10ee}', '\u{10ee}'),
+    ('\u{10ef}', '\u{10ef}'),
+    ('\u{10f0}', '\u{10f0}'),
+    ('\u{10f1}', '\u{10f1}'),
+    ('\u{10f2}', '\u{10f2}'),
+    ('\u{10f3}', '\u{10f3}'),
+    ('\u{10f4}', '\u{10f4}'),
+    ('\u{10f5}', '\u{10f5}'),
+    ('\u{10f6}', '\u{10f6}'),
+    ('\u{10f7}', '\u{10f7}'),
+    ('\u{10f8}', '\u{10f8}'),
+    ('\u{10f9}', '\u{10f9}'),
+    ('\u{10fa}', '\u{10fa}'),
+    ('\u{10fd}', '\u{10fd}'),
+    ('\u{10fe}', '\u{10fe}'),
+    ('\u{10ff}', '\u{10ff}'),
     ('\u{1f80}', '\u{1f88}'),
     ('\u{1f81}', '\u{1f89}'),
     ('\u{1f82}', '\u{1f8a}'),
@@ -4225,14 +4279,38 @@ mod tests {
             assert_eq!(super::java_title_case(from), to, "U+{:04X}", from as u32);
             checked += 1;
         }
-        assert_eq!(checked, 1149, "the dump lost entries");
-        // And the identity half: a character the JVM does not map must come
-        // back unchanged, which the table cannot say on its own.
-        for c in ['a', 'A', '1', ' ', '\u{4e00}'] {
-            assert_eq!(
-                super::java_title_case(c),
-                c.to_uppercase().next().unwrap_or(c)
-            );
+        assert_eq!(checked, 1199, "the dump lost entries");
+
+        // **The identity half asserted the implementation's own fallback arm
+        // back at itself** -- `java_title_case(c) == c.to_uppercase()...` is
+        // literally what the function does when the table misses, so it was
+        // unfailable for exactly the inputs where the bug lived. It asserts
+        // the FIXTURE now, on the rows where the title case IS the character
+        // and the uppercase is not: the already-title-case digraphs and the
+        // Georgian block, 50 code points the old dump could not contain.
+        let mut identity = 0usize;
+        for pair in DUMP
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .flat_map(|l| l.split(','))
+            .filter(|p| !p.is_empty())
+        {
+            let (from, to) = pair.split_once(':').expect("<from>:<to>");
+            let from = u32::from_str_radix(from, 16).expect("hex");
+            let to = u32::from_str_radix(to, 16).expect("hex");
+            if from == to {
+                let c = char::from_u32(from).expect("a BMP code point");
+                assert_eq!(super::java_title_case(c), c, "U+{from:04X}");
+                identity += 1;
+            }
+        }
+        assert!(
+            identity >= 50,
+            "only {identity} identity rows: the dump narrowed"
+        );
+        // And a code point NEITHER map touches comes back unchanged.
+        for c in ['1', ' ', '\u{4e00}'] {
+            assert_eq!(super::java_title_case(c), c);
         }
     }
 

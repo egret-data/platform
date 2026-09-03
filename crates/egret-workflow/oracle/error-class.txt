@@ -635,3 +635,34 @@ filter-distinct-of-split
 # `charAt(0)` on an empty String, which is the one branch of `first`/`last`
 # that Pebble and minijinja do not answer the same way.
 filter-first-of-an-empty-string
+
+# --- W2 Task 8, fix round 3: `java.util.Formatter`'s FLAG GRAMMAR, which the
+# round before validated not at all -- any flag before any conversion, no
+# pairing, no duplicate, no exclusion, no width requirement. A 3 994-case grid
+# found 1 748 cases where Kestra raises and egret answered, and 765 of those
+# were a refusal that round DELETED, because the wrapper it replaced had
+# refused them for its own reasons. `runners::javaformat::LEGAL_FLAGS` and
+# `validate` carry the rules, all six exception classes measured.
+filter-format-illegal-flag-for-the-conversion
+filter-format-illegal-flag-on-a-string
+filter-format-duplicate-flag
+filter-format-mutually-exclusive-sign-flags
+filter-format-mutually-exclusive-fill-flags
+filter-format-left-justify-needs-a-width
+filter-format-zero-fill-needs-a-width
+filter-format-illegal-flag-on-a-percent
+filter-format-newline-takes-no-flags
+filter-format-newline-takes-no-width
+filter-format-precision-on-an-integer
+filter-format-radix-sign-flag-with-a-number
+filter-format-argument-index-out-of-range
+
+# (The `t`/`T` family's entry is `filter-format-date-family-refused`, which is
+# NOT error-class: Kestra ANSWERS `null` there and egret refuses, so it is a
+# plain baselined divergence and the ratchet holds it.)
+
+# An UNDEFINED argument. `is_java_null` folds `Undefined`, so this is the
+# ARGUMENT side of the regression `strict_undefined` fixed on the input side --
+# in new code written by the round whose premise was that this is not allowed.
+filter-format-undefined-argument-root
+filter-format-undefined-argument-attribute

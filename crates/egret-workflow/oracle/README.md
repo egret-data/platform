@@ -136,7 +136,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**225** entries carry it today (153 before W2 Task 8, 182 before its fix
+**240** entries carry it today (153 before W2 Task 8, 182 before its fix
 round), counted out of `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -162,7 +162,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 23 of the 225 are *also* in `baseline.txt`, because egret
+make it pass: 23 of the 240 are *also* in `baseline.txt`, because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -199,7 +199,7 @@ that costs, and **105 of 1047** after W2 Task 8 -- which BANKED seven (every
 function the brief called service-backed that is not) and RECORDED three -- and
 **117 of 1141** after that task's fix round, which fixed 110 measured
 divergences that had NO corpus entry at all and recorded twelve that it
-deliberately did not fix, and **130 of 1203** after its second round, which
+deliberately did not fix, and **130 of 1203** after its second round, and **131 of 1234** after its third, which
 BANKED two and recorded fifteen while closing two regressions the first round
 had introduced.
 The test fails in **both** directions:
@@ -732,7 +732,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 1 203 entries)
+## Corpus (`corpus.json`, 1 234 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -4153,3 +4153,118 @@ reverting the `_context` local-scope guard, and making the sentinel a `Seq`
 again — **survived on the first attempt**, because the behaviour had been fixed
 without an entry. Three entries later they fail by name. A fix with no entry is
 a fix the ratchet cannot keep.
+
+## W2 Task 8, fix round 3 — the third time a fix reintroduced its own criticism
+
+Scoped to `javaformat` and the title-case fallback. Both round-2 Criticals held
+across 291 probes; these are the defects the *fix* for them shipped.
+
+### The pattern, because it is the third instance
+
+`parse_spec` accepted **any flag before any conversion** — no per-conversion
+set, no duplicate check, no mutual exclusion, no width requirement. Over a
+3 994-case grid of flag x conversion x width x argument, **1 748 cases Kestra
+refuses were answered**, and **765 of those were a refusal the same round
+deleted**, because the wrapper it replaced had refused them for its own
+reasons.
+
+`runners::filters::strict_undefined`'s doc, written in that round, says:
+*"converting a refusal into an answer is the one divergence this crate's rules
+do not allow."*
+
+That is the third time on this branch: after two mutations surviving because
+two behaviours were fixed and neither entered, which the report itself named as
+"the criticism you levelled at round 1, reproduced inside the round fixing it".
+**When a sentence like that is written, the next action is to grep the same
+diff for the shape it forbids** — not to trust that writing it down was the
+work.
+
+### The flag grammar, measured
+
+`LEGAL_FLAGS` and `validate` carry Java's rules, and every one is read off the
+grid rather than out of memory:
+
+| rule | what Java raises |
+|---|---|
+| per-conversion legal flag set | `FormatFlagsConversionMismatch` (761 cases) |
+| a repeated flag, checked **first** | `DuplicateFormatFlags` (432) |
+| `+` with ` `, `-` with `0`, any flag on `%`/`n` | `IllegalFormatFlags` (285) |
+| `-` or `0` without a width | `MissingFormatWidth` (160) |
+| a width on `%n` | `IllegalFormatWidth` (90) |
+| a precision on `d o x X %` or `n` | `IllegalFormatPrecision` (12) |
+
+The order matters and is measured: `%--s` is a **duplicate** and not a missing
+width, and `%+ s` is a **mismatch** (because `+` is not legal for `s`) where
+`%+ d` is an exclusion.
+
+**Three flags are checked at PRINT time, not parse time**, and that distinction
+is only visible through a null: `+`, ` ` and `(` on `%o`/`%x`/`%X` live inside
+Java's `printInteger`, which a null argument never reaches because a null takes
+the string path first. So `'%+x' | format(null)` is `null` and
+`'%+x' | format(42)` raises. 27 cases turned on it.
+
+### `%b` was two arms where Java has three
+
+`if null { "false" } else { "true" }` — the middle arm, **a `Boolean` gives its
+own value**, was missing, so `'%b' | format(false)` rendered `true` and `%B`
+rendered `TRUE`. The module's only `%b` corpus entry passed a **null**: the one
+argument for which two arms are right.
+
+### `format`'s arguments escaped the round's own undefined guard
+
+`is_java_null` folds `Undefined`, and the argument path called it — so
+`{{ '%s' | format(nothere) }}` rendered the four characters `null` where Kestra
+raises. `strict_undefined` had been applied to the seventeen filter *inputs*
+and to nothing else, in the round whose premise was that this is not allowed.
+
+### Four more, all measured
+
+- **`%d`/`%x` past `i64::MAX` was refused** where Kestra answers.
+  `java_class_name` already says `BigInteger` there and `sort`'s comparator
+  already routes those through `i128`; the formatter was the only consumer that
+  narrowed. A `BigInteger` prints sign-and-magnitude rather than a two's
+  complement, because it has no fixed width.
+- **`%#012x` put the zero fill in front of the `0x`** (`000xffffff01` against
+  `0x00ffffff01`), and `%(012d` put it outside the parentheses. `pad` skipped
+  only a leading sign; it now takes the position to fill after.
+- **Width and precision counted `char`s where Java counts UTF-16 code units.**
+  The same branch `filters::first` documents. A precision that would split a
+  supplementary character produces a lone surrogate in Java, which Rust cannot
+  hold — egret stops one short, recorded in the module doc, and it can have no
+  corpus entry for the same reason `first`'s cannot.
+- **`'%tY' | format(null)` was `nullY`**: the null arm sat in front of the
+  refusal and `parse_spec` consumed only one of the family's two characters.
+  The refusal comes first now and the family is parsed before it is refused.
+
+### `capitalize`/`title` were wrong on 50 code points, and the guard could not fail
+
+`JAVA_TITLE_CASE` was derived from a fixture dumped as *"every code point whose
+title case is not itself"* — which is blind **by construction** to a code point
+whose title case IS itself while its uppercase is not. Those took the uppercase
+fallback: the four already-title-case digraphs (so the half of the family round
+2 fixed was `\u{1c6}` to `\u{1c5}`, and the half it broke was `\u{1c5}` to
+itself) plus the whole Georgian Mkhedruli block, 46 code points.
+
+**And the test guarding the derivation asserted the implementation's own
+fallback arm back at itself** — `java_title_case(c) == c.to_uppercase()…` is
+literally what the function does when the table misses, so it was unfailable
+for exactly the inputs where the bug lived. The fixture is the **union** of both
+maps now (1 199 rows), the table is 85 entries, and the identity half asserts
+the fixture's `from == to` rows — the 50 the old dump could not contain.
+
+### And the module had no unit tests at all
+
+476 lines of a foreign grammar, every assertion in 21 corpus entries, none of
+which carried an illegal flag, a `#` with a width, a precision on a string, a
+supplementary character or an argument above `i64::MAX`. That is why five
+defects shipped green. It has **eight** now, one of them the grid itself — and
+the grid pins the accept-set as an **exact count** (455 refusals, 229
+acceptances) rather than a threshold, because a threshold lets it widen.
+
+### Counted
+
+**131 of 1234**, from 130 of 1203. Thirty-one entries, one new recorded
+divergence (`%t` with a null, which Kestra answers through its string path).
+The 1 748 over-acceptances the grid found had **no entries at all**, which is
+the same shape as both of round 2's Criticals and the reason the count barely
+moves when a large class is closed.
