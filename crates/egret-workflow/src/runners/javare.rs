@@ -378,6 +378,40 @@ fn expand_replacement(
     Ok(())
 }
 
+/// How deeply a character class may nest.
+///
+/// **Java bounds this and egret must too.** `parse_class` -> `class_member`
+/// -> `parse_class` is a mutual recursion driven by the pattern text, and the
+/// pattern text is a flow author's string: `regexMatch(regex='[' * 2000)`
+/// SIGABRTed the worker on its 2 MiB stack, and no `catch_unwind` sees a
+/// stack overflow. `rewrite::MAX_NESTING_DEPTH` does not help — it never
+/// looks inside a template's string literal.
+///
+/// The number is Java's own, measured against the fidelity target rather than
+/// chosen: Java compiles a class nested 10 000 deep and answers
+/// `Stack overflow during pattern compilation` at 15 000, so 10 000 is the
+/// deepest class that must still WORK.
+/// **What it costs was measured, not estimated**, by bisecting the depth that
+/// survives a thread of a given size — and the first version of this sentence
+/// was wrong by a factor of ten, which is why the number is now derived from
+/// a measurement instead of a guess:
+///
+/// | stack | deepest class that compiles | bytes per level |
+/// |---|---:|---:|
+/// | 2 MiB (a tokio worker) | 1 046 | 2 004 |
+/// | 8 MiB (a libtest thread) | 4 192 | 2 001 |
+///
+/// so one level costs **about 2 KiB** — the parse frame, `regex-syntax`'s own
+/// frame over the translated text, and the `Drop` that unwinds the same tree.
+/// 10 000 levels therefore need about 20 MB, which is why
+/// `env::RENDER_STACK_BYTES` is 128 MiB: a 6.4x margin. Neither a tokio
+/// worker's 2 MiB nor a libtest thread's 8 MiB can hold Java's own depth,
+/// which is the whole reason the render moved onto a thread of its own.
+///
+/// The same number caps the crate's own class nesting (`nest_limit`), which
+/// recurses over the SAME text in `regex-syntax`'s parser.
+pub(super) const MAX_CLASS_DEPTH: usize = 10_000;
+
 /// Compiles a Java pattern.
 pub(super) fn compile(pattern: &str) -> Result<JavaRegex, JavaRegexError> {
     let mut translator = Translator::new(pattern);
@@ -388,6 +422,10 @@ pub(super) fn compile(pattern: &str) -> Result<JavaRegex, JavaRegexError> {
     // no single setting and is refused rather than answered under one of them.
     let unix_lines = translator.anchors_are_unix_lines.unwrap_or_default();
     let mut builder = RegexBuilder::new(&translated);
+    // The crate parses the TRANSLATED text with its own recursive descent, so
+    // bounding only egret's parser would move the abort rather than remove
+    // it. Its default is 250, which would refuse patterns Java compiles.
+    builder.nest_limit(MAX_CLASS_DEPTH as u32);
     builder.multi_line(translator.saw_multiline_anchor);
     builder.crlf(translator.saw_multiline_anchor && !unix_lines);
     match builder.build() {
@@ -439,6 +477,8 @@ struct Translator {
     /// `a**` and a bare `{`; the crate accepts the first and reads the second
     /// as a literal.
     quantifiable: bool,
+    /// How many `parse_class` frames are live. See [`MAX_CLASS_DEPTH`].
+    class_depth: usize,
 }
 
 impl Translator {
@@ -452,6 +492,7 @@ impl Translator {
             saw_multiline_anchor: false,
             anchors_are_unix_lines: None,
             quantifiable: false,
+            class_depth: 0,
         }
     }
 
@@ -752,6 +793,24 @@ impl Translator {
                     out.push_str("(?:");
                     return Ok(());
                 }
+                // **`U` moves TWO bits.** Java's `(?U)` sets `UNICODE_CASE`
+                // as well as `UNICODE_CHARACTER_CLASS` and `(?-U)` clears
+                // both. Measured three ways, because "U implies u" would be a
+                // different rule and the third row separates them:
+                //
+                // | pattern | on `ſ` |
+                // |---|---|
+                // | `(?iU)[a-z]` | `true` |
+                // | `(?iU)(?-U)[a-z]` | `false` |
+                // | `(?iuU)(?-u)[a-z]` | `false` — a BIT, not an implication |
+                // |                    | read at use time |
+                //
+                // Setting only the one bit made `(?iU)` fold ASCII-only, and
+                // it took the flag × intersection cross-product to see it.
+                Some('U') => {
+                    flags.unicode_classes = !negating;
+                    flags.unicode_case = !negating;
+                }
                 Some(c) => {
                     let slot = match c {
                         'i' => &mut flags.case_insensitive,
@@ -760,7 +819,6 @@ impl Translator {
                         's' => &mut flags.dot_all,
                         'u' => &mut flags.unicode_case,
                         'x' => &mut flags.comments,
-                        'U' => &mut flags.unicode_classes,
                         _ => return Err(self.syntax("Unknown inline modifier")),
                     };
                     *slot = !negating;
@@ -1000,15 +1058,17 @@ impl Translator {
         // Through the same writer a `[...]` goes through. A bare property's
         // fold is decided by the property alone: an ASCII-only one never
         // takes the Unicode fold, `(?u)` or not.
-        let ascii_only = is_ascii_only_property(&name);
-        emit_class(
-            out,
-            &translated,
+        // Through the same writer a `[...]` goes through, as a class of one
+        // operand.
+        let class = ClassAst {
             negated,
-            self.flags,
-            !ascii_only,
-            ascii_only,
-        );
+            operands: vec![vec![ClassItem::Property(
+                false,
+                translated,
+                !is_ascii_only_property(&name),
+            )]],
+        };
+        out.push_str(&class_text(&class, self.flags));
         Ok(())
     }
 
@@ -1044,6 +1104,23 @@ impl Translator {
     /// became `a-z` intersected with the *set* `{b, &, c}` and matched `b` —
     /// which Java does not. `&&` is what separates operands here.
     fn parse_class(&mut self) -> Result<ClassAst, JavaRegexError> {
+        // The bound is HERE rather than at each call site because this is the
+        // only way into the recursion, and an unbounded one aborts the
+        // process rather than failing the render.
+        self.class_depth += 1;
+        if self.class_depth > MAX_CLASS_DEPTH {
+            // Java's own sentence for it, which is a `PatternSyntaxException`
+            // and not a crash: `Pattern` catches its own `StackOverflowError`.
+            return Err(JavaRegexError::Syntax(
+                "Stack overflow during pattern compilation".to_string(),
+            ));
+        }
+        let result = self.parse_class_body();
+        self.class_depth -= 1;
+        result
+    }
+
+    fn parse_class_body(&mut self) -> Result<ClassAst, JavaRegexError> {
         let mut class = ClassAst::default();
         if self.peek() == Some('^') {
             self.pos += 1;
@@ -1068,17 +1145,9 @@ impl Translator {
             // starts a comment. Both measured: `(?x)[a b]` does not match a
             // space, and `(?x)[a#b]` is an unclosed class in Java because the
             // comment eats the `]`.
-            if self.flags.comments {
-                if c.is_whitespace() {
-                    self.pos += 1;
-                    continue;
-                }
-                if c == '#' {
-                    while self.peek().is_some_and(|c| c != '\n') {
-                        self.pos += 1;
-                    }
-                    continue;
-                }
+            if self.flags.comments && (c.is_whitespace() || c == '#') {
+                self.skip_insignificant();
+                continue;
             }
             match c {
                 ']' => {
@@ -1092,7 +1161,7 @@ impl Translator {
                     }
                     return Ok(class);
                 }
-                '&' if self.chars.get(self.pos + 1) == Some(&'&') => {
+                '&' => {
                     // **A run of `&` is read as a whole**, because what Java
                     // does with it depends on the run's LENGTH and on whether
                     // an earlier run was odd. Measured over 43 patterns
@@ -1113,10 +1182,42 @@ impl Translator {
                     // `[a&&&b&&&c]` throws while `[a&&&&b&&&&c]` and
                     // `[a&&&&&b]` do not. Counting no-ops alone was wrong in
                     // both directions.
+                    // **Under `(?x)` the run is separated by whitespace, and
+                    // the whitespace AFTER it changes what the run MEANS.**
+                    // Java's `next()` skips insignificant whitespace while its
+                    // `unread()` backs up ONE position, so a lone `&` followed
+                    // by whitespace is swallowed together with it and the next
+                    // character is read as a plain member. All four corners
+                    // measured:
+                    //
+                    // | pattern | Java |
+                    // |---|---|
+                    // | `(?x)[a &b]` | `&` is a member |
+                    // | `(?x)[a & b]` | the `&` is GONE — `{a,b}` |
+                    // | `(?x)[a & ]` | `Unclosed character class`: the `]` |
+                    // |              | is eaten as a member |
+                    // | `(?x)[a & ]x]` | `{a,],x}` |
+                    //
+                    // and `(?x)[a & [bc]]` matches nothing, because the `[` is
+                    // eaten as a member too, the class closes at the first
+                    // `]`, and the second `]` stays in the pattern as a
+                    // literal — so the regex needs TWO characters.
+                    //
+                    // The run itself was read with a raw `while` that never
+                    // consulted the `(?x)` skip, which left 21 rows silent:
+                    // `(?x)[a & & b]` is `[a&&b]`, an INTERSECTION.
                     let mut run = 0usize;
-                    while self.chars.get(self.pos) == Some(&'&') {
-                        self.pos += 1;
-                        run += 1;
+                    let mut whitespace_after_run = false;
+                    loop {
+                        if self.chars.get(self.pos) == Some(&'&') {
+                            self.pos += 1;
+                            run += 1;
+                        } else {
+                            break;
+                        }
+                        let before = self.pos;
+                        self.skip_insignificant();
+                        whitespace_after_run = self.pos != before;
                     }
                     let odd = run % 2 == 1;
                     let no_ops = if odd { (run - 1) / 2 } else { run / 2 - 1 };
@@ -1134,7 +1235,19 @@ impl Translator {
                         after_an_odd_run = true;
                     }
                     if odd {
-                        operand.push(ClassItem::Char('&'));
+                        if whitespace_after_run {
+                            // Swallowed with the whitespace: the next member
+                            // is read where the `&` was, `]` and `[` losing
+                            // their meaning because Java reads it through
+                            // `single()`.
+                            operand.push(self.class_member()?);
+                        } else {
+                            // Back onto the `&` so that a RANGE still parses:
+                            // `[&-a]` is a range in Java, and pushing a bare
+                            // `Char('&')` here would silently split it.
+                            self.pos -= 1;
+                            operand.push(self.class_member()?);
+                        }
                     } else {
                         class.operands.push(std::mem::take(&mut operand));
                     }
@@ -1145,6 +1258,25 @@ impl Translator {
                     operand.push(ClassItem::Nested(Box::new(nested)));
                 }
                 _ => operand.push(self.class_member()?),
+            }
+        }
+    }
+
+    /// Consumes whitespace and `#` comments where `(?x)` makes them
+    /// insignificant. A no-op when the flag is off.
+    fn skip_insignificant(&mut self) {
+        if !self.flags.comments {
+            return;
+        }
+        loop {
+            match self.peek() {
+                Some(c) if c.is_whitespace() => self.pos += 1,
+                Some('#') => {
+                    while self.peek().is_some_and(|c| c != '\n') {
+                        self.pos += 1;
+                    }
+                }
+                _ => return,
             }
         }
     }
@@ -1281,20 +1413,13 @@ fn write_class(out: &mut String, class: &ClassAst, flags: Flags) -> Result<(), J
                 .to_string(),
         ));
     }
-    emit_class(
-        out,
-        &class_inner(class, flags),
-        class.negated,
-        flags,
-        class_has_property(class),
-        class_is_only_ascii_properties(class),
-    );
+    out.push_str(&class_text(class, flags));
     Ok(())
 }
 
 /// Does this class contain a **Unicode** `\p{…}` anywhere, nesting included?
 ///
-/// It decides which of Java's TWO case folds applies — see [`emit_class`]. An
+/// It decides which of Java's TWO case folds applies — see [`class_text`]. An
 /// ASCII-only property such as `\p{Alpha}` does NOT count: it takes the ASCII
 /// fold, like a literal.
 fn class_has_property(class: &ClassAst) -> bool {
@@ -1347,130 +1472,189 @@ fn class_is_only_ascii_properties(class: &ClassAst) -> bool {
     any
 }
 
-/// Writes one class from its inner text, applying **whichever of Java's two
-/// case folds** applies.
+/// A class as the crate spells it, with **whichever of Java's two case folds**
+/// applies, applied WHERE Java applies it.
 ///
-/// **There are two, and an earlier cut knew about one.** Its doc said Java's
-/// rule is `c ∈ C or swapAsciiCase(c) ∈ C` "whatever `C` is". That is true
-/// for a character, for a range, and for an ASCII-only property, and
+/// **There are two folds, and an earlier cut knew about one.** Its doc said
+/// Java's rule is `c ∈ C or swapAsciiCase(c) ∈ C` "whatever `C` is". That is
+/// true for a character, for a range, and for an ASCII-only property, and
 /// **false for a Unicode `CharProperty`**: Java case-folds `\p{Lu}` with full
 /// Unicode mapping even without `UNICODE_CASE`. Measured, 20 rows:
 /// `(?i)\p{Lu}` matches `é`, `ς`, `ſ`, `à` and `к` in Java and matched none
-/// of them here. The round-1 fixture covered only the ASCII POSIX names,
-/// where the two folds agree — a third review finding an entry one variant
-/// away.
+/// of them here. A first cut of that fix then folded EVERY property with
+/// Unicode and got the other half wrong: `(?i)\p{Alpha}` matched `ſ` and
+/// `K`, which Java does not. So:
 ///
-/// A first cut of the fix then folded EVERY property with Unicode and got the
-/// other half wrong: `(?i)\p{Alpha}` matched `ſ` and `\u212a`, which Java
-/// does not, because an ASCII-only class cannot contain either. So:
-///
-/// - **a Unicode property, or `(?u)`** — the crate's own `(?i:…)`, which is
-///   Unicode folding, which is what Java does in both cases;
+/// - **a Unicode property, or `(?u)`/`(?U)`** — the crate's own `(?i:…)`,
+///   which is Unicode folding, which is what Java does in both cases;
 /// - **everything else under `(?i)`** — the ASCII fold, computed by asking
-///   the engine: write the class, compile it, test the 52 ASCII letters. That
-///   is what keeps `(?i)k` from matching the Kelvin sign, and it is exact
-///   where a member-rewriting fold is not (`[Z-a]` spans `[`, `\`, `]`, `^`,
-///   `_` and `` ` `` and has no mirrored range).
+///   the engine: write the operand, compile it, test the 52 ASCII letters.
+///   That is what keeps `(?i)k` from matching the Kelvin sign, and it is
+///   exact where a member-rewriting fold is not (`[Z-a]` spans `[`, `\`, `]`,
+///   `^`, `_` and `` ` `` and has no mirrored range).
 ///
-/// **The fold happens BEFORE the negation.** `(?i)[^a-c]` does not match `B`
-/// in Java: the fold closes `a-c` into `a-cA-C` and the negation then
-/// excludes both cases.
-fn emit_class(
-    out: &mut String,
-    inner: &str,
-    negated: bool,
-    flags: Flags,
-    has_unicode_property: bool,
-    only_ascii_properties: bool,
-) {
-    // `(?u)` widens the fold of literals and ranges; it does NOT widen an
-    // ASCII-only property. So a class that is nothing but those keeps the
-    // ASCII fold even under `(?iu)`.
-    let unicode_fold = has_unicode_property || (flags.unicode_case && !only_ascii_properties);
-    if flags.case_insensitive && unicode_fold {
-        out.push_str("(?i:[");
-        if negated {
-            out.push('^');
-        }
-        out.push_str(inner);
-        out.push_str("])");
-        return;
-    }
-
-    let extras = if flags.case_insensitive {
-        ascii_case_extras(inner)
-    } else {
-        String::new()
-    };
-    match (negated, extras.is_empty()) {
-        (false, true) => {
-            out.push('[');
-            out.push_str(inner);
-            out.push(']');
-        }
-        // An alternation rather than `[inner extras]`, because `inner` can be
-        // an intersection (`a-z&&[^c]`) and appending to one of those would
-        // land inside the right-hand operand.
-        (false, false) => {
-            out.push_str("(?:[");
-            out.push_str(inner);
-            out.push_str("]|[");
-            out.push_str(&extras);
-            out.push_str("])");
-        }
-        (true, true) => {
-            out.push_str("[^");
-            out.push_str(inner);
-            out.push(']');
-        }
-        (true, false) => {
-            out.push_str("[^[");
-            out.push_str(inner);
-            out.push_str("][");
-            out.push_str(&extras);
-            out.push_str("]]");
-        }
-    }
-}
-
-/// The class's members as the crate spells them, with no brackets, no
-/// negation and no case folding.
-fn class_inner(class: &ClassAst, flags: Flags) -> String {
+/// **And the fold is applied PER OPERAND and PER NESTING LEVEL, not to the
+/// flattened class.** It happens before a negation — `(?i)[^a-c]` does not
+/// match `B`, because the fold closes `a-c` into `a-cA-C` first — and it
+/// distributes over the operands of an `&&`. Appending the extras to the
+/// flattened text put them in the LAST operand of an intersection:
+/// `(?i)[\p{Alpha}&&[^b]]` on `b` is `false` in Java and was `true` here,
+/// because `[^b]` became `[^b] ∪ {b,B}`, which is everything. Union is the
+/// only operation the fold distributes over for free, which is why an operand
+/// (always a union) may be folded whole and an intersection may not.
+fn class_text(class: &ClassAst, flags: Flags) -> String {
     let mut out = String::new();
-    let mut first = true;
-    for operand in &class.operands {
-        if !first {
-            out.push_str("&&");
-            out.push('[');
-        }
-        for item in operand {
-            write_class_item(&mut out, item, flags);
-        }
-        if !first {
-            out.push(']');
-        }
-        first = false;
-    }
+    write_class_text(&mut out, class, flags);
     out
 }
 
-/// The class as the crate spells it, brackets and negation included. Used
-/// where a class is nested inside another one.
-fn class_body(class: &ClassAst, flags: Flags) -> String {
-    let mut out = String::new();
+/// [`class_text`], writing in place.
+///
+/// **In place because it was quadratic.** Returning a `String` per level and
+/// embedding it in the parent's copies the whole subtree once per level: a
+/// well-formed class nested 9 999 deep — inside `MAX_CLASS_DEPTH`, so it must
+/// work — took **10 s**, and 14 s at only 4 000 under `(?i)`. Doubling the
+/// depth quadrupled the time, which is the signature. It is linear now.
+fn write_class_text(out: &mut String, class: &ClassAst, flags: Flags) {
+    // `(?u)` widens the fold of literals and ranges; it does NOT widen an
+    // ASCII-only property. So a class that is nothing but those keeps the
+    // ASCII fold even under `(?iu)`.
+    let unicode_fold =
+        class_has_property(class) || (flags.unicode_case && !class_is_only_ascii_properties(class));
+    if flags.case_insensitive && unicode_fold {
+        // ONE group: the crate's `(?i)` folds each member, across `&&` and
+        // `^` as well, which is what Java does under this fold.
+        //
+        // **Nested classes go in UNFOLDED.** A nested `class_text` here would
+        // emit its own `(?i:…)`, and inside a character class that group's
+        // punctuation is not syntax — `(`, `?`, `i`, `:` and `)` would join
+        // the class as members. 13 rows of a 63-probe sweep, every one of
+        // them a boolean egret answered wrongly; the group is written once,
+        // at the top, and everything below it is plain text.
+        out.push_str("(?i:");
+        write_plain_class(out, class, flags);
+        out.push(')');
+        return;
+    }
+
+    // The ASCII fold, computed by ASKING THE ENGINE: write the operand's own
+    // members, compile them, and test the 52 ASCII letters. That is exact
+    // where a member-rewriting fold is not -- `[Z-a]` spans `[`, `\`, `]`,
+    // `^`, `_` and `` ` `` and has no mirrored range.
+    let bracket = class.negated || class.operands.len() > 1;
+    if class.negated {
+        out.push_str("[^");
+    } else if bracket {
+        out.push('[');
+    }
+    for (index, operand) in class.operands.iter().enumerate() {
+        if index > 0 {
+            out.push_str("&&");
+        }
+        out.push('[');
+        // **The probe sees the operand's OWN members only**, and that is not
+        // an approximation: a nested class was folded at ITS level, so it is
+        // already closed under the ASCII fold and can contribute no
+        // counterpart the parent does not already have. Union is the only
+        // operation the fold distributes over, and an operand is a union.
+        let mut own = String::new();
+        for item in operand {
+            write_own_member(&mut own, item, flags);
+        }
+        if flags.case_insensitive {
+            let extras = ascii_case_extras(&own);
+            own.push_str(&extras);
+        }
+        out.push_str(&own);
+        for item in operand {
+            if let ClassItem::Nested(nested) = item {
+                if !is_plain_union(nested) {
+                    // Folded at ITS level, which is what makes a nested
+                    // `[^b]` become `[^bB]` under `(?i)` rather than being
+                    // unioned with the extras of the class that contains it.
+                    write_class_text(out, nested, flags);
+                }
+            }
+        }
+        out.push(']');
+    }
+    if class.negated || bracket {
+        out.push(']');
+    }
+}
+
+/// One member inside the Unicode fold's group, flattening a nested union all
+/// the way down — the same quadratic that [`is_plain_union`] describes.
+fn write_plain_member(out: &mut String, item: &ClassItem, flags: Flags) {
+    match item {
+        ClassItem::Nested(nested) if is_plain_union(nested) => {
+            for inner in &nested.operands[0] {
+                write_plain_member(out, inner, flags);
+            }
+        }
+        ClassItem::Nested(nested) => write_plain_class(out, nested, flags),
+        item => write_class_item(out, item, flags),
+    }
+}
+
+/// Is this nested class **just a union**, with no negation and no `&&`?
+///
+/// `[[[[a]]]]` is `[a]`, and writing the brackets out costs more than the
+/// characters: `regex-syntax` unions a nested class into its parent at every
+/// level, which is quadratic in the nesting depth. A well-formed class nested
+/// 9 999 deep — inside `MAX_CLASS_DEPTH`, so it must WORK, and Java compiles
+/// it — took **10 s** of CPU for one render, which is a denial of service
+/// with a 20 KB pattern. Flattened, the same pattern is linear.
+///
+/// A negation or an `&&` is NOT flattenable: `[a[^b]]` is not `[a^b]` and
+/// `[a[b&&c]]` is not `[ab&&c]`. Only the union case is inlined.
+fn is_plain_union(class: &ClassAst) -> bool {
+    !class.negated && class.operands.len() == 1
+}
+
+/// One member's own text, inlining a nested class that is a plain union.
+///
+/// A union's members join the parent's directly, which is also why the ASCII
+/// fold stays correct: the probe sees them, and the fold distributes over a
+/// union.
+fn write_own_member(own: &mut String, item: &ClassItem, flags: Flags) {
+    match item {
+        ClassItem::Nested(nested) if is_plain_union(nested) => {
+            for inner in &nested.operands[0] {
+                write_own_member(own, inner, flags);
+            }
+        }
+        ClassItem::Nested(_) => {}
+        item => write_class_item(own, item, flags),
+    }
+}
+
+/// A class exactly as written — brackets, negation, operands and nesting —
+/// with **no fold applied at any level**. Used inside the one `(?i:…)` the
+/// Unicode fold emits, where the crate does the folding instead.
+fn write_plain_class(out: &mut String, class: &ClassAst, flags: Flags) {
     out.push('[');
     if class.negated {
         out.push('^');
     }
-    out.push_str(&class_inner(class, flags));
+    for (index, operand) in class.operands.iter().enumerate() {
+        if index > 0 {
+            out.push_str("&&[");
+        }
+        for item in operand {
+            write_plain_member(out, item, flags);
+        }
+        if index > 0 {
+            out.push(']');
+        }
+    }
     out.push(']');
-    out
 }
 
-/// The ASCII letters a `(?i)` class must also accept.
+/// The ASCII letters a `(?i)` operand must also accept.
 ///
-/// Compiles the class as written and asks it about the other case of each of
-/// the 52 letters. A class the crate cannot compile yields nothing — the
+/// Compiles the operand as written and asks it about the other case of each
+/// of the 52 letters. A class the crate cannot compile yields nothing — the
 /// caller is about to fail on it anyway, and guessing here would be worse.
 fn ascii_case_extras(inner: &str) -> String {
     let Ok(probe) = Regex::new(&format!("^(?:[{inner}])$")) else {
@@ -1511,7 +1695,9 @@ fn write_class_item(out: &mut String, item: &ClassItem, flags: Flags) {
                 write_class_item(out, member, flags);
             }
         }
-        ClassItem::Nested(nested) => out.push_str(&class_body(nested, flags)),
+        // Reached only from `write_plain_class`'s sibling arm and from a
+        // caller that already handles nesting itself; folded at its level.
+        ClassItem::Nested(nested) => write_class_text(out, nested, flags),
     }
 }
 
@@ -1799,7 +1985,7 @@ mod tests {
                  answers {actual}"
             );
         }
-        assert_eq!(rows, 1868, "the fixture lost rows");
+        assert_eq!(rows, 2916, "the fixture lost rows");
     }
 
     /// The fixture's `java` column must be what the **committed harness
@@ -2174,5 +2360,162 @@ mod tests {
         assert_eq!(compile(r"(\d+)-(\d+)").expect("ok").group_count(), 2);
         assert_eq!(compile(r"(?:a)(b)").expect("ok").group_count(), 1);
         assert_eq!(compile("abc").expect("ok").group_count(), 0);
+    }
+
+    /// **The class-nesting abort, and the two sentences Java answers with.**
+    ///
+    /// `parse_class` -> `class_member` -> `parse_class` is a mutual recursion
+    /// driven by the pattern text. Unbounded, `regexMatch(regex='[' * 2000)`
+    /// SIGABRTed the worker: a stack overflow is not a panic, so neither
+    /// `catch_unwind` nor the oracle's guard sees it — the process dies.
+    ///
+    /// Java does not die, because `Pattern` catches its own
+    /// `StackOverflowError` and reports a `PatternSyntaxException`. Both of
+    /// its sentences are reproduced here.
+    ///
+    /// **The depth at which Java switches between them is not assertable.**
+    /// Measured across repetitions inside ONE JVM, the same depth flips:
+    /// 7 000, 8 000 and 9 000 each answered `Stack overflow during pattern
+    /// compilation` on the first repetition and `Unclosed character class` on
+    /// the next two, because it depends on the live stack at compile time.
+    /// So this asserts the two ends, where Java is consistent with itself,
+    /// and `oracle/error-class.txt` records why the corpus entries compare by
+    /// class.
+    #[test]
+    fn a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it() {
+        // **On the stack the shipped path gives it.** A libtest thread has
+        // 8 MiB, which holds 4 192 of these levels -- so running this test
+        // inline would abort the whole binary, and `MAX_CLASS_DEPTH` is only
+        // affordable BECAUSE `render_str` moved the render onto a thread of
+        // `env::RENDER_STACK_BYTES`. That makes this a pin on that constant
+        // too: shrink it and this test's process dies.
+        std::thread::Builder::new()
+            .stack_size(crate::runners::env::RENDER_STACK_BYTES)
+            .spawn(the_class_nesting_assertions)
+            .expect("a render-sized thread")
+            .join()
+            .expect("no abort");
+    }
+
+    fn the_class_nesting_assertions() {
+        // The number is Java's own and it is load-bearing: at 10 000 Java
+        // still COMPILES a well-formed class, so a smaller cap would refuse
+        // patterns Java accepts.
+        assert_eq!(MAX_CLASS_DEPTH, 10_000);
+
+        let past = "[".repeat(MAX_CLASS_DEPTH + 1);
+        assert_eq!(
+            compile(&past).err(),
+            Some(JavaRegexError::Syntax(
+                "Stack overflow during pattern compilation".to_string()
+            )),
+            "past the cap egret must answer Java's own sentence, not abort"
+        );
+
+        // Inside the cap the class is merely unterminated, which is Java's
+        // other sentence -- and reaching it at all proves the recursion ran
+        // 2 000 deep without dying.
+        assert_eq!(
+            compile(&"[".repeat(2_000)).err(),
+            Some(JavaRegexError::Syntax(
+                "Unclosed character class".to_string()
+            ))
+        );
+
+        // A WELL-FORMED deep class must still work. This is what pins
+        // `nest_limit` as well: `regex-syntax`'s own default is 250, and
+        // without raising it this line fails on a pattern Java compiles.
+        let deep = format!("{}a{}", "[".repeat(1_000), "]".repeat(1_000));
+        assert!(compile(&deep)
+            .expect("Java compiles this")
+            .is_match("a")
+            .unwrap());
+
+        // And the cap counts DEPTH, not length: a pattern far longer than the
+        // cap but shallow compiles.
+        assert!(compile(&"a".repeat(MAX_CLASS_DEPTH * 2)).is_ok());
+    }
+
+    /// **`(?x)` inside a class, where Java's whitespace skip and its
+    /// one-position `unread()` disagree.**
+    ///
+    /// Every expectation is a measured Java answer. The pair that matters is
+    /// the first two: the same class, one space apart, and the `&` survives
+    /// in one and vanishes in the other.
+    #[test]
+    fn the_comments_flag_changes_what_an_ampersand_run_means() {
+        let m = |p: &str, s: &str| compile(p).expect("compiles").is_match(s).unwrap();
+
+        // No whitespace after the `&`: it is a member.
+        assert!(m("(?x)[a &b]", "&"));
+        // Whitespace after it: Java swallows both and the `&` is GONE.
+        assert!(!m("(?x)[a & b]", "&"));
+        assert!(m("(?x)[a & b]", "a") && m("(?x)[a & b]", "b"));
+
+        // Whitespace INSIDE the run does not break the run: `& &` is `&&`,
+        // an intersection, and `[a&&b]` matches nothing.
+        assert!(!m("(?x)[a & & b]", "a"));
+        assert!(!m("(?x)[a & & b]", "b"));
+        assert!(!m("(?x)[a && b]", "a"));
+
+        // An odd run of three is a no-op plus a lone `&` -- which the
+        // whitespace then swallows.
+        assert!(m("(?x)[a&&&b]", "&"));
+        assert!(!m("(?x)[a &&& b]", "&"));
+
+        // The swallowed `&` takes the NEXT character with it as a member,
+        // `]` included, which is how Java loses the class terminator.
+        assert_eq!(
+            compile("(?x)[a & ]").err(),
+            Some(JavaRegexError::Syntax(
+                "Unclosed character class".to_string()
+            ))
+        );
+        assert!(m("(?x)[a & ]x]", "]") && m("(?x)[a & ]x]", "x"));
+
+        // Without `(?x)` none of this happens: a lone `&` is a member and a
+        // space is a space.
+        assert!(m("[a & b]", "&") && m("[a & b]", " "));
+        // And a lone `&` still starts a RANGE, which pushing a bare `&`
+        // member instead of re-reading it would silently split.
+        assert!(m("[&-a]", "_") && !m("[&-a]", "b"));
+    }
+
+    /// **The case fold is per operand and per nesting level.**
+    ///
+    /// Each of these was a silent divergence: egret answered a boolean and it
+    /// was the wrong one. The mechanism is the same in both — the ASCII fold
+    /// used to be appended to the FLATTENED class text, which lands the
+    /// counterparts inside the last operand of an intersection and inside a
+    /// negation that should already have closed over them.
+    #[test]
+    fn the_ascii_fold_distributes_over_operands_and_nesting() {
+        let m = |p: &str, s: &str| compile(p).expect("compiles").is_match(s).unwrap();
+
+        // `[^b]` folds to `[^bB]` BEFORE the intersection, so `b` is out.
+        assert!(!m(r"(?i)[\p{Alpha}&&[^b]]", "b"));
+        assert!(!m(r"(?i)[\p{Alpha}&&[^b]]", "B"));
+        assert!(m(r"(?i)[\p{Alpha}&&[^b]]", "a"));
+        assert!(!m(r"(?i)[a-z&&[^b]]", "B"));
+        assert!(m(r"(?i)[a-z&&[^b]]", "C"));
+        // The fold before a negation, which was already true and must stay.
+        assert!(!m("(?i)[^a-c]", "B"));
+        // And the Unicode fold still reaches across an intersection.
+        assert!(!m(r"(?i)[\p{L}&&[^b]]", "b"));
+    }
+
+    /// **`(?U)` carries `UNICODE_CASE` with it, and `(?-U)` takes it back.**
+    ///
+    /// Three rows, because the third separates a BIT from an implication read
+    /// at use time: with `(?iuU)(?-u)` the `U` is still on and Java still
+    /// answers `false`.
+    #[test]
+    fn unicode_classes_moves_the_unicode_case_bit_too() {
+        let m = |p: &str, s: &str| compile(p).expect("compiles").is_match(s).unwrap();
+        assert!(m("(?iU)[a-z]", "\u{17f}"));
+        assert!(!m("(?iU)(?-U)[a-z]", "\u{17f}"));
+        assert!(!m("(?iuU)(?-u)[a-z]", "\u{17f}"));
+        // Without it, the ASCII fold: `(?i)[a-z]` does not reach a long s.
+        assert!(!m("(?i)[a-z]", "\u{17f}"));
     }
 }

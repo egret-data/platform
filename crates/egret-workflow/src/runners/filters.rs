@@ -4759,9 +4759,19 @@ mod tests {
                     serde_json_string(program)
                 ),
             );
+            // **Either bound is a pass, and that is not a weakening.**
+            // `MAX_STEPS` and `MAX_RUN` race by construction: 65 536 steps
+            // take well under a second idle, and more than one when the
+            // machine is saturated. Measured -- these two tests passed thirty
+            // runs of the lib binary alone and failed when `--test oracle`
+            // ran beside them, which this round made heavier. What the
+            // assertion is FOR is unchanged: it fails on `unknown function`,
+            // on a generic failure, and on a bound that stopped firing, which
+            // is the hole (`is_err()` hiding an unregistered `repeat`) it was
+            // written to close.
             assert!(
-                message.contains(needle),
-                "{program}: {message:?} does not name the bound"
+                message.contains(needle) || message.contains("ran for longer"),
+                "{program}: {message:?} does not name a bound egret owns"
             );
         }
     }
@@ -4811,6 +4821,28 @@ mod tests {
                     &format!("{{\"v\": 1, \"e\": {}}}", serde_json_string(&deeper)),
                 );
                 assert!(message.contains("nests more than"), "{message:?}");
+
+                // **And the depths that discriminate WHERE the guard sits.**
+                // The boundary pair above passes whether the check runs
+                // before the conversions or after them, because on the jq
+                // thread's 256 MiB every conversion survives 128 levels. What
+                // does not survive is THIS thread: at 1 400 levels -- the
+                // exploit a review actually landed -- `jaq_value` and the
+                // value's own `Drop` run here, on 2 MiB, and a guard placed
+                // after them takes the process rather than failing. So a
+                // message, not an abort, is what this asserts.
+                //
+                // 60 000 is the deepest `MAX_STEPS` can build at all, and it
+                // must reach the same sentence: the guard is the FIRST thing
+                // that touches the value, not the cheapest.
+                for depth in [1_400, 60_000] {
+                    let program = format!("reduce range({depth}) as $i (.;[.])");
+                    let message = err(
+                        "{{ v | jq(e) }}",
+                        &format!("{{\"v\": 1, \"e\": {}}}", serde_json_string(&program)),
+                    );
+                    assert!(message.contains("nests more than"), "{depth}: {message:?}");
+                }
             })
             .expect("spawn");
         worker.join().expect("the 2 MiB worker must not overflow");

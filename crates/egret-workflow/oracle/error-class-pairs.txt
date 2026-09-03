@@ -160,3 +160,9 @@ filter-jq-source-past-the-cap     test:every_deep_jq_source_is_refused_before_th
 
 # --- W2 Task 6, fix round 3.
 filter-regexmatch-two-odd-ampersand-runs test:a_pattern_java_rejects_is_rejected_here_too
+
+# --- W2 Task 6, fix round 4.
+filter-regexmatch-class-nesting-past-the-cap        test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-class-nesting-inside-the-cap      test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-class-nesting-in-a-template-literal test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-comments-ampersand-unclosed       test:the_comments_flag_changes_what_an_ampersand_run_means

@@ -335,3 +335,22 @@ filter-jq-source-past-the-cap
 # single `&&&` run is a UNION (`[a&&&b]` is `[ab&]`), `&&&&` is an
 # intersection, and `[a&&&&b&&&&c]` is legal.
 filter-regexmatch-two-odd-ampersand-runs
+
+# Fix round 4. A class nested past what a stack can hold: Java's `Pattern`
+# catches its own `StackOverflowError` and reports a PatternSyntaxException,
+# and egret bounds `parse_class` at `javare::MAX_CLASS_DEPTH` to do the same
+# rather than SIGABRT the worker. Both of Java's two sentences are reproduced
+# ("Unclosed character class" inside the cap, "Stack overflow during pattern
+# compilation" past it) but the DEPTH at which Java switches between them is
+# not a constant -- the same depth flips between runs of one JVM, because it
+# depends on the live stack when the pattern is compiled -- so only the
+# ERROR CLASS can be asserted here.
+filter-regexmatch-class-nesting-past-the-cap
+filter-regexmatch-class-nesting-inside-the-cap
+# The literal form matters on its own: `rewrite::MAX_NESTING_DEPTH` never
+# looks inside a template's string literal, so it is not a second guard.
+filter-regexmatch-class-nesting-in-a-template-literal
+
+# `(?x)[a & ]`: Java's `unread()` backs up one position after a whitespace
+# skip, so the `]` is eaten as a class member and the class never closes.
+filter-regexmatch-comments-ampersand-unclosed

@@ -212,9 +212,20 @@ pub(super) const TICK: &str = "__egret_tick";
 ///
 /// **128 is `serde_json`'s own recursion limit**, which is what already
 /// bounds the *other* way a value enters this crate — a context deeper than
-/// that fails to parse. Using the same number gives one invariant instead of
-/// two: **no value anywhere in this crate is more than
-/// `MAX_VALUE_DEPTH` deep.**
+/// that fails to parse.
+///
+/// **The two numbers are close but they are not the same number, and neither
+/// covers every door.** Measured, not restated: a context whose variable
+/// holds 126 nested arrays parses and 127 does not, because `serde_json`
+/// counts the enclosing object and the variable's own value toward its 128.
+/// So the context path admits 126 and this admits 128. And a caller that
+/// builds a `RenderContext` in Rust — `RenderContext::insert`,
+/// `RenderContext::from_json_object` — parses nothing and is checked by
+/// neither: it can hand the renderer a value of any depth. What holds is the
+/// narrower claim: **no value that egret PARSES or that jq BUILDS is more
+/// than `MAX_VALUE_DEPTH` deep**, and the whole render runs on
+/// `env::RENDER_STACK_BYTES` so that a programmatic caller's deep value costs
+/// a `RenderError` rather than the process.
 ///
 /// It is also far inside what the recursion can afford. Measured, by
 /// bisecting the depth that overflows a thread of a given size, and linear in
@@ -670,12 +681,25 @@ fn contains_word(source: &str, word: &str) -> bool {
 /// [`MAX_VALUE_DEPTH`] + 1.
 ///
 /// Iteratively because the thing it is guarding against is recursion over
-/// this value: a recursive depth check is the same overflow one function
-/// earlier. The explicit stack holds `(value, depth)` pairs and never grows
-/// past the number of nodes at the current frontier.
+/// this value: a recursive depth check would be the same overflow one
+/// function earlier.
 ///
-/// It stops as soon as the limit is exceeded, so a value 65 536 deep costs
-/// 129 steps, not 65 536.
+/// **That is a reason, not a measurement, and the measurement does not back
+/// it at today's constants.** A recursive version of this check was built and
+/// run against the deepest value jq can reach (`MAX_STEPS` caps it near
+/// 60 000) and against a hand-built chain of 400 000, both on
+/// `JQ_STACK_BYTES`, and it survived both — the frame is small enough that
+/// 256 MiB absorbs it. So the iterative form is defence for a future in which
+/// `MAX_STEPS` rises, the stack shrinks, or a caller runs this somewhere
+/// else; it is not what stands between egret and an abort today. Said plainly
+/// because an unfalsifiable claim in a doc comment is worse than no claim. The explicit stack holds `(value, depth)` pairs — on the HEAP,
+/// which is the whole point; it is a work list, not a frontier, and for a
+/// wide value it can hold as many pairs as the value has nodes.
+///
+/// It stops as soon as the limit is exceeded, so a CHAIN 65 536 deep costs
+/// 129 pops rather than 65 536 stack frames. A wide value is still walked in
+/// full, which is bounded by `MAX_OUTPUT_BYTES` on the way out and by
+/// `MAX_STEPS` on the way in.
 pub(super) fn too_deep(value: &Val) -> bool {
     let mut stack: Vec<(&Val, usize)> = vec![(value, 1)];
     while let Some((value, depth)) = stack.pop() {
@@ -770,6 +794,86 @@ mod tests {
     /// The comparison mirrors the corpus's own error-class rule: a row where
     /// Kestra fails and egret fails is not a divergence whatever the two
     /// messages say, and a row where Kestra SUCCEEDS and egret refuses is.
+    /// **`too_deep` itself, which nothing tested.**
+    ///
+    /// It is the guard on the third axis and it had no unit test: the only
+    /// thing exercising it was one end-to-end entry, which a mutation showed
+    /// admits two wrong implementations. These pin the boundary in both
+    /// directions AND the property the boundary is worthless without --
+    /// **that the check does not itself recurse**.
+    #[test]
+    fn the_value_depth_guard_measures_depth_and_does_not_recurse() {
+        // A chain of arrays `depth` deep.
+        fn chain(depth: usize) -> Val {
+            // Built iteratively for the same reason the check is.
+            let mut value = Val::Null;
+            for _ in 1..depth {
+                value = Val::Arr(std::rc::Rc::new(vec![value]));
+            }
+            value
+        }
+        assert_eq!(MAX_VALUE_DEPTH, 128);
+        // The boundary, both sides of it: one level shallower passes, one
+        // level deeper is refused. Either alone admits an off-by-one.
+        assert!(!too_deep(&chain(MAX_VALUE_DEPTH)));
+        assert!(too_deep(&chain(MAX_VALUE_DEPTH + 1)));
+        assert!(!too_deep(&Val::Null));
+
+        // A value far past anything jq can build, on the thread the shipped
+        // code runs this on -- because BUILDING and DROPPING a value this
+        // deep are themselves recursive. `Val` is an `Rc` chain and its
+        // `Drop` walks it, which is the same hazard one function further on,
+        // and it is why the guard runs on the jq thread rather than after the
+        // value has been handed back.
+        //
+        // **This does NOT pin the iterativeness.** A recursive depth check
+        // was substituted and survived this line, and survived the end-to-end
+        // path at 60 000 as well: 256 MiB absorbs the frames. What it pins is
+        // that the guard answers at all at a depth no writer could survive.
+        std::thread::Builder::new()
+            .stack_size(JQ_STACK_BYTES)
+            .spawn(|| assert!(too_deep(&chain(400_000))))
+            .expect("a jq-sized thread")
+            .join()
+            .expect("no abort");
+
+        // Depth is not breadth. `__egret_guard` counts outputs, and a wide
+        // value passes a guard that counts them while still being shallow --
+        // which is why this axis needed its own bound.
+        let wide = Val::Arr(std::rc::Rc::new((0..10_000).map(|_| Val::Null).collect()));
+        assert!(!too_deep(&wide));
+
+        // An object nests exactly like an array.
+        let mut object = Val::Null;
+        for _ in 1..MAX_VALUE_DEPTH + 1 {
+            let mut map = jaq_json::Map::default();
+            map.insert(Val::from("a".to_string()), object);
+            object = Val::Obj(std::rc::Rc::new(map));
+        }
+        assert!(too_deep(&object));
+    }
+
+    /// **The jq thread's stack is a derived number and the derivation is the
+    /// point.**
+    ///
+    /// `MAX_SOURCE_BYTES` is `JQ_STACK_BYTES / WORST_STACK_PER_SOURCE_BYTE /
+    /// PARSE_STACK_MARGIN`, so lowering the stack silently narrows what a
+    /// flow may write. A previous round shaved the margin instead of raising
+    /// the stack and refused legitimate jq; this states both ends so that
+    /// either move is a visible diff.
+    #[test]
+    fn the_jq_stack_and_the_source_cap_move_together() {
+        assert_eq!(JQ_STACK_BYTES, 256 * 1024 * 1024);
+        assert_eq!(MAX_SOURCE_BYTES, 4369);
+        assert_eq!(
+            MAX_SOURCE_BYTES,
+            JQ_STACK_BYTES / WORST_STACK_PER_SOURCE_BYTE / PARSE_STACK_MARGIN
+        );
+        // The cap must clear the pipelines flows actually write. 1 352 bytes
+        // is a real one a review handed back after an earlier cap refused it.
+        const { assert!(MAX_SOURCE_BYTES > 1_352) };
+    }
+
     #[test]
     fn the_jq_surface_matches_the_engine() {
         let fixture = include_str!("../../oracle/jq-surface.txt");
@@ -1017,7 +1121,20 @@ mod tests {
         ] {
             let message =
                 render_jq(program, "[]").expect_err(&format!("{program} must be refused"));
-            assert!(message.contains(needle), "{program}: {message:?}");
+            // **Either bound is a pass, and that is not a weakening.**
+            // `MAX_STEPS` and `MAX_RUN` race by construction: 65 536 steps
+            // take well under a second idle, and more than one when the
+            // machine is saturated. Measured -- these two tests passed thirty
+            // runs of the lib binary alone and failed when `--test oracle`
+            // ran beside them, which this round made heavier. What the
+            // assertion is FOR is unchanged: it fails on `unknown function`,
+            // on a generic failure, and on a bound that stopped firing, which
+            // is the hole (`is_err()` hiding an unregistered `repeat`) it was
+            // written to close.
+            assert!(
+                message.contains(needle) || message.contains("ran for longer"),
+                "{program}: {message:?} does not name a bound egret owns"
+            );
         }
     }
 

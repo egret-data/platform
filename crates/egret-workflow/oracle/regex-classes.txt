@@ -129,7 +129,7 @@
 (?dm)b$	b\na	true	true	-
 (?m)^b	a\rb	true	true	-
 (?m)^b	a\nb	true	true	-
-(?m)^b	ab	true	refused	the crate breaks lines on \n and \r\n only; U+0085 is a line terminator to Java and the subject has one
+(?m)^b	ab	true	refused	a multi-line '^' or '$' against a subject containing U+0085, U+2028 or U+2029 (Java breaks lines on those and egret's engine does not)
 (?m)b$	b\ra	true	true	-
 (?m)b$	b\na	true	true	-
 (?s)a.b	a\nb	true	true	-
@@ -157,8 +157,8 @@
 (?-i)a	a	true	true	-
 a(?i)b	aB	true	true	-
 a(?i)b	AB	false	false	-
-\\X	a	true	refused	a grapheme cluster; the crate has no such construct and no way to spell one
-\\N{LATIN SMALL LETTER A}	a	true	refused	a codepoint named by its Unicode name; no name table is in this dependency tree
+\\X	a	true	refused	'\X' (a grapheme cluster)
+\\N{LATIN SMALL LETTER A}	a	true	refused	'\N{…}' (a codepoint named by its Unicode name)
 \\p{all}	a	true	true	-
 \\p{IsAlphabetic}	a	true	true	-
 \\p{IsAlphabetic}	1	false	false	-
@@ -181,7 +181,7 @@ a(?i)b	AB	false	false	-
 \\v	\n	true	true	-
 \\v	\u000b	true	true	-
 a**	aaa	error	error	-
-a*+	aaa	true	refused	a possessive quantifier; the crate's engine does not backtrack and cannot express one
+a*+	aaa	true	refused	a possessive quantifier ('*+', '++', '?+', '{n,m}+')
 a{	a{	error	error	-
 a{,3}	a{,3}	error	error	-
 a{2,1}	aa	error	error	-
@@ -1266,15 +1266,15 @@ a|	b	true	true	-
 (?iU)\\p{Cntrl}	к	false	false	-
 (?iU)\\p{Cntrl}	٣	false	false	-
 (?iU)\\p{Cntrl}	 	false	false	-
-(?iU)[\\p{Cntrl}x]	a	false	false	-
-(?iU)[\\p{Cntrl}x]	A	false	false	-
-(?iU)[\\p{Cntrl}x]	é	false	false	-
-(?iU)[\\p{Cntrl}x]	ſ	false	false	-
-(?iU)[\\p{Cntrl}x]	K	false	false	-
-(?iU)[\\p{Cntrl}x]	ς	false	false	-
-(?iU)[\\p{Cntrl}x]	к	false	false	-
-(?iU)[\\p{Cntrl}x]	٣	false	false	-
-(?iU)[\\p{Cntrl}x]	 	false	false	-
+(?iU)[\\p{Cntrl}x]	a	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	A	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{Cntrl}x]	 	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
 (?i)\\p{ASCII}	a	true	true	-
 (?i)\\p{ASCII}	A	true	true	-
 (?i)\\p{ASCII}	é	false	false	-
@@ -1356,15 +1356,15 @@ a|	b	true	true	-
 (?iU)\\p{ASCII}	к	false	false	-
 (?iU)\\p{ASCII}	٣	false	false	-
 (?iU)\\p{ASCII}	 	true	true	-
-(?iU)[\\p{ASCII}x]	a	true	true	-
-(?iU)[\\p{ASCII}x]	A	true	true	-
-(?iU)[\\p{ASCII}x]	é	false	false	-
-(?iU)[\\p{ASCII}x]	ſ	false	false	-
-(?iU)[\\p{ASCII}x]	K	true	true	-
-(?iU)[\\p{ASCII}x]	ς	false	false	-
-(?iU)[\\p{ASCII}x]	к	false	false	-
-(?iU)[\\p{ASCII}x]	٣	false	false	-
-(?iU)[\\p{ASCII}x]	 	true	true	-
+(?iU)[\\p{ASCII}x]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	A	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	ς	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	к	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	٣	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iU)[\\p{ASCII}x]	 	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
 (?i)\\p{L}	a	true	true	-
 (?i)\\p{L}	A	true	true	-
 (?i)\\p{L}	é	true	true	-
@@ -1897,3 +1897,1058 @@ a|	b	true	true	-
 [a&&&&&&&b]	b	true	true	-
 [a&&&&&&&b]	c	false	false	-
 [a&&&&&&&b]	&	true	true	-
+
+# Fix round 4: the flag x intersection cross-product, and the `(?x)`
+# ampersand run whose whitespace changes what the run MEANS.
+[a&b]	B	false	false	-
+[a&b]	K	false	false	-
+[a&b]	ſ	false	false	-
+[a&b]	é	false	false	-
+[a&&b]	B	false	false	-
+[a&&b]	K	false	false	-
+[a&&b]	ſ	false	false	-
+[a&&b]	é	false	false	-
+[a&&&b]	B	false	false	-
+[a&&&b]	K	false	false	-
+[a&&&b]	ſ	false	false	-
+[a&&&b]	é	false	false	-
+[a & b]	a	true	true	-
+[a & b]	b	true	true	-
+[a & b]	B	false	false	-
+[a & b]	&	true	true	-
+[a & b]	c	false	false	-
+[a & b]	K	false	false	-
+[a & b]	ſ	false	false	-
+[a & b]	é	false	false	-
+[a & & b]	a	true	true	-
+[a & & b]	b	true	true	-
+[a & & b]	B	false	false	-
+[a & & b]	&	true	true	-
+[a & & b]	c	false	false	-
+[a & & b]	K	false	false	-
+[a & & b]	ſ	false	false	-
+[a & & b]	é	false	false	-
+[a &&& b]	a	true	true	-
+[a &&& b]	b	true	true	-
+[a &&& b]	B	false	false	-
+[a &&& b]	&	true	true	-
+[a &&& b]	c	false	false	-
+[a &&& b]	K	false	false	-
+[a &&& b]	ſ	false	false	-
+[a &&& b]	é	false	false	-
+[\\p{Alpha}&&[^b]]	B	true	true	-
+[\\p{Alpha}&&[^b]]	&	false	false	-
+[\\p{Alpha}&&[^b]]	c	true	true	-
+[\\p{Alpha}&&[^b]]	K	true	true	-
+[\\p{Alpha}&&[^b]]	ſ	false	false	-
+[\\p{Alpha}&&[^b]]	é	false	false	-
+[\\p{L}&&[^b]]	a	true	true	-
+[\\p{L}&&[^b]]	b	false	false	-
+[\\p{L}&&[^b]]	B	true	true	-
+[\\p{L}&&[^b]]	&	false	false	-
+[\\p{L}&&[^b]]	c	true	true	-
+[\\p{L}&&[^b]]	K	true	true	-
+[\\p{L}&&[^b]]	ſ	true	true	-
+[\\p{L}&&[^b]]	é	true	true	-
+[a-z&&[^b]]	a	true	true	-
+[a-z&&[^b]]	b	false	false	-
+[a-z&&[^b]]	B	false	false	-
+[a-z&&[^b]]	&	false	false	-
+[a-z&&[^b]]	c	true	true	-
+[a-z&&[^b]]	K	false	false	-
+[a-z&&[^b]]	ſ	false	false	-
+[a-z&&[^b]]	é	false	false	-
+[[a-c]&&[b-d]]	a	false	false	-
+[[a-c]&&[b-d]]	b	true	true	-
+[[a-c]&&[b-d]]	B	false	false	-
+[[a-c]&&[b-d]]	&	false	false	-
+[[a-c]&&[b-d]]	c	true	true	-
+[[a-c]&&[b-d]]	K	false	false	-
+[[a-c]&&[b-d]]	ſ	false	false	-
+[[a-c]&&[b-d]]	é	false	false	-
+[\\p{Lower}&&[^b]]	a	true	true	-
+[\\p{Lower}&&[^b]]	b	false	false	-
+[\\p{Lower}&&[^b]]	B	false	false	-
+[\\p{Lower}&&[^b]]	&	false	false	-
+[\\p{Lower}&&[^b]]	c	true	true	-
+[\\p{Lower}&&[^b]]	K	false	false	-
+[\\p{Lower}&&[^b]]	ſ	false	false	-
+[\\p{Lower}&&[^b]]	é	false	false	-
+[a&&\\p{Alpha}]	a	true	true	-
+[a&&\\p{Alpha}]	b	false	false	-
+[a&&\\p{Alpha}]	B	false	false	-
+[a&&\\p{Alpha}]	&	false	false	-
+[a&&\\p{Alpha}]	c	false	false	-
+[a&&\\p{Alpha}]	K	false	false	-
+[a&&\\p{Alpha}]	ſ	false	false	-
+[a&&\\p{Alpha}]	é	false	false	-
+(?i)[a&b]	a	true	true	-
+(?i)[a&b]	b	true	true	-
+(?i)[a&b]	B	true	true	-
+(?i)[a&b]	&	true	true	-
+(?i)[a&b]	c	false	false	-
+(?i)[a&b]	K	false	false	-
+(?i)[a&b]	ſ	false	false	-
+(?i)[a&b]	é	false	false	-
+(?i)[a&&b]	a	false	false	-
+(?i)[a&&b]	b	false	false	-
+(?i)[a&&b]	B	false	false	-
+(?i)[a&&b]	&	false	false	-
+(?i)[a&&b]	c	false	false	-
+(?i)[a&&b]	K	false	false	-
+(?i)[a&&b]	ſ	false	false	-
+(?i)[a&&b]	é	false	false	-
+(?i)[a&&&b]	a	true	true	-
+(?i)[a&&&b]	b	true	true	-
+(?i)[a&&&b]	B	true	true	-
+(?i)[a&&&b]	&	true	true	-
+(?i)[a&&&b]	c	false	false	-
+(?i)[a&&&b]	K	false	false	-
+(?i)[a&&&b]	ſ	false	false	-
+(?i)[a&&&b]	é	false	false	-
+(?i)[a & b]	a	true	true	-
+(?i)[a & b]	b	true	true	-
+(?i)[a & b]	B	true	true	-
+(?i)[a & b]	&	true	true	-
+(?i)[a & b]	c	false	false	-
+(?i)[a & b]	K	false	false	-
+(?i)[a & b]	ſ	false	false	-
+(?i)[a & b]	é	false	false	-
+(?i)[a & & b]	a	true	true	-
+(?i)[a & & b]	b	true	true	-
+(?i)[a & & b]	B	true	true	-
+(?i)[a & & b]	&	true	true	-
+(?i)[a & & b]	c	false	false	-
+(?i)[a & & b]	K	false	false	-
+(?i)[a & & b]	ſ	false	false	-
+(?i)[a & & b]	é	false	false	-
+(?i)[a &&& b]	a	true	true	-
+(?i)[a &&& b]	b	true	true	-
+(?i)[a &&& b]	B	true	true	-
+(?i)[a &&& b]	&	true	true	-
+(?i)[a &&& b]	c	false	false	-
+(?i)[a &&& b]	K	false	false	-
+(?i)[a &&& b]	ſ	false	false	-
+(?i)[a &&& b]	é	false	false	-
+(?i)[\\p{Alpha}&&[^b]]	a	true	true	-
+(?i)[\\p{Alpha}&&[^b]]	b	false	false	-
+(?i)[\\p{Alpha}&&[^b]]	B	false	false	-
+(?i)[\\p{Alpha}&&[^b]]	&	false	false	-
+(?i)[\\p{Alpha}&&[^b]]	c	true	true	-
+(?i)[\\p{Alpha}&&[^b]]	K	true	true	-
+(?i)[\\p{Alpha}&&[^b]]	ſ	false	false	-
+(?i)[\\p{Alpha}&&[^b]]	é	false	false	-
+(?i)[\\p{L}&&[^b]]	a	true	true	-
+(?i)[\\p{L}&&[^b]]	b	false	false	-
+(?i)[\\p{L}&&[^b]]	B	false	false	-
+(?i)[\\p{L}&&[^b]]	&	false	false	-
+(?i)[\\p{L}&&[^b]]	c	true	true	-
+(?i)[\\p{L}&&[^b]]	K	true	true	-
+(?i)[\\p{L}&&[^b]]	ſ	true	true	-
+(?i)[\\p{L}&&[^b]]	é	true	true	-
+(?i)[a-z&&[^b]]	a	true	true	-
+(?i)[a-z&&[^b]]	b	false	false	-
+(?i)[a-z&&[^b]]	B	false	false	-
+(?i)[a-z&&[^b]]	&	false	false	-
+(?i)[a-z&&[^b]]	c	true	true	-
+(?i)[a-z&&[^b]]	K	true	true	-
+(?i)[a-z&&[^b]]	ſ	false	false	-
+(?i)[a-z&&[^b]]	é	false	false	-
+(?i)[[a-c]&&[b-d]]	a	false	false	-
+(?i)[[a-c]&&[b-d]]	b	true	true	-
+(?i)[[a-c]&&[b-d]]	B	true	true	-
+(?i)[[a-c]&&[b-d]]	&	false	false	-
+(?i)[[a-c]&&[b-d]]	c	true	true	-
+(?i)[[a-c]&&[b-d]]	K	false	false	-
+(?i)[[a-c]&&[b-d]]	ſ	false	false	-
+(?i)[[a-c]&&[b-d]]	é	false	false	-
+(?i)[\\p{Lower}&&[^b]]	a	true	true	-
+(?i)[\\p{Lower}&&[^b]]	b	false	false	-
+(?i)[\\p{Lower}&&[^b]]	B	false	false	-
+(?i)[\\p{Lower}&&[^b]]	&	false	false	-
+(?i)[\\p{Lower}&&[^b]]	c	true	true	-
+(?i)[\\p{Lower}&&[^b]]	K	true	true	-
+(?i)[\\p{Lower}&&[^b]]	ſ	false	false	-
+(?i)[\\p{Lower}&&[^b]]	é	false	false	-
+(?i)[a&&\\p{Alpha}]	a	true	true	-
+(?i)[a&&\\p{Alpha}]	b	false	false	-
+(?i)[a&&\\p{Alpha}]	B	false	false	-
+(?i)[a&&\\p{Alpha}]	&	false	false	-
+(?i)[a&&\\p{Alpha}]	c	false	false	-
+(?i)[a&&\\p{Alpha}]	K	false	false	-
+(?i)[a&&\\p{Alpha}]	ſ	false	false	-
+(?i)[a&&\\p{Alpha}]	é	false	false	-
+(?x)[a&b]	a	true	true	-
+(?x)[a&b]	b	true	true	-
+(?x)[a&b]	B	false	false	-
+(?x)[a&b]	&	true	true	-
+(?x)[a&b]	c	false	false	-
+(?x)[a&b]	K	false	false	-
+(?x)[a&b]	ſ	false	false	-
+(?x)[a&b]	é	false	false	-
+(?x)[a&&b]	a	false	false	-
+(?x)[a&&b]	b	false	false	-
+(?x)[a&&b]	B	false	false	-
+(?x)[a&&b]	&	false	false	-
+(?x)[a&&b]	c	false	false	-
+(?x)[a&&b]	K	false	false	-
+(?x)[a&&b]	ſ	false	false	-
+(?x)[a&&b]	é	false	false	-
+(?x)[a&&&b]	a	true	true	-
+(?x)[a&&&b]	b	true	true	-
+(?x)[a&&&b]	B	false	false	-
+(?x)[a&&&b]	&	true	true	-
+(?x)[a&&&b]	c	false	false	-
+(?x)[a&&&b]	K	false	false	-
+(?x)[a&&&b]	ſ	false	false	-
+(?x)[a&&&b]	é	false	false	-
+(?x)[a & b]	a	true	true	-
+(?x)[a & b]	b	true	true	-
+(?x)[a & b]	B	false	false	-
+(?x)[a & b]	&	false	false	-
+(?x)[a & b]	c	false	false	-
+(?x)[a & b]	K	false	false	-
+(?x)[a & b]	ſ	false	false	-
+(?x)[a & b]	é	false	false	-
+(?x)[a & & b]	a	false	false	-
+(?x)[a & & b]	b	false	false	-
+(?x)[a & & b]	B	false	false	-
+(?x)[a & & b]	&	false	false	-
+(?x)[a & & b]	c	false	false	-
+(?x)[a & & b]	K	false	false	-
+(?x)[a & & b]	ſ	false	false	-
+(?x)[a & & b]	é	false	false	-
+(?x)[a &&& b]	a	true	true	-
+(?x)[a &&& b]	b	true	true	-
+(?x)[a &&& b]	B	false	false	-
+(?x)[a &&& b]	&	false	false	-
+(?x)[a &&& b]	c	false	false	-
+(?x)[a &&& b]	K	false	false	-
+(?x)[a &&& b]	ſ	false	false	-
+(?x)[a &&& b]	é	false	false	-
+(?x)[\\p{Alpha}&&[^b]]	a	true	true	-
+(?x)[\\p{Alpha}&&[^b]]	b	false	false	-
+(?x)[\\p{Alpha}&&[^b]]	B	true	true	-
+(?x)[\\p{Alpha}&&[^b]]	&	false	false	-
+(?x)[\\p{Alpha}&&[^b]]	c	true	true	-
+(?x)[\\p{Alpha}&&[^b]]	K	true	true	-
+(?x)[\\p{Alpha}&&[^b]]	ſ	false	false	-
+(?x)[\\p{Alpha}&&[^b]]	é	false	false	-
+(?x)[\\p{L}&&[^b]]	a	true	true	-
+(?x)[\\p{L}&&[^b]]	b	false	false	-
+(?x)[\\p{L}&&[^b]]	B	true	true	-
+(?x)[\\p{L}&&[^b]]	&	false	false	-
+(?x)[\\p{L}&&[^b]]	c	true	true	-
+(?x)[\\p{L}&&[^b]]	K	true	true	-
+(?x)[\\p{L}&&[^b]]	ſ	true	true	-
+(?x)[\\p{L}&&[^b]]	é	true	true	-
+(?x)[a-z&&[^b]]	a	true	true	-
+(?x)[a-z&&[^b]]	b	false	false	-
+(?x)[a-z&&[^b]]	B	false	false	-
+(?x)[a-z&&[^b]]	&	false	false	-
+(?x)[a-z&&[^b]]	c	true	true	-
+(?x)[a-z&&[^b]]	K	false	false	-
+(?x)[a-z&&[^b]]	ſ	false	false	-
+(?x)[a-z&&[^b]]	é	false	false	-
+(?x)[[a-c]&&[b-d]]	a	false	false	-
+(?x)[[a-c]&&[b-d]]	b	true	true	-
+(?x)[[a-c]&&[b-d]]	B	false	false	-
+(?x)[[a-c]&&[b-d]]	&	false	false	-
+(?x)[[a-c]&&[b-d]]	c	true	true	-
+(?x)[[a-c]&&[b-d]]	K	false	false	-
+(?x)[[a-c]&&[b-d]]	ſ	false	false	-
+(?x)[[a-c]&&[b-d]]	é	false	false	-
+(?x)[\\p{Lower}&&[^b]]	a	true	true	-
+(?x)[\\p{Lower}&&[^b]]	b	false	false	-
+(?x)[\\p{Lower}&&[^b]]	B	false	false	-
+(?x)[\\p{Lower}&&[^b]]	&	false	false	-
+(?x)[\\p{Lower}&&[^b]]	c	true	true	-
+(?x)[\\p{Lower}&&[^b]]	K	false	false	-
+(?x)[\\p{Lower}&&[^b]]	ſ	false	false	-
+(?x)[\\p{Lower}&&[^b]]	é	false	false	-
+(?x)[a&&\\p{Alpha}]	a	true	true	-
+(?x)[a&&\\p{Alpha}]	b	false	false	-
+(?x)[a&&\\p{Alpha}]	B	false	false	-
+(?x)[a&&\\p{Alpha}]	&	false	false	-
+(?x)[a&&\\p{Alpha}]	c	false	false	-
+(?x)[a&&\\p{Alpha}]	K	false	false	-
+(?x)[a&&\\p{Alpha}]	ſ	false	false	-
+(?x)[a&&\\p{Alpha}]	é	false	false	-
+(?ix)[a&b]	a	true	true	-
+(?ix)[a&b]	b	true	true	-
+(?ix)[a&b]	B	true	true	-
+(?ix)[a&b]	&	true	true	-
+(?ix)[a&b]	c	false	false	-
+(?ix)[a&b]	K	false	false	-
+(?ix)[a&b]	ſ	false	false	-
+(?ix)[a&b]	é	false	false	-
+(?ix)[a&&b]	a	false	false	-
+(?ix)[a&&b]	b	false	false	-
+(?ix)[a&&b]	B	false	false	-
+(?ix)[a&&b]	&	false	false	-
+(?ix)[a&&b]	c	false	false	-
+(?ix)[a&&b]	K	false	false	-
+(?ix)[a&&b]	ſ	false	false	-
+(?ix)[a&&b]	é	false	false	-
+(?ix)[a&&&b]	a	true	true	-
+(?ix)[a&&&b]	b	true	true	-
+(?ix)[a&&&b]	B	true	true	-
+(?ix)[a&&&b]	&	true	true	-
+(?ix)[a&&&b]	c	false	false	-
+(?ix)[a&&&b]	K	false	false	-
+(?ix)[a&&&b]	ſ	false	false	-
+(?ix)[a&&&b]	é	false	false	-
+(?ix)[a & b]	a	true	true	-
+(?ix)[a & b]	b	true	true	-
+(?ix)[a & b]	B	true	true	-
+(?ix)[a & b]	&	false	false	-
+(?ix)[a & b]	c	false	false	-
+(?ix)[a & b]	K	false	false	-
+(?ix)[a & b]	ſ	false	false	-
+(?ix)[a & b]	é	false	false	-
+(?ix)[a & & b]	a	false	false	-
+(?ix)[a & & b]	b	false	false	-
+(?ix)[a & & b]	B	false	false	-
+(?ix)[a & & b]	&	false	false	-
+(?ix)[a & & b]	c	false	false	-
+(?ix)[a & & b]	K	false	false	-
+(?ix)[a & & b]	ſ	false	false	-
+(?ix)[a & & b]	é	false	false	-
+(?ix)[a &&& b]	a	true	true	-
+(?ix)[a &&& b]	b	true	true	-
+(?ix)[a &&& b]	B	true	true	-
+(?ix)[a &&& b]	&	false	false	-
+(?ix)[a &&& b]	c	false	false	-
+(?ix)[a &&& b]	K	false	false	-
+(?ix)[a &&& b]	ſ	false	false	-
+(?ix)[a &&& b]	é	false	false	-
+(?ix)[\\p{Alpha}&&[^b]]	a	true	true	-
+(?ix)[\\p{Alpha}&&[^b]]	b	false	false	-
+(?ix)[\\p{Alpha}&&[^b]]	B	false	false	-
+(?ix)[\\p{Alpha}&&[^b]]	&	false	false	-
+(?ix)[\\p{Alpha}&&[^b]]	c	true	true	-
+(?ix)[\\p{Alpha}&&[^b]]	K	true	true	-
+(?ix)[\\p{Alpha}&&[^b]]	ſ	false	false	-
+(?ix)[\\p{Alpha}&&[^b]]	é	false	false	-
+(?ix)[\\p{L}&&[^b]]	a	true	true	-
+(?ix)[\\p{L}&&[^b]]	b	false	false	-
+(?ix)[\\p{L}&&[^b]]	B	false	false	-
+(?ix)[\\p{L}&&[^b]]	&	false	false	-
+(?ix)[\\p{L}&&[^b]]	c	true	true	-
+(?ix)[\\p{L}&&[^b]]	K	true	true	-
+(?ix)[\\p{L}&&[^b]]	ſ	true	true	-
+(?ix)[\\p{L}&&[^b]]	é	true	true	-
+(?ix)[a-z&&[^b]]	a	true	true	-
+(?ix)[a-z&&[^b]]	b	false	false	-
+(?ix)[a-z&&[^b]]	B	false	false	-
+(?ix)[a-z&&[^b]]	&	false	false	-
+(?ix)[a-z&&[^b]]	c	true	true	-
+(?ix)[a-z&&[^b]]	K	true	true	-
+(?ix)[a-z&&[^b]]	ſ	false	false	-
+(?ix)[a-z&&[^b]]	é	false	false	-
+(?ix)[[a-c]&&[b-d]]	a	false	false	-
+(?ix)[[a-c]&&[b-d]]	b	true	true	-
+(?ix)[[a-c]&&[b-d]]	B	true	true	-
+(?ix)[[a-c]&&[b-d]]	&	false	false	-
+(?ix)[[a-c]&&[b-d]]	c	true	true	-
+(?ix)[[a-c]&&[b-d]]	K	false	false	-
+(?ix)[[a-c]&&[b-d]]	ſ	false	false	-
+(?ix)[[a-c]&&[b-d]]	é	false	false	-
+(?ix)[\\p{Lower}&&[^b]]	a	true	true	-
+(?ix)[\\p{Lower}&&[^b]]	b	false	false	-
+(?ix)[\\p{Lower}&&[^b]]	B	false	false	-
+(?ix)[\\p{Lower}&&[^b]]	&	false	false	-
+(?ix)[\\p{Lower}&&[^b]]	c	true	true	-
+(?ix)[\\p{Lower}&&[^b]]	K	true	true	-
+(?ix)[\\p{Lower}&&[^b]]	ſ	false	false	-
+(?ix)[\\p{Lower}&&[^b]]	é	false	false	-
+(?ix)[a&&\\p{Alpha}]	a	true	true	-
+(?ix)[a&&\\p{Alpha}]	b	false	false	-
+(?ix)[a&&\\p{Alpha}]	B	false	false	-
+(?ix)[a&&\\p{Alpha}]	&	false	false	-
+(?ix)[a&&\\p{Alpha}]	c	false	false	-
+(?ix)[a&&\\p{Alpha}]	K	false	false	-
+(?ix)[a&&\\p{Alpha}]	ſ	false	false	-
+(?ix)[a&&\\p{Alpha}]	é	false	false	-
+(?u)[a&b]	a	true	true	-
+(?u)[a&b]	b	true	true	-
+(?u)[a&b]	B	false	false	-
+(?u)[a&b]	&	true	true	-
+(?u)[a&b]	c	false	false	-
+(?u)[a&b]	K	false	false	-
+(?u)[a&b]	ſ	false	false	-
+(?u)[a&b]	é	false	false	-
+(?u)[a&&b]	a	false	false	-
+(?u)[a&&b]	b	false	false	-
+(?u)[a&&b]	B	false	false	-
+(?u)[a&&b]	&	false	false	-
+(?u)[a&&b]	c	false	false	-
+(?u)[a&&b]	K	false	false	-
+(?u)[a&&b]	ſ	false	false	-
+(?u)[a&&b]	é	false	false	-
+(?u)[a&&&b]	a	true	true	-
+(?u)[a&&&b]	b	true	true	-
+(?u)[a&&&b]	B	false	false	-
+(?u)[a&&&b]	&	true	true	-
+(?u)[a&&&b]	c	false	false	-
+(?u)[a&&&b]	K	false	false	-
+(?u)[a&&&b]	ſ	false	false	-
+(?u)[a&&&b]	é	false	false	-
+(?u)[a & b]	a	true	true	-
+(?u)[a & b]	b	true	true	-
+(?u)[a & b]	B	false	false	-
+(?u)[a & b]	&	true	true	-
+(?u)[a & b]	c	false	false	-
+(?u)[a & b]	K	false	false	-
+(?u)[a & b]	ſ	false	false	-
+(?u)[a & b]	é	false	false	-
+(?u)[a & & b]	a	true	true	-
+(?u)[a & & b]	b	true	true	-
+(?u)[a & & b]	B	false	false	-
+(?u)[a & & b]	&	true	true	-
+(?u)[a & & b]	c	false	false	-
+(?u)[a & & b]	K	false	false	-
+(?u)[a & & b]	ſ	false	false	-
+(?u)[a & & b]	é	false	false	-
+(?u)[a &&& b]	a	true	true	-
+(?u)[a &&& b]	b	true	true	-
+(?u)[a &&& b]	B	false	false	-
+(?u)[a &&& b]	&	true	true	-
+(?u)[a &&& b]	c	false	false	-
+(?u)[a &&& b]	K	false	false	-
+(?u)[a &&& b]	ſ	false	false	-
+(?u)[a &&& b]	é	false	false	-
+(?u)[\\p{Alpha}&&[^b]]	a	true	true	-
+(?u)[\\p{Alpha}&&[^b]]	b	false	false	-
+(?u)[\\p{Alpha}&&[^b]]	B	true	true	-
+(?u)[\\p{Alpha}&&[^b]]	&	false	false	-
+(?u)[\\p{Alpha}&&[^b]]	c	true	true	-
+(?u)[\\p{Alpha}&&[^b]]	K	true	true	-
+(?u)[\\p{Alpha}&&[^b]]	ſ	false	false	-
+(?u)[\\p{Alpha}&&[^b]]	é	false	false	-
+(?u)[\\p{L}&&[^b]]	a	true	true	-
+(?u)[\\p{L}&&[^b]]	b	false	false	-
+(?u)[\\p{L}&&[^b]]	B	true	true	-
+(?u)[\\p{L}&&[^b]]	&	false	false	-
+(?u)[\\p{L}&&[^b]]	c	true	true	-
+(?u)[\\p{L}&&[^b]]	K	true	true	-
+(?u)[\\p{L}&&[^b]]	ſ	true	true	-
+(?u)[\\p{L}&&[^b]]	é	true	true	-
+(?u)[a-z&&[^b]]	a	true	true	-
+(?u)[a-z&&[^b]]	b	false	false	-
+(?u)[a-z&&[^b]]	B	false	false	-
+(?u)[a-z&&[^b]]	&	false	false	-
+(?u)[a-z&&[^b]]	c	true	true	-
+(?u)[a-z&&[^b]]	K	false	false	-
+(?u)[a-z&&[^b]]	ſ	false	false	-
+(?u)[a-z&&[^b]]	é	false	false	-
+(?u)[[a-c]&&[b-d]]	a	false	false	-
+(?u)[[a-c]&&[b-d]]	b	true	true	-
+(?u)[[a-c]&&[b-d]]	B	false	false	-
+(?u)[[a-c]&&[b-d]]	&	false	false	-
+(?u)[[a-c]&&[b-d]]	c	true	true	-
+(?u)[[a-c]&&[b-d]]	K	false	false	-
+(?u)[[a-c]&&[b-d]]	ſ	false	false	-
+(?u)[[a-c]&&[b-d]]	é	false	false	-
+(?u)[\\p{Lower}&&[^b]]	a	true	true	-
+(?u)[\\p{Lower}&&[^b]]	b	false	false	-
+(?u)[\\p{Lower}&&[^b]]	B	false	false	-
+(?u)[\\p{Lower}&&[^b]]	&	false	false	-
+(?u)[\\p{Lower}&&[^b]]	c	true	true	-
+(?u)[\\p{Lower}&&[^b]]	K	false	false	-
+(?u)[\\p{Lower}&&[^b]]	ſ	false	false	-
+(?u)[\\p{Lower}&&[^b]]	é	false	false	-
+(?u)[a&&\\p{Alpha}]	a	true	true	-
+(?u)[a&&\\p{Alpha}]	b	false	false	-
+(?u)[a&&\\p{Alpha}]	B	false	false	-
+(?u)[a&&\\p{Alpha}]	&	false	false	-
+(?u)[a&&\\p{Alpha}]	c	false	false	-
+(?u)[a&&\\p{Alpha}]	K	false	false	-
+(?u)[a&&\\p{Alpha}]	ſ	false	false	-
+(?u)[a&&\\p{Alpha}]	é	false	false	-
+(?iu)[a&b]	a	true	true	-
+(?iu)[a&b]	b	true	true	-
+(?iu)[a&b]	B	true	true	-
+(?iu)[a&b]	&	true	true	-
+(?iu)[a&b]	c	false	false	-
+(?iu)[a&b]	K	false	false	-
+(?iu)[a&b]	ſ	false	false	-
+(?iu)[a&b]	é	false	false	-
+(?iu)[a&&b]	a	false	false	-
+(?iu)[a&&b]	b	false	false	-
+(?iu)[a&&b]	B	false	false	-
+(?iu)[a&&b]	&	false	false	-
+(?iu)[a&&b]	c	false	false	-
+(?iu)[a&&b]	K	false	false	-
+(?iu)[a&&b]	ſ	false	false	-
+(?iu)[a&&b]	é	false	false	-
+(?iu)[a&&&b]	a	true	true	-
+(?iu)[a&&&b]	b	true	true	-
+(?iu)[a&&&b]	B	true	true	-
+(?iu)[a&&&b]	&	true	true	-
+(?iu)[a&&&b]	c	false	false	-
+(?iu)[a&&&b]	K	false	false	-
+(?iu)[a&&&b]	ſ	false	false	-
+(?iu)[a&&&b]	é	false	false	-
+(?iu)[a & b]	a	true	true	-
+(?iu)[a & b]	b	true	true	-
+(?iu)[a & b]	B	true	true	-
+(?iu)[a & b]	&	true	true	-
+(?iu)[a & b]	c	false	false	-
+(?iu)[a & b]	K	false	false	-
+(?iu)[a & b]	ſ	false	false	-
+(?iu)[a & b]	é	false	false	-
+(?iu)[a & & b]	a	true	true	-
+(?iu)[a & & b]	b	true	true	-
+(?iu)[a & & b]	B	true	true	-
+(?iu)[a & & b]	&	true	true	-
+(?iu)[a & & b]	c	false	false	-
+(?iu)[a & & b]	K	false	false	-
+(?iu)[a & & b]	ſ	false	false	-
+(?iu)[a & & b]	é	false	false	-
+(?iu)[a &&& b]	a	true	true	-
+(?iu)[a &&& b]	b	true	true	-
+(?iu)[a &&& b]	B	true	true	-
+(?iu)[a &&& b]	&	true	true	-
+(?iu)[a &&& b]	c	false	false	-
+(?iu)[a &&& b]	K	false	false	-
+(?iu)[a &&& b]	ſ	false	false	-
+(?iu)[a &&& b]	é	false	false	-
+(?iu)[\\p{Alpha}&&[^b]]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	b	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	B	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	&	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	c	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Alpha}&&[^b]]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{L}&&[^b]]	a	true	true	-
+(?iu)[\\p{L}&&[^b]]	b	false	false	-
+(?iu)[\\p{L}&&[^b]]	B	false	false	-
+(?iu)[\\p{L}&&[^b]]	&	false	false	-
+(?iu)[\\p{L}&&[^b]]	c	true	true	-
+(?iu)[\\p{L}&&[^b]]	K	true	true	-
+(?iu)[\\p{L}&&[^b]]	ſ	true	true	-
+(?iu)[\\p{L}&&[^b]]	é	true	true	-
+(?iu)[a-z&&[^b]]	a	true	true	-
+(?iu)[a-z&&[^b]]	b	false	false	-
+(?iu)[a-z&&[^b]]	B	false	false	-
+(?iu)[a-z&&[^b]]	&	false	false	-
+(?iu)[a-z&&[^b]]	c	true	true	-
+(?iu)[a-z&&[^b]]	K	true	true	-
+(?iu)[a-z&&[^b]]	ſ	true	true	-
+(?iu)[a-z&&[^b]]	é	false	false	-
+(?iu)[[a-c]&&[b-d]]	a	false	false	-
+(?iu)[[a-c]&&[b-d]]	b	true	true	-
+(?iu)[[a-c]&&[b-d]]	B	true	true	-
+(?iu)[[a-c]&&[b-d]]	&	false	false	-
+(?iu)[[a-c]&&[b-d]]	c	true	true	-
+(?iu)[[a-c]&&[b-d]]	K	false	false	-
+(?iu)[[a-c]&&[b-d]]	ſ	false	false	-
+(?iu)[[a-c]&&[b-d]]	é	false	false	-
+(?iu)[\\p{Lower}&&[^b]]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	b	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	B	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	&	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	c	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	K	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[\\p{Lower}&&[^b]]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	a	true	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	b	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	B	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	&	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	c	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	K	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	ſ	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?iu)[a&&\\p{Alpha}]	é	false	refused	Java folds an ASCII-only property and a literal DIFFERENTLY under (?iu), and one character class cannot carry two folds
+(?U)[a&b]	a	true	true	-
+(?U)[a&b]	b	true	true	-
+(?U)[a&b]	B	false	false	-
+(?U)[a&b]	&	true	true	-
+(?U)[a&b]	c	false	false	-
+(?U)[a&b]	K	false	false	-
+(?U)[a&b]	ſ	false	false	-
+(?U)[a&b]	é	false	false	-
+(?U)[a&&b]	a	false	false	-
+(?U)[a&&b]	b	false	false	-
+(?U)[a&&b]	B	false	false	-
+(?U)[a&&b]	&	false	false	-
+(?U)[a&&b]	c	false	false	-
+(?U)[a&&b]	K	false	false	-
+(?U)[a&&b]	ſ	false	false	-
+(?U)[a&&b]	é	false	false	-
+(?U)[a&&&b]	a	true	true	-
+(?U)[a&&&b]	b	true	true	-
+(?U)[a&&&b]	B	false	false	-
+(?U)[a&&&b]	&	true	true	-
+(?U)[a&&&b]	c	false	false	-
+(?U)[a&&&b]	K	false	false	-
+(?U)[a&&&b]	ſ	false	false	-
+(?U)[a&&&b]	é	false	false	-
+(?U)[a & b]	a	true	true	-
+(?U)[a & b]	b	true	true	-
+(?U)[a & b]	B	false	false	-
+(?U)[a & b]	&	true	true	-
+(?U)[a & b]	c	false	false	-
+(?U)[a & b]	K	false	false	-
+(?U)[a & b]	ſ	false	false	-
+(?U)[a & b]	é	false	false	-
+(?U)[a & & b]	a	true	true	-
+(?U)[a & & b]	b	true	true	-
+(?U)[a & & b]	B	false	false	-
+(?U)[a & & b]	&	true	true	-
+(?U)[a & & b]	c	false	false	-
+(?U)[a & & b]	K	false	false	-
+(?U)[a & & b]	ſ	false	false	-
+(?U)[a & & b]	é	false	false	-
+(?U)[a &&& b]	a	true	true	-
+(?U)[a &&& b]	b	true	true	-
+(?U)[a &&& b]	B	false	false	-
+(?U)[a &&& b]	&	true	true	-
+(?U)[a &&& b]	c	false	false	-
+(?U)[a &&& b]	K	false	false	-
+(?U)[a &&& b]	ſ	false	false	-
+(?U)[a &&& b]	é	false	false	-
+(?U)[\\p{Alpha}&&[^b]]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	B	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	c	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Alpha}&&[^b]]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{L}&&[^b]]	a	true	true	-
+(?U)[\\p{L}&&[^b]]	b	false	false	-
+(?U)[\\p{L}&&[^b]]	B	true	true	-
+(?U)[\\p{L}&&[^b]]	&	false	false	-
+(?U)[\\p{L}&&[^b]]	c	true	true	-
+(?U)[\\p{L}&&[^b]]	K	true	true	-
+(?U)[\\p{L}&&[^b]]	ſ	true	true	-
+(?U)[\\p{L}&&[^b]]	é	true	true	-
+(?U)[a-z&&[^b]]	a	true	true	-
+(?U)[a-z&&[^b]]	b	false	false	-
+(?U)[a-z&&[^b]]	B	false	false	-
+(?U)[a-z&&[^b]]	&	false	false	-
+(?U)[a-z&&[^b]]	c	true	true	-
+(?U)[a-z&&[^b]]	K	false	false	-
+(?U)[a-z&&[^b]]	ſ	false	false	-
+(?U)[a-z&&[^b]]	é	false	false	-
+(?U)[[a-c]&&[b-d]]	a	false	false	-
+(?U)[[a-c]&&[b-d]]	b	true	true	-
+(?U)[[a-c]&&[b-d]]	B	false	false	-
+(?U)[[a-c]&&[b-d]]	&	false	false	-
+(?U)[[a-c]&&[b-d]]	c	true	true	-
+(?U)[[a-c]&&[b-d]]	K	false	false	-
+(?U)[[a-c]&&[b-d]]	ſ	false	false	-
+(?U)[[a-c]&&[b-d]]	é	false	false	-
+(?U)[\\p{Lower}&&[^b]]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	B	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	c	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[\\p{Lower}&&[^b]]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	B	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	c	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?U)[a&&\\p{Alpha}]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&b]	a	true	true	-
+(?iU)[a&b]	b	true	true	-
+(?iU)[a&b]	B	true	true	-
+(?iU)[a&b]	&	true	true	-
+(?iU)[a&b]	c	false	false	-
+(?iU)[a&b]	K	false	false	-
+(?iU)[a&b]	ſ	false	false	-
+(?iU)[a&b]	é	false	false	-
+(?iU)[a&&b]	a	false	false	-
+(?iU)[a&&b]	b	false	false	-
+(?iU)[a&&b]	B	false	false	-
+(?iU)[a&&b]	&	false	false	-
+(?iU)[a&&b]	c	false	false	-
+(?iU)[a&&b]	K	false	false	-
+(?iU)[a&&b]	ſ	false	false	-
+(?iU)[a&&b]	é	false	false	-
+(?iU)[a&&&b]	a	true	true	-
+(?iU)[a&&&b]	b	true	true	-
+(?iU)[a&&&b]	B	true	true	-
+(?iU)[a&&&b]	&	true	true	-
+(?iU)[a&&&b]	c	false	false	-
+(?iU)[a&&&b]	K	false	false	-
+(?iU)[a&&&b]	ſ	false	false	-
+(?iU)[a&&&b]	é	false	false	-
+(?iU)[a & b]	a	true	true	-
+(?iU)[a & b]	b	true	true	-
+(?iU)[a & b]	B	true	true	-
+(?iU)[a & b]	&	true	true	-
+(?iU)[a & b]	c	false	false	-
+(?iU)[a & b]	K	false	false	-
+(?iU)[a & b]	ſ	false	false	-
+(?iU)[a & b]	é	false	false	-
+(?iU)[a & & b]	a	true	true	-
+(?iU)[a & & b]	b	true	true	-
+(?iU)[a & & b]	B	true	true	-
+(?iU)[a & & b]	&	true	true	-
+(?iU)[a & & b]	c	false	false	-
+(?iU)[a & & b]	K	false	false	-
+(?iU)[a & & b]	ſ	false	false	-
+(?iU)[a & & b]	é	false	false	-
+(?iU)[a &&& b]	a	true	true	-
+(?iU)[a &&& b]	b	true	true	-
+(?iU)[a &&& b]	B	true	true	-
+(?iU)[a &&& b]	&	true	true	-
+(?iU)[a &&& b]	c	false	false	-
+(?iU)[a &&& b]	K	false	false	-
+(?iU)[a &&& b]	ſ	false	false	-
+(?iU)[a &&& b]	é	false	false	-
+(?iU)[\\p{Alpha}&&[^b]]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	B	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	c	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Alpha}&&[^b]]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{L}&&[^b]]	a	true	true	-
+(?iU)[\\p{L}&&[^b]]	b	false	false	-
+(?iU)[\\p{L}&&[^b]]	B	false	false	-
+(?iU)[\\p{L}&&[^b]]	&	false	false	-
+(?iU)[\\p{L}&&[^b]]	c	true	true	-
+(?iU)[\\p{L}&&[^b]]	K	true	true	-
+(?iU)[\\p{L}&&[^b]]	ſ	true	true	-
+(?iU)[\\p{L}&&[^b]]	é	true	true	-
+(?iU)[a-z&&[^b]]	a	true	true	-
+(?iU)[a-z&&[^b]]	b	false	false	-
+(?iU)[a-z&&[^b]]	B	false	false	-
+(?iU)[a-z&&[^b]]	&	false	false	-
+(?iU)[a-z&&[^b]]	c	true	true	-
+(?iU)[a-z&&[^b]]	K	true	true	-
+(?iU)[a-z&&[^b]]	ſ	true	true	-
+(?iU)[a-z&&[^b]]	é	false	false	-
+(?iU)[[a-c]&&[b-d]]	a	false	false	-
+(?iU)[[a-c]&&[b-d]]	b	true	true	-
+(?iU)[[a-c]&&[b-d]]	B	true	true	-
+(?iU)[[a-c]&&[b-d]]	&	false	false	-
+(?iU)[[a-c]&&[b-d]]	c	true	true	-
+(?iU)[[a-c]&&[b-d]]	K	false	false	-
+(?iU)[[a-c]&&[b-d]]	ſ	false	false	-
+(?iU)[[a-c]&&[b-d]]	é	false	false	-
+(?iU)[\\p{Lower}&&[^b]]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	B	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	c	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	K	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	ſ	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[\\p{Lower}&&[^b]]	é	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	a	true	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	b	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	B	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	&	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	c	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	K	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	ſ	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+(?iU)[a&&\\p{Alpha}]	é	false	refused	(?U) redefines \d \w \s \b and the whole POSIX family to Unicode sets that are close to but not the crate's, so it is refused rather than approximated
+[a&b]	 	false	false	-
+(?x)[a & b]	 	false	false	-
+[a& b]	a	true	true	-
+[a& b]	b	true	true	-
+[a& b]	&	true	true	-
+[a& b]	 	true	true	-
+[a& b]	c	false	false	-
+(?x)[a& b]	a	true	true	-
+(?x)[a& b]	b	true	true	-
+(?x)[a& b]	&	false	false	-
+(?x)[a& b]	 	false	false	-
+(?x)[a& b]	c	false	false	-
+(?x)[a &b]	a	true	true	-
+(?x)[a &b]	b	true	true	-
+(?x)[a &b]	&	true	true	-
+(?x)[a &b]	 	false	false	-
+(?x)[a &b]	c	false	false	-
+[&]	a	false	false	-
+[&]	b	false	false	-
+[&]	&	true	true	-
+[&]	 	false	false	-
+[&]	c	false	false	-
+(?x)[ & ]	a	error	error	-
+(?x)[ & ]	b	error	error	-
+(?x)[ & ]	&	error	error	-
+(?x)[ & ]	 	error	error	-
+(?x)[ & ]	c	error	error	-
+(?x)[a & & b]	 	false	false	-
+(?x)[a && b]	a	false	false	-
+(?x)[a && b]	b	false	false	-
+(?x)[a && b]	&	false	false	-
+(?x)[a && b]	 	false	false	-
+(?x)[a && b]	c	false	false	-
+[a&&b]	 	false	false	-
+(?x)[a&&b]	 	false	false	-
+[ab&]	a	true	true	-
+[ab&]	b	true	true	-
+[ab&]	&	true	true	-
+[ab&]	 	false	false	-
+[ab&]	c	false	false	-
+(?x)[ab & ]	a	error	error	-
+(?x)[ab & ]	b	error	error	-
+(?x)[ab & ]	&	error	error	-
+(?x)[ab & ]	 	error	error	-
+(?x)[ab & ]	c	error	error	-
+(?x)[a & &b]	a	false	false	-
+(?x)[a & &b]	b	false	false	-
+(?x)[a & &b]	&	false	false	-
+(?x)[a & &b]	 	false	false	-
+(?x)[a & &b]	c	false	false	-
+(?x)[a& &b]	a	false	false	-
+(?x)[a& &b]	b	false	false	-
+(?x)[a& &b]	&	false	false	-
+(?x)[a& &b]	 	false	false	-
+(?x)[a& &b]	c	false	false	-
+[a&&]	b	false	false	-
+[a&&]	&	false	false	-
+[a&&]	 	false	false	-
+[a&&]	c	false	false	-
+(?x)[a && ]	a	true	true	-
+(?x)[a && ]	b	false	false	-
+(?x)[a && ]	&	false	false	-
+(?x)[a && ]	 	false	false	-
+(?x)[a && ]	c	false	false	-
+(?x)[a & ]	a	error	error	-
+(?x)[a & ]	b	error	error	-
+(?x)[a & ]	&	error	error	-
+(?x)[a & ]	 	error	error	-
+(?x)[a & ]	c	error	error	-
+[a&]	a	true	true	-
+[a&]	b	false	false	-
+[a&]	&	true	true	-
+[a&]	 	false	false	-
+[a&]	c	false	false	-
+(?x)[a & ]	d	error	error	-
+(?x)[a & ]	[	error	error	-
+(?x)[a & ]	]	error	error	-
+(?x)[a & ]	x	error	error	-
+(?x)[a & ]	\\	error	error	-
+(?x)[a & ]	-	error	error	-
+(?x)[a & ]	1	error	error	-
+(?x)[a & ]	z	error	error	-
+(?x)[a & ]	#	error	error	-
+(?x)[a & ]x]	a	true	true	-
+(?x)[a & ]x]	b	false	false	-
+(?x)[a & ]x]	c	false	false	-
+(?x)[a & ]x]	d	false	false	-
+(?x)[a & ]x]	&	false	false	-
+(?x)[a & ]x]	[	false	false	-
+(?x)[a & ]x]	]	true	true	-
+(?x)[a & ]x]	x	true	true	-
+(?x)[a & ]x]	\\	false	false	-
+(?x)[a & ]x]	-	false	false	-
+(?x)[a & ]x]	1	false	false	-
+(?x)[a & ]x]	z	false	false	-
+(?x)[a & ]x]	#	false	false	-
+(?x)[a & [bc]]	a	false	false	-
+(?x)[a & [bc]]	b	false	false	-
+(?x)[a & [bc]]	c	false	false	-
+(?x)[a & [bc]]	d	false	false	-
+(?x)[a & [bc]]	&	false	false	-
+(?x)[a & [bc]]	[	false	false	-
+(?x)[a & [bc]]	]	false	false	-
+(?x)[a & [bc]]	x	false	false	-
+(?x)[a & [bc]]	\\	false	false	-
+(?x)[a & [bc]]	-	false	false	-
+(?x)[a & [bc]]	1	false	false	-
+(?x)[a & [bc]]	z	false	false	-
+(?x)[a & [bc]]	#	false	false	-
+(?x)[a & \\d]	a	true	true	-
+(?x)[a & \\d]	b	false	false	-
+(?x)[a & \\d]	c	false	false	-
+(?x)[a & \\d]	d	false	false	-
+(?x)[a & \\d]	&	false	false	-
+(?x)[a & \\d]	[	false	false	-
+(?x)[a & \\d]	]	false	false	-
+(?x)[a & \\d]	x	false	false	-
+(?x)[a & \\d]	\\	false	false	-
+(?x)[a & \\d]	-	false	false	-
+(?x)[a & \\d]	1	true	true	-
+(?x)[a & \\d]	z	false	false	-
+(?x)[a & \\d]	#	false	false	-
+(?x)[a & b-d]	a	true	true	-
+(?x)[a & b-d]	b	true	true	-
+(?x)[a & b-d]	c	true	true	-
+(?x)[a & b-d]	d	true	true	-
+(?x)[a & b-d]	&	false	false	-
+(?x)[a & b-d]	[	false	false	-
+(?x)[a & b-d]	]	false	false	-
+(?x)[a & b-d]	x	false	false	-
+(?x)[a & b-d]	\\	false	false	-
+(?x)[a & b-d]	-	false	false	-
+(?x)[a & b-d]	1	false	false	-
+(?x)[a & b-d]	z	false	false	-
+(?x)[a & b-d]	#	false	false	-
+(?x)[a &  ]	a	error	error	-
+(?x)[a &  ]	b	error	error	-
+(?x)[a &  ]	c	error	error	-
+(?x)[a &  ]	d	error	error	-
+(?x)[a &  ]	&	error	error	-
+(?x)[a &  ]	[	error	error	-
+(?x)[a &  ]	]	error	error	-
+(?x)[a &  ]	x	error	error	-
+(?x)[a &  ]	\\	error	error	-
+(?x)[a &  ]	-	error	error	-
+(?x)[a &  ]	1	error	error	-
+(?x)[a &  ]	z	error	error	-
+(?x)[a &  ]	#	error	error	-
+(?x)[a & #z\n b]	a	true	true	-
+(?x)[a & #z\n b]	b	true	true	-
+(?x)[a & #z\n b]	c	false	false	-
+(?x)[a & #z\n b]	d	false	false	-
+(?x)[a & #z\n b]	&	false	false	-
+(?x)[a & #z\n b]	[	false	false	-
+(?x)[a & #z\n b]	]	false	false	-
+(?x)[a & #z\n b]	x	false	false	-
+(?x)[a & #z\n b]	\\	false	false	-
+(?x)[a & #z\n b]	-	false	false	-
+(?x)[a & #z\n b]	1	false	false	-
+(?x)[a & #z\n b]	z	false	false	-
+(?x)[a & #z\n b]	#	false	false	-
+(?x)[a & \\]]	a	true	true	-
+(?x)[a & \\]]	b	false	false	-
+(?x)[a & \\]]	c	false	false	-
+(?x)[a & \\]]	d	false	false	-
+(?x)[a & \\]]	&	false	false	-
+(?x)[a & \\]]	[	false	false	-
+(?x)[a & \\]]	]	true	true	-
+(?x)[a & \\]]	x	false	false	-
+(?x)[a & \\]]	\\	false	false	-
+(?x)[a & \\]]	-	false	false	-
+(?x)[a & \\]]	1	false	false	-
+(?x)[a & \\]]	z	false	false	-
+(?x)[a & \\]]	#	false	false	-
+(?x)[a &&& b]	d	false	false	-
+(?x)[a &&& b]	[	false	false	-
+(?x)[a &&& b]	]	false	false	-
+(?x)[a &&& b]	x	false	false	-
+(?x)[a &&& b]	\\	false	false	-
+(?x)[a &&& b]	-	false	false	-
+(?x)[a &&& b]	1	false	false	-
+(?x)[a &&& b]	z	false	false	-
+(?x)[a &&& b]	#	false	false	-
+(?x)[a&&&b]	d	false	false	-
+(?x)[a&&&b]	[	false	false	-
+(?x)[a&&&b]	]	false	false	-
+(?x)[a&&&b]	x	false	false	-
+(?x)[a&&&b]	\\	false	false	-
+(?x)[a&&&b]	-	false	false	-
+(?x)[a&&&b]	1	false	false	-
+(?x)[a&&&b]	z	false	false	-
+(?x)[a&&&b]	#	false	false	-
+(?x)[a &&&b]	a	true	true	-
+(?x)[a &&&b]	b	true	true	-
+(?x)[a &&&b]	c	false	false	-
+(?x)[a &&&b]	d	false	false	-
+(?x)[a &&&b]	&	true	true	-
+(?x)[a &&&b]	[	false	false	-
+(?x)[a &&&b]	]	false	false	-
+(?x)[a &&&b]	x	false	false	-
+(?x)[a &&&b]	\\	false	false	-
+(?x)[a &&&b]	-	false	false	-
+(?x)[a &&&b]	1	false	false	-
+(?x)[a &&&b]	z	false	false	-
+(?x)[a &&&b]	#	false	false	-
+(?x)[a&&& b]	a	true	true	-
+(?x)[a&&& b]	b	true	true	-
+(?x)[a&&& b]	c	false	false	-
+(?x)[a&&& b]	d	false	false	-
+(?x)[a&&& b]	&	false	false	-
+(?x)[a&&& b]	[	false	false	-
+(?x)[a&&& b]	]	false	false	-
+(?x)[a&&& b]	x	false	false	-
+(?x)[a&&& b]	\\	false	false	-
+(?x)[a&&& b]	-	false	false	-
+(?x)[a&&& b]	1	false	false	-
+(?x)[a&&& b]	z	false	false	-
+(?x)[a&&& b]	#	false	false	-
+(?x)[a & ^b]	a	true	true	-
+(?x)[a & ^b]	b	true	true	-
+(?x)[a & ^b]	c	false	false	-
+(?x)[a & ^b]	d	false	false	-
+(?x)[a & ^b]	&	false	false	-
+(?x)[a & ^b]	[	false	false	-
+(?x)[a & ^b]	]	false	false	-
+(?x)[a & ^b]	x	false	false	-
+(?x)[a & ^b]	\\	false	false	-
+(?x)[a & ^b]	-	false	false	-
+(?x)[a & ^b]	1	false	false	-
+(?x)[a & ^b]	z	false	false	-
+(?x)[a & ^b]	#	false	false	-
+
+# Fix round 4b: a nested class inside the Unicode fold's `(?i:…)` group.
+# Written as a nested `class_text` it emitted its OWN group, and inside a
+# character class `(`, `?`, `i`, `:` and `)` are members, not syntax.
+(?i)[a[\\p{L}]]	a	true	true	-
+(?i)[a[\\p{L}]]	(	false	false	-
+(?i)[a[\\p{L}]]	?	false	false	-
+(?i)[a[\\p{L}]]	i	true	true	-
+(?i)[a[\\p{L}]]	:	false	false	-
+(?i)[a[\\p{L}]]	)	false	false	-
+(?i)[a[\\p{L}]]	b	true	true	-
+(?i)[a[\\p{L}]]	Z	true	true	-
+(?i)[a[\\p{L}]]	é	true	true	-
+(?i)[[\\p{L}]a]	a	true	true	-
+(?i)[[\\p{L}]a]	(	false	false	-
+(?i)[[\\p{L}]a]	?	false	false	-
+(?i)[[\\p{L}]a]	i	true	true	-
+(?i)[[\\p{L}]a]	:	false	false	-
+(?i)[[\\p{L}]a]	)	false	false	-
+(?i)[[\\p{L}]a]	b	true	true	-
+(?i)[[\\p{L}]a]	Z	true	true	-
+(?i)[[\\p{L}]a]	é	true	true	-
+(?i)[\\p{L}[a-z]]	a	true	true	-
+(?i)[\\p{L}[a-z]]	(	false	false	-
+(?i)[\\p{L}[a-z]]	?	false	false	-
+(?i)[\\p{L}[a-z]]	i	true	true	-
+(?i)[\\p{L}[a-z]]	:	false	false	-
+(?i)[\\p{L}[a-z]]	)	false	false	-
+(?i)[\\p{L}[a-z]]	b	true	true	-
+(?i)[\\p{L}[a-z]]	Z	true	true	-
+(?i)[\\p{L}[a-z]]	é	true	true	-
+(?iu)[a[b]]	a	true	true	-
+(?iu)[a[b]]	(	false	false	-
+(?iu)[a[b]]	?	false	false	-
+(?iu)[a[b]]	i	false	false	-
+(?iu)[a[b]]	:	false	false	-
+(?iu)[a[b]]	)	false	false	-
+(?iu)[a[b]]	b	true	true	-
+(?iu)[a[b]]	Z	false	false	-
+(?iu)[a[b]]	é	false	false	-
+(?u)[a[b]]	a	true	true	-
+(?u)[a[b]]	(	false	false	-
+(?u)[a[b]]	?	false	false	-
+(?u)[a[b]]	i	false	false	-
+(?u)[a[b]]	:	false	false	-
+(?u)[a[b]]	)	false	false	-
+(?u)[a[b]]	b	true	true	-
+(?u)[a[b]]	Z	false	false	-
+(?u)[a[b]]	é	false	false	-
+(?i)[a[b]&&[b]]	a	false	false	-
+(?i)[a[b]&&[b]]	(	false	false	-
+(?i)[a[b]&&[b]]	?	false	false	-
+(?i)[a[b]&&[b]]	i	false	false	-
+(?i)[a[b]&&[b]]	:	false	false	-
+(?i)[a[b]&&[b]]	)	false	false	-
+(?i)[a[b]&&[b]]	b	true	true	-
+(?i)[a[b]&&[b]]	Z	false	false	-
+(?i)[a[b]&&[b]]	é	false	false	-
+(?i)[\\p{Lu}[a]]	a	true	true	-
+(?i)[\\p{Lu}[a]]	(	false	false	-
+(?i)[\\p{Lu}[a]]	?	false	false	-
+(?i)[\\p{Lu}[a]]	i	true	true	-
+(?i)[\\p{Lu}[a]]	:	false	false	-
+(?i)[\\p{Lu}[a]]	)	false	false	-
+(?i)[\\p{Lu}[a]]	b	true	true	-
+(?i)[\\p{Lu}[a]]	Z	true	true	-
+(?i)[\\p{Lu}[a]]	é	true	true	-

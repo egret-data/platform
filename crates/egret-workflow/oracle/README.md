@@ -2388,3 +2388,202 @@ results, `paths`/`walk`/`tostream`/`setpath`/`getpath` over deep values, a
 100 000-bracket JSON string input, a 65 536-element output, a catastrophic
 regex, a 100 kB `regexReplace`, and a source at and past the cap. **Nothing
 took more than 0.8 s and nothing aborted.**
+
+## W2 Task 6, fix round 4 — the hazard is per-THREAD, and every descent over author-controlled input
+
+A reviewer aborted the process again, this time without going near jq:
+
+```
+{{ s | regexMatch(regex=p) }}   with p = '[' x 2000    ->  SIGABRT
+{{ 'a' | regexMatch(regex='[' x 3000) }}               ->  SIGABRT
+```
+
+`javare::parse_class` -> `class_member` -> `parse_class` is a mutual recursion
+driven by the pattern text, and a flow author's pattern is text. The second
+form is the one that matters: **`rewrite::MAX_NESTING_DEPTH` never looks
+inside a template's string literal**, so it is not a second guard.
+
+That was the fifth bound placed where the last exploit was. The review's
+instruction was to stop doing that: *"The hazard is not per-value-type. It is
+per-thread."* So the render moved onto a thread whose stack egret chooses
+(`env::RENDER_STACK_BYTES`), and the per-construct caps are derived from that
+one number — and this is the list the next person should read before adding a
+recursive descent.
+
+### Every recursive descent over author-controlled input
+
+Author-controlled means: the template text, a filter argument, or a context
+value. "Render thread" is `render_str`'s own thread since this round; before
+it, every one of these ran on a 2 MiB tokio worker.
+
+| descent | input | thread | bounded by |
+|---|---|---|---|
+| `javare::Translator::parse_class` <-> `class_member` | pattern text | render | `MAX_CLASS_DEPTH` = 10 000, Java's own |
+| `regex_syntax`'s parser over the translated pattern | pattern text | render | `nest_limit(MAX_CLASS_DEPTH)` — its default 250 would refuse patterns Java compiles |
+| `javare::class_text` / `write_class_item` (AST walk) | pattern text | render | the same parse bound: the AST cannot be deeper than the parse |
+| `javare::class_has_property`, `class_has_ascii_only_property`, `class_is_only_ascii_properties` | pattern text | render | as above |
+| `ClassAst`'s `Drop` | pattern text | render | as above — and it unwinds the same tree, so it is on the same budget |
+| `minijinja`'s expression parser and evaluator | **template text** | render | **NOTHING egret owns.** See below. |
+| `rewrite::expand` (nested `{{ }}` and `{% %}`) | template text | render | `MAX_NESTING_DEPTH` = 500 |
+| `serde_json`'s parser (a context value) | context | caller | its own 128, which admits 126 levels under a variable |
+| `jaq`'s parser (a jq program) | filter argument | jq | `MAX_SOURCE_BYTES`, derived from `JQ_STACK_BYTES` |
+| `jaq_json::Val::to_string`, `filters::jq_out` | jq result | jq | `MAX_VALUE_DEPTH`, checked first |
+| `jaq_json::Val`'s `Drop` | jq result | jq | `JQ_STACK_BYTES`, 256 MiB |
+| `filters::jaq_value`, `JqOut`'s and `MjValue`'s `Drop` | jq result | render | `MAX_VALUE_DEPTH` |
+| `env::write_json`, `ionfmt::write_ion`, `yamlfmt::write_map`/`write_seq`, `env::kestra_to_string`, `env::json_to_minijinja` | any value | render | `MAX_VALUE_DEPTH`, or `serde_json`'s 128 for a context value |
+| `filters::write_equality_key` (`distinct`), `filters::escape_value` (`escapeChar`) | any value | render | as above |
+| `javafmt`'s formatter tree | format string | render | the format string's own length; no nesting construct |
+
+### The one that is still open, with its numbers
+
+**minijinja's own parser and evaluator recurse over the template text and
+egret bounds neither.** Measured, on the 128 MiB render thread, with
+`{{ v | lower | lower | ... }}`:
+
+| filters in one expression | Kestra | egret |
+|---:|---|---|
+| 2 000 | `a` | `a` |
+| 5 000 | `java.lang.StackOverflowError` | `a` |
+| 20 000 | `java.lang.StackOverflowError` | `a` |
+| 30 000 | `java.lang.StackOverflowError` | `a` |
+| 50 000 | `java.lang.StackOverflowError` | `engine ran out of fuel` |
+| 100 000 | `java.lang.StackOverflowError` | **SIGABRT** |
+
+Two things follow, and they point in opposite directions. Kestra dies at 5 000
+where egret still answers, so egret is the more capable engine over the whole
+range a flow could plausibly use — a cap anywhere above 5 000 costs nothing in
+fidelity. But Java's stack overflow is a catchable `Error` and Rust's is
+`SIGABRT`, so where Kestra returns a message and keeps serving, egret at
+100 000 takes the worker down.
+
+It is **not fixed here**, and the reason is that the obvious cheap bound is
+wrong. Depth is bounded by template LENGTH, so a length cap would close it —
+and would also refuse a 40 KB SQL body with three variables in it, which is an
+ordinary flow. A correct bound has to count nesting, which means parsing the
+expression, which belongs with `rewrite`'s parse layer rather than with a
+filter batch. **W3 should take it there.** What this round did do is raise the
+floor: the same template aborted at 1 600 filters before the render thread
+existed, and now needs sixty times as many.
+
+### What the eighth sweep found, and what the report may no longer say
+
+477 patterns x 18 subjects, crossing the flags with the intersection forms,
+found 37 rows where egret answered a boolean and it was the wrong one. Two
+families, both pre-existing, both now closed:
+
+**`(?x)` and a run of `&`.** Java's `next()` skips insignificant whitespace
+and its `unread()` backs up one position, and those two disagree. All four
+corners, measured:
+
+| pattern | Java |
+|---|---|
+| `(?x)[a &b]` | `&` is a member |
+| `(?x)[a & b]` | the `&` is GONE — `{a,b}` |
+| `(?x)[a & ]` | `Unclosed character class`: the `]` is eaten as a member |
+| `(?x)[a & ]x]` | `{a,],x}` |
+
+and `(?x)[a & [bc]]` matches nothing at all, because the `[` is eaten as a
+member too, the class closes at the first `]`, and the second `]` is left in
+the pattern as a literal — so the regex needs TWO characters. `& &` with
+whitespace between is still an INTERSECTION, which is what made
+`(?x)[a & & b]` silent: the run scanner was a raw `while` that never consulted
+the `(?x)` skip.
+
+**The ASCII fold across an intersection.** The fold was appended to the
+FLATTENED class text, which lands the case counterparts in the last operand of
+an `&&`: `(?i)[\p{Alpha}&&[^b]]` on `b` is `false` in Java and was `true`
+here, because `[^b]` became `[^b] u {b,B}` — everything. The fold is now
+applied per operand and per nesting level. Union is the only operation it
+distributes over for free, which is exactly why an operand may be folded whole
+and an intersection may not.
+
+**And a third, which the widened corpus found on its own:** `(?U)` sets
+`UNICODE_CASE` as well as `UNICODE_CHARACTER_CLASS`, and `(?-U)` clears both.
+Three rows separate a bit from an implication: `(?iU)[a-z]` matches `ſ`,
+`(?iU)(?-U)[a-z]` does not, and `(?iuU)(?-u)[a-z]` does not either — so `U`
+moves the bit rather than implying the behaviour at use time. Setting only the
+one bit made `(?iU)` fold ASCII-only.
+
+The report's earlier sentence — "zero silent rows across seven sweeps" — was
+true of the sweeps that had been run and false as a claim about the filter.
+`oracle/regex-classes.txt` now carries 2 853 rows including the flag x
+intersection cross-product, so the claim is a fixture rather than a sentence.
+
+### Java's own threshold is not a number
+
+`MAX_CLASS_DEPTH` reproduces both of Java's sentences — `Unclosed character
+class` inside it, `Stack overflow during pattern compilation` past it — but
+**the depth at which Java switches between them is not stable.** Within one
+JVM run, the same depth answered differently on consecutive repetitions:
+
+| depth | rep 1 | rep 2 | rep 3 |
+|---:|---|---|---|
+| 7 000 | stack overflow | unclosed | unclosed |
+| 8 000 | stack overflow | unclosed | unclosed |
+| 9 000 | stack overflow | unclosed | unclosed |
+| 12 000 | stack overflow | stack overflow | stack overflow |
+
+It depends on the live stack when the pattern is compiled. So the corpus
+entries compare by error class, the fixture asserts only the two ends, and no
+test anywhere may assert Java's crossover.
+
+### What it costs, measured rather than estimated
+
+The first version of `MAX_CLASS_DEPTH`'s doc said one level costs "under 200
+bytes". Bisecting the depth that survives a thread of a given size:
+
+| stack | deepest class that compiles | bytes per level |
+|---|---:|---:|
+| 2 MiB (a tokio worker) | 1 046 | 2 004 |
+| 8 MiB (a libtest thread) | 4 192 | 2 001 |
+
+so it is **about 2 KiB**, ten times the guess. 10 000 levels need about 20 MB,
+which is where `RENDER_STACK_BYTES` = 128 MiB comes from. Note the second row:
+a libtest thread cannot hold Java's own depth either, so the test for this
+spawns its own thread of `RENDER_STACK_BYTES` — which makes it a pin on that
+constant as well.
+
+### Two more, found by attacking the fix rather than reasoning about it
+
+The review asked whether it could still be aborted or hung after the fix.
+Twenty-nine attacks were run — class and group nesting at 50 000, alternation,
+nested quantifiers, `\Q` at a megabyte, a backtracking bait, a deep context
+value through every writer, a jq value at `MAX_STEPS`, template nesting, and
+the filter chain. Nothing aborted and nothing hung. Two real defects fell out
+of it anyway, and neither would have been found by reading the diff.
+
+**A nested class inside the Unicode fold emitted its own group.** The fold
+writes one `(?i:…)` around the class; a nested class written through the same
+entry point wrote a second one INSIDE it, and inside a character class `(`,
+`?`, `i`, `:` and `)` are members rather than syntax. `(?i)[a[\p{L}]]` matched
+`(`, `?`, `i`, `:` and `)` in egret and matches none of them in Java — **13
+silent rows in a 63-probe sweep, introduced by this round's own diff.** The
+group is now written once, at the top, and everything below it is plain text.
+The 63 rows are in the fixture.
+
+**A well-formed class 9 999 deep cost 10 s of CPU.** That depth is inside
+`MAX_CLASS_DEPTH`, so it must work, and Java compiles it in milliseconds. Two
+separate quadratics: `class_text` returned a `String` per level and the parent
+copied it (fixed by writing in place, which also removed a 10x penalty under
+`(?i)`, where every level compiled its own probe over the whole subtree), and
+`regex-syntax` unions a nested class into its parent at every level. The
+second is not egret's to fix, so nested classes that are **plain unions** are
+now flattened — `[[[[a]]]]` is `[a]` — which removes the nesting the crate
+would recurse over. A negation or an `&&` is not flattenable and is left
+alone.
+
+| depth | before | after |
+|---:|---:|---:|
+| 1 000 | 90 ms | 2 ms |
+| 2 000 | 344 ms | 3 ms |
+| 4 000 | 1 397 ms | 7 ms |
+| 4 000 under `(?i)` | 14 064 ms | 8 ms |
+| 9 999 | 10 140 ms | 19 ms |
+
+**And one about the suite itself.** `MAX_STEPS` and `MAX_RUN` race by
+construction, and two tests asserted which one wins. They passed thirty runs
+of the lib binary alone and failed when `--test oracle` ran beside them —
+which this round's corpus entries made heavier. Both now accept either bound
+by name, which still fails on `unknown function`, on a generic failure, and on
+a bound that stopped firing.
+

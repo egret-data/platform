@@ -168,6 +168,37 @@ const RECURSION_LIMIT: usize = 64;
 /// does not have, for the same reason `rewrite::MAX_NESTING_DEPTH` is.
 pub(super) const MAX_OUTPUT_BYTES: usize = 1 << 20;
 
+/// The stack every render gets, whoever called it.
+///
+/// # Why the render owns a thread
+///
+/// **The hazard here is not per value type; it is per thread.** Every
+/// recursive descent over author-supplied input in this crate runs on
+/// whatever stack the caller happened to have — in production a 2 MiB tokio
+/// worker — and a recursive descent that overflows is `SIGABRT`, which
+/// `catch_unwind` does not see and no test harness can report. Four rounds of
+/// this package bounded one descent each, always the axis of the last
+/// exploit: bracket nesting in the jq source, then jaq's parser, then the
+/// depth of a jq value, then a regex character class. The list was never the
+/// problem; the scope was.
+///
+/// Running the whole render on a thread whose stack egret chooses covers the
+/// list at once, and makes every per-construct cap derivable from ONE number
+/// instead of from a guess about the caller. `oracle/README.md` carries the
+/// table of descents and what bounds each.
+///
+/// **The number is derived from the deepest per-construct cap, measured.**
+/// The most expensive descent is `javare`'s class parser at about 2 KiB a
+/// level (bisected; see [`super::javare::MAX_CLASS_DEPTH`] for the table),
+/// and Java's own limit -- which egret must reach to be faithful -- is 10 000
+/// levels. 10 000 x 2 KiB = 20 MB, so 128 MiB carries a 6.4x margin. A tokio
+/// worker's 2 MiB holds 1 046 of those levels, which is why this exists.
+///
+/// It is reserved address space, committed lazily: a render that nests
+/// nothing touches a few KiB of it, and the reservation lasts as long as the
+/// render, not as long as the process.
+pub const RENDER_STACK_BYTES: usize = 128 * 1024 * 1024;
+
 /// `VariableRenderer.RAW_PATTERN`, copied character for character from
 /// `core/src/main/java/io/kestra/core/runners/VariableRenderer.java:23`:
 ///
@@ -1181,11 +1212,35 @@ pub fn environment() -> Environment<'static> {
 pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
     // `VariableRenderer.java:76-79`: "it's not a Pebble template so we
     // short-circuit rendering". Note the test is `{`, not `{{` -- a source
-    // containing a lone `{` still goes through the engine.
+    // containing a lone `{` still goes through the engine. Done before the
+    // thread, because a source with no brace does no work at all.
     if !template.contains('{') {
         return Ok(template.to_string());
     }
 
+    // **On a thread whose stack egret chooses.** See [`RENDER_STACK_BYTES`]
+    // for why this is here rather than a fifth per-construct bound.
+    // `RenderContext` is `Send + Sync` (minijinja's `Value` is), so this is a
+    // scoped borrow and not a copy -- `render_context_crosses_a_thread`
+    // pins that, because the day it stops being true this has to become a
+    // serialise-and-rebuild and nothing else would say so.
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("egret-render".to_string())
+            .stack_size(RENDER_STACK_BYTES)
+            .spawn_scoped(scope, || render_on_this_thread(template, cx))
+            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
+        match worker.join() {
+            Ok(result) => result,
+            // A panic below is still a panic -- it is resumed on this thread
+            // when the scope ends, so `tests/oracle.rs`'s guard still sees it.
+            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+        }
+    })
+}
+
+/// The render loop, on the thread [`render_str`] gave it.
+fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
     let env = environment();
     let variables = cx.to_minijinja();
 
@@ -1694,6 +1749,60 @@ mod tests {
     /// and this environment now matches it; W2 Task 6's `yaml` filter is what
     /// made that visible, since it is the first filter whose value ends in a
     /// newline.
+    /// **The render runs on a thread egret spawns, so the context must be
+    /// able to cross one.**
+    ///
+    /// `render_str` borrows the caller's `RenderContext` into a scoped thread
+    /// with `env::RENDER_STACK_BYTES` of stack. That compiles only while
+    /// `RenderContext` is `Send + Sync`, and it is a property of the TYPE, not
+    /// of any call: adding an `Rc` field anywhere inside it — jaq's own value
+    /// is `Rc`-based, so it is one careless `pub` away — breaks the whole
+    /// render path, and this says so at the type rather than at the use.
+    #[test]
+    fn the_render_context_can_cross_a_thread() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<RenderContext>();
+        assert_sync::<RenderContext>();
+        assert_send::<MjValue>();
+        assert_sync::<MjValue>();
+    }
+
+    /// **The render's own recursion depth, which belongs to no filter.**
+    ///
+    /// `{{ v | lower | lower | ... }}` x 1 600 is minijinja's evaluator
+    /// recursing over its own AST: no filter in this crate is involved, no
+    /// per-construct cap sees it, and on a 2 MiB tokio worker it SIGABRTed
+    /// the process. It is the case that proves the fix had to be at the
+    /// render's entry point rather than at a filter -- the hazard is
+    /// per-thread, not per-value-type.
+    ///
+    /// Kestra answers `a`, measured through the harness.
+    #[test]
+    fn a_render_nested_past_a_worker_stack_still_answers() {
+        let mut cx = RenderContext::default();
+        cx.insert("v", serde_json::json!("A"));
+        let template = format!("{{{{ v{} }}}}", " | lower".repeat(1_600));
+        assert_eq!(render_str(&template, &cx).expect("renders"), "a");
+    }
+
+    /// The stack the render thread asks for is a number this crate DERIVES,
+    /// and two of its consumers point back at it. If it is lowered, the
+    /// class-nesting test's process dies rather than failing politely, so the
+    /// number is stated here where a reader will see it change.
+    #[test]
+    fn the_render_stack_is_the_size_the_deepest_cap_needs() {
+        assert_eq!(RENDER_STACK_BYTES, 128 * 1024 * 1024);
+        // 10 000 class levels x ~2 KiB measured = ~20 MB, so the margin is
+        // better than sixfold. A change to either side must move both.
+        const {
+            assert!(
+                RENDER_STACK_BYTES >= crate::runners::javare::MAX_CLASS_DEPTH * 2 * 1024 * 6,
+                "the render stack no longer covers the deepest per-construct cap"
+            )
+        };
+    }
+
     #[test]
     fn a_multiline_raw_region_is_not_protected_by_the_pattern() {
         let source = "{% raw %}\n{{ var }}\n{% endraw %}";
