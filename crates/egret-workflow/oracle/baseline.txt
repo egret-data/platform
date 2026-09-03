@@ -560,3 +560,57 @@ function-fetchcontext-in-a-loop
 # extra arguments are ignored"), now with an entry. It is BOTH error-class and
 # baselined, because egret succeeds where Kestra throws.
 filter-replace-unknown-named-argument
+
+# --- W2 Task 8, fix round 1: seven more recorded divergences, and every one of
+# them is a name BOTH engines bind where egret is not running Pebble's answer.
+# `oracle/name-surface.txt`'s `semantics` column names each of these, so the
+# record lives in the ratchet rather than in prose.
+#
+# `escape`'s three non-HTML strategies are three character tables this round
+# was not scoped to; egret refuses them, which is the safe direction.
+filter-escape-js-strategy
+# Java's `String.format` conversion language -- `%,d` grouping, `%N$s` argument
+# indices, `%b` -- is not ported. `minijinja::filters::format` agrees with
+# `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and `%%` (measured,
+# all six), so re-implementing the grammar would risk turning honest errors
+# into silently wrong values.
+filter-format-argument-index
+# A map LITERAL iterates in java.util.HashMap bucket order in Pebble and in
+# key-sorted order in minijinja, and because `replace`'s pairs CHAIN the value
+# differs. A map out of the CONTEXT agrees -- LinkedHashMap against OrderedMap,
+# both insertion order -- and `filter-replace-context-map-order` pins that half.
+filter-replace-literal-order
+filter-replace-literal-order-chained
+# Pebble's `even`/`odd` cast to Long and throw on a String; `iterable` is false
+# for a String where minijinja's is true. The `is` surface -- Kestra's `json`
+# test and Pebble's four -- was never given to a W2 task, so egret keeps
+# minijinja's four and records the difference.
+test-even
+test-odd
+test-iterable
+
+# --- W2 Task 8, fix round 1, found by attacking the sixteen filter ports OFF
+# their own axis: which Java collection a filter RETURNS decides whether the
+# next filter accepts it, and egret has one sequence type.
+#
+# `keys` and `values` hand back a Set/Collection and `flatten` an immutable
+# list. `sort` needs a mutable `List`, `reverse` needs a `List` and `slice`
+# needs a List/String/array, so all three refuse those inputs on Kestra and
+# answer here. `first`, `last`, `join`, `length` and `default` take a
+# `Collection` and agree, and `distinct`, `chunk`, `split`, `range` and
+# `fromJson` all return real mutable Lists -- so the class is three producers
+# wide, which `filter-sort-of-a-real-list` pins from the other side.
+#
+# Not fixable without giving egret a second sequence type whose only purpose
+# is to be refused, which is implementation structure by this file's own rule.
+filter-sort-of-keys
+filter-reverse-of-keys
+filter-slice-of-keys
+filter-sort-of-flatten
+# The same recorded class as `filter-string-undefined-input`: an undefined root
+# variable is a `RootAttributeNotFoundException` there and reaches a filter's
+# null branch here. The sixteen new names join a class the other 35 were
+# already in; `length` gets the entry because it answers a VALUE (`0`) rather
+# than rendering empty.
+filter-length-of-an-undefined
+

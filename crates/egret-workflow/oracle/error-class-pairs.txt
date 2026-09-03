@@ -294,3 +294,46 @@ filter-replace-missing-argument                     test:replace_is_pebbles_map_
 filter-replace-pairs-not-a-map                      test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
 filter-replace-null-replacement                     test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
 filter-replace-unknown-named-argument               baselined
+
+# W2 Task 8, fix round 1: Pebble's OWN core filters, which refuse an input
+# type minijinja happily answered. Every one of these was over-acceptance --
+# egret answering where Kestra throws -- until the sixteen ports.
+filter-abs-not-a-number                             test:pebble_core_filters_refuse_a_wrong_input_type
+filter-capitalize-not-a-string                      test:pebble_core_filters_refuse_a_wrong_input_type
+filter-first-map                                    test:pebble_core_filters_refuse_a_wrong_input_type
+filter-join-string-input                            test:pebble_core_filters_refuse_a_wrong_input_type
+filter-reverse-string                               test:pebble_core_filters_refuse_a_wrong_input_type
+filter-sort-mixed-classes                           test:pebble_core_filters_refuse_a_wrong_input_type
+filter-sort-string-input                            test:pebble_core_filters_refuse_a_wrong_input_type
+filter-split-input-not-a-string                     test:pebble_core_filters_refuse_a_wrong_input_type
+filter-trim-not-a-string                            test:pebble_core_filters_refuse_a_wrong_input_type
+
+# `split`'s delimiter is a Java REGEX and `slice`'s indices are Java's own,
+# so both refuse things minijinja's namesakes accepted.
+filter-split-dangling-quantifier                    test:split_and_slice_refuse_what_java_refuses
+filter-split-missing-delimiter                      test:split_and_slice_refuse_what_java_refuses
+filter-slice-to-index-past-the-end                  test:split_and_slice_refuse_what_java_refuses
+
+# Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
+# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
+# task -- so these are ALSO baselined and the ratchet is what holds them.
+test-even                                           baselined
+test-odd                                            baselined
+
+# W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
+# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
+# `reverse` (a List) and `slice` (a List, String or array) all refuse them
+# there and answer here. `first`, `last`, `join`, `length` and `default` take a
+# Collection and agree -- so the class is exactly three producers, not every
+# sequence. Found by attacking the sixteen ports off their own axis.
+filter-sort-of-keys                                 baselined
+filter-reverse-of-keys                              baselined
+filter-slice-of-keys                                baselined
+filter-sort-of-flatten                              baselined
+
+# The recorded "egret cannot tell Pebble's `null` literal from a typo'd
+# variable" class (see `filter-string-undefined-input`), which the sixteen new
+# filter names join. `length` is the one that answers a VALUE rather than
+# rendering empty, so it gets the entry.
+filter-length-of-an-undefined                       baselined

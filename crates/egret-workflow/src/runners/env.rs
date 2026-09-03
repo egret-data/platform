@@ -1258,6 +1258,117 @@ pub(super) fn write_java_double(out: &mut String, x: f64) {
 /// Read the module doc before changing a line of this; every setting here is
 /// either a `PebbleEngineFactory` setting being reproduced or a bound on
 /// author-supplied input.
+/// Every filter `minijinja` 2.24.0 binds by default under this workspace's
+/// feature set.
+///
+/// Derived from the lock file's `defaults::build_builtin_filters` — `safe`,
+/// `escape` and `e` unconditionally, the rest under `builtins`, and **not**
+/// `tojson` or `urlencode`, whose features are off. The workspace pins
+/// minijinja with `=`, not `^`, precisely so this list cannot go stale under a
+/// minor release: see the note beside the dependency.
+///
+/// It exists so [`the_built_in_surface_matches_the_engines`] can COMPUTE the
+/// names egret binds rather than trust the fixture to list them — which is the
+/// half of that check a mutant found missing: a filter registered under a name
+/// with no row was invisible to it.
+#[cfg(test)]
+const MINIJINJA_DEFAULT_FILTERS: &[&str] = &[
+    "safe",
+    "escape",
+    "e",
+    "lower",
+    "upper",
+    "title",
+    "capitalize",
+    "replace",
+    "length",
+    "count",
+    "dictsort",
+    "items",
+    "reverse",
+    "trim",
+    "join",
+    "split",
+    "lines",
+    "default",
+    "d",
+    "round",
+    "abs",
+    "int",
+    "float",
+    "attr",
+    "first",
+    "last",
+    "min",
+    "max",
+    "sort",
+    "list",
+    "string",
+    "bool",
+    "batch",
+    "slice",
+    "sum",
+    "indent",
+    "select",
+    "reject",
+    "selectattr",
+    "rejectattr",
+    "map",
+    "groupby",
+    "unique",
+    "chain",
+    "zip",
+    "pprint",
+    "format",
+];
+
+/// Every test `minijinja` 2.24.0 binds by default, minus the six whose names
+/// are operators.
+///
+/// The six (`==`, `!=`, `<`, `<=`, `>`, `>=`) are unreachable from template
+/// syntax — `is` parses an identifier — so they are neither removed nor
+/// listed; `the_operator_spelled_tests_are_unreachable_rather_than_removed`
+/// keeps that a fact rather than a belief.
+#[cfg(test)]
+const MINIJINJA_DEFAULT_TESTS: &[&str] = &[
+    "undefined",
+    "defined",
+    "none",
+    "safe",
+    "escaped",
+    "boolean",
+    "odd",
+    "even",
+    "divisibleby",
+    "number",
+    "integer",
+    "int",
+    "float",
+    "string",
+    "sequence",
+    "iterable",
+    "mapping",
+    "startingwith",
+    "endingwith",
+    "lower",
+    "upper",
+    "sameas",
+    "eq",
+    "equalto",
+    "ne",
+    "lt",
+    "lessthan",
+    "le",
+    "gt",
+    "greaterthan",
+    "ge",
+    "in",
+    "true",
+    "false",
+    "filter",
+    "test",
+];
+
 /// The 27 minijinja filters no Pebble engine has a name for.
 ///
 /// Measured, all 27, against `io.kestra:core:2.0.0-rc13` + `CoreExtension` +
@@ -1367,6 +1478,28 @@ const MINIJINJA_ONLY_TESTS: &[&str] = &[
     "test",
 ];
 
+/// The global under which [`render_on_this_thread`] publishes the render
+/// context's own top-level names.
+///
+/// **It contains a space, so no template can name it.** `minijinja`'s parser
+/// reads an identifier after `{{`, exactly as its `is` operator does, so this
+/// is unreachable from template syntax with or without it registered — the
+/// same argument that keeps `==`, `!=`, `<`, `<=`, `>`, `>=` out of
+/// [`MINIJINJA_ONLY_TESTS`], and it is pinned by a test rather than left as
+/// prose (`the_context_scope_global_is_unreachable_from_a_template`).
+///
+/// # Why a global at all
+///
+/// `FetchContextFunction` drops a whole **scope** whose key set contains
+/// `_context`, and `minijinja` exposes no way to tell a name that came from
+/// the render context from one a `{% set %}` or a `{% for %}` bound:
+/// `State::known_variables` returns the union with no provenance. Measured,
+/// the difference is visible — `{"_context":1,"a":2}` with a
+/// `{% set y = 9 %}` in front answers `{"y":9}` on Kestra, not `{}` — so a
+/// port that dropped everything would be wrong in the one case the guard
+/// exists for. This carries the provenance the API does not.
+pub(super) const CONTEXT_SCOPE_NAMES: &str = "egret context scope";
+
 pub fn environment() -> Environment<'static> {
     let mut env = Environment::new();
 
@@ -1425,10 +1558,13 @@ pub fn environment() -> Environment<'static> {
     // What is NOT removed, and why:
     //
     // - the four names both sides have (`defined`, `even`, `odd`, `iterable`)
-    //   stay, with their semantic differences recorded as divergent rows --
-    //   removing them would refuse a construct Kestra accepts, which is the
-    //   opposite error;
-    // - `escape` stays: Pebble's `EscaperExtension` registers it too;
+    //   stay -- removing them would refuse a construct Kestra accepts, which
+    //   is the opposite error. Three of the four DIVERGE, and the fix round
+    //   gave `oracle/name-surface.txt` a `semantics` column so the fixture can
+    //   say so: before it, the file's own rule forbade a reason on exactly the
+    //   both-bind rows, which is where the `replace` class lives;
+    // - `escape` stays and is now PORTED, along with sixteen more Pebble-core
+    //   filter names the fix round measured (104 probes, 52 divergent);
     // - `kestra_null_coalesce`, `kestra_undefined_coalesce` and `kestra_is_in`
     //   stay: `super::rewrite` compiles Kestra's `??`, `???` and `isIn`
     //   operators into calls to them, so they are a seam this crate cannot do
@@ -1522,8 +1658,26 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
 
 /// The render loop, on the thread [`render_str`] gave it.
 fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
-    let env = environment();
+    let mut env = environment();
     let variables = cx.to_minijinja();
+
+    // The render context's own top-level names, for
+    // `super::functions::fetch_context`. See [`CONTEXT_SCOPE_NAMES`] for why
+    // this is a global rather than something read off `State`.
+    env.add_global(
+        CONTEXT_SCOPE_NAMES,
+        MjValue::from(
+            cx.bindings()
+                .iter()
+                .map(|(name, _)| MjValue::from(name.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    let env = env;
+
+    // W2 Task 8 fix round 1: one budget for the whole render, shared by every
+    // `replace` call in it. See [`super::filters::MAX_REPLACE_SCAN_BYTES`].
+    let _budget = super::filters::ReplaceBudget::install();
 
     let mut current = template.to_string();
     // Inclusive: see [`MAX_RENDERING_AMOUNT`]'s note on Kestra's off-by-one.
@@ -1690,6 +1844,25 @@ mod tests {
     #[test]
     fn the_built_in_surface_matches_the_engines() {
         const FIXTURE: &str = include_str!("../../oracle/name-surface.txt");
+        const BASELINE: &str = include_str!("../../oracle/baseline.txt");
+        const GOLDEN: &str = include_str!("../../oracle/golden.json");
+
+        let baselined_ids: std::collections::BTreeSet<&str> = BASELINE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        // The ids, read out of the committed golden file's own `"id"` fields
+        // rather than parsed -- this is a name check, not a schema check, and
+        // `tests/oracle.rs` is what binds the two files together.
+        let golden_ids: std::collections::BTreeSet<&str> = GOLDEN
+            .match_indices("\"id\" : \"")
+            .filter_map(|(at, m)| {
+                let rest = &GOLDEN[at + m.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect();
+        assert!(golden_ids.len() > 1000, "the golden file did not parse");
 
         let mut counts = std::collections::BTreeMap::new();
         let mut rows = 0usize;
@@ -1700,11 +1873,12 @@ mod tests {
             let fields: Vec<&str> = line.split('\t').collect();
             assert_eq!(
                 fields.len(),
-                5,
-                "every row is `kind name engine egret reason`, tab-separated: {line:?}"
+                6,
+                "every row is `kind name engine egret semantics reason`, tab-separated: {line:?}"
             );
-            let (kind, name, engine, egret, reason) =
-                (fields[0], fields[1], fields[2], fields[3], fields[4]);
+            let (kind, name, engine, egret, semantics, reason) = (
+                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
+            );
             rows += 1;
             if engine == "yes" {
                 *counts.entry(kind).or_insert(0usize) += 1;
@@ -1712,15 +1886,37 @@ mod tests {
 
             // A divergence must be explained, and so must a `no`/`no` row --
             // that row exists only because egret REMOVED a minijinja default,
-            // which is a decision and not an absence. Only "both bind it" is
-            // allowed to say nothing. The same rule `refusal-sets.txt`
-            // carries.
+            // which is a decision and not an absence. The same rule
+            // `refusal-sets.txt` carries.
+            //
+            // **For a BOTH-BIND row the rule is the corpus entry**, which is
+            // what makes a semantic divergence on a shared name recordable at
+            // all. Before the fix round this file forbade a reason on exactly
+            // those rows -- so the `replace` class, which is the class this
+            // fixture exists for, was the one thing it could not record.
             if engine == "yes" && egret == "yes" {
+                assert!(
+                    golden_ids.contains(semantics),
+                    "{kind} {name}: `{semantics}` is not a corpus id"
+                );
+                let diverges = baselined_ids.contains(semantics);
                 assert_eq!(
-                    reason, "-",
-                    "{kind} {name}: both sides bind it, so the reason column must be `-`"
+                    reason == "-",
+                    !diverges,
+                    "{kind} {name}: `{semantics}` is {} baseline.txt, so the reason column must \
+                     {} -- a shared name's divergence is recorded HERE and held by the ratchet",
+                    if diverges { "in" } else { "not in" },
+                    if diverges {
+                        "say what differs"
+                    } else {
+                        "be `-`"
+                    }
                 );
             } else {
+                assert_eq!(
+                    semantics, "-",
+                    "{kind} {name}: only a both-bind row names a comparison entry"
+                );
                 assert_ne!(
                     reason, "-",
                     "{kind} {name}: the two sides differ and the row carries no reason"
@@ -1757,6 +1953,133 @@ mod tests {
         assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
         assert_eq!(counts.get("function"), Some(&37), "engine function count");
         assert_eq!(counts.get("test"), Some(&8), "engine test count");
+    }
+
+    /// The other half of [`the_built_in_surface_matches_the_engines`]: a name
+    /// egret binds that has **no row at all** must fail.
+    ///
+    /// # Why this is a second test and not a stronger assertion in the first
+    ///
+    /// The first one iterates the fixture's rows and probes egret for each.
+    /// That catches a row whose claim is wrong and — since W2 Task 8's mutation
+    /// round — a removed minijinja default that came back. It cannot catch an
+    /// *addition*: a filter registered under a brand-new name is in neither
+    /// the fixture nor the engine, so no row mentions it, the probe never
+    /// runs, and `rows == 177` is still satisfied. Measured, before this
+    /// existed: registering one left the suite green.
+    ///
+    /// **The scan is textual, so a doc comment containing a registration call
+    /// adds a phantom name.** That is not hypothetical — this comment used to
+    /// spell the example out and this test failed on its own prose. Write such
+    /// an example without the literal.
+    ///
+    /// So this computes what egret binds instead of reading it:
+    ///
+    /// - **functions** exactly, from `Environment::globals()`, which minijinja
+    ///   does expose;
+    /// - **filters** and **tests** as
+    ///   `(minijinja's pinned defaults − the removal list) ∪ (what
+    ///   `runners::` registers)`, the second half scanned out of the committed
+    ///   source with `include_str!` — the same technique
+    ///   `tests/oracle.rs::declared_test_names` uses, and for the same reason:
+    ///   minijinja exposes no filter or test registry.
+    ///
+    /// The scan and the defaults close different holes and both are needed.
+    /// The defaults are pinned by an `=` requirement on the dependency, so a
+    /// minor release cannot widen them behind this.
+    #[test]
+    fn no_name_egret_binds_is_missing_from_the_surface_fixture() {
+        const FIXTURE: &str = include_str!("../../oracle/name-surface.txt");
+        const SOURCES: &[(&str, &str)] = &[
+            ("env", include_str!("env.rs")),
+            ("filters", include_str!("filters.rs")),
+            ("functions", include_str!("functions.rs")),
+        ];
+
+        let mut rows: std::collections::BTreeSet<(String, String)> = Default::default();
+        for line in FIXTURE.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let f: Vec<&str> = line.split('\t').collect();
+            if f[3] == "yes" {
+                rows.insert((f[0].to_string(), f[1].to_string()));
+            }
+        }
+
+        // Registered by a string literal somewhere in `src/runners/`.
+        let mut bound: std::collections::BTreeSet<(String, String)> = Default::default();
+        for (_, source) in SOURCES {
+            for (call, kind) in [
+                ("add_filter(\"", "filter"),
+                ("add_function(\"", "function"),
+                ("add_test(\"", "test"),
+            ] {
+                for (at, _) in source.match_indices(call) {
+                    let rest = &source[at + call.len()..];
+                    if let Some(end) = rest.find('"') {
+                        bound.insert((kind.to_string(), rest[..end].to_string()));
+                    }
+                }
+            }
+        }
+        // minijinja's own defaults, minus what `environment()` removes.
+        for name in MINIJINJA_DEFAULT_FILTERS {
+            if !MINIJINJA_ONLY_FILTERS.contains(name) {
+                bound.insert(("filter".to_string(), (*name).to_string()));
+            }
+        }
+        for name in MINIJINJA_DEFAULT_TESTS {
+            if !MINIJINJA_ONLY_TESTS.contains(name) {
+                bound.insert(("test".to_string(), (*name).to_string()));
+            }
+        }
+        // Functions, exactly, from the environment itself.
+        let env = environment();
+        for (name, _) in env.globals() {
+            // The one global no template can name -- it has a space in it.
+            // See [`CONTEXT_SCOPE_NAMES`], and
+            // `the_context_scope_global_is_unreachable_from_a_template`.
+            if name == CONTEXT_SCOPE_NAMES {
+                continue;
+            }
+            bound.insert(("function".to_string(), name.to_string()));
+        }
+
+        let missing: Vec<&(String, String)> = bound.difference(&rows).collect();
+        assert!(
+            missing.is_empty(),
+            "egret binds {} name(s) with no row in oracle/name-surface.txt: {missing:?}",
+            missing.len()
+        );
+        let stale: Vec<&(String, String)> = rows.difference(&bound).collect();
+        assert!(
+            stale.is_empty(),
+            "oracle/name-surface.txt says egret binds {} name(s) it does not: {stale:?}",
+            stale.len()
+        );
+    }
+
+    /// [`CONTEXT_SCOPE_NAMES`] cannot be reached from a template, which is why
+    /// it is a global with no fixture row.
+    ///
+    /// The same argument as the six operator-spelled tests, and pinned the
+    /// same way rather than left in prose: `minijinja`'s parser reads an
+    /// identifier, and this name contains a space.
+    #[test]
+    fn the_context_scope_global_is_unreachable_from_a_template() {
+        assert!(
+            CONTEXT_SCOPE_NAMES.contains(' '),
+            "the point of this name is that it is not an identifier"
+        );
+        let message = render_str(
+            &format!("{{{{ {CONTEXT_SCOPE_NAMES} }}}}"),
+            &RenderContext::new(),
+        )
+        .expect_err("must not parse");
+        assert!(message.to_string().contains("syntax error"), "{message}");
+        // And it is not reachable as an ordinary name either.
+        assert!(render_str("{{ egret }}", &RenderContext::new()).is_err());
     }
 
     /// The six operator-spelled test names minijinja registers are unreachable

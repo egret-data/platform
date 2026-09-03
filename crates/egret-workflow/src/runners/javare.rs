@@ -215,6 +215,87 @@ impl JavaRegex {
             .map(|caps| caps.get(group).map(|m| m.as_str().to_string())))
     }
 
+    /// `Pattern.split(CharSequence, int)`, ported.
+    ///
+    /// Java's own loop, not the `regex` crate's `split`, because three of its
+    /// rules are not the crate's and each is observable:
+    ///
+    /// - a **zero-width match at index 0** produces no leading empty string,
+    ///   so `'a.b.c'.split("")` is `["a",".","b",".","c"]` and not
+    ///   `["","a",".","b",".","c",""]`;
+    /// - with `limit == 0` the **trailing** empty strings are dropped, and
+    ///   with any other limit they are kept: `'a,b,,c'.split(",")` is
+    ///   `["a","b","","c"]` but `'a,b,,'.split(",")` is `["a","b"]`;
+    /// - a **positive limit** caps the number of parts and the last part is
+    ///   the whole remaining input, so `'a,b,,c'.split(",", 2)` is
+    ///   `["a","b,,c"]`.
+    ///
+    /// It also matters that this is `find()` in a loop and not
+    /// `Regex::find_iter`: the same distinction [`JavaRegex::replace_all`]
+    /// documents, where the crate's iterator suppresses an empty match that
+    /// abuts the previous match's end and Java's matcher takes it.
+    ///
+    /// **`^` and `$` split nothing rather than erroring**, because they match
+    /// zero-width at index 0 / the end: `'a^b' | split('^')` is `["a^b"]`,
+    /// measured. `+` and `*` are `PatternSyntaxException`s, which
+    /// [`compile`] already produces.
+    pub(super) fn split(&self, haystack: &str, limit: i64) -> Result<Vec<String>, JavaRegexError> {
+        self.check_haystack(haystack)?;
+
+        let limited = limit > 0;
+        let cap = if limited { limit as usize } else { usize::MAX };
+        let mut parts: Vec<String> = Vec::new();
+        let mut index = 0usize;
+        let mut from = 0usize;
+
+        while from <= haystack.len() {
+            let Some(found) = self.regex.find_at(haystack, from) else {
+                break;
+            };
+            let (start, end) = (found.start(), found.end());
+            let step = if start == end {
+                // One CHARACTER on, exactly as `replace_all` does, because
+                // `from` is a byte index into a `&str`.
+                match haystack[end..].chars().next() {
+                    Some(c) => end + c.len_utf8(),
+                    None => haystack.len() + 1,
+                }
+            } else {
+                end
+            };
+
+            if !limited || parts.len() < cap - 1 {
+                // Java: `if (index == 0 && index == m.start() && m.start() ==
+                // m.end()) continue;` -- no empty leading substring for a
+                // zero-width match at the beginning.
+                if index == 0 && start == 0 && start == end {
+                    from = step;
+                    continue;
+                }
+                parts.push(haystack[index..start].to_string());
+                index = end;
+            } else if parts.len() == cap - 1 {
+                parts.push(haystack[index..].to_string());
+                index = end;
+            }
+            from = step;
+        }
+
+        // "If no match was found, return this."
+        if index == 0 {
+            return Ok(vec![haystack.to_string()]);
+        }
+        if !limited || parts.len() < cap {
+            parts.push(haystack[index..].to_string());
+        }
+        if limit == 0 {
+            while parts.last().is_some_and(String::is_empty) {
+                parts.pop();
+            }
+        }
+        Ok(parts)
+    }
+
     /// `Matcher.replaceAll(replacement)`, with Java's replacement grammar —
     /// see [`expand_replacement`] for why the crate's own cannot be used.
     pub(super) fn replace_all(

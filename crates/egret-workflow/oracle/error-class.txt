@@ -549,3 +549,46 @@ filter-replace-missing-argument
 filter-replace-pairs-not-a-map
 filter-replace-null-replacement
 filter-replace-unknown-named-argument
+
+# --- W2 Task 8, fix round 1: Pebble's OWN core filters, which refuse an input
+# type minijinja happily answered. Every one of these was over-acceptance --
+# egret answering where Kestra throws -- until the sixteen ports.
+filter-abs-not-a-number
+filter-capitalize-not-a-string
+filter-first-map
+filter-join-string-input
+filter-reverse-string
+filter-sort-mixed-classes
+filter-sort-string-input
+filter-split-input-not-a-string
+filter-trim-not-a-string
+
+# `split`'s delimiter is a Java REGEX and `slice`'s indices are Java's own,
+# so both refuse things minijinja's namesakes accepted.
+filter-split-dangling-quantifier
+filter-split-missing-delimiter
+filter-slice-to-index-past-the-end
+
+# Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
+# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
+# task -- so these are ALSO baselined and the ratchet is what holds them.
+test-even
+test-odd
+
+# --- W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
+# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
+# `reverse` (a List) and `slice` (a List, String or array) all refuse them
+# there and answer here. `first`, `last`, `join`, `length` and `default` take a
+# Collection and agree -- so the class is exactly three producers, not every
+# sequence. Found by attacking the sixteen ports off their own axis.
+filter-sort-of-keys
+filter-reverse-of-keys
+filter-slice-of-keys
+filter-sort-of-flatten
+
+# The recorded "egret cannot tell Pebble's `null` literal from a typo'd
+# variable" class (see `filter-string-undefined-input`), which the sixteen new
+# filter names join. `length` is the one that answers a VALUE rather than
+# rendering empty, so it gets the entry.
+filter-length-of-an-undefined

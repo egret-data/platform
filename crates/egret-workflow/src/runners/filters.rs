@@ -143,6 +143,26 @@ pub(super) fn register(env: &mut Environment<'static>) {
     // resolved to minijinja's answer instead of erroring as unknown -- see
     // [`replace`].
     env.add_filter("replace", replace);
+    // W2 Task 8 fix round 1: ten more names minijinja and Pebble BOTH bind,
+    // where egret was answering minijinja's question. See the section header
+    // above [`pebble_string_cast`].
+    env.add_filter("abs", abs);
+    env.add_filter("capitalize", capitalize);
+    env.add_filter("default", default);
+    env.add_filter("escape", escape);
+    env.add_filter("first", first);
+    env.add_filter("format", format);
+    env.add_filter("join", join);
+    env.add_filter("last", last);
+    env.add_filter("length", length);
+    env.add_filter("lower", lower);
+    env.add_filter("reverse", reverse);
+    env.add_filter("slice", slice);
+    env.add_filter("sort", sort);
+    env.add_filter("split", split);
+    env.add_filter("title", title);
+    env.add_filter("trim", trim);
+    env.add_filter("upper", upper);
     env.add_filter("sha1", sha1);
     env.add_filter("sha512", sha512);
     env.add_filter("slugify", slugify);
@@ -442,6 +462,82 @@ fn class_name(value: MjValue) -> Result<MjValue, MjError> {
     Ok(MjValue::from(java_class_name(&value)))
 }
 
+// ---------------------------------------------------------------------------
+// The per-RENDER `replace` budget
+// ---------------------------------------------------------------------------
+
+/// The total bytes every `replace` call in ONE render may scan, together.
+///
+/// 1 024 x [`super::env::MAX_OUTPUT_BYTES`] = 1 GiB, **measured at 1.48 s** on
+/// the machine this was written on for a single call that exhausts it. (An
+/// earlier note said ~290 ms. That was five times optimistic and the arithmetic
+/// said why: each pair does *two* full passes — `matches().count()` and then
+/// `replace` — plus a full-length allocation, while the budget charges
+/// `out.len()` once. The number is now measured end to end rather than derived
+/// from a per-scan rate.)
+///
+/// # Why per-render and not per-call
+///
+/// A per-call cap is multiplied by any loop. Measured before this change, with
+/// a `{% for %}` whose per-iteration output is empty — so
+/// [`super::env::MAX_OUTPUT_BYTES`] is satisfied for ever — 20 / 80 / 320
+/// iterations cost 267 ms / 1.05 s / **4.42 s** and produced zero bytes.
+/// `range()` caps at 1 000 000 elements, so one template reached hours.
+///
+/// The class (an expensive filter inside a loop, with no per-render work
+/// budget) is older than this filter and still applies to `jq` and the regex
+/// filters. What made it this filter's problem is that a per-call gigabyte
+/// raised the legal per-iteration cost by about three orders of magnitude over
+/// anything else in the module. One budget for the whole render is the shape
+/// that cannot be multiplied, and `replace_is_bounded_across_a_whole_render`
+/// is the test — it has a loop in it, which the first cut's sweep did not.
+pub(super) const MAX_REPLACE_SCAN_BYTES: usize = 1024 * super::env::MAX_OUTPUT_BYTES;
+
+thread_local! {
+    /// What is left of [`MAX_REPLACE_SCAN_BYTES`] on this render thread.
+    ///
+    /// A thread-local rather than an argument because `minijinja` gives a
+    /// filter no place to hang per-render state that survives across calls,
+    /// and because [`super::env::render_str`] already gives every render its
+    /// own thread — see `RENDER_STACK_BYTES`. [`ReplaceBudget::install`] still
+    /// resets it, so a caller that renders on a thread of its own reusing it
+    /// is correct too.
+    static REPLACE_BUDGET: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(MAX_REPLACE_SCAN_BYTES) };
+}
+
+/// Resets the render-wide `replace` budget, and restores it on drop.
+pub(super) struct ReplaceBudget(());
+
+impl ReplaceBudget {
+    /// Installed once per render by [`super::env::render_str`].
+    pub(super) fn install() -> Self {
+        REPLACE_BUDGET.with(|left| left.set(MAX_REPLACE_SCAN_BYTES));
+        ReplaceBudget(())
+    }
+
+    /// Charges `bytes` against the render's budget, or refuses.
+    fn charge(bytes: usize) -> Result<(), MjError> {
+        REPLACE_BUDGET.with(|left| {
+            let remaining = left.get();
+            if bytes > remaining {
+                return Err(pebble_error(format!(
+                    "the 'replace' filter would scan more than {MAX_REPLACE_SCAN_BYTES} bytes \
+                     in one render"
+                )));
+            }
+            left.set(remaining - bytes);
+            Ok(())
+        })
+    }
+}
+
+impl Drop for ReplaceBudget {
+    fn drop(&mut self) {
+        REPLACE_BUDGET.with(|left| left.set(MAX_REPLACE_SCAN_BYTES));
+    }
+}
+
 /// `replace` — **Pebble's own built-in**, not Kestra's, and this override is
 /// W2 Task 8's G4 ruling.
 ///
@@ -478,10 +574,37 @@ fn class_name(value: MjValue) -> Result<MjValue, MjError> {
 /// [`super::env::kestra_to_string`] and not `to_string` — and one literal
 /// `String.replace(key.toString(), value.toString())` per entry, **in the
 /// map's iteration order**, each seeing the previous one's output:
-/// `'ab' | replace({'a':'b','b':'c'})` is `cc`, not `bc`.
+/// `'ab' | replace({'a':'b','b':'c'})` is `cc`, not `bc` — but see the note
+/// below on **which** order that is.
 ///
 /// A null *value* is an NPE on its `toString()`; a null *key* cannot occur,
 /// since neither JSON nor a Pebble map literal can carry one.
+///
+/// # The order is the map's, and for a map LITERAL the two maps disagree
+///
+/// An earlier draft of this doc said pairs are applied "in the map's iteration
+/// order" and cited `'ab' | replace({'a':'b','b':'c'})` → `cc`. That example
+/// agrees **by luck**: for the key set `{a, b}`, Java's `HashMap` bucket order
+/// and `minijinja`'s key-sorted literal order coincide. In general they do
+/// not, and because the pairs chain the whole value differs:
+///
+/// | expression | Kestra | egret |
+/// |---|---|---|
+/// | `'ap' \| replace({'p':'a','a':'x'})` | `xx` | `xa` |
+/// | `'a' \| replace({'p':'z','a':'p'})` | `p` | `z` |
+///
+/// **A map that came from the CONTEXT agrees**, in both directions: Jackson
+/// builds a `LinkedHashMap` and [`super::env::OrderedMap`] keeps insertion
+/// order, so `replace(m)` over the same two pairs answers `xx` on both sides.
+/// It is map literals only — which is, unhelpfully, the documented idiom.
+///
+/// This is recorded rather than fixed, under the standing ruling that Java's
+/// `HashMap` bucket order is implementation *structure* (see
+/// `oracle/README.md`, "What egret copies from upstream", and
+/// `filter-escapechar-map-two-keys`). `filter-replace-literal-order` and
+/// `-literal-order-chained` are the baselined entries, and
+/// `filter-replace-context-map-order` is the one that pins the agreeing half —
+/// without it, "context maps agree" would be a claim rather than a test.
 ///
 /// An empty key is Java's `String.replace("", x)` — `'ab'` becomes `-a-b-` —
 /// and Rust's `str::replace` agrees, which is measured here rather than
@@ -506,22 +629,14 @@ fn class_name(value: MjValue) -> Result<MjValue, MjError> {
 /// same limit `indent`'s padding is measured against. The check is the
 /// **predicted** length — `len - matches x needle + matches x replacement` —
 /// computed before each `replace` call, because a check afterwards is a check
-/// on a string that has already been allocated. `filter-replace-past-the-cap`
-/// is the divergence; Kestra answers it, slowly and then not at all.
-/// The total bytes one `replace` call may scan, across all its pairs.
+/// on a string that has already been allocated.
 ///
-/// 1 024 x [`super::env::MAX_OUTPUT_BYTES`] = 1 GiB. **Measured, not chosen**:
-/// 20 000 pairs over a 500 KB subject is 10 GiB of scanning and takes
-/// 2 825 ms on the machine this was written on, i.e. 0.28 ms per MiB scanned,
-/// so 1 GiB is about 290 ms — the same order as the crate's other
-/// author-facing ceilings, and far above any real substitution map.
-///
-/// It is a **separate** axis from the growth check, which is why it is a
-/// separate number. The growth check bounds `|out|`; nothing bounds the number
-/// of pairs, which comes out of a context map, and a pair that *shrinks* the
-/// subject keeps `|out|` under the growth cap forever.
-const MAX_REPLACE_SCAN_BYTES: usize = 1024 * super::env::MAX_OUTPUT_BYTES;
-
+/// **There is no corpus entry**: Kestra answers this, slowly and then not at
+/// all, so a golden would be a hang or an OOM — the C7 case, where the rule is
+/// a unit test instead. `replace_is_bounded_where_pebbles_own_loop_is_not` and
+/// `replace_is_bounded_across_a_whole_render` are the pins. An earlier draft
+/// of this sentence named `filter-replace-past-the-cap`, which does not exist
+/// in any control file and never did.
 fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
@@ -545,7 +660,6 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         .try_iter()
         .map(|keys| keys.collect())
         .unwrap_or_default();
-    let mut scanned = 0usize;
     for key in keys {
         let Ok(replacement) = pairs.get_item(&key) else {
             continue;
@@ -562,18 +676,14 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         // the multiplicative blow-up below: a single `String.replace` can
         // allocate `matches x replacement` bytes, so measuring `out.len()`
         // afterwards is measuring a string that has already been built.
-        // The SECOND axis, and the one the growth check above cannot see:
+        // The SECOND axis, and the one the growth check below cannot see:
         // the loop is `pairs x |out|`, and a shrinking pair keeps `|out|`
         // under the growth cap while the pair count stays the author's.
         // Found by attacking the growth check rather than by reasoning about
         // it -- 20 000 pairs over a 500 KB subject is 2 825 ms, and a context
-        // map is not bounded at 20 000.
-        scanned = scanned.saturating_add(out.len());
-        if scanned > MAX_REPLACE_SCAN_BYTES {
-            return Err(pebble_error(format!(
-                "the 'replace' filter would scan more than {MAX_REPLACE_SCAN_BYTES} bytes"
-            )));
-        }
+        // map is not bounded at 20 000. Charged against the RENDER's budget,
+        // not this call's, because a `{% for %}` multiplies a per-call one.
+        ReplaceBudget::charge(out.len())?;
         let matches = out.matches(&needle).count();
         let grown = out
             .len()
@@ -587,6 +697,674 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             )));
         }
         out = out.replace(&needle, &replacement);
+    }
+    Ok(MjValue::from(out))
+}
+
+// ---------------------------------------------------------------------------
+// W2 Task 8, fix round 1 — Pebble's OWN core filters
+// ---------------------------------------------------------------------------
+//
+// **Sixteen names both engines bind, where egret was running minijinja's
+// semantics and nobody had compared them.** W2's filter batches were Kestra's
+// 35 *registered* filters; Pebble's own 28 were never in a batch, and the
+// seventeen names minijinja happens to share with them were therefore
+// answering minijinja's question. 104 differential probes: 43 agreed, 9 failed
+// on both sides, **52 diverged**. `abs` is the only one of the seventeen that
+// was clean.
+//
+// That is the `replace` class, sixteen more times, and three of them are as
+// bad as `replace` was:
+//
+// | filter | Kestra | egret, before |
+// |---|---|---|
+// | `'a.b.c' \| split('.')` | `[]` — the delimiter is a **regex** | `["a","b","c"]` |
+// | `[3,1,2] \| slice(0,2)` | `[3,1]` — `(fromIndex, toIndex)` | an error; `slice(1)` was `[[3,1,2]]` |
+// | `null \| default('D')` | `D` — null, blank and empty count | empty |
+//
+// and the Python-spelling defect this crate has now met four times was back
+// through the built-ins, because `upper`/`lower`/`capitalize`/`title`/`trim`/
+// `escape` stringify with `Display` rather than [`super::env::kestra_to_string`]:
+// `{{ nothing | upper }}` rendered `NONE`, `lower` rendered `none`, and the
+// other four rendered `None`.
+//
+// What is ported here is what the fix round was scoped to: `split`, `slice`,
+// `default`, `capitalize`, `title`, `trim`, `length`, `upper`, `lower` and
+// `escape`'s null/stringify branch. `first`, `last`, `join`, `sort`,
+// `reverse`, `format` and `escape`'s three non-HTML strategies are **measured
+// and recorded** instead — in `oracle/name-surface.txt`'s `semantics` column,
+// which names a baselined corpus id per row, so the record is in the ratchet
+// rather than in prose.
+
+/// Pebble's `(String) input` cast, which tolerates a Java `null`.
+///
+/// `checkcast` lets a `null` through, so `null | capitalize` is `null` and
+/// `42 | capitalize` is a `ClassCastException`. Five of these filters share
+/// exactly that shape.
+fn pebble_string_cast(value: &MjValue) -> Result<Option<String>, MjError> {
+    if is_java_null(value) {
+        return Ok(None);
+    }
+    match value.as_str() {
+        Some(text) => Ok(Some(text.to_string())),
+        None => Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(value)
+        ))),
+    }
+}
+
+/// `UpperFilter` — `String.toUpperCase(locale)`, and **`toString()` first for
+/// anything that is not a String**.
+///
+/// That second branch is the whole reason this overrides minijinja's: a null
+/// rendered `NONE` and a map rendered `{"A": 1}` where Kestra writes `{A=1}`,
+/// because minijinja's stringifies with `Display` and Java's with
+/// `Object::toString`. [`super::env::kestra_to_string`] is the only correct
+/// route and this crate has now learned that four times.
+fn upper(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    Ok(MjValue::from(kestra_to_string(&value).to_uppercase()))
+}
+
+/// `LowerFilter` — the mirror of [`upper`].
+fn lower(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    Ok(MjValue::from(kestra_to_string(&value).to_lowercase()))
+}
+
+/// `CapitalizeFilter` — title-case the first non-whitespace character and
+/// **leave the rest of the string exactly as it is**.
+///
+/// minijinja's lowercases the tail, which is Python's rule and not Pebble's:
+/// `'hello WORLD' | capitalize` is `Hello WORLD` there and was `Hello world`
+/// here. Leading whitespace is preserved and skipped over, so
+/// `'  hi there'` is `'  Hi there'`.
+///
+/// A non-String input is a `ClassCastException`, unlike [`upper`], which
+/// stringifies — the two neighbouring filters really do differ on that.
+fn capitalize(value: MjValue) -> Result<MjValue, MjError> {
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices();
+    for (at, c) in chars.by_ref() {
+        if c.is_whitespace() {
+            out.push(c);
+            continue;
+        }
+        // `Character.toTitleCase`, then the remainder untouched.
+        out.extend(java_title_case(c));
+        out.push_str(&text[at + c.len_utf8()..]);
+        break;
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `TitleFilter` — title-case the first character of every whitespace-delimited
+/// word, and leave every other character alone.
+///
+/// Again not minijinja's, which lowercases the rest of each word and treats
+/// punctuation as a boundary: `"a-b c'd" | title` is `A-b C'd` on Kestra and
+/// was `A-B C'D` here. Only `Character.isWhitespace` delimits, so `'1a b'` is
+/// `'1a B'` — the `1` is a word start and title-casing it changes nothing.
+fn title(value: MjValue) -> Result<MjValue, MjError> {
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut at_word_start = true;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            out.push(c);
+            at_word_start = true;
+        } else if at_word_start {
+            out.extend(java_title_case(c));
+            at_word_start = false;
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(MjValue::from(out))
+}
+
+/// `Character.toTitleCase`, which is `toUpperCase` for every character whose
+/// title case is a single character — every one a flow will meet.
+///
+/// Rust has no title-case table; `to_uppercase` is an iterator because a few
+/// characters upper-case to more than one (`ß` to `SS`), and Java's
+/// `toTitleCase(char)` cannot express that and returns the character
+/// unchanged. That difference is one character wide, it is recorded rather
+/// than modelled, and no corpus entry reaches it.
+fn java_title_case(c: char) -> impl Iterator<Item = char> {
+    c.to_uppercase()
+}
+
+/// `TrimFilter` — `String.trim()`, which is **not** Rust's `str::trim`.
+///
+/// Java strips every character `<= U+0020` from both ends and nothing else, so
+/// U+00A0 and U+2028 survive there and Rust's Unicode-whitespace `trim` eats
+/// them. And Pebble's takes **no argument**: `'xxhixx' | trim('x')` is
+/// `xxhixx` on Kestra, where minijinja's honoured the `x`.
+fn trim(value: MjValue, _rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let Some(text) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+    let trimmed = text.trim_matches(|c: char| c <= '\u{20}').to_string();
+    Ok(MjValue::from(trimmed))
+}
+
+/// `LengthFilter` — and its last branch is `return 0`, not an error.
+///
+/// A null is `0`, a String is its **UTF-16** length, a Collection or Map is
+/// its size, and **anything else is `0`** — a number, a boolean, a date. egret
+/// raised for all four of those. The UTF-16 part is observable without
+/// contrivance: `'a😀b' | length` is `4` on Kestra and was `3` here.
+fn length(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(0));
+    }
+    let count = match value.kind() {
+        ValueKind::String => value
+            .as_str()
+            .map(|s| s.chars().map(char::len_utf16).sum::<usize>())
+            .unwrap_or(0),
+        ValueKind::Seq | ValueKind::Iterable | ValueKind::Map => {
+            value.try_iter().map(Iterator::count).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    Ok(MjValue::from(count))
+}
+
+/// `DefaultFilter` — `EmptyTest ? default : input`, and `EmptyTest` is much
+/// wider than minijinja's `is undefined`.
+///
+/// Pebble falls back for a Java `null`, for a String that is **blank after
+/// `trim()`**, and for an empty Collection or Map. minijinja's `default` fires
+/// only for an undefined value, so `{{ nothing | default('D') }}` rendered
+/// empty where Kestra writes `D` — probably the most-written filter in a real
+/// flow, silently wrong on the case it exists for.
+///
+/// `0` and `false` are **not** empty and are kept, which is the boundary worth
+/// pinning in both directions.
+fn default(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let fallback = args.get("default", 0).unwrap_or_else(|| MjValue::from(()));
+    let empty = if is_java_null(&value) {
+        true
+    } else {
+        match value.kind() {
+            ValueKind::String => value
+                .as_str()
+                .is_some_and(|s| s.trim_matches(|c: char| c <= '\u{20}').is_empty()),
+            ValueKind::Seq | ValueKind::Iterable | ValueKind::Map => value
+                .try_iter()
+                .map(|mut i| i.next().is_none())
+                .unwrap_or(false),
+            _ => false,
+        }
+    };
+    Ok(if empty { fallback } else { value })
+}
+
+/// `SplitFilter` — `String.split`, and the delimiter is a **Java regex**.
+///
+/// This is the worst of the sixteen, because every common delimiter is a
+/// metacharacter and every one of them was silently wrong:
+///
+/// | expression | Kestra | egret, before |
+/// |---|---|---|
+/// | `'a.b.c' \| split('.')` | `[]` | `["a","b","c"]` |
+/// | `'a\|b' \| split('\|')` | `["a","\|","b"]` | `["a","b"]` |
+/// | `'a+b' \| split('+')` | `PatternSyntaxException` | `["a","b"]` |
+/// | `'a,b,,c' \| split(',', 2)` | `["a","b,,c"]` | the limit was ignored |
+///
+/// The delimiter and the input are both `(String)` casts (a number is a
+/// `ClassCastException`, not a stringification), an absent delimiter is
+/// `missing delimiter parameter in split filter`, and the `limit` is a
+/// `(Number)`. [`super::javare::JavaRegex::split`] carries Java's own loop.
+fn split(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let Some(delimiter) = args.get("delimiter", 0) else {
+        return Err(pebble_error("missing delimiter parameter in split filter"));
+    };
+    // `(String) args.get("delimiter")`, so an explicit null reaches the null
+    // check below rather than the cast.
+    let Some(delimiter) = pebble_string_cast(&delimiter)? else {
+        return Err(pebble_error("missing delimiter parameter in split filter"));
+    };
+    let limit = match args.get("limit", 1).filter(|v| !is_java_null(v)) {
+        None => 0i64,
+        Some(limit) => {
+            // `(Number) args.get("limit")` then `intValue()`, which truncates.
+            if limit.kind() != ValueKind::Number {
+                return Err(pebble_error(format!(
+                    "class {} cannot be cast to class java.lang.Number",
+                    java_class_name(&limit)
+                )));
+            }
+            i64::try_from(limit.clone())
+                .unwrap_or_else(|_| f64::try_from(limit).map(|f| f as i64).unwrap_or(0))
+        }
+    };
+    let Some(input) = pebble_string_cast(&value)? else {
+        return Ok(MjValue::from(()));
+    };
+
+    let regex = super::javare::compile(&delimiter).map_err(|e| match e {
+        super::javare::JavaRegexError::Syntax(_) => {
+            pebble_error(format!("Invalid regex '{delimiter}': {e}"))
+        }
+        super::javare::JavaRegexError::Unsupported(_) => {
+            pebble_error(format!("Unsupported regex '{delimiter}': {e}"))
+        }
+    })?;
+    let parts = regex
+        .split(&input, limit)
+        .map_err(|e| pebble_error(format!("Unsupported regex '{delimiter}': {e}")))?;
+    Ok(MjValue::from(
+        parts.into_iter().map(MjValue::from).collect::<Vec<_>>(),
+    ))
+}
+
+/// `SliceFilter` — `(fromIndex, toIndex)`, which is **a different filter from
+/// minijinja's `slice(slices, index)` wearing the same name**.
+///
+/// `[3,1,2] | slice(0,2)` is `[3,1]` on Kestra and was an error here;
+/// `[3,1,2] | slice(1)` is `[1,2]` there and was `[[3,1,2]]` here — a chunked
+/// list, silently, because minijinja's first argument is a *number of slices*.
+/// This is exactly the `replace` shape.
+///
+/// Both indices are `Number`s and `intValue()` truncates (`slice(1.9)` is
+/// `slice(1)`); a negative `fromIndex` is
+/// `IllegalArgumentException: fromIndex must be greater than 0`; a `toIndex`
+/// past the length or not greater than `fromIndex` are two different
+/// `PebbleException`s; and `fromIndex` past the length is `subList`'s own
+/// `fromIndex(4) > toIndex(3)`. Strings, lists and arrays only.
+fn slice(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let index = |name: &str, at: usize| -> Result<Option<i64>, MjError> {
+        match args.get(name, at).filter(|v| !is_java_null(v)) {
+            None => Ok(None),
+            Some(v) if v.kind() == ValueKind::Number => {
+                Ok(Some(i64::try_from(v.clone()).unwrap_or_else(|_| {
+                    f64::try_from(v).map(|f| f as i64).unwrap_or(0)
+                })))
+            }
+            Some(v) => Err(pebble_error(format!(
+                "Argument {name} must be a number. Actual type: {}",
+                java_class_name(&v)
+            ))),
+        }
+    };
+    let from = index("fromIndex", 0)?.unwrap_or(0);
+    if from < 0 {
+        return Err(pebble_error("fromIndex must be greater than 0"));
+    }
+    let to = index("toIndex", 1)?;
+
+    // The three input shapes, and their lengths. A String's length is UTF-16
+    // here too, and so is `substring`, so the two agree by construction.
+    let units: Vec<MjValue> = match value.kind() {
+        ValueKind::String => value
+            .as_str()
+            .unwrap_or_default()
+            .encode_utf16()
+            .map(|u| MjValue::from(u64::from(u)))
+            .collect(),
+        ValueKind::Seq | ValueKind::Iterable => {
+            value.try_iter().map(Iterator::collect).unwrap_or_default()
+        }
+        _ => {
+            return Err(pebble_error(format!(
+                "Slice filter can only be applied to String, List and array inputs. \
+                 Actual type was: {}",
+                java_class_name(&value)
+            )))
+        }
+    };
+    let length = units.len() as i64;
+
+    let to = match to {
+        Some(to) => {
+            if to > length {
+                return Err(pebble_error(format!(
+                    "toIndex must be smaller than input size: {length}"
+                )));
+            }
+            if from >= to {
+                return Err(pebble_error("toIndex must be greater than fromIndex"));
+            }
+            to
+        }
+        None => length,
+    };
+    // `List.subList` / `String.substring`'s own guard, which fires only once
+    // `toIndex` has defaulted to the length.
+    if from > to {
+        return Err(pebble_error(format!("fromIndex({from}) > toIndex({to})")));
+    }
+
+    let picked = &units[from as usize..to as usize];
+    if value.kind() == ValueKind::String {
+        let code_units: Vec<u16> = picked
+            .iter()
+            .filter_map(|u| u64::try_from(u.clone()).ok().map(|n| n as u16))
+            .collect();
+        return Ok(MjValue::from(String::from_utf16_lossy(&code_units)));
+    }
+    Ok(MjValue::from(picked.to_vec()))
+}
+
+/// `FormatFilter` — `String.format(input.toString(), args…)`.
+///
+/// **Only the three things that were silently or needlessly wrong are ported;
+/// Java's conversion language is NOT.** `minijinja::filters::format` already
+/// agrees with `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and
+/// `%%` — measured, all six — so re-implementing the specifier grammar would
+/// buy nothing and would risk turning four honest errors into four silently
+/// wrong values, which is the direction this crate's rules forbid.
+///
+/// What this wrapper fixes:
+///
+/// | expression | Kestra | egret, before |
+/// |---|---|---|
+/// | `null \| format('x')` | `null` (renders empty) | an error |
+/// | `42 \| format('a')` | `42` — the input is `toString`'d | an error |
+/// | `'%s' \| format(null)` | `null` — `String.valueOf` | `None`, **silently** |
+///
+/// What it does not, and what `oracle/name-surface.txt` records with a
+/// baselined entry each: `%,d` (grouping), `%2$s` (argument index) and `%b`
+/// are Java conversions `minijinja` does not have, and egret raises where
+/// Kestra answers. Under-acceptance, which is the safe direction — an author
+/// gets an error rather than a different number.
+fn format(
+    state: &minijinja::State,
+    value: MjValue,
+    rest: Rest<MjValue>,
+) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    // `String.valueOf(o)` per argument: a null argument is the four
+    // characters `null`, not minijinja's `None`.
+    let args: Vec<MjValue> = rest
+        .0
+        .into_iter()
+        .map(|arg| {
+            if is_java_null(&arg) {
+                MjValue::from("null")
+            } else {
+                arg
+            }
+        })
+        .collect();
+    minijinja::filters::format(state, &MjValue::from(kestra_to_string(&value)), Rest(args))
+}
+
+/// `AbsFilter` — and it reproduces Java's `Math.abs` **overflow**.
+///
+/// `Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE`: there is no positive
+/// counterpart in the range, and Java returns the input rather than throwing.
+/// So `{{ -9223372036854775808 | abs }}` is `-9223372036854775808` on Kestra
+/// and was `9223372036854775808` here — a silently wrong sign at exactly one
+/// input, which is the only thing the seventeen-name sweep found wrong with
+/// `abs`. Reproduced, because a flow author on both engines must see one
+/// answer; it is upstream defect 7 in `oracle/README.md`.
+///
+/// The Integer/Long split follows [`java_class_name`]'s, so
+/// `Integer.MIN_VALUE` overflows the same way inside `Math.abs(int)`.
+///
+/// A null is `Can not pass null value to "abs" filter.` and anything that is
+/// not a number is `The 'abs' filter does require a number` — a String is
+/// **not** coerced, unlike `upper`'s input.
+fn abs(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Err(pebble_error("Can not pass null value to \"abs\" filter."));
+    }
+    if value.kind() != ValueKind::Number {
+        return Err(pebble_error(
+            "The 'abs' filter does require a number as input.",
+        ));
+    }
+    if value.is_integer() {
+        let Ok(n) = i64::try_from(value.clone()) else {
+            return Ok(value);
+        };
+        return Ok(MjValue::from(match i32::try_from(n) {
+            // `Math.abs(int)`, which wraps at `Integer.MIN_VALUE`.
+            Ok(small) => i64::from(small.wrapping_abs()),
+            // `Math.abs(long)`, which wraps at `Long.MIN_VALUE`.
+            Err(_) => n.wrapping_abs(),
+        }));
+    }
+    match f64::try_from(value.clone()) {
+        Ok(f) => Ok(MjValue::from(f.abs())),
+        Err(_) => Ok(value),
+    }
+}
+
+/// `FirstFilter` — the first **character** of a String, the first element of a
+/// Collection, and a `ClassCastException` for everything else.
+///
+/// An empty Collection is `null`, and egret raised; an empty String is
+/// `charAt(0)`'s `StringIndexOutOfBoundsException`; and a Map is **not** a
+/// Collection, so `{"a":1} | first` throws there and answered `a` here.
+fn first(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    match value.kind() {
+        ValueKind::String => match value.as_str().unwrap_or_default().chars().next() {
+            Some(c) => Ok(MjValue::from(c.to_string())),
+            None => Err(pebble_error(
+                "Index 0 out of bounds for length 0".to_string(),
+            )),
+        },
+        ValueKind::Seq | ValueKind::Iterable => Ok(value
+            .try_iter()
+            .ok()
+            .and_then(|mut items| items.next())
+            .unwrap_or_else(|| MjValue::from(()))),
+        _ => Err(pebble_error(format!(
+            "class {} cannot be cast to class java.util.Collection",
+            java_class_name(&value)
+        ))),
+    }
+}
+
+/// `LastFilter` — [`first`]'s mirror, `charAt(length - 1)` and the last
+/// element.
+fn last(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    match value.kind() {
+        ValueKind::String => match value.as_str().unwrap_or_default().chars().next_back() {
+            Some(c) => Ok(MjValue::from(c.to_string())),
+            None => Err(pebble_error(
+                "Index -1 out of bounds for length 0".to_string(),
+            )),
+        },
+        ValueKind::Seq | ValueKind::Iterable => Ok(value
+            .try_iter()
+            .ok()
+            .and_then(|items| items.last())
+            .unwrap_or_else(|| MjValue::from(()))),
+        _ => Err(pebble_error(format!(
+            "class {} cannot be cast to class java.util.Collection",
+            java_class_name(&value)
+        ))),
+    }
+}
+
+/// `JoinFilter` — `StringBuilder.append(Object)` per element, which is
+/// `String.valueOf` and therefore **`null` for a null**.
+///
+/// The Python-spelling defect again, in a filter nobody had looked at:
+/// `[1,null,2] | join('-')` is `1-null-2` on Kestra and was `1-None-2` here,
+/// and a map element is `{a=1}` there against `{"a": 1}` here. Both silent.
+///
+/// A String or a Map **input** is a `PebbleException`, where minijinja's
+/// joined a string's characters and a map's keys. And the separator is a
+/// `(String)` cast, so `join(3)` is a `ClassCastException`; an explicitly null
+/// separator joins with nothing at all, measured.
+fn join(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let separator = match args.get("separator", 0) {
+        None => String::new(),
+        Some(sep) => pebble_string_cast(&sep)?.unwrap_or_default(),
+    };
+    let items = match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable => value
+            .try_iter()
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default(),
+        _ => {
+            return Err(pebble_error(
+                "The 'join' filter expects that the input is either a collection or an array.",
+            ))
+        }
+    };
+    let rendered: Vec<String> = items.iter().map(kestra_to_string).collect();
+    Ok(MjValue::from(rendered.join(&separator)))
+}
+
+/// `SortFilter` — `Collections.sort`, which is `Comparable` and therefore
+/// **refuses a mixed list**.
+///
+/// Four over-acceptances, all of them egret answering where Kestra throws:
+/// `[1, 2147483648] | sort` is a `ClassCastException` there (an `Integer` and
+/// a `Long` are not mutually comparable, and which one a JSON number becomes
+/// is its magnitude — see [`java_class_name`]), and so are `[true, 1]`,
+/// `[[1],[2]]` and a String input.
+///
+/// **The comparison is pairwise, so a one-element list never compares
+/// anything**: `[null] | sort` is `[null]` and `[{"a":1}] | sort` is itself,
+/// both measured. That is why the class check below is skipped below two
+/// elements rather than run over every input.
+fn sort(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let mut items: Vec<MjValue> = match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable => value
+            .try_iter()
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default(),
+        _ => return Err(pebble_error("Unsupported input type for sort filter")),
+    };
+    if items.len() >= 2 {
+        let first_class = java_class_name(&items[0]);
+        for item in &items[1..] {
+            let class = java_class_name(item);
+            if class != first_class {
+                return Err(pebble_error(format!(
+                    "class {class} cannot be cast to class {first_class}"
+                )));
+            }
+        }
+        if !matches!(
+            first_class.as_str(),
+            "java.lang.String"
+                | "java.lang.Boolean"
+                | "java.lang.Integer"
+                | "java.lang.Long"
+                | "java.lang.Double"
+                | "java.math.BigInteger"
+        ) {
+            return Err(pebble_error(format!(
+                "class {first_class} cannot be cast to class java.lang.Comparable"
+            )));
+        }
+    }
+    // One class, so one ordering. Strings compare by code point here and by
+    // UTF-16 code unit in Java; the two disagree only for a supplementary
+    // character against U+E000..U+FFFF, which no corpus entry reaches and
+    // which `oracle/name-surface.txt` records.
+    items.sort_by(
+        |a, b| match (a.kind(), f64::try_from(a.clone()), f64::try_from(b.clone())) {
+            (ValueKind::Number, Ok(x), Ok(y)) => x.total_cmp(&y),
+            _ => kestra_to_string(a).cmp(&kestra_to_string(b)),
+        },
+    );
+    Ok(MjValue::from(items))
+}
+
+/// `ReverseFilter` — `(List) input`, so a String or a Map is a
+/// `ClassCastException` rather than a reversed string.
+fn reverse(value: MjValue) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let mut items: Vec<MjValue> = match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable => value
+            .try_iter()
+            .map(Iterator::collect::<Vec<_>>)
+            .unwrap_or_default(),
+        _ => {
+            return Err(pebble_error(format!(
+                "class {} cannot be cast to class java.util.List",
+                java_class_name(&value)
+            )))
+        }
+    };
+    items.reverse();
+    Ok(MjValue::from(items))
+}
+
+/// The `escape` filter's null and stringify branches.
+///
+/// `EscaperExtension`'s filter takes a `strategy` argument and Pebble's own
+/// escaper library implements `html`, `js`, `css` and `url_param`. Only the
+/// default — HTML — is ported; the other three are **recorded**, because they
+/// are three character tables this fix round was not scoped to and because
+/// refusing them is the safe direction (an author gets an error, never a
+/// wrong escape).
+///
+/// What is fixed is the part that was silently wrong: a null rendered `None`
+/// and a boolean rendered `True`, both `Display` rather than
+/// `Object::toString`. And `&#x27;` was `&#39;` on Kestra — the same
+/// character, a different spelling, and a byte difference in rendered output.
+fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    if let Some(strategy) = args.get("strategy", 0) {
+        let strategy = kestra_to_string(&strategy);
+        if strategy != "html" {
+            return Err(pebble_error(format!(
+                "the 'escape' filter's '{strategy}' strategy is not implemented in egret; \
+                 only 'html' is"
+            )));
+        }
+    }
+    let mut out = String::new();
+    for c in kestra_to_string(&value).chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
     }
     Ok(MjValue::from(out))
 }
@@ -2914,6 +3692,361 @@ mod tests {
         render(template, context).expect_err("must fail")
     }
 
+    /// The budget is spent by the whole RENDER, so a `{% for %}` cannot
+    /// multiply it.
+    ///
+    /// **A per-call cap is not a bound.** Measured before this changed, with
+    /// a loop whose per-iteration output is empty — so
+    /// [`super::env::MAX_OUTPUT_BYTES`] stays satisfied for ever — 20 / 80 /
+    /// 320 iterations cost 267 ms / 1.05 s / 4.42 s and produced zero bytes,
+    /// and `range()` caps at a million, so one template reached hours. The
+    /// first cut's adversarial sweep had 21 cases in it and **not one of them
+    /// contained a loop**, which is why a per-call cap looked sufficient.
+    ///
+    /// Verified by removing the reset in [`ReplaceBudget::install`], not by
+    /// asserting it: the loop below then runs to completion.
+    #[test]
+    fn replace_is_bounded_across_a_whole_render() {
+        // Each iteration is well inside the per-call cap on its own -- 2 000
+        // pairs over 64 KiB is 128 MiB, an eighth of the budget -- so only a
+        // render-wide budget refuses this.
+        let pairs: Vec<String> = (0..2_000).map(|i| format!("\"k{i}\": \"\"")).collect();
+        let context = format!(
+            r#"{{"s": {}, "m": {{{}}}}}"#,
+            serde_json::to_string(&"z".repeat(64 * 1024)).unwrap(),
+            pairs.join(",")
+        );
+        let message = render(
+            "{% for i in range(start=1, end=64) %}{{ (s | replace(m)) | length > 0 }}{% endfor %}",
+            &context,
+        )
+        .expect_err("a loop must not multiply the budget");
+        assert!(message.contains("in one render"), "{message}");
+
+        // The accepted neighbour: the same filter, the same map, few enough
+        // iterations to stay inside one render's budget.
+        assert!(render(
+            "{% for i in range(start=1, end=4) %}{{ (s | replace(m)) | length > 0 }}{% endfor %}",
+            &context,
+        )
+        .is_ok());
+
+        // And a fresh render starts with a full budget, which is what
+        // `ReplaceBudget`'s reset is for -- without it the second call here
+        // would inherit the first's exhaustion.
+        assert!(render(
+            "{% for i in range(start=1, end=4) %}{{ (s | replace(m)) | length > 0 }}{% endfor %}",
+            &context,
+        )
+        .is_ok());
+    }
+
+    // -- W2 Task 8 fix round 1: Pebble's own core filters ----------------
+
+    /// The nine `error-class` entries where Pebble **refuses an input type**
+    /// that minijinja happily answered.
+    ///
+    /// Pairs `filter-abs-not-a-number`, `filter-capitalize-not-a-string`,
+    /// `filter-first-map`, `filter-join-string-input`,
+    /// `filter-reverse-string`, `filter-sort-mixed-classes`,
+    /// `filter-sort-string-input`, `filter-split-input-not-a-string` and
+    /// `filter-trim-not-a-string`.
+    ///
+    /// Every one of these was **over-acceptance** before this round — egret
+    /// answered where Kestra throws — which is the direction this crate's
+    /// rules do not allow, because the flow renders here and fails there.
+    #[test]
+    fn pebble_core_filters_refuse_a_wrong_input_type() {
+        for (template, context, needle) in [
+            (
+                "{{ s | abs }}",
+                r#"{"s": "-5"}"#,
+                "The 'abs' filter does require",
+            ),
+            (
+                "{{ n | capitalize }}",
+                r#"{"n": 42}"#,
+                "cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ m | first }}",
+                r#"{"m": {"a": 1}}"#,
+                "cannot be cast to class java.util.Collection",
+            ),
+            (
+                "{{ s | join('-') }}",
+                r#"{"s": "abc"}"#,
+                "either a collection or an array",
+            ),
+            (
+                "{{ s | reverse }}",
+                r#"{"s": "abc"}"#,
+                "cannot be cast to class java.util.List",
+            ),
+            (
+                "{{ l | sort }}",
+                r#"{"l": [1, "a"]}"#,
+                "cannot be cast to class java.lang.Integer",
+            ),
+            (
+                "{{ s | sort }}",
+                r#"{"s": "cba"}"#,
+                "Unsupported input type for sort filter",
+            ),
+            (
+                "{{ n | split(p) }}",
+                r#"{"n": 42, "p": "."}"#,
+                "cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ n | trim }}",
+                r#"{"n": 42}"#,
+                "cannot be cast to class java.lang.String",
+            ),
+        ] {
+            let message = render(template, context).expect_err("must be refused");
+            assert!(message.contains(needle), "{template}\n  got: {message}");
+        }
+
+        // The accepted neighbour of each refusal, so the boundary is pinned in
+        // both directions and not only where it says no.
+        assert_eq!(ok("{{ n | abs }}", r#"{"n": -5}"#), "5");
+        assert_eq!(ok("{{ s | capitalize }}", r#"{"s": "ab"}"#), "Ab");
+        assert_eq!(ok("{{ l | first }}", r#"{"l": [3, 1]}"#), "3");
+        assert_eq!(ok("{{ l | join('-') }}", r#"{"l": [1, 2]}"#), "1-2");
+        assert_eq!(ok("{{ l | reverse }}", r#"{"l": [1, 2]}"#), "[2,1]");
+        assert_eq!(ok("{{ l | sort }}", r#"{"l": [3, 1, 2]}"#), "[1,2,3]");
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a,b", "p": ","}"#),
+            r#"["a","b"]"#
+        );
+        assert_eq!(ok("{{ s | trim }}", r#"{"s": " hi "}"#), "hi");
+        // And `sort`'s real boundary, which is the pair COUNT: one element is
+        // never compared, so a list Java could not sort still answers.
+        assert_eq!(ok("{{ l | sort }}", r#"{"l": [null]}"#), "[null]");
+        // Two Integers sort; an Integer and a Long do not, and which one a
+        // JSON number becomes is its magnitude.
+        assert_eq!(ok("{{ l | sort }}", r#"{"l": [2, 1]}"#), "[1,2]");
+        assert!(render("{{ l | sort }}", r#"{"l": [1, 2147483648]}"#).is_err());
+    }
+
+    /// `split` and `slice` refuse what Java refuses, and the messages are
+    /// three different sentences.
+    ///
+    /// Pairs `filter-split-dangling-quantifier`,
+    /// `filter-split-missing-delimiter` and
+    /// `filter-slice-to-index-past-the-end`.
+    ///
+    /// The first is the point of the whole `split` port: the delimiter is a
+    /// **regex**, so `+` is a `PatternSyntaxException` where minijinja's split
+    /// treated it as a literal and answered.
+    #[test]
+    fn split_and_slice_refuse_what_java_refuses() {
+        let message = render("{{ s | split(p) }}", r#"{"s": "a+b", "p": "+"}"#)
+            .expect_err("a dangling quantifier is not a delimiter");
+        assert!(message.contains("Invalid regex"), "{message}");
+        let message = render("{{ s | split }}", r#"{"s": "a.b"}"#).expect_err("must be refused");
+        assert!(
+            message.contains("missing delimiter parameter in split filter"),
+            "{message}"
+        );
+        let message =
+            render("{{ l | slice(0,9) }}", r#"{"l": [3, 1, 2]}"#).expect_err("must be refused");
+        assert!(
+            message.contains("toIndex must be smaller than input size: 3"),
+            "{message}"
+        );
+
+        // The neighbours: a metacharacter that IS a valid pattern splits, and
+        // a `toIndex` exactly at the length is accepted.
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a.b.c", "p": "."}"#),
+            "[]"
+        );
+        assert_eq!(ok("{{ l | slice(0,3) }}", r#"{"l": [3, 1, 2]}"#), "[3,1,2]");
+        // And the three `slice` errors are three different sentences.
+        assert!(render("{{ l | slice(2,1) }}", r#"{"l": [1, 2, 3]}"#)
+            .expect_err("must fail")
+            .contains("toIndex must be greater than fromIndex"));
+        assert!(render("{{ l | slice(4) }}", r#"{"l": [1, 2, 3]}"#)
+            .expect_err("must fail")
+            .contains("fromIndex(4) > toIndex(3)"));
+        assert!(render("{{ l | slice(-1) }}", r#"{"l": [1, 2, 3]}"#)
+            .expect_err("must fail")
+            .contains("fromIndex must be greater than 0"));
+    }
+
+    /// The Python-spelling defect, found for the **fifth** time and this time
+    /// through minijinja's own built-ins.
+    ///
+    /// `kestra_to_string` was made total in W2 Task 3 and every filter this
+    /// crate wrote goes through it. These six never did, because egret never
+    /// wrote them — they were minijinja's, and minijinja stringifies with
+    /// `Display`, which is Python's spelling:
+    ///
+    /// | expression | Kestra | egret, before |
+    /// |---|---|---|
+    /// | `{{ nothing \| upper }}` | *(empty)* | `NONE` |
+    /// | `{{ nothing \| lower }}` | *(empty)* | `none` |
+    /// | `{{ nothing \| capitalize }}` | *(empty)* | `None` |
+    /// | `{{ [1,null,2] \| join('-') }}` | `1-null-2` | `1-None-2` |
+    ///
+    /// The last one is the one a shape check would never find: it is not a
+    /// null rendering as a word, it is a null *inside a container* rendering
+    /// as the wrong word.
+    #[test]
+    fn the_built_in_filters_no_longer_write_pythons_spelling_of_null() {
+        for template in [
+            "<{{ n | upper }}>",
+            "<{{ n | lower }}>",
+            "<{{ n | capitalize }}>",
+            "<{{ n | title }}>",
+            "<{{ n | trim }}>",
+            "<{{ n | escape }}>",
+            "<{{ n | format('x') }}>",
+        ] {
+            assert_eq!(
+                render(template, r#"{"n": null}"#).unwrap(),
+                "<>",
+                "{template}"
+            );
+        }
+        assert_eq!(
+            ok("{{ l | join('-') }}", r#"{"l": [1, null, 2]}"#),
+            "1-null-2"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%s", "n": null}"#),
+            "null"
+        );
+        // And a container, which is Java's `toString` and not minijinja's
+        // `Display`: `{A=1}`, no quotes and an `=`.
+        assert_eq!(ok("{{ m | upper }}", r#"{"m": {"a": 1}}"#), "{A=1}");
+        assert_eq!(ok("{{ b | escape }}", r#"{"b": true}"#), "true");
+    }
+
+    /// The three that were silently answering a **different question**, each
+    /// pinned by the value that separates the two filters.
+    ///
+    /// These are the `replace` shape: minijinja resolved the name and answered,
+    /// so nothing but a differential could see it.
+    #[test]
+    fn split_slice_and_default_are_pebbles_and_not_minijinjas() {
+        // `split`'s delimiter is a Java regex. minijinja's is a literal, so
+        // every dotted, piped or bracketed delimiter was wrong.
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a.b.c", "p": "."}"#),
+            "[]"
+        );
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a|b", "p": "|"}"#),
+            r#"["a","|","b"]"#
+        );
+        // The limit argument, which minijinja's ignored.
+        assert_eq!(
+            ok("{{ s | split(p, 2) }}", r#"{"s": "a,b,,c", "p": ","}"#),
+            r#"["a","b,,c"]"#
+        );
+        // Java's own two edge rules: trailing empties dropped at limit 0,
+        // inner ones kept, and no leading empty for a zero-width match at 0.
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a,b,,", "p": ","}"#),
+            r#"["a","b"]"#
+        );
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "a,b,,c", "p": ","}"#),
+            r#"["a","b","","c"]"#
+        );
+        assert_eq!(
+            ok("{{ s | split(p) }}", r#"{"s": "abc", "p": ""}"#),
+            r#"["a","b","c"]"#
+        );
+
+        // `slice` is `(fromIndex, toIndex)`, not `(slices, index)`.
+        assert_eq!(ok("{{ l | slice(0,2) }}", r#"{"l": [3, 1, 2]}"#), "[3,1]");
+        assert_eq!(ok("{{ l | slice(1) }}", r#"{"l": [3, 1, 2]}"#), "[1,2]");
+        assert_eq!(ok("{{ s | slice(1,3) }}", r#"{"s": "abcdef"}"#), "bc");
+        // `intValue()` truncates.
+        assert_eq!(
+            ok("{{ l | slice(f) }}", r#"{"l": [1,2,3], "f": 1.9}"#),
+            "[2,3]"
+        );
+
+        // `default` fires on null, blank and empty -- not only on undefined.
+        assert_eq!(
+            render("<{{ n | default('D') }}>", r#"{"n": null}"#).unwrap(),
+            "<D>"
+        );
+        assert_eq!(ok("<{{ s | default('D') }}>", r#"{"s": "  "}"#), "<D>");
+        assert_eq!(ok("<{{ l | default('D') }}>", r#"{"l": []}"#), "<D>");
+        assert_eq!(ok("<{{ m | default('D') }}>", r#"{"m": {}}"#), "<D>");
+        // And the boundary in the other direction: `0` and `false` are NOT
+        // empty and are kept.
+        assert_eq!(ok("{{ z | default('D') }}", r#"{"z": 0}"#), "0");
+        assert_eq!(ok("{{ f | default('D') }}", r#"{"f": false}"#), "false");
+    }
+
+    /// The four that were wrong about *how much* of the input they touch.
+    #[test]
+    fn capitalize_title_trim_and_length_follow_javas_rules() {
+        // `capitalize` and `title` leave the tail of every word alone; Python
+        // lowercases it, and minijinja is Python's.
+        assert_eq!(
+            ok("{{ s | capitalize }}", r#"{"s": "hello WORLD"}"#),
+            "Hello WORLD"
+        );
+        assert_eq!(
+            ok("{{ s | capitalize }}", r#"{"s": "  hi there"}"#),
+            "  Hi there"
+        );
+        assert_eq!(
+            ok("{{ s | title }}", r#"{"s": "hello WORLD"}"#),
+            "Hello WORLD"
+        );
+        // Only whitespace delimits a word: punctuation does not.
+        assert_eq!(ok("{{ s | title }}", r#"{"s": "a-b c'd"}"#), "A-b C'd");
+        assert_eq!(ok("{{ s | title }}", r#"{"s": "1a b"}"#), "1a B");
+
+        // `trim` takes NO argument -- minijinja's honoured one.
+        assert_eq!(
+            ok("<{{ s | trim('x') }}>", r#"{"s": "xxhixx"}"#),
+            "<xxhixx>"
+        );
+        // and it is Java's `String.trim()`: everything <= U+0020, and nothing
+        // else. U+00A0 survives here and Rust's `str::trim` would eat it.
+        assert_eq!(
+            ok("<{{ s | trim }}>", "{\"s\": \"\\u00a0hi\"}"),
+            "<\u{a0}hi>"
+        );
+
+        // `length` counts UTF-16 code units, and its last branch is `0`.
+        assert_eq!(ok("{{ s | length }}", "{\"s\": \"a\\ud83d\\ude00b\"}"), "4");
+        assert_eq!(ok("{{ n | length }}", r#"{"n": 42}"#), "0");
+        assert_eq!(ok("{{ b | length }}", r#"{"b": true}"#), "0");
+        assert_eq!(render("{{ n | length }}", r#"{"n": null}"#).unwrap(), "0");
+        assert_eq!(ok("{{ s | length }}", r#"{"s": "abc"}"#), "3");
+    }
+
+    /// `abs` reproduces `Math.abs`'s overflow, which is upstream defect 7.
+    ///
+    /// There is no positive `Long.MIN_VALUE`, and Java returns the input
+    /// rather than throwing. Fixing it would give a flow author a different
+    /// number on the two engines, which is the single thing this package
+    /// exists to prevent.
+    #[test]
+    fn abs_reproduces_javas_overflow_at_the_minimum() {
+        assert_eq!(
+            ok("{{ n | abs }}", r#"{"n": -9223372036854775808}"#),
+            "-9223372036854775808"
+        );
+        assert_eq!(ok("{{ n | abs }}", r#"{"n": -2147483648}"#), "-2147483648");
+        // One away from each boundary, so the test says where the wrap starts
+        // rather than only that it exists.
+        assert_eq!(ok("{{ n | abs }}", r#"{"n": -2147483647}"#), "2147483647");
+        assert_eq!(ok("{{ n | abs }}", r#"{"n": -5}"#), "5");
+        assert_eq!(ok("{{ f | abs }}", r#"{"f": -1.5}"#), "1.5");
+    }
+
     // -- W2 Task 8: `replace` ------------------------------------------
 
     /// `replace` is **Pebble's** map-taking filter, not minijinja's
@@ -3004,10 +4137,28 @@ mod tests {
         );
 
         // Pairs chain: each sees the previous one's output, so this is `cc`
-        // and not `bc`.
+        // and not `bc`. **That example agrees with Kestra by luck** -- for
+        // the key set `{a, b}`, Java's HashMap bucket order and minijinja's
+        // key-sorted literal order coincide. The next row is where they part,
+        // and it is a recorded divergence rather than a fidelity claim.
         assert_eq!(
             ok("{{ s | replace({'a': 'b', 'b': 'c'}) }}", r#"{"s": "ab"}"#),
             "cc"
+        );
+        assert_eq!(
+            ok("{{ s | replace({'p': 'a', 'a': 'x'}) }}", r#"{"s": "ap"}"#),
+            "xa"
+        );
+        // And the half that DOES agree, which without a test would be a
+        // claim: a map out of the CONTEXT is a `LinkedHashMap` there and an
+        // `OrderedMap` here, both insertion order, so the same two pairs
+        // answer `xx` on both engines.
+        assert_eq!(
+            ok(
+                "{{ s | replace(m) }}",
+                r#"{"s": "ap", "m": {"p": "a", "a": "x"}}"#
+            ),
+            "xx"
         );
         // Java's `String.replace("", x)`, which Rust's `str::replace` agrees
         // with -- measured rather than assumed.
@@ -3028,6 +4179,9 @@ mod tests {
     /// Verified by REMOVING the bound, not by asserting it: with the
     /// `grown > MAX_OUTPUT_BYTES` check deleted, the first case allocates
     /// ~4 GB inside one `String::replace` and the second runs for minutes.
+    ///
+    /// See [`replace_is_bounded_across_a_whole_render`] for the third axis, a
+    /// loop, which a per-call budget cannot see at all.
     #[test]
     fn replace_is_bounded_where_pebbles_own_loop_is_not() {
         // One pair, multiplying: 65 536 needles x a 65 536-byte replacement.

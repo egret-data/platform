@@ -1527,6 +1527,49 @@ fn decrypt(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// measured to agree with Pebble on both, including inside a `{% for %}`,
 /// where Pebble's loop scope IS global and its loop variable does show up.
 ///
+/// # `known_variables()` includes the GLOBALS, and subtracting them BY NAME
+/// deletes the author's data
+///
+/// This is the defect the first cut shipped. `known_variables(true)` is the
+/// union of the context's names and the environment's, and every
+/// `add_function` name is in the second set — so filtering by name removed
+/// **forty** names from the output *even when the context bound them*:
+///
+/// | context | Kestra | egret, before |
+/// |---|---|---|
+/// | `{"range":1,"a":2}` | `{"a":2,"range":1}` | `{"a":2}` |
+/// | `{"secret":1,"a":2}` | `{"a":2,"secret":1}` | `{"a":2}` |
+///
+/// `{{ range }}` still rendered `1`, so the value was there and only this
+/// function hid it — omission of data an author asked for by name. Thirteen
+/// corpus entries now cover it, one per name a real flow is likely to hit.
+///
+/// **What replaces the name filter is an IDENTITY test.** `State::lookup`
+/// returns the context's binding when there is one and the environment's
+/// global otherwise, and `Value`'s `PartialEq` falls through to
+/// `Object::is_same_object` — `Arc` identity — for two objects. So a name
+/// belongs to the environment *only* when what `lookup` hands back **is the
+/// very global object**; anything else, including a context value that merely
+/// shares the name, is the author's. A JSON-derived context value can never be
+/// the same `Arc` as a registered function, so this cannot confuse the two.
+///
+/// # The `_context` scope guard, ported
+///
+/// `lambda$execute$0` drops a whole **scope** whose key set contains
+/// `_context`, and never filters by name — which is how Pebble's own internal
+/// scope stays out of the answer. An author's `_context` key lands in the
+/// render context's scope and takes that whole scope with it. Measured:
+///
+/// | template | context | Kestra |
+/// |---|---|---|
+/// | `{{ fetchContext() }}` | `{"_context":1,"a":2}` | `{}` |
+/// | `{% set y = 9 %}{{ fetchContext() }}` | the same | `{"y":9}` |
+///
+/// so "drop everything" would be wrong in exactly the case the guard is for.
+/// The render context's own names arrive through
+/// [`super::env::CONTEXT_SCOPE_NAMES`], because `known_variables` carries no
+/// provenance and nothing else in `minijinja`'s API does either.
+///
 /// # Two recorded divergences, neither of them fixable here
 ///
 /// - **Key order.** Kestra collects into a `java.util.HashMap`, so the order
@@ -1540,33 +1583,58 @@ fn decrypt(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 ///   order; it sorts by name, which is at least stable and explainable.
 ///   `function-fetchcontext-two-keys` and `-three-keys` are the entries.
 /// - **The `loop` object.** Pebble's has `first/last/length/index/revindex`;
-///   minijinja's has a different set. `function-fetchcontext-in-a-loop` is
-///   baselined for that reason and it is a fact about the loop object, not
-///   about this function.
+///   minijinja's has nine different fields.
+///   `function-fetchcontext-in-a-loop` is baselined for that reason and it is
+///   a fact about the loop object, not about this function.
 ///
 /// A null value is **kept**, not dropped: the emptying happens later, in
 /// `JsonWriter`, which omits null map entries — so `{"x": null}` renders `{}`
 /// on both sides and for the same reason.
 fn fetch_context(state: &State) -> Result<MjValue, MjError> {
-    let globals: std::collections::HashSet<String> = state
+    let globals: Vec<(String, MjValue)> = state
         .env()
         .globals()
-        .map(|(name, _)| name.to_string())
+        .map(|(name, value)| (name.to_string(), value))
         .collect();
+
+    // The render context's own top-level names, as its scope.
+    let scope: Vec<String> = state
+        .lookup(super::env::CONTEXT_SCOPE_NAMES)
+        .and_then(|names| names.try_iter().ok().map(|it| it.collect::<Vec<_>>()))
+        .map(|names| names.iter().map(super::env::kestra_to_string).collect())
+        .unwrap_or_default();
+    // `lambda$execute$0`: a scope whose keys contain `_context` is skipped
+    // whole.
+    let drop_the_context_scope = scope.iter().any(|name| name == "_context");
+
     let mut names: Vec<String> = state
         .known_variables()
         .into_iter()
         .map(|name| name.into_owned())
-        .filter(|name| !globals.contains(name))
         .collect();
     names.sort();
-    let entries: Vec<(String, MjValue)> = names
-        .into_iter()
-        .map(|name| {
-            let value = state.lookup(&name).unwrap_or_else(|| MjValue::from(()));
-            (name, value)
-        })
-        .collect();
+
+    let mut entries: Vec<(String, MjValue)> = Vec::with_capacity(names.len());
+    for name in names {
+        if drop_the_context_scope && scope.contains(&name) {
+            continue;
+        }
+        let Some(value) = state.lookup(&name) else {
+            continue;
+        };
+        // Identity, not name: see this function's doc. A global the context
+        // has NOT shadowed hands back the very object the environment holds,
+        // and that one is the engine's rather than the author's. This is also
+        // what keeps `CONTEXT_SCOPE_NAMES` itself out of the answer.
+        if globals
+            .iter()
+            .any(|(global, held)| *global == name && *held == value)
+        {
+            continue;
+        }
+        entries.push((name, value));
+    }
+
     Ok(MjValue::from_object(OrderedMap::new(entries)))
 }
 
@@ -2932,6 +3000,14 @@ mod tests {
     /// - it is **not** the "unknown function" that a deletion of the
     ///   registration would produce, which is the failure the corpus entry
     ///   cannot tell apart from a real refusal.
+    ///
+    /// The second of those is belt and braces rather than the discriminating
+    /// assertion, and saying so is the honest version: unregistering the
+    /// twelve dies on the `contains(&want)` assert first, because
+    /// `unknown function: secret is unknown` does not contain the sentence.
+    /// It earns its place only for a *different* mutation — a refusal that
+    /// forwards to minijinja's unknown-name error while still being
+    /// registered — and it costs one line.
     #[test]
     fn the_twelve_refusals_name_themselves_and_their_owner() {
         let expected = [
