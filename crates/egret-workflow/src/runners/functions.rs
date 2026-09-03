@@ -1,8 +1,11 @@
 // kestra: core/src/main/java/io/kestra/core/runners/pebble/Extension.java
 // kestra: core/src/main/java/io/kestra/core/runners/pebble/functions/*.java
 
-//! W2 Task 7 — the **pure** functions of Kestra's Pebble extension: the ones
-//! that reach no service and can be answered from their arguments alone.
+//! Kestra's Pebble **functions**: all 34 the built engine registers, plus the
+//! four it does not.
+//!
+//! W2 Task 7 took the nineteen that reach no service; **W2 Task 8 took the
+//! rest, and seven of those turned out not to reach a service either.**
 //!
 //! # The wire name is a `NAME` constant, not a file name
 //!
@@ -16,19 +19,50 @@
 //! (`javap -p -c -constants`) and cross-checked against `host.Oracle dump`,
 //! which reports the 34 names the built engine actually carries.
 //!
-//! This module owns 19 of those 34:
-//!
 //! ```text
-//! now uuid id ksuid nanoId randomInt randomPort range
-//! fromJson fromIon yaml
-//! dayOfMonth dayOfWeek hourOfDay monthOfYear
-//! isWeekend isPublicHoliday isLastWorkingDay isDayWeekInMonth
+//! Task 7, the pure nineteen:
+//!   now uuid id ksuid nanoId randomInt randomPort range
+//!   fromJson fromIon yaml
+//!   dayOfMonth dayOfWeek hourOfDay monthOfYear
+//!   isWeekend isPublicHoliday isLastWorkingDay isDayWeekInMonth
+//!
+//! Task 8, seven more that are also pure:
+//!   env encrypt decrypt fetchContext printContext tasksWithState loopOutputs
+//!
+//! Task 8, eight registered with a null backing -- refusals:
+//!   secret kv read fileURI fileSize fileExists isFileEmpty http
+//!
+//! Task 8, four the built engine does not register at all -- refusals:
+//!   render renderOnce errorLogs subflow
 //! ```
 //!
-//! The other 15 are Task 8's: the eight null-backed ones (`secret`, `kv`,
-//! `read`, `fileURI`, `fileSize`, `isFileEmpty`, `fileExists`, `http`),
-//! `encrypt`/`decrypt`, `env`, `fetchContext`/`printContext`,
-//! `tasksWithState` and `loopOutputs`.
+//! # Seven of Task 8's "service-backed" functions reach no service
+//!
+//! The plan and the task brief both describe Task 8 as "the service-backed
+//! functions, ported as explicit refusals", and name nineteen. **Seven of
+//! them answer in the standalone harness**, with ordinary values in
+//! `golden.json`, and were baselined as unported work rather than marked
+//! error-class:
+//!
+//! | function | what it actually reads |
+//! |---|---|
+//! | `env` | the `envs` **context variable** — never `System.getenv` |
+//! | `encrypt` / `decrypt` | `EncryptionService`, which is pure AES-GCM over a base64 key argument |
+//! | `fetchContext` / `printContext` | the render context itself |
+//! | `tasksWithState` | the `tasks` context variable |
+//! | `loopOutputs` | its own `outputs` argument |
+//!
+//! So they are ported here, and what they depend on is W3 putting `envs` and
+//! `tasks` into the context — not a service this crate would have to call.
+//!
+//! # A refusal is a feature
+//!
+//! The twelve that are refused say so in a sentence naming the function, what
+//! it needs and the package that will implement it. **The oracle cannot check
+//! any of that**: their corpus entries are `compare: "error-class"`, which any
+//! failure satisfies — including `unknown function: secret is unknown`, which
+//! is what egret said before this task. See [`not_implemented`] and
+//! `the_twelve_refusals_name_themselves_and_their_owner`.
 //!
 //! # `range` was already bound, and it did not error
 //!
@@ -83,15 +117,16 @@
 
 use std::net::TcpListener;
 
+use base64::Engine as _;
 use chrono::{Datelike, Days, Months, NaiveDate, NaiveDateTime, Timelike, Utc};
 use minijinja::value::{Rest, Value as MjValue, ValueKind};
-use minijinja::{Environment, Error as MjError};
+use minijinja::{Environment, Error as MjError, State};
 use rand::RngCore;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
 use super::env::OrderedMap;
-use super::filters::{is_java_null, pebble_error, Args, DateArgs};
+use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs};
 use super::ionfmt::read_ion;
 use super::javafmt::{parse_iso, Zdt, Zone};
 use super::jqsandbox::MAX_VALUE_DEPTH;
@@ -121,7 +156,65 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_function("range", range);
     env.add_function("uuid", uuid);
     env.add_function("yaml", yaml);
+
+    // W2 Task 8's seven ports. `fetchContext` and `printContext` are ONE
+    // class registered under two keys -- a class-per-name reading loses the
+    // alias, and nothing would notice.
+    env.add_function("decrypt", decrypt);
+    env.add_function("encrypt", encrypt);
+    env.add_function("env", env_function);
+    env.add_function("fetchContext", fetch_context);
+    env.add_function("loopOutputs", loop_outputs);
+    env.add_function("printContext", fetch_context);
+    env.add_function("tasksWithState", tasks_with_state);
+
+    // W2 Task 8's twelve refusals. See [`not_implemented`] for the message
+    // shape and why the oracle cannot check it.
+    for (name, needs, package) in REFUSED {
+        env.add_function(
+            *name,
+            move |_args: Rest<MjValue>| -> Result<MjValue, MjError> {
+                Err(not_implemented(name, needs, package))
+            },
+        );
+    }
 }
+
+/// The twelve names egret registers only to refuse, with what each is waiting
+/// for and who owns it.
+///
+/// **Two different kinds of absence, deliberately treated the same.** The
+/// first eight are *registered* on the built engine with a `null` `Function`
+/// behind them, because `Extension.getFunctions()` `put`s their `NAME` keys
+/// unguarded while Micronaut never fills the `@Inject` fields; the last four
+/// are `@Inject @Nullable` and are guarded by `if (x != null)`, so they are
+/// **not in the map at all** — `host.Oracle dump` reports 34 names and none of
+/// these four is among them. Pebble answers
+/// `Function or Macro [x] does not exist.` for **both** groups, so from a flow
+/// author's seat they are one behaviour, and egret gives them one message.
+///
+/// The package column is this task's assignment, not the programme spec's:
+/// `subflow` is named in W6's contents and the KV store and namespace files in
+/// W9's, but `secret` and `http` are in no package's contents at all. They are
+/// assigned to W9 here so the message can name an owner, and the task report
+/// says so — a wrong owner in a message is correctable, a message with no
+/// owner is not.
+const REFUSED: &[(&str, &str, &str)] = &[
+    // Registered with a null backing on the built engine.
+    ("secret", "the secret backend", "W9"),
+    ("kv", "the namespace KV store", "W9"),
+    ("read", "internal storage and namespace files", "W9"),
+    ("fileURI", "namespace files", "W9"),
+    ("fileSize", "internal storage and namespace files", "W9"),
+    ("fileExists", "internal storage and namespace files", "W9"),
+    ("isFileEmpty", "internal storage and namespace files", "W9"),
+    ("http", "an outbound HTTP client", "W9"),
+    // Not registered at all on the built engine: `@Inject @Nullable`, guarded.
+    ("render", "an execution context to render against", "W3"),
+    ("renderOnce", "an execution context to render against", "W3"),
+    ("errorLogs", "the running execution's logs", "W3"),
+    ("subflow", "subflow execution", "W6"),
+];
 
 // ---------------------------------------------------------------------------
 // The structured-data readers
@@ -1230,6 +1323,573 @@ fn base62_bytes(bytes: &[u8], pad: usize) -> String {
     String::from_utf8(digits).expect("base62 digits are ASCII")
 }
 
+// ===========================================================================
+// W2 Task 8 — the rest of the 34: seven ports, twelve refusals
+// ===========================================================================
+//
+// See this module's doc for the split. What follows is measured against
+// `io.kestra:core:2.0.0-rc13` with `javap -p -c -constants`, and every claim
+// about an answer is a corpus entry rendered through the harness.
+
+/// The message every Task 8 refusal carries.
+///
+/// **A refusal is a feature, and it has to say what it is waiting for.** The
+/// oracle cannot check this: those entries are `compare: "error-class"`, which
+/// any failure satisfies — including `unknown function: secret is unknown`,
+/// which is what egret said before this task and which tells a flow author
+/// nothing. So the shape is pinned by a unit test per function instead
+/// (`runners::functions::the_twelve_refusals_name_themselves_and_their_owner`),
+/// and this one function is where the shape lives so twelve messages cannot
+/// drift apart.
+///
+/// Three things are in it on purpose: the function's own wire name, what it
+/// needs, and the **package that will implement it** — so the reader can find
+/// the plan. Never empty, never null: an empty refusal is a wrong value that
+/// renders successfully, which is the failure mode this whole programme keeps
+/// meeting.
+fn not_implemented(name: &str, needs: &str, package: &str) -> MjError {
+    pebble_error(format!(
+        "The '{name}' function is not implemented yet: it needs {needs}, \
+         which egret's {package} package provides."
+    ))
+}
+
+/// `EnvFunction` — `envs` out of the evaluation context, with a fallback.
+///
+/// Pure, despite the name: it never reads the process environment. Kestra's
+/// runner puts a `Map<String, String> envs` into the render context (built
+/// from `KESTRA_`-prefixed process variables plus configuration), and this
+/// function only reads that variable. So it is portable today and W3 decides
+/// what goes into `envs`.
+///
+/// The bytecode, in order, because three of the five branches are easy to get
+/// backwards:
+///
+/// 1. `name` absent → `PebbleException`. **`containsKey`, not a null check**,
+///    so `env(name=null)` is a *present* argument;
+/// 2. `(String) args.get("name")` → a non-`String` is a `ClassCastException`.
+///    A Java `null` passes a checkcast, which is why (1) and this differ;
+/// 3. `context.getVariable("envs")` — absent, or present and not a `Map`, and
+///    the **default is returned**, not an error;
+/// 4. the value is `null` **or** `value.toString().isEmpty()` → the default.
+///    An empty string is therefore indistinguishable from an absent key;
+/// 5. otherwise the raw value, **not** its string form:
+///    `env(name='A')` over `{"envs": {"A": {"k": 1}}}` renders `{"k":1}`.
+///
+/// The default itself is `args.get("default")` with no `containsKey` guard,
+/// so an absent `default` is Java `null` and renders as nothing.
+fn env_function(state: &State, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let Some(name) = args.get("name", 0) else {
+        return Err(pebble_error(
+            "The 'env' function expects an argument 'name'.",
+        ));
+    };
+    let default = args.get("default", 1).unwrap_or_else(|| MjValue::from(()));
+
+    // Branch 2. A Java `null` passes `checkcast`, and `Map.get(null)` then
+    // finds nothing, so a null `name` falls all the way through to the
+    // default rather than throwing.
+    if is_java_null(&name) {
+        return Ok(default);
+    }
+    let Some(key) = name.as_str() else {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(&name)
+        )));
+    };
+
+    let Some(envs) = state.lookup("envs") else {
+        return Ok(default);
+    };
+    if envs.kind() != ValueKind::Map {
+        return Ok(default);
+    }
+    let Ok(value) = envs.get_item(&MjValue::from(key)) else {
+        return Ok(default);
+    };
+    if is_java_null(&value) || super::env::kestra_to_string(&value).is_empty() {
+        return Ok(default);
+    }
+    Ok(value)
+}
+
+/// `EncryptFunction` → `EncryptionService.encrypt(String key, String plaintext)`.
+///
+/// `AES/GCM/NoPadding` with a **12-byte random IV prefixed to the ciphertext**
+/// and a 128-bit auth tag, the key base64-decoded into a `SecretKeySpec`, the
+/// whole thing base64-encoded. Read out of `javap -p -c EncryptionService`.
+///
+/// **The order of the guards is load-bearing.** `EncryptionService.encrypt`
+/// tests the *plaintext* first — `if (plaintext == null || plaintext.isEmpty())
+/// return plaintext;` — and only then decodes the key, so
+/// `encrypt(key='!!!', plaintext='')` is `''` and not a base64 error. A port
+/// that validated the key first would refuse a call Kestra answers.
+///
+/// The IV is fresh on every call, so `function-encrypt`'s corpus entry is in
+/// `tests/oracle.rs`'s `NON_DETERMINISTIC` set. That is a shape check, and a
+/// shape check cannot see an IV length or a tag length — so the round trip
+/// `decrypt(key=k, encrypted=encrypt(key=k, plaintext=…))` is a *deterministic*
+/// corpus entry and it is what actually pins the format.
+fn encrypt(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let (Some(key), Some(plaintext)) = (args.get("key", 0), args.get("plaintext", 1)) else {
+        return Err(pebble_error(
+            "The 'encrypt' function expects two arguments 'key' and 'plaintext'.",
+        ));
+    };
+    let Some(text) = java_string_arg(&plaintext)? else {
+        // `plaintext == null` returns `plaintext`, i.e. null.
+        return Ok(MjValue::from(()));
+    };
+    if text.is_empty() {
+        return Ok(MjValue::from(text));
+    }
+    // **A bound Kestra does not have, and the reason it is needed is that
+    // `encrypt` GROWS.** Base64 of `12 + n + 16` bytes is `4/3 (n + 28)`, so
+    // nesting the call multiplies: measured on the shipped path, 30 levels is
+    // 672 KB in 6 ms, 48 levels is 1 686 ms, and the trend puts 60 levels at
+    // ~16 GB. `super::rewrite`'s nesting cap does not see a function-call
+    // chain, and the output cap sees only the LAST value, after every
+    // intermediate has been allocated. Capping each level's INPUT at the
+    // output ceiling caps the whole chain: nothing over 1 MiB can be rendered
+    // anyway.
+    if text.len() > super::env::MAX_OUTPUT_BYTES {
+        return Err(pebble_error(format!(
+            "the 'encrypt' function refuses a plaintext over {} bytes",
+            super::env::MAX_OUTPUT_BYTES
+        )));
+    }
+    let key = decode_aes_key(&key)?;
+    let mut iv = [0u8; AES_GCM_IV_BYTES];
+    rand::thread_rng().fill_bytes(&mut iv);
+    let mut out = iv.to_vec();
+    out.extend_from_slice(&aes_gcm_seal(&key, &iv, text.as_bytes())?);
+    Ok(MjValue::from(BASE64.encode(out)))
+}
+
+/// `DecryptFunction` → `EncryptionService.decrypt(String key, String encrypted)`.
+///
+/// The inverse, with the same null/empty short-circuit ahead of the key.
+///
+/// **A ciphertext shorter than the IV is an `IllegalArgumentException`, not a
+/// tag mismatch**, and the two are different sentences a flow author will see:
+/// `Arrays.copyOf(data, 12)` zero-pads happily, and it is the *next* line,
+/// `Arrays.copyOfRange(data, 12, data.length)`, that throws `12 > 3`. Measured
+/// (`function-decrypt-shorter-than-the-iv`).
+fn decrypt(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let (Some(key), Some(encrypted)) = (args.get("key", 0), args.get("encrypted", 1)) else {
+        return Err(pebble_error(
+            "The 'decrypt' function expects two arguments 'key' and 'encrypted'.",
+        ));
+    };
+    let Some(text) = java_string_arg(&encrypted)? else {
+        return Ok(MjValue::from(()));
+    };
+    if text.is_empty() {
+        return Ok(MjValue::from(text));
+    }
+    // The same ceiling, for symmetry and for the same reason: a plaintext
+    // that could not be rendered is not worth decrypting, and this keeps the
+    // decode allocation bounded too.
+    if text.len() > super::env::MAX_OUTPUT_BYTES {
+        return Err(pebble_error(format!(
+            "the 'decrypt' function refuses a ciphertext over {} bytes",
+            super::env::MAX_OUTPUT_BYTES
+        )));
+    }
+    let data = BASE64
+        .decode(text.as_bytes())
+        .map_err(|_| pebble_error("Illegal base64 character"))?;
+    if data.len() < AES_GCM_IV_BYTES {
+        return Err(pebble_error(format!("{AES_GCM_IV_BYTES} > {}", data.len())));
+    }
+    let key = decode_aes_key(&key)?;
+    let iv: [u8; AES_GCM_IV_BYTES] = data[..AES_GCM_IV_BYTES]
+        .try_into()
+        .expect("the length was just checked");
+    let plain = aes_gcm_open(&key, &iv, &data[AES_GCM_IV_BYTES..])?;
+    // `new String(byte[])` on JDK 18+ is UTF-8 with replacement, never a
+    // throw -- `String.CASE_INSENSITIVE_ORDER`'s charset default changed in
+    // JEP 400. `from_utf8_lossy` is that.
+    Ok(MjValue::from(String::from_utf8_lossy(&plain).into_owned()))
+}
+
+/// `FetchContextFunction`, registered **twice** — as `fetchContext` and as
+/// `printContext`. One class, two `put` calls (`NAME` and `ALIAS`), which is
+/// why 33 classes give 34 names.
+///
+/// It collects every key of every *global* scope and answers a map of
+/// name → value. In egret that is the render context plus whatever `{% set %}`
+/// has bound, which is what `minijinja`'s `State::known_variables` returns —
+/// measured to agree with Pebble on both, including inside a `{% for %}`,
+/// where Pebble's loop scope IS global and its loop variable does show up.
+///
+/// # Two recorded divergences, neither of them fixable here
+///
+/// - **Key order.** Kestra collects into a `java.util.HashMap`, so the order
+///   is `String.hashCode`'s bucket layout: `{"b":1,"a":2}` comes back
+///   `{"a":2,"b":1}` and `{"zebra":…,"apple":…,"mango":…}` comes back in that
+///   same insertion order — neither sorted nor insertion, just hashed. This
+///   crate's standing ruling is that `HashMap` bucket order is *implementation
+///   structure* and is recorded rather than ported (see `oracle/README.md`,
+///   "What egret copies from upstream", and `filter-escapechar-map-two-keys`).
+///   `known_variables` returns a `HashSet` anyway, so egret must impose *some*
+///   order; it sorts by name, which is at least stable and explainable.
+///   `function-fetchcontext-two-keys` and `-three-keys` are the entries.
+/// - **The `loop` object.** Pebble's has `first/last/length/index/revindex`;
+///   minijinja's has a different set. `function-fetchcontext-in-a-loop` is
+///   baselined for that reason and it is a fact about the loop object, not
+///   about this function.
+///
+/// A null value is **kept**, not dropped: the emptying happens later, in
+/// `JsonWriter`, which omits null map entries — so `{"x": null}` renders `{}`
+/// on both sides and for the same reason.
+fn fetch_context(state: &State) -> Result<MjValue, MjError> {
+    let globals: std::collections::HashSet<String> = state
+        .env()
+        .globals()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    let mut names: Vec<String> = state
+        .known_variables()
+        .into_iter()
+        .map(|name| name.into_owned())
+        .filter(|name| !globals.contains(name))
+        .collect();
+    names.sort();
+    let entries: Vec<(String, MjValue)> = names
+        .into_iter()
+        .map(|name| {
+            let value = state.lookup(&name).unwrap_or_else(|| MjValue::from(()));
+            (name, value)
+        })
+        .collect();
+    Ok(MjValue::from_object(OrderedMap::new(entries)))
+}
+
+/// `TasksWithStateFunction` — the tasks of the current execution whose state
+/// matches, read out of the `tasks` context variable.
+///
+/// Pure: `tasks` is a context variable, so this is answerable today and W3
+/// decides what goes into it.
+///
+/// The shape, from the bytecode, is a **two-level** walk that most readings of
+/// the name get wrong. `tasks` is `Map<taskId, Map<key, value>>`, and for each
+/// inner `(key, value)`:
+///
+/// | `key` | `value` | emitted when it matches |
+/// |---|---|---|
+/// | `"state"` | not a map | `{state}` — no `value` key |
+/// | `"state"` | a map with a `state` entry | `{state, value: "state"}` |
+/// | anything else | a map with a `state` entry | `{state, value: key}` |
+/// | anything else | not a map | nothing |
+///
+/// so a task can contribute **more than one** row
+/// (`function-taskswithstate-nested-and-flat`).
+///
+/// Three more measured details:
+///
+/// - the `state` argument is `((String) …).toUpperCase()`, and `toState` also
+///   uppercases the value — so `state='failed'` matches `"FAILED"`, and
+///   `state='FAILED'` matches `"failed"`, and the emitted `state` is always
+///   the upper-cased one;
+/// - `toState` returns `null` for anything that is neither a `String` nor an
+///   `Enum`, so a numeric state never matches — not even `state='42'`;
+/// - an absent or null `tasks` is `[]`; a `tasks` that is present and **not** a
+///   map is a `ClassCastException`.
+///
+/// # The result map's key order is a constant, not a hash
+///
+/// The rows come out of a `HashMap` too, so upstream's order is
+/// `state, value, taskId` for a three-key row and `state, taskId` for a
+/// two-key one — measured, both. That is not `HashMap` order being *ported*:
+/// the key set here is fixed at three names, so one emission order reproduces
+/// both shapes exactly, and it is written down as that constant rather than as
+/// a hash function. `function-fetchcontext-two-keys`, whose key set is the
+/// author's, is where the same question has to be recorded instead.
+fn tasks_with_state(state: &State, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let Some(wanted) = args.get("state", 0) else {
+        return Err(pebble_error(
+            "The 'tasksWithState' function expects an argument 'state'.",
+        ));
+    };
+    // `((String) args.get("state")).toUpperCase()`: a null is an NPE on the
+    // `toUpperCase` call, a non-String a ClassCastException, and the two say
+    // different things.
+    if is_java_null(&wanted) {
+        return Err(pebble_error(
+            "Cannot invoke \"String.toUpperCase()\" because the return value of \
+             \"java.util.Map.get(Object)\" is null",
+        ));
+    }
+    let Some(wanted) = wanted.as_str() else {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(&wanted)
+        )));
+    };
+    let wanted = wanted.to_uppercase();
+
+    let mut rows: Vec<MjValue> = Vec::new();
+    let Some(tasks) = state.lookup("tasks") else {
+        return Ok(MjValue::from(rows));
+    };
+    if is_java_null(&tasks) {
+        return Ok(MjValue::from(rows));
+    }
+    if tasks.kind() != ValueKind::Map {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.util.Map",
+            java_class_name(&tasks)
+        )));
+    }
+
+    for task_id in map_keys(&tasks) {
+        let Ok(task) = tasks.get_item(&task_id) else {
+            continue;
+        };
+        if task.kind() != ValueKind::Map {
+            continue;
+        }
+        let task_id = super::env::kestra_to_string(&task_id);
+        for key in map_keys(&task) {
+            let Ok(value) = task.get_item(&key) else {
+                continue;
+            };
+            let key = super::env::kestra_to_string(&key);
+            let nested = (value.kind() == ValueKind::Map)
+                .then(|| value.get_item(&MjValue::from("state")).ok())
+                .flatten();
+            let (found, value_key) = match (&nested, key.as_str()) {
+                // `"state"` holding a map: the state comes from the map, and
+                // the `value` key is the literal `"state"`.
+                (Some(inner), "state") => (to_state(inner), Some("state".to_string())),
+                // `"state"` holding a scalar: no `value` key at all.
+                (None, "state") => (to_state(&value), None),
+                // Any other key holding a map.
+                (Some(inner), _) => (to_state(inner), Some(key.clone())),
+                (None, _) => (None, None),
+            };
+            if found.as_deref() != Some(wanted.as_str()) {
+                continue;
+            }
+            let mut row: Vec<(String, MjValue)> =
+                vec![("state".to_string(), MjValue::from(found.expect("matched")))];
+            if let Some(value_key) = value_key {
+                row.push(("value".to_string(), MjValue::from(value_key)));
+            }
+            row.push(("taskId".to_string(), MjValue::from(task_id.clone())));
+            rows.push(MjValue::from_object(OrderedMap::new(row)));
+        }
+    }
+    Ok(MjValue::from(rows))
+}
+
+/// `TasksWithStateFunction.toState` — `String` or `Enum` uppercased, `null`
+/// for everything else.
+///
+/// The `null` arm is what makes `tasksWithState(state='42')` answer `[]` for a
+/// task whose state is the *number* 42: a `Long` is neither, so it never even
+/// reaches the comparison.
+fn to_state(value: &MjValue) -> Option<String> {
+    (value.kind() == ValueKind::String).then(|| super::env::kestra_to_string(value).to_uppercase())
+}
+
+/// `LoopOutputsFunction` — pluck one output name out of every iteration of a
+/// loop task.
+///
+/// Four guards, in this order, each with its own sentence (all four measured
+/// through the harness, and all four `error-class` entries):
+///
+/// 1. `outputs` absent **or** Java null → "expects a non-null argument
+///    'outputs'". Unlike `env`'s `containsKey`, this one is a null check, so
+///    the two cases really do share a message;
+/// 2. `outputs` not a `List` → "expects 'outputs' to be a list";
+/// 3. `name` absent or null → "expects a non-null argument 'name'";
+/// 4. `name` not a `String` → "expects 'name' to be a string".
+///
+/// Then, per element: an element that is not a map contributes `null`, a
+/// missing or non-map `outputs` key contributes `null`, and an absent `name`
+/// inside it contributes `null`. **Nothing is skipped** — the output list is
+/// always exactly as long as the input.
+fn loop_outputs(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    let args = Args::new(rest);
+    let outputs = args.get("outputs", 0).unwrap_or_else(|| MjValue::from(()));
+    if is_java_null(&outputs) {
+        return Err(pebble_error(
+            "The 'loopOutputs' function expects a non-null argument 'outputs'.",
+        ));
+    }
+    let Some(items) = as_seq(&outputs) else {
+        return Err(pebble_error(
+            "The 'loopOutputs' function expects 'outputs' to be a list.",
+        ));
+    };
+    let name = args.get("name", 1).unwrap_or_else(|| MjValue::from(()));
+    if is_java_null(&name) {
+        return Err(pebble_error(
+            "The 'loopOutputs' function expects a non-null argument 'name'.",
+        ));
+    }
+    let Some(name) = name.as_str() else {
+        return Err(pebble_error(
+            "The 'loopOutputs' function expects 'name' to be a string.",
+        ));
+    };
+
+    let name = MjValue::from(name);
+    let picked: Vec<MjValue> = items
+        .into_iter()
+        .map(|item| {
+            if item.kind() != ValueKind::Map {
+                return MjValue::from(());
+            }
+            let inner = item.get_item(&MjValue::from("outputs")).ok();
+            match inner {
+                Some(inner) if inner.kind() == ValueKind::Map => {
+                    inner.get_item(&name).unwrap_or_else(|_| MjValue::from(()))
+                }
+                _ => MjValue::from(()),
+            }
+        })
+        .collect();
+    Ok(MjValue::from(picked))
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for the four ports above
+// ---------------------------------------------------------------------------
+
+/// The 12 bytes `EncryptionService.generateIv()` produces, and the 12 bytes
+/// `decrypt` slices back off the front.
+const AES_GCM_IV_BYTES: usize = 12;
+
+/// `java.util.Base64`, which is RFC 4648 with padding and **no** line breaks.
+const BASE64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::STANDARD;
+
+/// A Java `(String)` cast that tolerates `null`: `Ok(None)` for Kestra's null,
+/// `Err` for anything else that is not a string.
+///
+/// Java's `checkcast` lets a `null` through, so `(String) null` is `null` and
+/// not an exception — which is why `encrypt(plaintext=null)` returns null
+/// rather than throwing. Every call site that reads a `String` argument and
+/// has a null branch shares this.
+fn java_string_arg(value: &MjValue) -> Result<Option<String>, MjError> {
+    if is_java_null(value) {
+        return Ok(None);
+    }
+    match value.as_str() {
+        Some(text) => Ok(Some(text.to_string())),
+        None => Err(pebble_error(format!(
+            "class {} cannot be cast to class java.lang.String",
+            java_class_name(value)
+        ))),
+    }
+}
+
+/// `new SecretKeySpec(Base64.getDecoder().decode(key), "AES")`.
+///
+/// Two separate failures, and Kestra says different things for each: a
+/// non-base64 key is `IllegalArgumentException: Illegal base64 character …`
+/// straight out of the decoder, and a decoded length that is not 16, 24 or 32
+/// is `InvalidKeyException: Invalid AES key length: N bytes` out of the JCE.
+/// Measured, both.
+fn decode_aes_key(key: &MjValue) -> Result<Vec<u8>, MjError> {
+    let Some(key) = java_string_arg(key)? else {
+        // `Base64.getDecoder().decode((String) null)` is an NPE.
+        return Err(pebble_error(
+            "Cannot invoke \"String.length()\" because \"src\" is null",
+        ));
+    };
+    let bytes = BASE64
+        .decode(key.as_bytes())
+        .map_err(|_| pebble_error("Illegal base64 character"))?;
+    match bytes.len() {
+        16 | 24 | 32 => Ok(bytes),
+        other => Err(pebble_error(format!(
+            "Invalid AES key length: {other} bytes"
+        ))),
+    }
+}
+
+/// `Cipher.getInstance("AES/GCM/NoPadding")` in ENCRYPT mode, 128-bit tag.
+fn aes_gcm_seal(
+    key: &[u8],
+    iv: &[u8; AES_GCM_IV_BYTES],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, MjError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{AesGcm, Nonce};
+    let nonce = Nonce::from(*iv);
+    let sealed = match key.len() {
+        16 => aes_gcm::Aes128Gcm::new_from_slice(key)
+            .map_err(|_| pebble_error("Invalid AES key"))?
+            .encrypt(&nonce, plaintext),
+        24 => {
+            AesGcm::<aes_gcm::aes::Aes192, aes_gcm::aes::cipher::consts::U12>::new_from_slice(key)
+                .map_err(|_| pebble_error("Invalid AES key"))?
+                .encrypt(&nonce, plaintext)
+        }
+        _ => aes_gcm::Aes256Gcm::new_from_slice(key)
+            .map_err(|_| pebble_error("Invalid AES key"))?
+            .encrypt(&nonce, plaintext),
+    };
+    sealed.map_err(|_| pebble_error("Encryption failed"))
+}
+
+/// The same in DECRYPT mode. A wrong key, a tampered ciphertext and a
+/// truncated tag are all one failure in GCM, and Kestra's own message for it
+/// is `Tag mismatch`.
+fn aes_gcm_open(
+    key: &[u8],
+    iv: &[u8; AES_GCM_IV_BYTES],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, MjError> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    use aes_gcm::{AesGcm, Nonce};
+    let nonce = Nonce::from(*iv);
+    let opened = match key.len() {
+        16 => aes_gcm::Aes128Gcm::new_from_slice(key)
+            .map_err(|_| pebble_error("Invalid AES key"))?
+            .decrypt(&nonce, ciphertext),
+        24 => {
+            AesGcm::<aes_gcm::aes::Aes192, aes_gcm::aes::cipher::consts::U12>::new_from_slice(key)
+                .map_err(|_| pebble_error("Invalid AES key"))?
+                .decrypt(&nonce, ciphertext)
+        }
+        _ => aes_gcm::Aes256Gcm::new_from_slice(key)
+            .map_err(|_| pebble_error("Invalid AES key"))?
+            .decrypt(&nonce, ciphertext),
+    };
+    opened.map_err(|_| pebble_error("Tag mismatch"))
+}
+
+/// The keys of a minijinja map value, in the map's own order.
+fn map_keys(value: &MjValue) -> Vec<MjValue> {
+    value
+        .try_iter()
+        .map(|keys| keys.collect())
+        .unwrap_or_default()
+}
+
+/// A sequence's elements, or `None` when the value is not a `List`.
+///
+/// **A map is not a list here**, which is `instanceof List` in Java and is not
+/// what `try_iter` alone answers: a minijinja map iterates its keys, so
+/// `loopOutputs(outputs={…})` would silently walk key names instead of
+/// refusing.
+fn as_seq(value: &MjValue) -> Option<Vec<MjValue>> {
+    match value.kind() {
+        ValueKind::Seq | ValueKind::Iterable => Some(value.try_iter().ok()?.collect()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2238,6 +2898,393 @@ mod tests {
 
         let port: u32 = ok("{{ randomPort() }}").parse().expect("a port");
         assert!(port > 1023 && port < 65536, "{port}");
+    }
+
+    // -----------------------------------------------------------------
+    // W2 Task 8. The oracle CANNOT check any of this.
+    //
+    // The refusal entries are `compare: "error-class"`, which any failure
+    // satisfies -- including `unknown function: secret is unknown`, which is
+    // what egret said before this task and which names neither the function
+    // nor anything a reader could act on. A green oracle is therefore not
+    // evidence a refusal works, and it never will be. These are.
+    // -----------------------------------------------------------------
+
+    /// The twelve names egret registers only to refuse, each asserted for its
+    /// **exact message**: the function's own name, what it needs, and the
+    /// package that will implement it.
+    ///
+    /// Pairs `function-secret`, `-kv`, `-read`, `-fileuri`, `-filesize`,
+    /// `-fileexists`, `-isfileempty`, `-http` (which were
+    /// `unported:task-8` until this task), and `function-render`,
+    /// `-renderonce`, `-errorlogs`, `-subflow`.
+    ///
+    /// # These refuse unconditionally, and that is the honest answer
+    ///
+    /// The standing rule is that a paired test asserts a refused input **and**
+    /// a neighbouring accepted one, because an entry pins *that* egret refuses
+    /// and a test pins *what it says* — neither pins *which inputs*. There is
+    /// no boundary here: every one of the twelve refuses for every argument
+    /// list, including none. So what this asserts instead is the two things
+    /// that could actually go wrong:
+    ///
+    /// - the refusal does not depend on the arguments (three shapes each);
+    /// - it is **not** the "unknown function" that a deletion of the
+    ///   registration would produce, which is the failure the corpus entry
+    ///   cannot tell apart from a real refusal.
+    #[test]
+    fn the_twelve_refusals_name_themselves_and_their_owner() {
+        let expected = [
+            ("secret", "the secret backend", "W9"),
+            ("kv", "the namespace KV store", "W9"),
+            ("read", "internal storage and namespace files", "W9"),
+            ("fileURI", "namespace files", "W9"),
+            ("fileSize", "internal storage and namespace files", "W9"),
+            ("fileExists", "internal storage and namespace files", "W9"),
+            ("isFileEmpty", "internal storage and namespace files", "W9"),
+            ("http", "an outbound HTTP client", "W9"),
+            ("render", "an execution context to render against", "W3"),
+            ("renderOnce", "an execution context to render against", "W3"),
+            ("errorLogs", "the running execution's logs", "W3"),
+            ("subflow", "subflow execution", "W6"),
+        ];
+        assert_eq!(expected.len(), REFUSED.len(), "a name was added or dropped");
+
+        for (name, needs, package) in expected {
+            let want = format!(
+                "The '{name}' function is not implemented yet: it needs {needs}, \
+                 which egret's {package} package provides."
+            );
+            // Three argument shapes: none, one named, one positional. A
+            // refusal that only fired for one of them would still satisfy the
+            // corpus entry.
+            for call in [
+                format!("{{{{ {name}() }}}}"),
+                format!("{{{{ {name}(key='x', path='y', uri='z') }}}}"),
+                format!("{{{{ {name}('x') }}}}"),
+            ] {
+                let message = err(&call);
+                assert!(message.contains(&want), "{call}\n  got: {message}");
+                // The one thing the corpus entry cannot see.
+                assert!(
+                    !message.contains("is unknown"),
+                    "{call}: this is minijinja saying the name is not registered, \
+                     not egret refusing: {message}"
+                );
+            }
+        }
+    }
+
+    /// `env` — the two refusals, and the accepted neighbour of each.
+    ///
+    /// Pairs `function-env-missing-name` and `function-env-name-not-a-string`.
+    ///
+    /// The boundary that matters is **`containsKey` versus a null check**:
+    /// an absent `name` throws and a `name` that is explicitly null does not,
+    /// which is the same distinction `loopOutputs` gets the other way round.
+    #[test]
+    fn env_refuses_a_missing_name_and_a_non_string_one() {
+        assert!(
+            err("{{ env(default='D') }}")
+                .contains("The 'env' function expects an argument 'name'."),
+            "{}",
+            err("{{ env(default='D') }}")
+        );
+        assert!(
+            err("{{ env(name=42, default='D') }}")
+                .contains("class java.lang.Integer cannot be cast to class java.lang.String"),
+            "{}",
+            err("{{ env(name=42, default='D') }}")
+        );
+
+        // The accepted neighbours. A null `name` is PRESENT, so it falls all
+        // the way through to the default rather than throwing.
+        assert_eq!(
+            render(
+                "{{ env(name=nothing, default='D') }}",
+                r#"{"nothing": null}"#
+            )
+            .unwrap(),
+            "D"
+        );
+        assert_eq!(
+            render("{{ env(name='A') }}", r#"{"envs": {"A": "v"}}"#).unwrap(),
+            "v"
+        );
+    }
+
+    /// `encrypt`/`decrypt` — eight refusals, and the key lengths either side
+    /// of each boundary.
+    ///
+    /// Pairs `function-encrypt-missing-argument`, `-key-not-base64`,
+    /// `-key-wrong-length`, `-plaintext-not-a-string`,
+    /// `function-decrypt-bad-base64`, `-wrong-key`, `-shorter-than-the-iv`
+    /// and `-missing-argument`.
+    ///
+    /// Two boundaries are real and both are asserted from both sides: the AES
+    /// key length (16/24/32 accepted, 3 refused) and the IV length (a
+    /// ciphertext of 12 bytes or more reaches the cipher, one of 3 does not).
+    #[test]
+    fn encrypt_and_decrypt_refuse_what_the_jce_refuses() {
+        const K: &str = r#"{"k": "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="}"#;
+
+        for (template, needle) in [
+            (
+                "{{ encrypt(key=k) }}",
+                "The 'encrypt' function expects two arguments 'key' and 'plaintext'.",
+            ),
+            ("{{ encrypt(key='!!!', plaintext='x') }}", "Illegal base64"),
+            (
+                "{{ encrypt(key='YWJj', plaintext='x') }}",
+                "Invalid AES key length: 3 bytes",
+            ),
+            (
+                "{{ encrypt(key=k, plaintext=42) }}",
+                "cannot be cast to class java.lang.String",
+            ),
+            ("{{ decrypt(key=k, encrypted='!!!') }}", "Illegal base64"),
+            ("{{ decrypt(key=k, encrypted='AAAA') }}", "12 > 3"),
+            (
+                "{{ decrypt(key=k) }}",
+                "The 'decrypt' function expects two arguments 'key' and 'encrypted'.",
+            ),
+        ] {
+            let message = render(template, K).expect_err("must be refused");
+            assert!(message.contains(needle), "{template}\n  got: {message}");
+        }
+
+        // A well-formed 32-byte key that is the WRONG key: GCM's tag check,
+        // not an argument error.
+        let message = render(
+            "{{ decrypt(key='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', encrypted=e) }}",
+            r#"{"e": "jw802WCJ41neKSYhoaevC8MOepbp12q0JVqoduhDIfo0Gv7nMnr2uA=="}"#,
+        )
+        .expect_err("must be refused");
+        assert!(message.contains("Tag mismatch"), "{message}");
+
+        // The accepted neighbours, on both boundaries. All three AES key
+        // sizes round-trip; 3 bytes does not, above.
+        for key in [
+            "AAAAAAAAAAAAAAAAAAAAAA==",                     // 16 bytes
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",             // 24 bytes
+            "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY=", // 32 bytes
+        ] {
+            let cx = format!(r#"{{"k": "{key}"}}"#);
+            assert_eq!(
+                render(
+                    "{{ decrypt(key=k, encrypted=encrypt(key=k, plaintext='hello')) }}",
+                    &cx
+                )
+                .unwrap_or_else(|e| panic!("{key}: {e}")),
+                "hello"
+            );
+        }
+
+        // The bound egret has and Kestra does not, and the shape that needs
+        // it: `encrypt` grows by 4/3 (n + 28) bytes, so NESTING multiplies.
+        // Measured on the shipped path before the bound: 30 levels was 672 KB
+        // in 6 ms and 48 levels 1 686 ms, with 60 levels extrapolating to
+        // ~16 GB. `rewrite`'s nesting cap does not see a call chain and the
+        // output cap sees only the last value.
+        let mut expr = "'seed'".to_string();
+        for _ in 0..60 {
+            expr = format!("encrypt(key=k, plaintext={expr})");
+        }
+        let message =
+            render(&format!("{{{{ {expr} }}}}"), K).expect_err("the chain must be refused");
+        assert!(message.contains("refuses a plaintext over"), "{message}");
+        // The accepted neighbour: a chain that stays inside the ceiling still
+        // answers, so this is a ceiling and not a refusal of nesting.
+        let mut expr = "'seed'".to_string();
+        for _ in 0..8 {
+            expr = format!("encrypt(key=k, plaintext={expr})");
+        }
+        assert!(render(&format!("{{{{ {expr} }}}}"), K).is_ok());
+
+        // And the empty/null short-circuit, which happens BEFORE the key is
+        // looked at -- so a key egret would refuse never gets decoded.
+        assert_eq!(
+            render("{{ encrypt(key='!!!', plaintext='') }}", "{}").unwrap(),
+            ""
+        );
+        assert_eq!(
+            render("{{ encrypt(key='!!!', plaintext=n) }}", r#"{"n": null}"#).unwrap(),
+            ""
+        );
+    }
+
+    /// `tasksWithState` — four refusals that say four different things, and
+    /// the accepted neighbour of each.
+    ///
+    /// Pairs `function-taskswithstate-tasks-not-a-map`, `-missing-argument`,
+    /// `-argument-not-a-string` and `-argument-null`.
+    ///
+    /// The `null` argument and the absent one are **different** errors here
+    /// (an NPE on `toUpperCase` against a `containsKey` check), which is a
+    /// distinction the error-class entries cannot see at all, and it is the
+    /// opposite of what `loopOutputs` does with the same two cases.
+    #[test]
+    fn tasks_with_state_refuses_four_shapes_and_each_says_something_different() {
+        let tasks = r#"{"tasks": {"t1": {"state": "FAILED"}}, "nothing": null}"#;
+        for (template, needle) in [
+            (
+                "{{ tasksWithState() }}",
+                "The 'tasksWithState' function expects an argument 'state'.",
+            ),
+            (
+                "{{ tasksWithState(state=42) }}",
+                "cannot be cast to class java.lang.String",
+            ),
+            (
+                "{{ tasksWithState(state=nothing) }}",
+                "String.toUpperCase()",
+            ),
+        ] {
+            let message = render(template, tasks).expect_err("must be refused");
+            assert!(message.contains(needle), "{template}\n  got: {message}");
+        }
+        let message = render("{{ tasksWithState(state='FAILED') }}", r#"{"tasks": "no"}"#)
+            .expect_err("must be refused");
+        assert!(
+            message.contains("cannot be cast to class java.util.Map"),
+            "{message}"
+        );
+
+        // The accepted neighbours. `tasks` ABSENT and `tasks` NULL are `[]`,
+        // not errors -- only a present non-map throws, which is the boundary
+        // the entry above cannot pin on its own.
+        assert_eq!(ok("{{ tasksWithState(state='FAILED') }}"), "[]");
+        assert_eq!(
+            render("{{ tasksWithState(state='FAILED') }}", r#"{"tasks": null}"#).unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            render("{{ tasksWithState(state='FAILED') }}", tasks).unwrap(),
+            r#"[{"state":"FAILED","taskId":"t1"}]"#
+        );
+    }
+
+    /// `loopOutputs` — six refusals in a fixed order, and the accepted
+    /// neighbour of each.
+    ///
+    /// Pairs `function-loopoutputs-missing-outputs`, `-outputs-null`,
+    /// `-outputs-not-a-list`, `-missing-name`, `-name-null` and
+    /// `-name-not-a-string`.
+    ///
+    /// **The order is the assertion.** `outputs` is validated completely
+    /// before `name` is looked at, so `loopOutputs()` with neither says
+    /// `'outputs'` and never `'name'`; a port that checked both up front would
+    /// pass every error-class entry and give a flow author the wrong sentence.
+    #[test]
+    fn loop_outputs_has_four_guards_in_this_order() {
+        let cx = r#"{"o": [{"outputs": {"x": 1}}], "nothing": null}"#;
+        for (template, needle) in [
+            (
+                "{{ loopOutputs(name='x') }}",
+                "The 'loopOutputs' function expects a non-null argument 'outputs'.",
+            ),
+            (
+                "{{ loopOutputs(outputs=nothing, name='x') }}",
+                "The 'loopOutputs' function expects a non-null argument 'outputs'.",
+            ),
+            (
+                "{{ loopOutputs(outputs=42, name='x') }}",
+                "The 'loopOutputs' function expects 'outputs' to be a list.",
+            ),
+            (
+                "{{ loopOutputs(outputs=o) }}",
+                "The 'loopOutputs' function expects a non-null argument 'name'.",
+            ),
+            (
+                "{{ loopOutputs(outputs=o, name=nothing) }}",
+                "The 'loopOutputs' function expects a non-null argument 'name'.",
+            ),
+            (
+                "{{ loopOutputs(outputs=o, name=42) }}",
+                "The 'loopOutputs' function expects 'name' to be a string.",
+            ),
+        ] {
+            let message = render(template, cx).expect_err("must be refused");
+            assert!(message.contains(needle), "{template}\n  got: {message}");
+        }
+
+        // `outputs` first: with BOTH arguments missing the message is
+        // `outputs`, never `name`.
+        let message = render("{{ loopOutputs() }}", cx).expect_err("must be refused");
+        assert!(message.contains("'outputs'"), "{message}");
+        assert!(!message.contains("'name'"), "{message}");
+
+        // A MAP is not a list, which `try_iter` alone would have accepted --
+        // it would have walked the key names.
+        let message = render(
+            "{{ loopOutputs(outputs=m, name='x') }}",
+            r#"{"m": {"a": 1}}"#,
+        )
+        .expect_err("a map is not a list");
+        assert!(message.contains("to be a list"), "{message}");
+
+        // The accepted neighbours: an empty list, and one whose elements are
+        // every shape the refusals above are not.
+        assert_eq!(
+            render("{{ loopOutputs(outputs=[], name='x') }}", cx).unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            render("{{ loopOutputs(outputs=o, name='x') }}", cx).unwrap(),
+            "[1]"
+        );
+        assert_eq!(
+            render(
+                "{{ loopOutputs(outputs=o, name='x') }}",
+                r#"{"o": [1, {"a": 1}, {"outputs": 5}, {"outputs": {"y": 1}}]}"#
+            )
+            .unwrap(),
+            "[null,null,null,null]"
+        );
+    }
+
+    /// The seven ports answer, and they answer the way the bytecode says.
+    ///
+    /// Not a refusal test: these are the values `oracle/corpus.json` pins
+    /// through the differential, restated here for the three properties the
+    /// differential is weakest on — that `printContext` really is the SAME
+    /// class as `fetchContext`, that the result map of `tasksWithState` has
+    /// its three keys in the engine's own order, and that a task can
+    /// contribute two rows.
+    #[test]
+    fn the_seven_ports_answer_the_way_the_bytecode_does() {
+        assert_eq!(
+            render("{{ printContext() }}", r#"{"x": 1}"#).unwrap(),
+            render("{{ fetchContext() }}", r#"{"x": 1}"#).unwrap()
+        );
+        // `state, value, taskId` -- Kestra's HashMap order for this fixed key
+        // set, reproduced as a constant rather than as a hash function.
+        assert_eq!(
+            render(
+                "{{ tasksWithState(state='FAILED') }}",
+                r#"{"tasks": {"t1": {"child": {"state": "FAILED"}}}}"#
+            )
+            .unwrap(),
+            r#"[{"state":"FAILED","value":"child","taskId":"t1"}]"#
+        );
+        assert_eq!(
+            render(
+                "{{ tasksWithState(state='FAILED') }}",
+                r#"{"tasks": {"t1": {"state": "FAILED", "child": {"state": "FAILED"}}}}"#
+            )
+            .unwrap(),
+            r#"[{"state":"FAILED","taskId":"t1"},{"state":"FAILED","value":"child","taskId":"t1"}]"#
+        );
+        // `toState` is String-or-Enum, so a numeric state never matches --
+        // not even against its own digits.
+        assert_eq!(
+            render(
+                "{{ tasksWithState(state='42') }}",
+                r#"{"tasks": {"t1": {"state": 42}}}"#
+            )
+            .unwrap(),
+            "[]"
+        );
     }
 
     // -----------------------------------------------------------------

@@ -1258,6 +1258,115 @@ pub(super) fn write_java_double(out: &mut String, x: f64) {
 /// Read the module doc before changing a line of this; every setting here is
 /// either a `PebbleEngineFactory` setting being reproduced or a bound on
 /// author-supplied input.
+/// The 27 minijinja filters no Pebble engine has a name for.
+///
+/// Measured, all 27, against `io.kestra:core:2.0.0-rc13` + `CoreExtension` +
+/// `EscaperExtension` + `I18nExtension` — the engine answers
+/// `Filter [x] does not exist.` for every one of them, and egret answered
+/// before this. `oracle/name-surface.txt` is the fixture and
+/// [`the_built_in_surface_matches_the_engines`] asserts it.
+///
+/// **`escape` is deliberately not here**: Pebble's `EscaperExtension`
+/// registers that name too, so removing it would refuse a filter Kestra
+/// accepts. Its *semantics* differ (Pebble takes a `strategy` argument); that
+/// is a divergence row in the fixture, not a removal.
+const MINIJINJA_ONLY_FILTERS: &[&str] = &[
+    "safe",
+    "e",
+    "count",
+    "dictsort",
+    "items",
+    "lines",
+    "d",
+    "round",
+    "int",
+    "float",
+    "attr",
+    "min",
+    "max",
+    "list",
+    "bool",
+    "batch",
+    "sum",
+    "select",
+    "reject",
+    "selectattr",
+    "rejectattr",
+    "map",
+    "groupby",
+    "unique",
+    "chain",
+    "zip",
+    "pprint",
+];
+
+/// The three minijinja globals no Pebble engine has a name for.
+///
+/// minijinja's whole global inventory under this workspace's feature set is
+/// `range`, `dict`, `debug`, `namespace` — derived from the lock file's
+/// `defaults::build_globals`, not from a list. `range` is Kestra's too and
+/// `super::functions` overrides it; the other three do not exist in Pebble
+/// (`Function or Macro [dict] does not exist.`, measured).
+///
+/// `debug` was already removed in Task 3 because it dumps the whole template
+/// state; it is here as well now, for the ordinary reason.
+const MINIJINJA_ONLY_GLOBALS: &[&str] = &["dict", "debug", "namespace"];
+
+/// The 32 minijinja tests no Pebble engine has a name for.
+///
+/// The engine carries eight (`defined empty even iterable json map null odd`)
+/// and minijinja carries 42. Four names overlap and stay — removing `defined`
+/// would refuse `{{ x is defined }}`, which Kestra accepts — and the other 32
+/// go.
+///
+/// **Six of minijinja's 38 non-overlapping test names are not in this list and
+/// need no removal: `==`, `!=`, `<`, `<=`, `>`, `>=`.** minijinja's `is`
+/// operator parses an *identifier*, so those names are unreachable from
+/// template syntax at all — `{{ x is ==(1) }}` is a parse error with them
+/// registered and without them. Keeping them out of the list keeps every row
+/// in `oracle/name-surface.txt` probeable through `render_str`, which is what
+/// makes the fixture an assertion rather than a claim.
+///
+/// The four that stay are **not** semantically identical, and the fixture says
+/// so: Pebble's `even`/`odd` throw a `ClassCastException` on a non-number
+/// where minijinja answers `false`, and Pebble's `iterable` is `false` for a
+/// String where minijinja's is `true`. Porting the `is` surface is not W2's —
+/// no task was given the eight — and those rows carry the reason.
+const MINIJINJA_ONLY_TESTS: &[&str] = &[
+    "undefined",
+    "none",
+    "safe",
+    "escaped",
+    "boolean",
+    "divisibleby",
+    "number",
+    "integer",
+    "int",
+    "float",
+    "string",
+    "sequence",
+    "mapping",
+    "startingwith",
+    "endingwith",
+    "lower",
+    "upper",
+    "sameas",
+    "eq",
+    "equalto",
+    "ne",
+    "lt",
+    "lessthan",
+    "le",
+    "gt",
+    "greaterthan",
+    "ge",
+    "in",
+    "true",
+    "false",
+    "filter",
+    "test",
+];
+
 pub fn environment() -> Environment<'static> {
     let mut env = Environment::new();
 
@@ -1289,22 +1398,54 @@ pub fn environment() -> Environment<'static> {
     // found it; every earlier filter's value happened not to.
     env.set_keep_trailing_newline(true);
 
-    // Two minijinja built-ins that have no Pebble counterpart and both dump
-    // internal state: `debug` is `format!("{state:#?}")`, which recovers the
-    // whole template context plus an inventory of every registered filter,
-    // test and global; `pprint` is the `Debug` repr of a value. A flow author
-    // is not an anonymous caller, but a rendered `Property` can end up in a
-    // log, an output or a downstream task's arguments, and neither of these
-    // exists in the language being ported -- removing them costs nothing.
+    // ------------------------------------------------------------------
+    // W2 Task 8: the built-in surface, reconciled.
+    // ------------------------------------------------------------------
     //
-    // The rest of minijinja's global inventory is `range`, `dict` and
-    // `namespace`. **`range` is Kestra's too**, and W2 Task 7 overrides it in
-    // `super::functions` -- inclusive where minijinja's is exclusive, with
-    // named arguments and a 1 000 000-element cap. `dict` and `namespace`
-    // stay: neither exists in Pebble, but neither leaks anything either, and
-    // reconciling the remaining built-in surface is Task 8's.
-    env.remove_global("debug");
-    env.remove_filter("pprint");
+    // **egret binds a name the engine does not, and the name RESOLVES.** That
+    // is the trap this package has met four times -- `string` and `indent`
+    // (Task 4), `range` (Task 7) and `replace` (Task 8) -- and each time what
+    // hid it was that minijinja *answered* instead of erroring. Task 4 found
+    // `string` only because one corpus entry happened to disagree; nothing
+    // would have found it otherwise.
+    //
+    // Those four are collisions, where both sides have the name. This is the
+    // other half: **62 names minijinja binds that the engine has no
+    // counterpart for at all** -- 27 filters, 3 globals and 32 tests -- every
+    // one of which egret answered and Kestra refuses with
+    // `Filter [x] does not exist.` / `Function or Macro [x] does not exist.` /
+    // `Test [x] does not exist.`. Measured, all 62, through the harness (`oracle/name-surface.txt` is the fixture and it is asserted
+    // bidirectionally by `the_built_in_surface_matches_the_engines`).
+    //
+    // Over-acceptance is the one divergence this crate's rules do not allow:
+    // a flow that renders here and fails on Kestra is exactly the outcome W2
+    // exists to prevent, and it fails *later*, in production, rather than at
+    // authoring time. So they go.
+    //
+    // What is NOT removed, and why:
+    //
+    // - the four names both sides have (`defined`, `even`, `odd`, `iterable`)
+    //   stay, with their semantic differences recorded as divergent rows --
+    //   removing them would refuse a construct Kestra accepts, which is the
+    //   opposite error;
+    // - `escape` stays: Pebble's `EscaperExtension` registers it too;
+    // - `kestra_null_coalesce`, `kestra_undefined_coalesce` and `kestra_is_in`
+    //   stay: `super::rewrite` compiles Kestra's `??`, `???` and `isIn`
+    //   operators into calls to them, so they are a seam this crate cannot do
+    //   without. They are egret-only and the fixture says so.
+    //
+    // `pprint` and `debug` were already removed in Task 3 for a different
+    // reason (both dump internal state); they are two of the 62 and are now
+    // removed for this reason as well.
+    for name in MINIJINJA_ONLY_FILTERS {
+        env.remove_filter(name);
+    }
+    for name in MINIJINJA_ONLY_TESTS {
+        env.remove_test(name);
+    }
+    for name in MINIJINJA_ONLY_GLOBALS {
+        env.remove_global(name);
+    }
 
     // The port of `JsonWriter.write(Object)` -- null, booleans and containers.
     // See [`json_writer_formatter`] for the four-row table; three of the four
@@ -1523,6 +1664,121 @@ mod tests {
 
     fn render(template: &str, ctx: JsonValue) -> Result<String, RenderError> {
         render_str(template, &cx(ctx))
+    }
+
+    // -----------------------------------------------------------------
+    // W2 Task 8: the name surface
+    // -----------------------------------------------------------------
+
+    /// `oracle/name-surface.txt`, asserted **bidirectionally by probing** —
+    /// not by reading a registry, which minijinja does not expose for filters
+    /// and tests anyway.
+    ///
+    /// The one thing this closes: a name minijinja binds that Kestra has no
+    /// counterpart for **resolves and answers** here, so a flow that renders
+    /// in egret fails on Kestra — later, in production, rather than at
+    /// authoring time. Nothing else in this crate can see that: the oracle
+    /// only renders expressions somebody thought to write down, and nobody
+    /// writes `{{ x | groupby(…) }}` into a corpus for an engine that has
+    /// never had the filter.
+    ///
+    /// Verified by deliberate breakage before committing, five ways, each
+    /// failing by name: deleting a name from `MINIJINJA_ONLY_FILTERS` (egret
+    /// binds what the file says it does not), adding one (egret refuses what
+    /// the file says it binds), flipping an `engine` column without a reason,
+    /// adding a reason to an agreeing row, and deleting a row.
+    #[test]
+    fn the_built_in_surface_matches_the_engines() {
+        const FIXTURE: &str = include_str!("../../oracle/name-surface.txt");
+
+        let mut counts = std::collections::BTreeMap::new();
+        let mut rows = 0usize;
+        for line in FIXTURE.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert_eq!(
+                fields.len(),
+                5,
+                "every row is `kind name engine egret reason`, tab-separated: {line:?}"
+            );
+            let (kind, name, engine, egret, reason) =
+                (fields[0], fields[1], fields[2], fields[3], fields[4]);
+            rows += 1;
+            if engine == "yes" {
+                *counts.entry(kind).or_insert(0usize) += 1;
+            }
+
+            // A divergence must be explained, and so must a `no`/`no` row --
+            // that row exists only because egret REMOVED a minijinja default,
+            // which is a decision and not an absence. Only "both bind it" is
+            // allowed to say nothing. The same rule `refusal-sets.txt`
+            // carries.
+            if engine == "yes" && egret == "yes" {
+                assert_eq!(
+                    reason, "-",
+                    "{kind} {name}: both sides bind it, so the reason column must be `-`"
+                );
+            } else {
+                assert_ne!(
+                    reason, "-",
+                    "{kind} {name}: the two sides differ and the row carries no reason"
+                );
+            }
+
+            // The probe. A name egret does not bind produces minijinja's
+            // `unknown filter` / `unknown function` / `unknown test`; anything
+            // else -- a value, or a complaint about arguments -- means it is
+            // bound.
+            let (template, unknown) = match kind {
+                "filter" => (format!("{{{{ 'x' | {name} }}}}"), "unknown filter"),
+                "function" => (format!("{{{{ {name}() }}}}"), "unknown function"),
+                "test" => (format!("{{{{ 'x' is {name} }}}}"), "unknown test"),
+                other => panic!("unknown kind {other:?} in name-surface.txt"),
+            };
+            let bound = match render_str(&template, &RenderContext::new()) {
+                Ok(_) => true,
+                Err(e) => !e.to_string().contains(unknown),
+            };
+            assert_eq!(
+                bound,
+                egret == "yes",
+                "{kind} {name}: `oracle/name-surface.txt` says egret {}bind it, and it does {}",
+                if egret == "yes" { "" } else { "does not " },
+                if bound { "" } else { "not" },
+            );
+        }
+
+        // A row cannot be deleted to make a failure go away: these three are
+        // `host.Oracle dump`'s own counts for the built engine, plus Pebble's
+        // core/escaper/i18n extensions.
+        assert_eq!(rows, 177, "row count");
+        assert_eq!(counts.get("filter"), Some(&63), "engine filter count");
+        assert_eq!(counts.get("function"), Some(&37), "engine function count");
+        assert_eq!(counts.get("test"), Some(&8), "engine test count");
+    }
+
+    /// The six operator-spelled test names minijinja registers are unreachable
+    /// from template syntax, which is why they are not in
+    /// [`MINIJINJA_ONLY_TESTS`] and have no fixture row.
+    ///
+    /// Without this, "unreachable" is prose, and the next reader who notices
+    /// `==` in minijinja's test map has no way to tell a considered omission
+    /// from an oversight.
+    #[test]
+    fn the_operator_spelled_tests_are_unreachable_rather_than_removed() {
+        for name in ["==", "!=", "<", "<=", ">", ">="] {
+            let message = render_str(
+                &format!("{{{{ 'x' is {name}(1) }}}}"),
+                &RenderContext::new(),
+            )
+            .expect_err("must not parse");
+            assert!(
+                message.to_string().contains("expected identifier"),
+                "{name}: {message}"
+            );
+        }
     }
 
     /// A map past [`ORDERED_MAP_INDEX_THRESHOLD`] answers the same questions

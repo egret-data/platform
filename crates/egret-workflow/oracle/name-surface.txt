@@ -1,0 +1,236 @@
+# The NAME SURFACE: every filter, function and test name any of the three
+# sources binds -- the engine, egret, and minijinja's own defaults.
+#
+# W2 Task 8. Four times this package has found a name minijinja binds that
+# Kestra also binds, RESOLVING to minijinja's answer instead of erroring as
+# unknown -- `string` and `indent` (Task 4), `range` (Task 7), `replace`
+# (Task 8). Each was invisible because minijinja ANSWERED. This file is the
+# other half of that question and the fixture that keeps it answered: which
+# names does each side have at all?
+#
+# `runners::env::the_built_in_surface_matches_the_engines` asserts it
+# BIDIRECTIONALLY, by probing egret through `render_str` rather than by reading
+# a registry:
+#
+#   - a name the file says egret binds that egret does not fails, by name;
+#   - a name the file says egret does not bind that egret does fails, by name;
+#   - a row whose two columns DIFFER must carry a reason, and so must a
+#     `no`/`no` row, which exists only because egret REMOVED a minijinja
+#     default -- so neither a gap nor a removal can be introduced or undone
+#     silently;
+#   - the engine-side counts must equal `host.Oracle dump`'s (63 filters,
+#     37 functions, 8 tests), so a row cannot be deleted to make a failure go
+#     away.
+#
+# **The `no`/`no` rows are why this file is longer than either engine's
+# inventory, and they were added because a mutant survived without them.**
+# The first cut listed only the names one side or the other binds, so
+# re-registering a removed minijinja filter (`groupby`) produced no row and no
+# failure -- an over-acceptance the fixture existed to catch, invisible to the
+# fixture. Every removed default now has a row.
+#
+# **This file is about NAME PRESENCE, not about semantics.** A `-` row says
+# both engines have the name; it does NOT say they agree about what it does.
+# The names both sides have divide into three groups:
+#
+#   - Kestra's own 35 filters and 34 functions, differentially verified by
+#     `corpus.json` -- that is what W2 Tasks 4-8 were;
+#   - `indent`, `string`, `range` and `replace`, where egret OVERRIDES
+#     minijinja's built-in with Kestra's semantics for exactly this reason;
+#   - seventeen more Pebble-core filter names (`abs capitalize default escape
+#     first format join last length lower reverse slice sort split title trim
+#     upper`) plus four test names (`defined even iterable odd`), where egret
+#     is running MINIJINJA's semantics and no task has compared them. See
+#     `oracle/README.md`, "The name surface, and what W2 did not compare".
+#
+# Format: `<kind> <name> <engine> <egret> <reason>`, tab-separated.
+#   kind    filter | function | test
+#   engine  does io.kestra:core:2.0.0-rc13 + Pebble 4.1.2 bind this name --
+#           MEASURED, by instantiating CoreExtension, EscaperExtension,
+#           I18nExtension and io.kestra.core.runners.pebble.Extension and
+#           reading their getFilters()/getFunctions()/getTests() maps
+#   egret   does egret bind it, after `runners::env::environment()`
+#   reason  `-` when both sides bind it; why not otherwise
+#
+# Six of minijinja's test names -- `==`, `!=`, `<`, `<=`, `>`, `>=` -- have no
+# row: minijinja's `is` operator parses an identifier, so they are unreachable
+# from template syntax with or without them registered, and a row nothing can
+# probe is a claim rather than an assertion. That is pinned by
+# `the_operator_spelled_tests_are_unreachable_rather_than_removed`.
+filter	abbreviate	yes	no	Pebble core; W2 ported the 35 filters KESTRA registers, and Pebble's own 28 were never in a batch
+filter	abs	yes	yes	-
+filter	attr	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	base64decode	yes	no	Pebble core; never in a W2 batch
+filter	base64encode	yes	no	Pebble core; never in a W2 batch
+filter	batch	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	bool	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	capitalize	yes	yes	-
+filter	chain	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	chunk	yes	yes	-
+filter	className	yes	yes	-
+filter	count	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	d	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	date	yes	yes	-
+filter	dateAdd	yes	yes	-
+filter	default	yes	yes	-
+filter	dictsort	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	distinct	yes	yes	-
+filter	e	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	endsWith	yes	yes	-
+filter	escape	yes	yes	-
+filter	escapeChar	yes	yes	-
+filter	first	yes	yes	-
+filter	flatten	yes	yes	-
+filter	float	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	format	yes	yes	-
+filter	groupby	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	indent	yes	yes	-
+filter	int	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	items	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	join	yes	yes	-
+filter	jq	yes	yes	-
+filter	keys	yes	yes	-
+filter	last	yes	yes	-
+filter	length	yes	yes	-
+filter	lines	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	list	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	lower	yes	yes	-
+filter	map	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	max	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	md5	yes	yes	-
+filter	merge	yes	no	Pebble core; never in a W2 batch
+filter	min	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	nindent	yes	yes	-
+filter	nl2br	yes	no	Pebble core; never in a W2 batch
+filter	number	yes	yes	-
+filter	numberformat	yes	no	Pebble core; never in a W2 batch
+filter	pprint	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	raw	yes	no	Pebble core; egret handles raw REGIONS in `env::replace_raw_tags`, but not the filter
+filter	regexExtract	yes	yes	-
+filter	regexMatch	yes	yes	-
+filter	regexReplace	yes	yes	-
+filter	reject	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	rejectattr	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	replace	yes	yes	-
+filter	reverse	yes	yes	-
+filter	round	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	rsort	yes	no	Pebble core; never in a W2 batch
+filter	safe	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	select	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	selectattr	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	sha1	yes	yes	-
+filter	sha256	yes	no	Pebble core. Kestra's own Md5/Sha1/Sha512 filters all carry a copy-pasted 'sha256' javadoc and register three names; the fourth name comes from Pebble instead, and no W2 task owned it
+filter	sha512	yes	yes	-
+filter	slice	yes	yes	-
+filter	slugify	yes	yes	-
+filter	sort	yes	yes	-
+filter	split	yes	yes	-
+filter	startsWith	yes	yes	-
+filter	string	yes	yes	-
+filter	substringAfter	yes	yes	-
+filter	substringAfterLast	yes	yes	-
+filter	substringBefore	yes	yes	-
+filter	substringBeforeLast	yes	yes	-
+filter	sum	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	timestamp	yes	yes	-
+filter	timestampMicro	yes	yes	-
+filter	timestampMilli	yes	yes	-
+filter	timestampNano	yes	yes	-
+filter	title	yes	yes	-
+filter	toIon	yes	yes	-
+filter	toJson	yes	yes	-
+filter	trim	yes	yes	-
+filter	unique	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+filter	upper	yes	yes	-
+filter	urldecode	yes	yes	-
+filter	urlencode	yes	no	Pebble core; Kestra registers `urldecode` only, and egret has that one
+filter	values	yes	yes	-
+filter	yaml	yes	yes	-
+filter	zip	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
+function	dayOfMonth	yes	yes	-
+function	dayOfWeek	yes	yes	-
+function	debug	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
+function	decrypt	yes	yes	-
+function	dict	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
+function	encrypt	yes	yes	-
+function	env	yes	yes	-
+function	errorLogs	no	yes	egret binds it to a W2 Task 8 REFUSAL; see `render`
+function	fetchContext	yes	yes	-
+function	fileExists	yes	yes	-
+function	fileSize	yes	yes	-
+function	fileURI	yes	yes	-
+function	fromIon	yes	yes	-
+function	fromJson	yes	yes	-
+function	hourOfDay	yes	yes	-
+function	http	yes	yes	-
+function	i18n	yes	no	Pebble core; a message bundle, which egret has no counterpart for
+function	id	yes	yes	-
+function	isDayWeekInMonth	yes	yes	-
+function	isFileEmpty	yes	yes	-
+function	isLastWorkingDay	yes	yes	-
+function	isPublicHoliday	yes	yes	-
+function	isWeekend	yes	yes	-
+function	kestra_is_in	no	yes	egret-only by construction: `super::rewrite` compiles Kestra's `isIn` operator into a call to it
+function	kestra_null_coalesce	no	yes	egret-only by construction: `super::rewrite` compiles Kestra's `??` into a call to it, so it is a seam and not a language name
+function	kestra_undefined_coalesce	no	yes	egret-only by construction: `super::rewrite` compiles Kestra's `???` into a call to it
+function	ksuid	yes	yes	-
+function	kv	yes	yes	-
+function	loopOutputs	yes	yes	-
+function	max	yes	no	Pebble core; never in a W2 batch
+function	min	yes	no	Pebble core; never in a W2 batch
+function	monthOfYear	yes	yes	-
+function	namespace	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_GLOBALS` removes it -- the engine answers `Function or Macro [x] does not exist.`
+function	nanoId	yes	yes	-
+function	now	yes	yes	-
+function	printContext	yes	yes	-
+function	randomInt	yes	yes	-
+function	randomPort	yes	yes	-
+function	range	yes	yes	-
+function	read	yes	yes	-
+function	render	no	yes	egret binds it to a W2 Task 8 REFUSAL. The built engine does not carry it (`@Inject @Nullable`, guarded), so both sides fail and only the message differs -- egret's names the function and W3
+function	renderOnce	no	yes	egret binds it to a W2 Task 8 REFUSAL; see `render`
+function	secret	yes	yes	-
+function	subflow	no	yes	egret binds it to a W2 Task 8 REFUSAL; the owner in the message is W6, which the programme spec names
+function	tasksWithState	yes	yes	-
+function	uuid	yes	yes	-
+function	yaml	yes	yes	-
+test	boolean	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	defined	yes	yes	-
+test	divisibleby	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	empty	yes	no	the `is` surface was never given to a W2 task; Pebble's own
+test	endingwith	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	eq	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	equalto	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	escaped	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	even	yes	yes	-
+test	false	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	filter	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	float	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	ge	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	greaterthan	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	gt	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	in	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	int	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	integer	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	iterable	yes	yes	-
+test	json	yes	no	the `is` surface was never given to a W2 task. This is the ONE test `Extension.getTests()` registers, so it is the only Kestra-owned name in this column
+test	le	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	lessthan	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	lower	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	lt	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	map	yes	no	the `is` surface was never given to a W2 task; Pebble's own
+test	mapping	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	ne	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	none	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	null	yes	no	the `is` surface was never given to a W2 task; Pebble's own
+test	number	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	odd	yes	yes	-
+test	safe	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	sameas	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	sequence	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	startingwith	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	string	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	test	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	true	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	undefined	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
+test	upper	no	no	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`

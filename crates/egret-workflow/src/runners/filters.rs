@@ -138,6 +138,11 @@ pub(super) fn register(env: &mut Environment<'static>) {
     env.add_filter("regexMatch", regex_match);
     env.add_filter("regexReplace", regex_replace);
     env.add_filter("number", number);
+    // W2 Task 8: OVERRIDES minijinja's own `replace`, which takes `(old, new)`
+    // where Pebble's takes one map. The fourth name in this crate that
+    // resolved to minijinja's answer instead of erroring as unknown -- see
+    // [`replace`].
+    env.add_filter("replace", replace);
     env.add_filter("sha1", sha1);
     env.add_filter("sha512", sha512);
     env.add_filter("slugify", slugify);
@@ -435,6 +440,155 @@ fn class_name(value: MjValue) -> Result<MjValue, MjError> {
         return Ok(MjValue::from(()));
     }
     Ok(MjValue::from(java_class_name(&value)))
+}
+
+/// `replace` — **Pebble's own built-in**, not Kestra's, and this override is
+/// W2 Task 8's G4 ruling.
+///
+/// # Why a filter nobody assigned to a batch ends up here
+///
+/// Three facts, each measured rather than reasoned:
+///
+/// 1. `io.kestra.core.runners.pebble.filters.ReplaceFilter` **exists** in
+///    `core-2.0.0-rc13.jar` — it has a `regexp` argument and a
+///    `replace_pairs` one — and `Extension.getFilters()` does **not** register
+///    it. `host.Oracle dump`'s 35 Kestra filter names do not include
+///    `replace`, and `{{ s | replace({'a':'b'}, regexp=true) }}` answers
+///    `The following named argument does not exist: regexp`, which is the
+///    proof: the class the engine is running is Pebble's, whose only argument
+///    is `replace_pairs`.
+/// 2. so on Kestra's side `replace` is
+///    `io.pebbletemplates.pebble.extension.core.ReplaceFilter`: **one**
+///    argument, a `Map`, applied as a chain of literal `String.replace` calls;
+/// 3. and on egret's side, before this, it was **minijinja's** `replace`,
+///    which takes `(old, new)`.
+///
+/// The two signatures are not compatible in either direction — Kestra refuses
+/// `replace('a','b')` (`The argument at position 2 is not allowed`) and
+/// minijinja refuses `replace({'a':'b'})` — so leaving it was not cosmetic. It
+/// is the same trap as `indent`, `string` and `range`, and it is the fourth.
+///
+/// # What it does
+///
+/// `input == null` → null. `args.get("replace_pairs") == null` → a
+/// `PebbleException` (a **null check**, so passing `replace_pairs=null`
+/// explicitly says the same thing as omitting it). A non-`Map` is a
+/// `ClassCastException`. Then `input.toString()` — Java's, so a list is
+/// `[1, 2]` and a map is `{a=1}`, which is why this goes through
+/// [`super::env::kestra_to_string`] and not `to_string` — and one literal
+/// `String.replace(key.toString(), value.toString())` per entry, **in the
+/// map's iteration order**, each seeing the previous one's output:
+/// `'ab' | replace({'a':'b','b':'c'})` is `cc`, not `bc`.
+///
+/// A null *value* is an NPE on its `toString()`; a null *key* cannot occur,
+/// since neither JSON nor a Pebble map literal can carry one.
+///
+/// An empty key is Java's `String.replace("", x)` — `'ab'` becomes `-a-b-` —
+/// and Rust's `str::replace` agrees, which is measured here rather than
+/// assumed (`filter-replace-empty-key`).
+///
+/// # One bound Kestra does not have, and the arithmetic for it
+///
+/// Pebble's `ReplaceFilter` is an unguarded loop of `String.replace`
+/// (`javap -p -c io.pebbletemplates.pebble.extension.core.ReplaceFilter`: no
+/// `RenderLimits`, no length check, nothing) and it grows **multiplicatively**
+/// on author-controlled input in two independent ways:
+///
+/// - one pair, `'x' x 1e6 | replace({'x': <a 1 MiB context string>})`, is
+///   1e6 x 1e6 = 1 TB allocated inside a single `String.replace`;
+/// - and pairs **chain**, each seeing the last one's output, so
+///   `{'a':'bb','b':'cc', …}` over the alphabet is `2^25` times the input from
+///   a 25-entry map literal that fits in a template a hundred bytes wide.
+///
+/// So it is bounded here, per the C7 ruling ("a resource-exhaustion vector is
+/// not a behaviour to port"), against the ceiling that already exists rather
+/// than a second invented one: [`super::env::MAX_OUTPUT_BYTES`], 1 MiB, the
+/// same limit `indent`'s padding is measured against. The check is the
+/// **predicted** length — `len - matches x needle + matches x replacement` —
+/// computed before each `replace` call, because a check afterwards is a check
+/// on a string that has already been allocated. `filter-replace-past-the-cap`
+/// is the divergence; Kestra answers it, slowly and then not at all.
+/// The total bytes one `replace` call may scan, across all its pairs.
+///
+/// 1 024 x [`super::env::MAX_OUTPUT_BYTES`] = 1 GiB. **Measured, not chosen**:
+/// 20 000 pairs over a 500 KB subject is 10 GiB of scanning and takes
+/// 2 825 ms on the machine this was written on, i.e. 0.28 ms per MiB scanned,
+/// so 1 GiB is about 290 ms — the same order as the crate's other
+/// author-facing ceilings, and far above any real substitution map.
+///
+/// It is a **separate** axis from the growth check, which is why it is a
+/// separate number. The growth check bounds `|out|`; nothing bounds the number
+/// of pairs, which comes out of a context map, and a pair that *shrinks* the
+/// subject keeps `|out|` under the growth cap forever.
+const MAX_REPLACE_SCAN_BYTES: usize = 1024 * super::env::MAX_OUTPUT_BYTES;
+
+fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    if is_java_null(&value) {
+        return Ok(MjValue::from(()));
+    }
+    let args = Args::new(rest);
+    let pairs = args
+        .get("replace_pairs", 0)
+        .unwrap_or_else(|| MjValue::from(()));
+    if is_java_null(&pairs) {
+        return Err(pebble_error("The argument 'replace_pairs' is required."));
+    }
+    if pairs.kind() != ValueKind::Map {
+        return Err(pebble_error(format!(
+            "class {} cannot be cast to class java.util.Map",
+            java_class_name(&pairs)
+        )));
+    }
+
+    let mut out = super::env::kestra_to_string(&value);
+    let keys: Vec<MjValue> = pairs
+        .try_iter()
+        .map(|keys| keys.collect())
+        .unwrap_or_default();
+    let mut scanned = 0usize;
+    for key in keys {
+        let Ok(replacement) = pairs.get_item(&key) else {
+            continue;
+        };
+        if is_java_null(&replacement) {
+            return Err(pebble_error(
+                "Cannot invoke \"Object.toString()\" because the return value of \
+                 \"java.util.Map$Entry.getValue()\" is null",
+            ));
+        }
+        let needle = super::env::kestra_to_string(&key);
+        let replacement = super::env::kestra_to_string(&replacement);
+        // **Checked BEFORE the allocation, not after it.** See the note on
+        // the multiplicative blow-up below: a single `String.replace` can
+        // allocate `matches x replacement` bytes, so measuring `out.len()`
+        // afterwards is measuring a string that has already been built.
+        // The SECOND axis, and the one the growth check above cannot see:
+        // the loop is `pairs x |out|`, and a shrinking pair keeps `|out|`
+        // under the growth cap while the pair count stays the author's.
+        // Found by attacking the growth check rather than by reasoning about
+        // it -- 20 000 pairs over a 500 KB subject is 2 825 ms, and a context
+        // map is not bounded at 20 000.
+        scanned = scanned.saturating_add(out.len());
+        if scanned > MAX_REPLACE_SCAN_BYTES {
+            return Err(pebble_error(format!(
+                "the 'replace' filter would scan more than {MAX_REPLACE_SCAN_BYTES} bytes"
+            )));
+        }
+        let matches = out.matches(&needle).count();
+        let grown = out
+            .len()
+            .saturating_sub(matches.saturating_mul(needle.len()))
+            .saturating_add(matches.saturating_mul(replacement.len()));
+        if grown > super::env::MAX_OUTPUT_BYTES {
+            return Err(pebble_error(format!(
+                "the 'replace' filter would produce {grown} bytes, over egret's \
+                 {} byte limit",
+                super::env::MAX_OUTPUT_BYTES
+            )));
+        }
+        out = out.replace(&needle, &replacement);
+    }
+    Ok(MjValue::from(out))
 }
 
 /// `DistinctFilter` — `list.stream().distinct()`.
@@ -2758,6 +2912,187 @@ mod tests {
 
     fn err(template: &str, context: &str) -> String {
         render(template, context).expect_err("must fail")
+    }
+
+    // -- W2 Task 8: `replace` ------------------------------------------
+
+    /// `replace` is **Pebble's** map-taking filter, not minijinja's
+    /// `(old, new)` one, and the two are incompatible in both directions.
+    ///
+    /// Pairs `filter-replace-two-positional-arguments`,
+    /// `filter-replace-missing-argument`, `filter-replace-pairs-not-a-map` and
+    /// `filter-replace-null-replacement`.
+    ///
+    /// # What fails when the override is deleted
+    ///
+    /// Not `unknown filter` — that is the whole point, and it is why this is
+    /// the fourth name in this crate to need a test of this shape. With the
+    /// `add_filter("replace", replace)` line removed, minijinja's own filter
+    /// answers: `{{ 'ab' | replace('a','b') }}` renders `bb` where Kestra
+    /// throws, and `{{ 'ab' | replace({'a':'b'}) }}` complains about a missing
+    /// second argument rather than doing the substitution. Both assertions
+    /// below fail on that build, which is what makes them the test and not the
+    /// corpus entry.
+    #[test]
+    fn replace_is_pebbles_map_taking_filter_not_minijinjas_pair() {
+        // The accepted shape: one map, positional or named.
+        assert_eq!(
+            ok("{{ s | replace({'a': 'b'}) }}", r#"{"s": "banana"}"#),
+            "bbnbnb"
+        );
+        assert_eq!(
+            ok(
+                "{{ s | replace(replace_pairs={'a': 'b'}) }}",
+                r#"{"s": "banana"}"#
+            ),
+            "bbnbnb"
+        );
+
+        // minijinja's shape, which Kestra refuses. egret refuses it too --
+        // for a different reason (a String is not a Map, where Pebble's own
+        // arity check fires first), but it refuses.
+        let message = err("{{ s | replace('a', 'b') }}", r#"{"s": "banana"}"#);
+        assert!(
+            message.contains("cannot be cast to class java.util.Map"),
+            "minijinja's own replace would have answered `bbnbnb` here: {message}"
+        );
+        assert!(
+            err("{{ s | replace }}", r#"{"s": "banana"}"#)
+                .contains("The argument 'replace_pairs' is required."),
+            "{}",
+            err("{{ s | replace }}", r#"{"s": "banana"}"#)
+        );
+        assert!(
+            err("{{ s | replace('a') }}", r#"{"s": "banana"}"#)
+                .contains("cannot be cast to class java.util.Map"),
+            "{}",
+            err("{{ s | replace('a') }}", r#"{"s": "banana"}"#)
+        );
+        // An explicit null `replace_pairs` says the same thing as an absent
+        // one: Pebble's guard is `get(...) == null`, not `containsKey`.
+        assert!(
+            err("{{ s | replace(n) }}", r#"{"s": "ab", "n": null}"#)
+                .contains("The argument 'replace_pairs' is required."),
+            "{}",
+            err("{{ s | replace(n) }}", r#"{"s": "ab", "n": null}"#)
+        );
+        assert!(
+            err("{{ s | replace({'a': n}) }}", r#"{"s": "abc", "n": null}"#)
+                .contains("because the return value of \"java.util.Map$Entry.getValue()\" is null"),
+            "{}",
+            err("{{ s | replace({'a': n}) }}", r#"{"s": "abc", "n": null}"#)
+        );
+
+        // The input goes through Java's `toString`, not minijinja's Display:
+        // `None`/`True` would be the giveaway, and a list is `[1, 2]`.
+        assert_eq!(
+            ok("{{ l | replace({'1': 'x'}) }}", r#"{"l": [1, 2]}"#),
+            "[x, 2]"
+        );
+        assert_eq!(
+            ok("{{ m | replace({'1': 'x'}) }}", r#"{"m": {"a": 1}}"#),
+            "{a=x}"
+        );
+        assert_eq!(
+            ok("{{ b | replace({'true': 'y'}) }}", r#"{"b": true}"#),
+            "y"
+        );
+        // A null INPUT is null, which is every Pebble filter's first line.
+        assert_eq!(
+            ok("<{{ n | replace({'a': 'b'}) }}>", r#"{"n": null}"#),
+            "<>"
+        );
+
+        // Pairs chain: each sees the previous one's output, so this is `cc`
+        // and not `bc`.
+        assert_eq!(
+            ok("{{ s | replace({'a': 'b', 'b': 'c'}) }}", r#"{"s": "ab"}"#),
+            "cc"
+        );
+        // Java's `String.replace("", x)`, which Rust's `str::replace` agrees
+        // with -- measured rather than assumed.
+        assert_eq!(
+            ok("{{ s | replace({'': '-'}) }}", r#"{"s": "ab"}"#),
+            "-a-b-"
+        );
+    }
+
+    /// The bound `replace` has and Kestra does not — and the two shapes that
+    /// need it.
+    ///
+    /// No corpus entry: Kestra answers both of these, slowly and then not at
+    /// all, so a golden would be a hang or an OOM. That is the C7 case
+    /// (`oracle/README.md`, "A resource-exhaustion vector is not a behaviour
+    /// to port"), and it is a unit test instead.
+    ///
+    /// Verified by REMOVING the bound, not by asserting it: with the
+    /// `grown > MAX_OUTPUT_BYTES` check deleted, the first case allocates
+    /// ~4 GB inside one `String::replace` and the second runs for minutes.
+    #[test]
+    fn replace_is_bounded_where_pebbles_own_loop_is_not() {
+        // One pair, multiplying: 65 536 needles x a 65 536-byte replacement.
+        let wide = "x".repeat(1 << 16);
+        let cx = format!(
+            r#"{{"s": {}, "r": {}}}"#,
+            serde_json::to_string(&wide).unwrap(),
+            serde_json::to_string(&wide).unwrap()
+        );
+        let message = render("{{ s | replace({'x': r}) }}", &cx).expect_err("must be refused");
+        assert!(message.contains("over egret's"), "{message}");
+
+        // Pairs CHAINING, which no single-step check would see: each entry
+        // doubles the string, so twenty-five entries are 2^25 times the input
+        // from a template a hundred bytes wide.
+        let alphabet = "abcdefghijklmnopqrstuvwxyz";
+        let pairs: Vec<String> = alphabet
+            .chars()
+            .zip(alphabet.chars().skip(1))
+            .map(|(from, to)| format!("'{from}': '{to}{to}'"))
+            .collect();
+        let template = format!("{{{{ s | replace({{{}}}) }}}}", pairs.join(", "));
+        let message =
+            render(&template, r#"{"s": "aaaaaaaaaaaaaaaa"}"#).expect_err("must be refused");
+        assert!(message.contains("over egret's"), "{message}");
+
+        // The SECOND axis, which the growth check above does not cover and
+        // which attacking that check is what found: a pair that SHRINKS the
+        // subject keeps `|out|` small forever while the pair count stays the
+        // author's, so the cost is `pairs x |out|` and only `|out|` was
+        // bounded. Thirty thousand pairs over a 64 KiB subject.
+        let pairs: Vec<String> = (0..30_000).map(|i| format!("\"k{i}\": \"\"")).collect();
+        let message = render(
+            "{{ s | replace(m) }}",
+            &format!(
+                r#"{{"s": {}, "m": {{{}}}}}"#,
+                serde_json::to_string(&"z".repeat(64 * 1024)).unwrap(),
+                pairs.join(",")
+            ),
+        )
+        .expect_err("must be refused");
+        assert!(message.contains("would scan more than"), "{message}");
+
+        // And the accepted neighbour: a substitution that stays under the cap
+        // still answers, so the bound is a ceiling and not a refusal.
+        assert_eq!(
+            ok("{{ s | replace({'x': 'yy'}) }}", r#"{"s": "xx"}"#),
+            "yyyy"
+        );
+        // A thousand pairs over a 64 KiB subject is 64 MiB of scanning, well
+        // inside the budget, and still answers.
+        let pairs: Vec<String> = (0..1_000).map(|i| format!("\"k{i}\": \"\"")).collect();
+        assert_eq!(
+            render(
+                "{{ s | replace(m) }}",
+                &format!(
+                    r#"{{"s": {}, "m": {{{}}}}}"#,
+                    serde_json::to_string(&"z".repeat(64 * 1024)).unwrap(),
+                    pairs.join(",")
+                )
+            )
+            .expect("must render")
+            .len(),
+            64 * 1024
+        );
     }
 
     // -- the four `compare: "error-class"` entries -----------------------

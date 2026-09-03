@@ -143,6 +143,17 @@ jaq-json = "2.0"
 # module has to pin against the artifact's bytecode anyway.
 rand.workspace = true
 
+# W2 Task 8: `encrypt()`/`decrypt()` are `io.kestra.core.encryption.EncryptionService`,
+# and that class is pure -- `AES/GCM/NoPadding`, a base64 key, a 12-byte random
+# IV prefixed to the ciphertext, a 128-bit auth tag, base64 out. Read from
+# `javap -p -c EncryptionService`, not from a doc. Both crates are ALREADY
+# workspace dependencies (`egret-secrets` and `egret-engine-mgmt` both take
+# aes-gcm today), so this is a direct edge and no new crate; `aes` itself reaches
+# the AES-192 key size through `aes_gcm::aes`, which aes-gcm re-exports, rather
+# than through a second dependency entry.
+aes-gcm.workspace = true
+base64.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as

@@ -216,9 +216,27 @@ fn shape_ok(id: &str, golden: &GoldenResult, actual: &Outcome) -> bool {
                 && value.len() <= 22
                 && value.bytes().all(|b| b.is_ascii_alphanumeric())
         }
-        // A timestamp and a base64 blob: pin only that they are non-empty, so
-        // this never turns into a second, weaker copy of the real comparison.
-        "function-now" | "function-encrypt" => !value.is_empty(),
+        // A timestamp: pin only that it is non-empty, so this never turns
+        // into a second, weaker copy of the real comparison.
+        "function-now" => !value.is_empty(),
+        // **`!value.is_empty()` was what this used to be, and it could not see
+        // the format at all.** A shape check sees a length, and the length is
+        // exactly what carries the format here: 12 IV bytes + 12 ciphertext
+        // bytes for `'hello-secret'` + a 16-byte GCM tag is 40 bytes, which is
+        // 56 base64 characters. A port with an 8-byte IV, or a 96-bit tag, or
+        // no IV at all, satisfied "non-empty" and fails this.
+        //
+        // What a shape check still cannot see is that the ciphertext is
+        // *right*. `function-encrypt-decrypt-round-trip` is what pins that,
+        // and it is an ordinary exact-compared entry precisely because the
+        // round trip is deterministic where the ciphertext is not.
+        "function-encrypt" => {
+            value.len() == 56
+                && value.ends_with("==")
+                && value[..54]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+        }
         other => unreachable!("{other} is on NON_DETERMINISTIC but has no shape check"),
     }
 }
@@ -448,27 +466,26 @@ fn error_class_entries_are_exactly_the_committed_allowlist() {
     );
 }
 
-/// The eight error-class ids with **nothing ported behind them**.
+/// The error-class ids with **nothing ported behind them** — now none.
 ///
-/// Each matches only because egret says `unknown function` where Kestra says
-/// `Function or Macro [x] does not exist` — the hollow pass the whole
-/// error-class fence exists to make visible. `oracle/error-class-pairs.txt`
-/// marks them `unported:task-8`, and this constant is what stops a ninth
-/// being added there quietly: growing the list means editing this file, which
-/// is a diff in a test rather than in a data file.
+/// It held eight through Tasks 4-7: `secret`, `kv`, `read`, `fileURI`,
+/// `fileSize`, `fileExists`, `isFileEmpty` and `http`, each matching only
+/// because egret said `unknown function: secret is unknown` where Kestra says
+/// `Function or Macro [secret] does not exist` — the hollow pass the whole
+/// error-class fence exists to make visible. **The two are indistinguishable
+/// to this file**, by construction, which is why the debt had to be declared
+/// here rather than measured.
 ///
-/// Task 8 empties it by porting each as an explicit refusal with asserted
-/// text, and deleting its line here in the same commit.
-const UNPORTED_ERROR_CLASS: &[&str] = &[
-    "function-secret",
-    "function-kv",
-    "function-read",
-    "function-fileuri",
-    "function-filesize",
-    "function-fileexists",
-    "function-isfileempty",
-    "function-http",
-];
+/// W2 Task 8 emptied it: all eight now refuse with a message that names the
+/// function and the package that will implement it, asserted by
+/// `runners::functions::the_twelve_refusals_name_themselves_and_their_owner`,
+/// and their pairings moved from `unported:task-8` to that test in the same
+/// commit.
+///
+/// **Leave it empty.** The constant stays because it is what stops a new
+/// `unported:` being added to `oracle/error-class-pairs.txt` quietly: growing
+/// the list means editing a test, not a data file.
+const UNPORTED_ERROR_CLASS: &[&str] = &[];
 
 /// Every `#[test] fn` name declared in the crate's own sources.
 ///

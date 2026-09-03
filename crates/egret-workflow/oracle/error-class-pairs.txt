@@ -51,14 +51,14 @@ isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rathe
 # they match only because egret says "unknown function" where Kestra says
 # "Function or Macro [x] does not exist". Task 8 owns turning each into an
 # explicit refusal with asserted text.
-function-secret                     unported:task-8
-function-kv                         unported:task-8
-function-read                       unported:task-8
-function-fileuri                    unported:task-8
-function-filesize                   unported:task-8
-function-fileexists                 unported:task-8
-function-isfileempty                unported:task-8
-function-http                       unported:task-8
+function-secret                     test:the_twelve_refusals_name_themselves_and_their_owner
+function-kv                         test:the_twelve_refusals_name_themselves_and_their_owner
+function-read                       test:the_twelve_refusals_name_themselves_and_their_owner
+function-fileuri                    test:the_twelve_refusals_name_themselves_and_their_owner
+function-filesize                   test:the_twelve_refusals_name_themselves_and_their_owner
+function-fileexists                 test:the_twelve_refusals_name_themselves_and_their_owner
+function-isfileempty                test:the_twelve_refusals_name_themselves_and_their_owner
+function-http                       test:the_twelve_refusals_name_themselves_and_their_owner
 
 # --- W2 Task 4: wrong-typed input.
 filter-chunk-not-list               test:chunk_rejects_a_non_list
@@ -235,3 +235,62 @@ function-fromion-unsupported-version-marker           test:the_ion_reader_refuse
 # --- W2 Task 7, fix round 3.
 function-fromion-unsupported-major-version  test:the_ion_reader_refuses_what_ion_itself_forbids
 function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_text_and_its_container_is_a_container
+
+# --- W2 Task 8, the last of them. There is no `unported:` line left in this
+# file: the eight above moved from `unported:task-8` to a test in the same
+# commit that gave them a message worth asserting.
+
+# W2 Task 8: the four functions the BUILT ENGINE DOES NOT CARRY.
+# `RenderFunction`, `RenderOnceFunction`, `ErrorLogsFunction` and
+# `SubflowFunction` are `@Inject @Nullable` fields that `Extension.getFunctions()`
+# guards with `if (x != null)`, so a standalone engine has 34 names and none of
+# these is among them -- `Function or Macro [render] does not exist.` egret
+# binds all four to a refusal that names the function and its package instead,
+# so both sides fail and only the message differs.
+function-render                                     test:the_twelve_refusals_name_themselves_and_their_owner
+function-renderonce                                 test:the_twelve_refusals_name_themselves_and_their_owner
+function-errorlogs                                  test:the_twelve_refusals_name_themselves_and_their_owner
+function-subflow                                    test:the_twelve_refusals_name_themselves_and_their_owner
+
+# W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
+# throws and an explicitly null one falls through to the default.
+function-env-missing-name                           test:env_refuses_a_missing_name_and_a_non_string_one
+function-env-name-not-a-string                      test:env_refuses_a_missing_name_and_a_non_string_one
+
+# W2 Task 8: `encrypt`/`decrypt`. Two boundaries, both asserted from both
+# sides in the paired test: the AES key length and the 12-byte IV.
+function-encrypt-missing-argument                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-key-not-base64                     test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-key-wrong-length                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-plaintext-not-a-string             test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-bad-base64                         test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-wrong-key                          test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-shorter-than-the-iv                test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-missing-argument                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+
+# W2 Task 8: `tasksWithState`. A null `state` and an absent one are
+# DIFFERENT errors here (an NPE on `toUpperCase` against a `containsKey`
+# check), which is the opposite of what `loopOutputs` does with the same pair.
+function-taskswithstate-tasks-not-a-map             test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-missing-argument            test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-argument-not-a-string       test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-argument-null               test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+
+# W2 Task 8: `loopOutputs`. Four guards in a fixed order, and the ORDER is
+# the thing the paired test asserts -- `outputs` is validated completely before
+# `name` is looked at.
+function-loopoutputs-missing-outputs                test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-outputs-null                   test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-outputs-not-a-list             test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-missing-name                   test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-name-null                      test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-name-not-a-string              test:loop_outputs_has_four_guards_in_this_order
+
+# W2 Task 8: `replace`, Pebble's own filter, which egret now OVERRIDES
+# minijinja's `(old, new)` one with. The last of these is also in baseline.txt:
+# egret ignores an unknown named argument where Pebble's binder refuses it.
+filter-replace-two-positional-arguments             test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-missing-argument                     test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-pairs-not-a-map                      test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-null-replacement                     test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-unknown-named-argument               baselined

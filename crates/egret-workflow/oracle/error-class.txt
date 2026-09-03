@@ -494,3 +494,58 @@ function-fromion-unsupported-major-version
 # renders -- the case a fifteen-form table missed because `a::{b:1}` stood in
 # for it.
 function-fromion-annotation-of-a-list
+
+# --- W2 Task 8: the four functions the BUILT ENGINE DOES NOT CARRY.
+# `RenderFunction`, `RenderOnceFunction`, `ErrorLogsFunction` and
+# `SubflowFunction` are `@Inject @Nullable` fields that `Extension.getFunctions()`
+# guards with `if (x != null)`, so a standalone engine has 34 names and none of
+# these is among them -- `Function or Macro [render] does not exist.` egret
+# binds all four to a refusal that names the function and its package instead,
+# so both sides fail and only the message differs.
+function-render
+function-renderonce
+function-errorlogs
+function-subflow
+
+# --- W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
+# throws and an explicitly null one falls through to the default.
+function-env-missing-name
+function-env-name-not-a-string
+
+# --- W2 Task 8: `encrypt`/`decrypt`. Two boundaries, both asserted from both
+# sides in the paired test: the AES key length and the 12-byte IV.
+function-encrypt-missing-argument
+function-encrypt-key-not-base64
+function-encrypt-key-wrong-length
+function-encrypt-plaintext-not-a-string
+function-decrypt-bad-base64
+function-decrypt-wrong-key
+function-decrypt-shorter-than-the-iv
+function-decrypt-missing-argument
+
+# --- W2 Task 8: `tasksWithState`. A null `state` and an absent one are
+# DIFFERENT errors here (an NPE on `toUpperCase` against a `containsKey`
+# check), which is the opposite of what `loopOutputs` does with the same pair.
+function-taskswithstate-tasks-not-a-map
+function-taskswithstate-missing-argument
+function-taskswithstate-argument-not-a-string
+function-taskswithstate-argument-null
+
+# --- W2 Task 8: `loopOutputs`. Four guards in a fixed order, and the ORDER is
+# the thing the paired test asserts -- `outputs` is validated completely before
+# `name` is looked at.
+function-loopoutputs-missing-outputs
+function-loopoutputs-outputs-null
+function-loopoutputs-outputs-not-a-list
+function-loopoutputs-missing-name
+function-loopoutputs-name-null
+function-loopoutputs-name-not-a-string
+
+# --- W2 Task 8: `replace`, Pebble's own filter, which egret now OVERRIDES
+# minijinja's `(old, new)` one with. The last of these is also in baseline.txt:
+# egret ignores an unknown named argument where Pebble's binder refuses it.
+filter-replace-two-positional-arguments
+filter-replace-missing-argument
+filter-replace-pairs-not-a-map
+filter-replace-null-replacement
+filter-replace-unknown-named-argument

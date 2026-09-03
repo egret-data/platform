@@ -104,8 +104,11 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **five ids are in this file AND in `baseline.txt`**, because such an
-entry still fails when egret *succeeds* where Kestra threw. A task that could not reproduce a filter
+that: **seven ids are in this file AND in `baseline.txt`**, because such an
+entry still fails when egret *succeeds* where Kestra threw. (This said "five"
+until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
+`function-fromion-annotation-of-a-list` without moving the number. Counted out
+of the two files, not carried forward.) A task that could not reproduce a filter
 could mark its entry error-class and turn the oracle green on work it did not
 do. Keeping the set in its own short file makes adding one a one-line,
 reviewable diff instead of a field edit buried in a 291-entry JSON file — the
@@ -133,8 +136,8 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**153** entries carry it today, counted out of `golden.json` rather than added
-up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
+**182** entries carry it today (153 before W2 Task 8), counted out of
+`golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
 wrong-typed inputs, five exceptions its first fix round found, and three more
@@ -154,11 +157,26 @@ what carries them is the test and not the mode.
 
 That is a lot, and it is a deliberate trade: each records an exception Kestra
 actually throws, which is worth having in `golden.json`, at the cost of an
-entry the ratchet cannot fail. **The ratio deserves a look before Task 8**,
-whose whole deliverable is refusals. Note that marking an entry error-class
-does **not** make it pass: 5 of the 90 are *also* in `baseline.txt`, because
-egret *succeeds* where Kestra throws — a real divergence, and it stays
-visible.
+entry the ratchet cannot fail. **The ratio was to be looked at before Task 8**,
+whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
+7% of the corpus, and every one of them is `test:`-paired — the pairing file
+now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
+`tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
+make it pass: 7 of the 182 are *also* in `baseline.txt`, because egret
+*succeeds* where Kestra throws — a real divergence, and it stays visible.
+
+## `name-surface.txt` — which names each side has at all
+
+W2 Task 8. Four times this package found a name minijinja binds that Kestra
+also binds, resolving to minijinja's answer instead of erroring as unknown
+(`string`, `indent`, `range`, `replace`). `name-surface.txt` is the fixture for
+the other half of that question: every filter, function and test name any of
+the three sources binds — the engine, egret, and minijinja's own defaults —
+with what each side does about it and a reason on every row where they differ.
+`runners::env::the_built_in_surface_matches_the_engines` asserts it by
+**probing** `render_str`, in both directions. See "The name surface, and what
+W2 did not compare" at the end of this file for what it closed and what it
+deliberately left open.
 
 ## `baseline.txt` — the ratchet
 
@@ -177,7 +195,8 @@ disagree -- 80 of 892 after that task's fix round, which recorded ten
 divergences that had no entry at all, 87 of 931 after its second, which fixed
 thirteen regressions and recorded nine more of the same kind, and **109 of 966**
 after its third, which REVERTED one of the second's fixes and recorded what
-that costs.
+that costs, and **105 of 1047** after W2 Task 8 -- which BANKED seven (every
+function the brief called service-backed that is not) and RECORDED three.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -215,15 +234,18 @@ committed: breaking `kestra_null_coalesce` produced `REGRESSION: 6`, and
 registering a working `json` test without editing the baseline produced
 `PROGRESS NOT BANKED: 2`.
 
-**Nine ids are expected to differ on every regeneration**, not eight: the
-eight non-deterministic ones in `tests/oracle.rs`'s `NON_DETERMINISTIC`, plus
-`function-fromion-annotation-in-a-list`, whose golden is a **Jackson serialiser
-artifact that is not stable between JVM runs** — on the same jar and the same
+**TEN ids are expected to differ on every regeneration** — this said nine
+until W2 Task 8's regeneration diff showed a tenth: the eight
+non-deterministic ones in `tests/oracle.rs`'s `NON_DETERMINISTIC`, plus
+`function-fromion-annotation-in-a-list` **and
+`function-fromion-annotation-of-a-list`**, whose goldens are a **Jackson
+serialiser artifact that is not stable between JVM runs** — on the same jar and the same
 corpus, five runs gave `Document nesting depth (1001) exceeds the maximum`
 three times and `Direct self-reference leading to cycle` twice. It is
 baselined rather than shape-checked: egret answers where Kestra throws, so the
 ratchet holds it as an ordinary recorded divergence and only the golden text
-moves. W2 Task 7's fix round 2 deleted the entry for that instability and its
+moves. The tenth is `error-class`, so nothing can fail for it at all, which is
+why it took a regeneration diff rather than a red run to find. W2 Task 7's fix round 2 deleted the entry for that instability and its
 third round put it back — `error-class` exists precisely for an unstable Java
 message, and what stopped it being used here is that egret no longer fails,
 which makes `baseline.txt` the honest home rather than deletion.
@@ -3562,3 +3584,183 @@ six on the `e`-with-a-dot boundary (`-float-with-a-dot` and its `-class` and
 `-float-unit-exponent-round-trip`). Four further mutations — the dot-first
 classification, the prefix version marker, the normalised Ion mantissa and the
 plain-string `String.valueOf` — are each killed by name.
+
+## What W2 Task 8's 81 new entries measured (read before touching a function, a refusal, or the built-in surface)
+
+Task 8 is the last task of W2. It took the **fifteen** remaining registered
+functions plus the **four** the built engine does not register, and one filter
+nobody had owned. The brief called all nineteen "service-backed, ported as
+explicit refusals". Seven of them are not.
+
+### Seven of the "service-backed" nineteen reach no service
+
+`env`, `encrypt`, `decrypt`, `fetchContext`, `printContext`, `tasksWithState`
+and `loopOutputs` **answer in the standalone harness**, with ordinary values in
+`golden.json`, and had been sitting in `baseline.txt` as unported work — not in
+`error-class.txt`. Reading the bytecode says why:
+
+| function | what it actually reads |
+|---|---|
+| `env` | the `envs` **context variable**, never `System.getenv`. `EnvFunction.execute` is `context.getVariable("envs")` and a `Map.get` |
+| `encrypt` / `decrypt` | `io.kestra.core.encryption.EncryptionService`, which is pure: `AES/GCM/NoPadding`, a base64 key **argument**, a 12-byte random IV prefixed to the ciphertext, a 128-bit tag, base64 out |
+| `fetchContext` / `printContext` | the render context itself, collected off Pebble's global scopes |
+| `tasksWithState` | the `tasks` context variable |
+| `loopOutputs` | its own `outputs` argument |
+
+So they are ported, and all seven baseline lines are banked. What they wait on
+is W3 putting `envs` and `tasks` into the context — not a service.
+
+### The other twelve, and the two different reasons they are absent
+
+| group | why absent | what Pebble says |
+|---|---|---|
+| `secret`, `kv`, `read`, `fileURI`, `fileSize`, `fileExists`, `isFileEmpty`, `http` | **registered** with a `null` `Function` value: `Extension.getFunctions()` `put`s their `NAME` keys unguarded and Micronaut never fills the `@Inject` fields | `Function or Macro [secret] does not exist.` |
+| `render`, `renderOnce`, `errorLogs`, `subflow` | **not registered at all**: `@Inject @Nullable`, guarded by `if (x != null)` | the same sentence |
+
+Pebble's parser treats a null-valued map entry exactly as a missing key, so the
+two groups are **one behaviour** from a flow author's seat, and egret gives them
+one message. `function-render`, `-renderonce`, `-errorlogs` and `-subflow` are
+new corpus entries recording that the built engine really does not carry them.
+
+**A green oracle is not evidence a refusal works, and it never will be.** All
+twelve are `compare: "error-class"`, which any failure satisfies — including
+`unknown function: secret is unknown`, which is what egret said before this task
+and which names neither the function nor anything a reader can act on. The eight
+that were `unported:task-8` in `error-class-pairs.txt` are now
+`test:the_twelve_refusals_name_themselves_and_their_owner`, and
+`UNPORTED_ERROR_CLASS` in `tests/oracle.rs` is empty.
+
+### `fetchContext`'s key order is `HashMap`'s, and that is a recorded divergence
+
+Measured: `{"b":1,"a":2}` comes back `{"a":2,"b":1}` and
+`{"zebra":1,"apple":2,"mango":3}` comes back in that same order. Neither sorted
+nor insertion — `String.hashCode`'s bucket layout, because the function collects
+into a `java.util.HashMap`. This file's standing ruling is that `HashMap` bucket
+order is implementation *structure* and is recorded rather than ported (see
+"What egret copies from upstream" and `filter-escapechar-map-two-keys`), and
+minijinja's `known_variables` returns a `HashSet` anyway, so egret must impose
+*some* order. It sorts. `function-fetchcontext-two-keys` matches because sorted
+and hashed agree for `{a, b}`; `-three-keys` is where they part, and it is
+baselined.
+
+**`tasksWithState` is the same question with a different answer.** Its result
+rows are `HashMap`s too — `state, value, taskId` for a three-key row and
+`state, taskId` for a two-key one, both measured — but the key set is *fixed* at
+three names, so **one emission order reproduces both shapes exactly**. That is
+written down as a constant, not as a port of `String.hashCode`.
+
+### Two things `fetchContext` sees that a reading of the name would not predict
+
+- **inside a `{% for %}`, Pebble's loop scope IS global**, so `fetchContext()`
+  returns the loop variable and the `loop` object as well. minijinja's
+  `known_variables` agrees; the two `loop` objects do not
+  (`first/last/length/index/revindex` against nine different fields), so
+  `function-fetchcontext-in-a-loop` is baselined for the loop object's shape and
+  not for this function's;
+- a **null** context value is kept, not dropped. `{"x": null}` renders `{}` on
+  both sides, and for the same reason: `JsonWriter` omits null map entries one
+  layer later.
+
+### `replace` was the fourth minijinja name resolving to the wrong answer
+
+`io.kestra.core.runners.pebble.filters.ReplaceFilter` is in the jar with a
+`regexp` argument and `Extension.getFilters()` does not register it, so the live
+`replace` is **Pebble's own**: one argument, `replace_pairs`, a `Map`, applied as
+a chain of literal `String.replace` calls. The proof is a probe rather than a
+reading — `{{ s | replace({'a':'b'}, regexp=true) }}` answers
+`The following named argument does not exist: regexp`, which only Pebble's class
+can say.
+
+egret's was **minijinja's** `(old, new)`, and the two are incompatible in both
+directions: Kestra refuses `replace('a','b')`
+(`The argument at position 2 is not allowed`) and minijinja refuses
+`replace({'a':'b'})`. It is now overridden, the fourth after `indent`, `string`
+and `range`.
+
+Measured details worth keeping: the input goes through Java `toString`
+(`[1, 2]`, `{a=1}`), pairs **chain** so `'ab' | replace({'a':'b','b':'c'})` is
+`cc`, an empty key is Java's `String.replace("", x)` (`ab` → `-a-b-`, which
+Rust's `str::replace` agrees with), a null *value* is an NPE, and a null *input*
+is null.
+
+### The name surface, and what W2 did not compare
+
+`oracle/name-surface.txt` is new, and it is the fixture for the question the
+four collisions above are instances of: **which names does each side have at
+all?**
+
+The whole engine — Pebble's `CoreExtension`, `EscaperExtension` and
+`I18nExtension` plus Kestra's `Extension` — carries **63 filters, 37 functions
+and 8 tests**. minijinja at this workspace's feature set carries 47 filters, 4
+globals and 42 tests. Sixty-two of minijinja's names have **no counterpart in
+the engine at all**, and egret answered every one of them where Kestra says
+`Filter [count] does not exist.` Over-acceptance is the one divergence this
+crate's rules do not allow — a flow that renders here and fails there fails in
+production rather than at authoring time — so they are removed:
+
+- 27 filters (`safe e count dictsort items lines d round int float attr min max
+  list bool batch sum select reject selectattr rejectattr map groupby unique
+  chain zip pprint`);
+- 3 globals (`dict debug namespace`);
+- 32 tests.
+
+Six more minijinja test names (`==`, `!=`, `<`, `<=`, `>`, `>=`) need no
+removal: minijinja's `is` operator parses an identifier, so they are unreachable
+from template syntax either way. Pinned by a test, because "unreachable" written
+in prose is not distinguishable from an oversight.
+
+**What is NOT closed, and is stated rather than hidden.** The fixture is about
+name *presence*, not semantics, and three sets are left open with an owner:
+
+- **17 Pebble-core filter names both sides bind, running minijinja's semantics
+  here and nobody's differential** — `abs capitalize default escape first format
+  join last length lower reverse slice sort split title trim upper`. W2's
+  batches were Kestra's 35 registered filters; Pebble's own 28 were never in
+  one.
+- **10 filters and 3 functions the engine has and egret does not** —
+  `abbreviate base64decode base64encode merge nl2br numberformat raw rsort
+  sha256 urlencode`, and `i18n max min`. Note `sha256`: Kestra's own
+  `Md5Filter`/`Sha1Filter`/`Sha512Filter` each carry a copy-pasted "implements
+  the 'sha256' filter" javadoc and register three names, and the fourth name
+  comes from Pebble instead — which is why W2's filter batches correctly did not
+  own it, and why egret does not have it.
+- **the `is` surface.** The engine's eight tests are `defined empty even
+  iterable json map null odd`; `json` is Kestra's own and the only one any W2
+  task could have owned. egret keeps the four names that overlap and they are
+  **not** semantically identical (Pebble's `even`/`odd` throw a
+  `ClassCastException` on a non-number where minijinja answers `false`; Pebble's
+  `iterable` is `false` for a String where minijinja's is `true`). Recorded as
+  divergent rows.
+
+`runners::env::the_built_in_surface_matches_the_engines` asserts every row by
+**probing** `render_str`, in both directions. **Its first cut had a hole a
+mutant found**: it listed only names one side or the other binds, so
+re-registering a removed minijinja filter produced no row and no failure — the
+exact over-acceptance the fixture existed to catch, invisible to the fixture.
+Every removed default now has a `no`/`no` row with a reason.
+
+### Two bounds Kestra does not have, both derived from a measured cost
+
+Per the C7 ruling. Both were found by **attacking the new code**, and the second
+was found by attacking the first — which is now the third time on this branch
+that a fix's own blast radius carried the defect.
+
+| construct | why it is unbounded upstream | bound |
+|---|---|---|
+| `encrypt` | base64 of `12 + n + 16` bytes is `4/3 (n + 28)`, so **nesting multiplies**. Measured on the shipped path: 30 levels is 672 KB in 6 ms, 48 levels is 1 686 ms, and the trend puts 60 levels at ~16 GB. `rewrite`'s nesting cap does not see a call chain, and the output cap sees only the last value, after every intermediate is allocated | the plaintext may not exceed `MAX_OUTPUT_BYTES`; a value over 1 MiB could not be rendered anyway |
+| `replace` | Pebble's is an unguarded loop of `String.replace` with **two** growth axes: one pair can allocate `matches x replacement` inside a single call, and pairs *chain*, so a 25-entry map literal is `2^25` times its input | the predicted length is checked **before** each `replace`, against `MAX_OUTPUT_BYTES` |
+| `replace`, again | **the growth check does not bound the pair count**, and a pair that *shrinks* the subject keeps `|out|` under the growth cap forever. The loop is `pairs x |out|`, and the pairs come out of a context map: 20 000 pairs over a 500 KB subject is 2 825 ms | a cumulative scan budget, `MAX_REPLACE_SCAN_BYTES` = 1 024 x `MAX_OUTPUT_BYTES` = 1 GiB, measured at 0.28 ms per MiB scanned, so about 290 ms |
+
+Neither adds a row to "Every recursive descent over author-controlled input":
+neither recurses. `render` and `renderOnce` — the only two functions in W2 that
+*would* have — are **refused**, so no recursion was added at all.
+
+### The tenth unstable golden
+
+This file has said "**nine** ids are expected to differ on every regeneration".
+It is **ten**: `function-fromion-annotation-of-a-list` alternates between
+`Document nesting depth (1001) exceeds the maximum` and
+`Direct self-reference leading to cycle` across runs, exactly as
+`function-fromion-annotation-in-a-list` does. It is `error-class`, so only the
+documentation text moves and nothing can fail for it — which is why it took a
+regeneration diff to notice.

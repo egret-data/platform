@@ -31,13 +31,6 @@ coalesce-or
 coalesce-is-not-null
 
 # function not ported (Task 8: the service-backed ones)
-function-env
-function-encrypt
-function-decrypt
-function-fetchcontext
-function-printcontext
-function-taskswithstate
-function-loopoutputs
 
 # DELIBERATE (W2 Task 7): the `yaml()` function's plain-scalar resolver is the
 # YAML 1.2 core schema here (`serde_norway`) and SnakeYAML's YAML 1.1 schema in
@@ -545,3 +538,25 @@ function-fromion-annotation-in-a-list
 # for an explicit null; `filters::Args` reads it as false. Unchanged by this
 # round and previously unrecorded.
 function-fromion-all-rows-not-a-boolean
+
+# --- W2 Task 8: three recorded divergences, none of them a filter that is
+# not ported.
+#
+# `fetchContext` collects into a java.util.HashMap, so upstream's key order is
+# String.hashCode's bucket layout -- not sorted, not insertion. This crate's
+# standing ruling is that HashMap bucket order is implementation STRUCTURE and
+# is recorded rather than ported (see `filter-escapechar-map-two-keys`), and
+# minijinja's `known_variables` hands back a HashSet anyway, so egret must
+# impose an order of its own: it sorts. `function-fetchcontext-two-keys` MATCHES
+# because sorted and hashed happen to agree for `{a, b}`; three keys is where
+# they part.
+function-fetchcontext-three-keys
+# The `loop` object itself, not this function: Pebble's carries
+# first/last/length/index/revindex and minijinja's carries nine different
+# fields. `fetchContext` is simply the first thing that renders it.
+function-fetchcontext-in-a-loop
+# egret ignores an unknown named argument where Pebble's own argument binder
+# refuses it -- the divergence W2 Task 7's fix round recorded ("unknown and
+# extra arguments are ignored"), now with an entry. It is BOTH error-class and
+# baselined, because egret succeeds where Kestra throws.
+filter-replace-unknown-named-argument
