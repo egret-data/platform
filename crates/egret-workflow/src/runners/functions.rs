@@ -1824,7 +1824,17 @@ mod tests {
         // none, so this is the pin instead, and `oracle/README.md` says why.
         assert_eq!(ok("{{ fromIon(ion='[a::1, 2]') }}"), r#"["a::1",2]"#);
         assert_eq!(ok("{{ fromIon(ion='{f:a::1}') }}"), r#"{"f":"a::1"}"#);
+
+        // **An annotated LIST is not an annotated STRUCT**, and the first
+        // version of this test asserted `a::[1]` renders `a::[1]` — which
+        // Kestra does not do. Measured: `a::[1]`, `a::[1,2]` and `a::(1 2)`
+        // all throw, `a::[]` and `a::()` are `[]` with the annotation DROPPED,
+        // and `a::{b:1}` and `a::{}` keep it. The fifteen-form table had
+        // `a::{b:1}` standing in for the whole container case, so it recorded
+        // the one member of it that renders.
         assert_eq!(ok("{{ fromIon(ion='a::[1]') }}"), "a::[1]");
+        assert_eq!(ok("{{ fromIon(ion='a::[]') }}"), "a::[]");
+        assert_eq!(ok("{{ fromIon(ion='a::{}') }}"), "a::{}");
 
         // A malformed annotation is still an error: the decorated value is
         // parsed, which is what says where the text ends.
@@ -1834,43 +1844,54 @@ mod tests {
         assert_eq!(ok("{{ fromIon(ion='{a:b}') }}"), r#"{"a":"b"}"#);
     }
 
-    /// **Ion's `d` exponent and its bare `.` make a `java.math.BigDecimal`;
-    /// its `e` exponent makes a `java.lang.Double`.** Measured across fourteen
-    /// literals, four ways each.
+    /// **Every non-integer Ion number is an `f64` here, and Kestra splits them
+    /// in two**: `e`/`E` is a `java.lang.Double`, and `d`/`D` or a bare `.` is
+    /// a `java.math.BigDecimal`.
     ///
-    /// An `f64` for the first family loses the scale, and the sentence that
-    /// excused it said "no round trip through this crate reaches it — only
-    /// hand-written Ion does". `{{ fromIon('1d2') | toIon }}` is a round trip
-    /// through this crate that reaches it: `1d2` in Kestra, `100e0` here.
+    /// Fix round 2 carried a decimal as `filters::BigNumber` to keep the
+    /// scale, and that is an `Object`: `value::ops::coerce` has no object arm,
+    /// and `Ord for Value` compares `kind()` first with `ValueKind::Plain`
+    /// above `ValueKind::Number`. So every `+ - * / %` became an error and
+    /// **every `>`/`>=` became unconditionally true**, silently. Reverted
+    /// here, with the scale recorded in `oracle/baseline.txt` instead.
+    ///
+    /// **This is the axis the test could not see before.** It checked render,
+    /// `className`, `toIon` and `toJson` — exactly where `BigNumber` is right
+    /// — and nothing put an operator on a decimal. Changing what a value *is*
+    /// has a blast radius of every operation the type takes part in, not the
+    /// operations the entry exercises.
     #[test]
-    fn an_ion_decimal_is_a_big_decimal_and_an_ion_float_is_a_double() {
+    fn every_non_integer_ion_number_is_an_f64_and_takes_operators() {
+        // The operator axis first, because it is the one that was wrong.
+        assert_eq!(ok("{{ fromIon(ion='1.5') + 1 }}"), "2.5");
+        assert_eq!(ok("{{ fromIon(ion='1.5') - 1 }}"), "0.5");
+        assert_eq!(ok("{{ fromIon(ion='1.5') / 2 }}"), "0.75");
+        assert_eq!(ok("{{ fromIon(ion='1.5') | abs }}"), "1.5");
+        assert_eq!(ok("{{ fromIon(ion='1.5') > 1 }}"), "true");
+        assert_eq!(ok("{{ fromIon(ion='1.5') < 1 }}"), "false");
+        assert_eq!(ok("{{ fromIon(ion='1.5') == 1.5 }}"), "true");
+        // The boundary the object ordering made unconditionally true.
+        assert_eq!(ok("{{ fromIon(ion='1.') > 1 }}"), "false");
+        assert_eq!(ok("{{ fromIon(ion='1d2') > 1000 }}"), "false");
+
         for (source, plain, class, ion) in [
-            ("1d2", "100", "java.math.BigDecimal", "1d2"),
-            (
-                "1d20",
-                "100000000000000000000",
-                "java.math.BigDecimal",
-                "1d20",
-            ),
-            ("1d-2", "0.01", "java.math.BigDecimal", "0.01"),
-            ("1.50", "1.50", "java.math.BigDecimal", "1.50"),
-            ("-1.50", "-1.50", "java.math.BigDecimal", "-1.50"),
-            ("100d-2", "1.00", "java.math.BigDecimal", "1.00"),
-            ("0.001", "0.001", "java.math.BigDecimal", "0.001"),
-            ("1.", "1", "java.math.BigDecimal", "1."),
-            ("0.", "0", "java.math.BigDecimal", "0."),
-            ("1d0", "1", "java.math.BigDecimal", "1."),
-            // `BigDecimal` has no negative zero.
-            ("-0.0", "0.0", "java.math.BigDecimal", "0.0"),
-            (
-                "12345678901234567890.5",
-                "12345678901234567890.5",
-                "java.math.BigDecimal",
-                "12345678901234567890.5",
-            ),
-            // An `e` exponent is a FLOAT, and stays one.
+            // `d`/`D` and a bare `.`: a `BigDecimal` there, an `f64` here.
+            ("1d2", "100.0", "java.lang.Double", "100e0"),
+            ("1.50", "1.5", "java.lang.Double", "1.5e0"),
+            ("1.", "1.0", "java.lang.Double", "1e0"),
+            ("-0.0", "-0.0", "java.lang.Double", "-0e0"),
+            // `e`/`E` is a float on BOTH engines, **with or without a dot**.
+            // Fix round 2 classified `1.5E2` by the dot rather than by the
+            // exponent letter and made it a decimal; its three float entries
+            // were all `1E2` and its unit test added `1e0`, so every one of
+            // them sat on the same, dotless side of the boundary that was
+            // wrong.
             ("1E2", "100.0", "java.lang.Double", "100e0"),
             ("1e0", "1.0", "java.lang.Double", "1e0"),
+            ("1.5E2", "150.0", "java.lang.Double", "150e0"),
+            ("-2.5e10", "-2.5E10", "java.lang.Double", "-2.5e10"),
+            ("1.0E308", "1.0E308", "java.lang.Double", "1.0e308"),
+            ("1.5e0", "1.5", "java.lang.Double", "1.5e0"),
         ] {
             let cx = format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap());
             assert_eq!(
@@ -1889,13 +1910,31 @@ mod tests {
                 "{source} through toIon"
             );
         }
-        assert_eq!(ok("{{ fromIon(ion='1d2') | toJson }}"), "1E+2");
-        // The pre-existing writer bug the decimal work exposed: a scale-0
-        // `BigDecimal` needs Ion's `.`, or it reads back as an integer.
+        // The `number(type='BIGDECIMAL')` path still returns the object and
+        // still has the hole. Recorded in `oracle/baseline.txt`; asserted here
+        // so it is a fact rather than a sentence, and so it fails loudly on
+        // the day `BigNumber` becomes a number.
+        assert!(render("{{ '1.5' | number(type='BIGDECIMAL') + 1 }}", "{}").is_err());
+        assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') > 1 }}"), "true");
+
+        // Three writer facts that path DOES get right, all fixed here: a
+        // scale-0 `BigDecimal` needs Ion's `.` or it reads back as an integer;
+        // Ion writes the UNSCALED digits with the scale where
+        // `BigDecimal.toString()` normalises the mantissa; and
+        // `String.valueOf` is `toString()`, not `toPlainString()`.
         assert_eq!(ok("{{ '1' | number(type='BIGDECIMAL') | toIon }}"), "1.");
         assert_eq!(
             ok("{{ '1.50' | number(type='BIGDECIMAL') | toIon }}"),
             "1.50"
+        );
+        assert_eq!(ok("{{ '1E2' | number(type='BIGDECIMAL') | toIon }}"), "1d2");
+        assert_eq!(
+            ok("{{ '1.5E2' | number(type='BIGDECIMAL') | toIon }}"),
+            "15d1"
+        );
+        assert_eq!(
+            ok("{{ '1E2' | number(type='BIGDECIMAL') | string }}"),
+            "1E+2"
         );
     }
 

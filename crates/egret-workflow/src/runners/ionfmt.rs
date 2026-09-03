@@ -106,10 +106,19 @@ pub(super) fn write_ion(out: &mut String, value: &MjValue) {
         _ if super::filters::big_number_text(value).is_some() => {
             let text = super::filters::big_number_text(value).expect("checked");
             match text.split_once('E') {
+                // **Ion writes the UNSCALED digits and the scale**, where
+                // `BigDecimal.toString()` writes a normalised mantissa. So
+                // `1.5E+2` is `15d1` and not `1.5d2` — measured through
+                // `'1.5E2' | number(type='BIGDECIMAL') | toIon`. The two agree
+                // only when the mantissa has no fraction, which is exactly
+                // where the existing entries sat.
                 Some((mantissa, exponent)) => {
-                    out.push_str(mantissa);
+                    let fraction = mantissa.split_once('.').map_or(0, |(_, f)| f.len());
+                    let unscaled: String = mantissa.chars().filter(|c| *c != '.').collect();
+                    let exponent: i64 = exponent.parse().unwrap_or(0);
+                    out.push_str(&unscaled);
                     out.push('d');
-                    out.push_str(exponent.strip_prefix('+').unwrap_or(exponent));
+                    out.push_str(&(exponent - fraction as i64).to_string());
                 }
                 // **A scale-0 `BigDecimal` still needs a `.`**, because Ion
                 // spells a decimal with a `.` or a `d` and an integer with
@@ -333,22 +342,19 @@ pub(super) fn read_ion(text: &str, all_rows: bool) -> Result<Vec<MjValue>, Strin
     };
     let mut values = Vec::new();
     reader.skip_ignorable();
-    // `$ion_1_0` is the version marker, not a value. `$ion_1_01` is a version
-    // this reader does not speak, and Kestra throws
-    // `UnsupportedIonVersionException` rather than reading it as a symbol.
-    if let Some(rest) = reader.rest.strip_prefix("$ion_1_") {
-        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if digits.is_empty() || !digits.is_empty() && starts_identifier_char(&rest[digits.len()..])
-        {
-            return Err(format!(
-                "unsupported ion version marker: $ion_1_{}",
-                rest.split_whitespace().next().unwrap_or("")
-            ));
+    // `$ion_1_0` is the version marker, not a value, and `$ion_1_1` is a
+    // version this reader does not speak — Kestra throws
+    // `UnsupportedIonVersionException` for that one.
+    //
+    // **The test is on the whole TOKEN, not on a prefix.** An earlier cut
+    // stripped `$ion_1_` and refused anything after it, which traded four
+    // correct answers for one: `$ion_1_`, `$ion_1_x`, `$ion_1_0abc` and
+    // `$ion_1_0_x` are ordinary symbols and Kestra answers all four.
+    if let Some(marker) = ion_version_marker(reader.rest) {
+        if marker != "0" {
+            return Err(format!("unsupported ion version marker: $ion_1_{marker}"));
         }
-        if digits != "0" {
-            return Err(format!("unsupported ion version marker: $ion_1_{digits}"));
-        }
-        reader.rest = &rest[digits.len()..];
+        reader.rest = &reader.rest["$ion_1_".len() + marker.len()..];
         reader.skip_ignorable();
     }
     while !reader.rest.is_empty() {
@@ -369,6 +375,23 @@ pub(super) fn read_ion(text: &str, all_rows: bool) -> Result<Vec<MjValue>, Strin
         return Err("unterminated ion block comment".to_string());
     }
     Ok(values)
+}
+
+/// The digits of an Ion version marker at the head of `s`, if the token there
+/// is exactly `$ion_1_<digits>`.
+///
+/// `None` for `$ion_1_`, `$ion_1_x`, `$ion_1_0abc` and `$ion_1_0_x`, every one
+/// of which is an ordinary symbol that Kestra answers — measured.
+fn ion_version_marker(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("$ion_1_")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    let digits = &rest[..end];
+    if digits.is_empty() || starts_identifier_char(&rest[end..]) {
+        return None;
+    }
+    Some(digits)
 }
 
 /// Does `s` begin with a character that would continue an identifier?
@@ -887,28 +910,36 @@ fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
             Err(_) => Err(format!("ion integer out of range: {token}")),
         });
     }
-    // **A `d`/`D` exponent or a `.` makes it a DECIMAL, which is a
-    // `java.math.BigDecimal` — an `e`/`E` exponent makes it a float.**
-    // Measured: `1d2` is `100` and `java.math.BigDecimal`, `1E2` is `100.0`
-    // and `java.lang.Double`. An `f64` for the first loses the scale, so
-    // `1.50` came back `1.5` and `1d2 | toIon` came back `100e0` instead of
-    // `1d2`.
+    // **Every non-integer Ion number is an `f64` here, and Kestra splits them
+    // in two.** An `e`/`E` exponent is a `java.lang.Double` and a `d`/`D` one
+    // or a bare `.` is a `java.math.BigDecimal`, which is a first-class number
+    // there: `1.5 * 2` is `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className`
+    // is `java.math.BigDecimal`.
+    //
+    // **It cannot be one here, and that is a property of minijinja rather than
+    // a choice.** `filters::BigNumber` is an `Object`, and `value::ops::coerce`
+    // matches on `ValueRepr` alone with no object arm, while `Ord for Value`
+    // compares `kind()` FIRST and `ValueKind::Plain` sorts above
+    // `ValueKind::Number`. So routing Ion decimals through `BigNumber` — which
+    // an earlier cut did, to keep the scale — made every `+ - * / %` an error
+    // and made **every `>`/`>=` unconditionally true and every `<`/`<=`
+    // unconditionally false**, silently. `Object::custom_cmp` does not help:
+    // it is consulted only when both sides are objects of the same type.
+    //
+    // Ion is the format Kestra task outputs are written in, so
+    // `{{ fromIon(...) }}` followed by arithmetic is the ordinary case. A
+    // wrong SPELLING is recorded; a wrong COMPARISON is not acceptable, so the
+    // scale is what gives way. Five entries record what that costs, and
+    // `filter-number-bigdecimal-is-not-a-number-here` records the same hole on
+    // the `number(type='BIGDECIMAL')` path, which still has it.
     let signed = if negative {
         format!("-{cleaned}")
     } else {
-        cleaned.clone()
+        cleaned
     };
-    if signed.contains(['d', 'D']) || signed.contains('.') {
-        // Java's `BigDecimal(String)` spells the exponent `E` and has no
-        // trailing-dot form; Ion's `1.` is a scale-0 decimal.
-        let java = signed.replacen(['d', 'D'], "E", 1);
-        let java = java.strip_suffix('.').unwrap_or(&java).to_string();
-        return Some(
-            super::filters::big_decimal(&java)
-                .ok_or_else(|| format!("not an ion decimal: {token}")),
-        );
-    }
-    let value: f64 = signed.parse().ok()?;
+    // A decimal's exponent letter is the only difference from a float's.
+    let normalised = signed.replacen(['d', 'D'], "e", 1);
+    let value: f64 = normalised.parse().ok()?;
     Some(Ok(MjValue::from(value)))
 }
 

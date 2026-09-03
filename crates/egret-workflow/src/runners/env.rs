@@ -930,10 +930,19 @@ pub(super) fn kestra_to_string(value: &MjValue) -> String {
         // `input == null` branch, which is the level Kestra makes the decision
         // at too.
         ValueKind::None => "null".to_string(),
-        // Everything else — strings, `Undefined` (see above), and the `Plain`
-        // objects `runners::filters` builds for Java's `BigDecimal`/
-        // `BigInteger` — has a `Display` that is either its Java `toString` or,
-        // for `Undefined`, the empty string Kestra renders for a null.
+        // **A `BigDecimal`'s `String.valueOf` is `toString()`, not
+        // `toPlainString()`.** `'1E2' | number(type='BIGDECIMAL') | string` is
+        // `1E+2` in Kestra; this fell through to `Display`, which is
+        // `BigNumber::render`, which is the PLAIN string — so it answered
+        // `100`. The two spellings differ whenever the scale is negative or
+        // the adjusted exponent is below -6, and `filter-string-bigdecimal`
+        // is the entry.
+        _ if super::filters::big_number_text(value).is_some() => {
+            super::filters::big_number_text(value).expect("checked")
+        }
+        // Everything else — strings, `Undefined` (see above) — has a `Display`
+        // that is either its Java `toString` or, for `Undefined`, the empty
+        // string Kestra renders for a null.
         //
         // `ValueKind::Bytes` and `ValueKind::Invalid` also land here and are
         // the residue: nothing in this crate constructs either, no corpus

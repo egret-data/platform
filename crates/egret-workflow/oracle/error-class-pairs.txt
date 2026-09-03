@@ -231,3 +231,7 @@ function-fromion-does-not-stop-before-a-first-bad-value test:from_ion_reads_one_
 function-fromion-all-rows-reads-the-tail              test:from_ion_reads_one_value_and_never_looks_at_the_tail
 function-fromion-all-rows-reads-a-tail-comment        test:from_ion_reads_one_value_and_never_looks_at_the_tail
 function-fromion-unsupported-version-marker           test:the_ion_reader_refuses_what_ion_itself_forbids
+
+# --- W2 Task 7, fix round 3.
+function-fromion-unsupported-major-version  test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_text_and_its_container_is_a_container

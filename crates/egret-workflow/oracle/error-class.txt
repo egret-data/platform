@@ -483,3 +483,14 @@ function-fromion-all-rows-reads-a-tail-comment
 # `$ion_1_01` is a version this reader does not speak; Kestra throws
 # `UnsupportedIonVersionException` where egret answered the symbol `$ion_1_01`.
 function-fromion-unsupported-version-marker
+
+# --- W2 Task 7, fix round 3.
+# `$ion_1_1` is a version this reader does not speak. Note the SIBLINGS that
+# are not here: `$ion_1_`, `$ion_1_x`, `$ion_1_0abc` and `$ion_1_0_x` are
+# ordinary symbols Kestra answers, and an earlier cut refused all four by
+# testing the prefix rather than the token.
+function-fromion-unsupported-major-version
+# An annotated LIST or S-EXPRESSION throws in Kestra where an annotated STRUCT
+# renders -- the case a fifteen-form table missed because `a::{b:1}` stood in
+# for it.
+function-fromion-annotation-of-a-list

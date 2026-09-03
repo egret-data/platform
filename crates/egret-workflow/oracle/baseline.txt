@@ -475,3 +475,73 @@ function-fromion-timestamp
 # `==` instead; both are the price of carrying it as text rather than as a
 # fourth opaque object type.
 function-fromion-annotation-is-not-a-string
+
+# --- W2 Task 7, fix round 3.
+
+# DELIBERATE, and it is a REVERSAL of fix round 2's F4. An Ion decimal is a
+# `java.math.BigDecimal` in Kestra and a FIRST-CLASS NUMBER there: `1.5 * 2` is
+# `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className` is `java.math.BigDecimal`.
+# It cannot be one here, and that is minijinja's shape rather than a choice:
+# `filters::BigNumber` is an `Object`, `value::ops::coerce` matches on
+# `ValueRepr` with no object arm, and `Ord for Value` compares `kind()` FIRST
+# with `ValueKind::Plain` above `ValueKind::Number`. Routing Ion decimals
+# through it made every `+ - * / %` an error and every `>`/`>=` unconditionally
+# TRUE, silently. A wrong spelling is recorded; a wrong comparison is not
+# acceptable, so the scale is what gives way. These are what that costs.
+function-fromion-decimal-exponent
+function-fromion-decimal-exponent-class
+function-fromion-decimal-exponent-round-trip
+function-fromion-decimal-exponent-through-tojson
+function-fromion-decimal-keeps-its-scale
+function-fromion-decimal-negative-zero
+function-fromion-decimal-scale-zero
+function-fromion-decimal-scale-zero-round-trip
+function-fromion-decimal-wide
+function-fromion-decimal-with-a-dot
+function-fromion-decimal-with-a-dot-class
+function-fromion-decimal-multiplication-loses-the-scale
+
+# KNOWN and PRE-EXISTING, on the path that still routes into that hole:
+# `number(type='BIGDECIMAL')` returns the same `Object`, so arithmetic on it is
+# an error here and `> 1` is unconditionally true. Recorded rather than fixed
+# because fixing it means a numeric `ValueRepr`, which is the scale again --
+# but recorded, because before this round nothing in the corpus could see it.
+filter-number-bigdecimal-is-not-a-number-here
+filter-number-bigdecimal-comparison
+
+# DELIBERATE: `IonValue.toString()` re-serialises CANONICALLY and egret keeps
+# the source text, so the two agree only where the source already is canonical.
+# The class is much wider than the two forms round 2 recorded -- radix,
+# underscores, `e`-exponents, uppercase `D`, `-0`, quoted annotation names,
+# triple-quoted strings, and every run of whitespace and comments -- and these
+# five stand for it. Round 2's baseline comment listed eleven forms as "right"
+# and they were, but they had been chosen from spellings that were already
+# canonical: the third round running in which a sentence about annotations
+# generalised past what was measured.
+function-fromion-annotation-normalises-underscores
+function-fromion-annotation-normalises-an-exponent
+function-fromion-annotation-normalises-a-quoted-name
+function-fromion-annotation-normalises-whitespace
+
+# DELIBERATE: Jackson DROPS the annotation on an empty list or s-expression
+# (`a::[]` and `a::()` are both `[]`) and throws on a non-empty one, while it
+# keeps it on a struct of either size. egret carries the text in all four.
+function-fromion-annotation-dropped-on-an-empty-list
+# error-class AND baselined: egret SUCCEEDS where Kestra throws, which is what
+# the five other ids in both files do too.
+function-fromion-annotation-of-a-list
+
+# DELIBERATE, and RESTORED rather than deleted. Round 2 removed this entry
+# because its golden is a Jackson serialiser artifact that is not stable
+# between JVM runs -- reproduced twice, five runs, two different messages. But
+# error-class exists for an unstable Java message; what stops it being used
+# here is that egret no longer FAILS, so the honest home is this file. The
+# regeneration section of README.md names it as a ninth id whose golden is
+# expected to move.
+function-fromion-annotation-in-a-list
+
+# KNOWN and PRE-EXISTING: `(Boolean) args.get("allRows")` is a
+# `ClassCastException` in Kestra for a non-boolean and a `NullPointerException`
+# for an explicit null; `filters::Args` reads it as false. Unchanged by this
+# round and previously unrecorded.
+function-fromion-all-rows-not-a-boolean

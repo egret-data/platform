@@ -133,7 +133,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**151** entries carry it today, counted out of `golden.json` rather than added
+**153** entries carry it today, counted out of `golden.json` rather than added
 up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -174,8 +174,10 @@ answer differently rather than a filter that is not ported -- and 78 of
 third, 70 of 855 after W2 Task 7 -- which BANKED eighteen (its whole batch of
 pure functions) and RECORDED two, both places the two YAML scalar resolvers
 disagree -- 80 of 892 after that task's fix round, which recorded ten
-divergences that had no entry at all, and **87 of 931** after its second, which
-fixed thirteen regressions and recorded nine more of the same kind.
+divergences that had no entry at all, 87 of 931 after its second, which fixed
+thirteen regressions and recorded nine more of the same kind, and **109 of 966**
+after its third, which REVERTED one of the second's fixes and recorded what
+that costs.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -212,6 +214,19 @@ Both directions were verified by deliberate breakage before this was
 committed: breaking `kestra_null_coalesce` produced `REGRESSION: 6`, and
 registering a working `json` test without editing the baseline produced
 `PROGRESS NOT BANKED: 2`.
+
+**Nine ids are expected to differ on every regeneration**, not eight: the
+eight non-deterministic ones in `tests/oracle.rs`'s `NON_DETERMINISTIC`, plus
+`function-fromion-annotation-in-a-list`, whose golden is a **Jackson serialiser
+artifact that is not stable between JVM runs** — on the same jar and the same
+corpus, five runs gave `Document nesting depth (1001) exceeds the maximum`
+three times and `Direct self-reference leading to cycle` twice. It is
+baselined rather than shape-checked: egret answers where Kestra throws, so the
+ratchet holds it as an ordinary recorded divergence and only the golden text
+moves. W2 Task 7's fix round 2 deleted the entry for that instability and its
+third round put it back — `error-class` exists precisely for an unstable Java
+message, and what stopped it being used here is that egret no longer fails,
+which makes `baseline.txt` the honest home rather than deletion.
 
 **A regenerated `golden.json` MUST be reviewed as a `git diff` before
 committing.** A changed value means either upstream Kestra changed (the
@@ -687,7 +702,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 931 entries)
+## Corpus (`corpus.json`, 966 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -3411,3 +3426,139 @@ positional one are ignored here and throw in Pebble) is **crate-wide**, not
 `dayOfWeek`'s. Every one of the 35 filters and 19 functions has it; the two
 entries are a sample standing for all of them, and `baseline.txt` now says so
 rather than implying one function is the case.
+
+## W2 Task 7, fix round 3 — proving a fix discriminates is not probing its blast radius
+
+A third review verified round 2's laziness fix across thirteen refusal classes
+with a valid value in front, plus adjacency, nulls with and without `allRows`,
+and decimals inside containers: **every one matches**. Integrity is clean and
+the annotation facts are all true. It also corrected this file's own count in
+the safe direction — **25** entries fail against a rebuilt round 1, not
+fourteen.
+
+Both of its Criticals are in the decimal path, which was round 2's third fix
+and the one its verification never probed off its own axis.
+
+### The method point, which is the reason both got through
+
+Round 2's evidence was: rebuild the previous build, check the new entries fail
+against it. That is a good technique and it stays. But it proves the entries
+**pin the fix**. It says nothing about whether the fix broke something **off
+the axis of the fix** — and both Criticals are off-axis: classification is not
+rendering, and arithmetic is not `className`.
+
+> **When you change what a value IS, the blast radius is every operation the
+> type takes part in, not the operations the entry exercises.** Round 2's
+> decimal test checked render, `className`, `toIon` and `toJson` — exactly the
+> four axes on which `BigNumber` is right — and nothing in the corpus put an
+> operator on a decimal.
+
+### C-A: routing Ion decimals through `BigNumber` broke every operator
+
+`filters::BigNumber` is a `minijinja` **`Object`**, and minijinja has no numeric
+protocol for one. Read out of the lock file's own source, not inferred:
+
+- `value::ops::coerce` matches on `ValueRepr` alone; its fallback is
+  `i128::try_from`, whose arms are `Bool`/`I64`/`U64`/`F64`/`I128`/`U128`.
+  There is no object arm, so `+ - * / %` cannot reach one.
+- `impl Ord for Value` begins `self.kind().cmp(&other.kind())` and returns
+  early on a difference. `ValueKind::Plain` is declared **after**
+  `ValueKind::Number`, so **an object is Greater than every number,
+  unconditionally**.
+- `Object::custom_cmp` does not help: `PartialEq` consults it only when both
+  sides are objects of the same type, and `Ord`'s kind check fires first
+  anyway.
+
+So the shipped round 2 answered:
+
+| | Kestra | round 1 | round 2 |
+|---|---|---|---|
+| `fromIon('1.5') + 1` | `2.5` | `2.5` | error |
+| `fromIon('1.5') \| abs` | `1.5` | `1.5` | error |
+| `fromIon('1.') > 1` | `false` | `false` | **`true`** |
+| `fromIon('1.5') == 1.5` | `true` | `true` | `false` |
+
+Kestra's `BigDecimal` is a first-class number — `1.5 * 2` is `3.00` with the
+scale kept, and `(1.5 + 1) | className` is `java.math.BigDecimal`. egret cannot
+have both that and working operators, so **the scale is what gives way**: Ion
+decimals are `f64` again, and twelve entries record what that costs (`1d2` is
+`100.0` not `100`, `1.50` is `1.5`, `className` is `java.lang.Double`,
+`1d2 | toIon` is `100e0` not `1d2`, `1.5 * 2` is `3.0` not `3.00`).
+
+A wrong spelling is recorded. A **silently wrong comparison** is not
+acceptable, and `{{ fromIon(outputs.x.uri) }}` followed by arithmetic is the
+ordinary case — Ion is the format Kestra task outputs are written in.
+
+**The same hole is still on the `number(type='BIGDECIMAL')` path**, which
+returns the same object. It predates Task 7 and it is unchanged — but it now
+has two entries (`filter-number-bigdecimal-is-not-a-number-here`,
+`filter-number-bigdecimal-comparison`) where before this round nothing in the
+corpus could see it.
+
+### C-B: an `e` exponent with a dot was classified as a decimal
+
+Ion's rule is that `e`/`E` makes a **float regardless of the dot**. Round 2
+tested `contains(['d','D']) || contains('.')` in that order, so `1.5E2` became a
+decimal: `150` instead of `150.0`, `BigDecimal` instead of `Double`, `1.5d2`
+instead of `150e0`, and `1.0E308` became a 309-digit integer.
+
+> **The one-variant-away pattern, recurring inside the commit that fixed the
+> previous instance.** Round 2's float side had three entries and a unit test,
+> and every one of them used `1E2` or `1e0` — both **dotless**. "Fourteen
+> literals, four ways each" was true and contained exactly two floats, both on
+> the same side of the boundary that was wrong.
+
+Both sides of that boundary are entries now, and so is the one comparison that
+discriminates it: `fromIon('1.5') > 1` and `< 1` agree with the **broken**
+build by luck (an object is Greater, and Kestra also says `true`), while
+`fromIon('1.') > 1` is `false` in Kestra and was `true`. An entry on the wrong
+side of a boundary agrees with the bug.
+
+### Three more from the same review
+
+- **The version-marker test was on a PREFIX**, so `$ion_1_`, `$ion_1_x`,
+  `$ion_1_0abc` and `$ion_1_0_x` were refused — four ordinary symbols Kestra
+  answers, traded for one refusal that is reachable without them. It is a whole
+  **token** test now, and the four are entries.
+- **The annotation-normalisation class is at least sixteen forms, and
+  `baseline.txt` recorded two.** `IonValue.toString()` re-serialises
+  canonically: radix (`a::0b101` is `a::5`), underscores (`a::1_000` is
+  `a::1000`), `e`-exponents (`a::1e2` is `a::100e0`), uppercase `D`, `-0`,
+  quoted annotation names (`'a'::1` is `a::1`), triple-quoted strings, and every
+  run of whitespace and comments. **This is the third round running in which a
+  sentence about annotations generalised past what was measured**, and this
+  time it was in `baseline.txt`, justifying a divergence's recorded extent.
+  Round 2's list of eleven "right" forms was right and had been chosen from
+  spellings that were already canonical.
+- **A unit test pinned an answer Kestra does not give.** `fromIon('a::[1]')`
+  throws there; the test asserted it renders. The annotated-*container* case had
+  never been probed — `a::{b:1}`, which does render, stood in for it in a
+  fifteen-form table. Measured now: `a::[1]`, `a::[1,2]` and `a::(1 2)` throw,
+  `a::[]` and `a::()` are `[]` with the annotation **dropped**, and `a::{}` and
+  `a::{b:1}` keep it.
+
+### Two writer facts, both pre-existing and both newly visible
+
+- **Ion writes a decimal's UNSCALED digits and its scale**, where
+  `BigDecimal.toString()` normalises the mantissa: `1.5E+2` is `15d1`, not
+  `1.5d2`. The two agree only when the mantissa has no fraction — which is
+  where both existing round-trip entries sat.
+- **`String.valueOf(BigDecimal)` is `toString()`, not `toPlainString()`.**
+  `'1E2' | number(type='BIGDECIMAL') | string` is `1E+2`; `kestra_to_string`
+  fell through to `Display`, which is the plain string, and answered `100`.
+
+And one recorded rather than fixed: `(Boolean) args.get("allRows")` is a
+`ClassCastException` in Kestra for a non-boolean and a `NullPointerException`
+for an explicit null, where `filters::Args` reads it as false.
+
+### The evidence
+
+Rebuilding round 2's decimal path — `filters::big_decimal` restored and the
+`ionfmt` branch with it — fails **eleven corpus entries** and the unit test:
+five on the operator axis (`-decimal-arithmetic`, `-decimal-division`,
+`-decimal-abs`, `-decimal-equality`, `-scale-zero-decimal-greater-than`) and
+six on the `e`-with-a-dot boundary (`-float-with-a-dot` and its `-class` and
+`-round-trip`, `-float-negative-exponent`, `-float-at-the-top-of-a-double`,
+`-float-unit-exponent-round-trip`). Four further mutations — the dot-first
+classification, the prefix version marker, the normalised Ion mantissa and the
+plain-string `String.valueOf` — are each killed by name.
