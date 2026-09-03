@@ -1,0 +1,684 @@
+# The oracle ratchet's baseline: entries that do not match egret's renderer yet.
+#
+# tests/oracle.rs fails if an id NOT listed here mismatches (a regression), and
+# ALSO fails if an id listed here now matches -- delete the line in the same
+# commit that fixes it. That second direction is what makes this a ratchet
+# rather than a suppression list.
+#
+# One id per line. `#` starts a comment. Corpus order.
+#
+# Written by W2 Task 3 at 76 entries. Tasks 4-8 drive it to zero.
+# W2 Task 4 banked 21 (its whole filter batch) and added permanent divergences
+# of its own, all documented below: 57, then 59 after fix round 2, then 60
+# after fix round 3 recorded the null-literal-versus-typo divergence.
+#
+# 128 today. The merge gate banked the last three -- the
+# `context-integer-past-u64` family -- and it banked them by reading
+# `cargo tree` rather than by porting anything: see the note above group 1 of
+# "W2 Task 6, fix round 2".
+
+
+# Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
+gt-mixed
+
+# as gt-mixed
+lt-mixed
+lte-mixed
+gte-mixed
+
+# Pebble coerces and/or to a strict boolean; minijinja returns an operand. Needs kestra_and/kestra_or.
+coalesce-and
+
+# as coalesce-and
+coalesce-or
+
+# minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
+coalesce-is-not-null
+
+# function not ported (Task 8: the service-backed ones)
+
+# DELIBERATE (W2 Task 7): the `yaml()` function's plain-scalar resolver is the
+# YAML 1.2 core schema here (`serde_norway`) and SnakeYAML's YAML 1.1 schema in
+# Kestra, so `yes`/`on` are booleans there and strings here, and a leading zero
+# is octal there and not here. Reproducing it needs a scalar's QUOTING STYLE,
+# which `serde_norway` does not expose -- `visit_untagged_scalar` funnels `yes`
+# and `"yes"` into the same visitor call -- and re-resolving on the string alone
+# would make `a: "010"` answer 8, a NEW silent wrong answer traded for an old
+# one. `runners::functions::yaml` carries the table.
+function-yaml-yes-is-a-boolean-or-not
+function-yaml-octal-looking
+
+# DELIBERATE (W2 Task 7): Kestra answers `isPublicHoliday` out of
+# `de.focus_shift.jollyday` 2.19.0, a per-country, per-subdivision XML holiday
+# calendar. There is no such database in this tree and no Rust crate carrying
+# jollyday's data, so egret refuses by name rather than answering a date a flow
+# branches on -- the same call `javafmt` makes for the three CLDR pattern
+# letters. `runners::functions::is_public_holiday` carries the reason;
+# `runners::functions::tests::is_public_holiday_refuses_rather_than_guessing` is
+# the pin.
+function-ispublicholiday
+
+# Pebble test not ported
+test-json-true
+test-json-false
+
+# DELIBERATE: Kestra's RAW_PATTERN has no DOTALL so Pebble rejects the tag; minijinja's own raw tag handles it. task-3-report.md S5.
+raw-multiline
+
+# no minijinja syntax for this operator (recorded divergence, task-3-report.md S6)
+op-equals
+op-contains
+op-contains-boxed-int
+op-contains-literal
+op-range
+
+# UndefinedBehavior::Strict raises before `??` is reached. Deliberate: the alternatives are worse. task-3-report.md S9.
+coalesce-nested-absent
+
+# W2 TASK 4, DELIBERATE, three rows of one fact: egret cannot carry a value's
+# JAVA BOX TYPE without making the value unusable as a value.
+#
+# `className` reports `Integer` for a whole number that fits in an i32, `Double`
+# for any non-integer and `Long` only past 2^31. Kestra distinguishes more:
+#
+#   - a whole number from the CONTEXT is an Integer (Jackson's convertValue
+#     boxes it) and the same number as a template LITERAL is a Long;
+#   - `number(type='LONG')` and `number(type='FLOAT')` return Long and Float
+#     boxes regardless of magnitude.
+#
+# The first cut of this file said "minijinja has one integer type". THAT IS
+# WRONG: `ValueRepr` carries U64/I64/U128/I128 unnormalised, and this crate's
+# context deserialiser really does route a positive context integer through
+# visit_u64 while a literal is always I64. The honest reasons are that the
+# split is positive-vs-signed rather than context-vs-literal -- a NEGATIVE
+# context integer is I64 too, so keying on it would trade this line for a
+# wrong row on the commoner case -- and that minijinja exposes no public
+# accessor for the discriminant anyway.
+#
+# For the LONG/FLOAT pair the reason is different and simpler: carrying the box
+# would mean returning an opaque object, which is what BigDecimal/BigInteger
+# already are and why THOSE two now answer correctly (fixed in the fix round),
+# and it would stop the result being usable as a number -- the filter's whole
+# purpose. See runners::filters::java_class_name.
+filter-classname-literal-int
+filter-classname-of-long
+filter-classname-of-float
+
+# W2 TASK 4 FIX ROUND 3, DELIBERATE and NOT this module's to fix: egret cannot
+# tell Pebble's `null` LITERAL from a TYPO'D VARIABLE at a filter's input.
+# `{{ typo | string }}` is a RootAttributeNotFoundException in Kestra and
+# renders empty here.
+#
+# Pebble's `null` is a real literal; minijinja has no such name, so BOTH arrive
+# as ValueKind::Undefined. Measured on minijinja 2.24:
+# UndefinedBehavior::Strict raises for `{{ typo }}` but NOT for
+# `{{ typo | string }}` -- an undefined piped into a filter is simply passed in.
+# So this is not a cost of treating an undefined as Kestra's null in
+# runners::filters::is_java_null: the typo renders empty either way, and that
+# treatment is what makes the six `*-literal-null` entries pass, including
+# filter-distinct-literal-null (`<null>`), which no other route can produce.
+#
+# The real fix is one layer up: if runners::rewrite translated Pebble's `null`
+# literal to minijinja's `none`, the literal would be a None and the typo would
+# stay an Undefined, and the two could be kept apart. That is a change to the
+# REWRITER's vocabulary. Flagged for whoever owns it.
+filter-string-undefined-input
+
+# W2 TASK 4, DELIBERATE: `EscapeCharFilter.processMap` allocates a
+# `new HashMap<>()`, so Kestra LOSES a map's key order here -- `{"b":..,"a":..}`
+# comes back `{"a":..,"b":..}`. egret keeps insertion order, like every other
+# map path in this crate. Matching would mean porting Java's hash-bucket
+# layout into egret to imitate a bug. See runners::filters::escape_char.
+filter-escapechar-map-two-keys
+
+
+# W2 TASK 5, DELIBERATE (1 of 3): egret refuses the THREE pattern letters whose
+# output is TEXT OUT OF A LOCALE DATABASE, rather than answering plausibly.
+#
+# `z`/`zz`/`zzz`/`zzzz` is the zone's CLDR *specific* display name. Measured
+# through this harness: Asia/Tokyo is `JST`, Asia/Ho_Chi_Minh is `GMT+07:00`,
+# Australia/Eucla is `GMT+08:45`, Europe/Moscow is `GMT+03:00`. tzdb's own
+# abbreviations -- which `chrono-tz` exposes and which are the only zone text
+# available to egret -- agree for the first and the third and say `+07` and
+# `MSK` for the other two. There is no rule that is right for both halves, so
+# `runners::javafmt::format_field` refuses with the letter named.
+#
+# `v`/`vvvv` is the *generic* zone name (`JT` / `Japan Time`), a third CLDR
+# table, and is refused for the same reason. **It was missing from the
+# alphabet entirely until the fix round's probe sweep**, so egret said
+# `Unknown pattern letter: v` where Java says the pattern is valid -- telling
+# an author their pattern was wrong when it was not. `B` (the day period as
+# text, `in the morning`) is the third and has no corpus entry of its own.
+#
+# `full` and `long` are the same fact once removed: their CLDR patterns end in
+# `zzzz` and `z`, so they inherit the refusal. `medium` and `short` do not and
+# both pass.
+filter-date-pattern-zone-name
+filter-date-pattern-generic-zone-name
+filter-date-style-full
+filter-date-style-long
+
+# W2 TASK 5, DELIBERATE (2 of 3): egret's `date` filters are English-only.
+#
+# Kestra's month, day, era and quarter names come from the JVM's CLDR data for
+# whatever locale is in force; egret carries the English names and refuses any
+# other `locale`, because answering `January` for `locale='fr'` is a silently
+# wrong string in a renderer whose whole job is byte fidelity.
+#
+# Only `en` and `en_US` are accepted, not every English tag, and that is
+# measured rather than cautious: `WeekFields.of(locale)` reads the locale's
+# COUNTRY, so `en`/`en_US` are Sunday-first with one minimal day while `en_GB`
+# is Monday-first with four and `en_VN` -- the harness machine's own default --
+# is Monday-first with one. Accepting `en_GB` would answer `w`, `W`, `Y`, `e`
+# and `c` wrongly while looking supported. See runners::javafmt::Locale.
+filter-date-locale-french
+
+# W2 TASK 5, DELIBERATE (3 of 3): a whole number is Kestra's `Long` here.
+#
+# `AbstractDate.convert` has branches for `Long` and for `String` and NONE for
+# `Integer`, so a context integer small enough to box as `java.lang.Integer`
+# falls through to `(String) input` and throws -- while the same digits as a
+# template LITERAL are a `Long` and are read as an epoch. `1705314600` is a
+# ten-digit epoch second, the commonest number anyone pipes into `date`, and it
+# is exactly the range that cannot work in Kestra.
+#
+# This is the same limit that baselines filter-classname-literal-int, and for
+# the same reason: minijinja carries the U64/I64 discriminant but exposes no
+# accessor for it, and the split is positive-versus-signed rather than
+# context-versus-literal. Given the choice of which side to be right on, egret
+# reads every whole number as a Long -- so filter-date-epoch-seconds-literal,
+# filter-date-epoch-millis-context, filter-date-epoch-nanos-context and
+# filter-date-epoch-nanos-truncating all pass, and this one records the cost.
+filter-date-epoch-seconds-context
+
+
+# W2 TASK 5 FIX ROUND 1, DELIBERATE: egret's DATE RANGE is chrono's, which is
+# narrower than java.time's.
+#
+# A `NaiveDateTime` reaches about +/-262143 years; a `LocalDateTime` reaches
+# +/-999999999. So `dateAdd(100000000, 'DAYS')` is `+275814-09-28` in Kestra
+# and cannot be represented here. The limit is the crate's, not a choice.
+#
+# What WAS a choice, and was wrong, is the message: the first cut reported
+# `long overflow` -- Java's sentence for genuine `long` arithmetic overflowing,
+# a different cause -- and its unit test asserted exactly the two extremes
+# (`Long.MAX_VALUE` DAYS, 1e9 YEARS) where the two engines agree, while the
+# whole middle diverged silently. Both now separated: `runners::javafmt`
+# checks `Math.addExact` first and keeps `long overflow` for it, and says
+# `egret's dates are chrono's` for its own limit.
+filter-dateadd-past-egrets-date-range
+
+# W2 TASK 5 FIX ROUND 1, DELIBERATE: the FOURTH `className` row, which is the
+# one that fails.
+#
+# `{{ d | timestamp | className }}` is `java.lang.Long` in Kestra and
+# `java.lang.Integer` here, because `java_class_name` decides Integer-versus-
+# Long by MAGNITUDE and every epoch SECOND between 1901 and 2038 fits in an
+# `i32`. The milli/micro/nano ones are all outside that range, which is
+# exactly why `filter-timestampmicro-is-a-string`,
+# `filter-timestampnano-is-a-string` and `filter-timestampmilli-is-a-long`
+# pass -- three of four selected, unconsciously, to be the ones that work.
+#
+# The underlying limit is W2 Task 4's and is already recorded above under
+# filter-classname-literal-int. This line records that the `timestamp*` family
+# reaches it too.
+filter-timestamp-classname
+
+
+# W2 TASK 5 FIX ROUND 3, DELIBERATE: the CLDR refusals, at the counts Java
+# actually accepts.
+#
+# The three letters egret refuses -- `z`, `v`, `B` -- had been declared in the
+# module doc and the README, and `filter-date-pattern-zone-name` and
+# `-generic-zone-name` pinned two of them on the FORMAT side. Three holes were
+# left, and the third review found all three:
+#
+#   - `B`'s only entry was error-class at count 2, a count BOTH engines reject,
+#     so it was born matching and pinned nothing. `{{ d | date('B') }}` is
+#     `in the morning` in Kestra and a refusal here, and nothing said so.
+#   - Kestra PARSES all three (it consumes and discards them), so the
+#     parse-side refusals are divergences too. The README said they were
+#     "named as such"; they were named in prose and nowhere in the ratchet.
+#
+# All four are the same decision as `filter-date-pattern-zone-name` above:
+# their text lives in a locale database egret does not carry, and answering
+# plausibly is worse than refusing. What is new here is that the divergence is
+# now visible in the count rather than only in a paragraph.
+filter-date-pattern-day-period
+filter-date-existing-format-day-period-parse
+filter-date-existing-format-zone-name-parse
+filter-date-existing-format-generic-zone-parse
+
+# --- W2 Task 6. Seventeen recorded divergences, in four groups. None of them
+# is "not ported yet": all 35 filters are ported, and every one of these is a
+# place where the two engines answer DIFFERENTLY and egret says so out loud.
+
+# 1. Java regex constructs egret refuses rather than mis-answers.
+#
+# The `regex` crate is a linear-time automaton with no backtracking, so it
+# cannot express a lookaround, an atomic group, a possessive quantifier or a
+# backreference; and it carries Unicode scripts and categories but no BLOCK
+# tables and no `java.lang.Character` predicates. Kestra ACCEPTS all of these,
+# so there is no error class to compare against -- the entry stays here rather
+# than becoming a free pass in error-class.txt, and
+# `runners::filters::a_refused_construct_says_so_rather_than_claiming_the_pattern_is_invalid`
+# asserts that each refusal names its own construct.
+#
+# `runners::javare` translates everything it can instead of refusing: a
+# 265-probe sweep found 101 divergences between Java's pattern language and
+# the crate's, and after the translation the only ones left are these.
+filter-regexmatch-lookahead
+filter-regexmatch-lookbehind
+filter-regexmatch-backreference
+filter-regexmatch-possessive-quantifier
+filter-regexmatch-atomic-group
+filter-regexmatch-unicode-block
+filter-regexmatch-java-character-predicate
+filter-regexmatch-previous-match-anchor
+# Java's `$` outside MULTILINE is `\Z`: it matches before a FINAL line
+# terminator. The crate's `$` is end-of-haystack. `runners::javare` translates
+# `$` to `\z`, which is exact on every subject that does not end in a line
+# terminator, and refuses the subject that does -- the only input where the
+# two could differ. Consuming the terminator instead would answer `regexMatch`
+# right and then delete the newline in `regexReplace`.
+filter-regexmatch-dollar-before-a-trailing-newline
+
+# 2. minijinja's string-literal lexer is not Pebble's, and this is NOT a
+# filter's doing.
+#
+# Pebble does not process backslash escapes inside a single-quoted string:
+# `'(a)\1'` reaches the filter as six characters and `'\\'` as two. minijinja
+# reads `\1` as U+0001 and `\\` as one backslash. So a Kestra pattern or
+# replacement written with either spelling means something different here
+# before any filter sees it.
+#
+# `filter-regexreplace-escaped-backslash-from-a-variable` is the same
+# replacement supplied through the context, and it PASSES -- which is what
+# separates "the filter is wrong" from "the literal arrived different". The
+# fix belongs in `runners::rewrite` / the environment's lexing, not in
+# `runners::filters`.
+filter-regexmatch-numeric-escape-in-a-string-literal
+filter-regexreplace-escaped-backslash
+
+# 3. jq: `jaq` is not `jackson-jq`, in both directions.
+#
+# A 132-expression sweep of Kestra's jq surface agreed on 116. Three of the
+# five that remain are functions Kestra's `jackson-jq` at `Versions.JQ_1_6`
+# HAS and `jaq-std` does not; two are the other way round, where egret answers
+# and Kestra throws.
+filter-jq-at-csv
+filter-jq-leaf-paths
+# `jaq`'s `del` rebuilds the object sorted; `jackson-jq` keeps insertion order,
+# and Kestra's writer renders that order. Every other jq operation measured
+# preserves it on both sides, `keys_unsorted` included.
+filter-jq-del-loses-key-order
+# `todate`, `strftime`, `repeat`, `debug` and `1 / 0` are in `jaq` and not in
+# `jackson-jq` 1.6, so egret SUCCEEDS where Kestra throws. Two entries pin the
+# direction; the others are the same fact.
+filter-jq-todate-is-not-in-kestras-jq
+filter-jq-division-by-zero
+
+# 4. SnakeYAML folds a plain scalar across U+0085, U+2028 and U+2029, which it
+# reads as YAML 1.1 line breaks: the emitter re-indents after the break and
+# two spaces appear that were not in the input. egret writes the character
+# inside a double-quoted scalar instead. Not reproduced: Kestra's own output
+# does not round-trip back to the input either, so there is no value here to
+# be faithful to.
+filter-yaml-next-line-character-folds
+
+# --- W2 Task 6, fix round 1. Two more refusals, both places Kestra ANSWERS.
+#
+# A jq `def` can call itself, directly or through another definition, and
+# nothing egret can read from the source bounds that -- `def f: f; f` is two
+# words. Refused by name; Kestra answers it. See `runners::jqsandbox`.
+filter-jq-user-definition
+
+# --- W2 Task 6, fix round 2. Four more, in two groups.
+
+# 1. BANKED at the merge gate, and the reason it sat here for five tasks is
+# worth keeping. The three `context-integer-past-u64` entries used to live on
+# this line, recorded as permanent: a context integer wider than 64 bits lost
+# its digits because `serde_json` WITHOUT `arbitrary_precision` narrows such a
+# literal to an `f64` inside its own parser, before any `Visitor` method is
+# called. The note said the fix was that Cargo feature, that features are
+# additive across the graph, and that turning it on "is not W2's call".
+#
+# The feature was ALREADY ON in every build this crate ships in -- starlark
+# 0.14.2 enables it, egret-dataapi depends on starlark, and egret-bin pulls
+# egret-dataapi and egret-workflow together. The note reasoned about turning a
+# feature on and never ran `cargo tree` to ask whether it was already on. What
+# the divergence actually measured, for five tasks, was the difference between
+# `cargo test -p egret-workflow` and the binary; declaring the feature in this
+# crate's Cargo.toml and teaching both readers the parser's number sentinel
+# banked all three at once. See `runners::env::OrderedJsonVisitor::visit_map`.
+
+# 2. `(?U)` (UNICODE_CHARACTER_CLASS) redefines the whole POSIX family --
+# \p{Alpha}, \p{Alnum}, \p{Graph}, \p{Print}, \p{Upper}, \p{Lower},
+# \p{Punct}, \p{Digit}, \p{Space}, \p{Blank}, \p{XDigit} -- and not only the
+# four escapes the refusal message used to name. 29 measured rows. Refused
+# rather than approximated: Java's `(?U)` sets are close to the crate's
+# Unicode ones and not equal to them.
+filter-regexmatch-unicode-classes-over-posix
+
+# 3. Java has no line at all in an empty subject, so `(?m)^` does not match
+# there; the crate's multi-line `^` matches at position 0. Refused rather than
+# answered, in `runners::javare::check_haystack`.
+filter-regexmatch-multiline-anchor-on-an-empty-subject
+
+# --- W2 Task 6, fix round 3. Four more, on a THIRD axis.
+#
+# `MAX_SOURCE_BYTES` bounds the source and `MAX_STEPS`/`MAX_RUN` bound the
+# evaluation; neither bounds the DEPTH of the value jq builds.
+# `jq('reduce range(1400) as $i (.;[.])')` is a 40-byte source that evaluates
+# in 0.04 s and builds a 1400-deep value -- and every one of egret's own value
+# writers recurses over it, on the CALLER's thread, which in production is a
+# 2 MiB tokio worker. `runners::jqsandbox::MAX_VALUE_DEPTH` refuses past 128,
+# which is `serde_json`'s own recursion limit and therefore what already
+# bounds the other way a value enters this crate. Kestra renders these.
+filter-jq-result-past-the-depth-limit
+filter-jq-deep-object-result
+# 200 nested brackets is inside the source cap and produces a 200-deep value,
+# so this entry is now refused for the DEPTH, not the length. It matched
+# briefly when the cap was the only bound.
+filter-jq-deeply-nested-source
+
+# `(?iu)` over a class that MIXES an ASCII-only property with a literal needs
+# a per-member fold: Java folds the literal with Unicode and the property with
+# ASCII. One character class cannot carry two folds, and splitting it into an
+# alternation would be wrong in the presence of `&&`. 14 rows of a 7182-probe
+# sweep; `(?iu)` over a mixed class is not something a flow writes.
+filter-regexmatch-unicode-case-over-a-mixed-class
+
+# --- W2 Task 7, fix round 1: ten divergences the first cut could not see,
+# every one measured through the harness rather than reasoned about.
+
+
+# Two more members of the already-recorded YAML 1.1-vs-1.2 plain-scalar class
+# (see `function-yaml-yes-is-a-boolean-or-not`). Listed rather than left to a
+# sentence, so the class's EXTENT fails loudly if `serde_norway` moves.
+function-yaml-underscore-separated-number
+function-yaml-off-is-a-boolean
+
+# NOT that class, and an earlier version of this file said it was -- two
+# committed control files giving one id two different causes. `1e300` is a
+# `Double` on BOTH engines; `1e400` stays a string here only because
+# `serde_norway` declines to produce a non-finite `f64`, which is the same
+# fact `runners::functions::BoundedVisitor::visit_f64` documents.
+function-yaml-huge-exponent
+
+# DELIBERATE, and the REASON changed at the merge gate. Kestra answers
+# `Infinity`; egret refuses. It used to refuse because `serde_json` rejected an
+# out-of-range exponent in its own parser. With `arbitrary_precision` declared
+# it does NOT -- it keeps the literal's text and hands it over -- so the
+# refusal is now this crate's own, in `runners::functions::finite_or_malformed`
+# via the sentinel branch of `BoundedVisitor::visit_map`. Same outcome, our
+# layer instead of a dependency's, and
+# `a_huge_exponent_is_refused_by_this_crate_now_and_not_by_serde_json` is what
+# fails if it moves again. NOT the same layer as the context-integer-past-u64
+# entries any more -- those are banked.
+function-fromjson-huge-exponent
+
+# DELIBERATE: Jackson's YAMLParser does NOT resolve an alias -- `b: *x` comes
+# back as the four-character string `x`, losing the anchored value entirely.
+# `serde_norway` resolves it. egret's answer is the useful one and Kestra's is
+# arguably an upstream defect; reproducing it would mean intercepting the
+# loader, which the crate does not expose.
+function-yaml-alias
+
+# KNOWN over-acceptance, and the only one left: SnakeYAML forbids a tab where
+# the space after `key:` belongs and libyaml allows it. Deciding this needs a
+# YAML scanner of egret's own, which is not worth a tab.
+function-yaml-tab-after-a-key
+
+# egret refuses `isPublicHoliday` outright (see above), so a call Kestra
+# answers `true` is refused here too. The countryCode guard itself is fixed:
+# Kestra only NULL-checks it, and an earlier cut refused a BLANK one.
+function-ispublicholiday-blank-country
+
+# KNOWN, pre-existing, and CRATE-WIDE rather than this function's:
+# `filters::Args` ignores a named argument the callee does not declare and an
+# extra positional one, where Pebble throws `The following named argument does
+# not exist` and `The argument at position N is not allowed`. Every one of the
+# 35 filters and 19 functions has it -- the `date` filter always did -- so
+# these two entries stand for all of them, and the same regression in another
+# name would not be visible here. `dayOfWeek` is the sample, not the case.
+function-dayofweek-unknown-named-argument
+function-dayofweek-extra-positional-argument
+
+# --- W2 Task 7, fix round 2: the annotated-value class, and three Ion types
+# egret refuses. Every row measured through the harness.
+
+# DELIBERATE: an annotated value is an opaque `IonValue` in Kestra, whose
+# `className` is `com.amazon.ion.impl.lite.IonIntLite`. egret carries it as its
+# own source text, so the class is `java.lang.String`. `oracle/README.md`'s own
+# rule excludes "an internal class name" from what a port copies -- the same
+# call `filter-classname-of-long` makes.
+function-fromion-annotation-class
+
+# DELIBERATE: Ion's own `toString()` NORMALISES the value it decorates --
+# `a::'x'` is `a::x` and `a::0x10` is `a::16`. egret keeps the source text,
+# which is right for every other probed form (`a::1`, `a::"s"`, `a::1.5`,
+# `a::1d2`, `a::1e0`, `a::true`, `a::null`, `a::{b:1}`, `a::-1`,
+# `a::null.int`, `a::b::1`) and wrong for these two.
+function-fromion-annotation-normalises-a-symbol
+function-fromion-annotation-normalises-a-radix
+
+# DELIBERATE: a serialiser refuses an `IonValue` in Kestra; egret writes the
+# text it is carrying. Same for `toIon`, `yaml` and `jq`; one entry stands for
+# the class, because the message is the same sentence with a different word.
+function-fromion-annotation-through-tojson
+
+# DELIBERATE: a blob and a clob are `byte[]` in Kestra and base64 on output
+# (`[B` is the className); a timestamp is a `java.time.LocalDate`. None has a
+# `minijinja::Value` that means the same thing and `write_ion` emits none of
+# them, so all three are refused by name. Recorded as ENTRIES rather than
+# prose, which is this file's own rule and which fix round 1 applied to `yaml`
+# and not to these.
+function-fromion-blob
+function-fromion-clob
+function-fromion-timestamp
+
+# DELIBERATE: an annotated value is an opaque `IonValue` in Kestra, so
+# `fromIon('a::1') == 'a::1'` is FALSE there and true here, where it is the
+# string it renders as. The same fact as the className row above, seen through
+# `==` instead; both are the price of carrying it as text rather than as a
+# fourth opaque object type.
+function-fromion-annotation-is-not-a-string
+
+# --- W2 Task 7, fix round 3.
+
+# DELIBERATE, and it is a REVERSAL of fix round 2's F4. An Ion decimal is a
+# `java.math.BigDecimal` in Kestra and a FIRST-CLASS NUMBER there: `1.5 * 2` is
+# `3.00`, `1.5 > 1` is `true`, `(1.5 + 1) | className` is `java.math.BigDecimal`.
+# It cannot be one here, and that is minijinja's shape rather than a choice:
+# `filters::BigNumber` is an `Object`, `value::ops::coerce` matches on
+# `ValueRepr` with no object arm, and `Ord for Value` compares `kind()` FIRST
+# with `ValueKind::Plain` above `ValueKind::Number`. Routing Ion decimals
+# through it made every `+ - * / %` an error and every `>`/`>=` unconditionally
+# TRUE, silently. A wrong spelling is recorded; a wrong comparison is not
+# acceptable, so the scale is what gives way. These are what that costs.
+function-fromion-decimal-exponent
+function-fromion-decimal-exponent-class
+function-fromion-decimal-exponent-round-trip
+function-fromion-decimal-exponent-through-tojson
+function-fromion-decimal-keeps-its-scale
+function-fromion-decimal-negative-zero
+function-fromion-decimal-scale-zero
+function-fromion-decimal-scale-zero-round-trip
+function-fromion-decimal-wide
+function-fromion-decimal-with-a-dot
+function-fromion-decimal-with-a-dot-class
+function-fromion-decimal-multiplication-loses-the-scale
+
+# KNOWN and PRE-EXISTING, on the path that still routes into that hole:
+# `number(type='BIGDECIMAL')` returns the same `Object`, so arithmetic on it is
+# an error here and `> 1` is unconditionally true. Recorded rather than fixed
+# because fixing it means a numeric `ValueRepr`, which is the scale again --
+# but recorded, because before this round nothing in the corpus could see it.
+filter-number-bigdecimal-is-not-a-number-here
+filter-number-bigdecimal-comparison
+
+# DELIBERATE: `IonValue.toString()` re-serialises CANONICALLY and egret keeps
+# the source text, so the two agree only where the source already is canonical.
+# The class is much wider than the two forms round 2 recorded -- radix,
+# underscores, `e`-exponents, uppercase `D`, `-0`, quoted annotation names,
+# triple-quoted strings, and every run of whitespace and comments -- and these
+# five stand for it. Round 2's baseline comment listed eleven forms as "right"
+# and they were, but they had been chosen from spellings that were already
+# canonical: the third round running in which a sentence about annotations
+# generalised past what was measured.
+function-fromion-annotation-normalises-underscores
+function-fromion-annotation-normalises-an-exponent
+function-fromion-annotation-normalises-a-quoted-name
+function-fromion-annotation-normalises-whitespace
+
+# DELIBERATE: Jackson DROPS the annotation on an empty list or s-expression
+# (`a::[]` and `a::()` are both `[]`) and throws on a non-empty one, while it
+# keeps it on a struct of either size. egret carries the text in all four.
+function-fromion-annotation-dropped-on-an-empty-list
+# error-class AND baselined: egret SUCCEEDS where Kestra throws, which is what
+# the five other ids in both files do too.
+function-fromion-annotation-of-a-list
+
+# DELIBERATE, and RESTORED rather than deleted. Round 2 removed this entry
+# because its golden is a Jackson serialiser artifact that is not stable
+# between JVM runs -- reproduced twice, five runs, two different messages. But
+# error-class exists for an unstable Java message; what stops it being used
+# here is that egret no longer FAILS, so the honest home is this file. The
+# regeneration section of README.md names it as a ninth id whose golden is
+# expected to move.
+function-fromion-annotation-in-a-list
+
+# KNOWN and PRE-EXISTING: `(Boolean) args.get("allRows")` is a
+# `ClassCastException` in Kestra for a non-boolean and a `NullPointerException`
+# for an explicit null; `filters::Args` reads it as false. Unchanged by this
+# round and previously unrecorded.
+function-fromion-all-rows-not-a-boolean
+
+# --- W2 Task 8: three recorded divergences, none of them a filter that is
+# not ported.
+#
+# `fetchContext` collects into a java.util.HashMap, so upstream's key order is
+# String.hashCode's bucket layout -- not sorted, not insertion. This crate's
+# standing ruling is that HashMap bucket order is implementation STRUCTURE and
+# is recorded rather than ported (see `filter-escapechar-map-two-keys`), and
+# minijinja's `known_variables` hands back a HashSet anyway, so egret must
+# impose an order of its own: it sorts. `function-fetchcontext-two-keys` MATCHES
+# because sorted and hashed happen to agree for `{a, b}`; three keys is where
+# they part.
+function-fetchcontext-three-keys
+# The `loop` object itself, not this function: Pebble's carries
+# first/last/length/index/revindex and minijinja's carries nine different
+# fields. `fetchContext` is simply the first thing that renders it.
+function-fetchcontext-in-a-loop
+# egret ignores an unknown named argument where Pebble's own argument binder
+# refuses it -- the divergence W2 Task 7's fix round recorded ("unknown and
+# extra arguments are ignored"), now with an entry. It is BOTH error-class and
+# baselined, because egret succeeds where Kestra throws.
+filter-replace-unknown-named-argument
+
+# --- W2 Task 8, fix round 1: seven more recorded divergences, and every one of
+# them is a name BOTH engines bind where egret is not running Pebble's answer.
+# `oracle/name-surface.txt`'s `semantics` column names each of these, so the
+# record lives in the ratchet rather than in prose.
+#
+# `escape`'s three non-HTML strategies are three character tables this round
+# was not scoped to; egret refuses them, which is the safe direction.
+filter-escape-js-strategy
+# Java's `String.format` conversion language -- `%,d` grouping, `%N$s` argument
+# indices, `%b` -- is not ported. `minijinja::filters::format` agrees with
+# `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and `%%` (measured,
+# all six), so re-implementing the grammar would risk turning honest errors
+# into silently wrong values.
+# A map LITERAL iterates in java.util.HashMap bucket order in Pebble and in
+# key-sorted order in minijinja, and because `replace`'s pairs CHAIN the value
+# differs. A map out of the CONTEXT agrees -- LinkedHashMap against OrderedMap,
+# both insertion order -- and `filter-replace-context-map-order` pins that half.
+filter-replace-literal-order
+filter-replace-literal-order-chained
+# Pebble's `even`/`odd` cast to Long and throw on a String; `iterable` is false
+# for a String where minijinja's is true. The `is` surface -- Kestra's `json`
+# test and Pebble's four -- was never given to a W2 task, so egret keeps
+# minijinja's four and records the difference.
+test-even
+test-odd
+test-iterable
+
+# --- W2 Task 8, fix round 1, found by attacking the sixteen filter ports OFF
+# their own axis: which Java collection a filter RETURNS decides whether the
+# next filter accepts it, and egret has one sequence type.
+#
+# **Five producers and six consumers**, corrected in fix round 2 -- the first
+# cut committed "three producers wide" and two probes falsified it:
+# `'a,b,c' | split(',') | reverse` is a ClassCastException on `[Ljava.lang.String;`
+# there (SplitFilter returns a Java ARRAY, not a List) and `l | chunk(2) | reverse`
+# is an UnsupportedOperationException (ChunkFilter's list is immutable).
+#
+# producers whose result is not a mutable `List`: `keys` and `values` (a
+# Set/Collection), `flatten` and `chunk` (immutable), `split` (a String[]).
+# consumers that cast: `sort`, `reverse`, `slice` -- and `distinct`, `chunk`
+# and `flatten`, which are W2 Task 4's and were already in this class.
+# `first`, `last`, `join`, `length` and `default` take a `Collection` and
+# agree, and `distinct`, `range` and `fromJson` return real mutable Lists --
+# `filter-sort-of-a-real-list` pins that side.
+#
+# Two of the pairs below are REGRESSIONS from fix round 1 rather than
+# pre-existing: `keys | slice` and `values | slice` agreed before it, because
+# minijinja's `slice` errored on them for its own reasons.
+#
+# Not fixable without giving egret a second sequence type whose only purpose
+# is to be refused, which is implementation structure by this file's own rule.
+filter-sort-of-keys
+filter-reverse-of-keys
+filter-slice-of-keys
+filter-sort-of-flatten
+# The same recorded class as `filter-string-undefined-input`: an undefined root
+# variable is a `RootAttributeNotFoundException` there and reaches a filter's
+# null branch here. The sixteen new names join a class the other 35 were
+# already in; `length` gets the entry because it answers a VALUE (`0`) rather
+# than rendering empty.
+
+# --- W2 Task 8, fix round 2.
+#
+# The rest of the collection class (see the note above): `split` returns a Java
+# array and `chunk`/`flatten` return immutable lists, so six consumers refuse
+# five producers and egret has one sequence type for all of them.
+filter-reverse-of-split
+filter-reverse-of-chunk
+filter-reverse-of-flatten
+filter-sort-of-values
+filter-reverse-of-values
+filter-slice-of-values
+filter-distinct-of-keys
+filter-chunk-of-keys
+filter-flatten-of-keys
+filter-distinct-of-split
+# What refusing an UNDEFINED input costs, and it is the same trade
+# `filter-string-undefined-input` records seen from the other side. egret
+# cannot tell Pebble's `null` LITERAL from a typo'd variable -- both arrive as
+# minijinja's undefined -- and fix round 2 chose the direction that fails
+# loudly, because the alternative turned `{{ nothere | upper }}` from an error
+# into an empty string. Kestra renders these; egret refuses them.
+filter-upper-literal-null
+filter-length-literal-null
+# Java's `%g` and `%c`. `runners::javaformat` implements `s S b B d o x X f e E
+# % n` exactly and refuses the rest BY NAME rather than answering differently;
+# `%a`, `%h` and the `%t` date family are refused the same way and are not
+# separately listed.
+filter-format-g-conversion
+filter-format-c-conversion
+# `javare` refuses the Java regex constructs the `regex` crate cannot express,
+# and `split`'s delimiter inherits that set. Under-acceptance, and the same
+# recorded class as `filter-regexmatch-lookahead`.
+filter-split-lookahead
+
+# --- W2 Task 8, fix round 3.
+#
+# `%t`/`%T` is Java's date family. `runners::javaformat` refuses it by name
+# along with `c`, `g`, `a` and `h` -- but a NULL argument reaches Kestra's
+# string path before its date path, so `'%tY' | format(null)` ANSWERS `null`
+# there and is refused here. Under-acceptance, and the entry exists because
+# the round before rendered `nullY`: the null arm sat in front of the refusal
+# and `parse_spec` consumed only one of the family's two characters.
+filter-format-date-family-refused
+

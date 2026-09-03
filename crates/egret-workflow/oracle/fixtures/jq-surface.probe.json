@@ -1,0 +1,3880 @@
+[
+ {
+  "id": "jq-identity",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-field",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a"
+  }
+ },
+ {
+  "id": "jq-nested",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a.b"
+  }
+ },
+ {
+  "id": "jq-missing",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".nope"
+  }
+ },
+ {
+  "id": "jq-missing-deep",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".nope.deeper"
+  }
+ },
+ {
+  "id": "jq-optional",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a?"
+  }
+ },
+ {
+  "id": "jq-index-str",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".[\"a\"]"
+  }
+ },
+ {
+  "id": "jq-iterate",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[]"
+  }
+ },
+ {
+  "id": "jq-iterate-all",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".[]"
+  }
+ },
+ {
+  "id": "jq-index-0",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[0]"
+  }
+ },
+ {
+  "id": "jq-index-neg",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[-1]"
+  }
+ },
+ {
+  "id": "jq-slice",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[0:2]"
+  }
+ },
+ {
+  "id": "jq-keys",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "keys"
+  }
+ },
+ {
+  "id": "jq-keys-unsorted",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "keys_unsorted"
+  }
+ },
+ {
+  "id": "jq-length",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | length"
+  }
+ },
+ {
+  "id": "jq-length-str",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".s | length"
+  }
+ },
+ {
+  "id": "jq-type",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | type"
+  }
+ },
+ {
+  "id": "jq-values",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | .[]"
+  }
+ },
+ {
+  "id": "jq-map",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | map(. + 1)"
+  }
+ },
+ {
+  "id": "jq-select",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[] | select(. > 1)"
+  }
+ },
+ {
+  "id": "jq-alt-operator",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".nope // \"dflt\""
+  }
+ },
+ {
+  "id": "jq-to-entries",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | to_entries"
+  }
+ },
+ {
+  "id": "jq-from-entries",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[{key:\"k\",value:1}] | from_entries"
+  }
+ },
+ {
+  "id": "jq-with-entries",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | with_entries(.value += 1)"
+  }
+ },
+ {
+  "id": "jq-add",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | add"
+  }
+ },
+ {
+  "id": "jq-any",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | any(. > 2)"
+  }
+ },
+ {
+  "id": "jq-all",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | all(. > 0)"
+  }
+ },
+ {
+  "id": "jq-sort",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | sort"
+  }
+ },
+ {
+  "id": "jq-sort-by",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[{x:2},{x:1}] | sort_by(.x)"
+  }
+ },
+ {
+  "id": "jq-group-by",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,1,2] | group_by(.)"
+  }
+ },
+ {
+  "id": "jq-unique",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,1,2] | unique"
+  }
+ },
+ {
+  "id": "jq-flatten",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[[1,[2]],3] | flatten"
+  }
+ },
+ {
+  "id": "jq-reverse",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | reverse"
+  }
+ },
+ {
+  "id": "jq-min-max",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list | [min, max]"
+  }
+ },
+ {
+  "id": "jq-range",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[range(3)]"
+  }
+ },
+ {
+  "id": "jq-range-2",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[range(1;4)]"
+  }
+ },
+ {
+  "id": "jq-tostring",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | tostring"
+  }
+ },
+ {
+  "id": "jq-tonumber",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"42\" | tonumber"
+  }
+ },
+ {
+  "id": "jq-tojson",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | tojson"
+  }
+ },
+ {
+  "id": "jq-fromjson",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"{\\\"z\\\":1}\" | fromjson"
+  }
+ },
+ {
+  "id": "jq-ascii-downcase",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"AB\" | ascii_downcase"
+  }
+ },
+ {
+  "id": "jq-ltrimstr",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | ltrimstr(\"a\")"
+  }
+ },
+ {
+  "id": "jq-startswith",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | startswith(\"a\")"
+  }
+ },
+ {
+  "id": "jq-split",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a,b\" | split(\",\")"
+  }
+ },
+ {
+  "id": "jq-join",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"a\",\"b\"] | join(\"-\")"
+  }
+ },
+ {
+  "id": "jq-test",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | test(\"b\")"
+  }
+ },
+ {
+  "id": "jq-test-flags",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"ABC\" | test(\"b\";\"i\")"
+  }
+ },
+ {
+  "id": "jq-match",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | [match(\"b\").offset]"
+  }
+ },
+ {
+  "id": "jq-capture",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a1\" | capture(\"(?<d>[0-9])\") | .d"
+  }
+ },
+ {
+  "id": "jq-sub",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | sub(\"b\";\"X\")"
+  }
+ },
+ {
+  "id": "jq-gsub",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"aba\" | gsub(\"a\";\"X\")"
+  }
+ },
+ {
+  "id": "jq-splits",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"a,b\" | splits(\",\")]"
+  }
+ },
+ {
+  "id": "jq-interp",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"v=\\(.a.b)\""
+  }
+ },
+ {
+  "id": "jq-at-base64",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"ab\" | @base64"
+  }
+ },
+ {
+  "id": "jq-at-json",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | @json"
+  }
+ },
+ {
+  "id": "jq-at-csv",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[[1,2]] | .[] | @csv"
+  }
+ },
+ {
+  "id": "jq-at-tsv",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[[1,2]] | .[] | @tsv"
+  }
+ },
+ {
+  "id": "jq-at-uri",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a b\" | @uri"
+  }
+ },
+ {
+  "id": "jq-at-sh",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a b\" | @sh"
+  }
+ },
+ {
+  "id": "jq-at-html",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"<a>\" | @html"
+  }
+ },
+ {
+  "id": "jq-at-text",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | @text"
+  }
+ },
+ {
+  "id": "jq-if-then",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "if .a.b > 1 then \"big\" else \"small\" end"
+  }
+ },
+ {
+  "id": "jq-try-catch",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "try error(\"boom\") catch ."
+  }
+ },
+ {
+  "id": "jq-error",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "error(\"boom\")"
+  }
+ },
+ {
+  "id": "jq-reduce",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "reduce .list[] as $x (0; . + $x)"
+  }
+ },
+ {
+  "id": "jq-foreach",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[foreach .list[] as $x (0; . + $x)]"
+  }
+ },
+ {
+  "id": "jq-def",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "def f: . + 1; .a.b | f"
+  }
+ },
+ {
+  "id": "jq-var-binding",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a.b as $x | $x + 1"
+  }
+ },
+ {
+  "id": "jq-update-assign",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a.b |= . + 1"
+  }
+ },
+ {
+  "id": "jq-plain-assign",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a.b = 7"
+  }
+ },
+ {
+  "id": "jq-alt-assign",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".nope //= \"d\""
+  }
+ },
+ {
+  "id": "jq-del",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "del(.a)"
+  }
+ },
+ {
+  "id": "jq-has",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | has(\"b\")"
+  }
+ },
+ {
+  "id": "jq-in-op",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"b\" | in({b:1})"
+  }
+ },
+ {
+  "id": "jq-contains",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".s | contains(\"h\")"
+  }
+ },
+ {
+  "id": "jq-inside",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"h\" | inside(\"hi\")"
+  }
+ },
+ {
+  "id": "jq-paths",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 1
+    }
+   },
+   "e": "[paths]"
+  }
+ },
+ {
+  "id": "jq-getpath",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "getpath([\"a\",\"b\"])"
+  }
+ },
+ {
+  "id": "jq-setpath",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": 1
+   },
+   "e": "setpath([\"z\"];1)"
+  }
+ },
+ {
+  "id": "jq-leaf-paths",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 1
+    }
+   },
+   "e": "[leaf_paths]"
+  }
+ },
+ {
+  "id": "jq-recurse",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 1
+    }
+   },
+   "e": "[..] | length"
+  }
+ },
+ {
+  "id": "jq-env",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "$ENV | type"
+  }
+ },
+ {
+  "id": "jq-env-fn",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "env | type"
+  }
+ },
+ {
+  "id": "jq-now",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "now | type"
+  }
+ },
+ {
+  "id": "jq-input-line",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "input_line_number"
+  }
+ },
+ {
+  "id": "jq-limit",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[limit(2; .list[])]"
+  }
+ },
+ {
+  "id": "jq-first-last",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[first(.list[]), last(.list[])]"
+  }
+ },
+ {
+  "id": "jq-until",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[.list[] | until(. > 2; . + 1)]"
+  }
+ },
+ {
+  "id": "jq-while",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1 | while(. < 4; . + 1)]"
+  }
+ },
+ {
+  "id": "jq-repeat",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[limit(3; 1 | repeat(. + 1))]"
+  }
+ },
+ {
+  "id": "jq-todate",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "0 | todate"
+  }
+ },
+ {
+  "id": "jq-strftime",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "0 | strftime(\"%Y\")"
+  }
+ },
+ {
+  "id": "jq-ascii",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "65 | [.] | implode"
+  }
+ },
+ {
+  "id": "jq-explode",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"ab\" | explode"
+  }
+ },
+ {
+  "id": "jq-splits-empty",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"\" | splits(\",\")]"
+  }
+ },
+ {
+  "id": "jq-tostream",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[.a | tostream] | length"
+  }
+ },
+ {
+  "id": "jq-walk",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "walk(if type == \"number\" then . + 1 else . end) | .a.b"
+  }
+ },
+ {
+  "id": "jq-input",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "input"
+  }
+ },
+ {
+  "id": "jq-debug",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "debug"
+  }
+ },
+ {
+  "id": "jq-halt",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "halt"
+  }
+ },
+ {
+  "id": "jq-getpath-missing",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "getpath([\"x\",\"y\"])"
+  }
+ },
+ {
+  "id": "jq-comma",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a, .s"
+  }
+ },
+ {
+  "id": "jq-empty",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "empty"
+  }
+ },
+ {
+  "id": "jq-not",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "false | not"
+  }
+ },
+ {
+  "id": "jq-arith-div0",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "1 / 0"
+  }
+ },
+ {
+  "id": "jq-arith-str-add",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a\" + \"b\""
+  }
+ },
+ {
+  "id": "jq-arith-obj-add",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "{a:1} + {b:2}"
+  }
+ },
+ {
+  "id": "jq-arith-type-error",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "1 + \"a\""
+  }
+ },
+ {
+  "id": "jq-null-field",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".n.x"
+  }
+ },
+ {
+  "id": "jq-iterate-scalar",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".s[]"
+  }
+ },
+ {
+  "id": "jq-syntax-error",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a["
+  }
+ },
+ {
+  "id": "jq-unknown-fn",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "no_such_function"
+  }
+ },
+ {
+  "id": "jq-bignum",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "9007199254740993"
+  }
+ },
+ {
+  "id": "jq-float-out",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".f"
+  }
+ },
+ {
+  "id": "jq-null-out",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".n"
+  }
+ },
+ {
+  "id": "jq-bool-out",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".t"
+  }
+ },
+ {
+  "id": "jq-multiple-out",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[]"
+  }
+ },
+ {
+  "id": "jq-object-out",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a"
+  }
+ },
+ {
+  "id": "jq-empty-object",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "{}"
+  }
+ },
+ {
+  "id": "jq-nan",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "nan | isnan"
+  }
+ },
+ {
+  "id": "jq-infinite",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "infinite"
+  }
+ },
+ {
+  "id": "jq-in-string-json",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "{\"a\":1}",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-number",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "42",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-quoted",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "\"x\"",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-bare",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "abc",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-empty",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-two-docs",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "1 2",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-number",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": 7,
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-bool",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": true,
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-list",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": [
+    1,
+    2
+   ],
+   "e": ".[]"
+  }
+ },
+ {
+  "id": "jq-in-float",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": 1.5,
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-in-string-null",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": "null",
+   "e": "."
+  }
+ },
+ {
+  "id": "jq-null-input",
+  "expr": "<{{ v | jq('.') }}>",
+  "context": {
+   "v": null
+  }
+ },
+ {
+  "id": "jq-missing-expression",
+  "expr": "{{ v | jq() }}",
+  "context": {
+   "v": {
+    "a": 1
+   }
+  }
+ },
+ {
+  "id": "jq-expression-null",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": 1
+   },
+   "e": null
+  }
+ },
+ {
+  "id": "jq-expression-number",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": 1
+   },
+   "e": 1
+  }
+ },
+ {
+  "id": "jq-named-arg",
+  "expr": "{{ v | jq(expression='.a') }}",
+  "context": {
+   "v": {
+    "a": 1
+   }
+  }
+ },
+ {
+  "id": "jq-scan",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a1b2\" | [scan(\"[0-9]\")]"
+  }
+ },
+ {
+  "id": "jq-scan-group",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a1b2\" | [scan(\"([0-9])\")]"
+  }
+ },
+ {
+  "id": "jq-splits-multi",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"a,b,c\" | splits(\",\")]"
+  }
+ },
+ {
+  "id": "jq-sub-global",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"aba\" | sub(\"a\";\"X\")"
+  }
+ },
+ {
+  "id": "jq-gsub-group",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"a1\" | gsub(\"(?<d>[0-9])\";\"<\\(.d)>\")"
+  }
+ },
+ {
+  "id": "jq-test-ci",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"AB\" | test(\"ab\";\"i\")"
+  }
+ },
+ {
+  "id": "jq-match-all",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"aa\" | [match(\"a\";\"g\").offset]"
+  }
+ },
+ {
+  "id": "jq-getpath-str",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "getpath([\"a\",\"b\"])"
+  }
+ },
+ {
+  "id": "jq-ltrimstr-nonmatch",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abc\" | ltrimstr(\"z\")"
+  }
+ },
+ {
+  "id": "jq-splits-regex",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"a1b\" | splits(\"[0-9]\")]"
+  }
+ },
+ {
+  "id": "jq-tojson-num",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "1.0 | tojson"
+  }
+ },
+ {
+  "id": "jq-tostring-num",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "1.0 | tostring"
+  }
+ },
+ {
+  "id": "jq-floatfmt",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".f | tostring"
+  }
+ },
+ {
+  "id": "jq-bigint",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "9007199254740993"
+  }
+ },
+ {
+  "id": "jq-bigint-add",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "9007199254740993 + 1"
+  }
+ },
+ {
+  "id": "jq-intdiv",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "7 / 2"
+  }
+ },
+ {
+  "id": "jq-sort-mixed",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,\"a\",null,true] | sort"
+  }
+ },
+ {
+  "id": "jq-unique-mixed",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,1.0] | unique"
+  }
+ },
+ {
+  "id": "jq-group-keys",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[{a:1},{a:1}] | group_by(.a) | length"
+  }
+ },
+ {
+  "id": "jq-to-entries-order",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "{b:1,a:2} | to_entries | map(.key)"
+  }
+ },
+ {
+  "id": "jq-add-null",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[] | add"
+  }
+ },
+ {
+  "id": "jq-min-empty",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[] | min"
+  }
+ },
+ {
+  "id": "jq-has-idx",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,2] | has(1)"
+  }
+ },
+ {
+  "id": "jq-index-oob",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[9]"
+  }
+ },
+ {
+  "id": "jq-slice-neg",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".list[-2:]"
+  }
+ },
+ {
+  "id": "jq-string-slice",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".s[0:1]"
+  }
+ },
+ {
+  "id": "jq-obj-construct",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "{x: .a.b}"
+  }
+ },
+ {
+  "id": "jq-obj-shorthand",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": ".a | {b}"
+  }
+ },
+ {
+  "id": "jq-alt-error",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "(error(\"x\") // \"d\")"
+  }
+ },
+ {
+  "id": "jq-try-alt",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "try error(\"x\") catch \"c\""
+  }
+ },
+ {
+  "id": "jq-path-of",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[path(.a.b)]"
+  }
+ },
+ {
+  "id": "jq-del-multi",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "del(.a,.s) | keys_unsorted"
+  }
+ },
+ {
+  "id": "jq-to-number-bad",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"z\" | tonumber"
+  }
+ },
+ {
+  "id": "jq-ascii-down-uni",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"É\" | ascii_downcase"
+  }
+ },
+ {
+  "id": "jq-at-base64d",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"YWI=\" | @base64d"
+  }
+ },
+ {
+  "id": "jq-at-uri-uni",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"é\" | @uri"
+  }
+ },
+ {
+  "id": "jq-input-line-number",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "input_line_number"
+  }
+ },
+ {
+  "id": "jq-ltrim",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\" a \" | ltrimstr(\" \")"
+  }
+ },
+ {
+  "id": "jq-splits-empty-re",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"ab\" | splits(\"\")]"
+  }
+ },
+ {
+  "id": "jq-env-obj",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "$ENV | type"
+  }
+ },
+ {
+  "id": "jq-getpath-null",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "null | getpath([\"a\"])"
+  }
+ },
+ {
+  "id": "jq-limit-zero",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[limit(0; .list[])]"
+  }
+ },
+ {
+  "id": "jq-first-empty",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[first(empty)]"
+  }
+ },
+ {
+  "id": "jq-nan-sort",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[nan] | sort | length"
+  }
+ },
+ {
+  "id": "jq-infinite-tostring",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "infinite | tostring"
+  }
+ },
+ {
+  "id": "jq-abs",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "-1 | fabs"
+  }
+ },
+ {
+  "id": "jq-floor-str",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"1\" | floor"
+  }
+ },
+ {
+  "id": "jq-implode-bad",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[-1] | implode"
+  }
+ },
+ {
+  "id": "jq-utf8len",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"é\" | utf8bytelength"
+  }
+ },
+ {
+  "id": "jq-splits-flags",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"aXb\" | splits(\"x\";\"i\")]"
+  }
+ },
+ {
+  "id": "jq-indices",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"abcb\" | indices(\"b\")"
+  }
+ },
+ {
+  "id": "jq-indices-arr",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1,2,1] | indices(1)"
+  }
+ },
+ {
+  "id": "jq-walk-str",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "walk(if type==\"string\" then ascii_upcase else . end) | .s"
+  }
+ },
+ {
+  "id": "jq-todate-num",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "0 | todateiso8601"
+  }
+ },
+ {
+  "id": "jq-fromdate",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"1970-01-01T00:00:00Z\" | fromdateiso8601"
+  }
+ },
+ {
+  "id": "jq-strptime",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "\"1970-01-01T00:00:00Z\" | strptime(\"%Y-%m-%dT%H:%M:%SZ\") | length"
+  }
+ },
+ {
+  "id": "jq-gmtime",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "0 | gmtime | length"
+  }
+ },
+ {
+  "id": "jq-mktime",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[1970,0,1,0,0,0,0,0] | mktime"
+  }
+ },
+ {
+  "id": "jq-splits-none",
+  "expr": "{{ v | jq(e) }}",
+  "context": {
+   "v": {
+    "a": {
+     "b": 42
+    },
+    "list": [
+     3,
+     1,
+     2
+    ],
+    "s": "hi",
+    "n": null,
+    "t": true,
+    "f": 1.5
+   },
+   "e": "[\"abc\" | splits(\"z\")]"
+  }
+ }
+]

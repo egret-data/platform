@@ -1,0 +1,668 @@
+# Every corpus entry compared by ERROR CLASS instead of by value.
+#
+# `compare: "error-class"` means tests/oracle.rs checks only that egret ALSO
+# fails, never what it says -- because the golden value is a Java exception
+# string no Rust port can reproduce byte for byte.
+#
+# It is also a FREE PASS: such an entry matches on any error at all, including
+# `unknown function`, so it is born matching, never enters oracle/baseline.txt,
+# and can never fail. A task that cannot reproduce a filter could mark its
+# entry error-class and the oracle would go green on work that was not done.
+#
+# So adding one is a deliberate, reviewable act: this file is asserted to equal
+# the set of markers in corpus.json EXACTLY, which makes a new error-class
+# entry a one-line diff here rather than a field edit buried in a 138-entry
+# JSON file. The same discipline oracle/baseline.txt applies to mismatches.
+#
+# One id per line. `#` starts a comment. Corpus order.
+
+# Pebble THROWS on a String/Number comparison; egret coerces. Still
+# mismatching -- error-class forgives the message, not the outcome.
+gt-mixed
+lt-mixed
+lte-mixed
+gte-mixed
+
+# Registered but null-backed standalone: Pebble reports "Function or Macro
+# [x] does not exist". These match today only because egret says "unknown
+# function" -- NOTHING IS PORTED. Task 8 must assert the refusal TEXT
+# separately; error-class by construction cannot.
+function-secret
+function-kv
+function-read
+function-fileuri
+function-filesize
+function-fileexists
+function-isfileempty
+function-http
+
+# Kestra's RAW_PATTERN has no DOTALL, so Pebble rejects the unknown tag.
+# egret's own raw tag handles it, so this still mismatches -- deliberate.
+raw-multiline
+
+# strictVariables(true): an ABSENT variable in an isIn raises, and is a
+# different state from a bound null. See runners::env::kestra_is_in.
+isin-undefined-left
+isin-undefined-right
+isin-missing-attr-left
+
+# W2 TASK 4, four wrong-typed-input entries. Their goldens are
+# `PebbleException` text and their only reproducible content is "Kestra
+# refuses this". Each is backed by a unit test in runners::filters that
+# asserts egret's OWN message for the same input, so the free pass is not
+# what is carrying them:
+#
+#   filter-chunk-not-list      -> chunk_rejects_a_non_list
+#   filter-distinct-not-list   -> distinct_rejects_a_non_list
+#   filter-values-not-map      -> values_rejects_a_non_map
+#   filter-number-not-string   -> number_rejects_a_non_string
+#
+# `distinct` and `chunk` are here for the same reason but say opposite things
+# about null: `chunk(null)` is null and `distinct(null)` is the STRING "null",
+# so the pair is what makes the asymmetry visible.
+filter-chunk-not-list
+filter-distinct-not-list
+filter-values-not-map
+filter-number-not-string
+
+# W2 TASK 4 FIX ROUND, five more -- every one an EXCEPTION Kestra throws where
+# the first cut of these filters silently answered. Same discipline: each is
+# paired with a unit test in runners::filters that asserts egret's own message,
+# so what carries them is the test, not the mode.
+#
+#   filter-escapechar-map-null-value    -> escape_char_refuses_a_null_inside_a_container
+#   filter-escapechar-list-null-element -> escape_char_refuses_a_null_inside_a_container
+#   filter-chunk-size-truncated         -> chunk_narrows_its_size_to_an_int
+#   filter-indent-amount-overflow       -> indent_narrows_its_amount_to_an_int
+#   filter-number-int-overflow          -> number_int_really_is_thirty_two_bits
+#
+# The two escapeChar ones are the C1 defect: before the fix, a null inside a
+# map came out as the literal text `None` -- Python's spelling -- from a filter
+# whose `shell` mode exists to build command lines.
+filter-escapechar-map-null-value
+filter-escapechar-list-null-element
+filter-chunk-size-truncated
+filter-indent-amount-overflow
+filter-number-int-overflow
+
+# W2 TASK 4 FIX ROUND 3, three more. Same discipline; same pairing.
+#
+#   filter-indent-amount-over-max -> indent_reproduces_kestras_own_max_amount
+#   filter-number-type-not-string -> number_reads_its_type_argument_strictly
+#   filter-number-type-null       -> number_reads_its_type_argument_strictly
+#
+# filter-indent-amount-over-max is the ONE entry here whose golden egret
+# reproduces almost verbatim: `RenderLimitExceededException`'s message is
+# Kestra's own text and this port copies it word for word. Only the Java class
+# name and the template coordinates differ, which is precisely the residue
+# error-class exists for.
+filter-indent-amount-over-max
+filter-number-type-not-string
+filter-number-type-null
+
+# W2 TASK 5 -- the date/time batch, fourteen. Every one of these is an
+# exception Kestra actually throws; none of them is a filter this task could
+# not finish. The pairing is in error-class-pairs.txt and is asserted.
+#
+# Eight of the fourteen are the JAVA PATTERN COMPILER refusing a pattern, and
+# they are the reason this task did not need a `RenderLimits`-style bound of
+# its own: `DateTimeFormatter.ofPattern` caps every repeatable letter itself
+# (`d` at 2, `S` at 9, `y` at 19), so a pattern of ten thousand letters is an
+# IllegalArgumentException in Kestra and in egret rather than an allocation.
+# `runners::javafmt` reproduces each message word for word.
+#
+#   filter-date-pattern-too-many-letters   -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-fraction-too-wide  -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-year-too-wide      -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-unclosed-literal   -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-pattern-reserved-char      -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-pattern-unmatched-bracket  -> date_reproduces_javas_pattern_syntax_errors
+#   filter-date-unknown-named-format       -> an_unknown_format_name_is_compiled_as_a_pattern
+#   filter-date-input-not-a-string         -> date_rejects_an_input_that_is_not_a_string
+#   filter-date-input-unparseable          -> date_refuses_an_unparseable_input
+#   filter-date-unknown-zone               -> date_refuses_an_unknown_time_zone
+#   filter-dateadd-unit-lowercase          -> date_add_refuses_a_unit_that_is_not_a_chrono_unit
+#   filter-dateadd-missing-unit            -> date_add_refuses_a_missing_unit
+#   filter-dateadd-amount-not-a-number     -> date_add_refuses_an_amount_that_is_not_a_number
+#   filter-dateadd-amount-not-numeric-text -> date_add_refuses_an_amount_that_is_not_a_number
+#
+# `filter-date-unknown-named-format` is the sharpest of them: `date('nope_format')`
+# is NOT an unknown-format error at all. `AbstractDate.formatter` falls through
+# both of its maps to `ofPattern(name)`, so the name is compiled as a PATTERN
+# and the message names the first letter of it that is not a pattern letter --
+# `Unknown pattern letter: o`.
+filter-date-pattern-too-many-letters
+filter-date-pattern-fraction-too-wide
+filter-date-pattern-year-too-wide
+filter-date-pattern-unclosed-literal
+filter-date-pattern-reserved-char
+filter-date-pattern-unmatched-bracket
+filter-date-unknown-named-format
+filter-date-input-not-a-string
+filter-date-input-unparseable
+filter-date-unknown-zone
+filter-dateadd-unit-lowercase
+filter-dateadd-missing-unit
+filter-dateadd-amount-not-a-number
+filter-dateadd-amount-not-numeric-text
+
+# W2 TASK 5 FIX ROUND 1 -- nine more, every one of them a variant ONE STEP
+# from an entry above that already passed. That is the pattern the fix round's
+# review named, and it is what the probe sweep (every ASCII letter at counts
+# 1-11, every ChronoUnit at ten magnitudes, 50 zone ids, 30 existingFormat
+# patterns) exists to break: the entries above were chosen, unconsciously, to
+# be the variants that pass.
+#
+# Two of these carry a FOURTH JDK sentence the earlier eight never reached --
+# `Wrong number of pattern letters`, which is what `v` and `B` say for a count
+# outside their non-contiguous sets (`v` takes 1 or 4; `B` takes 1, 4 or 5).
+# `Too many pattern letters` is a different rule and was the only one pinned.
+#
+#   filter-date-pattern-generic-zone-wrong-count    -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-day-period-wrong-count      -> date_reproduces_javas_pattern_letter_limits
+#   filter-date-pattern-pad-at-a-wide-value         -> date_reproduces_javas_padding_rules
+#   filter-date-pattern-pad-not-followed-by-a-letter-> date_reproduces_javas_padding_rules
+#   filter-date-pattern-pad-before-a-bracket        -> date_reproduces_javas_padding_rules
+#   filter-date-zone-offset-colon-placement         -> date_reproduces_javas_zone_offset_grammar
+#   filter-date-zone-offset-out-of-range            -> date_reproduces_javas_zone_offset_grammar
+#   filter-date-zone-legacy-three-letter            -> date_refuses_an_unknown_time_zone
+#   filter-date-format-rfc-1123-year-out-of-range   -> rfc_1123_refuses_a_year_it_cannot_print
+#
+# `filter-date-pattern-pad-at-a-wide-value` is the sharpest: it is the SAME
+# pattern as the passing `filter-date-pattern-pad`, at a different clock time.
+# 05:07 fits inside both pads; 10:30 does not, and Java throws
+# `Cannot print as output of 2 characters exceeds pad width of 1` where egret
+# was silently emitting the value unpadded.
+#
+# `filter-date-zone-legacy-three-letter` records that `ZoneId.of("EST")`
+# THROWS while `ZoneId.of("EST5EDT")` does not -- the JDK's tzdb build drops
+# the three-letter `backward` links that collide with `ZoneId.SHORT_IDS`.
+# `chrono-tz` carries them, so egret had to deny exactly four ids by name;
+# the set is closed, checked by feeding all 597 `chrono-tz` names to
+# `ZoneId.of`.
+filter-date-pattern-generic-zone-wrong-count
+filter-date-pattern-day-period-wrong-count
+filter-date-pattern-pad-at-a-wide-value
+filter-date-pattern-pad-not-followed-by-a-letter
+filter-date-pattern-pad-before-a-bracket
+filter-date-zone-offset-colon-placement
+filter-date-zone-offset-out-of-range
+filter-date-zone-legacy-three-letter
+filter-date-format-rfc-1123-year-out-of-range
+
+# W2 TASK 5 FIX ROUND 2 -- five from the `existingFormat` PARSE sweep, which
+# is the surface fix round 1 named as its thinnest and left at 30 patterns
+# against one input each. This sweep is every pattern letter at every count
+# that formats, round-tripped through Java's own output, plus each field's
+# near-misses -- because a parser is only pinned by the inputs it must REFUSE.
+#
+# Per the fix round's second ruling, each paired test now asserts a BOUNDARY:
+# one input refused and one neighbouring input accepted. An error-class entry
+# pins THAT egret refuses and its test pins WHAT it says; neither pins WHICH
+# inputs, and that gap is exactly where `v` and the four legacy zone ids lived.
+#
+#   filter-date-existing-format-offset-xxx-needs-a-colon    -> an_existing_formats_offset_letters_are_count_specific
+#   filter-date-existing-format-offset-is-case-sensitive    -> an_existing_formats_offset_letters_are_count_specific
+#   filter-date-existing-format-hour-of-ampm-out-of-range   -> an_existing_formats_fields_are_range_checked
+#   filter-date-existing-format-year-of-era-cannot-be-zero  -> an_existing_formats_fields_are_range_checked
+#   filter-date-existing-format-year-of-era-cannot-be-negative -> an_existing_formats_fields_are_range_checked
+#
+# The two year ones are a boundary in the sharpest possible form: `yyyy`
+# refuses `0000-01-15` and `-0044-01-15` because YearOfEra starts at 1, and
+# `uuuu` -- one letter away -- takes both.
+filter-date-existing-format-offset-xxx-needs-a-colon
+filter-date-existing-format-offset-is-case-sensitive
+filter-date-existing-format-hour-of-ampm-out-of-range
+filter-date-existing-format-year-of-era-cannot-be-zero
+filter-date-existing-format-year-of-era-cannot-be-negative
+
+# W2 TASK 5 FIX ROUND 3 -- eight, and **every one was written before its fix
+# and shown to FAIL against the pre-fix implementation.** That is the rule the
+# third review imposed, and it is mutation discipline applied to corpus
+# selection: a sweep finds divergences, but nothing forces the ENTRY you write
+# afterwards to sit on one. Two reviews in a row found my new entries sitting
+# one variant away from the failure -- `Q E G` on values that agree, `KK` at 12
+# but not `hh` at 0, `DAYS` for a bug in the time-based units.
+#
+#   filter-date-existing-format-quarter-conflicts       -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-day-of-week-conflicts   -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-day-of-year-conflicts   -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-milli-of-day-conflicts  -> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-repeated-field-conflicts-> java_cross_checks_the_fields_it_parses
+#   filter-date-existing-format-clock-hour-of-ampm-thirteen -> smart_exempts_a_zero_clock_hour_but_not_a_thirteenth
+#   filter-date-existing-format-wide-year-needs-the-sign    -> a_wide_year_is_read_back_only_with_its_sign
+#   filter-date-existing-format-optional-year-absent        -> an_optional_section_that_fails_leaves_no_year
+#
+# The first five correct a claim W2 Task 5's fix round 2 wrote down and got
+# wrong: it said Java "parses and then ignores" `Q`, `q`, `w`, `W`, `F`, `Y`,
+# `g`, `E` and `G`. It does not. `Parsed.updateCheckConflict` resolves each into
+# a field and CROSS-CHECKS it against the date, and the same mechanism rejects
+# a field supplied twice with two values.
+filter-date-existing-format-quarter-conflicts
+filter-date-existing-format-day-of-week-conflicts
+filter-date-existing-format-day-of-year-conflicts
+filter-date-existing-format-milli-of-day-conflicts
+filter-date-existing-format-repeated-field-conflicts
+filter-date-existing-format-clock-hour-of-ampm-thirteen
+filter-date-existing-format-wide-year-needs-the-sign
+filter-date-existing-format-optional-year-absent
+
+# --- W2 Task 6: the four structured-data filters and the three regex ones.
+#
+# Fourteen entries, each an exception Kestra actually throws and each backed
+# by a unit test in `runners::filters` asserting egret's OWN message:
+#
+#   filter-jq-string-input-not-json        -> jq_reports_the_input_it_could_not_use
+#   filter-jq-missing-expression           -> jq_reports_the_input_it_could_not_use
+#   filter-jq-expression-not-a-string      -> jq_reports_the_input_it_could_not_use
+#   filter-jq-syntax-error                 -> jq_reports_the_input_it_could_not_use
+#   filter-regexmatch-bare-script-name     -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-invalid-regex        -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-missing-regex        -> a_missing_regex_argument_is_reported_by_name
+#   filter-regexmatch-null-regex           -> a_missing_regex_argument_is_reported_by_name
+#   filter-regexreplace-missing-replacement-> a_missing_regex_argument_is_reported_by_name
+#   filter-regexreplace-group-out-of-range -> a_bad_replacement_reference_is_reported
+#   filter-regexreplace-trailing-dollar    -> a_bad_replacement_reference_is_reported
+#   filter-regexextract-group-out-of-range -> a_bad_group_argument_is_reported
+#   filter-regexextract-negative-group     -> a_bad_group_argument_is_reported
+#   filter-regexextract-group-not-a-number -> a_bad_group_argument_is_reported
+#
+# Note what is NOT here. Every construct egret refuses and Kestra accepts
+# (a lookahead, a backreference, a possessive quantifier, a Unicode block)
+# is in `baseline.txt` instead: Kestra SUCCEEDS on those, so there is no
+# error to compare classes with, and marking them error-class would be the
+# free pass this file exists to make visible.
+filter-jq-string-input-not-json
+filter-jq-missing-expression
+filter-jq-expression-not-a-string
+filter-jq-syntax-error
+filter-regexmatch-bare-script-name
+filter-regexmatch-missing-regex
+filter-regexmatch-null-regex
+filter-regexmatch-invalid-regex
+filter-regexreplace-group-out-of-range
+filter-regexreplace-trailing-dollar
+filter-regexreplace-missing-replacement
+filter-regexextract-group-out-of-range
+filter-regexextract-negative-group
+filter-regexextract-group-not-a-number
+
+# --- W2 Task 6, fix round 1. Four more, all measured to throw in Kestra too.
+#
+#   filter-regexmatch-all-empty-intersection   -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-comment-eats-the-class   -> an_invalid_java_pattern_is_reported_as_invalid
+#   filter-regexmatch-quantifier-on-a-quantifier -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-unclosed-repetition      -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-repetition-without-a-lower-bound -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-regexmatch-non-latin-group-name     -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-jq-environment-is-withheld          -> the_host_reading_jq_natives_are_refused_by_name
+#   filter-jq-service-log-is-withheld          -> the_host_reading_jq_natives_are_refused_by_name
+#   filter-jq-host-timezone-is-withheld        -> the_host_reading_jq_natives_are_refused_by_name
+#
+# The six regex ones are patterns Java itself REFUSES and the `regex` crate
+# accepts -- `a**`, `a{`, `a{,3}`, `[&&]`, `(?x)[a#b]`, `(?<λ>a)`. egret
+# answering them would be the silent class in the other direction: a flow that
+# works here and fails in Kestra.
+filter-regexmatch-all-empty-intersection
+filter-regexmatch-comment-eats-the-class
+filter-regexmatch-quantifier-on-a-quantifier
+filter-regexmatch-unclosed-repetition
+filter-regexmatch-repetition-without-a-lower-bound
+filter-regexmatch-non-latin-group-name
+filter-jq-environment-is-withheld
+filter-jq-service-log-is-withheld
+filter-jq-host-timezone-is-withheld
+
+# --- W2 Task 6, fix round 2.
+#
+#   filter-regexmatch-ampersands-only  -> a_pattern_java_rejects_is_rejected_here_too
+#   filter-jq-source-past-the-cap      -> every_deep_jq_source_is_refused_before_the_parser_sees_it
+#
+# `[&&&]` is `Bad class syntax` in Java and the `regex` crate accepts it.
+# A 4000-byte `-`x4000 source is a StackOverflowError in Kestra's own parser --
+# so both engines fail, for different reasons and at different sizes, and
+# egret's is a bound rather than a crash.
+filter-regexmatch-ampersands-only
+filter-jq-source-past-the-cap
+
+# --- W2 Task 6, fix round 3.
+#
+#   filter-regexmatch-two-odd-ampersand-runs -> a_pattern_java_rejects_is_rejected_here_too
+#
+# `[a&&&b&&&c]` is `Bad intersection syntax` in Java -- two runs of `&` where
+# the first is odd and at least 3 -- and the `regex` crate accepts it. The
+# rule is derived from 43 measured patterns, not from the one example: a
+# single `&&&` run is a UNION (`[a&&&b]` is `[ab&]`), `&&&&` is an
+# intersection, and `[a&&&&b&&&&c]` is legal.
+filter-regexmatch-two-odd-ampersand-runs
+
+# Fix round 4. A class nested past what a stack can hold: Java's `Pattern`
+# catches its own `StackOverflowError` and reports a PatternSyntaxException,
+# and egret bounds `parse_class` at `javare::MAX_CLASS_DEPTH` to do the same
+# rather than SIGABRT the worker. Both of Java's two sentences are reproduced
+# ("Unclosed character class" inside the cap, "Stack overflow during pattern
+# compilation" past it) but the DEPTH at which Java switches between them is
+# not a constant -- the same depth flips between runs of one JVM, because it
+# depends on the live stack when the pattern is compiled -- so only the
+# ERROR CLASS can be asserted here.
+filter-regexmatch-class-nesting-past-the-cap
+filter-regexmatch-class-nesting-inside-the-cap
+# The literal form matters on its own: `rewrite::MAX_NESTING_DEPTH` never
+# looks inside a template's string literal, so it is not a second guard.
+filter-regexmatch-class-nesting-in-a-template-literal
+
+# `(?x)[a & ]`: Java's `unread()` backs up one position after a whitespace
+# skip, so the `]` is eaten as a class member and the class never closes.
+filter-regexmatch-comments-ampersand-unclosed
+
+# Fix round 5. Kestra answers all four of these with a bare
+# `java.lang.StackOverflowError: null` -- a catchable Error there, an abort
+# here -- so only the error CLASS can be compared. egret refuses each with a
+# message naming its bound, and `runners::rewrite::tests::a_region_long_...`
+# and `runners::javafmt::tests::optional_sections_are_bounded_...` assert
+# egret's own messages.
+template-unary-minus-chain-past-the-cap
+template-not-chain-past-the-cap
+template-attribute-chain-past-the-cap
+filter-date-optional-sections-past-the-cap
+
+# --- W2 Task 7: the pure functions. Every one of these is a Java exception
+# string, so only the class can be compared; each is paired in
+# `error-class-pairs.txt` with a `#[test] fn` in `runners::functions` that
+# asserts egret's own message, and each was shown to fail before the function
+# existed (they all said `unknown function` on the pre-fix build).
+
+# `BoundedRangeFunction` and the Pebble `RangeFunction` it delegates to.
+function-range-increment-zero
+function-range-increment-not-a-number
+function-range-two-character-string
+function-range-mixed-types
+# `RenderLimits.ensureAtMost(count, 1000000, ...)` -- Kestra's own bound, one
+# of only two call sites in the whole jar.
+function-range-over-the-cap
+
+# `fromJson`: an ABSENT argument throws and a null one returns null, which is
+# the opposite of `yaml` four lines down.
+function-fromjson-missing-argument
+function-fromjson-not-a-string
+function-fromjson-malformed
+
+# `fromIon`.
+function-fromion-missing-argument
+function-fromion-not-a-string
+function-fromion-malformed
+# Upstream defect 6's last row, end to end: `nothing | toIon` is the
+# four-character string `null` and `fromIon` then refuses it.
+function-fromion-of-the-string-null
+function-fromion-round-trip-of-nothing
+
+# `yaml()` has NO null branch, so a null input is the wrong-type error rather
+# than an empty result.
+function-yaml-null-input
+function-yaml-missing-argument
+function-yaml-not-a-string
+function-yaml-malformed
+# The filter writes `.inf` unquoted and its own reader rejects it.
+function-yaml-refuses-what-its-own-writer-wrote
+
+# The calendar functions' two failure modes: no `date` argument, and a `date`
+# that does not parse.
+function-dayofweek-missing-argument
+function-dayofweek-unparseable
+function-dayofweek-null
+function-dayofmonth-missing-argument
+function-monthofyear-missing-argument
+function-isweekend-missing-argument
+function-hourofday-missing-argument
+# `hourOfDay` is the one that does NOT go through `DateUtils.parseLocalDate`,
+# so a date with no time is an error there and fine everywhere else.
+function-hourofday-date-only
+function-islastworkingday-invalid-working-days
+function-islastworkingday-missing-argument
+function-isdayweekinmonth-invalid-position
+function-isdayweekinmonth-invalid-day-of-week
+function-isdayweekinmonth-missing-position
+
+# `randomInt`, whose three messages all spell the function `randomIn()`.
+function-randomint-upper-below-lower
+function-randomint-missing-arguments
+function-randomint-not-a-long
+
+# `nanoId`'s two bounds and its empty-alphabet guard. Both bounds are `>`,
+# not `>=`, so the boundary VALUES are corpus entries that must pass --
+# `function-nanoid-length-at-the-max` and `-alphabet-at-the-max`. A mutation
+# run found `>= ` surviving on both, because nothing sat on the boundary.
+function-nanoid-empty-alphabet
+function-nanoid-length-zero
+function-nanoid-length-past-the-max
+function-nanoid-alphabet-past-the-max
+
+# `now` shares `AbstractDate`'s formatter, so an unknown format NAME is
+# compiled as a PATTERN and fails as `Unknown pattern letter: o`.
+function-now-unknown-format
+
+# --- W2 Task 7, fix round 1. Ten shapes the first cut ACCEPTED and Kestra
+# refuses; over-acceptance is the one kind of divergence this crate's rules do
+# not allow, so each is now a refusal with its own message and its own test.
+# All ten were measured through the harness before they were written.
+
+# Ion forbids a leading `+` and a leading zero; `$0` is a reserved symbol ID;
+# `[1,,2]` and `{,}` have no empty element. egret answered 5, 7, `$0` and
+# `[1,2]`.
+function-fromion-leading-zero
+function-fromion-leading-plus
+function-fromion-symbol-id
+function-fromion-empty-list-element
+# A TRUNCATED document rendered as NOTHING, which is the silent-wrong-answer
+# class -- `skip_ignorable` mapped an unterminated `/*` to end-of-input.
+function-fromion-unterminated-comment
+
+# `yaml('')`, `yaml('   ')` and `yaml('# c')` answered NULL, which renders as
+# nothing. Jackson throws `No content to map due to end-of-input`.
+function-yaml-empty-document
+function-yaml-blank-document
+function-yaml-comment-only-document
+
+# `alphabet` is measured in UTF-16 code units (`String.toCharArray().length`),
+# so 200 astral characters is 400 units and is past the 256 bound.
+function-nanoid-astral-alphabet
+
+# --- W2 Task 7, fix round 2.
+#
+# `fromIon` is LAZY: `findFirst()` is `take(1)`, so a bad token AFTER the first
+# value is never seen. These two are bad at the FIRST value, which is where a
+# refusal belongs -- and they are the entries the first cut's refusals should
+# have had, since every one of those was a document consisting only of the bad
+# token and so passed the eager implementation too.
+function-fromion-does-not-stop-before-a-first-null
+function-fromion-does-not-stop-before-a-first-bad-value
+# `allRows=true` is `toList()` and DOES read the tail. Measured, both ways.
+function-fromion-all-rows-reads-the-tail
+function-fromion-all-rows-reads-a-tail-comment
+
+# `$ion_1_01` is a version this reader does not speak; Kestra throws
+# `UnsupportedIonVersionException` where egret answered the symbol `$ion_1_01`.
+function-fromion-unsupported-version-marker
+
+# --- W2 Task 7, fix round 3.
+# `$ion_1_1` is a version this reader does not speak. Note the SIBLINGS that
+# are not here: `$ion_1_`, `$ion_1_x`, `$ion_1_0abc` and `$ion_1_0_x` are
+# ordinary symbols Kestra answers, and an earlier cut refused all four by
+# testing the prefix rather than the token.
+function-fromion-unsupported-major-version
+# An annotated LIST or S-EXPRESSION throws in Kestra where an annotated STRUCT
+# renders -- the case a fifteen-form table missed because `a::{b:1}` stood in
+# for it.
+function-fromion-annotation-of-a-list
+
+# --- W2 Task 8: the four functions the BUILT ENGINE DOES NOT CARRY.
+# `RenderFunction`, `RenderOnceFunction`, `ErrorLogsFunction` and
+# `SubflowFunction` are `@Inject @Nullable` fields that `Extension.getFunctions()`
+# guards with `if (x != null)`, so a standalone engine has 34 names and none of
+# these is among them -- `Function or Macro [render] does not exist.` egret
+# binds all four to a refusal that names the function and its package instead,
+# so both sides fail and only the message differs.
+function-render
+function-renderonce
+function-errorlogs
+function-subflow
+
+# --- W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
+# throws and an explicitly null one falls through to the default.
+function-env-missing-name
+function-env-name-not-a-string
+
+# --- W2 Task 8: `encrypt`/`decrypt`. Two boundaries, both asserted from both
+# sides in the paired test: the AES key length and the 12-byte IV.
+function-encrypt-missing-argument
+function-encrypt-key-not-base64
+function-encrypt-key-wrong-length
+function-encrypt-plaintext-not-a-string
+function-decrypt-bad-base64
+function-decrypt-wrong-key
+function-decrypt-shorter-than-the-iv
+function-decrypt-missing-argument
+
+# --- W2 Task 8: `tasksWithState`. A null `state` and an absent one are
+# DIFFERENT errors here (an NPE on `toUpperCase` against a `containsKey`
+# check), which is the opposite of what `loopOutputs` does with the same pair.
+function-taskswithstate-tasks-not-a-map
+function-taskswithstate-missing-argument
+function-taskswithstate-argument-not-a-string
+function-taskswithstate-argument-null
+
+# --- W2 Task 8: `loopOutputs`. Four guards in a fixed order, and the ORDER is
+# the thing the paired test asserts -- `outputs` is validated completely before
+# `name` is looked at.
+function-loopoutputs-missing-outputs
+function-loopoutputs-outputs-null
+function-loopoutputs-outputs-not-a-list
+function-loopoutputs-missing-name
+function-loopoutputs-name-null
+function-loopoutputs-name-not-a-string
+
+# --- W2 Task 8: `replace`, Pebble's own filter, which egret now OVERRIDES
+# minijinja's `(old, new)` one with. The last of these is also in baseline.txt:
+# egret ignores an unknown named argument where Pebble's binder refuses it.
+filter-replace-two-positional-arguments
+filter-replace-missing-argument
+filter-replace-pairs-not-a-map
+filter-replace-null-replacement
+filter-replace-unknown-named-argument
+
+# --- W2 Task 8, fix round 1: Pebble's OWN core filters, which refuse an input
+# type minijinja happily answered. Every one of these was over-acceptance --
+# egret answering where Kestra throws -- until the sixteen ports.
+filter-abs-not-a-number
+filter-capitalize-not-a-string
+filter-first-map
+filter-join-string-input
+filter-reverse-string
+filter-sort-mixed-classes
+filter-sort-string-input
+filter-split-input-not-a-string
+filter-trim-not-a-string
+
+# `split`'s delimiter is a Java REGEX and `slice`'s indices are Java's own,
+# so both refuse things minijinja's namesakes accepted.
+filter-split-dangling-quantifier
+filter-split-missing-delimiter
+filter-slice-to-index-past-the-end
+
+# Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
+# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
+# task -- so these are ALSO baselined and the ratchet is what holds them.
+test-even
+test-odd
+
+# --- W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
+# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
+# `reverse` (a List) and `slice` (a List, String or array) all refuse them
+# there and answer here. `first`, `last`, `join`, `length` and `default` take a
+# Collection and agree -- so the class is exactly three producers, not every
+# sequence. Found by attacking the sixteen ports off their own axis.
+filter-sort-of-keys
+filter-reverse-of-keys
+filter-slice-of-keys
+filter-sort-of-flatten
+
+# The recorded "egret cannot tell Pebble's `null` literal from a typo'd
+# variable" class (see `filter-string-undefined-input`), which the sixteen new
+# filter names join. `length` is the one that answers a VALUE rather than
+# rendering empty, so it gets the entry.
+filter-length-of-an-undefined
+
+# --- W2 Task 8, fix round 2: an UNDEFINED input. Kestra raises under
+# strictVariables(true) for a missing root attribute and for a missing
+# attribute, and fix round 1 turned sixteen filters from refusing to answering
+# -- 28 measured regressions. `default` is the one exception and Pebble's own:
+# its filter-invocation expression catches the exception so the fallback can
+# work, which is why `filter-default-undefined-*` are NOT here.
+filter-upper-undefined-root
+filter-upper-undefined-attribute
+filter-length-undefined-root
+filter-length-undefined-attribute
+filter-sort-undefined-root
+filter-sort-undefined-attribute
+filter-split-undefined-root
+filter-split-undefined-attribute
+filter-join-undefined-root
+filter-join-undefined-attribute
+
+# `runners::javaformat` refuses a conversion it does not implement BY NAME,
+# and Java itself refuses an integer through a float conversion and an unknown
+# conversion character.
+filter-format-integer-through-a-float
+filter-format-unknown-conversion
+filter-format-trailing-percent
+
+# The collection class: which Java collection a filter RETURNS decides whether
+# the next accepts it, five producers by six consumers, and egret has one
+# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
+# so the ratchet is what holds them.
+filter-reverse-of-split
+filter-reverse-of-chunk
+filter-reverse-of-flatten
+filter-sort-of-values
+filter-reverse-of-values
+filter-slice-of-values
+filter-distinct-of-keys
+filter-chunk-of-keys
+filter-flatten-of-keys
+filter-distinct-of-split
+
+# `charAt(0)` on an empty String, which is the one branch of `first`/`last`
+# that Pebble and minijinja do not answer the same way.
+filter-first-of-an-empty-string
+
+# --- W2 Task 8, fix round 3: `java.util.Formatter`'s FLAG GRAMMAR, which the
+# round before validated not at all -- any flag before any conversion, no
+# pairing, no duplicate, no exclusion, no width requirement. A 3 994-case grid
+# found 1 748 cases where Kestra raises and egret answered, and 765 of those
+# were a refusal that round DELETED, because the wrapper it replaced had
+# refused them for its own reasons. `runners::javaformat::LEGAL_FLAGS` and
+# `validate` carry the rules, all six exception classes measured.
+filter-format-illegal-flag-for-the-conversion
+filter-format-illegal-flag-on-a-string
+filter-format-duplicate-flag
+filter-format-mutually-exclusive-sign-flags
+filter-format-mutually-exclusive-fill-flags
+filter-format-left-justify-needs-a-width
+filter-format-zero-fill-needs-a-width
+filter-format-illegal-flag-on-a-percent
+filter-format-newline-takes-no-flags
+filter-format-newline-takes-no-width
+filter-format-precision-on-an-integer
+filter-format-radix-sign-flag-with-a-number
+filter-format-argument-index-out-of-range
+
+# (The `t`/`T` family's entry is `filter-format-date-family-refused`, which is
+# NOT error-class: Kestra ANSWERS `null` there and egret refuses, so it is a
+# plain baselined divergence and the ratchet holds it.)
+
+# An UNDEFINED argument. `is_java_null` folds `Undefined`, so this is the
+# ARGUMENT side of the regression `strict_undefined` fixed on the input side --
+# in new code written by the round whose premise was that this is not allowed.
+filter-format-undefined-argument-root
+filter-format-undefined-argument-attribute

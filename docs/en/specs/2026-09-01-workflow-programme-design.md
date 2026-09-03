@@ -307,6 +307,15 @@ in one file.
    - *Artifact reference* — the published version the plugin host and the Pebble
      oracle link against: `2.0.0-rc13`.
    These are not the same artefact and must be bumped together, deliberately.
+
+   **They have already drifted in content, and the drift is not cosmetic.** W2's oracle found that
+   `2.0.0-rc13` carries a `range` function (`BoundedRangeFunction`) that does not exist anywhere in
+   checkout `96893b589` — confirmed by decompiling `Extension.class`. So the published artifact was not
+   built from the pinned commit. The rule that follows: **the artifact is authoritative for behaviour**,
+   because it is what the oracle can measure and what a user's Kestra actually runs; the checkout is
+   authoritative for *reading* an implementation. Where a surface exists only in the artifact, record it
+   and port it from measured behaviour or skip it with a stated reason — never quietly assume the two
+   agree.
    Note that Kestra 2.x is compiled for Java 25 and 1.3.x for Java 21; the host
    image's JDK follows the artifact reference.
 2. **Rust module names mirror the Java package names**: `models/`, `runners/`,

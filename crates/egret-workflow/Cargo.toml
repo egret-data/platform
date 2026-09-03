@@ -12,7 +12,31 @@ serde.workspace = true
 # archived upstream (0.9.34+deprecated) and reaches us only through kube-client.
 # Error::location() gives the line/column that spec section 9 layer 1 requires.
 serde_norway = "0.9"
-serde_json.workspace = true
+# `arbitrary_precision` is named here so that THIS crate's own resolution
+# equals the one it ships in, not because W2 wants to turn a feature on.
+#
+# It is already on in the shipping binary: `starlark` 0.14.2 enables it,
+# `egret-dataapi` depends on starlark, and `egret-bin` pulls both
+# `egret-dataapi` and `egret-workflow`, so cargo's feature unification turns it
+# on for every crate in that build. Measured, not assumed --
+# `cargo tree -p egret-bin --format "{p} [{f}]"` shows
+# `serde_json v1.0.151 [alloc,arbitrary_precision,default,indexmap,preserve_order,raw_value,std]`
+# where the same command for `-p egret-workflow` showed it absent.
+#
+# That difference is what made `cargo test -p egret-workflow` green while the
+# same tests failed in `cargo test --workspace`: 13 lib tests and both oracle
+# tests. Declaring the feature deletes the difference -- there is now no
+# resolution of this crate in which the tests mean something else. See
+# `runners::env::OrderedJsonVisitor::visit_map` for what the feature changes.
+#
+# Two things keep it from drifting back:
+# `runners::env::tests::the_arbitrary_precision_sentinel_is_still_spelled_this_way`
+# fails by name if this line is dropped (it asserts the resolution the crate is
+# written against, under every command anyone runs), and `just
+# test-shipping-resolution` -- also a step in `.github/workflows/ci.yml` --
+# compiles this crate's tests with `-p egret-bin` selected, which is the
+# resolution that actually ships and therefore catches the NEXT feature.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 
 # Task 5: the repository. `egret-metastore` for `Db`. Plain `sqlx` for
 # `query_as`/`FromRow`, following `crates/egret-dataapi/src/endpoints.rs`.
@@ -26,6 +50,12 @@ egret-metastore.workspace = true
 sqlx.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# W2 Task 5: `date`/`dateAdd`/`timestamp*` take an IANA `timeZone` argument
+# (`ZoneId.of("Asia/Tokyo")`), and a zone's DST transitions decide what
+# `dateAdd(1, 'DAYS')` answers -- chrono alone carries fixed offsets only.
+# Already a workspace dependency (schedules resolve their zone through it), so
+# this adds a direct edge and no new crate.
+chrono-tz.workspace = true
 anyhow.workspace = true
 
 # Task 6 (publish): `RefKind` and `WorkflowRefPort` -- the port trait publish
@@ -62,7 +92,99 @@ egret-analytics-api.workspace = true
 # `tests/publish.rs`'s `FakeRefs`.
 async-trait.workspace = true
 
+# W2 Task 2: `runners::rewrite::RewriteError` derives `thiserror::Error`,
+# following the rest of the workspace's error-type convention (see e.g.
+# `egret-core`, `egret-dataapi`).
+thiserror.workspace = true
+
+# W2 Task 3: `runners::env` builds the real render environment, so minijinja
+# moves out of [dev-dependencies] (where Task 2 kept it, only to parse-check
+# its rewrites) and becomes a runtime dependency. The workspace entry's
+# feature list is taken AS-IS -- `default-features = false` plus six named
+# features, with `macros` and `multi_template` deliberately OFF so
+# `{% macro %}`, `{% call %}`, `{% include %}` and `{% extends %}` do not
+# parse at all. Nothing added here needs them: Kestra's Pebble extension
+# registers no tags of its own (`Extension.getTokenParsers()` returns null),
+# and a `Property` is a single literal template with no loader behind it.
+minijinja.workspace = true
+
+# W2 Task 3: `VariableRenderer`'s `{% raw %}` protection is a regex in Kestra
+# (`VariableRenderer.java:23`) and is ported as that same regex here -- see
+# `runners::env::RAW_PATTERN`. Already in this workspace's tree, so this adds
+# no new transitive crates.
+regex.workspace = true
+
+# W2 Task 4: the `md5`/`sha1`/`sha512` filters are Kestra's `ShaBaseFilter`,
+# i.e. `MessageDigest.getInstance(...)` over the input's UTF-8 bytes, rendered
+# as lowercase hex. `sha2` and `hex` are already workspace dependencies;
+# `sha1` 0.10 is already a direct dependency of `egret-bin` and `md-5` 0.10 is
+# the same RustCrypto generation (`digest` 0.10) as `sha2` 0.10, so all four
+# share one `digest` rather than dragging in the 0.11 line beside it.
+#
+# There is deliberately no `sha256` filter: Kestra's `Md5Filter`/`Sha1Filter`/
+# `Sha512Filter` all carry a copy-pasted "implements the 'sha256' filter"
+# javadoc, but `Extension.getFilters()` registers only those three names.
+sha2.workspace = true
+sha1 = "0.10"
+md-5 = "0.10"
+hex.workspace = true
+
+# W2 Task 4: `slugify` is `io.kestra.core.utils.Slugify.of`, whose second step
+# is `Normalizer.normalize(s, Form.NFD)` -- that is what turns "Café" into
+# "cafe" rather than "caf", because the combining accent is only strippable by
+# the `[^\w-]` pass once decomposition has separated it from the base letter.
+# Already in this workspace's lock file at 0.1.25, so this adds a direct edge
+# and no new compilation. `oracle/corpus.json`'s `filter-slugify-accents` is
+# the entry that fails without it.
+unicode-normalization = "0.1"
+
+# W2 Task 6: the `jq` filter is Kestra's `JqFilter`, which compiles the query
+# with `net.thisptr:jackson-jq` at `Versions.JQ_1_6`. `jaq` is the Rust
+# implementation of the same language; the three crates are its library split
+# (`jaq-core` the interpreter, `jaq-std` the standard library, `jaq-json` the
+# JSON value type and reader). A 132-expression sweep of Kestra's jq surface
+# against these agreed on 116 -- the 16 that differ are enumerated in
+# `oracle/README.md`.
+#
+# `ion-rs` is deliberately NOT here, though W2 Task 6's brief names it:
+# measured on 1.0.1, its text writer emits `{a: 1}` where Kestra emits `{a:1}`,
+# a trailing comma inside sequences, `1e100` for `1.0e100`, and unescaped
+# control characters -- and its `Writer`/`ValueWriter` are `pub(crate)`, so
+# none of that is configurable. `runners::ionfmt` writes the format directly
+# instead; its module doc carries the table.
+jaq-core = "3.1"
+jaq-std = "3.0"
+jaq-json = "2.0"
+
+# W2 Task 7: `uuid()`, `id()`, `ksuid()`, `nanoId()` and `randomInt()` are
+# `SecureRandom` / `Math.random()` in Kestra. `rand` is already a workspace
+# dependency at 0.8, so this is a direct edge and no new crate; `getrandom`
+# under it is the same OS entropy source `SecureRandom` reads.
+#
+# `uuid` is deliberately NOT used for `uuid()`: the workspace entry carries
+# `["v4", "serde"]` and Kestra's function is a **v7**, so it would mean adding
+# a feature to a shared dependency for sixteen bytes of layout that this
+# module has to pin against the artifact's bytecode anyway.
+rand.workspace = true
+
+# W2 Task 8: `encrypt()`/`decrypt()` are `io.kestra.core.encryption.EncryptionService`,
+# and that class is pure -- `AES/GCM/NoPadding`, a base64 key, a 12-byte random
+# IV prefixed to the ciphertext, a 128-bit auth tag, base64 out. Read from
+# `javap -p -c EncryptionService`, not from a doc. Both crates are ALREADY
+# workspace dependencies (`egret-secrets` and `egret-engine-mgmt` both take
+# aes-gcm today), so this is a direct edge and no new crate; `aes` itself reaches
+# the AES-192 key size through `aes_gcm::aes`, which aes-gcm re-exports, rather
+# than through a second dependency entry.
+aes-gcm.workspace = true
+base64.workspace = true
+
 [dev-dependencies]
+# minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
+# real environment). `runners::rewrite`'s tests still reach it as
+# `minijinja::...` through the crate's own dependency, to parse-check every
+# rewritten output -- a test that pins a shape minijinja rejects is worse
+# than no test, since it certifies a bug.
+
 # serde_json moved to [dependencies] in W1 (Property<T> uses it directly);
 # tests still reach it as `serde_json::...` via the crate's own dependency.
 

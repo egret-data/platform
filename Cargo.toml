@@ -151,7 +151,15 @@ starlark = "0.14"
 # `custom_syntax`, `loop_controls` and `unstable_machinery` stay off — leaving
 # `custom_syntax` off also means no template author can change the `{{ }}`
 # delimiters out from under the renderer.
-minijinja = { version = "2.24", default-features = false, features = [
+# **Pinned EXACTLY, not caret.** `crates/egret-workflow/oracle/name-surface.txt`
+# is a fixture over the names minijinja binds by DEFAULT, and
+# `runners::env::the_built_in_surface_matches_the_engines` checks egret's
+# surface against it. A caret range lets a minor release add a default filter
+# or test, which would silently re-open the over-acceptance that fixture exists
+# to close -- minijinja exposes no way to enumerate filters or tests at
+# runtime, so nothing else could notice. Bumping this means re-deriving
+# `MINIJINJA_DEFAULT_FILTERS`/`_TESTS` from the new version's `defaults.rs`.
+minijinja = { version = "=2.24.0", default-features = false, features = [
     "builtins",
     "serde",
     "deserialization",

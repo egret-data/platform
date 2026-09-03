@@ -1,0 +1,112 @@
+# The REFUSAL SETS: which pattern letters egret actually renders and reads,
+# per side, against what the real engine does.
+#
+# `letter-counts.txt` covers only whether a pattern COMPILES. `z` compiles and
+# then refuses at render; `w` compiles and then refuses at parse. That layer had
+# no fixture, and it is where `v` and the four legacy zone ids lived -- both
+# found by a reviewer running probes, neither by the suite. Prose does not fail.
+#
+# `tests` in `runners::javafmt` asserts this file BIDIRECTIONALLY:
+#
+#   - a letter egret refuses that the engine accepts fails, naming the letter;
+#   - a letter egret accepts that the engine refuses fails, naming the letter;
+#   - a row whose two outcomes DIFFER must carry a reason, and a row whose
+#     outcomes AGREE must not -- so a divergence cannot be added silently and a
+#     refusal cannot claim to be one when it is not;
+#   - every letter that compiles per `letter-counts.txt` must appear on BOTH
+#     sides, so a new letter cannot enter the alphabet undeclared.
+#
+# **The two sides differ deliberately and the difference is encoded, not
+# flattened**: egret refuses three letters when writing and eight when reading.
+# W2 Task 5's fix round 2 made the sets identical and wrote down "a letter egret
+# can write, it can read"; fix round 3 broke that on purpose for the five
+# locale-resolved letters, and this file is where that decision now lives.
+#
+# Format: `<side> <pattern> <engine> <egret> <sample> <reason>`, tab-separated.
+#   side     `format` or `parse`
+#   engine   what io.kestra:core:2.0.0-rc13 does, MEASURED through the harness
+#   egret    what egret must do
+#   sample   parse side only: the text after `2024-03-09 14:25:36 | `, which is
+#            the engine's OWN output for that letter on that instant -- a round
+#            trip, so a row cannot fail for want of a well-formed input
+#   reason   `-` when the two agree; why they differ otherwise
+#
+# The five locale-resolved samples are formatted WITHOUT an explicit locale, so
+# the round trip is self-consistent on the harness machine (`en_VN`,
+# Monday-first). That is exactly the fact that makes them divergent: under
+# `locale='en'` the engine would write a value its own parser then rejects.
+#
+# **Regenerate only from the harness, never by hand** -- the same rule
+# `golden.json` and `letter-counts.txt` carry.
+format	A	ok	ok	-	-
+parse	A	ok	ok	51936123	-
+format	a	ok	ok	-	-
+parse	a	ok	ok	PM	-
+format	B	ok	refuse	-	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)
+parse	B	ok	refuse	in the afternoon	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)
+format	c	ok	ok	-	-
+parse	c	ok	refuse	6	it resolves through WeekFields.of(locale) and AbstractDate.convert passes the parser NO locale, so its meaning is the JVM's own region
+format	D	ok	ok	-	-
+parse	D	ok	ok	69	-
+format	d	ok	ok	-	-
+parse	d	ok	ok	9	-
+format	E	ok	ok	-	-
+parse	E	ok	ok	Sat	-
+format	e	ok	ok	-	-
+parse	e	ok	refuse	6	it resolves through WeekFields.of(locale) and AbstractDate.convert passes the parser NO locale, so its meaning is the JVM's own region
+format	F	ok	ok	-	-
+parse	F	ok	ok	2	-
+format	G	ok	ok	-	-
+parse	G	ok	ok	AD	-
+format	g	ok	ok	-	-
+parse	g	ok	ok	60378	-
+format	H	ok	ok	-	-
+parse	H	ok	ok	14	-
+format	h	ok	ok	-	-
+parse	h	ok	ok	2	-
+format	K	ok	ok	-	-
+parse	K	ok	ok	2	-
+format	k	ok	ok	-	-
+parse	k	ok	ok	14	-
+format	L	ok	ok	-	-
+parse	L	ok	ok	3	-
+format	M	ok	ok	-	-
+parse	M	ok	ok	3	-
+format	m	ok	ok	-	-
+parse	m	ok	ok	25	-
+format	N	ok	ok	-	-
+parse	N	ok	ok	51936123000000	-
+format	n	ok	ok	-	-
+parse	n	ok	ok	123000000	-
+format	O	ok	ok	-	-
+parse	O	ok	ok	GMT	-
+format	Q	ok	ok	-	-
+parse	Q	ok	ok	1	-
+format	q	ok	ok	-	-
+parse	q	ok	ok	1	-
+format	S	ok	ok	-	-
+parse	S	ok	ok	1	-
+format	s	ok	ok	-	-
+parse	s	ok	ok	36	-
+format	u	ok	ok	-	-
+parse	u	ok	ok	2024	-
+format	VV	ok	ok	-	-
+parse	VV	ok	ok	UTC	-
+format	v	ok	refuse	-	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)
+parse	v	ok	refuse	UTC	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)
+format	W	ok	ok	-	-
+parse	W	ok	refuse	2	it resolves through WeekFields.of(locale) and AbstractDate.convert passes the parser NO locale, so its meaning is the JVM's own region
+format	w	ok	ok	-	-
+parse	w	ok	refuse	10	it resolves through WeekFields.of(locale) and AbstractDate.convert passes the parser NO locale, so its meaning is the JVM's own region
+format	X	ok	ok	-	-
+parse	X	ok	ok	Z	-
+format	x	ok	ok	-	-
+parse	x	ok	ok	+00	-
+format	Y	ok	ok	-	-
+parse	Y	ok	refuse	2024	it resolves through WeekFields.of(locale) and AbstractDate.convert passes the parser NO locale, so its meaning is the JVM's own region
+format	y	ok	ok	-	-
+parse	y	ok	ok	2024	-
+format	Z	ok	ok	-	-
+parse	Z	ok	ok	+0000	-
+format	z	ok	refuse	-	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)
+parse	z	ok	refuse	UTC	its text is CLDR zone/day-period data egret does not carry; a plausible guess is wrong for real zones (Europe/Moscow is GMT+03:00, not MSK)

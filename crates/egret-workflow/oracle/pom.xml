@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Standalone Java harness for the W2 expression-language oracle.
+
+  This is NOT a Kestra plugin and does not run inside Micronaut. It depends
+  only on io.kestra:core so it can construct io.kestra.core.runners.pebble.Extension
+  directly (public no-arg constructor) and build a PebbleEngine by hand. See
+  crates/egret-workflow/oracle/README.md for what this is for and how to run it.
+
+  Pinned to the same Kestra commit as the sibling `kestra` checkout
+  (96893b589, release 2.0.0-rc13). Requires JDK 25 (Corretto) to build and
+  run: Kestra 2.x class files are version 69 and will not load on JDK 21.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>host</groupId>
+  <artifactId>egret-workflow-oracle</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <kestra.version>2.0.0-rc13</kestra.version>
+    <exec.mainClass>host.Oracle</exec.mainClass>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.kestra</groupId>
+      <artifactId>core</artifactId>
+      <version>${kestra.version}</version>
+    </dependency>
+    <!-- io.kestra:core declares this as scope=runtime (it never references Pebble
+         types directly in its own compiled API), but this harness calls
+         PebbleEngine.Builder and friends directly, so it needs compile scope.
+         This harness has no parent BOM, so the version must be explicit,
+         pinned to what io.kestra:core:2.0.0-rc13 itself resolves to. -->
+    <dependency>
+      <groupId>io.pebbletemplates</groupId>
+      <artifactId>pebble</artifactId>
+      <version>4.1.2</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>egret-workflow-oracle</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <!-- Builds a runnable fat jar so `java -jar` needs no -cp assembly step. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>host.Oracle</mainClass>
+                </transformer>
+              </transformers>
+              <!-- Multiple Kestra transitive deps ship the same META-INF service files;
+                   append rather than let the shade plugin pick one arbitrarily. -->
+              <transformers combine.children="append">
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

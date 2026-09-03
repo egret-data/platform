@@ -1,0 +1,413 @@
+# What actually holds each `compare: "error-class"` entry to account.
+#
+# error-class comparison is a FREE PASS: the entry matches on any failure at
+# all, so it is born matching, never enters baseline.txt, and can never fail.
+# `error-class.txt` makes ADDING one a visible diff. This file makes each one
+# ANSWERABLE: it names, per id, the thing that would notice if egret stopped
+# refusing -- or says plainly that nothing does yet, and whose job that is.
+#
+# Until now the pairing was a convention written in prose. Tasks 6-8 will add
+# more entries (Task 8's whole deliverable is refusals), and a convention
+# nobody checks is not a constraint. `tests/oracle.rs`'s
+# `every_error_class_entry_is_paired_with_something_that_can_fail` asserts this
+# file against `error-class.txt` in BOTH directions, checks every named test
+# exists, and checks every `baselined` claim -- so an entry added without a
+# pair fails the suite by name.
+#
+# Format: `<corpus id> <justification>`. `#` starts a comment.
+#
+#   test:<name>       a `#[test] fn` in this crate that asserts egret's OWN
+#                     message for that input. The strongest form: it fails if
+#                     the refusal turns into a success OR changes meaning.
+#   baselined         the id is ALSO in baseline.txt, so it is not born
+#                     matching at all -- egret succeeds where Kestra throws and
+#                     the ratchet is already policing it. Verified against
+#                     baseline.txt, not taken on trust.
+#   unported:<task>   nothing is ported behind it. The entry matches only
+#                     because egret says "unknown function", exactly the
+#                     hollow pass B5 warns about. Named so it is a declared
+#                     debt with an owner rather than an omission. The set of
+#                     these is ALSO pinned, as a const in tests/oracle.rs, so
+#                     a new one cannot be added quietly here.
+
+# --- W2 Task 3: egret SUCCEEDS where Pebble throws on a String/Number mix, so
+# these are real mismatches and the ratchet holds them.
+gt-mixed                            baselined
+lt-mixed                            baselined
+lte-mixed                           baselined
+gte-mixed                           baselined
+
+# --- W2 Task 3: minijinja has a real multiline `{% raw %}` and Kestra's
+# RAW_PATTERN has no DOTALL. Deliberate divergence, and baselined.
+raw-multiline                       baselined
+
+# --- W2 Task 3: an ABSENT variable inside an isIn must raise, not answer
+# false. One test covers all three rows and asserts egret's own error.
+isin-undefined-left                 test:an_undefined_is_in_operand_raises_rather_than_answering_false
+isin-undefined-right                test:an_undefined_is_in_operand_raises_rather_than_answering_false
+isin-missing-attr-left              test:an_undefined_is_in_operand_raises_rather_than_answering_false
+
+# --- Registered but null-backed standalone. NOTHING IS PORTED behind these:
+# they match only because egret says "unknown function" where Kestra says
+# "Function or Macro [x] does not exist". Task 8 owns turning each into an
+# explicit refusal with asserted text.
+function-secret                     test:the_twelve_refusals_name_themselves_and_their_owner
+function-kv                         test:the_twelve_refusals_name_themselves_and_their_owner
+function-read                       test:the_twelve_refusals_name_themselves_and_their_owner
+function-fileuri                    test:the_twelve_refusals_name_themselves_and_their_owner
+function-filesize                   test:the_twelve_refusals_name_themselves_and_their_owner
+function-fileexists                 test:the_twelve_refusals_name_themselves_and_their_owner
+function-isfileempty                test:the_twelve_refusals_name_themselves_and_their_owner
+function-http                       test:the_twelve_refusals_name_themselves_and_their_owner
+
+# --- W2 Task 4: wrong-typed input.
+filter-chunk-not-list               test:chunk_rejects_a_non_list
+filter-distinct-not-list            test:distinct_rejects_a_non_list
+filter-values-not-map               test:values_rejects_a_non_map
+filter-number-not-string            test:number_rejects_a_non_string
+
+# --- W2 Task 4 fix round 1: exceptions where the first cut answered.
+filter-escapechar-map-null-value    test:escape_char_refuses_a_null_inside_a_container
+filter-escapechar-list-null-element test:escape_char_refuses_a_null_inside_a_container
+filter-chunk-size-truncated         test:chunk_narrows_its_size_to_an_int
+filter-indent-amount-overflow       test:indent_narrows_its_amount_to_an_int
+filter-number-int-overflow          test:number_int_really_is_thirty_two_bits
+
+# --- W2 Task 4 fix round 3.
+filter-indent-amount-over-max       test:indent_reproduces_kestras_own_max_amount
+filter-number-type-not-string       test:number_reads_its_type_argument_strictly
+filter-number-type-null             test:number_reads_its_type_argument_strictly
+
+# --- W2 Task 5: the date/time batch.
+filter-date-pattern-too-many-letters   test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-fraction-too-wide  test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-year-too-wide      test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-unclosed-literal   test:date_reproduces_javas_pattern_syntax_errors
+filter-date-pattern-reserved-char      test:date_reproduces_javas_pattern_syntax_errors
+filter-date-pattern-unmatched-bracket  test:date_reproduces_javas_pattern_syntax_errors
+filter-date-unknown-named-format       test:an_unknown_format_name_is_compiled_as_a_pattern
+filter-date-input-not-a-string         test:date_rejects_an_input_that_is_not_a_string
+filter-date-input-unparseable          test:date_refuses_an_unparseable_input
+filter-date-unknown-zone               test:date_refuses_an_unknown_time_zone
+filter-dateadd-unit-lowercase          test:date_add_refuses_a_unit_that_is_not_a_chrono_unit
+filter-dateadd-missing-unit            test:date_add_refuses_a_missing_unit
+filter-dateadd-amount-not-a-number     test:date_add_refuses_an_amount_that_is_not_a_number
+filter-dateadd-amount-not-numeric-text test:date_add_refuses_an_amount_that_is_not_a_number
+
+# --- W2 Task 5 fix round 1: what the probe sweep found.
+filter-date-pattern-generic-zone-wrong-count    test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-day-period-wrong-count      test:date_reproduces_javas_pattern_letter_limits
+filter-date-pattern-pad-at-a-wide-value         test:date_reproduces_javas_padding_rules
+filter-date-pattern-pad-not-followed-by-a-letter test:date_reproduces_javas_padding_rules
+filter-date-pattern-pad-before-a-bracket        test:date_reproduces_javas_padding_rules
+filter-date-zone-offset-colon-placement         test:date_reproduces_javas_zone_offset_grammar
+filter-date-zone-offset-out-of-range            test:date_reproduces_javas_zone_offset_grammar
+filter-date-zone-legacy-three-letter            test:date_refuses_an_unknown_time_zone
+filter-date-format-rfc-1123-year-out-of-range   test:rfc_1123_refuses_a_year_it_cannot_print
+
+# --- W2 Task 5 fix round 2: the `existingFormat` parse sweep. Each of these
+# tests asserts a refused input AND its accepted neighbour, per the ruling
+# that a paired test must pin the boundary and not only the message.
+filter-date-existing-format-offset-xxx-needs-a-colon       test:an_existing_formats_offset_letters_are_count_specific
+filter-date-existing-format-offset-is-case-sensitive       test:an_existing_formats_offset_letters_are_count_specific
+filter-date-existing-format-hour-of-ampm-out-of-range      test:an_existing_formats_fields_are_range_checked
+filter-date-existing-format-year-of-era-cannot-be-zero     test:an_existing_formats_fields_are_range_checked
+filter-date-existing-format-year-of-era-cannot-be-negative test:an_existing_formats_fields_are_range_checked
+
+# --- W2 Task 5 fix round 3. Each entry was shown to FAIL pre-fix before it
+# was written down; each paired test asserts the conflicting value AND the
+# agreeing one beside it.
+filter-date-existing-format-quarter-conflicts           test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-day-of-week-conflicts       test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-day-of-year-conflicts       test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-milli-of-day-conflicts      test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-repeated-field-conflicts    test:java_cross_checks_the_fields_it_parses
+filter-date-existing-format-clock-hour-of-ampm-thirteen test:smart_exempts_a_zero_clock_hour_but_not_a_thirteenth
+filter-date-existing-format-wide-year-needs-the-sign    test:a_wide_year_is_read_back_only_with_its_sign
+filter-date-existing-format-optional-year-absent        test:an_optional_section_that_fails_leaves_no_year
+
+# --- W2 Task 6. Four filters' argument and syntax failures. Each paired test
+# asserts egret's own sentence, not merely that something failed.
+filter-jq-string-input-not-json         test:jq_reports_the_input_it_could_not_use
+filter-jq-missing-expression            test:jq_reports_the_input_it_could_not_use
+filter-jq-expression-not-a-string       test:jq_reports_the_input_it_could_not_use
+filter-jq-syntax-error                  test:jq_reports_the_input_it_could_not_use
+filter-regexmatch-bare-script-name      test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-invalid-regex         test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-missing-regex         test:a_missing_regex_argument_is_reported_by_name
+filter-regexmatch-null-regex            test:a_missing_regex_argument_is_reported_by_name
+filter-regexreplace-missing-replacement test:a_missing_regex_argument_is_reported_by_name
+filter-regexreplace-group-out-of-range  test:a_bad_replacement_reference_is_reported
+filter-regexreplace-trailing-dollar     test:a_bad_replacement_reference_is_reported
+filter-regexextract-group-out-of-range  test:a_bad_group_argument_is_reported
+filter-regexextract-negative-group      test:a_bad_group_argument_is_reported
+filter-regexextract-group-not-a-number  test:a_bad_group_argument_is_reported
+
+# --- W2 Task 6, fix round 1.
+filter-regexmatch-all-empty-intersection           test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-comment-eats-the-class           test:an_invalid_java_pattern_is_reported_as_invalid
+filter-regexmatch-quantifier-on-a-quantifier       test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-unclosed-repetition              test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-repetition-without-a-lower-bound test:a_pattern_java_rejects_is_rejected_here_too
+filter-regexmatch-non-latin-group-name             test:a_pattern_java_rejects_is_rejected_here_too
+filter-jq-environment-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
+filter-jq-service-log-is-withheld                  test:the_host_reading_jq_natives_are_refused_by_name
+filter-jq-host-timezone-is-withheld                test:the_host_reading_jq_natives_are_refused_by_name
+
+# --- W2 Task 6, fix round 2.
+filter-regexmatch-ampersands-only test:a_pattern_java_rejects_is_rejected_here_too
+filter-jq-source-past-the-cap     test:every_deep_jq_source_is_refused_before_the_parser_sees_it
+
+# --- W2 Task 6, fix round 3.
+filter-regexmatch-two-odd-ampersand-runs test:a_pattern_java_rejects_is_rejected_here_too
+
+# --- W2 Task 6, fix round 4.
+filter-regexmatch-class-nesting-past-the-cap        test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-class-nesting-inside-the-cap      test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-class-nesting-in-a-template-literal test:a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it
+filter-regexmatch-comments-ampersand-unclosed       test:the_comments_flag_changes_what_an_ampersand_run_means
+
+# --- W2 Task 6, fix round 5.
+template-unary-minus-chain-past-the-cap    test:a_region_long_enough_to_overflow_the_template_parser_is_refused
+template-not-chain-past-the-cap            test:a_region_long_enough_to_overflow_the_template_parser_is_refused
+template-attribute-chain-past-the-cap      test:a_region_long_enough_to_overflow_the_template_parser_is_refused
+filter-date-optional-sections-past-the-cap test:optional_sections_are_bounded_and_their_matching_end_is_resolved_once
+
+# --- W2 Task 7, the pure functions.
+function-range-increment-zero              test:range_refuses_an_increment_that_cannot_advance_it
+function-range-increment-not-a-number      test:range_refuses_an_increment_that_cannot_advance_it
+function-range-two-character-string        test:range_refuses_an_argument_that_is_neither_a_number_nor_one_character
+function-range-mixed-types                 test:range_refuses_an_argument_that_is_neither_a_number_nor_one_character
+function-range-over-the-cap                test:range_carries_kestras_own_million_element_cap
+function-fromjson-missing-argument         test:from_json_names_the_argument_it_wanted
+function-fromjson-not-a-string             test:from_json_names_the_argument_it_wanted
+function-fromjson-malformed                test:from_json_names_the_argument_it_wanted
+function-fromion-missing-argument          test:from_ion_names_the_argument_it_wanted
+function-fromion-not-a-string              test:from_ion_names_the_argument_it_wanted
+function-fromion-malformed                 test:from_ion_names_the_argument_it_wanted
+function-fromion-of-the-string-null        test:from_ion_refuses_the_text_its_own_writer_produces_for_nothing
+function-fromion-round-trip-of-nothing     test:from_ion_refuses_the_text_its_own_writer_produces_for_nothing
+function-yaml-null-input                   test:yaml_has_no_null_branch_where_from_json_does
+function-yaml-missing-argument             test:yaml_has_no_null_branch_where_from_json_does
+function-yaml-not-a-string                 test:yaml_has_no_null_branch_where_from_json_does
+function-yaml-malformed                    test:yaml_has_no_null_branch_where_from_json_does
+function-yaml-refuses-what-its-own-writer-wrote test:yaml_refuses_the_infinity_its_own_filter_writes
+function-dayofweek-missing-argument        test:a_calendar_function_names_itself_when_the_date_is_missing
+function-dayofweek-null                    test:a_calendar_function_names_itself_when_the_date_is_missing
+function-dayofmonth-missing-argument       test:a_calendar_function_names_itself_when_the_date_is_missing
+function-monthofyear-missing-argument      test:a_calendar_function_names_itself_when_the_date_is_missing
+function-isweekend-missing-argument        test:a_calendar_function_names_itself_when_the_date_is_missing
+function-hourofday-missing-argument        test:a_calendar_function_names_itself_when_the_date_is_missing
+function-islastworkingday-missing-argument test:a_calendar_function_names_itself_when_the_date_is_missing
+function-dayofweek-unparseable             test:a_calendar_function_names_itself_when_the_date_does_not_parse
+function-hourofday-date-only               test:hour_of_day_refuses_a_date_with_no_time_where_its_siblings_take_one
+function-islastworkingday-invalid-working-days test:is_last_working_day_names_the_day_it_could_not_read
+function-isdayweekinmonth-invalid-position test:is_day_week_in_month_lists_what_it_would_have_accepted
+function-isdayweekinmonth-invalid-day-of-week test:is_day_week_in_month_lists_what_it_would_have_accepted
+function-isdayweekinmonth-missing-position test:is_day_week_in_month_lists_what_it_would_have_accepted
+function-randomint-upper-below-lower       test:random_int_reproduces_upstreams_missing_letter
+function-randomint-missing-arguments       test:random_int_reproduces_upstreams_missing_letter
+function-randomint-not-a-long              test:random_int_reproduces_upstreams_missing_letter
+function-nanoid-empty-alphabet             test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
+function-nanoid-length-zero                test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
+function-nanoid-length-past-the-max        test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
+function-nanoid-alphabet-past-the-max      test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
+function-now-unknown-format                test:now_compiles_an_unknown_format_name_as_a_pattern
+
+# --- W2 Task 7, fix round 1.
+function-fromion-leading-zero              test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-leading-plus              test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-symbol-id                 test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-empty-list-element        test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-unterminated-comment      test:an_unterminated_ion_comment_is_corrupt_not_an_empty_document
+function-yaml-empty-document               test:an_empty_yaml_document_is_an_error_not_a_null
+function-yaml-blank-document               test:an_empty_yaml_document_is_an_error_not_a_null
+function-yaml-comment-only-document        test:an_empty_yaml_document_is_an_error_not_a_null
+function-nanoid-astral-alphabet            test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
+
+# --- W2 Task 7, fix round 2.
+function-fromion-does-not-stop-before-a-first-null    test:from_ion_reads_one_value_and_never_looks_at_the_tail
+function-fromion-does-not-stop-before-a-first-bad-value test:from_ion_reads_one_value_and_never_looks_at_the_tail
+function-fromion-all-rows-reads-the-tail              test:from_ion_reads_one_value_and_never_looks_at_the_tail
+function-fromion-all-rows-reads-a-tail-comment        test:from_ion_reads_one_value_and_never_looks_at_the_tail
+function-fromion-unsupported-version-marker           test:the_ion_reader_refuses_what_ion_itself_forbids
+
+# --- W2 Task 7, fix round 3.
+function-fromion-unsupported-major-version  test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-annotation-of-a-list       test:an_annotated_value_is_its_own_text_and_its_container_is_a_container
+
+# --- W2 Task 8, the last of them. There is no `unported:` line left in this
+# file: the eight above moved from `unported:task-8` to a test in the same
+# commit that gave them a message worth asserting.
+
+# W2 Task 8: the four functions the BUILT ENGINE DOES NOT CARRY.
+# `RenderFunction`, `RenderOnceFunction`, `ErrorLogsFunction` and
+# `SubflowFunction` are `@Inject @Nullable` fields that `Extension.getFunctions()`
+# guards with `if (x != null)`, so a standalone engine has 34 names and none of
+# these is among them -- `Function or Macro [render] does not exist.` egret
+# binds all four to a refusal that names the function and its package instead,
+# so both sides fail and only the message differs.
+function-render                                     test:the_twelve_refusals_name_themselves_and_their_owner
+function-renderonce                                 test:the_twelve_refusals_name_themselves_and_their_owner
+function-errorlogs                                  test:the_twelve_refusals_name_themselves_and_their_owner
+function-subflow                                    test:the_twelve_refusals_name_themselves_and_their_owner
+
+# W2 Task 8: `env`. `containsKey`, not a null check -- an absent `name`
+# throws and an explicitly null one falls through to the default.
+function-env-missing-name                           test:env_refuses_a_missing_name_and_a_non_string_one
+function-env-name-not-a-string                      test:env_refuses_a_missing_name_and_a_non_string_one
+
+# W2 Task 8: `encrypt`/`decrypt`. Two boundaries, both asserted from both
+# sides in the paired test: the AES key length and the 12-byte IV.
+function-encrypt-missing-argument                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-key-not-base64                     test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-key-wrong-length                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-encrypt-plaintext-not-a-string             test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-bad-base64                         test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-wrong-key                          test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-shorter-than-the-iv                test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+function-decrypt-missing-argument                   test:encrypt_and_decrypt_refuse_what_the_jce_refuses
+
+# W2 Task 8: `tasksWithState`. A null `state` and an absent one are
+# DIFFERENT errors here (an NPE on `toUpperCase` against a `containsKey`
+# check), which is the opposite of what `loopOutputs` does with the same pair.
+function-taskswithstate-tasks-not-a-map             test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-missing-argument            test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-argument-not-a-string       test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+function-taskswithstate-argument-null               test:tasks_with_state_refuses_four_shapes_and_each_says_something_different
+
+# W2 Task 8: `loopOutputs`. Four guards in a fixed order, and the ORDER is
+# the thing the paired test asserts -- `outputs` is validated completely before
+# `name` is looked at.
+function-loopoutputs-missing-outputs                test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-outputs-null                   test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-outputs-not-a-list             test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-missing-name                   test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-name-null                      test:loop_outputs_has_four_guards_in_this_order
+function-loopoutputs-name-not-a-string              test:loop_outputs_has_four_guards_in_this_order
+
+# W2 Task 8: `replace`, Pebble's own filter, which egret now OVERRIDES
+# minijinja's `(old, new)` one with. The last of these is also in baseline.txt:
+# egret ignores an unknown named argument where Pebble's binder refuses it.
+filter-replace-two-positional-arguments             test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-missing-argument                     test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-pairs-not-a-map                      test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-null-replacement                     test:replace_is_pebbles_map_taking_filter_not_minijinjas_pair
+filter-replace-unknown-named-argument               baselined
+
+# W2 Task 8, fix round 1: Pebble's OWN core filters, which refuse an input
+# type minijinja happily answered. Every one of these was over-acceptance --
+# egret answering where Kestra throws -- until the sixteen ports.
+filter-abs-not-a-number                             test:pebble_core_filters_refuse_a_wrong_input_type
+filter-capitalize-not-a-string                      test:pebble_core_filters_refuse_a_wrong_input_type
+filter-first-map                                    test:pebble_core_filters_refuse_a_wrong_input_type
+filter-join-string-input                            test:pebble_core_filters_refuse_a_wrong_input_type
+filter-reverse-string                               test:pebble_core_filters_refuse_a_wrong_input_type
+filter-sort-mixed-classes                           test:pebble_core_filters_refuse_a_wrong_input_type
+filter-sort-string-input                            test:pebble_core_filters_refuse_a_wrong_input_type
+filter-split-input-not-a-string                     test:pebble_core_filters_refuse_a_wrong_input_type
+filter-trim-not-a-string                            test:pebble_core_filters_refuse_a_wrong_input_type
+
+# `split`'s delimiter is a Java REGEX and `slice`'s indices are Java's own,
+# so both refuse things minijinja's namesakes accepted.
+filter-split-dangling-quantifier                    test:split_and_slice_refuse_what_java_refuses
+filter-split-missing-delimiter                      test:split_and_slice_refuse_what_java_refuses
+filter-slice-to-index-past-the-end                  test:split_and_slice_refuse_what_java_refuses
+
+# Pebble's `even`/`odd` cast to Long and throw on a String; minijinja's answer
+# `false`. egret keeps minijinja's -- the `is` surface was never given to a W2
+# task -- so these are ALSO baselined and the ratchet is what holds them.
+test-even                                           baselined
+test-odd                                            baselined
+
+# W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
+# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
+# `reverse` (a List) and `slice` (a List, String or array) all refuse them
+# there and answer here. `first`, `last`, `join`, `length` and `default` take a
+# Collection and agree -- so the class is exactly three producers, not every
+# sequence. Found by attacking the sixteen ports off their own axis.
+filter-sort-of-keys                                 baselined
+filter-reverse-of-keys                              baselined
+filter-slice-of-keys                                baselined
+filter-sort-of-flatten                              baselined
+
+# The recorded "egret cannot tell Pebble's `null` literal from a typo'd
+# variable" class (see `filter-string-undefined-input`), which the sixteen new
+# filter names join. `length` is the one that answers a VALUE rather than
+# rendering empty, so it gets the entry.
+filter-length-of-an-undefined                       test:the_ported_filters_refuse_an_undefined_input
+
+# W2 Task 8, fix round 2: an UNDEFINED input. Kestra raises under
+# strictVariables(true) for a missing root attribute and for a missing
+# attribute, and fix round 1 turned sixteen filters from refusing to answering
+# -- 28 measured regressions. `default` is the one exception and Pebble's own:
+# its filter-invocation expression catches the exception so the fallback can
+# work, which is why `filter-default-undefined-*` are NOT here.
+filter-upper-undefined-root                         test:the_ported_filters_refuse_an_undefined_input
+filter-upper-undefined-attribute                    test:the_ported_filters_refuse_an_undefined_input
+filter-length-undefined-root                        test:the_ported_filters_refuse_an_undefined_input
+filter-length-undefined-attribute                   test:the_ported_filters_refuse_an_undefined_input
+filter-sort-undefined-root                          test:the_ported_filters_refuse_an_undefined_input
+filter-sort-undefined-attribute                     test:the_ported_filters_refuse_an_undefined_input
+filter-split-undefined-root                         test:the_ported_filters_refuse_an_undefined_input
+filter-split-undefined-attribute                    test:the_ported_filters_refuse_an_undefined_input
+filter-join-undefined-root                          test:the_ported_filters_refuse_an_undefined_input
+filter-join-undefined-attribute                     test:the_ported_filters_refuse_an_undefined_input
+
+# `runners::javaformat` refuses a conversion it does not implement BY NAME,
+# and Java itself refuses an integer through a float conversion and an unknown
+# conversion character.
+filter-format-integer-through-a-float               test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+filter-format-unknown-conversion                    test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+filter-format-trailing-percent                      test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+
+# The collection class: which Java collection a filter RETURNS decides whether
+# the next accepts it, five producers by six consumers, and egret has one
+# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
+# so the ratchet is what holds them.
+filter-reverse-of-split                             baselined
+filter-reverse-of-chunk                             baselined
+filter-reverse-of-flatten                           baselined
+filter-sort-of-values                               baselined
+filter-reverse-of-values                            baselined
+filter-slice-of-values                              baselined
+filter-distinct-of-keys                             baselined
+filter-chunk-of-keys                                baselined
+filter-flatten-of-keys                              baselined
+filter-distinct-of-split                            baselined
+
+# `charAt(0)` on an empty String, which is the one branch of `first`/`last`
+# that Pebble and minijinja do not answer the same way.
+filter-first-of-an-empty-string                     test:pebble_core_filters_refuse_a_wrong_input_type
+
+# W2 Task 8, fix round 3: `java.util.Formatter`'s FLAG GRAMMAR, which the
+# round before validated not at all -- any flag before any conversion, no
+# pairing, no duplicate, no exclusion, no width requirement. A 3 994-case grid
+# found 1 748 cases where Kestra raises and egret answered, and 765 of those
+# were a refusal that round DELETED, because the wrapper it replaced had
+# refused them for its own reasons. `runners::javaformat::LEGAL_FLAGS` and
+# `validate` carry the rules, all six exception classes measured.
+filter-format-illegal-flag-for-the-conversion       test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-illegal-flag-on-a-string              test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-duplicate-flag                        test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-mutually-exclusive-sign-flags         test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-mutually-exclusive-fill-flags         test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-left-justify-needs-a-width            test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-zero-fill-needs-a-width               test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-illegal-flag-on-a-percent             test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-newline-takes-no-flags                test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-newline-takes-no-width                test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-precision-on-an-integer               test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-radix-sign-flag-with-a-number         test:the_flag_grid_accepts_exactly_what_java_accepts
+filter-format-argument-index-out-of-range           test:the_flag_grid_accepts_exactly_what_java_accepts
+
+# (The `t`/`T` family's entry is `filter-format-date-family-refused`, which is
+# NOT error-class: Kestra ANSWERS `null` there and egret refuses, so it is a
+# plain baselined divergence and the ratchet holds it.)
+
+# An UNDEFINED argument. `is_java_null` folds `Undefined`, so this is the
+# ARGUMENT side of the regression `strict_undefined` fixed on the input side --
+# in new code written by the round whose premise was that this is not allowed.
+filter-format-undefined-argument-root               test:an_undefined_argument_is_refused
+filter-format-undefined-argument-attribute          test:an_undefined_argument_is_refused
