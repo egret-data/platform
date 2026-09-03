@@ -104,7 +104,7 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **twenty-three ids are in this file AND in `baseline.txt`**, because such an
+that: **twenty-five ids are in this file AND in `baseline.txt`**, because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
 until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
 `function-fromion-annotation-of-a-list` without moving the number. Counted out
@@ -136,7 +136,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**240** entries carry it today (153 before W2 Task 8, 182 before its fix
+**245** entries carry it today (240 before W2b, 153 before W2 Task 8, 182 before its fix
 round), counted out of `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -162,7 +162,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 23 of the 240 are *also* in `baseline.txt`, because egret
+make it pass: 25 of the 245 are *also* in `baseline.txt`, because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -199,9 +199,13 @@ that costs, and **105 of 1047** after W2 Task 8 -- which BANKED seven (every
 function the brief called service-backed that is not) and RECORDED three -- and
 **117 of 1141** after that task's fix round, which fixed 110 measured
 divergences that had NO corpus entry at all and recorded twelve that it
-deliberately did not fix, and **130 of 1203** after its second round, and **131 of 1234** after its third, which
+deliberately did not fix, and **130 of 1203** after its second round, and **128 of 1234** after its third, which
 BANKED two and recorded fifteen while closing two regressions the first round
-had introduced.
+had introduced -- **that number said 131 in two places until W2b counted it out
+of the file, which is what C8 asks for and what nobody had done here** -- and
+**131 of 1278** after W2b -- which added 44 entries for
+Pebble's `null` literal (a class the corpus had NO entry for at all), BANKED
+three and RECORDED six.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -4285,8 +4289,179 @@ acceptances) rather than a threshold, because a threshold lets it widen.
 
 ### Counted
 
-**131 of 1234**, from 130 of 1203. Thirty-one entries, one new recorded
-divergence (`%t` with a null, which Kestra answers through its string path).
+**128 of 1234** (this said 131; counted out of `baseline.txt` by W2b, which
+found 128 ids and a test printing 128), from 130 of 1203. Thirty-one entries,
+one new recorded divergence (`%t` with a null, which Kestra answers through its string path).
 The 1 748 over-acceptances the grid found had **no entries at all**, which is
 the same shape as both of round 2's Criticals and the reason the count barely
 moves when a large class is closed.
+
+## What W2b's 44 new entries measured (read before touching `rewrite`'s vocabulary)
+
+W2b is the `null` **literal**. It is a follow-on rather than a fix round
+because nothing failed first: **the corpus had no entry for a bare `{{ null }}`
+anywhere**, so the ratchet was blind to the whole class. The entries went in
+first and 23 of the 44 failed against the pre-fix build; the count is the
+deliverable, not the fix.
+
+### Pebble's literal is FOUR spellings, and the rule is not case-insensitivity
+
+Measured through the harness against `io.kestra:core:2.0.0-rc13`, one probe per
+spelling, `{{ x }}` and `{{ x == none }}`:
+
+| spelling | Kestra |
+|---|---|
+| `null`, `NULL`, `none`, `NONE` | renders empty; `== none` is `true` |
+| `None`, `Null`, `nUll`, `NoNe`, `nulL` | `RootAttributeNotFoundException` — a **variable** |
+
+The booleans split the same way (`true`/`TRUE`/`false`/`FALSE` are literals,
+`True` is a variable), which is what makes "all-lower or all-upper, nothing in
+between" the rule rather than an artifact of the five negative probes chosen.
+`runners::rewrite::is_null_literal_spelling` is the `matches!`, and
+`runners::filters::tests::the_null_literal_is_exactly_four_spellings` is what
+fails if it is ever widened — measured by widening it to
+`eq_ignore_ascii_case`, which killed that test **and**
+`null-literal-mixed-case-is-not-the-literal` by name.
+
+**`none` is both an input and the target**, so the rename is a no-op for it.
+That is deliberate: `{{ none }}` already agreed and is one of the boundary
+entries.
+
+### minijinja's vocabulary is WIDER, and no rewrite of a NAME can reach it
+
+The other direction, and W2b **recorded** it rather than fixing it: minijinja's
+own lexer binds `None`, `True` and `False` — Python's spellings — as constants.
+Pebble does not, so `{{ None }}` renders empty here and raises there. This is an
+**over-acceptance**, the divergence this crate's rules do not allow, and it is
+not reachable from `runners::rewrite`: the rewriter emits minijinja *source*,
+and by the time those words are read they are keywords of the lexer it feeds,
+not names. Closing it means a different lever (an environment-level rejection,
+or a rewrite to a name that cannot resolve — which risks colliding with a real
+variable). `null-literal-python-spelling-is-not-the-literal` and
+`boolean-literal-python-spelling-is-not-the-literal` are the entries, both in
+`baseline.txt` **and** `error-class.txt` paired `baselined`, so neither is a
+free pass.
+
+### The attribute guard has to skip whitespace, and that is measured
+
+`{{ o . null }}` renders `1` on the artifact — Pebble's lexer allows whitespace
+around the attribute dot. A guard that looked only at the immediately preceding
+token would translate it, and `o . none` is a **parse error** in minijinja
+(`none` is a literal there, and a literal is not an attribute name), so the
+failure would be loud but wrong. `null-is-an-attribute-name-across-whitespace`
+is the entry. Both halves of the guard were mutated: removing it entirely
+failed all three attribute entries, and removing only the whitespace skip
+failed exactly that one.
+
+### The `~` OPERATOR is unported, and W2b is the first thing that ever looked
+
+Translating the literal is **not enough** for `{{ 'a' ~ null ~ 'b' }}`. After
+the rewrite the operand is a real `None`, and minijinja's `~` then writes it
+through `Display` — Python's spelling — so egret answers `aNoneb` where Kestra
+answers `ab`. This is the same stringification trap this file records three
+times for filters (`kestra_to_string` is the only correct route, and the crate
+"has now learned that four times"), found for the first time in an **operator**,
+where a filter's fix cannot reach it.
+
+The corpus had **zero** entries containing `~` before W2b, so the two engines'
+concatenation had never been compared at all. Four value classes probed, three
+diverge:
+
+| expression | Kestra | egret |
+|---|---|---|
+| `'a' ~ null` | `a` | `aNone` |
+| `'a' ~ true` | `atrue` | `aTrue` |
+| `'a' ~ m` (a map) | `a{a=1}` | `a{"a": 1}` |
+| `'a' ~ [1,2]` | `a[1, 2]` | `a[1, 2]` — agrees, and it is the boundary |
+
+Closing this means teaching `runners::rewrite` to emit a function call for `~`,
+the way it already does for `??`, `???` and `isIn`, and that needs Pebble's `~`
+**precedence** measured against the rest of the table first. That is a task, not
+a line, so W2b recorded four entries (`null-literal-concatenated`,
+`concat-null-from-the-context`, `concat-boolean`, `concat-map`) and left them
+baselined. **A reader planning that work should start from the precedence
+table, not from these four values.**
+
+### `is_java_null` narrowed to `is_none()`, and the mutation SURVIVED
+
+The narrowing is the point of the task: once the literal is a `None` and a typo
+is an `Undefined`, the predicate can ask the narrow question, and the sixteen
+`{{ null | F }}` cases and the seventeen `{{ nothere | F }}` cases hold in the
+same run — which W2 Task 8 could only ever have one of.
+
+**And restoring the old body left the whole crate green.** 412 lib tests, all
+ten oracle tests, 131 of 1278 exactly at baseline. The reason is structural: the
+seventeen filters that pin the undefined half run `strict_undefined` *before*
+this predicate, so an undefined never reaches it there, and the filters that do
+reach it had no entry. A change that is right and that nothing can see is an
+equivalent mutant, and the fix is an observer, not a stronger assertion.
+
+The observer is a 105-case sweep over all **35** registered filters x {null
+literal, missing root, missing attribute}, run against the pre-change build and
+the post-change build with the same Java goldens:
+
+| | undefined cases answering where Kestra raises |
+|---|---:|
+| before the narrowing | **70 of 70** |
+| after | **38 of 70** |
+
+Thirty-two moved from "answers" to "refuses" and none moved the other way.
+`runners::filters::tests::narrowing_java_null_is_what_makes_sixteen_more_filters_refuse_a_typo`
+pins sixteen of them plus the predicate's own contract, and it fails on the
+restored body naming `chunk`.
+
+### Nineteen filters answered a typo'd variable, and eighteen still do
+
+That sweep is the finding W2b did not go looking for. `string` was the
+nineteenth and closes here — `oracle/baseline.txt` named the rewriter's owner as
+the one to fix it, so `filter-string-undefined-input` is **banked**, moved to
+`error-class.txt` (its golden is a Java exception string) and paired with a test
+that asserts both halves.
+
+The other eighteen still answer where Kestra raises: `className`, `endsWith`,
+`escapeChar`, `indent`, `jq`, `nindent`, `regexExtract`, `regexMatch`,
+`regexReplace`, `slugify`, `startsWith`, `substringAfter`,
+`substringAfterLast`, `substringBefore`, `substringBeforeLast`, `toIon`,
+`toJson`, `yaml`. Each reaches its answer by a route that does not go through
+`is_java_null`, so each needs its own `strict_undefined` call the way W2 Task
+8's sixteen did. **They are a declared debt with no corpus entry**, because 36
+`error-class` entries would be 36 free passes for work not done — the ratio this
+file already flags. The sweep above is how to re-measure them.
+
+### `default` was the one filter that needed the fold
+
+Narrowing the predicate turned `filter-default-undefined-root` and
+`-undefined-attribute` red, and the ratchet is what said so. Pebble's
+filter-invocation expression catches the attribute exception for `default`
+specifically, so `{{ nothere | default('D') }}` is `D` on Kestra where every
+other filter raises. `default` now spells `value.is_undefined()` out at its own
+call site rather than making thirty-four other filters share a predicate that
+is only right there.
+
+### `abs` is why it is sixteen and not seventeen
+
+Seventeen filters run `strict_undefined`. Only **sixteen** `{{ null | F }}`
+cases render on Kestra: `abs` refuses with `Can not pass null value to "abs"
+filter.`, measured. egret already refused correctly, so nothing was ported —
+but before W2b it refused with `strict_undefined`'s *undefined* message, so the
+entry would have been born matching for the wrong reason.
+`filter-abs-literal-null` is `error-class` and
+`the_null_literal_and_a_typo_get_different_refusals` is what makes it
+answerable: it asserts the literal names the **null** and a typo names the
+**undefined**, which is only possible after the rewriter's translation.
+
+### Counted
+
+**131 of 1278**, from **128** of 1234 -- and the 128 is itself a correction:
+the two places this file said 131 were both wrong, `baseline.txt` held 128 ids
+and the pre-W2b run printed 128. Forty-four entries. BANKED three
+(`filter-upper-literal-null`, `filter-length-literal-null`,
+`filter-string-undefined-input`) and RECORDED six (four for the unported `~`
+operator, two for minijinja's wider literal vocabulary). Thirty-eight of the
+forty-four new entries pass; 23 of the 44 failed against the pre-fix build,
+which is the number Step 1 exists to produce.
+
+Note what the flat count hides, which is the same shape this file records for
+W2 Task 8's fix round: the sixteen `{{ null | F }}` cases that now bank were
+**fourteen entries that did not exist** plus two that did, and the thirty-two
+undefined cases the narrowing fixed have **no entries at all**.

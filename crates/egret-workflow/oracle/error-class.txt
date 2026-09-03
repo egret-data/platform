@@ -666,3 +666,37 @@ filter-format-argument-index-out-of-range
 # in new code written by the round whose premise was that this is not allowed.
 filter-format-undefined-argument-root
 filter-format-undefined-argument-attribute
+
+# --- W2b. `abs` is the ONE of the seventeen filters that runs
+# `strict_undefined` where Kestra REFUSES a null rather than answering:
+# `Can not pass null value to "abs" filter.` Measured against the artifact --
+# the other sixteen render (fifteen empty, `length` renders `0`), which is why
+# `{{ null | F }}` banks sixteen times and not seventeen. Its paired test is
+# what separates the two refusals egret can now give here, which is the whole
+# point of the change: before it, the literal and a typo said the same thing.
+filter-abs-literal-null
+
+# --- W2b. The boundary of the `null` literal, in both directions.
+#
+# Pebble's literal is EXACTLY four spellings -- `null`, `NULL`, `none`, `NONE`
+# -- measured one probe each against the artifact. `NoNe` (and `None`, `Null`,
+# `nUll`, `nulL`) is a variable, so under strictVariables(true) it RAISES. A
+# case-insensitive rewrite would turn that into an answer, which is what the
+# paired test would catch.
+null-literal-mixed-case-is-not-the-literal
+# And the other direction, which this task RECORDED rather than fixed:
+# minijinja's lexer knows `None`/`True`/`False`, Python's spellings, and
+# Pebble's does not. egret ANSWERS where Kestra raises -- an over-acceptance,
+# and no rewrite of a name can reach it, because those are keywords to the
+# lexer the rewriter feeds. Both are ALSO in baseline.txt, so the ratchet holds
+# them and they are not born matching.
+null-literal-python-spelling-is-not-the-literal
+boolean-literal-python-spelling-is-not-the-literal
+
+# --- W2b, BANKED from baseline.txt. `<{{ typo | string }}>` is a
+# RootAttributeNotFoundException, i.e. a Java exception string, which is what
+# this mode is for. It was baselined instead only because egret could not
+# refuse it: the `null` literal and a typo were the same value, so a guard on
+# `string` would have broken `filter-string-literal-null`. The rewriter's
+# translation separates them and the guard is in.
+filter-string-undefined-input

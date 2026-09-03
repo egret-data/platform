@@ -93,6 +93,40 @@
 //! right short-circuit/attribute-missing semantics. This module does not
 //! attempt that; it only reshapes syntax.
 //!
+//! # Pebble's `null` literal, and why it is this module's problem
+//!
+//! `null` is a **literal** in Pebble and only a name in minijinja, so
+//! `{{ null }}` rendered empty there and raised `undefined value` here, and
+//! every `{{ null | <filter> }}` went the same way. The knock-on was the
+//! expensive half: because the literal and a **typo'd variable** both arrived
+//! as `ValueKind::Undefined`, `runners::filters::is_java_null` had to fold
+//! `Undefined` into "Kestra's null" — which W2 Task 8 then found turns
+//! `{{ nothere | upper }}` from a hard failure into `""`, the one divergence
+//! this crate's rules do not allow. Task 8 made the filters strict again and
+//! the sixteen renderable `{{ null | F }}` cases broke instead.
+//!
+//! Both halves close here, and only here: [`tokenize`] translates a bare
+//! `null`/`NULL`/`none`/`NONE` to minijinja's `none`, so the literal becomes a
+//! `None` and the typo stays an `Undefined`, and
+//! `runners::filters::is_java_null` narrows to `is_none()`. The literal
+//! renders and the typo still refuses, in the same run.
+//!
+//! Three things bound the translation, each with a corpus entry behind it:
+//! the four spellings are exact (see [`is_null_literal_spelling`] — `NoNe` is
+//! a variable), attribute position is excluded across whitespace (see
+//! [`follows_an_attribute_dot`]), and a string literal is one token, so
+//! `{{ 'null' }}` is never reached.
+//!
+//! **What this does NOT close, and it is recorded rather than fixed:**
+//! minijinja's literal vocabulary is *wider* than Pebble's. `None`, `True`
+//! and `False` — Python's spellings — are constants to minijinja's lexer and
+//! ordinary (absent) variable names to Pebble, so egret answers where Kestra
+//! raises. That is an over-acceptance, it predates this module's null work,
+//! and no rewrite of a *name* can reach it: the two are keywords to the lexer
+//! this module feeds. `null-literal-python-spelling-is-not-the-literal` and
+//! `boolean-literal-python-spelling-is-not-the-literal` are the entries, both
+//! baselined.
+//!
 //! # Why a tokenizer, not a regex
 //!
 //! Things that defeat a string-substitution rewrite, and are live corpus
@@ -762,6 +796,8 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
                 // included, and so would not have demonstrated anything).
                 if word == "isIn" {
                     toks.push(Tok::IsIn(word.to_string()));
+                } else if is_null_literal_spelling(word) && !follows_an_attribute_dot(&toks) {
+                    toks.push(Tok::Text(NULL_LITERAL_IN_MINIJINJA.to_string()));
                 } else {
                     toks.push(Tok::Text(word.to_string()));
                 }
@@ -774,6 +810,60 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, RewriteError> {
     }
 
     Ok(toks)
+}
+
+/// minijinja's spelling of the value Pebble writes four ways.
+///
+/// `none` is the only one of the four minijinja's own lexer already knows, so
+/// it is both the rewrite's target and one of its inputs — rewriting `none`
+/// to `none` is a deliberate no-op rather than a case the guard has to skip.
+const NULL_LITERAL_IN_MINIJINJA: &str = "none";
+
+/// Is this word one of Pebble's four spellings of the null literal?
+///
+/// **Exactly four, and the case rule is not "case-insensitive".** Measured
+/// through the oracle harness against the pinned artifact, one probe per
+/// spelling: `null`, `NULL`, `none` and `NONE` all render empty and all
+/// compare `== none` as `true`, while `None`, `Null`, `nUll`, `NoNe` and
+/// `nulL` are every one of them a
+/// `RootAttributeNotFoundException` — i.e. ordinary variable names. Pebble's
+/// own boolean literals split the same way (`true`/`TRUE`/`false`/`FALSE` are
+/// literals, `True` is a variable), which is what makes "all-lower or
+/// all-upper, nothing in between" the rule rather than an artifact of the five
+/// negative probes chosen.
+///
+/// `null-literal`, `null-literal-uppercase`, `null-literal-none-spelling` and
+/// `null-literal-minijinja-spelling` are the four positive corpus entries;
+/// `null-literal-mixed-case-is-not-the-literal` is the negative one, and a
+/// case-insensitive rewrite here would turn it from a refusal into an answer.
+fn is_null_literal_spelling(word: &str) -> bool {
+    matches!(word, "null" | "NULL" | "none" | "NONE")
+}
+
+/// Is the token about to be pushed in **attribute position** — i.e. is the
+/// last significant token a `.`?
+///
+/// `{{ o.null }}` is an attribute named `null` on both engines and already
+/// answers `1` here; translating it would produce `o.none`, which minijinja's
+/// parser rejects outright because `none` is a literal there and a literal is
+/// not a name. So this is the guard that keeps the fix from over-reaching, and
+/// `null-is-an-attribute-name` / `null-is-an-attribute-name-uppercase` are its
+/// entries.
+///
+/// **The whitespace skip is measured, not defensive.** `{{ o . null }}`
+/// renders `1` through the pinned artifact — Pebble's lexer allows whitespace
+/// around the attribute dot — so a guard that only looked at the immediately
+/// preceding token would translate that one and break it.
+/// `null-is-an-attribute-name-across-whitespace` is that entry.
+///
+/// A `.` inside a string literal cannot reach this: [`tokenize`] emits the
+/// whole literal, quotes included, as one [`Tok::Str`], whose `text()` is
+/// therefore never the single character `.`.
+fn follows_an_attribute_dot(toks: &[Tok]) -> bool {
+    toks.iter()
+        .rev()
+        .find(|t| !is_whitespace_tok(t))
+        .is_some_and(|t| t.text() == ".")
 }
 
 /// A flattened unit at one nesting level: either verbatim text (including a
@@ -2320,6 +2410,92 @@ but there is one on the next: '";
             start.elapsed() < std::time::Duration::from_secs(20),
             "200 000 regions took {:?}; the second scan is back",
             start.elapsed()
+        );
+    }
+
+    /// The four spellings of Pebble's `null` literal become minijinja's
+    /// `none`, and the boundary that stops the rename over-reaching.
+    ///
+    /// Every case here goes through `rewrite_and_parse`, so `o.none` -- which
+    /// is what an unguarded rename would emit for `{{ o.null }}` -- fails as a
+    /// parse error rather than as a wrong string, which is the shape a reader
+    /// of this test should expect from breaking the dot guard.
+    #[test]
+    fn the_null_literal_becomes_minijinjas_none() {
+        for spelling in ["null", "NULL", "none", "NONE"] {
+            assert_eq!(
+                rewrite_and_parse(&format!("{{{{ {spelling} }}}}")),
+                "{{ none }}",
+                "{spelling} is one of Pebble's four spellings"
+            );
+        }
+
+        // Operand positions, not just a bare region.
+        assert_eq!(rewrite_and_parse("{{ 'a' ~ null }}"), "{{ 'a' ~ none }}");
+        assert_eq!(
+            rewrite_and_parse("{{ [null, NULL] }}"),
+            "{{ [none, none] }}"
+        );
+        assert_eq!(
+            rewrite_and_parse("{{ fromJson(json=null) }}"),
+            "{{ fromJson(json=none) }}"
+        );
+        // A `{% %}` tag body goes through the same tokenizer. (The missing
+        // space before `%}` is `rewrite_tag_body`'s existing normalisation --
+        // it trims each side of the `=` junction -- not this rename's doing.)
+        assert_eq!(rewrite_and_parse("{% set x = null %}"), "{% set x = none%}");
+    }
+
+    /// The rename is guarded three ways, and each guard has a corpus entry.
+    ///
+    /// **Attribute position, across whitespace.** `{{ o . null }}` renders `1`
+    /// on the pinned artifact -- Pebble's lexer allows whitespace around the
+    /// dot -- so the look-back has to skip whitespace, not just glance at the
+    /// previous token. `null-is-an-attribute-name-across-whitespace`.
+    ///
+    /// **Inside a string literal.** `tokenize` emits a literal as one
+    /// `Tok::Str`, so `{{ 'null' }}` never reaches the rename at all.
+    /// `null-inside-a-single-quoted-string`.
+    ///
+    /// **A word that merely contains one of the spellings.** The rename is
+    /// applied to a whole identifier, the same rule `isIn` needs so it does
+    /// not fire inside `isInvalid`. `null-is-a-prefix-of-a-variable-name`.
+    #[test]
+    fn the_null_rename_does_not_reach_an_attribute_a_string_or_a_longer_name() {
+        for expr in [
+            "{{ o.null }}",
+            "{{ o.NULL }}",
+            "{{ o.NONE }}",
+            "{{ o . null }}",
+            "{{ o .  null }}",
+            "{{ a.b.null }}",
+            "{{ 'null' }}",
+            "{{ \"NULL\" }}",
+            "{{ 'a null b' }}",
+            "{{ nullish }}",
+            "{{ mynull }}",
+            "{{ null_ }}",
+            "{{ NONEISH }}",
+            "{{ {'null': 1} }}",
+        ] {
+            assert_eq!(
+                rewrite_and_parse(expr),
+                expr,
+                "{expr} must be copied through untouched"
+            );
+        }
+
+        // Mixed case is a VARIABLE on Kestra, measured one probe per spelling
+        // against the artifact, so the rename must not be case-insensitive.
+        for expr in ["{{ None }}", "{{ Null }}", "{{ nUll }}", "{{ NoNe }}"] {
+            assert_eq!(rewrite_and_parse(expr), expr, "{expr} is a variable name");
+        }
+
+        // The guard is positional, not sticky: a dot earlier in the expression
+        // must not protect a later literal.
+        assert_eq!(
+            rewrite_and_parse("{{ o.null ~ null }}"),
+            "{{ o.null ~ none }}"
         );
     }
 }

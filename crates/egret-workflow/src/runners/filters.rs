@@ -262,42 +262,36 @@ pub(super) fn pebble_error(message: impl Into<String>) -> MjError {
 
 /// Is this value Kestra's `null` at a filter's `input == null` branch?
 ///
-/// **An undefined counts, and that is measured rather than convenient.**
-/// Pebble's `null` is a real literal; minijinja has no such name, so
-/// `{{ null | distinct }}` reaches this crate as `ValueKind::Undefined`. Six
-/// corpus entries pin what Kestra answers for the literal
-/// (`filter-string-literal-null` and its siblings), and one of them —
-/// `filter-distinct-literal-null`, whose golden is `<null>` because `distinct`
-/// alone returns the *string* `"null"` — cannot be produced by any route that
-/// treats an undefined as "not null".
+/// **`is_none()` alone, and an undefined is deliberately NOT one.** This used
+/// to be `value.is_none() || value.is_undefined()`, and the `||` was not
+/// laziness: Pebble's `null` is a real literal, minijinja had no such name, so
+/// `{{ null | distinct }}` arrived here as `ValueKind::Undefined` and folding
+/// it in was the only way to answer the literal at all. The cost was written
+/// down at the time — egret could not tell the literal from a **typo'd
+/// variable** — and W2 Task 8 measured what that cost: applied at the entry
+/// point of a filter that used to refuse an undefined, it turned
+/// `{{ nothere | upper }}` into `""`, which is the one divergence this crate's
+/// rules do not allow. Task 8 put [`strict_undefined`] in front of sixteen
+/// filters, and the sixteen renderable `{{ null | F }}` cases broke instead.
 ///
-/// # What this costs, stated rather than hidden
+/// W2b removed the reason for the choice rather than picking a side of it:
+/// [`super::rewrite::tokenize`] now translates a bare `null`/`NULL`/`none`/
+/// `NONE` to minijinja's `none`, so **the literal is a `None` and a typo is
+/// still an `Undefined`**, and this predicate can ask the narrow question. The
+/// pair that proves it are in the same test run: sixteen `filter-*-literal-null`
+/// corpus entries render, and
+/// [`tests::the_ported_filters_refuse_an_undefined_input`] holds seventeen
+/// filters x {missing root, missing attribute} refusing.
 ///
-/// egret cannot tell Pebble's `null` literal from a **typo'd variable** at a
-/// filter's input, and Kestra can: `{{ typo | string }}` is a
-/// `RootAttributeNotFoundException` there and renders empty here.
-/// `filter-string-undefined-input` is that entry, baselined.
-///
-/// **This does not apply to the filters W2 Task 8's fix round ported.** Those
-/// refused an undefined before egret owned them, so folding it into "null"
-/// there converts a refusal into an ANSWER rather than trading one wrong
-/// answer for another — see [`strict_undefined`], which they call first.
-///
-/// **This is not a cost of the choice above.** Measured on minijinja 2.24:
-/// `UndefinedBehavior::Strict` raises for `{{ typo }}` but **not** for
-/// `{{ typo | string }}` — an undefined piped into a filter is simply passed
-/// in. So the typo renders empty either way, and the only thing the two routes
-/// differ on is whether the *literal* is answered correctly. The real fix is
-/// one layer up, in [`super::rewrite`]: translating Pebble's `null` literal to
-/// minijinja's `none` would make the literal a `None` and leave the typo an
-/// `Undefined`, and the filters could then keep them apart. That is a change
-/// to the rewriter's vocabulary, which is not this module's to make.
+/// `filter-distinct-literal-null` is the sharp one either way: its golden is
+/// `<null>` because `distinct` alone returns the *string* `"null"`, which no
+/// route that treats the input as "not null" can produce.
 ///
 /// `super::env::kestra_is_in` is deliberately different: it is a *function*,
 /// its operands are not filter inputs, and returning the undefined unchanged
 /// is what keeps a typo inside an `isIn` from silently deciding a branch.
 pub(super) fn is_java_null(value: &MjValue) -> bool {
-    value.is_none() || value.is_undefined()
+    value.is_none()
 }
 
 /// The `java.lang`/`java.util` class name Kestra would report for a value.
@@ -1107,7 +1101,16 @@ fn default(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     // function's guard is absent instead of forgotten.
     let args = Args::new(rest);
     let fallback = args.get("default", 0).unwrap_or_else(|| MjValue::from(()));
-    let empty = if is_java_null(&value) {
+    // **`is_undefined()` is spelled out here and NOT in [`is_java_null`], and
+    // that split is the whole point of W2b.** Until the rewriter learned
+    // Pebble's `null` literal, `is_java_null` folded `Undefined` in, and this
+    // branch got Pebble's catch-the-attribute-exception behaviour for free.
+    // Narrowing that predicate to `is_none()` took it away and turned both
+    // `filter-default-undefined-*` entries red -- caught by the ratchet, not
+    // by reasoning. `default` is the one filter that must treat a missing name
+    // as empty, so it says so itself rather than making every other filter
+    // share a predicate that is only right here.
+    let empty = if value.is_undefined() || is_java_null(&value) {
         true
     } else {
         match value.kind() {
@@ -1874,7 +1877,22 @@ fn prefix_args(
 /// `true`, a big float is `1.0E100`, a map is `{a=1, b=2}`. Four corpus
 /// entries separate them (`filter-string-bool`, `filter-string-map`,
 /// `filter-string-nested`, `filter-string-float`).
+///
+/// # The undefined guard, and why this one filter got it in W2b
+///
+/// `filter-string-undefined-input` (`<{{ typo | string }}>`) has been baselined
+/// since W2 Task 4's third fix round, and its comment in `oracle/baseline.txt`
+/// is a hand-off in as many words: the real fix is for `super::rewrite` to
+/// translate Pebble's `null` literal, "flagged for whoever owns it". W2b is
+/// that owner, so the entry is banked here rather than left as a note.
+///
+/// A W2b sweep over all 35 registered filters x {missing root, missing
+/// attribute} found **nineteen** that answer where Kestra raises; narrowing
+/// [`is_java_null`] closed sixteen of the thirty-five outright, `string` is the
+/// seventeenth and closes here, and the remaining eighteen are recorded with
+/// their names in `oracle/README.md` rather than ported in this task.
 fn string(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("string", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -3925,6 +3943,7 @@ fn grouped(n: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::env::{render_str, RenderContext};
+    use super::{is_java_null, MjValue};
 
     /// Renders `template` against a JSON object of bindings.
     fn render(template: &str, context: &str) -> Result<String, String> {
@@ -4001,7 +4020,8 @@ mod tests {
     /// Kestra runs with `strictVariables(true)`: a missing root attribute and
     /// a missing attribute both raise. Before the ports, egret's built-ins
     /// raised too, so the two agreed. Fix round 1 applied
-    /// [`is_java_null`] — which folds `Undefined` into Kestra's null — at the
+    /// [`is_java_null`] — which folded `Undefined` into Kestra's null until
+    /// W2b — at the
     /// **entry point** of every ported filter, and 28 measured cases turned
     /// from an error into an answer: `{{ nothere | upper }}` became `""` and
     /// `{{ obj.missing | length }}` became `"0"`. In a flow that turns a
@@ -4069,10 +4089,233 @@ mod tests {
         assert_eq!(render("<{{ nul | upper }}>", cx).unwrap(), "<>");
         assert_eq!(render("{{ nul | length }}", cx).unwrap(), "0");
 
-        // What it costs, and the entry that records it: the `null` LITERAL
-        // arrives as an undefined too, so egret refuses where Kestra renders
-        // nothing. The direction that fails loudly.
-        assert!(render("{{ null | upper }}", cx).is_err());
+        // **And the other half of the pair, in the same test.** Until W2b the
+        // `null` LITERAL arrived as an undefined too, so every line above cost
+        // a literal that Kestra renders: this assertion read
+        // `assert!(render("{{ null | upper }}", cx).is_err())`. Now
+        // `super::super::rewrite` translates the literal to minijinja's `none`
+        // and the two are different values, so the seventeen refusals above
+        // and the sixteen renders below hold **together** — which is the thing
+        // neither W2 Task 8's fix round 1 nor its fix round 2 could have.
+        //
+        // `abs` is the seventeenth and is deliberately absent from this list:
+        // Kestra REFUSES a null there (`Can not pass null value to "abs"
+        // filter.`), measured against the artifact, which is why sixteen bank
+        // and not seventeen. `the_null_literal_and_a_typo_get_different_refusals`
+        // is its test.
+        for (filter, rendered) in [
+            ("upper", "<>"),
+            ("lower", "<>"),
+            ("trim", "<>"),
+            ("capitalize", "<>"),
+            ("title", "<>"),
+            ("escape", "<>"),
+            ("length", "<0>"),
+            ("first", "<>"),
+            ("last", "<>"),
+            ("join('-')", "<>"),
+            ("sort", "<>"),
+            ("reverse", "<>"),
+            ("split(d)", "<>"),
+            ("slice(0,1)", "<>"),
+            ("format('x')", "<>"),
+            ("replace({'a':'b'})", "<>"),
+        ] {
+            let template = format!("<{{{{ null | {filter} }}}}>");
+            assert_eq!(
+                render(&template, cx).unwrap_or_else(|e| panic!("{template}: {e}")),
+                rendered,
+                "{template}"
+            );
+        }
+    }
+
+    /// `abs` is the one of the seventeen where Kestra refuses a null, and the
+    /// two refusals egret can now give there are **different sentences**.
+    ///
+    /// Pairs `filter-abs-literal-null`, whose golden is a Java exception and
+    /// which is therefore `error-class` — a mode satisfied by any failure at
+    /// all. Before W2b both inputs below produced [`strict_undefined`]'s
+    /// message, because the literal and the typo were the same value; that
+    /// entry would have been "born matching" for the wrong reason. This is
+    /// what makes it answerable, and it fails if the rewriter's translation is
+    /// removed.
+    #[test]
+    fn the_null_literal_and_a_typo_get_different_refusals() {
+        let cx = r#"{"obj": {"a": 1}}"#;
+
+        let literal = render("{{ null | abs }}", cx).expect_err("a null literal must be refused");
+        assert!(
+            literal.contains(r#"Can not pass null value to "abs" filter."#),
+            "the LITERAL must name the null: {literal}"
+        );
+
+        for subject in ["nothere", "obj.missing"] {
+            let template = format!("{{{{ {subject} | abs }}}}");
+            let typo = render(&template, cx).expect_err("a typo must be refused");
+            assert!(
+                typo.contains("an undefined value reached"),
+                "{template} must name the UNDEFINED: {typo}"
+            );
+        }
+
+        // A CONTEXT null takes the literal's route, because after the rewrite
+        // they are the same value -- which is the point.
+        let from_context = render("{{ n | abs }}", r#"{"n": null}"#).expect_err("also refused");
+        assert!(from_context.contains(r#"Can not pass null value to "abs" filter."#));
+    }
+
+    /// Pebble's null literal is **exactly four spellings**, and the rule is not
+    /// case-insensitivity.
+    ///
+    /// Pairs `null-literal-mixed-case-is-not-the-literal`. Measured through the
+    /// oracle harness against the pinned artifact, one probe per spelling:
+    /// `null`, `NULL`, `none` and `NONE` render empty and compare `== none` as
+    /// `true`; `None`, `Null`, `nUll`, `NoNe` and `nulL` are every one of them
+    /// a `RootAttributeNotFoundException`, i.e. ordinary variable names.
+    ///
+    /// A `matches!` widened to `eq_ignore_ascii_case` would turn all five of
+    /// those refusals into answers, and only this test would notice — the
+    /// corpus entry is `error-class`, so it is satisfied by any failure.
+    ///
+    /// **`None` and `True` are the exception, and they are recorded rather
+    /// than fixed**: minijinja's own lexer binds Python's spellings as
+    /// constants, so egret answers where Kestra raises. No rewrite of a *name*
+    /// can reach a keyword of the lexer it feeds.
+    /// `null-literal-python-spelling-is-not-the-literal` and
+    /// `boolean-literal-python-spelling-is-not-the-literal` are baselined.
+    #[test]
+    fn the_null_literal_is_exactly_four_spellings() {
+        for spelling in ["null", "NULL", "none", "NONE"] {
+            let template = format!("<{{{{ {spelling} }}}}>");
+            assert_eq!(
+                render(&template, "{}").unwrap_or_else(|e| panic!("{template}: {e}")),
+                "<>",
+                "{template}"
+            );
+            let compared = format!("{{{{ {spelling} == none }}}}");
+            assert_eq!(render(&compared, "{}").unwrap(), "true", "{compared}");
+        }
+
+        for near_miss in ["Null", "nUll", "NoNe", "nulL"] {
+            let template = format!("<{{{{ {near_miss} }}}}>");
+            assert!(
+                render(&template, "{}").is_err(),
+                "{template} is a VARIABLE on Kestra and must be refused here"
+            );
+        }
+
+        // Recorded, not fixed. Both are ordinary absent variables on Kestra.
+        assert_eq!(render("<{{ None }}>", "{}").unwrap(), "<>");
+        assert_eq!(render("<{{ True }}>", "{}").unwrap(), "<true>");
+    }
+
+    /// Narrowing [`is_java_null`] to `is_none()` is what makes sixteen MORE
+    /// filters refuse a typo'd variable, and without this test that narrowing
+    /// is an equivalent mutant.
+    ///
+    /// **Measured, and it is the reason this test exists.** Restoring the old
+    /// body (`value.is_none() || value.is_undefined()`) left the whole crate
+    /// GREEN — 412 lib tests and all ten oracle tests — because the seventeen
+    /// filters that pin the undefined half run [`strict_undefined`] *before*
+    /// this predicate, so an undefined never reaches it there, and the filters
+    /// that do reach it had no entry. The change was right and nothing could
+    /// see it.
+    ///
+    /// These sixteen are what can. Kestra raises for every one of them under
+    /// `strictVariables(true)`; before the narrowing egret ANSWERED — `chunk`
+    /// gave `<>`, `distinct` gave `<null>`, `md5` gave the hash of nothing —
+    /// because the undefined reached each filter's null branch. Measured as a
+    /// 105-case sweep over all 35 registered filters x {null literal, missing
+    /// root, missing attribute}: 70 undefined cases, 32 of which changed class
+    /// from "answers" to "refuses" and none of which changed the other way.
+    ///
+    /// The message is each filter's own type refusal rather than
+    /// `strict_undefined`'s sentence, and that is deliberate: these sixteen
+    /// were not part of W2 Task 8's port and W2b did not add a guard to them.
+    /// What is asserted is the CLASS — a refusal where Kestra refuses — which
+    /// is exactly what the narrowing bought.
+    ///
+    /// **The other eighteen are recorded, not fixed.** `className`, `endsWith`,
+    /// `escapeChar`, `indent`, `jq`, `nindent`, `regexExtract`, `regexMatch`,
+    /// `regexReplace`, `slugify`, `startsWith`, `substringAfter`,
+    /// `substringAfterLast`, `substringBefore`, `substringBeforeLast`, `toIon`,
+    /// `toJson` and `yaml` still answer for an undefined input, by a route that
+    /// does not go through this predicate. `oracle/README.md` carries the list
+    /// and the sweep. `string` was the nineteenth and closes here, because
+    /// `oracle/baseline.txt` named the rewriter's owner as the one to fix it.
+    #[test]
+    fn narrowing_java_null_is_what_makes_sixteen_more_filters_refuse_a_typo() {
+        let cx = r#"{"obj": {"a": 1}, "nul": null}"#;
+        for filter in [
+            "chunk(size=2)",
+            "date('iso', timeZone='UTC')",
+            "dateAdd(1,'DAYS','iso','UTC')",
+            "distinct",
+            "flatten",
+            "keys",
+            "md5",
+            "number(type='INT')",
+            "sha1",
+            "sha512",
+            "timestamp",
+            "timestampMicro",
+            "timestampMilli",
+            "timestampNano",
+            "urldecode",
+            "values",
+        ] {
+            for subject in ["nothere", "obj.missing"] {
+                let template = format!("<{{{{ {subject} | {filter} }}}}>");
+                let answered = render(&template, cx).unwrap_or_default();
+                assert!(
+                    render(&template, cx).is_err(),
+                    "{template} must be refused, as Kestra does; it answered {answered:?}"
+                );
+            }
+
+            // And the null LITERAL still renders through the same filter, which
+            // is the half that folding an undefined back in would keep working
+            // -- so the pair above and this line together are what pin the
+            // narrowing rather than either alone.
+            let literal = format!("{{{{ null | {filter} }}}}");
+            render(&literal, cx).unwrap_or_else(|e| panic!("{literal} must render: {e}"));
+        }
+
+        // The predicate's own contract, stated directly, because the sixteen
+        // above reach it through sixteen different type checks.
+        assert!(is_java_null(&MjValue::from(())), "a null IS Kestra's null");
+        assert!(
+            !is_java_null(&MjValue::UNDEFINED),
+            "an undefined is NOT -- that is the whole of W2b at this line"
+        );
+    }
+
+    /// `string` tells the literal from a typo, which is what banks
+    /// `filter-string-undefined-input`.
+    ///
+    /// That entry has been baselined since W2 Task 4's third fix round, and
+    /// the comment beside it in `oracle/baseline.txt` names the rewriter's
+    /// owner as the person to fix it. It is `error-class` from W2b on, because
+    /// its golden is a Java exception string; this is what makes it
+    /// answerable.
+    #[test]
+    fn the_string_filter_now_tells_the_literal_from_a_typo() {
+        let cx = r#"{"obj": {"a": 1}, "nul": null}"#;
+
+        // The literal, and a context null, both render.
+        assert_eq!(render("<{{ null | string }}>", cx).unwrap(), "<>");
+        assert_eq!(render("<{{ nul | string }}>", cx).unwrap(), "<>");
+
+        // A typo does not.
+        for subject in ["typo", "obj.missing"] {
+            let template = format!("<{{{{ {subject} | string }}}}>");
+            let message = render(&template, cx).expect_err("a typo must be refused");
+            assert!(
+                message.contains("an undefined value reached the 'string' filter"),
+                "{template}: {message}"
+            );
+        }
     }
 
     /// `format` refuses what Java refuses **and** what `super::javaformat` does

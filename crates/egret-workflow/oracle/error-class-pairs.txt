@@ -411,3 +411,21 @@ filter-format-argument-index-out-of-range           test:the_flag_grid_accepts_e
 # in new code written by the round whose premise was that this is not allowed.
 filter-format-undefined-argument-root               test:an_undefined_argument_is_refused
 filter-format-undefined-argument-attribute          test:an_undefined_argument_is_refused
+
+# --- W2b. The one `{{ null | F }}` Kestra refuses. Its test asserts that egret
+# now names the NULL, not the undefined -- the discrimination the rewriter's
+# `null` -> `none` translation bought, and the thing that would silently
+# regress if that translation were removed.
+filter-abs-literal-null                             test:the_null_literal_and_a_typo_get_different_refusals
+
+# --- W2b. The literal's boundary. One test asserts all four spellings render
+# and that five near-misses raise, so a case-insensitive rewrite fails it.
+null-literal-mixed-case-is-not-the-literal          test:the_null_literal_is_exactly_four_spellings
+# Recorded, not fixed: egret succeeds where Kestra raises, so the ratchet is
+# what holds these -- they are in baseline.txt and cannot be born matching.
+null-literal-python-spelling-is-not-the-literal     baselined
+boolean-literal-python-spelling-is-not-the-literal  baselined
+
+# --- W2b. Banked from baseline.txt; the test asserts BOTH sides, so it fails
+# if `string` stops refusing a typo AND if it starts refusing the literal.
+filter-string-undefined-input                       test:the_string_filter_now_tells_the_literal_from_a_typo

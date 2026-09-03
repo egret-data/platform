@@ -104,25 +104,13 @@ filter-classname-literal-int
 filter-classname-of-long
 filter-classname-of-float
 
-# W2 TASK 4 FIX ROUND 3, DELIBERATE and NOT this module's to fix: egret cannot
-# tell Pebble's `null` LITERAL from a TYPO'D VARIABLE at a filter's input.
-# `{{ typo | string }}` is a RootAttributeNotFoundException in Kestra and
-# renders empty here.
-#
-# Pebble's `null` is a real literal; minijinja has no such name, so BOTH arrive
-# as ValueKind::Undefined. Measured on minijinja 2.24:
-# UndefinedBehavior::Strict raises for `{{ typo }}` but NOT for
-# `{{ typo | string }}` -- an undefined piped into a filter is simply passed in.
-# So this is not a cost of treating an undefined as Kestra's null in
-# runners::filters::is_java_null: the typo renders empty either way, and that
-# treatment is what makes the six `*-literal-null` entries pass, including
-# filter-distinct-literal-null (`<null>`), which no other route can produce.
-#
-# The real fix is one layer up: if runners::rewrite translated Pebble's `null`
-# literal to minijinja's `none`, the literal would be a None and the typo would
-# stay an Undefined, and the two could be kept apart. That is a change to the
-# REWRITER's vocabulary. Flagged for whoever owns it.
-filter-string-undefined-input
+# (W2 TASK 4 FIX ROUND 3's `filter-string-undefined-input` was here, with a note
+# saying the real fix was for runners::rewrite to translate Pebble's `null`
+# literal and that it was "flagged for whoever owns it". W2b is that owner: the
+# rewriter now translates it, `is_java_null` narrowed to `is_none()`, `string`
+# got the same undefined guard the other seventeen have, and the entry is
+# BANKED -- moved to error-class.txt, whose golden is a Java exception string,
+# and paired with `the_string_filter_now_tells_the_literal_from_a_typo`.)
 
 # W2 TASK 4, DELIBERATE: `EscapeCharFilter.processMap` allocates a
 # `new HashMap<>()`, so Kestra LOSES a map's key order here -- `{"b":..,"a":..}`
@@ -653,14 +641,11 @@ filter-distinct-of-keys
 filter-chunk-of-keys
 filter-flatten-of-keys
 filter-distinct-of-split
-# What refusing an UNDEFINED input costs, and it is the same trade
-# `filter-string-undefined-input` records seen from the other side. egret
-# cannot tell Pebble's `null` LITERAL from a typo'd variable -- both arrive as
-# minijinja's undefined -- and fix round 2 chose the direction that fails
-# loudly, because the alternative turned `{{ nothere | upper }}` from an error
-# into an empty string. Kestra renders these; egret refuses them.
-filter-upper-literal-null
-filter-length-literal-null
+# (W2 Task 8 fix round 2's `filter-upper-literal-null` and
+# `filter-length-literal-null` were here: the cost of refusing an UNDEFINED
+# input while the `null` LITERAL was indistinguishable from a typo. W2b made
+# them distinguishable, so both are BANKED -- along with fourteen more of the
+# same class that had no entry at all until W2b added them.)
 # Java's `%g` and `%c`. `runners::javaformat` implements `s S b B d o x X f e E
 # % n` exactly and refuses the rest BY NAME rather than answering differently;
 # `%a`, `%h` and the `%t` date family are refused the same way and are not
@@ -682,3 +667,40 @@ filter-split-lookahead
 # and `parse_spec` consumed only one of the family's two characters.
 filter-format-date-family-refused
 
+# --- W2b: Pebble's `null` literal.
+#
+# THE CONCATENATION OPERATOR IS UNPORTED, and W2b found that by adding the
+# first corpus entries `~` has ever had -- the corpus had exactly ZERO before
+# these, so nothing had ever compared the two engines' `~`. Translating the
+# literal is NOT enough for `{{ 'a' ~ null ~ 'b' }}`: after the rewrite the
+# operand is a real `None`, and minijinja's `~` then writes it through
+# `Display`, which is Python's spelling. That is the same
+# stringification trap `oracle/README.md` records three times for filters
+# (`kestra_to_string` is the only correct route), now found in an OPERATOR,
+# where a filter's fix cannot reach it -- minijinja does not let a crate
+# override a binary operator, so closing this means teaching runners::rewrite
+# to emit a function call for `~`, the way it already does for `??`, `???` and
+# `isIn`. That needs Pebble's `~` PRECEDENCE measured against the rest of the
+# table before it can be written, which is a task, not a line.
+#
+# Measured, 4 of 4 value classes probed, 3 diverge:
+#   `'a' ~ null`  Kestra `a`         egret `aNone`
+#   `'a' ~ true`  Kestra `atrue`     egret `aTrue`
+#   `'a' ~ m`     Kestra `a{a=1}`    egret `a{"a": 1}`
+#   `'a' ~ [1,2]` Kestra `a[1, 2]`   egret `a[1, 2]`   (agrees -- the boundary)
+null-literal-concatenated
+concat-null-from-the-context
+concat-boolean
+concat-map
+
+# minijinja's literal vocabulary is WIDER than Pebble's, and this is an
+# OVER-acceptance -- egret answers where Kestra raises. Measured one probe per
+# spelling against the artifact: Pebble's literals are all-lower or all-upper
+# and nothing in between (`null` `NULL` `none` `NONE`, `true` `TRUE` `false`
+# `FALSE`), so `None`, `Null`, `nUll`, `NoNe`, `nulL` and `True` are ordinary
+# variable names there and raise under strictVariables(true). minijinja's own
+# LEXER binds `None`/`True`/`False`, so no rewrite of a name reaches them: the
+# rewriter hands minijinja source, and by then they are keywords. Both are also
+# in error-class.txt and paired `baselined`, so nothing here is a free pass.
+null-literal-python-spelling-is-not-the-literal
+boolean-literal-python-spelling-is-not-the-literal
