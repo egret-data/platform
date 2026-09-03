@@ -2,7 +2,7 @@
  * Sidebar zone tests
  *
  * Verifies the workspace sidebar renders the IA zones (Explore / Data API /
- * Data Engineering / Automate / Manage) with their items at the right
+ * Manage) with their items at the right
  * `/explore/:ws/...` hrefs, and the Control Plane group at `/control-plane/...`.
  *
  * Sidebar requires:
@@ -66,15 +66,16 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("Sidebar – workspace zones", () => {
-  test("renders the five zone headings", () => {
+  test("renders the three zone headings", () => {
     renderSidebar("/explore/eng/sql-lab");
     expect(screen.getByText("Explore")).toBeInTheDocument();
     expect(screen.getByText("Data API")).toBeInTheDocument();
-    expect(screen.getByText("Data Engineering")).toBeInTheDocument();
-    expect(screen.getByText("Automate")).toBeInTheDocument();
     expect(screen.getByText("Manage")).toBeInTheDocument();
-    // Data Lineage moved to Control Plane → Data governance, so Explore no
-    // longer has a Data Governance group.
+    // Automate and Data Engineering each held exactly one placeholder item
+    // (Workflows, Pipelines). Both items are gone in W0; the real Workflows
+    // group lands in W7, so neither heading should exist in between.
+    expect(screen.queryByText("Automate")).not.toBeInTheDocument();
+    expect(screen.queryByText("Data Engineering")).not.toBeInTheDocument();
     expect(screen.queryByText("Data Governance")).not.toBeInTheDocument();
   });
 
@@ -85,8 +86,6 @@ describe("Sidebar – workspace zones", () => {
       "Endpoints",
       "Clients",
       "Activity",
-      "Pipelines",
-      "Workflows",
       "Workspace settings",
     ]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
@@ -102,6 +101,9 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/settings/members",
     );
+    // W0 removed both placeholders; nothing should link to them.
+    expect(screen.queryByRole("link", { name: "Workflows" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Pipelines" })).not.toBeInTheDocument();
   });
 
   /**
@@ -113,11 +115,12 @@ describe("Sidebar – workspace zones", () => {
   const groupOf = (heading: string) =>
     screen.getByRole("button", { name: new RegExp(`^${heading}$`, "i") }).parentElement;
 
-  test("Alerts & Reports is an Explore module, not an Automate item", () => {
+  test("Alerts & Reports is an Explore module", () => {
     renderSidebar("/explore/eng/sql-lab");
     const link = screen.getByRole("link", { name: "Alerts & Reports" });
     expect(groupOf("Explore")).toContainElement(link);
-    expect(groupOf("Automate")).not.toContainElement(link);
+    // Automate no longer exists as a group at all (W0 removed its only item).
+    expect(screen.queryByText("Automate")).not.toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/explore/eng/alerts");
     // The old Automate entry is gone, label and all.
     expect(screen.queryByRole("link", { name: "Alerts" })).not.toBeInTheDocument();
@@ -149,10 +152,6 @@ describe("Sidebar – workspace zones", () => {
       "href",
       "/explore/eng/data-api/activity",
     );
-    expect(screen.getByRole("link", { name: "Workflows" })).toHaveAttribute(
-      "href",
-      "/explore/eng/workflows",
-    );
     // Data Lineage is no longer a workspace item (moved to the Control Plane).
     expect(screen.queryByRole("link", { name: "Data Lineage" })).not.toBeInTheDocument();
   });
@@ -170,18 +169,16 @@ describe("Sidebar – workspace zones", () => {
     expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
   });
 
-  test("Data API sits right after Explore and before Automate", () => {
+  test("Data API sits right after Explore and before Manage", () => {
     renderSidebar("/explore/eng/sql-lab");
     const dataApiHeading = screen.getByRole("button", { name: /^Data API$/i });
     const exploreHeading = screen.getByText("Explore");
-    const automateHeading = screen.getByRole("button", { name: /^Automate$/i });
-    // Explore precedes Data API…
+    const manageHeading = screen.getByRole("button", { name: /^Manage$/i });
     expect(
       exploreHeading.compareDocumentPosition(dataApiHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // …and Data API precedes Automate.
     expect(
-      dataApiHeading.compareDocumentPosition(automateHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+      dataApiHeading.compareDocumentPosition(manageHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -207,7 +204,7 @@ describe("Sidebar – workspace zones", () => {
     expect(screen.queryByText("Data API")).not.toBeInTheDocument();
     // Unaffected groups still render.
     expect(screen.getByRole("link", { name: "SQL Lab" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Pipelines" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Workspace settings" })).toBeInTheDocument();
   });
 });
 
@@ -472,7 +469,7 @@ describe("Sidebar – workspace feature entitlements", () => {
       expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
     }
     // Unaffected groups (no `feature` on their items) still render.
-    expect(screen.getByText("Automate")).toBeInTheDocument();
+    expect(screen.getByText("Manage")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Workspace settings" })).toBeInTheDocument();
   });
 

@@ -10,9 +10,9 @@
 //! env}` [`CatalogReq`], and [`build_provision_req`] assembles the full
 //! [`EngineProvisionReq`]. The kube-free provisioning ops (provision/status/
 //! update/delete/restart) go through the `EngineProvisioningPort`, implemented
-//! in egret-bin over `egret-orchestrator`. The kube-shaped ops
+//! in egret-bin over `egret-provisioner`. The kube-shaped ops
 //! (exec/pod-logs/coordinator-request) go straight through
-//! `egret_orchestrator::KubeClient`, held on `EngineMgmtState::kube`: `exec`
+//! `egret_provisioner::KubeClient`, held on `EngineMgmtState::kube`: `exec`
 //! returns a `kube::api::AttachedProcess` so [`bridge_exec`] can pump it onto a
 //! browser WebSocket.
 
@@ -60,7 +60,7 @@ const DEFAULT_SR_CN_IMAGE: &str = "starrocks/cn-ubuntu:4.1-latest";
 const STARROCKS_FE_MYSQL_PORT: u16 = 9030;
 
 // Canonical engine-spec DTOs now live in the dependency-free `egret-engine-mgmt-api`
-// contract crate (shared with `egret-orchestrator`); aliased here to the old
+// contract crate (shared with `egret-provisioner`); aliased here to the old
 // control-plane names so `parse_*`/`build_provision_req`/`inject_monitor_user`
 // bodies below (struct-literal construction + signatures) keep compiling unchanged.
 // `pub` because `lib.rs` re-exports these names from `engines::{..}`.
@@ -202,10 +202,10 @@ struct StarRocksConfigBody {
     /// (e.g. a dev cluster where the extra listener setup isn't wanted).
     tls_enabled: Option<bool>,
     /// FE (`fe.conf`) override keys → merged over egret's managed base by the
-    /// orchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
+    /// provisioner. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
     /// are rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.
     fe_config: Option<std::collections::BTreeMap<String, String>>,
-    /// CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.
+    /// CN (`cn.conf`) override keys → rendered into a ConfigMap by the provisioner.
     /// Omitted ⇒ preserved on update.
     cn_config: Option<std::collections::BTreeMap<String, String>>,
     /// CN horizontal autoscaling `{ minReplicas?, maxReplicas, targetCpuPercent? }`.
@@ -605,7 +605,7 @@ async fn build_provision_req(st: &CpState, engine: &Engine) -> Result<EngineProv
     }
     // Image-pull from a typed secret: resolve the referenced
     // kubernetes.io/dockerconfigjson secret, stash its `.dockerconfigjson`
-    // payload for the orchestrator to project into `{name}-pull`, and append
+    // payload for the provisioner to project into `{name}-pull`, and append
     // that Secret name to `imagePullSecrets`.
     if let Some(ref_id) = config.image_pull_secret_ref {
         let json = resolve_dockerconfigjson_secret(st, ref_id).await?;
@@ -761,7 +761,7 @@ fn parse_resources(v: &serde_json::Value) -> RoleResourcesReq {
 }
 
 /// A probe carrier only when the wire object is present (so an unset probe stays
-/// `None` and the orchestrator applies its default).
+/// `None` and the provisioner applies its default).
 fn parse_probe(v: &serde_json::Value) -> Option<ProbeReq> {
     if !v.is_object() {
         return None;
@@ -951,7 +951,7 @@ fn parse_volume_mounts(v: &serde_json::Value) -> Vec<VolumeMountReq> {
 }
 
 /// Parse an init/sidecar `containers[]` wire array. `rawOverride` (opaque JSON)
-/// wins verbatim downstream in the orchestrator; here it just carries through.
+/// wins verbatim downstream in the provisioner; here it just carries through.
 fn parse_mini_containers(v: &serde_json::Value) -> Vec<MiniContainerReq> {
     v.as_array()
         .map(|a| {
@@ -1363,7 +1363,7 @@ fn parse_prometheus_trigger(v: &serde_json::Value) -> Option<PrometheusTriggerRe
 /// Resolve the RAW `trinoConfig.auth`
 /// `{ passwordUsers: [{username, secretRef}], jwt?: {jwksUri?, requiredAudience?} }`
 /// into an [`AuthReq`]: each password secret is resolved + bcrypted so the
-/// orchestrator never sees plaintext, and an empty `jwksUri` falls back to the
+/// provisioner never sees plaintext, and an empty `jwksUri` falls back to the
 /// control-plane default [`CpState::engine_jwks_uri`]. `None` when the block is
 /// absent; `BadRequest` when a referenced secret is missing/unresolvable.
 async fn resolve_auth(st: &CpState, tc: &serde_json::Value) -> Result<Option<AuthReq>, CpError> {
@@ -2507,7 +2507,7 @@ async fn build_starrocks_provision_req(
 
     // FE HTTP ingress, parsed from the stored top-level `spec["ingress"]` (create/
     // update persist it there). Only `ingress` is used off this Trino-shaped config
-    // for a StarRocks engine — it's the field the orchestrator's `starrocks_ingress`
+    // for a StarRocks engine — it's the field the provisioner's `starrocks_ingress`
     // renders from.
     let mut config = TrinoConfigReq {
         ingress: parse_ingress(&engine.spec["ingress"]),
@@ -2573,7 +2573,7 @@ fn validate_sr_delegation_mode(sr_body: &StarRocksConfigBody) -> Result<(), CpEr
 /// manages itself ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`] — the
 /// shared-data run mode, object-store coords, TLS keystore, and wire ports). The
 /// SAME guard runs up front on both create and update, before any spec is
-/// persisted, so a bad override 400s with nothing to roll back. The orchestrator
+/// persisted, so a bad override 400s with nothing to roll back. The provisioner
 /// (Task 2, a separate crate) keeps its own belt-and-suspenders copy of the set
 /// when it merges the config, but this is the primary API-level gate.
 fn validate_sr_fe_config(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
@@ -2594,7 +2594,7 @@ fn validate_sr_fe_config(sr_body: &StarRocksConfigBody) -> Result<(), CpError> {
 /// error). Runs up front on both create and update, like the other SR guards.
 ///
 /// `maxReplicas == 0` is the disabled sentinel (autoscaling OFF — the CR omits
-/// `autoScalingPolicy` entirely, see the orchestrator), so validation is SKIPPED
+/// `autoScalingPolicy` entirely, see the provisioner), so validation is SKIPPED
 /// for it; it's a valid "off". Only an ENABLED policy (`maxReplicas > 0`) is
 /// checked:
 /// - `targetCpuPercent` absent or `0`: in our CPU-only model an enabled policy
@@ -2892,7 +2892,7 @@ async fn create_starrocks_engine(
     let mut spec = build_starrocks_spec(&sr_body, None);
     // Persist the FE HTTP ingress at TOP-LEVEL `spec["ingress"]` (kind-agnostic —
     // `build_starrocks_provision_req` reads it back into `config.ingress`, the
-    // field the orchestrator's `starrocks_ingress` renders from). The shared
+    // field the provisioner's `starrocks_ingress` renders from). The shared
     // create form builds `trinoConfig.ingress` even for a StarRocks engine, so the
     // wire ingress arrives on `b.trino_config`; copy it in when present.
     if let Some(ing) = b.trino_config.as_ref().and_then(|tc| tc.get("ingress")) {
@@ -3610,7 +3610,7 @@ async fn update_engine(
 
     // Rebuild the spec from the body + config. The primary Catalog Client is NOT
     // re-minted (its credential lives on the primary catalog row), so nothing is
-    // revoked here. Trino has no hot-reload; the orchestrator rolls the pods.
+    // revoked here. Trino has no hot-reload; the provisioner rolls the pods.
     let image_version = b
         .image_version
         .clone()
@@ -4874,7 +4874,7 @@ async fn pod_logs_follow(
 /// — there is no stdin to forward, unlike [`bridge_exec`]. Exits on stream
 /// end/error, WS close, or a WS send error.
 async fn bridge_log_follow(
-    kube: Arc<dyn egret_orchestrator::KubeClient>,
+    kube: Arc<dyn egret_provisioner::KubeClient>,
     namespace: &str,
     pod: &str,
     tail_lines: i64,
@@ -5006,7 +5006,7 @@ async fn pod_exec(
 /// `KubeClient::exec` failure (e.g. `FakeKube`'s
 /// "exec not supported") is sent back as one WS text frame before closing.
 async fn bridge_exec(
-    kube: Arc<dyn egret_orchestrator::KubeClient>,
+    kube: Arc<dyn egret_provisioner::KubeClient>,
     namespace: &str,
     pod: &str,
     mut socket: WebSocket,

@@ -3053,8 +3053,8 @@ dependencies = [
  "egret-machine-idp",
  "egret-metastore",
  "egret-notebook",
- "egret-orchestrator",
  "egret-policy",
+ "egret-provisioner",
  "egret-query",
  "egret-secrets",
  "egret-server",
@@ -3270,9 +3270,9 @@ dependencies = [
  "egret-engine-mgmt-api",
  "egret-events",
  "egret-metastore",
- "egret-orchestrator",
  "egret-policy",
  "egret-policy-api",
+ "egret-provisioner",
  "egret-query",
  "egret-query-api",
  "egret-secrets",
@@ -3431,27 +3431,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egret-orchestrator"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "egret-engine-mgmt-api",
- "futures-util",
- "http 1.5.0",
- "k8s-openapi",
- "kube",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "egret-policy"
 version = "0.1.0"
 dependencies = [
@@ -3484,6 +3463,27 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "egret-provisioner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "egret-engine-mgmt-api",
+ "futures-util",
+ "http 1.5.0",
+ "k8s-openapi",
+ "kube",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -3626,6 +3626,18 @@ dependencies = [
  "sqlx",
  "tokio",
 ]
+
+[[package]]
+name = "egret-workflow"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "egret-workflow-api"
+version = "0.1.0"
 
 [[package]]
 name = "egret-workspace"

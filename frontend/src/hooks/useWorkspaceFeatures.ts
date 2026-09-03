@@ -3,17 +3,20 @@ import { useMyWorkspaces } from "@/api/hooks";
 import { EXPLORE_MODULES } from "@/lib/exploreModules";
 
 /**
- * Every workspace feature key gated anywhere in the Explore nav, used only as
- * the "still loading" optimistic fallback below — NOT the same list
- * `useDefaultExplorePath` searches for a landing page (that one deliberately
- * stays scoped to `EXPLORE_MODULES`, so a non-module item can never become the
- * default explore path just by gaining a `feature` key here).
+ * Every workspace feature key that exists, used only to build the "still
+ * loading" optimistic fallback below — NOT the same list `useDefaultExplorePath`
+ * searches for a landing page (that one deliberately stays scoped to
+ * `EXPLORE_MODULES`, so a non-module item can never become the default
+ * explore path just by gaining a `feature` key here).
  *
- * The five `EXPLORE_MODULES` keys cover the Explore group; `data_api` is a
- * Data Engineering item gated the same way (Sidebar.tsx's `Data API` entry) but
- * isn't a landing-page candidate, so it isn't part of `EXPLORE_MODULES` itself.
+ * The six `EXPLORE_MODULES` keys cover the Explore group; `data_api` is gated
+ * the same way but on its own Sidebar group (`Data API`), not a module, so it
+ * isn't part of `EXPLORE_MODULES` itself. `workflows` is a feature entitlement
+ * key with no nav gate yet — the group that will read it lands in a later
+ * package — but it still belongs here because this list has to name every key
+ * the backend can return, not just the ones currently wired into the nav.
  */
-export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api"];
+export const ALL_FEATURE_KEYS: string[] = [...EXPLORE_MODULES.map((m) => m.key), "data_api", "workflows"];
 
 /**
  * The module keys the *current route's* workspace has switched on — the

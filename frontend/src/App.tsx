@@ -203,8 +203,6 @@ function ExploreRoutes() {
               recognises. */}
           <Route path="data-api/clients/:accountId/new-client" element={<RequireFeature feature="data_api"><ClientCreate /></RequireFeature>} />
           <Route path="data-api/activity" element={<RequireFeature feature="data_api"><Activity /></RequireFeature>} />
-          <Route path="pipelines" element={<Placeholder title="Pipelines" />} />
-          <Route path="workflows" element={<Placeholder title="Workflows" />} />
           <Route
             path="alerts"
             element={

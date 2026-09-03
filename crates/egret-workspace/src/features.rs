@@ -37,6 +37,7 @@ pub const FEATURE_KEYS: &[&str] = &[
     "notebooks",
     "alerts",
     "data_api",
+    "workflows",
 ];
 
 /// True if `key` names a module in the catalog.
@@ -185,6 +186,16 @@ pub const FEATURES: &[Feature] = &[
         // credentials being minted here; stopping traffic is `state='disabled'`
         // on the endpoint (spec §5.3).
         rules: &[prefix("data-api")],
+    },
+    Feature {
+        key: "workflows",
+        label: "Workflows",
+        description: "Author, schedule, and run multi-step workflows across engines, notebooks, and containers.",
+        // Declared in W0, before any route exists, for the reason `alerts` and
+        // `data_api` record above: an unmatched prefix rule is inert, but a
+        // route that lands before its rule fails OPEN. W1's management routes
+        // land under `/api/ws/{ws}/workflows/...` and are claimed on arrival.
+        rules: &[prefix("workflows")],
     },
 ];
 
@@ -511,6 +522,24 @@ mod tests {
     fn catalog_keys_match_the_key_list() {
         let from_catalog: Vec<&str> = FEATURES.iter().map(|f| f.key).collect();
         assert_eq!(from_catalog, FEATURE_KEYS);
+    }
+
+    #[test]
+    fn workflows_is_catalogued_and_gates_its_own_prefix() {
+        // The key exists and is ordered last, after data_api (W0; the nav group
+        // itself lands in W7).
+        assert_eq!(FEATURE_KEYS.last(), Some(&"workflows"));
+        assert!(is_known("workflows"));
+
+        // And the gate actually claims the prefix. Asserting only the key would
+        // pass with `rules: &[]`, which is the fail-OPEN shape this test exists
+        // to forbid.
+        let f = FEATURES
+            .iter()
+            .find(|f| f.key == "workflows")
+            .expect("workflows in FEATURES");
+        assert_eq!(f.rules.len(), 1);
+        assert_eq!(f.rules[0].path, "workflows");
     }
 
     #[test]

@@ -1,0 +1,15 @@
+[package]
+name = "egret-workflow-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# Leaf contract crate for the Workflow seam (W0). Mirrors egret-dataapi-api /
+# egret-query-api / egret-policy-api: no sqlx, axum, or heavy egret-* deps, so
+# any cross-seam consumer can depend on the Workflow vocabulary cheaply.
+#
+# Deliberately EMPTY at W0. `WorkflowPort::workspace_of` belongs here, but it
+# arrives with its first caller -- egret-dataapi-api records the rule this
+# follows: "A trait method with no consumer is untested surface -- do not add
+# one ahead of its caller."
+[dependencies]
