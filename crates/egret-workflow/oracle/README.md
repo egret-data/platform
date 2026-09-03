@@ -205,10 +205,11 @@ had introduced -- **that number said 131 in two places until W2b counted it out
 of the file, which is what C8 asks for and what nobody had done here** -- and
 **131 of 1278** after W2b -- which added 44 entries for
 Pebble's `null` literal (a class the corpus had NO entry for at all), BANKED
-three and RECORDED six -- and **141 of 1288** after its fix round, which
-RECORDED ten and banked none: `null` in a BOOLEAN context, where routing the
-literal onto minijinja's `none` turned four loud failures into silently wrong
-answers.
+three and RECORDED six -- and **139 of 1288** after its fix rounds, which
+RECORDED ten and BANKED two: `null` in a BOOLEAN context, where translating the
+literal removed the accidental reason egret used to fail for and left
+minijinja's own semantics showing, and where `is defined` -- the one of the five
+a crate can reach -- is closed by overriding a single test.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -4533,18 +4534,32 @@ messages, and `or` reports itself as `and`:
 | `{{ not null }}` | `null value given to not() and strict variables is set to true` | error | **`true`** |
 | `{{ null is defined }}` | `false` | `false` | **`true`** |
 
-**Loud failure to silently wrong answer**, which is the worse mode and the same
-shape as the `~` note above. And none of the five had a corpus entry, so the
-ratchet was blind to all of them — the exact blindness Step 1 existed to remove
-for `{{ null | F }}`, left in place one construct over. The one boundary entry
+**The four boolean ones are not regressions, and calling them that misreads
+what happened.** They *agreed* at `4498b48b` — both engines errored — for two
+different reasons. Pebble errors because a null in a boolean position is an
+error. egret errored because `null` was an **undefined variable** and
+minijinja's strict mode raises for one; it had no opinion about nulls in
+boolean positions then and has none now. Translating the literal removed
+egret's accidental reason and left minijinja's own semantics showing. That is a
+**masked divergence exposed by a root-cause fix**, and the difference matters to
+whoever reads this next: reverting the translation would not fix these four, it
+would only put the mask back — and the mask is what kept them out of
+`baseline.txt` for the whole of W2.
+
+The direction is still the worse one — a loud failure now reads as a wrong
+value — which is the same shape as the `~` note above and the reason they are
+recorded rather than left to a report. And none of the five had a corpus entry,
+so the ratchet was blind to all of them: the exact blindness Step 1 existed to
+remove for `{{ null | F }}`, left in place one construct over. The one boundary entry
 that existed here, `null-literal-ternary-condition`, **cannot see any of it**:
 Pebble's ternary answers `n` for a null while its `{% if %}` raises, so the two
 constructs disagree with each other and only the agreeing one had been written
 down.
 
-**Whose fault, measured rather than argued.** A *context* null answered `n` at
-`4498b48b` too, so the wrong answer predates W2b and what W2b changed is which
-inputs reach it. Kestra treats a literal and a context null identically in every
+**The mask is measurable, not argued.** A *context* null answered `n` at
+`4498b48b` too — no undefined involved there, so nothing was masked — which is
+what shows the wrong answer predates W2b and that what W2b changed is which
+inputs reach an answer egret was already giving. Kestra treats a literal and a context null identically in every
 one of these positions, so egret is now at least self-consistent.
 `null-from-the-context-in-an-if-condition` and `null-from-the-context-is-defined`
 are the controls, and they fail on **both** builds — which is what makes that
@@ -4553,7 +4568,7 @@ claim checkable rather than a defence.
 Not fixable from this crate: minijinja lets a crate override a filter, a
 function and a test, but not `{% if %}`, `and`, `or` or `not`.
 
-### `is defined` agreed BY LUCK, and it is not this package's surface to fix
+### `is defined` agreed BY LUCK, and it IS the one a crate can reach
 
 Pebble's `defined` is "present **and not null**". Measured four ways: a null
 literal, a context null, an absent root and a missing attribute are all `false`.
@@ -4561,13 +4576,25 @@ minijinja's is "not undefined", so a `none` is defined. Before W2b the literal
 was an undefined and answered `false` — the right answer for the wrong reason,
 the same shape this file already records for `filter-string` and `isin`.
 
-Registering a `defined` test is a three-line change and it is **deliberately not
-made here**: `runners::env::MINIJINJA_ONLY_TESTS`'s doc states that porting the
-`is` surface "is not W2's — no task was given the eight", and `name-surface.txt`
-carries a reason on each of those rows. Entering a declared-unported surface to
-close one entry is not a trade this round should make on its own. The row now
-names the baselined entry instead of `test-defined`, which agreed and could
-never have separated them.
+`is defined` is also the **only one of the five a crate can reach**, and the
+only one where egret answers a *value* that differs from Kestra's value rather
+than answering where Kestra errors. `runners::env` now overrides that one test,
+and both entries are **banked**.
+
+The fence in `runners::env::MINIJINJA_ONLY_TESTS` says *porting* the `is`
+surface "is not W2's — no task was given the eight". Putting back one name W2b's
+own change broke is not porting the surface, and the difference is a
+**measurement**, not a reading: overriding it moved the ratchet from
+`141 of 1288` to `139 of 1288` — the two entries it fixes, no regression,
+nothing else touched — and
+`the_defined_test_is_pebbles_and_it_is_the_only_one_overridden` asserts the
+seven siblings unchanged (`even`, `iterable`, `odd` still answer minijinja's
+way; `empty`, `json`, `map`, `null` are still unknown). "An `add_test` binds one
+name" is a property of minijinja rather than of this crate, so it is asserted
+rather than assumed.
+
+`test-defined` (a present String) agrees either way and could never have
+separated them, which is why the row now names `null-literal-is-defined`.
 
 The same surface from the other side: Pebble's null **test** is spelled `null`
 and minijinja's is spelled `none`, so `{{ null is null }}` is `true` there and
@@ -4593,6 +4620,15 @@ entry there would have been a lucky pass in a block whose whole purpose is
 discrimination, so it was dropped and `tag-elseif-is-pebbles-spelling` written
 instead: a real divergence, compared exact, baselined, with no free pass.
 
+**And it runs both ways, which the first write-up did not say.** Kestra refuses
+`elif` exactly as hard as minijinja refuses `elseif` —
+`ParserException: Unexpected tag name "elif"`, measured on the artifact with
+`{% if false %}a{% elif true %}b{% else %}c{% endif %}`. Neither engine accepts
+the other's spelling, so this is not "egret is missing a tag": it is one
+construct with two incompatible names, and a port has to translate it in
+`runners::rewrite` the way it translates `null`. The entry is written from
+Pebble's side because the corpus is Pebble source.
+
 ### Three numbers in the committed record were wrong
 
 **"23 of the 44 failed against the pre-fix build" was 28.** It was the count of
@@ -4613,13 +4649,51 @@ did not yet carry `string`'s guard, which the same section says closes here.
 Re-measured on the committed tree: of 105 sweep cases, 35 null-literal cases
 agree **exactly**, 34 undefined cases refuse, 36 still answer.
 
+### And three more prose numbers, written by the round that fixed three numbers
+
+Named by the re-review, all three in text this round had just added:
+
+- `error-class-pairs.txt` said "All **seven** are ALSO in baseline.txt" over a
+  block of **six** ids. The seventh was the `{% elseif null %}` entry, dropped
+  for the reason above, and the count was not carried back.
+- `error-class.txt` quoted Pebble's `not` message as `null value given to not()
+  and or operator`. The artifact says `null value given to not() and strict
+  variables is set to true`. `baseline.txt` and this file both had it right —
+  the one wrong copy was in the file whose own comment says all three messages
+  were measured against the artifact, which is exactly where a paraphrase does
+  the most damage.
+- `filters.rs` said "fourteen of the sixteen also have a corpus entry". **All
+  sixteen do.** Fourteen is the number W2b *added*;
+  `filter-upper-literal-null` and `filter-length-literal-null` were banked out
+  of `baseline.txt`, not out of `corpus.json`. The error understated this
+  crate's own coverage, which is why it survived a round whose subject was
+  wrong numbers.
+
+The pattern across all six: every one was a number about *this package's own
+work*, and each was written from what the author remembered doing rather than
+counted out of the file it describes. C8 says to count them out of the files.
+That rule is now three rounds old and has caught something every time.
+
 ### What this round strengthened
 
 - the near-miss loop in `the_null_literal_is_exactly_four_spellings` asserted
-  only `is_err()`, and its corpus entry is `error-class`, so **nothing anywhere
-  pinned what egret says** — a rewriter that renamed a mixed-case spelling into
-  something unparseable passed all four assertions and the entry. It now asserts
-  `undefined value`, i.e. refused as an absent variable.
+  only `is_err()`, and its corpus entry is `error-class`, so a rewriter that
+  renamed a mixed-case spelling into something unparseable passed all four
+  assertions **and that entry**. It now asserts `undefined value`, i.e. refused
+  as an absent variable.
+
+  **The ratchet is not silent on that mutant, and the first write-up implied it
+  was.** Measured: widening the predicate to `eq_ignore_ascii_case` over *both*
+  words renames `None` too, so `null-literal-python-spelling-is-not-the-literal`
+  starts matching and the oracle goes red at `138 of 1288 (baseline: 139)` on
+  the **PROGRESS** arm. What it does not do is name the cause — it reads as
+  progress on a Python-spelling divergence — and
+  `null-literal-mixed-case-is-not-the-literal`, the entry actually about mixed
+  case, still passes, because `error-class` accepts any failure. So the unit
+  test is still the only thing that names the right cause, and the ratchet is a
+  second, blunter alarm rather than nothing. (A narrower mutant widening only
+  the `null` spelling leaves `None` alone and the ratchet **stays green** —
+  measured, which is why the write-up has to say which mutant was run.)
 - the sixteen `{{ null | F }}` rows appended to
   `the_ported_filters_refuse_an_undefined_input` asserted only `<>`, which a
   filter that ignored its input would satisfy — live for `escape`,
@@ -4635,7 +4709,11 @@ agree **exactly**, 34 undefined cases refuse, 36 still answer.
 
 ### Counted
 
-**141 of 1288**, from 131 of 1278. Ten entries, all ten failing against W2b's
-own head, five of them also failing at `4498b48b`. BANKED none and RECORDED ten,
-which is the honest shape of a round whose finding is that a fix moved a failure
-from loud to silent.
+**139 of 1288**, from 131 of 1278 — ten entries recorded, then two of them
+banked by the `defined` override in the round after. All ten failed against
+W2b's own head; five also failed at `4498b48b`.
+
+The honest shape of it: the four boolean-context entries are a **masked
+divergence made visible**, not a fix's damage; `is defined` was the one of the
+five a crate could reach and it is closed; and the remaining eight are held by
+the ratchet rather than by prose.

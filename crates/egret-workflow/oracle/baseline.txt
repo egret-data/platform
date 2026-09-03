@@ -724,18 +724,27 @@ boolean-literal-python-spelling-is-not-the-literal
 #   {{ null or x }}    null value used in and operator   (Pebble says "and")
 #   {{ not null }}     null value given to not() and strict variables ...
 #
-# THE DIRECTION MATTERS AND IT IS THE WORSE ONE. These four ERRORED before W2b
-# (the literal was an undefined and minijinja's strict mode raised) and now
-# ANSWER: `n`, `false`, `z`, `true`. Loud failure -> silently wrong answer. That
-# is the same shape as the `~` note below, and it is why they are recorded here
-# rather than left to a sentence in a report.
+# THESE ARE NOT REGRESSIONS. THEY AGREED BY COINCIDENCE AND A ROOT-CAUSE FIX
+# UNMASKED THEM. All four ERRORED on both engines at 4498b48b -- and for
+# DIFFERENT REASONS. Pebble errors because a null in a boolean position is an
+# error. egret errored because `null` was an UNDEFINED VARIABLE and minijinja's
+# strict mode raises for one; it had no opinion about nulls in boolean
+# positions at all, and still has none. Translating the literal removed egret's
+# accidental reason and left minijinja's own semantics showing: `n`, `false`,
+# `z`, `true`.
 #
-# WHOSE FAULT, measured rather than argued: a CONTEXT null answered `n` at
-# 4498b48b too, so the wrong ANSWER predates W2b and what W2b changed is which
-# inputs reach it -- Kestra treats a literal and a context null identically in
-# these positions, so egret is now at least self-consistent.
+# THE DISTINCTION IS THE USEFUL PART, so do not read this block as "revert and
+# they are fixed". Reverting would not fix them; it would only put the mask
+# back, and the mask is what kept them out of this file for the whole of W2.
+# The direction is still the worse one -- a loud failure now reads as a wrong
+# value -- which is why they are recorded rather than left to a report.
+#
+# THE MASK IS MEASURABLE, not argued: a CONTEXT null answered `n` at 4498b48b,
+# where no undefined was involved and nothing was masked. Kestra treats a
+# literal and a context null identically in every one of these positions, so
+# what W2b changed is which inputs reach an answer egret was already giving.
 # `null-from-the-context-in-an-if-condition` is that control, and it fails on
-# BOTH builds, which is what makes the claim checkable.
+# BOTH builds, which is what makes the claim checkable rather than a defence.
 #
 # Not fixable from this crate: minijinja lets a crate override a filter, a
 # function and a test, but not `{% if %}`, `and`, `or` or `not`.
@@ -745,26 +754,18 @@ null-literal-in-an-or-operand
 null-literal-in-a-not-operand
 null-from-the-context-in-an-if-condition
 
-# `is defined` is the one that REGRESSED FROM AGREEMENT, and it agreed by luck.
-# Pebble's `defined` is "present AND not null": `{{ null is defined }}`,
-# `{{ n is defined }}` with a context null, `{{ nothere is defined }}` and
-# `{{ obj.missing is defined }}` are ALL false. minijinja's is "not undefined",
-# so a `none` is defined. Before W2b the literal was an undefined and answered
-# false -- the right answer for the wrong reason, exactly the shape
-# `oracle/README.md` records for `filter-string` and `isin`.
-#
-# The CONTEXT null was already wrong (`true`) at 4498b48b, and
-# `null-from-the-context-is-defined` fails on both builds to prove it.
-#
-# NOT FIXED, and the reason is a committed scope boundary rather than
-# difficulty: `runners::env::MINIJINJA_ONLY_TESTS`'s doc states that porting the
-# `is` surface "is not W2's -- no task was given the eight", and
-# `name-surface.txt` carries a reason on every one of those rows. Registering a
-# `defined` test is a three-line change; doing it here would enter a surface
-# this package deliberately left alone. Handed on with an entry instead of a
-# note.
-null-literal-is-defined
-null-from-the-context-is-defined
+# (`null-literal-is-defined` and `null-from-the-context-is-defined` were here
+# for one round and are BANKED. `is defined` was the one of the five where
+# egret answered a VALUE that differs from Kestra's value rather than answering
+# where Kestra errors, and it is the one a crate can reach: Pebble's `defined`
+# is "present AND NOT NULL" -- measured per kind, `0`/`false`/`""`/`[]`/`{}`
+# are all true -- and minijinja's is "not undefined". `runners::env` now
+# overrides that ONE test. The fence in `MINIJINJA_ONLY_TESTS` says PORTING the
+# eight is not W2's; putting back one name W2b's own change broke is not
+# porting them, and the measured cost was exactly these two entries and nothing
+# else: the ratchet moved 141 -> 139 with no regression. The seven siblings are
+# asserted unchanged by
+# `runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.)
 
 # The same unported `is` surface, seen from the other side: Pebble's null TEST
 # is spelled `null` and minijinja's is spelled `none`, so `{{ null is null }}`

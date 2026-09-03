@@ -4115,8 +4115,12 @@ mod tests {
         // returns the empty string -- and three of these (`escape`,
         // `format('x')`, `replace({'a':'b'})`) really could. The live column is
         // what separates "answered the null correctly" from "answers `<>` to
-        // everything"; fourteen of the sixteen also have a corpus entry, and
-        // this makes the test carry its own weight rather than borrowing it.
+        // everything". **All sixteen also have a `filter-*-literal-null` corpus
+        // entry** -- this said fourteen, which is the number W2b ADDED;
+        // `filter-upper-literal-null` and `filter-length-literal-null` were
+        // banked out of `baseline.txt`, not out of `corpus.json`. The live
+        // column is what makes the test carry its own weight rather than
+        // borrowing all of it from the corpus.
         //
         // **Every live value below was measured on the artifact, not guessed.**
         // Five of the first six written from memory were wrong -- a list

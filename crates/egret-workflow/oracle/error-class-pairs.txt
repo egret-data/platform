@@ -430,11 +430,15 @@ boolean-literal-python-spelling-is-not-the-literal  baselined
 # if `string` stops refusing a typo AND if it starts refusing the literal.
 filter-string-undefined-input                       test:the_string_filter_now_tells_the_literal_from_a_typo
 
-# --- W2b fix round. All seven are ALSO in baseline.txt -- egret succeeds where
+# --- W2b fix round. All SIX are ALSO in baseline.txt -- egret succeeds where
 # Kestra throws -- so the ratchet already holds them and nothing here is born
-# matching. Fixing them needs a lever this crate does not have: minijinja lets
-# a crate override a filter, a function and a test, but not `{% if %}`, `and`,
-# `or`, `not`, or the map-key writer.
+# matching. (This said "seven" over six lines: a seventh entry, for
+# `{% elseif null %}`, was written and then dropped because it passed on both
+# builds for a reason unrelated to null, and the count was not carried back.)
+# Fixing them needs a lever this crate does not have: minijinja lets a crate
+# override a filter, a function and a test -- W2b's final round overrides the
+# `defined` test for exactly that reason -- but not `{% if %}`, `and`, `or`,
+# `not`, or the map-key writer.
 null-literal-in-an-if-condition                     baselined
 null-literal-in-an-and-operand                      baselined
 null-literal-in-an-or-operand                       baselined

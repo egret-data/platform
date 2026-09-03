@@ -706,7 +706,10 @@ filter-string-undefined-input
 # artifact: `Wrong operand(s) type in conditional expression` for `{% if %}`
 # and `{% elseif %}`, `null value used in and operator` for BOTH `and` and `or`
 # (Pebble's own message says "and" in the `or` arm), and `null value given to
-# not() and or operator` for `not`.
+# not() and strict variables is set to true` for `not`. (That third one read
+# `not() and or operator` here for one round -- a paraphrase, in the file whose
+# own comment says all three were measured. `baseline.txt` and `README.md` both
+# carried the artifact's wording; this copy did not.)
 #
 # Every one of these is ALSO in baseline.txt: egret ANSWERS where Kestra
 # throws, so none of them is born matching and the ratchet holds all of them.

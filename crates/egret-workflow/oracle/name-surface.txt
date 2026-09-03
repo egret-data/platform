@@ -201,7 +201,7 @@ function	tasksWithState	yes	yes	function-taskswithstate	-
 function	uuid	yes	yes	function-uuid	-
 function	yaml	yes	yes	function-yaml-yes-is-a-boolean-or-not	the two YAML scalar resolvers disagree, and re-resolving would trade an old silent wrong answer for a new one
 test	boolean	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	defined	yes	yes	null-literal-is-defined	Pebble's `defined` is "present AND NOT NULL" and minijinja's is "not undefined", so a null is defined here and is not there. Measured four ways: a null literal, a context null, an absent root and a missing attribute are ALL false on the engine. `test-defined` (a present String) agrees and could never have separated them; W2b made the literal stop agreeing BY LUCK and the row now names the baselined entry. The `is` surface was never given to a W2 task -- see `env::MINIJINJA_ONLY_TESTS`
+test	defined	yes	yes	null-literal-is-defined	-
 test	divisibleby	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	empty	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
 test	endingwith	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
