@@ -271,7 +271,7 @@ pub trait TaskHandler: Send + Sync {
 | `egret.dataapi.call` | `DataApiEndpointPort` |
 | `egret.dataset.refresh`, `egret.report.send` | renderer + delivery của `egret-automation` |
 | `core.http`, `core.slack` | `automation/deliver/*`; phải chặn SSRF (allow-list host, cấm IP nội bộ) |
-| `core.{sequential,parallel,if,switch,dag,foreach,subflow}` | không handler — máy trạng thái |
+| `core.{sequential,parallel,if,switch,dag,loop,loopUntil,subflow}` | không handler — máy trạng thái |
 
 Handler phụ thuộc port trait, không bao giờ phụ thuộc crate cụ thể, đúng như
 `egret-dataapi` giữ `Arc<dyn QueryExecPort>` mà không biết `egret-query`.
@@ -353,7 +353,7 @@ W7 — một bản kiểm kê màn hình không phải một cuộc khảo sát 
 | **W0** Nền & đổi tên | khung crate phản chiếu tên module Kestra; xoá hai placeholder; entitlement `workflows`; đổi `egret-orchestrator` → `egret-provisioner` (hiện nghĩa là cấp phát engine trên k8s, sẽ va với workflow orchestrator) thành một PR cơ học riêng | — |
 | **W1** Model & ngôn ngữ | `models/{flows,tasks,executions,triggers,property}`; parse/validate YAML; bảng draft/version; publish + giải tham chiếu | W0 |
 | **W2** Biểu thức | minijinja + 37 filter + 40 function + viết lại `??`/`?:` + **oracle differential Pebble** | W0 |
-| **W3** Executor lõi | `advance()`; vòng claim; `sequential/parallel/if/switch/dag/foreach`; retry/timeout/`errors:`; task `core.log`, `egret.sql` | W1, W2 |
+| **W3** Executor lõi | `advance()`; vòng claim; `sequential/parallel/if/switch/dag/loop/loopUntil`; retry/timeout/`errors:`; task `core.log`, `egret.sql` | W1, W2 |
 | **W4** Runner & container | hợp đồng `TaskCommands`; `egret.container`, `egret.python`; stream log; file output; cancel/kill | W3 |
 | **W5** Kestra plugin host | image JVM, `ShimRunContext`, cầu `StorageInterface`, điều phối `kestra.<FQCN>`, giải jar plugin | W4 |
 | **W6** Trigger & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3 |

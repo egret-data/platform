@@ -60,6 +60,9 @@ pub struct AppState {
     /// Data API management surface (P2): service accounts and their OAuth2
     /// clients; `None` in unit tests.
     pub dataapi: Option<egret_dataapi::DataApiState>,
+    /// Workflow management surface (W1 Task 7): flow drafts and their
+    /// published versions; `None` in unit tests.
+    pub workflow: Option<egret_workflow::WorkflowState>,
 }
 
 impl AppState {
@@ -84,6 +87,7 @@ impl AppState {
             catalog_engine: None,
             idp: None,
             dataapi: None,
+            workflow: None,
         }
     }
 
@@ -156,6 +160,7 @@ pub fn openapi_doc() -> utoipa::openapi::OpenApi {
     doc.merge(egret_engine_mgmt::openapi());
     doc.merge(egret_machine_idp::openapi());
     doc.merge(egret_dataapi::openapi());
+    doc.merge(egret_workflow::openapi());
     // A SECOND document from the same crate, kept as its own line rather than
     // folded into the one above: the management surface is a browser-session API
     // under `/api/ws/{workspace}/…` and the serving surface is a machine API
@@ -382,6 +387,17 @@ pub fn build_router(state: AppState) -> Router {
             .nest("/data-api/v1", egret_dataapi::serving_router())
             .with_state(dataapi);
         router = router.merge(serving);
+    }
+
+    if let Some(workflow) = state.workflow.clone() {
+        // Workflow management (W1 Task 7): workspace-scoped, session-
+        // authenticated, browser-facing — same CSRF placement as `dataapi`
+        // just above and for the identical reason.
+        let group = Router::new()
+            .nest("/api", egret_workflow::management_router())
+            .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
+            .with_state(workflow);
+        router = router.merge(group);
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {

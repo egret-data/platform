@@ -184,6 +184,24 @@ pub static PERMISSIONS: &[Permission] = &[
         "Call a published Data API endpoint",
         Scope::Workspace
     ),
+    // Workflow W1 (Task 7). `:manage` was seeded to `ws_editor`/`ws_admin` in
+    // migration 0132 ("managing flows is an editor act", following
+    // `alert:manage`/`chart:manage`); `:read` is seeded alongside it in 0133,
+    // for the same reason `data_api_endpoint:read` is seeded alongside
+    // `:manage` in 0122 -- permissions are flat, so a role that may edit a
+    // flow must be granted the ability to list/view it explicitly.
+    perm!(
+        "workflow:read",
+        "Workflows",
+        "View flow drafts, their validation report, and their published versions",
+        Scope::Workspace
+    ),
+    perm!(
+        "workflow:manage",
+        "Workflows",
+        "Create, edit, publish and delete flow drafts",
+        Scope::Workspace
+    ),
     perm!(
         "policy:read",
         "Policies",

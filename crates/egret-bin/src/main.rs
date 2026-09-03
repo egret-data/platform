@@ -1724,7 +1724,10 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         manager: kernel_manager,
         // E5c-1: hand kernel the notebook-docs Port over the concrete
         // NotebookState (which impls `egret_analytics_api::NotebookDocsPort`).
-        notebook_docs: std::sync::Arc::new(notebook_state),
+        // Cloned, not moved (Task 7): `workflow`'s own `WorkflowRefs`, built
+        // further down this function, needs the same port over the same
+        // concrete state.
+        notebook_docs: std::sync::Arc::new(notebook_state.clone()),
         sessions: sessions.clone(),
         workspaces: WorkspaceRepo::new(db.clone()),
         authz: Authorizer::new(db.clone()),
@@ -2019,6 +2022,35 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         ),
     });
 
+    // Workflow management surface (W1 Task 7). `refs` is the real
+    // `WorkflowRefPort`: `RefKind::Subflow` resolves through this crate's own
+    // `FlowRepo`, `RefKind::DataApiEndpoint`/`Notebook` through the two ports
+    // already wired above for `automation`/`dataapi`, and
+    // `RefKind::Database`/`Dataset`/`Chart` resolve to `None` always -- no
+    // port for any of the three exists anywhere in the workspace yet, and
+    // `None` is the fail-closed answer `publish` needs: see
+    // `egret_workflow::refs`'s module doc for the full per-kind table.
+    //
+    // A fresh `EndpointStore`, same reasoning `automation`/`automation_runner`
+    // above give for their own fresh instances rather than reusing
+    // `dataapi.endpoints`: it is `Clone` and holds only `db`, so a second
+    // instance is free, and it keeps this block constructible without caring
+    // about `dataapi`'s construction order.
+    let workflow = Some(egret_workflow::WorkflowState {
+        db: db.clone(),
+        repo: egret_workflow::FlowRepo::new(db.clone()),
+        refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
+            flows: egret_workflow::FlowRepo::new(db.clone()),
+            dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
+            notebooks: std::sync::Arc::new(notebook_state.clone()),
+        }),
+        sessions: sessions.clone(),
+        workspaces: WorkspaceRepo::new(db.clone()),
+        authz: Authorizer::new(db.clone()),
+        pdp: pdp.clone(),
+        audit: audit_sink.clone(),
+    });
+
     let app = build_router(AppState {
         db: Some(db),
         auth: Some(auth),
@@ -2038,6 +2070,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         catalog_engine,
         idp,
         dataapi,
+        workflow,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

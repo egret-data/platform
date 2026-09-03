@@ -3060,6 +3060,7 @@ dependencies = [
  "egret-server",
  "egret-storage",
  "egret-test-db",
+ "egret-workflow",
  "egret-workspace",
  "futures-util",
  "hex",
@@ -3579,6 +3580,7 @@ dependencies = [
  "egret-policy",
  "egret-query",
  "egret-query-api",
+ "egret-workflow",
  "egret-workspace",
  "http-body-util",
  "metrics",
@@ -3631,13 +3633,38 @@ dependencies = [
 name = "egret-workflow"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "egret-analytics-api",
+ "egret-audit",
+ "egret-auth",
+ "egret-core",
+ "egret-dataapi-api",
+ "egret-events",
+ "egret-metastore",
+ "egret-test-db",
+ "egret-workflow-api",
+ "egret-workspace",
  "serde",
  "serde_json",
+ "serde_norway",
+ "sqlx",
+ "tokio",
+ "tower",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]
 name = "egret-workflow-api"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "egret-core",
+ "uuid",
+]
 
 [[package]]
 name = "egret-workspace"

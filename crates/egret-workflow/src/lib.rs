@@ -9,6 +9,9 @@
 //! Modules arrive with their package:
 //!
 //! - `models`    — W0 (this crate's first type) and W1
+//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`)
+//! - `refs`      — W1 Task 7 (`WorkflowRefs`, the real `WorkflowRefPort`)
+//! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
 //! - `worker`    — W4 (claim loops, handlers, reaper)
@@ -19,3 +22,18 @@
 //! it testable without standing anything up (spec §6.5).
 
 pub mod models;
+pub mod publish;
+pub mod refs;
+pub mod repo;
+pub mod routes;
+pub mod spec;
+
+pub use publish::publish;
+pub use refs::WorkflowRefs;
+pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
+pub use routes::{management_router, openapi, WorkflowState};
+// Task 6: `RefKind` moved to `egret-workflow-api` so `WorkflowRefPort` (also
+// re-exported here) can name it without this crate's engine dependencies.
+// Re-exported at the crate root -- not just via `spec::registry::RefKind` --
+// because `publish` and its port live at this level too.
+pub use egret_workflow_api::{RefKind, WorkflowRefPort};
