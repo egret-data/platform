@@ -440,3 +440,32 @@ function-nanoid-alphabet-past-the-max
 # `now` shares `AbstractDate`'s formatter, so an unknown format NAME is
 # compiled as a PATTERN and fails as `Unknown pattern letter: o`.
 function-now-unknown-format
+
+# --- W2 Task 7, fix round 1. Ten shapes the first cut ACCEPTED and Kestra
+# refuses; over-acceptance is the one kind of divergence this crate's rules do
+# not allow, so each is now a refusal with its own message and its own test.
+# All ten were measured through the harness before they were written.
+
+# Ion forbids a leading `+` and a leading zero; `$0` is a reserved symbol ID;
+# `[1,,2]` and `{,}` have no empty element. egret answered 5, 7, `$0` and
+# `[1,2]`.
+function-fromion-leading-zero
+function-fromion-leading-plus
+function-fromion-symbol-id
+function-fromion-empty-list-element
+# A TRUNCATED document rendered as NOTHING, which is the silent-wrong-answer
+# class -- `skip_ignorable` mapped an unterminated `/*` to end-of-input.
+function-fromion-unterminated-comment
+# Annotations are NOT dropped by Jackson, which is what the module doc used to
+# claim without measuring. Kestra throws for one inside a container.
+function-fromion-annotation-in-a-list
+
+# `yaml('')`, `yaml('   ')` and `yaml('# c')` answered NULL, which renders as
+# nothing. Jackson throws `No content to map due to end-of-input`.
+function-yaml-empty-document
+function-yaml-blank-document
+function-yaml-comment-only-document
+
+# `alphabet` is measured in UTF-16 code units (`String.toCharArray().length`),
+# so 200 astral characters is 400 units and is past the 256 bound.
+function-nanoid-astral-alphabet

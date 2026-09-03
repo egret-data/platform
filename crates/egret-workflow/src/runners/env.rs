@@ -427,12 +427,82 @@ pub(super) struct OrderedMap {
 const ORDERED_MAP_INDEX_THRESHOLD: usize = 32;
 
 impl OrderedMap {
+    /// Entries are passed through [`last_value_wins`], so an `OrderedMap`
+    /// never holds a key twice. That is the crate-wide invariant, enforced in
+    /// one place rather than at every construction site.
     pub(super) fn new(entries: Vec<(String, MjValue)>) -> Self {
         OrderedMap {
-            entries,
+            entries: last_value_wins(entries),
             index: std::sync::OnceLock::new(),
         }
     }
+}
+
+/// `java.util.LinkedHashMap.put`: a repeated key keeps its **first position**
+/// and takes its **last value**.
+///
+/// Measured, both halves, through the harness:
+/// `fromJson('{"a":1,"b":2,"a":3}')` is `{"a":3,"b":2}` -- the `3` wins and it
+/// is still first. `yaml` and `fromIon` agree, and so does
+/// [`RenderContext::insert`], which has said so in its own doc since W2
+/// Task 3.
+///
+/// # What this is fixing
+///
+/// W2 Task 7's two new readers pushed a duplicate as a **second entry**. The
+/// later value was not mis-selected -- it was discarded and replaced by a
+/// second copy of the earlier one, which then propagated through `toJson`,
+/// `keys`, `length` and every writer:
+///
+/// | | Kestra | egret, before |
+/// |---|---|---|
+/// | `fromJson('{"a":1,"a":2}')` | `{"a":2}` | `{"a":1,"a":1}` |
+/// | the same, `.a` | `2` | `1` |
+/// | the same, through `keys` | `["a"]` | `["a","a"]` |
+///
+/// `super::ionfmt`'s struct reader, in the **same commit**, got it right and
+/// said so in a comment. Putting the rule here rather than at each reader is
+/// what makes that impossible to get half-right again -- and it lets
+/// `ionfmt` drop its own per-field linear scan, which was quadratic in a
+/// struct's width (26 s for an 80 000-field document, against 17 ms for the
+/// same width through `fromJson`).
+///
+/// Returns the input untouched when there is no duplicate, which is every
+/// real map: nothing is allocated until one is found.
+fn last_value_wins(mut entries: Vec<(String, MjValue)>) -> Vec<(String, MjValue)> {
+    // Narrow maps are the overwhelming case and a scan beats hashing there;
+    // the threshold is the one [`OrderedMap::index`] already uses.
+    let first_seen: Option<std::collections::HashMap<&str, usize>> =
+        (entries.len() > ORDERED_MAP_INDEX_THRESHOLD).then(|| {
+            let mut seen = std::collections::HashMap::with_capacity(entries.len());
+            for (at, (name, _)) in entries.iter().enumerate() {
+                seen.entry(name.as_str()).or_insert(at);
+            }
+            seen
+        });
+    let duplicated = match &first_seen {
+        Some(seen) => seen.len() != entries.len(),
+        None => entries
+            .iter()
+            .enumerate()
+            .any(|(at, (name, _))| entries[..at].iter().any(|(other, _)| other == name)),
+    };
+    if !duplicated {
+        return entries;
+    }
+
+    let mut out: Vec<(String, MjValue)> = Vec::with_capacity(entries.len());
+    let mut at_of: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (name, value) in entries.drain(..) {
+        match at_of.get(&name) {
+            Some(at) => out[*at].1 = value,
+            None => {
+                at_of.insert(name.clone(), out.len());
+                out.push((name, value));
+            }
+        }
+    }
+    out
 }
 
 impl Object for OrderedMap {
@@ -450,9 +520,10 @@ impl Object for OrderedMap {
                 .map(|(_, value)| value.clone());
         }
         let index = self.index.get_or_init(|| {
-            // The FIRST occurrence wins, matching the linear `find` above --
-            // a duplicate key would otherwise answer differently depending on
-            // how wide the map happened to be.
+            // `or_insert` rather than `insert`, so this and the linear scan
+            // above agree even if a duplicate ever reached here.
+            // [`last_value_wins`] means one cannot, and that is the point: the
+            // two paths cannot disagree about a key that does not exist.
             let mut index = std::collections::HashMap::with_capacity(self.entries.len());
             for (at, (name, _)) in self.entries.iter().enumerate() {
                 index.entry(name.clone()).or_insert(at);
@@ -613,7 +684,11 @@ impl<'de> Deserialize<'de> for RenderContext {
                 {
                     entries.push((key, value));
                 }
-                Ok(RenderContext(entries))
+                // The top-level bindings are a `LinkedHashMap` too, and this
+                // is the one map in the crate that does not go through
+                // `OrderedMap`. `RenderContext::insert` has always collapsed a
+                // rebinding in place; the deserialiser did not.
+                Ok(RenderContext(last_value_wins(entries)))
             }
         }
 
@@ -1450,25 +1525,30 @@ mod tests {
     /// the map's width -- 7 370 ms for a 40 000-key context object, 43 s for a
     /// 100 000-key `yaml()` argument, both measured on the render path.
     ///
-    /// The risk the index introduces is a DUPLICATE key: a `HashMap` built by
-    /// insertion would answer the last occurrence where `Vec::find` answers
-    /// the first. `or_insert` is what keeps them the same, and this is what
-    /// says so. Both halves of the threshold are exercised, because a test
-    /// that only used a wide map would pass with the scan deleted.
+    /// A duplicate key is collapsed by [`last_value_wins`] before either path
+    /// sees it, so the map holds ONE `k0`, carrying the LAST value in the
+    /// FIRST position. Both halves of the threshold are exercised, because a
+    /// test that only used a wide map would pass with the scan deleted.
     #[test]
     fn a_wide_map_answers_exactly_what_the_narrow_one_does() {
         for width in [4usize, ORDERED_MAP_INDEX_THRESHOLD, 5_000] {
             let mut entries: Vec<(String, MjValue)> = (0..width)
                 .map(|i| (format!("k{i}"), MjValue::from(i)))
                 .collect();
-            // The same name twice: the FIRST wins on both paths.
+            // The same name twice: `LinkedHashMap.put` keeps the first
+            // POSITION and the last VALUE.
             entries.push(("k0".to_string(), MjValue::from("second")));
             let map = MjValue::from_object(OrderedMap::new(entries));
 
             assert_eq!(
                 map.get_item(&MjValue::from("k0")).unwrap(),
-                MjValue::from(0usize),
-                "width {width}: a duplicate key must answer its FIRST occurrence"
+                MjValue::from("second"),
+                "width {width}: a duplicate key must answer its LAST value"
+            );
+            assert_eq!(
+                map.try_iter().unwrap().next().unwrap(),
+                MjValue::from("k0"),
+                "width {width}: and keep its FIRST position"
             );
             assert_eq!(
                 map.get_item(&MjValue::from(format!("k{}", width - 1)))
@@ -1480,7 +1560,11 @@ mod tests {
                 .get_item(&MjValue::from("absent"))
                 .unwrap()
                 .is_undefined());
-            assert_eq!(map.try_iter().unwrap().count(), width + 1, "width {width}");
+            assert_eq!(
+                map.try_iter().unwrap().count(),
+                width,
+                "width {width}: the duplicate is collapsed, not carried"
+            );
         }
     }
 

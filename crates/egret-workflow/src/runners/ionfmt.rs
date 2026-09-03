@@ -261,14 +261,43 @@ fn is_ion_identifier(s: &str) -> bool {
 /// it, and a reader is the smaller half of the format — Kestra's own writer,
 /// twenty lines above, defines the surface that has to round-trip.
 ///
-/// # What it does not read, and why that is a refusal rather than a guess
+/// # What it does not read, and why each is a refusal rather than a guess
 ///
-/// S-expressions, blobs, clobs and timestamps have no `minijinja::Value` that
-/// means the same thing, and `write_ion` never emits one, so nothing egret
-/// writes can produce them. Each is refused **by name** rather than
-/// approximated — the same call `javafmt` makes for the three CLDR pattern
-/// letters. A timestamp in particular would otherwise become a string, which
+/// **Measured against the harness, not assumed.** An earlier version of this
+/// doc said "Jackson's `IonParser` drops [annotations], so the value they
+/// decorate is what comes back". That is false and it was written without
+/// running one: `fromIon('a::1')` is the string `a::1` in Kestra and
+/// `fromIon('[a::1, 2]')` throws. The sentence was load-bearing for a whole
+/// annotation-skipping loop that silently answered `1` and `[1,2]`.
+///
+/// | construct | Kestra | egret |
+/// |---|---|---|
+/// | `a::1` (an annotation) | the string `a::1` | **refused** |
+/// | `[a::1, 2]` | throws | **refused** |
+/// | `{{ aGVsbG8= }}` (a blob) | `"aGVsbG8="`, the base64 text | **refused** |
+/// | `{{ "clob" }}` | `"Y2xvYg=="`, base64 of the bytes | **refused** |
+/// | `2024-01-01T00:00:00Z`, `2024T` | `2024-01-01` | **refused** |
+///
+/// None of them has a `minijinja::Value` that means the same thing, and
+/// `write_ion` never emits one, so nothing egret writes can produce them. Each
+/// is refused **by name** — the same call `javafmt` makes for the three CLDR
+/// pattern letters, and the only kind of divergence this crate's own rule
+/// allows. A timestamp in particular would otherwise become a string, which
 /// reads back as a different type with no error anywhere.
+///
+/// S-expressions are **not** on that list any more: Kestra reads `(1 2)` as
+/// `[1,2]`, `(a b)` as `["a","b"]` and `(+ 1 2)` as `["+",1,2]`, so this
+/// reader does too.
+///
+/// # One divergence that is not a refusal
+///
+/// **A decimal is a `Double` here and a `BigDecimal` in Kestra.** `1.` and
+/// `0.` render as `1` and `0` there and `1.0`/`0.0` here, `1d3` is `1000`
+/// there and `1000.0` here, and `1.50` keeps its trailing zero there and not
+/// here. `write_ion` always writes a float (`2.5e0`), so no round trip through
+/// this crate reaches it — only hand-written Ion does. Recorded rather than
+/// fixed, because carrying `BigDecimal`'s scale means returning
+/// `filters::BigNumber` from a second module.
 ///
 /// # Bounded, because a struct nests
 ///
@@ -280,6 +309,7 @@ pub(super) fn read_ion(text: &str) -> Result<Vec<MjValue>, String> {
     let mut reader = IonReader {
         rest: text,
         depth: 0,
+        unterminated_comment: false,
     };
     let mut values = Vec::new();
     reader.skip_ignorable();
@@ -294,6 +324,9 @@ pub(super) fn read_ion(text: &str) -> Result<Vec<MjValue>, String> {
         values.push(reader.value()?);
         reader.skip_ignorable();
     }
+    if reader.unterminated_comment {
+        return Err("unterminated ion block comment".to_string());
+    }
     Ok(values)
 }
 
@@ -307,6 +340,8 @@ fn starts_identifier_char(s: &str) -> bool {
 struct IonReader<'a> {
     rest: &'a str,
     depth: usize,
+    /// Set by [`IonReader::skip_ignorable`] when a `/*` has no `*/`.
+    unterminated_comment: bool,
 }
 
 impl IonReader<'_> {
@@ -323,7 +358,20 @@ impl IonReader<'_> {
                 continue;
             }
             if let Some(after) = trimmed.strip_prefix("/*") {
-                self.rest = after.find("*/").map_or("", |at| &after[at + 2..]);
+                // An UNTERMINATED block comment is `Corrupt content to decode`
+                // in Kestra, not an empty document. Swallowing it to the end
+                // of the input made a truncated document render as NOTHING,
+                // which is the silent-wrong-answer class this package exists
+                // to prevent. A line comment with no trailing newline is fine
+                // on both sides — `1 // c` is `1`.
+                match after.find("*/") {
+                    Some(at) => self.rest = &after[at + 2..],
+                    None => {
+                        self.unterminated_comment = true;
+                        self.rest = "";
+                        return;
+                    }
+                }
                 continue;
             }
             self.rest = trimmed;
@@ -342,43 +390,83 @@ impl IonReader<'_> {
     }
 
     fn value(&mut self) -> Result<MjValue, String> {
-        // Annotations: `sym::sym::value`. Jackson's `IonParser` drops them,
-        // so the value they decorate is what comes back.
-        loop {
-            let save = self.rest;
-            let Ok(Some(_)) = self.symbol_like() else {
-                self.rest = save;
-                break;
-            };
-            let after = self.rest.trim_start();
-            match after.strip_prefix("::") {
-                Some(rest) => {
-                    self.rest = rest;
-                    self.skip_ignorable();
-                }
-                None => {
-                    self.rest = save;
-                    break;
-                }
+        // Annotations (`sym::value`) are refused, not skipped. See this
+        // module's doc: Kestra does NOT drop them.
+        let save = self.rest;
+        if let Ok(Some(_)) = self.symbol_like() {
+            let annotated = self.rest.trim_start().starts_with("::");
+            self.rest = save;
+            if annotated {
+                return self.fail(
+                    "egret does not read an ion annotation; Kestra answers the annotated \
+                     text for a bare one and throws for one inside a container",
+                );
             }
+        } else {
+            self.rest = save;
         }
 
         match self.peek() {
             None => self.fail("unexpected end of ion"),
             Some('[') => self.list(),
+            Some('(') => self.sexp(),
             Some('{') => {
                 if self.rest.starts_with("{{") {
                     return self.fail("egret does not read an ion blob or clob");
                 }
                 self.struct_()
             }
-            Some('(') => self.fail("egret does not read an ion s-expression"),
             Some('"') | Some('\'') => {
                 let text = self.string_or_symbol()?;
                 Ok(MjValue::from(text))
             }
             Some(_) => self.bare(),
         }
+    }
+
+    /// An s-expression, which Jackson reads as a **list**: `(1 2)` is `[1,2]`,
+    /// `(a b)` is `["a","b"]` and `(+ 1 2)` is `["+",1,2]`. Measured. Elements
+    /// are separated by whitespace and there are no commas.
+    fn sexp(&mut self) -> Result<MjValue, String> {
+        self.enter()?;
+        let _ = self.bump();
+        let mut items = Vec::new();
+        loop {
+            self.skip_ignorable();
+            match self.peek() {
+                None => return self.fail("unclosed ion s-expression"),
+                Some(')') => {
+                    let _ = self.bump();
+                    break;
+                }
+                Some(_) => items.push(self.sexp_value()?),
+            }
+        }
+        self.depth -= 1;
+        Ok(MjValue::from(items))
+    }
+
+    /// One s-expression element: anything a value can be, plus the operator
+    /// symbols Ion allows only here.
+    fn sexp_value(&mut self) -> Result<MjValue, String> {
+        if self.peek().is_some_and(is_ion_operator_char) {
+            let end = self
+                .rest
+                .find(|c: char| !is_ion_operator_char(c))
+                .unwrap_or(self.rest.len());
+            let token = &self.rest[..end];
+            // `-1` and `+inf` are values, not operators: a lone sign followed
+            // by a digit or a letter belongs to the number after it.
+            let is_sign_of_a_value = matches!(token, "-" | "+")
+                && self.rest[end..]
+                    .starts_with(|c: char| c.is_ascii_digit() || c.is_ascii_alphabetic());
+            if !is_sign_of_a_value {
+                let token = token.to_string();
+                self.rest = &self.rest[end..];
+                return Ok(MjValue::from(token));
+            }
+        }
+        self.value()
     }
 
     fn enter(&mut self) -> Result<(), String> {
@@ -405,10 +493,8 @@ impl IonReader<'_> {
                     let _ = self.bump();
                     break;
                 }
-                Some(',') => {
-                    let _ = self.bump();
-                    continue;
-                }
+                // No `Some(',') => continue` arm: `[1,,2]` is corrupt in
+                // Kestra and an earlier cut of this reader answered `[1,2]`.
                 Some(_) => items.push(self.value()?),
             }
             self.skip_ignorable();
@@ -439,10 +525,7 @@ impl IonReader<'_> {
                     let _ = self.bump();
                     break;
                 }
-                Some(',') => {
-                    let _ = self.bump();
-                    continue;
-                }
+                // No `Some(',') => continue` arm: `{,}` is corrupt in Kestra.
                 Some(_) => {}
             }
             let Some(field) = self.symbol_like()? else {
@@ -454,12 +537,13 @@ impl IonReader<'_> {
             }
             self.skip_ignorable();
             let value = self.value()?;
-            // Jackson keeps the LAST of two same-named fields, the way a
-            // `Map.put` does.
-            match entries.iter_mut().find(|(key, _)| *key == field) {
-                Some(slot) => slot.1 = value,
-                None => entries.push((field, value)),
-            }
+            // Pushed, not searched. Jackson keeps the LAST of two same-named
+            // fields the way a `Map.put` does, and `super::env::last_value_wins`
+            // — which `OrderedMap::new` runs — is where that now lives for the
+            // whole crate. The linear `find` this replaced was O(fields^2):
+            // 26 s for an 80 000-field document, against 17 ms for the same
+            // width through `fromJson`.
+            entries.push((field, value));
             self.skip_ignorable();
             match self.peek() {
                 Some(',') => {
@@ -576,7 +660,12 @@ impl IonReader<'_> {
             .rest
             .find(|c: char| {
                 c.is_whitespace()
-                    || matches!(c, ',' | ']' | '}' | ')' | '(' | '[' | '{' | '\'' | '"')
+                    // `/` ends a token because a comment may abut one:
+                    // `1//c` is `1` in Kestra and was an error here.
+                    || matches!(
+                        c,
+                        ',' | ']' | '}' | ')' | '(' | '[' | '{' | '\'' | '"' | '/'
+                    )
             })
             .unwrap_or(self.rest.len());
         let token = &self.rest[..end];
@@ -600,8 +689,10 @@ impl IonReader<'_> {
             "-inf" => return Ok(MjValue::from(f64::NEG_INFINITY)),
             _ => {}
         }
-        if let Some(value) = ion_number(token) {
-            return Ok(value);
+        match ion_number(token) {
+            Some(Ok(value)) => return Ok(value),
+            Some(Err(why)) => return Err(why),
+            None => {}
         }
         // A timestamp is a real Ion type with no `minijinja::Value` that
         // means the same thing, and reading it as text would change its type
@@ -611,6 +702,14 @@ impl IonReader<'_> {
                 "egret does not read the ion timestamp {token}; there is no \
                  value in this renderer that means the same thing"
             ));
+        }
+        // `$0`, `$12`: a symbol ID, not a name. Kestra refuses them
+        // (`Corrupt content to decode`) and an earlier cut answered `$0`.
+        if token.len() > 1
+            && token.starts_with('$')
+            && token[1..].bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(format!("an ion symbol ID is not a value: {token}"));
         }
         if is_ion_identifier(token) || token.starts_with('$') {
             return Ok(MjValue::from(token.to_string()));
@@ -634,36 +733,109 @@ fn is_ion_timestamp(token: &str) -> bool {
 /// shape: `1d3` is a **decimal** and `1e3` is a float, and Ion writes a
 /// decimal's exponent with `d` for exactly that reason (which is why
 /// `write_ion` above spells `BigDecimal`'s `E` as `d`).
-fn ion_number(token: &str) -> Option<MjValue> {
-    let (sign, digits) = match token.strip_prefix('-') {
-        Some(rest) => (-1i64, rest),
-        None => (1i64, token.strip_prefix('+').unwrap_or(token)),
+///
+/// # Two things Ion forbids that an earlier cut accepted
+///
+/// Both measured — Kestra answers `Corrupt content to decode` for each, and
+/// egret answered `7` and `5`:
+///
+/// - **a leading `+`**: `+5` and `+1.5` are not numbers. `+inf` is, and is
+///   handled by its caller before this is reached.
+/// - **a leading zero**: `007`, `00` and `-007` are refused, while `0`, `-0`,
+///   `0.5`, `0x10` and `0b11` are fine. The rule is a `0` followed by another
+///   *digit*.
+///
+/// `None` means "not a number", which the caller turns into a symbol or an
+/// error; `Some(Err(..))` means "a number, and Ion rejects it".
+#[allow(clippy::type_complexity)]
+fn ion_number(token: &str) -> Option<Result<MjValue, String>> {
+    let (negative, digits) = match token.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, token),
     };
+    if let Some(after) = token.strip_prefix('+') {
+        // Only reached for a token that otherwise looks numeric; `+inf` and
+        // the bare symbol `+` never get here.
+        return after
+            .starts_with(|c: char| c.is_ascii_digit())
+            .then(|| Err(format!("ion forbids a leading '+' on a number: {token}")));
+    }
     if digits.is_empty() || !digits.starts_with(|c: char| c.is_ascii_digit()) {
         return None;
     }
-    // Radix forms. Ion allows `_` as a digit separator in every int form.
+
+    // Radix forms, which Ion allows `_` inside. Checked before the
+    // leading-zero rule, since every one of them starts with `0`.
     for (prefix, radix) in [("0x", 16), ("0X", 16), ("0b", 2), ("0B", 2)] {
         if let Some(rest) = digits.strip_prefix(prefix) {
             let cleaned = rest.replace('_', "");
             if cleaned.is_empty() {
-                return None;
+                return Some(Err(format!("not an ion number: {token}")));
             }
-            let magnitude = i64::from_str_radix(&cleaned, radix).ok()?;
-            return Some(MjValue::from(sign * magnitude));
+            return Some(match i128::from_str_radix(&cleaned, radix) {
+                Ok(magnitude) => Ok(int_value(if negative { -magnitude } else { magnitude })),
+                Err(_) => Err(format!("ion integer out of range: {token}")),
+            });
         }
     }
+    if digits.starts_with('0') && digits[1..].starts_with(|c: char| c.is_ascii_digit()) {
+        return Some(Err(format!("ion forbids a leading zero: {token}")));
+    }
+
     let cleaned = digits.replace('_', "");
     if cleaned.bytes().all(|b| b.is_ascii_digit()) {
-        let magnitude: i64 = cleaned.parse().ok()?;
-        return Some(MjValue::from(sign * magnitude));
+        return Some(match cleaned.parse::<i128>() {
+            Ok(magnitude) => Ok(int_value(if negative { -magnitude } else { magnitude })),
+            Err(_) => Err(format!("ion integer out of range: {token}")),
+        });
     }
     // A decimal's `d`/`D` exponent, and the bare-`.` form Ion also calls a
-    // decimal. Both become an `f64` here, which is the same representation
-    // `write_ion`'s float branch reads back.
+    // decimal. Both become an `f64` here; see this module's doc for the one
+    // divergence that costs.
     let normalised = cleaned.replacen(['d', 'D'], "e", 1);
     let value: f64 = normalised.parse().ok()?;
-    Some(MjValue::from(sign as f64 * value))
+    Some(Ok(MjValue::from(if negative { -value } else { value })))
+}
+
+/// The narrowest integer that holds `magnitude`, so
+/// `-9223372036854775808` and `12345678901234567890` both come back as
+/// numbers rather than as errors — Kestra echoes both, and an `i64`-only
+/// parse refused them.
+fn int_value(magnitude: i128) -> MjValue {
+    if let Ok(narrow) = i64::try_from(magnitude) {
+        return MjValue::from(narrow);
+    }
+    if let Ok(wide) = u64::try_from(magnitude) {
+        return MjValue::from(wide);
+    }
+    MjValue::from(magnitude)
+}
+
+/// Ion's operator characters, which are symbols **only inside an
+/// s-expression**. `(+ 1 2)` is `["+",1,2]` in Kestra; the same `+` at the top
+/// level is not a value.
+fn is_ion_operator_char(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '#'
+            | '%'
+            | '&'
+            | '*'
+            | '+'
+            | '-'
+            | '.'
+            | '/'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '^'
+            | '`'
+            | '|'
+            | '~'
+    )
 }
 
 #[cfg(test)]

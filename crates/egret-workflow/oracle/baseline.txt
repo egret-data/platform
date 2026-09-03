@@ -386,3 +386,51 @@ filter-jq-deeply-nested-source
 # alternation would be wrong in the presence of `&&`. 14 rows of a 7182-probe
 # sweep; `(?iu)` over a mixed class is not something a flow writes.
 filter-regexmatch-unicode-case-over-a-mixed-class
+
+# --- W2 Task 7, fix round 1: ten divergences the first cut could not see,
+# every one measured through the harness rather than reasoned about.
+
+# DELIBERATE: Jackson does NOT drop an Ion annotation -- `fromIon('a::1')` is
+# the string `a::1` there. egret refuses instead of answering `1`, which is
+# what an earlier cut did on the strength of a "Kestra does" sentence written
+# without running one. A refusal is the only divergence this crate's rules
+# allow; `[a::1, 2]`, which Kestra throws on, is error-class rather than here.
+function-fromion-annotation
+
+# Three more members of the already-recorded YAML 1.1-vs-1.2 plain-scalar
+# class (see `function-yaml-yes-is-a-boolean-or-not`). Listed rather than left
+# to a sentence, so the class's EXTENT fails loudly if `serde_norway` moves.
+function-yaml-underscore-separated-number
+function-yaml-off-is-a-boolean
+function-yaml-huge-exponent
+
+# DELIBERATE: `serde_json` rejects an out-of-range exponent in its own parser,
+# where Jackson answers `Infinity`. Same layer as the context-integer-past-u64
+# entries -- a dependency's number model, not this crate's.
+function-fromjson-huge-exponent
+
+# DELIBERATE: Jackson's YAMLParser does NOT resolve an alias -- `b: *x` comes
+# back as the four-character string `x`, losing the anchored value entirely.
+# `serde_norway` resolves it. egret's answer is the useful one and Kestra's is
+# arguably an upstream defect; reproducing it would mean intercepting the
+# loader, which the crate does not expose.
+function-yaml-alias
+
+# KNOWN over-acceptance, and the only one left: SnakeYAML forbids a tab where
+# the space after `key:` belongs and libyaml allows it. Deciding this needs a
+# YAML scanner of egret's own, which is not worth a tab.
+function-yaml-tab-after-a-key
+
+# egret refuses `isPublicHoliday` outright (see above), so a call Kestra
+# answers `true` is refused here too. The countryCode guard itself is fixed:
+# Kestra only NULL-checks it, and an earlier cut refused a BLANK one.
+function-ispublicholiday-blank-country
+
+# KNOWN, and pre-existing rather than this batch's: `filters::Args` ignores a
+# named argument a function does not declare and an extra positional one,
+# where Pebble throws `The following named argument does not exist` and
+# `The argument at position N is not allowed`. The `date` filter has always
+# done this; Task 7 widened the surface by 19 functions, so it is recorded
+# here rather than left in prose.
+function-dayofweek-unknown-named-argument
+function-dayofweek-extra-positional-argument

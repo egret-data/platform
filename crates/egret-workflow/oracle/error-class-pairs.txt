@@ -213,3 +213,15 @@ function-nanoid-length-zero                test:nano_id_refuses_a_length_or_an_a
 function-nanoid-length-past-the-max        test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
 function-nanoid-alphabet-past-the-max      test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use
 function-now-unknown-format                test:now_compiles_an_unknown_format_name_as_a_pattern
+
+# --- W2 Task 7, fix round 1.
+function-fromion-leading-zero              test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-leading-plus              test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-symbol-id                 test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-empty-list-element        test:the_ion_reader_refuses_what_ion_itself_forbids
+function-fromion-unterminated-comment      test:an_unterminated_ion_comment_is_corrupt_not_an_empty_document
+function-fromion-annotation-in-a-list      test:the_ion_reader_refuses_an_annotation_rather_than_dropping_it
+function-yaml-empty-document               test:an_empty_yaml_document_is_an_error_not_a_null
+function-yaml-blank-document               test:an_empty_yaml_document_is_an_error_not_a_null
+function-yaml-comment-only-document        test:an_empty_yaml_document_is_an_error_not_a_null
+function-nanoid-astral-alphabet            test:nano_id_refuses_a_length_or_an_alphabet_it_cannot_use

@@ -129,7 +129,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**137** entries carry it today, counted out of `golden.json` rather than added
+**147** entries carry it today, counted out of `golden.json` rather than added
 up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -167,9 +167,10 @@ task's fix round, 62 of 486 after its second, 66 of 513 after its third,
 filters) and RECORDED seventeen, every one of them a place the two engines
 answer differently rather than a filter that is not ported -- and 78 of
 673 after that task's fix round, 82 of 693 after its second, 86 of 706 after its
-third, and **70 of 855** after W2 Task 7 -- which BANKED eighteen (its whole
-batch of pure functions) and RECORDED three: two places the two YAML scalar
-resolvers disagree, and `isPublicHoliday`, which egret refuses.
+third, 70 of 855 after W2 Task 7 -- which BANKED eighteen (its whole batch of
+pure functions) and RECORDED two, both places the two YAML scalar resolvers
+disagree -- and **80 of 892** after that task's fix round, which recorded ten
+divergences that had no entry at all.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -681,7 +682,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 855 entries)
+## Corpus (`corpus.json`, 892 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -2707,7 +2708,7 @@ by name, which still fails on `unknown function`, on a generic failure, and on
 a bound that stopped firing.
 
 
-## What W2 Task 7's 119 new entries measured (read before touching a function)
+## What W2 Task 7's 156 new entries measured (read before touching a function)
 
 Task 7 ported the **19** registered functions that reach no service —
 `now`, `uuid`, `id`, `ksuid`, `nanoId`, `randomInt`, `randomPort`, `range`,
@@ -2873,15 +2874,27 @@ schema. Measured through the harness:
 
 | plain scalar | Kestra | egret |
 |---|---|---|
-| `yes`, `on` | `true` | the string |
+| `yes`, `on`, `off` | `true` / `false` | the string |
 | `y`, `n` | the string | the string (they agree) |
 | `010` | `8` — a leading zero is octal | the string |
 | `0o10` | the string | `8` |
 | `0x10` | `16` | `16` (they agree) |
+| `1_000` | `1000` | the string |
+| `1e400` | `Infinity` | the string |
 | `.inf`, `.nan` | **throws**, in Jackson's own numeric coercion | **refused**, with Jackson's sentence |
 
-Only the last row is reproduced, and it is reproduced because it is exactly
-detectable: nothing else in either format produces a non-finite `f64`.
+Only the last row is reproduced. **The first version of this section gave the
+wrong reason for that** — it said "nothing else in either format produces a
+non-finite `f64`". What is true, measured: the other candidate is a huge
+exponent, and `serde_norway` leaves `1e400` a **string** rather than resolving
+it to infinity, so the refusal is reached only by `.inf`/`.nan` — by luck of
+the other resolver rather than by construction. `1e400` is its own recorded
+row above, and `fromJson('1e400')` is a third: `serde_json` rejects it in the
+parser where Jackson answers `Infinity`.
+
+The message names the canonical spelling, so `.Inf` and `.NaN` are reported as
+`.inf` and `.nan` where Kestra echoes the source; the raw text does not reach a
+`visit_f64`.
 
 The rest is recorded rather than fixed because **the fix is not available**:
 reproducing it needs to know whether a scalar was *quoted*, and `serde_norway`
@@ -3021,3 +3034,201 @@ month always ends on a working day, so `last == date` already implies that
 `date` is one. That is the implementation being redundant, not the tests being
 weak — and Kestra's own code has the same shape. Recorded in the code so the
 next reader does not re-derive it or weaken a test trying to kill it.
+
+## W2 Task 7, fix round 1 — a review's 330 probes, and the property a report can name without pinning
+
+A review wrote 330 probe expressions of its own and ran them through both
+engines. Most of the task came back verified — the name table, the
+`FetchContextFunction` double registration, `range` as the only minijinja
+collision, the four exact-value pins (2 000 Java draws for the uuid nibbles,
+5 000 for ksuid's length, no flake), and the `function-id` length finding, which
+it re-measured at **200 000 Java draws: `{19: 9, 20: 409, 21: 25 274,
+22: 174 308}`** — 12.8% at 21, exactly as the arithmetic predicts.
+
+What it found is worth more than that, and it is one shape three times over.
+
+### The knowledge was in the diff, in the other reader
+
+**Both new readers lost a duplicate key's value, and the third reader in the
+same commit got it right.** `LinkedHashMap.put` keeps a key's **first
+position** and its **last value**; `functions::BoundedVisitor::visit_map`
+pushed a second entry instead, and `OrderedMap::get_value` then answered the
+first:
+
+| | Kestra | egret, before |
+|---|---|---|
+| `fromJson('{"a":1,"b":2,"a":3}')` | `{"a":3,"b":2}` | `{"a":1,"b":2,"a":1}` |
+| `fromJson('{"a":1,"a":2}').a` | `2` | `1` |
+| the same, through `keys` | `["a"]` | `["a","a"]` |
+| `yaml('a: 1\na: 2')` | `{"a":2}` | `{"a":1,"a":1}` |
+
+The `2` was not mis-selected — it was **discarded and replaced by a second copy
+of the `1`**, which then propagated through every writer.
+
+`ionfmt`'s struct reader, in the same commit, did it correctly and said so in a
+comment; `RenderContext::insert` has said so in its doc since W2 Task 3. Two
+places in the crate already knew, and two new visitors did not. The rule now
+lives in **one** place, `env::last_value_wins`, which `OrderedMap::new` runs —
+so it is a crate-wide invariant rather than three bugs, and `RenderContext`'s
+own deserialiser (the one map that does not go through `OrderedMap`) uses it
+too.
+
+### The third quadratic of the same shape, and the axis no row covers
+
+`ionfmt`'s struct reader paid for its correctness with a linear scan per field:
+
+| fields | `fromIon` before | after | `fromJson`, same width |
+|---:|---:|---:|---:|
+| 10 000 | 425 ms | **48 ms** | 29 ms |
+| 40 000 | 5 858 ms | **227 ms** | 142 ms |
+| 80 000 | **26 644 ms** | **620 ms** | (past the output cap) |
+
+Kestra parses the 40 000-field document inside a 30-entry sweep that finished
+in 2.3 s total, and an ~1.1 MB Ion string is exactly what `read('…ion')` output
+looks like. Moving the de-duplication into `last_value_wins` removed the scan
+and the quadratic together.
+
+**This is the third quadratic of the same shape on this branch** — Task 6's
+`rewrite` regions, Task 7's `OrderedMap` width, now this. Every one is
+quadratic in the number of **siblings**, and the recursive-descent table is
+organised by *nesting*, so no row of it covers the axis. Task 7's own attack
+sweep probed a million top-level values, a million annotations and the alias
+bomb, and never a wide struct.
+
+> **For W3: when adding a construct, probe it wide as well as deep.** A
+> thousand siblings is a different question from a thousand levels, and this
+> branch has now paid for it three times.
+
+### A "Kestra does" sentence written without measuring, and what it was holding up
+
+`ionfmt`'s doc said *"Jackson's `IonParser` drops [annotations], so the value
+they decorate is what comes back."* **It does not.** Measured:
+`fromIon('a::1')` is the string `a::1` and `fromIon('[a::1, 2]')` throws. That
+sentence was load-bearing for an annotation-skipping loop that silently
+answered `1` and `[1,2]` — a C9 violation aimed at a Java class rather than a
+Rust crate, which is the same mistake the `BoundedRangeFunction` note exists to
+prevent.
+
+Annotations are now refused by name. `function-fromion-annotation` is
+baselined (Kestra answers a string) and
+`function-fromion-annotation-in-a-list` is error-class (Kestra throws).
+
+### Over-acceptance is the one divergence this crate's rules do not allow
+
+A refusal is allowed and is recorded; a plausible wrong answer is not. Six more
+of them, all measured, all now refusals:
+
+| | Kestra | egret, before |
+|---|---|---|
+| `fromIon('007')`, `'00'`, `'-007'` | throws — Ion forbids a leading zero | `7` |
+| `fromIon('+5')`, `'+1.5'` | throws — Ion forbids a leading `+` | `5` |
+| `fromIon('$0')` | throws — a reserved symbol ID | the string `$0` |
+| `fromIon('[1,,2]')`, `'{,}'` | throws | `[1,2]`, `{}` |
+| `fromIon('/* nope')` | throws — corrupt | **the empty string** |
+| `nanoId(alphabet=<200 astral chars>)` | throws — 400 UTF-16 units | a four-character id |
+
+The unterminated-comment row is the sharpest: `skip_ignorable` mapped a `/*`
+with no `*/` to end-of-input, so a **truncated document rendered as nothing**.
+A line comment is a different case and still works — `1//c` and `1 // c` are
+both `1`, and a document that is only a comment is an empty stream, which is
+`null` on both engines.
+
+`nanoId`'s bound is `String.toCharArray().length`, i.e. **UTF-16 code units**,
+so 128 astral characters is exactly 256 and is accepted while 200 is 400 and is
+not. The 256 boundary was right for the BMP and wrong above it.
+
+### Four shapes the first cut refused or mis-read, now correct
+
+| | |
+|---|---|
+| `fromIon('1//c')` | a comment may abut a token; `/` ends one |
+| `fromIon('-9223372036854775808')`, `'12345678901234567890'` | parsed as `i128`, narrowed to the `i64`/`u64`/`i128` that holds it — an `i64`-only parse refused both, while `fromJson` and `yaml` carried them |
+| `fromIon('(1 2)')` | Kestra reads an s-expression as a **list**: `[1,2]`, `(a b)` is `["a","b"]`, `(+ 1 2)` is `["+",1,2]`. Ported, bounded by `MAX_VALUE_DEPTH` like the other two containers |
+| `yaml('a: 1\n---\nb: 2')` | Jackson reads the **first** document; `serde_norway` refused a multi-document source |
+
+And one that was answering where it should throw: `yaml('')`, `yaml('   ')` and
+`yaml('# c')` deserialised to a **unit**, which renders as nothing, where
+Jackson throws `No content to map due to end-of-input`. The question is now
+asked of the source before the parser — every line blank or a comment — which
+cannot mis-fire on `~` or on `a: null`, both of which stay `null` and `{}`.
+
+### `isPublicHoliday`'s blank check is on the wrong argument
+
+The `isBlank()` in the bytecode is on **`subDivision`**; `countryCode` is only
+null-checked. Measured:
+`isPublicHoliday(date='2024-01-01', countryCode='  ')` is `true` in Kestra, and
+egret refused it with the wrong sentence. (It still refuses the function
+itself, for the jollyday reason above; the argument guard is what was wrong.)
+
+### A one-character sentence that error-class comparison could not see
+
+`range`'s increment message is `The increment of the range function must be a
+number ` — Pebble's constant carries a **trailing space**, proven by the
+golden (`must be a number x`, not `numberx`). egret dropped it, and
+`range_refuses_an_increment_that_cannot_advance_it` asserted egret's own wrong
+sentence, so the corpus entry (error-class) and the paired test agreed with
+each other and both with nothing. That is the exact failure mode the pairing
+convention exists to prevent, and it survived because the pair was written
+from the implementation rather than from the golden.
+
+### Two properties the report NAMED as invisible to a shape check, and pinned with nothing
+
+Both mutations built cleanly and both left the whole suite and the whole oracle
+green:
+
+- **`ksuid` without its timestamp prefix.** The module doc said the prefix "is
+  what makes two ksuids sort in the order they were minted"; the test checked
+  the length, the alphabet, and then `base62_bytes` on twenty **zero** bytes —
+  the padding helper, never a real ksuid. It now decodes the value back and
+  reads the field (a random `u32` lands in the window with probability 2 in
+  10^9) and asserts monotonicity across a second.
+- **`randomPort` faking the number.** Replacing the whole `TcpListener` block
+  with `gen_range(49152..=65535)` left everything green; the build only warned
+  about an unused import. The test asserted `1023 < port < 65536` and that two
+  draws differed, which any RNG satisfies. It now holds 120 ports open and
+  draws 4 000, asserting none is named: the ephemeral range is 16 384 wide, so
+  a fake collides 29 times in expectation and survives with probability about
+  `e^-29`. The real implementation collides with probability **zero**.
+
+> **Naming a property is not pinning it.** Both of these were written down, in
+> the report and in the module doc, as the thing a shape check cannot see —
+> and then nothing was written that could fail. A sentence in a doc is exactly
+> as strong as a sentence in `oracle/README.md`, which this file has already
+> learned twice.
+
+### What the fix round changed, counted
+
+**18 of the 37 measured disagreements fixed, 17 recorded** (plus two rows that
+are `isPublicHoliday`'s standing refusal). Ten of the recorded ones had no
+corpus entry at all before this round and now do, which is why the ratchet went
+**70 → 80 while the port got closer**: `function-fromion-annotation`, the three
+extra members of the YAML plain-scalar class (`1_000`, `off`, `1e400`),
+`function-fromjson-huge-exponent`, `function-yaml-alias`,
+`function-yaml-tab-after-a-key`, `function-ispublicholiday-blank-country`, and
+the two `Args` rows below.
+
+### Recorded, not fixed: unknown and extra arguments are ignored
+
+`dayOfWeek(date=…, timeZone='X')` throws `The following named argument does not
+exist` in Pebble and answers here; a third positional argument throws
+`The argument at position 2 is not allowed` and is ignored here. That is
+`filters::Args`' behaviour and it predates Task 7 — the `date` filter has
+always done it — but Task 7 widened the surface by nineteen functions, so it is
+two corpus entries now rather than a sentence.
+
+The other divergence that is not a refusal: **an Ion decimal is a `Double` here
+and a `BigDecimal` in Kestra**, so `1.` and `0.` are `1` and `0` there and
+`1.0`/`0.0` here, `1d3` is `1000` there and `1000.0` here, and `1.50` keeps its
+trailing zero there. `write_ion` always writes a float (`2.5e0`), so no round
+trip through this crate reaches it — only hand-written Ion does.
+
+### The attack, re-run against the fix
+
+The wide-struct axis, the all-duplicate worst case for `last_value_wins`, the
+new s-expression descent at 200 000 open parens and 200 000 operators, 200 000
+annotations, 200 000 blank and comment-only YAML lines, and the previous
+round's whole sweep. **Nothing panicked, nothing hung, and the slowest row is
+620 ms** for an 80 000-field Ion document that then hits the output cap. Six
+mutations — the ksuid prefix, the randomPort fake, the duplicate-key rule, the
+Ion leading zero, the unterminated comment, the empty YAML document — are each
+killed by a named test.

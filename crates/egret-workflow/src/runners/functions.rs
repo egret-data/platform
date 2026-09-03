@@ -257,10 +257,42 @@ fn yaml(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             "The 'yaml' function expects an argument 'yaml' with type string.",
         ));
     };
-    let de = serde_norway::Deserializer::from_str(text);
+    // **The FIRST document, and an empty stream is an error.** Measured:
+    // `yaml('a: 1\n---\nb: 2')` is `{"a":1}` in Kestra and was
+    // `deserializing from YAML containing more than one document is not
+    // supported` here; `yaml('')`, `yaml('   ')` and `yaml('# comment')` all
+    // throw `No content to map due to end-of-input` there and answered
+    // **null** here, which renders as nothing — a wrong value that renders
+    // successfully.
+    if is_empty_yaml_document(text) {
+        return Err(pebble_error(
+            "Invalid yaml: No content to map due to end-of-input",
+        ));
+    }
+    let Some(document) = serde_norway::Deserializer::from_str(text).next() else {
+        return Err(pebble_error(
+            "Invalid yaml: No content to map due to end-of-input",
+        ));
+    };
     Depth(1)
-        .deserialize(de)
+        .deserialize(document)
         .map_err(|e| pebble_error(format!("Invalid yaml: {e}")))
+}
+
+/// Is there no content at all? — every line blank or a comment.
+///
+/// `serde_norway` deserialises such a source to a **unit**, which renders as
+/// nothing; Jackson throws `No content to map due to end-of-input`. So the
+/// question has to be asked of the source, before the parser, and it is asked
+/// the narrowest way that answers it: a document with any content has at least
+/// one line whose first non-space character is not `#`.
+///
+/// It cannot mis-fire on a real document, and it must not be confused with a
+/// document whose content IS null: `yaml('~')` and `yaml('a: null')` are
+/// `null` and `{}` on both engines, and neither is empty by this rule.
+fn is_empty_yaml_document(text: &str) -> bool {
+    text.lines()
+        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
 }
 
 /// A serde seed that carries the nesting depth, so **both** readers above are
@@ -336,10 +368,21 @@ impl<'de> Visitor<'de> for BoundedVisitor {
     /// row: the `yaml` FILTER writes `.inf` unquoted and this function, its
     /// own reader, refuses to read it back.
     ///
-    /// Nothing else in either format produces a non-finite `f64`, so this arm
-    /// is exact rather than an over-refusal, and it is the one place the two
-    /// scalar resolvers can be reconciled without knowing a scalar's quoting
-    /// style. `function-yaml-refuses-what-its-own-writer-wrote` is the entry.
+    /// **This arm is exact in effect, and the first version of this sentence
+    /// gave the wrong reason for it.** It said "nothing else in either format
+    /// produces a non-finite `f64`". What is actually true, measured: the only
+    /// other candidate is a huge exponent, and `serde_norway` leaves `1e400`
+    /// a **string** rather than resolving it to infinity — so this arm is
+    /// reached only by `.inf`/`.nan`, but by luck of the other resolver rather
+    /// than by construction. `1e400` is a separate, recorded divergence
+    /// (Kestra answers `Infinity`; egret answers the string `1e400`, and
+    /// `fromJson('1e400')` errors where Kestra answers `Infinity` because
+    /// `serde_json` rejects it in the parser).
+    ///
+    /// The message names the canonical spelling, so `.Inf` and `.NaN` are
+    /// reported as `.inf` and `.nan` where Kestra echoes the source — the raw
+    /// text does not reach a `visit_f64`.
+    /// `function-yaml-refuses-what-its-own-writer-wrote` is the entry.
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<MjValue, E> {
         if !v.is_finite() {
             return Err(de::Error::custom(format!(
@@ -424,10 +467,14 @@ fn range(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         Some(value) if is_java_null(&value) => 1i64,
         Some(value) if value.kind() == ValueKind::Number => number_as_long(&value)?,
         Some(value) => {
+            // The trailing space is Pebble's own constant, proven by the
+            // golden: `must be a number x`, not `numberx`. One character, and
+            // the test that was meant to hold it pinned the wrong sentence
+            // instead -- exactly what error-class comparison hides.
             return Err(pebble_error(format!(
-                "The increment of the range function must be a number{}",
+                "The increment of the range function must be a number {}",
                 super::env::kestra_to_string(&value)
-            )))
+            )));
         }
     };
 
@@ -838,11 +885,15 @@ fn is_public_holiday(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             "The 'isPublicHoliday()' function expects a 'date' argument.",
         ));
     }
-    let country = args.get("countryCode", 1).filter(|v| !is_java_null(v));
-    let blank = country
-        .as_ref()
-        .is_none_or(|v| super::env::kestra_to_string(v).trim().is_empty());
-    if blank {
+    // **`countryCode` is only NULL-checked.** The `isBlank()` in the bytecode
+    // is on `subDivision`, not here: measured,
+    // `isPublicHoliday(date='2024-01-01', countryCode='  ')` answers `true` in
+    // Kestra, and an earlier cut of this refused it.
+    if args
+        .get("countryCode", 1)
+        .filter(|v| !is_java_null(v))
+        .is_none()
+    {
         return Err(pebble_error(
             "The 'isPublicHoliday()' function expects a 'countryCode' argument.",
         ));
@@ -1007,7 +1058,13 @@ fn nano_id(rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             "The 'nanoId()' function field 'alphabet' must not be empty",
         ));
     }
-    if alphabet.len() > 256 {
+    // **`String.toCharArray().length` counts UTF-16 code units**, not
+    // characters, so a 200-astral-character alphabet is 400 units and Kestra
+    // refuses it. Measured; an earlier cut counted `char`s and accepted it.
+    // The selection paths below index by `char`, which is the same set in a
+    // different unit -- the count is the only place the two differ.
+    let utf16_units: usize = alphabet.iter().map(|c| c.len_utf16()).sum();
+    if utf16_units > 256 {
         return Err(pebble_error(
             "The 'nanoId()' function field 'alphabet' must not contain more than: 256 characters",
         ));
@@ -1203,8 +1260,12 @@ mod tests {
             err("{{ range(start=1, end=3, increment=0) }}")
         );
         let message = err("{{ range(start=1, end=3, increment='x') }}");
+        // **The space is Pebble's own constant**, proven by the golden
+        // (`must be a number x`, not `numberx`). This assertion used to pin
+        // egret's own missing space, which is exactly what an error-class
+        // corpus entry cannot see.
         assert!(
-            message.contains("The increment of the range function must be a numberx"),
+            message.contains("The increment of the range function must be a number x"),
             "{message}"
         );
         // The 32-bit truncation Pebble's own character loop performs: an
@@ -1523,12 +1584,159 @@ mod tests {
             ),
         )
         .expect_err("257 is past the bound");
+        // And the count is UTF-16 code units, not characters: 200 astral
+        // characters is 400 units and Kestra refuses it. Measured; an earlier
+        // cut counted `char`s and accepted it. 128 astral characters is
+        // exactly 256 units and is accepted.
+        let astral: String = (0..200u32)
+            .map(|i| char::from_u32(0x10000 + i).expect("a valid char"))
+            .collect();
+        let astral_message = render(
+            "{{ nanoId(length=4, alphabet=a) }}",
+            &format!(r#"{{"a": {}}}"#, serde_json::to_string(&astral).unwrap()),
+        )
+        .expect_err("400 UTF-16 units is past the bound");
+        assert!(
+            astral_message.contains("must not contain more than: 256 characters"),
+            "{astral_message}"
+        );
+        let at_max: String = astral.chars().take(128).collect();
+        assert_eq!(
+            render(
+                "{{ nanoId(length=4, alphabet=a) }}",
+                &format!(r#"{{"a": {}}}"#, serde_json::to_string(&at_max).unwrap()),
+            )
+            .expect("256 units is allowed")
+            .chars()
+            .count(),
+            4
+        );
         assert!(
             message.contains(
                 "The 'nanoId()' function field 'alphabet' must not contain more than: 256 \
                  characters"
             ),
             "{message}"
+        );
+    }
+
+    /// Ion's own grammar refuses these; the first cut of this reader did not,
+    /// and answered `7`, `5`, `$0` and `[1,2]`. Over-acceptance is the one
+    /// kind of divergence this crate's rules do not allow — a refusal that
+    /// says so is fine, a plausible wrong answer is not.
+    #[test]
+    fn the_ion_reader_refuses_what_ion_itself_forbids() {
+        for (source, why) in [
+            ("007", "leading zero"),
+            ("00", "leading zero"),
+            ("-007", "leading zero"),
+            ("+5", "leading '+'"),
+            ("+1.5", "leading '+'"),
+            ("$0", "symbol ID"),
+            ("$12", "symbol ID"),
+            ("[1,,2]", "unexpected character"),
+            ("{,}", "an ion field name"),
+        ] {
+            let message = render(
+                "{{ fromIon(ion=i) }}",
+                &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
+            )
+            .expect_err("must be refused");
+            assert!(message.contains(why), "{source}: {message}");
+        }
+        // And the shapes Ion DOES allow, which the refusals must not catch.
+        assert_eq!(
+            ok("{{ fromIon(ion='[0x10, 1_0, 0b11, -0]') }}"),
+            "[16,10,3,0]"
+        );
+        assert_eq!(ok("{{ fromIon(ion='0.5') }}"), "0.5");
+        assert_eq!(ok("{{ fromIon(ion='+inf') }}"), "Infinity");
+        // Both i64 ends, which an `i64`-only magnitude parse refused.
+        assert_eq!(
+            ok("{{ fromIon(ion='-9223372036854775808') }}"),
+            "-9223372036854775808"
+        );
+        assert_eq!(
+            ok("{{ fromIon(ion='12345678901234567890') }}"),
+            "12345678901234567890"
+        );
+    }
+
+    /// A `/*` with no `*/` mapped to end-of-input, so a **truncated** document
+    /// rendered as nothing. Kestra says `Corrupt content to decode`.
+    ///
+    /// The line-comment form is not the same case and must keep working:
+    /// `1 // c` and `1//c` are both `1` on both engines, and a document that
+    /// is only a comment is an EMPTY stream, which is null rather than an
+    /// error.
+    #[test]
+    fn an_unterminated_ion_comment_is_corrupt_not_an_empty_document() {
+        let message = render("{{ fromIon(ion=i) }}", r#"{"i": "/* nope"}"#)
+            .expect_err("a truncated document must not render as nothing");
+        assert!(
+            message.contains("unterminated ion block comment"),
+            "{message}"
+        );
+
+        assert_eq!(ok("{{ fromIon(ion='1//c') }}"), "1");
+        assert_eq!(ok("{{ fromIon(ion='1 // c') }}"), "1");
+        assert_eq!(ok("{{ fromIon(ion='/* c */ 1') }}"), "1");
+        assert_eq!(
+            render("<{{ fromIon(ion=i) }}>", r#"{"i": "// c"}"#).unwrap(),
+            "<>"
+        );
+        assert_eq!(ok("<{{ fromIon(ion='') }}>"), "<>");
+    }
+
+    /// **The module doc used to say Jackson drops annotations. It does not.**
+    /// `fromIon('a::1')` is the string `a::1` in Kestra and
+    /// `fromIon('[a::1, 2]')` throws; the annotation-skipping loop that
+    /// sentence justified answered `1` and `[1,2]`. Refused now, by name.
+    #[test]
+    fn the_ion_reader_refuses_an_annotation_rather_than_dropping_it() {
+        for source in ["a::1", "abc::1", "[a::1, 2]", "{a: b::1}"] {
+            let message = render(
+                "{{ fromIon(ion=i) }}",
+                &format!(r#"{{"i": {}}}"#, serde_json::to_string(source).unwrap()),
+            )
+            .expect_err("must be refused");
+            assert!(
+                message.contains("egret does not read an ion annotation"),
+                "{source}: {message}"
+            );
+        }
+        // A bare symbol is not an annotation and must still read.
+        assert_eq!(ok("{{ fromIon(ion='abc') }}"), "abc");
+        assert_eq!(ok("{{ fromIon(ion='{a:b}') }}"), r#"{"a":"b"}"#);
+    }
+
+    /// `serde_norway` deserialises a source with no content to a **unit**,
+    /// which renders as nothing; Jackson throws. A wrong value that renders
+    /// successfully is the failure mode this whole package exists to prevent,
+    /// so the question is asked of the source, before the parser.
+    ///
+    /// The shapes that are NOT empty are asserted beside it, because a check
+    /// that answered "empty" for `~` would be a new bug of the same kind.
+    #[test]
+    fn an_empty_yaml_document_is_an_error_not_a_null() {
+        for source in ["", "   ", "# c", "\n\n", "# a\n# b\n"] {
+            let message = render(
+                "{{ yaml(yaml=y) }}",
+                &format!(r#"{{"y": {}}}"#, serde_json::to_string(source).unwrap()),
+            )
+            .expect_err("must be refused");
+            assert!(
+                message.contains("No content to map due to end-of-input"),
+                "{source:?}: {message}"
+            );
+        }
+        assert_eq!(ok("<{{ yaml(yaml='~') }}>"), "<>");
+        assert_eq!(ok("{{ yaml(yaml='a: null') }}"), "{}");
+        assert_eq!(ok("{{ yaml(yaml='0') }}"), "0");
+        // The FIRST of several documents, rather than a refusal.
+        assert_eq!(
+            render("{{ yaml(yaml=y) }}", r#"{"y": "a: 1\n---\nb: 2"}"#).unwrap(),
+            r#"{"a":1}"#
         );
     }
 
@@ -1568,23 +1776,69 @@ mod tests {
         assert!(lengths.contains(&22), "{lengths:?}");
     }
 
-    /// `Ksuid.PAD_TO_LENGTH` is 27, and the four-byte timestamp prefix is
-    /// what makes two ksuids sort in the order they were minted.
+    /// `Ksuid.PAD_TO_LENGTH` is 27, and the first four bytes are
+    /// `epochSecond - 1_400_000_000`, big-endian.
+    ///
+    /// **The prefix was pinned by nothing.** The first version of this test
+    /// checked the length, the alphabet, and then `base62_bytes` on twenty
+    /// ZERO bytes — which exercises the padding helper and never looks at a
+    /// real ksuid at all. Replacing the four timestamp bytes with random ones
+    /// left every test in the crate and the whole oracle green; verified by
+    /// running that mutation. So this decodes the value back and reads the
+    /// field: a random `u32` lands inside the window below with probability
+    /// about 2 in 10^9.
     #[test]
     fn a_ksuid_is_27_padded_base62_characters_with_a_time_prefix() {
-        let first = ok("{{ ksuid() }}");
-        assert_eq!(first.len(), 27, "{first}");
-        assert!(first.bytes().all(|b| b.is_ascii_alphanumeric()), "{first}");
         for _ in 0..200 {
             assert_eq!(ok("{{ ksuid() }}").len(), 27);
         }
-        // The prefix is `epochSecond - 1_400_000_000`, big-endian, so the
-        // leading characters move forward with the clock rather than randomly.
-        let decoded = base62_bytes(
-            &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            27,
+        let value = ok("{{ ksuid() }}");
+        assert!(value.bytes().all(|b| b.is_ascii_alphanumeric()), "{value}");
+
+        let bytes = base62_decode(&value);
+        let stamp = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let expected = (Utc::now().timestamp() - 1_400_000_000) as u32;
+        assert!(
+            stamp.abs_diff(expected) < 5,
+            "the four-byte prefix must be the ksuid epoch, not random: {stamp} vs {expected}"
         );
-        assert_eq!(decoded, "0".repeat(27));
+
+        // And it is monotonic across a second, which is what "sorts in mint
+        // order" means. Compared as strings: base 62 over a big-endian value
+        // at a fixed width is order-preserving.
+        let earlier = ok("{{ ksuid() }}");
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let later = ok("{{ ksuid() }}");
+        assert!(earlier < later, "{earlier} then {later}");
+
+        // The encoder's own round trip, which is what makes the decode above
+        // evidence rather than a second guess.
+        assert_eq!(base62_decode(&base62_bytes(&[0u8; 20], 27)), [0u8; 20]);
+        let mut probe = [0u8; 20];
+        probe[0] = 0x12;
+        probe[3] = 0x34;
+        probe[19] = 0xff;
+        assert_eq!(base62_decode(&base62_bytes(&probe, 27)), probe);
+    }
+
+    /// `Base62.encode`'s inverse, for the test above: 27 digits back into the
+    /// twenty big-endian bytes they came from, by `buf = buf * 62 + digit`.
+    fn base62_decode(text: &str) -> [u8; 20] {
+        let mut bytes = [0u8; 20];
+        for c in text.chars() {
+            let digit = BASE62
+                .iter()
+                .position(|d| *d as char == c)
+                .expect("a base62 digit") as u32;
+            let mut carry = digit;
+            for byte in bytes.iter_mut().rev() {
+                let value = u32::from(*byte) * 62 + carry;
+                *byte = (value & 0xff) as u8;
+                carry = value >> 8;
+            }
+            assert_eq!(carry, 0, "a 27-digit ksuid must fit in twenty bytes");
+        }
+        bytes
     }
 
     /// A `TimeBasedEpochRandomGenerator` UUID: version nibble `7`, variant
@@ -1698,21 +1952,64 @@ mod tests {
         assert!(!seen.contains("10"), "upper is exclusive: {seen:?}");
     }
 
-    /// `new ServerSocket(0)` asks the kernel, so the answer is in the host's
-    /// ephemeral range and never a port already in use -- which is why
-    /// neither engine has to avoid a well-known one.
+    /// `new ServerSocket(0)` asks the KERNEL, and the kernel never hands out
+    /// a port that is currently bound. That is the whole property, and it is
+    /// the one a fake cannot have.
+    ///
+    /// **The first version of this test could not see it.** It asserted
+    /// `1023 < port < 65536` and that two calls differed, which any RNG
+    /// satisfies: replacing the whole `TcpListener` block with
+    /// `gen_range(49152..=65535)` left every test in the crate green — the
+    /// build only warned about an unused import. Verified by running that
+    /// mutation.
+    ///
+    /// So this holds a set of ports open and asserts no draw ever names one.
+    /// The arithmetic, rather than a hope: the ephemeral range is 16 384 ports
+    /// wide, so a uniform fake names a held port on a `held / 16384` fraction
+    /// of draws and the expected number of collisions over `DRAWS` is
+    /// `DRAWS * held / 16384`. With 120 held and 4 000 draws that is 29, so a
+    /// fake survives with probability about `e^-29` — 2 in 10^13. The real
+    /// implementation collides with probability **zero**, not merely small.
     #[test]
     fn random_port_is_a_free_port_the_kernel_chose() {
+        // As many as this process's descriptor limit allows, up to 120 —
+        // enough for the arithmetic above and well inside a 256-fd default.
+        let held: Vec<TcpListener> = (0..120)
+            .map_while(|_| TcpListener::bind(("127.0.0.1", 0)).ok())
+            .collect();
+        let taken: std::collections::BTreeSet<u16> = held
+            .iter()
+            .filter_map(|l| l.local_addr().ok().map(|a| a.port()))
+            .collect();
+        assert!(
+            taken.len() >= 60,
+            "not enough listeners to make this test decisive: {}",
+            taken.len()
+        );
+
+        // Called directly rather than through `render_str`, which builds a
+        // whole environment and a thread per call; the wiring is checked once
+        // at the end.
         let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..20 {
-            let port: u32 = ok("{{ randomPort() }}").parse().expect("a port");
-            assert!(port > 1023 && port < 65536, "{port}");
+        for _ in 0..4_000 {
+            let value = random_port(Rest(Vec::new())).expect("a port");
+            let port = u16::try_from(i64::try_from(value).expect("an integer")).expect("a port");
+            assert!(port > 1023, "{port}");
+            assert!(
+                !taken.contains(&port),
+                "randomPort() returned {port}, which this test is holding open — the kernel \
+                 would never hand that out, so the number did not come from the kernel"
+            );
             seen.insert(port);
         }
         assert!(
             seen.len() > 1,
             "every call returned the same port: {seen:?}"
         );
+        drop(held);
+
+        let port: u32 = ok("{{ randomPort() }}").parse().expect("a port");
+        assert!(port > 1023 && port < 65536, "{port}");
     }
 
     // -----------------------------------------------------------------
