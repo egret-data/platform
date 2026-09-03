@@ -1312,5 +1312,16 @@
   {"id": "concat-null-from-the-context", "expr": "<{{ 'a' ~ n ~ 'b' }}>", "context": {"n": null}},
   {"id": "concat-boolean", "expr": "<{{ 'a' ~ t }}>", "context": {"t": true}},
   {"id": "concat-map", "expr": "<{{ 'a' ~ m }}>", "context": {"m": {"a": 1}}},
-  {"id": "concat-list", "expr": "<{{ 'a' ~ l }}>", "context": {"l": [1, 2]}}
+  {"id": "concat-list", "expr": "<{{ 'a' ~ l }}>", "context": {"l": [1, 2]}},
+
+  {"id": "null-literal-is-defined", "expr": "<{{ null is defined }}>", "context": {}},
+  {"id": "null-from-the-context-is-defined", "expr": "<{{ n is defined }}>", "context": {"n": null}},
+  {"id": "null-literal-is-null-test", "expr": "<{{ null is null }}>", "context": {}},
+  {"id": "null-literal-in-an-if-condition", "expr": "{% if null %}y{% else %}n{% endif %}", "context": {}, "compare": "error-class"},
+  {"id": "null-literal-in-an-and-operand", "expr": "<{{ null and true }}>", "context": {}, "compare": "error-class"},
+  {"id": "null-literal-in-an-or-operand", "expr": "<{{ null or 'z' }}>", "context": {}, "compare": "error-class"},
+  {"id": "null-literal-in-a-not-operand", "expr": "<{{ not null }}>", "context": {}, "compare": "error-class"},
+  {"id": "null-from-the-context-in-an-if-condition", "expr": "{% if n %}y{% else %}n{% endif %}", "context": {"n": null}, "compare": "error-class"},
+  {"id": "null-literal-as-a-bare-map-key", "expr": "<{{ {null: 1} }}>", "context": {}, "compare": "error-class"},
+  {"id": "tag-elseif-is-pebbles-spelling", "expr": "{% if false %}a{% elseif true %}b{% else %}c{% endif %}", "context": {}}
 ]

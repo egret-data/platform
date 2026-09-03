@@ -700,3 +700,27 @@ boolean-literal-python-spelling-is-not-the-literal
 # `string` would have broken `filter-string-literal-null`. The rewriter's
 # translation separates them and the guard is in.
 filter-string-undefined-input
+
+# --- W2b fix round. NULL IN A BOOLEAN CONTEXT. Pebble refuses a null in every
+# boolean position, with THREE distinct messages, measured against the
+# artifact: `Wrong operand(s) type in conditional expression` for `{% if %}`
+# and `{% elseif %}`, `null value used in and operator` for BOTH `and` and `or`
+# (Pebble's own message says "and" in the `or` arm), and `null value given to
+# not() and or operator` for `not`.
+#
+# Every one of these is ALSO in baseline.txt: egret ANSWERS where Kestra
+# throws, so none of them is born matching and the ratchet holds all of them.
+# `null-from-the-context-in-an-if-condition` is the control that says whose
+# fault it is -- a CONTEXT null answered `n` before W2b too, so W2b routed the
+# literal onto an existing wrong answer rather than inventing one. Both are
+# here so that claim is measured rather than asserted.
+null-literal-in-an-if-condition
+null-literal-in-an-and-operand
+null-literal-in-an-or-operand
+null-literal-in-a-not-operand
+null-from-the-context-in-an-if-condition
+# A BARE `null` map key is a Java null key, which Jackson refuses. egret builds
+# a key out of it either way -- `{"":1}` before W2b and `{"None":1}` after,
+# because minijinja's `none` stringifies to Python's spelling in key position.
+# Already wrong, now wrong differently, and it had no entry at all.
+null-literal-as-a-bare-map-key

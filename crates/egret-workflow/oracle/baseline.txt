@@ -669,8 +669,15 @@ filter-format-date-family-refused
 
 # --- W2b: Pebble's `null` literal.
 #
-# THE CONCATENATION OPERATOR IS UNPORTED, and W2b found that by adding the
-# first corpus entries `~` has ever had -- the corpus had exactly ZERO before
+# THE CONCATENATION OPERATOR IS UNPORTED, AND W2b REVERSED THE DIRECTION OF ITS
+# FAILURE. `{{ 'a' ~ null ~ 'b' }}` was an ERROR at 4498b48b -- the literal was
+# an undefined and minijinja's strict mode raised -- and now ANSWERS `aNoneb`.
+# Loud failure -> silently wrong value is the worse mode, and "unported
+# operator" undersells that; the entry is compared EXACT rather than
+# error-class precisely so the ratchet holds the value and not merely the fact
+# that something happened. Same shape as the boolean-context block below.
+#
+# W2b found this by adding the first corpus entries `~` has ever had -- the corpus had exactly ZERO before
 # these, so nothing had ever compared the two engines' `~`. Translating the
 # literal is NOT enough for `{{ 'a' ~ null ~ 'b' }}`: after the rewrite the
 # operand is a real `None`, and minijinja's `~` then writes it through
@@ -704,3 +711,79 @@ concat-map
 # in error-class.txt and paired `baselined`, so nothing here is a free pass.
 null-literal-python-spelling-is-not-the-literal
 boolean-literal-python-spelling-is-not-the-literal
+
+# --- W2b fix round: NULL IN A BOOLEAN CONTEXT, and the direction of the change.
+#
+# W2b routed the `null` LITERAL onto minijinja's `none`, which is right for
+# every value position and WRONG in every boolean position, because Pebble
+# refuses a null there and minijinja treats it as falsy. Measured against the
+# artifact, three distinct Pebble messages:
+#
+#   {% if null %}      Wrong operand(s) type in conditional expression
+#   {{ null and x }}   null value used in and operator
+#   {{ null or x }}    null value used in and operator   (Pebble says "and")
+#   {{ not null }}     null value given to not() and strict variables ...
+#
+# THE DIRECTION MATTERS AND IT IS THE WORSE ONE. These four ERRORED before W2b
+# (the literal was an undefined and minijinja's strict mode raised) and now
+# ANSWER: `n`, `false`, `z`, `true`. Loud failure -> silently wrong answer. That
+# is the same shape as the `~` note below, and it is why they are recorded here
+# rather than left to a sentence in a report.
+#
+# WHOSE FAULT, measured rather than argued: a CONTEXT null answered `n` at
+# 4498b48b too, so the wrong ANSWER predates W2b and what W2b changed is which
+# inputs reach it -- Kestra treats a literal and a context null identically in
+# these positions, so egret is now at least self-consistent.
+# `null-from-the-context-in-an-if-condition` is that control, and it fails on
+# BOTH builds, which is what makes the claim checkable.
+#
+# Not fixable from this crate: minijinja lets a crate override a filter, a
+# function and a test, but not `{% if %}`, `and`, `or` or `not`.
+null-literal-in-an-if-condition
+null-literal-in-an-and-operand
+null-literal-in-an-or-operand
+null-literal-in-a-not-operand
+null-from-the-context-in-an-if-condition
+
+# `is defined` is the one that REGRESSED FROM AGREEMENT, and it agreed by luck.
+# Pebble's `defined` is "present AND not null": `{{ null is defined }}`,
+# `{{ n is defined }}` with a context null, `{{ nothere is defined }}` and
+# `{{ obj.missing is defined }}` are ALL false. minijinja's is "not undefined",
+# so a `none` is defined. Before W2b the literal was an undefined and answered
+# false -- the right answer for the wrong reason, exactly the shape
+# `oracle/README.md` records for `filter-string` and `isin`.
+#
+# The CONTEXT null was already wrong (`true`) at 4498b48b, and
+# `null-from-the-context-is-defined` fails on both builds to prove it.
+#
+# NOT FIXED, and the reason is a committed scope boundary rather than
+# difficulty: `runners::env::MINIJINJA_ONLY_TESTS`'s doc states that porting the
+# `is` surface "is not W2's -- no task was given the eight", and
+# `name-surface.txt` carries a reason on every one of those rows. Registering a
+# `defined` test is a three-line change; doing it here would enter a surface
+# this package deliberately left alone. Handed on with an entry instead of a
+# note.
+null-literal-is-defined
+null-from-the-context-is-defined
+
+# The same unported `is` surface, seen from the other side: Pebble's null TEST
+# is spelled `null` and minijinja's is spelled `none`, so `{{ null is null }}`
+# is `true` there and `unknown test: test none is unknown` here. The rename W2b
+# added is what would make registering a `none`-spelled `null` test a one-liner,
+# which is why this is recorded now rather than left unwritten.
+null-literal-is-null-test
+
+# A BARE `null` map key is a Java null key and Jackson refuses it. egret builds
+# a key from it either way: `{"":1}` at 4498b48b, `{"None":1}` at W2b's head,
+# because minijinja's `none` stringifies to Python's spelling in KEY position,
+# where `runners::env::kestra_to_string` never gets a chance to run. Already
+# wrong, now wrong differently, and it had no entry at all until this round.
+null-literal-as-a-bare-map-key
+
+# Found while proving the boolean-context entries discriminate: an entry for
+# `{% elseif %}` PASSED on both builds, and for a reason that has nothing to do
+# with null -- minijinja spells it `elif` and refuses `elseif` outright
+# (`syntax error: unknown statement elseif`), whatever the condition. That is a
+# real divergence with no entry, and it would have made a null entry agree by
+# luck, so the null one was dropped and this one written instead.
+tag-elseif-is-pebbles-spelling

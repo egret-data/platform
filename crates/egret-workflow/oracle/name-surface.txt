@@ -201,7 +201,7 @@ function	tasksWithState	yes	yes	function-taskswithstate	-
 function	uuid	yes	yes	function-uuid	-
 function	yaml	yes	yes	function-yaml-yes-is-a-boolean-or-not	the two YAML scalar resolvers disagree, and re-resolving would trade an old silent wrong answer for a new one
 test	boolean	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	defined	yes	yes	test-defined	-
+test	defined	yes	yes	null-literal-is-defined	Pebble's `defined` is "present AND NOT NULL" and minijinja's is "not undefined", so a null is defined here and is not there. Measured four ways: a null literal, a context null, an absent root and a missing attribute are ALL false on the engine. `test-defined` (a present String) agrees and could never have separated them; W2b made the literal stop agreeing BY LUCK and the row now names the baselined entry. The `is` surface was never given to a W2 task -- see `env::MINIJINJA_ONLY_TESTS`
 test	divisibleby	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	empty	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
 test	endingwith	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
@@ -228,7 +228,7 @@ test	map	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
 test	mapping	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	ne	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	none	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	null	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
+test	null	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own. minijinja spells this test `none`, so `{{ x is null }}` is `unknown test: test none is unknown` here -- `null-literal-is-null-test` is the baselined entry W2b added for it
 test	number	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	odd	yes	yes	test-odd	the same as `even`
 test	safe	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`

@@ -104,7 +104,7 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **twenty-five ids are in this file AND in `baseline.txt`**, because such an
+that: **thirty-one ids are in this file AND in `baseline.txt`**, because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
 until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
 `function-fromion-annotation-of-a-list` without moving the number. Counted out
@@ -136,7 +136,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**245** entries carry it today (240 before W2b, 153 before W2 Task 8, 182 before its fix
+**251** entries carry it today (245 before W2b's fix round, 240 before W2b, 153 before W2 Task 8, 182 before its fix
 round), counted out of `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -162,7 +162,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 25 of the 245 are *also* in `baseline.txt`, because egret
+make it pass: 31 of the 251 are *also* in `baseline.txt`, because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -205,7 +205,10 @@ had introduced -- **that number said 131 in two places until W2b counted it out
 of the file, which is what C8 asks for and what nobody had done here** -- and
 **131 of 1278** after W2b -- which added 44 entries for
 Pebble's `null` literal (a class the corpus had NO entry for at all), BANKED
-three and RECORDED six.
+three and RECORDED six -- and **141 of 1288** after its fix round, which
+RECORDED ten and banked none: `null` in a BOOLEAN context, where routing the
+literal onto minijinja's `none` turned four loud failures into silently wrong
+answers.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -4374,6 +4377,13 @@ diverge:
 | `'a' ~ m` (a map) | `a{a=1}` | `a{"a": 1}` |
 | `'a' ~ [1,2]` | `a[1, 2]` | `a[1, 2]` — agrees, and it is the boundary |
 
+**And W2b reversed the direction of this failure**, which "unported operator"
+undersells: `{{ 'a' ~ null ~ 'b' }}` was an *error* at `4498b48b` (the literal
+was an undefined and minijinja's strict mode raised) and now answers `aNoneb`.
+Loud failure to silently wrong value is the worse mode. The entry is compared
+**exact**, not error-class, so the ratchet holds the value rather than merely
+the fact that something happened.
+
 Closing this means teaching `runners::rewrite` to emit a function call for `~`,
 the way it already does for `??`, `???` and `isIn`, and that needs Pebble's `~`
 **precedence** measured against the rest of the table first. That is a task, not
@@ -4394,7 +4404,13 @@ ten oracle tests, 131 of 1278 exactly at baseline. The reason is structural: the
 seventeen filters that pin the undefined half run `strict_undefined` *before*
 this predicate, so an undefined never reaches it there, and the filters that do
 reach it had no entry. A change that is right and that nothing can see is an
-equivalent mutant, and the fix is an observer, not a stronger assertion.
+equivalent mutant. The sweep below is what *found* the observers; what was
+written from it is a **stronger assertion**, and calling it "an observer, not a
+stronger assertion" undersold it. `assert!(!is_java_null(&MjValue::UNDEFINED))`
+is the predicate's contract stated directly, which no alternative
+implementation of the sixteen filters can satisfy by accident, and each of the
+sixteen is paired with a `render(...)` of `{{ null | F }}` that must SUCCEED --
+so a lazy "make everything refuse" fails it in the other direction.
 
 The observer is a 105-case sweep over all **35** registered filters x {null
 literal, missing root, missing attribute}, run against the pre-change build and
@@ -4403,9 +4419,13 @@ the post-change build with the same Java goldens:
 | | undefined cases answering where Kestra raises |
 |---|---:|
 | before the narrowing | **70 of 70** |
-| after | **38 of 70** |
+| after | **36 of 70** |
 
-Thirty-two moved from "answers" to "refuses" and none moved the other way.
+**Thirty-four** moved from "answers" to "refuses" and none moved the other way.
+(This said 38 and thirty-two in its first version, and the paragraph below it
+listing eighteen names contradicted its own table — 18 x 2 = 36, not 38. The 38
+was measured on a build that did not yet carry `string`'s guard, which the same
+section says closes here. Re-measured on the committed tree.)
 `runners::filters::tests::narrowing_java_null_is_what_makes_sixteen_more_filters_refuse_a_typo`
 pins sixteen of them plus the predicate's own contract, and it fails on the
 restored body naming `chunk`.
@@ -4424,7 +4444,12 @@ The other eighteen still answer where Kestra raises: `className`, `endsWith`,
 `substringAfterLast`, `substringBefore`, `substringBeforeLast`, `toIon`,
 `toJson`, `yaml`. Each reaches its answer by a route that does not go through
 `is_java_null`, so each needs its own `strict_undefined` call the way W2 Task
-8's sixteen did. **They are a declared debt with no corpus entry**, because 36
+8's sixteen did. **Three of them changed their wrong answer rather than keeping
+it** — `className` `<>` to `<null>`, `jq` `<>` to `<[null]>`, `yaml` `<null>` to
+`<null\n>` — because an `Undefined` now reaches code that used to be short-cut
+by the null branch. All three are still wrong in the same direction (an answer
+where Kestra raises), none is newly wrong, and none has an entry; saying only
+"34 changed class" hid that anything else moved at all. **They are a declared debt with no corpus entry**, because 36
 `error-class` entries would be 36 free passes for work not done — the ratio this
 file already flags. The sweep above is how to re-measure them.
 
@@ -4458,10 +4483,159 @@ and the pre-W2b run printed 128. Forty-four entries. BANKED three
 (`filter-upper-literal-null`, `filter-length-literal-null`,
 `filter-string-undefined-input`) and RECORDED six (four for the unported `~`
 operator, two for minijinja's wider literal vocabulary). Thirty-eight of the
-forty-four new entries pass; 23 of the 44 failed against the pre-fix build,
-which is the number Step 1 exists to produce.
+forty-four new entries pass, and **28 of the 44 failed against the pre-fix
+build** -- which is the number Step 1 exists to produce, so it is worth saying
+exactly how it was measured and what it was before.
+
+It said **23**, which was the count of a sub-measurement: 37 of the 44 entries
+existed when the pre-fix ratchet was run, 23 of those failed, and the remaining
+7 (added later, after the artifact probes found the spelling boundary and the
+`~` divergence) were never folded in. Five of those seven fail as well.
+
+The honest measurement is one command on a `4498b48b` worktree carrying the new
+`corpus.json`, `golden.json` and the two error-class files but **its own**
+`baseline.txt`, so that "regression" means exactly "a new entry that fails on
+the pre-fix build" with no arithmetic:
+
+```
+oracle: 161 of 1288 entries mismatch (baseline: 128)
+REGRESSION: 33
+```
+
+161 = 128 + 33 with no `PROGRESS`/`STALE` arm firing, and **zero** of the 33 is
+a pre-existing id. 28 of them are W2b's 44; the other 5 are the fix round's 10.
+The 16 that pass at the parent are the declared boundary (`{{ o.null }}` and
+its two siblings, the two string literals, the two longer names, the quoted map
+key, `{{ none }}`), plus `{{ [null,1] }}`, `{{ {'a':null} }}`,
+`{{ null ?? 'f' }}`, `{{ fromJson(json=null) }}`, `concat-list`,
+`null-literal-mixed-case-is-not-the-literal` and `filter-abs-literal-null` --
+every one of which is an entry that is supposed to agree.
 
 Note what the flat count hides, which is the same shape this file records for
 W2 Task 8's fix round: the sixteen `{{ null | F }}` cases that now bank were
 **fourteen entries that did not exist** plus two that did, and the thirty-two
 undefined cases the narrowing fixed have **no entries at all**.
+
+## W2b, fix round — the class one construct over, and three numbers that were wrong
+
+### `null` in a BOOLEAN context, and the direction of the change
+
+W2b routed the literal onto minijinja's `none`. That is right in every **value**
+position and wrong in every **boolean** one, because Pebble refuses a null there
+and minijinja treats it as falsy. Measured against the artifact — three distinct
+messages, and `or` reports itself as `and`:
+
+| expression | Kestra | `4498b48b` | W2b head |
+|---|---|---|---|
+| `{% if null %}y{% else %}n{% endif %}` | `Wrong operand(s) type in conditional expression` | error | **`n`** |
+| `{{ null and true }}` | `null value used in and operator` | error | **`false`** |
+| `{{ null or 'z' }}` | `null value used in and operator` | error | **`z`** |
+| `{{ not null }}` | `null value given to not() and strict variables is set to true` | error | **`true`** |
+| `{{ null is defined }}` | `false` | `false` | **`true`** |
+
+**Loud failure to silently wrong answer**, which is the worse mode and the same
+shape as the `~` note above. And none of the five had a corpus entry, so the
+ratchet was blind to all of them — the exact blindness Step 1 existed to remove
+for `{{ null | F }}`, left in place one construct over. The one boundary entry
+that existed here, `null-literal-ternary-condition`, **cannot see any of it**:
+Pebble's ternary answers `n` for a null while its `{% if %}` raises, so the two
+constructs disagree with each other and only the agreeing one had been written
+down.
+
+**Whose fault, measured rather than argued.** A *context* null answered `n` at
+`4498b48b` too, so the wrong answer predates W2b and what W2b changed is which
+inputs reach it. Kestra treats a literal and a context null identically in every
+one of these positions, so egret is now at least self-consistent.
+`null-from-the-context-in-an-if-condition` and `null-from-the-context-is-defined`
+are the controls, and they fail on **both** builds — which is what makes that
+claim checkable rather than a defence.
+
+Not fixable from this crate: minijinja lets a crate override a filter, a
+function and a test, but not `{% if %}`, `and`, `or` or `not`.
+
+### `is defined` agreed BY LUCK, and it is not this package's surface to fix
+
+Pebble's `defined` is "present **and not null**". Measured four ways: a null
+literal, a context null, an absent root and a missing attribute are all `false`.
+minijinja's is "not undefined", so a `none` is defined. Before W2b the literal
+was an undefined and answered `false` — the right answer for the wrong reason,
+the same shape this file already records for `filter-string` and `isin`.
+
+Registering a `defined` test is a three-line change and it is **deliberately not
+made here**: `runners::env::MINIJINJA_ONLY_TESTS`'s doc states that porting the
+`is` surface "is not W2's — no task was given the eight", and `name-surface.txt`
+carries a reason on each of those rows. Entering a declared-unported surface to
+close one entry is not a trade this round should make on its own. The row now
+names the baselined entry instead of `test-defined`, which agreed and could
+never have separated them.
+
+The same surface from the other side: Pebble's null **test** is spelled `null`
+and minijinja's is spelled `none`, so `{{ null is null }}` is `true` there and
+`unknown test: test none is unknown` here. `null-literal-is-null-test` records
+it. The rename W2b added is what would make registering a `none`-spelled `null`
+test a one-liner, which is why it is written down now.
+
+### A bare `null` map key leaks Python's spelling into a KEY
+
+`{{ {null: 1} }}` is a Java null key and Jackson refuses it. egret builds a key
+from it either way — `{"":1}` at `4498b48b`, `{"None":1}` at W2b's head, because
+`none` stringifies through `Display` in key position where
+`runners::env::kestra_to_string` never gets a chance to run. Already wrong, now
+wrong differently, and it had no entry until this round.
+
+### An entry that agreed for a reason that had nothing to do with `null`
+
+A sixth boolean-context entry was written for `{% elseif null %}` and **passed
+on both builds**. Not because egret agrees about null: minijinja spells the tag
+`elif` and refuses `elseif` outright — `syntax error: unknown statement elseif`,
+whatever the condition, measured with `{% elseif true %}` as the control. A null
+entry there would have been a lucky pass in a block whose whole purpose is
+discrimination, so it was dropped and `tag-elseif-is-pebbles-spelling` written
+instead: a real divergence, compared exact, baselined, with no free pass.
+
+### Three numbers in the committed record were wrong
+
+**"23 of the 44 failed against the pre-fix build" was 28.** It was the count of
+a sub-measurement — 37 of the 44 entries existed when that ratchet was run and
+23 of those failed; the 7 added later were never folded in, and 5 of them fail
+too. Measured as one command on a `4498b48b` worktree carrying the new corpus,
+golden and error-class files but **its own** `baseline.txt`, so "regression"
+means exactly "a new entry that fails pre-fix": `161 of 1288`, `REGRESSION: 33`,
+`161 = 128 + 33` with no other arm firing and **zero** pre-existing ids. 28 of
+the 33 are W2b's, 5 are this round's. The wrong number sat in the same paragraph
+that corrects somebody else's miscount, which is the reason to state the method
+and not just the digit.
+
+**"38 of 70" was 36, and "thirty-two moved" was thirty-four.** The observer the
+whole mutation-6 answer rests on. The paragraph listing eighteen names
+contradicted its own table — 18 x 2 is 36 — and the 38 came from a build that
+did not yet carry `string`'s guard, which the same section says closes here.
+Re-measured on the committed tree: of 105 sweep cases, 35 null-literal cases
+agree **exactly**, 34 undefined cases refuse, 36 still answer.
+
+### What this round strengthened
+
+- the near-miss loop in `the_null_literal_is_exactly_four_spellings` asserted
+  only `is_err()`, and its corpus entry is `error-class`, so **nothing anywhere
+  pinned what egret says** — a rewriter that renamed a mixed-case spelling into
+  something unparseable passed all four assertions and the entry. It now asserts
+  `undefined value`, i.e. refused as an absent variable.
+- the sixteen `{{ null | F }}` rows appended to
+  `the_ported_filters_refuse_an_undefined_input` asserted only `<>`, which a
+  filter that ignored its input would satisfy — live for `escape`,
+  `format('x')` and `replace({'a':'b'})`. Each row now carries a **live input
+  and its answer**, all sixteen measured on the artifact and all sixteen
+  agreeing. Five of the first six written from memory were wrong, which is the
+  usual reason to measure.
+- `the_ported_filters_refuse_an_undefined_input` accepted
+  `contains("an undefined value reached") || contains("Can not pass null
+  value")`. The second alternative was reachable only while `is_java_null`
+  folded an `Undefined` in — so a test whose subject is "a typo is not a null"
+  accepted a typo being reported as a null. Dropped.
+
+### Counted
+
+**141 of 1288**, from 131 of 1278. Ten entries, all ten failing against W2b's
+own head, five of them also failing at `4498b48b`. BANKED none and RECORDED ten,
+which is the honest shape of a round whose finding is that a fix moved a failure
+from loud to silent.

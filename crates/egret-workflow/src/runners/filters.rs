@@ -4039,7 +4039,9 @@ mod tests {
     ///   `ValueKind::None` and not an undefined.
     #[test]
     fn the_ported_filters_refuse_an_undefined_input() {
-        let cx = r#"{"obj": {"a": 1}, "d": ",", "nul": null}"#;
+        let cx = r#"{"obj": {"a": 1}, "d": ",", "nul": null,
+            "str": "a b", "low": "a b", "pad": "  a b  ", "tag": "<i>",
+            "list": [1, 2, 3], "unsorted": [2, 3, 1], "csv": "a,b", "fmt": "%s-x"}"#;
         for filter in [
             "upper",
             "lower",
@@ -4066,10 +4068,15 @@ mod tests {
                     render(&template, cx).is_err(),
                     "{template} must be refused; it answered {message:?}"
                 );
+                // **No `|| contains("Can not pass null value")` here, and its
+                // removal is the point of W2b.** That alternative was reachable
+                // while `is_java_null` folded an `Undefined` in, so this test --
+                // whose whole subject is that a typo is NOT a null -- accepted a
+                // typo being reported as a null. It is unreachable at head, and
+                // leaving it would let the fold come back with this test green.
                 assert!(
-                    message.contains("an undefined value reached")
-                        || message.contains("Can not pass null value"),
-                    "{template}: {message}"
+                    message.contains("an undefined value reached"),
+                    "{template} must name the UNDEFINED, not a null: {message}"
                 );
             }
         }
@@ -4103,30 +4110,53 @@ mod tests {
         // filter.`), measured against the artifact, which is why sixteen bank
         // and not seventeen. `the_null_literal_and_a_typo_get_different_refusals`
         // is its test.
-        for (filter, rendered) in [
-            ("upper", "<>"),
-            ("lower", "<>"),
-            ("trim", "<>"),
-            ("capitalize", "<>"),
-            ("title", "<>"),
-            ("escape", "<>"),
-            ("length", "<0>"),
-            ("first", "<>"),
-            ("last", "<>"),
-            ("join('-')", "<>"),
-            ("sort", "<>"),
-            ("reverse", "<>"),
-            ("split(d)", "<>"),
-            ("slice(0,1)", "<>"),
-            ("format('x')", "<>"),
-            ("replace({'a':'b'})", "<>"),
+        // **Each row carries a live input as well as the null**, because
+        // `<>` on its own is satisfied by a filter that ignores its input and
+        // returns the empty string -- and three of these (`escape`,
+        // `format('x')`, `replace({'a':'b'})`) really could. The live column is
+        // what separates "answered the null correctly" from "answers `<>` to
+        // everything"; fourteen of the sixteen also have a corpus entry, and
+        // this makes the test carry its own weight rather than borrowing it.
+        //
+        // **Every live value below was measured on the artifact, not guessed.**
+        // Five of the first six written from memory were wrong -- a list
+        // renders through `JsonWriter` as `[1,2,3]` and not
+        // `AbstractCollection.toString`'s `[1, 2]`, `split` writes
+        // `["a","b"]`, `'%s-x' | format('x')` is `x-x` because the `%s`
+        // consumes the argument, and `'a b' | replace({'a':'b'})` is `b b`.
+        // All sixteen agree between the two engines.
+        for (filter, on_null, live_input, on_live) in [
+            ("upper", "<>", "str", "<A B>"),
+            ("lower", "<>", "str", "<a b>"),
+            ("trim", "<>", "pad", "<a b>"),
+            ("capitalize", "<>", "low", "<A b>"),
+            ("title", "<>", "low", "<A B>"),
+            ("escape", "<>", "tag", "<&lt;i&gt;>"),
+            ("length", "<0>", "str", "<3>"),
+            ("first", "<>", "list", "<1>"),
+            ("last", "<>", "list", "<3>"),
+            ("join('-')", "<>", "list", "<1-2-3>"),
+            ("sort", "<>", "unsorted", "<[1,2,3]>"),
+            ("reverse", "<>", "list", "<[3,2,1]>"),
+            ("split(d)", "<>", "csv", "<[\"a\",\"b\"]>"),
+            ("slice(0,1)", "<>", "list", "<[1]>"),
+            ("format('x')", "<>", "fmt", "<x-x>"),
+            ("replace({'a':'b'})", "<>", "low", "<b b>"),
         ] {
             let template = format!("<{{{{ null | {filter} }}}}>");
             assert_eq!(
                 render(&template, cx).unwrap_or_else(|e| panic!("{template}: {e}")),
-                rendered,
+                on_null,
                 "{template}"
             );
+
+            let live = format!("<{{{{ {live_input} | {filter} }}}}>");
+            assert_eq!(
+                render(&live, cx).unwrap_or_else(|e| panic!("{live}: {e}")),
+                on_live,
+                "{live} -- if this is `{on_null}` the filter is ignoring its input"
+            );
+            assert_ne!(on_null, on_live, "{filter}: the live row must discriminate");
         }
     }
 
@@ -4197,11 +4227,22 @@ mod tests {
             assert_eq!(render(&compared, "{}").unwrap(), "true", "{compared}");
         }
 
+        // **The message, not just `is_err()`.** The paired corpus entry is
+        // `error-class`, which any failure satisfies, so `is_err()` alone left
+        // NOTHING pinning what egret says: a rewriter that renamed a mixed-case
+        // spelling into something unparseable would pass all four assertions
+        // and the entry. What Kestra raises is a
+        // `RootAttributeNotFoundException` -- an absent VARIABLE -- and
+        // minijinja's strict mode says `undefined value` for exactly that.
         for near_miss in ["Null", "nUll", "NoNe", "nulL"] {
             let template = format!("<{{{{ {near_miss} }}}}>");
+            let message = render(&template, "{}").expect_err(&format!(
+                "{template} is a VARIABLE on Kestra and must be refused"
+            ));
             assert!(
-                render(&template, "{}").is_err(),
-                "{template} is a VARIABLE on Kestra and must be refused here"
+                message.contains("undefined value"),
+                "{template} must be refused as an ABSENT VARIABLE, not by some \
+                 other accident: {message}"
             );
         }
 
@@ -4227,8 +4268,11 @@ mod tests {
     /// gave `<>`, `distinct` gave `<null>`, `md5` gave the hash of nothing —
     /// because the undefined reached each filter's null branch. Measured as a
     /// 105-case sweep over all 35 registered filters x {null literal, missing
-    /// root, missing attribute}: 70 undefined cases, 32 of which changed class
-    /// from "answers" to "refuses" and none of which changed the other way.
+    /// root, missing attribute}: 70 undefined cases, **34** of which changed
+    /// class from "answers" to "refuses" and none of which changed the other
+    /// way, leaving 36. (This doc said 32 and 38; the numbers came from a build
+    /// that did not yet carry `string`'s guard, and they contradicted the
+    /// eighteen names listed below -- 18 x 2 is 36, not 38. Re-measured.)
     ///
     /// The message is each filter's own type refusal rather than
     /// `strict_undefined`'s sentence, and that is deliberate: these sixteen
