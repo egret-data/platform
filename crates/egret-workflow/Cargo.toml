@@ -12,7 +12,31 @@ serde.workspace = true
 # archived upstream (0.9.34+deprecated) and reaches us only through kube-client.
 # Error::location() gives the line/column that spec section 9 layer 1 requires.
 serde_norway = "0.9"
-serde_json.workspace = true
+# `arbitrary_precision` is named here so that THIS crate's own resolution
+# equals the one it ships in, not because W2 wants to turn a feature on.
+#
+# It is already on in the shipping binary: `starlark` 0.14.2 enables it,
+# `egret-dataapi` depends on starlark, and `egret-bin` pulls both
+# `egret-dataapi` and `egret-workflow`, so cargo's feature unification turns it
+# on for every crate in that build. Measured, not assumed --
+# `cargo tree -p egret-bin --format "{p} [{f}]"` shows
+# `serde_json v1.0.151 [alloc,arbitrary_precision,default,indexmap,preserve_order,raw_value,std]`
+# where the same command for `-p egret-workflow` showed it absent.
+#
+# That difference is what made `cargo test -p egret-workflow` green while the
+# same tests failed in `cargo test --workspace`: 13 lib tests and both oracle
+# tests. Declaring the feature deletes the difference -- there is now no
+# resolution of this crate in which the tests mean something else. See
+# `runners::env::OrderedJsonVisitor::visit_map` for what the feature changes.
+#
+# Two things keep it from drifting back:
+# `runners::env::tests::the_arbitrary_precision_sentinel_is_still_spelled_this_way`
+# fails by name if this line is dropped (it asserts the resolution the crate is
+# written against, under every command anyone runs), and `just
+# test-shipping-resolution` -- also a step in `.github/workflows/ci.yml` --
+# compiles this crate's tests with `-p egret-bin` selected, which is the
+# resolution that actually ships and therefore catches the NEXT feature.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 
 # Task 5: the repository. `egret-metastore` for `Db`. Plain `sqlx` for
 # `query_as`/`FromRow`, following `crates/egret-dataapi/src/endpoints.rs`.

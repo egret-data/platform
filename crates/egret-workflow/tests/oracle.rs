@@ -811,6 +811,163 @@ fn a_panic_fails_even_when_the_ratchet_is_satisfied() {
     assert_eq!(assemble_failures(&clean), "");
 }
 
+/// **The `stale` arm fires and names the ids.**
+///
+/// Until the merge gate this arm was dead code to the test suite. A green run
+/// sits exactly at baseline, so `stale`, `regressions` and `banked` are all
+/// empty on every passing run, and nothing else constructs a [`Findings`]:
+/// measured, neutering all three (`if false && !f.stale.is_empty()`, and
+/// likewise for the other two) left
+/// `cargo test -p egret-workflow --test oracle` at **7 passed, 0 failed**.
+/// The whole branch's authority rests on this function, so each arm now has a
+/// test that dies when it is neutered — verified one arm at a time, not as a
+/// set.
+///
+/// `stale` is the arm that keeps `baseline.txt` honest against a corpus that
+/// has moved: a line naming an id `golden.json` no longer contains is a free
+/// pass that can never be spent, and silently accumulating those is how a
+/// ratchet becomes a suppression list.
+#[test]
+fn a_stale_baseline_line_fails_and_names_it() {
+    let gone = "an-id-that-golden-json-does-not-have".to_string();
+    let stale = [&gone];
+    let message = assemble_failures(&Findings {
+        panics: &[],
+        stale: &stale,
+        regressions: &[],
+        banked: &[],
+        detail: &BTreeMap::new(),
+    });
+    assert!(
+        !message.is_empty(),
+        "a baseline line with no golden entry behind it must fail the run"
+    );
+    assert!(
+        message.contains("not in golden.json"),
+        "the message must say what is wrong; got: {message:?}"
+    );
+    assert!(
+        message.contains("an-id-that-golden-json-does-not-have"),
+        "the message must NAME the stale id, or a maintainer cannot act on it; got: {message:?}"
+    );
+
+    // And the same findings with nothing stale are a pass, so the assertions
+    // above are about `stale` and not about the function always complaining.
+    assert_eq!(
+        assemble_failures(&Findings {
+            panics: &[],
+            stale: &[],
+            regressions: &[],
+            banked: &[],
+            detail: &BTreeMap::new(),
+        }),
+        ""
+    );
+}
+
+/// **The `regressions` arm fires, names the ids, and carries their detail.**
+///
+/// The direction the ratchet exists for: an id that mismatches and is *not*
+/// baselined. See [`a_stale_baseline_line_fails_and_names_it`] for why this
+/// needs its own test at all.
+///
+/// The detail assertion is deliberate. `detail_for` is a separate closure from
+/// the `panics` arm's inline lookup, and a regression reported by bare id —
+/// with no expected/actual — is most of the way to unactionable.
+#[test]
+fn a_regression_outside_the_baseline_fails_and_carries_its_detail() {
+    let id = "kestra-null-coalesce".to_string();
+    let regressions = [&id];
+    let mut detail = BTreeMap::new();
+    detail.insert(
+        id.clone(),
+        "  kestra-null-coalesce: expected Ok(\"a\") actual Ok(\"b\")".to_string(),
+    );
+
+    let message = assemble_failures(&Findings {
+        panics: &[],
+        stale: &[],
+        regressions: &regressions,
+        banked: &[],
+        detail: &detail,
+    });
+    assert!(
+        message.contains("REGRESSION"),
+        "a mismatch outside the baseline must fail as a regression; got: {message:?}"
+    );
+    assert!(
+        message.contains("kestra-null-coalesce"),
+        "the message must name the entry; got: {message:?}"
+    );
+    assert!(
+        message.contains("expected Ok(\"a\") actual Ok(\"b\")"),
+        "the message must carry the per-id detail, not just the id; got: {message:?}"
+    );
+    assert!(
+        message.contains("do not add them to the baseline"),
+        "the message must say which way to fix it; got: {message:?}"
+    );
+
+    assert_eq!(
+        assemble_failures(&Findings {
+            panics: &[],
+            stale: &[],
+            regressions: &[],
+            banked: &[],
+            detail: &detail,
+        }),
+        ""
+    );
+}
+
+/// **The `banked` arm fires and names the ids.**
+///
+/// The direction that makes this a ratchet rather than a suppression list: a
+/// baselined id that now MATCHES must fail until its line is deleted. See
+/// [`a_stale_baseline_line_fails_and_names_it`] for why this needs its own
+/// test at all.
+///
+/// This is not hypothetical. The merge gate's own `arbitrary_precision` fix
+/// banked `context-integer-past-u64` and its two siblings, and this arm is
+/// what demanded the deletion; with the arm neutered the fix would have
+/// landed with three permanent free passes still in the file, each carrying a
+/// justification that had become false.
+#[test]
+fn progress_that_is_not_banked_fails_and_names_it() {
+    let fixed = "context-integer-past-u64".to_string();
+    let banked = [&fixed];
+    let message = assemble_failures(&Findings {
+        panics: &[],
+        stale: &[],
+        regressions: &[],
+        banked: &banked,
+        detail: &BTreeMap::new(),
+    });
+    assert!(
+        message.contains("PROGRESS NOT BANKED"),
+        "a baselined id that now matches must fail the run; got: {message:?}"
+    );
+    assert!(
+        message.contains("context-integer-past-u64"),
+        "the message must name the line to delete; got: {message:?}"
+    );
+    assert!(
+        message.contains("oracle/baseline.txt"),
+        "the message must say which file to edit; got: {message:?}"
+    );
+
+    assert_eq!(
+        assemble_failures(&Findings {
+            panics: &[],
+            stale: &[],
+            regressions: &[],
+            banked: &[],
+            detail: &BTreeMap::new(),
+        }),
+        ""
+    );
+}
+
 /// The baseline: the ids that do not match yet.
 ///
 /// One id per line; `#` starts a comment and blank lines are ignored. Deleting

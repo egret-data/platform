@@ -219,17 +219,39 @@ a passing test**, so run it as
 cargo test -p egret-workflow --test oracle -- --nocapture
 ```
 
-**Run the whole target, not one test.** `--test oracle` carries **six** tests,
-and four of them guard the differential test rather than take part in it:
-`corpus_and_golden_describe_the_same_expressions` (the corpus and the golden
-file describe the same expressions),
-`error_class_entries_are_exactly_the_committed_allowlist`,
-`every_error_class_entry_is_paired_with_something_that_can_fail`, and
-`a_panic_fails_even_when_the_ratchet_is_satisfied`. Filtering to
-`-- render_corpus_matches_golden` — the natural thing to type while iterating —
-**skips all four**, so the ratchet will happily pass against a corpus that has
-drifted out of sync with the golden file it is being checked against, or
-against a free pass nothing can fail.
+**Run the whole target, not one test.** `--test oracle` carries **ten** tests,
+and **nine** of them guard the differential test rather than take part in it.
+Filtering to `-- render_corpus_matches_golden` — the natural thing to type while
+iterating — skips every one, so the ratchet will happily pass against a corpus
+that has drifted out of sync with the golden file it is being checked against,
+against a free pass nothing can fail, or with three of its own four failure
+arms deleted.
+
+| guard | what it holds |
+|---|---|
+| `corpus_and_golden_describe_the_same_expressions` | the corpus and the golden file describe the same expressions |
+| `error_class_entries_are_exactly_the_committed_allowlist` | `error-class.txt` is exactly the corpus's `compare: "error-class"` set |
+| `every_error_class_entry_is_paired_with_something_that_can_fail` | every free pass in `error-class.txt` has a justification in `error-class-pairs.txt` that is checkable |
+| `every_runners_module_is_scanned_for_declared_tests` | the `const` list of scanned files equals the `src/runners/` directory — **the table at the top of this section depends on it**, and a `test:<name>` justification is otherwise checked against a partial scan |
+| `a_panicking_renderer_is_a_mismatch_in_every_mode` | a panicking render is a mismatch in `entry_matches`, in every comparison mode |
+| `a_panic_fails_even_when_the_ratchet_is_satisfied` | … and it fails the RUN even when every panicking id is baselined |
+| `a_stale_baseline_line_fails_and_names_it` | `assemble_failures`' `stale` arm fires, and names the ids |
+| `a_regression_outside_the_baseline_fails_and_carries_its_detail` | its `regressions` arm fires, names the ids, and carries their expected/actual |
+| `progress_that_is_not_banked_fails_and_names_it` | its `banked` arm fires, and names the lines to delete |
+
+**This list said "six", and named four.** The two it omitted were
+`every_runners_module_is_scanned_for_declared_tests` — which the table at :129
+of this file explicitly relies on — and the panic guard. A maintainer trusting
+the count believed two guards did not exist.
+
+The last three arrived at the merge gate, and the reason they were missing is
+worth keeping: a green run sits exactly **at** baseline, so `stale`,
+`regressions` and `banked` are empty on every passing run, and nothing else in
+the file constructed a `Findings`. Measured — neutering all three arms
+(`if false && !f.stale.is_empty()`, and likewise) left the target at **7
+passed, 0 failed**. Three quarters of the instrument this whole package's
+authority rests on was dead code to its own test suite. Each arm was then
+neutered one at a time, and exactly its own test died.
 
 `--nocapture` is what actually shows the count and the exclusion lists. Without `--nocapture`, a
 green run tells you nothing about how much of the corpus is still baselined.

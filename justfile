@@ -40,7 +40,30 @@ check:
     ./deploy/prune-target.sh
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
+    just test-shipping-resolution
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+
+# egret-workflow's tests, compiled under the resolution the BINARY ships.
+#
+# Cargo unifies features across the packages a build SELECTS, so
+# `cargo test -p egret-workflow` and `egret-bin` can compile the same crate against
+# different dependencies. Measured: `starlark` 0.14.2 turns on
+# `serde_json/arbitrary_precision`, `egret-dataapi` depends on starlark, and `egret-bin`
+# pulls `egret-dataapi` and `egret-workflow` together — so the feature was ON in
+# everything that ships and OFF under `-p egret-workflow`. It changes how serde_json
+# hands numbers to a `Visitor` (every float becomes a one-entry map under a private
+# sentinel key), so the crate rendered `{"$serde_json::private::Number":"1.0"}` where it
+# meant `1.0`: 13 lib tests and both differential-oracle tests were red in the only
+# configuration that ships, while the single-crate command their authors ran all day was
+# green for five tasks.
+#
+# `-p egret-bin` is what makes this the SHIPPING resolution rather than some other one.
+# `--lib --test oracle` limits it to three test binaries, so beyond the dependency build
+# it costs almost nothing. `just check` runs it BEFORE the workspace suite, which would
+# also fail — but as a value mismatch three modules from the cause rather than by name.
+test-shipping-resolution:
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} \
+      cargo test -p egret-bin -p egret-workflow --lib --test oracle --no-fail-fast
 
 # The workspace suite with NO database, skipping every DB-gated test on purpose.
 #

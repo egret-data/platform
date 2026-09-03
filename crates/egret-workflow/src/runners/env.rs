@@ -72,6 +72,38 @@
 //! `oracle/corpus.json`'s `coalesce-nested-absent` pins it. Do not "fix" it by
 //! moving to `Chainable`: that trades one divergence for two, and silently
 //! empties every typo'd variable in every flow.
+//!
+//! # W3-BLOCKING: three bounds that are not bounds yet
+//!
+//! **Read this before the first caller.** These are measured, not suspected,
+//! and they are unreachable today for exactly one reason: **nothing in the
+//! workspace calls this crate.** W3 is the change that makes them reachable —
+//! an execution context is author-controlled data arriving on a tokio worker —
+//! so each is a prerequisite of W3, not a deferred nice-to-have. None of them
+//! is "low risk"; each is a process abort or a permanent refusal reachable
+//! from a flow's own inputs.
+//!
+//! 1. **[`RenderContext::from_json_object`] recurses on the CALLER's thread.**
+//!    It walks author data through `json_to_minijinja` with no depth bound and
+//!    aborts around depth 2,600 on a 2 MiB stack — which is what a tokio
+//!    worker has. [`RenderContext::from_json_str`] is correctly bounded at 127
+//!    (`serde_json`'s own parser limit); the two entry points do not agree.
+//!    Note the `serde_json::Value` the caller passes has already been parsed
+//!    *somewhere*, so the 127 does not protect this path.
+//! 2. **[`put_back_raw_tags`] runs AFTER `render_once`'s size check.** A
+//!    `{% for %}` over a raw region therefore amplifies past the cap without
+//!    the cap seeing it: measured 985×, a 4,157-byte source returning
+//!    4,096,000 bytes in 3.76 s. [`CappedSink`] cannot notice, because during
+//!    the render it only ever holds the 36-byte UUID placeholders — the
+//!    expansion happens when they are swapped back. The fix is to check the
+//!    size again after substitution, not to make the sink cleverer.
+//! 3. **`filters::REPLACE_BUDGET` is a thread-local that is never reset on a
+//!    caller-owned thread.** [`render_str`] installs a fresh budget on the
+//!    render thread it spawns, so it is fine; a caller who renders on its own
+//!    thread gets 5,368 renders and then a permanent refusal for the life of
+//!    that thread. The doc's escape hatch, `ReplaceBudget::install`, is
+//!    `pub(super)` — no caller outside `runners` can reach it, so the
+//!    documented remedy is not available to the party who needs it.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -336,6 +368,17 @@ impl RenderContext {
     /// when order matters — which it does against Kestra, whose maps are
     /// `LinkedHashMap`s (`oracle/corpus.json`'s `map-key-order`).
     ///
+    /// That recommendation was, for one commit, an instruction to walk into a
+    /// bug: `from_json_str` deserialises straight through
+    /// [`OrderedJsonVisitor`], and under `serde_json`'s `arbitrary_precision`
+    /// — on in every build this crate ships in — that visitor's `visit_map`
+    /// built the parser's private number sentinel as a literal one-entry map,
+    /// so every float became `{"$serde_json::private::Number":"1.0"}`. This
+    /// method survived it only because `json_to_minijinja` matches on
+    /// `JsonValue::Number`, which the feature leaves intact. Both paths are
+    /// correct now (see `visit_map`); the sentence above is safe to follow
+    /// again, and is kept together with what it cost.
+    ///
     /// Returns `None` for anything that is not an object: a template's
     /// variables are a name-to-value map and there is no sensible top-level
     /// binding for a bare array or scalar. Callers that must not silently
@@ -386,7 +429,13 @@ impl fmt::Display for RenderContext {
 /// `preserve_order` feature is on, and it is not (the workspace names six
 /// minijinja features and that is not one of them). Measured directly rather
 /// than inferred: `Value::from_serialize` on a `serde_json::Value` holding
-/// `{"b":1,"a":2,"c":3}` renders `{"a":2,"b":1,"c":3}`.
+/// `{"b":1,"a":2,"c":3}` comes back keyed a, b, c —
+/// `map_keys_render_in_document_order_not_sorted` pins it.
+///
+/// Since `serde_json`'s `arbitrary_precision` was declared, that same
+/// round-trip also turns each **number** into the parser's private sentinel
+/// map, which is a second and independent reason nothing in this crate uses
+/// `from_serialize`. The test carries the exact string.
 ///
 /// Note it is *only* minijinja that sorts here. `serde_json`'s own
 /// `preserve_order` is already on in this workspace, transitively via
@@ -621,26 +670,57 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
         Ok(OrderedJson(MjValue::from(v)))
     }
 
-    /// **A context integer wider than 64 bits arrives here as a FLOAT, and
-    /// its digits are already gone.**
+    /// A plain `f64`. **No longer the funnel every non-`i64`/`u64` number
+    /// arrives through** — see [`OrderedJsonVisitor::visit_map`].
     ///
-    /// `{"v": 18446744073709551616}` renders `1.8446744073709552E19` where
-    /// Kestra renders the exact digits — through `{{ v }}`, `toJson`, `yaml`,
-    /// `toIon` and `jq` — and `className` says `java.lang.Double` where
-    /// Jackson says `java.math.BigInteger`. Jackson reads such a literal as a
-    /// `BigInteger`; `serde_json` without `arbitrary_precision` converts it to
-    /// an `f64` **inside its own parser**, before any `Visitor` method is
-    /// called, so `visit_i128`/`visit_u128` do not help and are deliberately
-    /// not implemented here — a visitor that is never called, documented as a
-    /// fix, is worse than none.
+    /// # What this used to say, and why it was wrong
     ///
-    /// The fix is `serde_json`'s `arbitrary_precision`, and Cargo features
-    /// are additive across the graph: turning it on changes
-    /// `serde_json::Value`'s number representation for **every** crate in
-    /// this workspace. That is not W2's call to make.
+    /// This doc used to record `context-integer-past-u64` as permanent: a
+    /// literal wider than 64 bits reached here as an `f64` with its digits
+    /// already gone, because `serde_json` **without** `arbitrary_precision`
+    /// narrows such a literal inside its own parser, before any `Visitor`
+    /// method is called. It then said the fix was that feature, and that
+    /// "Cargo features are additive across the graph: turning it on changes
+    /// `serde_json::Value`'s number representation for every crate in this
+    /// workspace. That is not W2's call to make."
     ///
-    /// Recorded rather than hidden: `context-integer-past-u64` and its
-    /// siblings are the entries, baselined with this reason.
+    /// **The feature was already on.** `starlark` 0.14.2 enables it,
+    /// `egret-dataapi` depends on starlark, and `egret-bin` — the shipping
+    /// binary — pulls `egret-dataapi` and `egret-workflow` together, so
+    /// unification turned it on in every build this crate actually ships in.
+    /// The sentence above reasoned about *turning a feature on* and never
+    /// asked whether it was **already on**; the answer was one command:
+    ///
+    /// ```text
+    /// $ cargo tree -p egret-bin --format "{p} [{f}]" | grep serde_json
+    /// serde_json v1.0.151 [alloc,arbitrary_precision,default,indexmap,preserve_order,raw_value,std]
+    /// ```
+    ///
+    /// [`RenderContext::from_json_object`]'s doc, 250 lines above, had run
+    /// exactly that check for `preserve_order` and written "Measured, not
+    /// assumed". Two docs in one file, one measured and one reasoned, and
+    /// only the reasoned one was wrong. **Check the graph; do not argue about
+    /// it.** `crates/egret-workflow/Cargo.toml` now names
+    /// `arbitrary_precision` explicitly so this crate's own resolution equals
+    /// the shipping one;
+    /// `the_arbitrary_precision_sentinel_is_still_spelled_this_way` fails by
+    /// name if that declaration is dropped; and `just
+    /// test-shipping-resolution` (also a step in `.github/workflows/ci.yml`)
+    /// compiles this crate's tests with `-p egret-bin` selected, so the next
+    /// such feature cannot drift in silently either.
+    ///
+    /// # What reaches this method now
+    ///
+    /// With the feature on, `serde_json`'s parser hands `visit_u64`/
+    /// `visit_i64` any literal that fits, and routes **everything else** —
+    /// every float, and every integer past 64 bits — through `visit_map`
+    /// under its `$serde_json::private::Number` sentinel. So this method is
+    /// reached only by a non-JSON `Deserializer` that calls it directly
+    /// (`serde_norway`'s, for one). It stays, and stays correct, for those.
+    ///
+    /// `visit_i128`/`visit_u128` are still deliberately not implemented:
+    /// `serde_json` never calls them either way, and the digits now arrive
+    /// through the sentinel as text.
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
         Ok(OrderedJson(MjValue::from(v)))
     }
@@ -657,13 +737,101 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
         Ok(OrderedJson(MjValue::from(items)))
     }
 
+    /// A JSON object — **or a number wearing an object's clothes.**
+    ///
+    /// With `serde_json`'s `arbitrary_precision` on (it is; see
+    /// [`OrderedJsonVisitor::visit_f64`] and this crate's `Cargo.toml`), the
+    /// parser stops narrowing numbers itself. Anything that does not fit
+    /// `i64`/`u64` — every float, and every integer past 64 bits — is handed
+    /// to `deserialize_any` as a **one-entry map** whose key is the private
+    /// sentinel [`ARBITRARY_PRECISION_TOKEN`] and whose value is the literal's
+    /// original text. A visitor that faithfully builds that as a map turns
+    /// every float in a context into
+    /// `{"$serde_json::private::Number":"1.0"}`, which is exactly what this
+    /// one did: 13 lib tests and both oracle tests failed in the shipping
+    /// resolution while `cargo test -p egret-workflow` was green.
+    ///
+    /// Recognising the sentinel and parsing the text back is also what
+    /// **closes** `context-integer-past-u64`: `18446744073709551616` arrives
+    /// here as those exact twenty digits and becomes a `u128`, where before
+    /// the feature it had already been narrowed to `1.8446744073709552e19`
+    /// inside the parser.
+    ///
+    /// `serde_json`'s own `Value` visitor does the same thing, so a document
+    /// that really does contain that key as author data collapses to a number
+    /// on **both** paths ([`RenderContext::from_json_str`] and
+    /// [`RenderContext::from_json_object`]) rather than on one of them — the
+    /// two entry points agree, which is the property that matters here.
+    ///
+    /// The recognition is **narrow, and falls back rather than failing**: one
+    /// entry, that exact key, a string payload, and a payload that parses as
+    /// a number. Anything else is a map, and stays one. The first cut of this
+    /// method errored on a second entry instead, and
+    /// `the_arbitrary_precision_sentinel_is_still_spelled_this_way` — this
+    /// commit's own test — rejected a perfectly ordinary two-key context
+    /// because of it. A visitor over author data has no business inventing
+    /// errors for shapes the format allows.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut entries: Vec<(String, MjValue)> = Vec::new();
         while let Some((key, OrderedJson(value))) = map.next_entry::<String, OrderedJson>()? {
             entries.push((key, value));
         }
+
+        if let [(key, payload)] = entries.as_slice() {
+            if key == ARBITRARY_PRECISION_TOKEN {
+                if let Some(number) = payload.as_str().and_then(number_from_literal) {
+                    return Ok(OrderedJson(number));
+                }
+            }
+        }
+
         Ok(OrderedJson(MjValue::from_object(OrderedMap::new(entries))))
     }
+}
+
+/// `serde_json`'s `arbitrary_precision` sentinel key.
+///
+/// Spelled out rather than imported because the constant behind it is
+/// `pub(crate) const TOKEN` (`serde_json-1.0.151/src/number.rs:18`) and no
+/// public item re-exports it — `serde_json::value::TOKEN` does not exist.
+/// `the_arbitrary_precision_sentinel_is_still_spelled_this_way` pins the
+/// spelling against a `serde_json` bump by reading the key back off a real
+/// serializer rather than by asserting the string against itself.
+pub(super) const ARBITRARY_PRECISION_TOKEN: &str = "$serde_json::private::Number";
+
+/// A JSON number literal's **text** back to an exact integer, or `None` if it
+/// is not one.
+///
+/// Widest-exact-first: `i64`, then `u64`, then `i128`, then `u128`. The order
+/// matters — `18446744073709551616` is past `u64::MAX` by one and is exact as
+/// a `u128`, and failing over to `f64` for it is precisely the loss
+/// `context-integer-past-u64` recorded.
+///
+/// Separate from [`number_from_literal`] because [`super::functions`]'s reader
+/// must not hand a **non-finite** `f64` on to a value: `fromJson('1e400')`
+/// used to be rejected by `serde_json`'s parser and, with
+/// `arbitrary_precision` on, is not — it now reaches this crate as text. See
+/// `functions::finite_or_malformed`.
+pub(super) fn integer_from_literal(literal: &str) -> Option<MjValue> {
+    if let Ok(i) = literal.parse::<i64>() {
+        return Some(MjValue::from(i));
+    }
+    if let Ok(u) = literal.parse::<u64>() {
+        return Some(MjValue::from(u));
+    }
+    if let Ok(i) = literal.parse::<i128>() {
+        return Some(MjValue::from(i));
+    }
+    literal.parse::<u128>().ok().map(MjValue::from)
+}
+
+/// [`integer_from_literal`], falling back to `f64`.
+///
+/// A literal past `u128` still lands on `f64` and still loses digits Jackson
+/// keeps. That is a much narrower class than the one this closes, and nothing
+/// in `oracle/corpus.json` reaches it.
+fn number_from_literal(literal: &str) -> Option<MjValue> {
+    integer_from_literal(literal).or_else(|| literal.parse::<f64>().ok().map(MjValue::from))
 }
 
 impl<'de> Deserialize<'de> for RenderContext {
@@ -1519,7 +1687,34 @@ pub(super) struct ContextScope(pub(super) Vec<String>);
 
 impl minijinja::value::Object for ContextScope {}
 
-pub fn environment() -> Environment<'static> {
+/// The bare minijinja engine: **the unbounded half of the renderer.**
+///
+/// `pub(crate)` on purpose, and it used to be `pub` and re-exported at the
+/// crate root with no doc comment at all, beside a [`render_str`] carrying
+/// about two hundred lines of them. A caller who reached for the one that
+/// looked like the primitive got none of what makes the other safe. Measured,
+/// on this engine as returned:
+///
+/// | lost | what happens instead |
+/// |---|---|
+/// | the output cap | `{{ 'a' * 5000000 }}` returns 5,000,000 bytes; through [`render_str`] it is `RenderError::OutputTooLarge` |
+/// | the 128 MiB render thread | the render runs on the caller's stack — a 2 MiB tokio worker, in production |
+/// | [`super::rewrite`] | `??` and `isIn` are **syntax errors**, so half of Kestra's operator surface does not parse |
+/// | `{% raw %}` fidelity | the raw-region protection [`render_str`] wraps every pass in is simply absent |
+/// | [`CONTEXT_SCOPE_NAMES`] | the sentinel global is unbound, so `fetchContext()` silently answers an **empty** scope rather than failing |
+///
+/// And composing the two `pub` items did not merely lose the bounds, it
+/// **aborted the process**: `rewrite()` on one corpus expression yields
+/// 40,328 bytes of source, which is inside `rewrite`'s own cap, and feeding
+/// that to this engine on a 2 MiB stack overflows it. `rewrite()` alone on
+/// the same stack is fine, so the defect belonged to the composition — i.e.
+/// to the pair of `pub` functions, which is precisely what no caller could
+/// have been expected to know.
+///
+/// **[`render_str`] is the only supported entry point.** It is the pair, in
+/// the right order, with every bound attached. Nothing outside this crate
+/// called this function when it was narrowed, so nothing was broken by it.
+pub(crate) fn environment() -> Environment<'static> {
     let mut env = Environment::new();
 
     // `PebbleEngineFactory.newPebbleEngineBuilder().strictVariables(true)`.
@@ -2318,13 +2513,29 @@ mod tests {
             r#"{"b":1,"a":2,"c":3}"#
         );
         // What genuinely sorts is minijinja's own ValueMap, which is why
-        // `OrderedMap` exists. This is that layer, directly.
+        // `OrderedMap` exists. This is that layer, directly -- and it now
+        // shows TWO independent reasons nothing in this crate goes through
+        // `Value::from_serialize`:
+        //
+        // 1. the keys come back a, b, c: minijinja's `ValueMap` is a
+        //    `BTreeMap` without its own `preserve_order` feature; and
+        // 2. every NUMBER comes back as `serde_json`'s private
+        //    `arbitrary_precision` sentinel, because `from_serialize` drives
+        //    `Value`'s `Serialize` impl, which emits a number as a one-field
+        //    struct -- and minijinja, having no idea what that struct means,
+        //    builds it as a map. This crate's own readers (`OrderedJson` and
+        //    `functions::BoundedVisitor`) decode the sentinel; `from_serialize`
+        //    cannot, and there is no hook to teach it.
+        //
+        // Pinned exactly as measured. If a future minijinja or serde_json
+        // changes either half, this is where it is noticed rather than in a
+        // rendered value somewhere downstream.
         assert_eq!(
             serde_json::to_string(&MjValue::from_serialize(
                 serde_json::from_str::<JsonValue>(r#"{"b":1,"a":2,"c":3}"#).unwrap()
             ))
             .unwrap(),
-            r#"{"a":2,"b":1,"c":3}"#
+            r#"{"a":{"$serde_json::private::Number":"2"},"b":{"$serde_json::private::Number":"1"},"c":{"$serde_json::private::Number":"3"}}"#
         );
     }
 
@@ -2345,6 +2556,79 @@ mod tests {
         assert_eq!(
             render_ordered("{{ m }}", r#"{"m": {"a": null}}"#).unwrap(),
             "{}"
+        );
+    }
+
+    /// **The crate asserts the cargo resolution it is written against.**
+    ///
+    /// Two things, and the first one is the guard the merge gate wanted most
+    /// because it holds under *every* command anyone runs — `-p
+    /// egret-workflow`, `--workspace`, a downstream binary — rather than only
+    /// under a CI step someone remembered to add.
+    ///
+    /// 1. `serde_json`'s `arbitrary_precision` is ON. It is named in this
+    ///    crate's `Cargo.toml` precisely so this holds everywhere; before
+    ///    that it was on in `egret-bin` and off under `-p egret-workflow`,
+    ///    and the difference silently changed what 15 green tests meant. If
+    ///    the declaration is ever removed, this fails **by name** instead of
+    ///    as a value mismatch three modules away.
+    /// 2. The sentinel is still spelled the way this module matches on it.
+    ///    [`ARBITRARY_PRECISION_TOKEN`] cannot be imported — `serde_json`'s
+    ///    own constant is `pub(crate) const TOKEN`
+    ///    (`serde_json-1.0.151/src/number.rs:18`) and no public item
+    ///    re-exports it, so `serde_json::value::TOKEN` does not exist. A
+    ///    copied string asserted against itself would prove nothing, so this
+    ///    drives a **real serializer** and reads the key back off it.
+    ///
+    /// # The instrument had to be changed to measure anything
+    ///
+    /// The first version of this probe was
+    /// `serde_json::to_string(&json!({"n": 2.5}))` and it answered `{"n":2.5}`
+    /// **with the feature on**: `serde_json`'s own serializer recognises its
+    /// own token and writes the number back out. So that probe passes
+    /// identically either way and proves nothing at all. The sentinel is only
+    /// visible to a **foreign** serializer — which is exactly the situation
+    /// the crate is in, and exactly why the bug existed.
+    #[test]
+    fn the_arbitrary_precision_sentinel_is_still_spelled_this_way() {
+        // minijinja is the foreign serializer, and `serde_json::to_string`
+        // over the RESULT only ever sees a plain map by then.
+        let through_a_foreign_serializer =
+            serde_json::to_string(&MjValue::from_serialize(serde_json::json!(2.5)))
+                .expect("the minijinja value serialises");
+        assert!(
+            through_a_foreign_serializer.contains(ARBITRARY_PRECISION_TOKEN),
+            "serde_json did not emit the arbitrary_precision sentinel. Either the feature is \
+             OFF for this build -- check `serde_json` in crates/egret-workflow/Cargo.toml, and \
+             see `OrderedJsonVisitor::visit_f64` for what that costs -- or serde_json has \
+             renamed the token and `ARBITRARY_PRECISION_TOKEN` must follow. \
+             Got: {through_a_foreign_serializer}"
+        );
+
+        // And the decode itself, through the parser rather than a hand-built
+        // `MapAccess`: floats keep their value and integers past `u64::MAX`
+        // keep their digits.
+        assert_eq!(render_ordered("{{ f }}", r#"{"f": 2.5}"#).unwrap(), "2.5");
+        assert_eq!(
+            render_ordered("{{ v }}", r#"{"v": 18446744073709551616}"#).unwrap(),
+            "18446744073709551616"
+        );
+        // `context-integer-past-u64-classname`: Jackson says `BigInteger`,
+        // and it used to say `java.lang.Double` here because the digits were
+        // gone before any visitor ran.
+        assert_eq!(
+            render_ordered("{{ v | className }}", r#"{"v": 18446744073709551616}"#).unwrap(),
+            "java.math.BigInteger"
+        );
+        // A real author key that merely resembles the sentinel is not one:
+        // the sentinel is a ONE-entry map, and a second entry is a map.
+        assert_eq!(
+            render_ordered(
+                "{{ m }}",
+                r#"{"m": {"$serde_json::private::Number": "1.0", "z": 2}}"#
+            )
+            .unwrap(),
+            r#"{"$serde_json::private::Number":"1.0","z":2}"#
         );
     }
 

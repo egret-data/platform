@@ -45,5 +45,10 @@ mod jqsandbox;
 pub mod rewrite;
 mod yamlfmt;
 
-pub use env::{environment, render_str, RenderContext, RenderError};
+// `environment` is deliberately NOT re-exported: it is `pub(crate)` and is
+// the unbounded half of the renderer (no output cap, no 128 MiB render
+// thread, no rewrite, no `{% raw %}` protection, no context-scope
+// sentinel). `render_str` is the supported entry point -- see
+// `env::environment`'s doc for the measured table.
+pub use env::{render_str, RenderContext, RenderError};
 pub use rewrite::{rewrite, RewriteError};

@@ -91,6 +91,39 @@ jobs:
       # "pre-existing, environmental" for an entire programme because nobody could
       # see past the first red binary. A red run costs longer; a red run that
       # answers one question at a time costs weeks.
+      # BEFORE the workspace run, because it is the fast, NAMED version of a
+      # failure the workspace run reports as a mystery — and because the
+      # command developers actually iterate with cannot see it at all.
+      #
+      # Cargo unifies features across the packages a build SELECTS. So
+      # `cargo test -p egret-workflow` and the shipping binary can compile the
+      # same crate against different dependencies. Measured: `starlark` 0.14.2
+      # turns on `serde_json/arbitrary_precision`, `egret-dataapi` depends on
+      # starlark, and `egret-bin` pulls `egret-dataapi` and `egret-workflow`
+      # together — so the feature was ON in everything that ships and OFF in
+      # `-p egret-workflow`. That feature changes how serde_json hands numbers
+      # to a `Visitor`, every float becoming a one-entry map under a private
+      # sentinel key, so egret-workflow rendered
+      # `{"$serde_json::private::Number":"1.0"}` where it meant `1.0`. 13 lib
+      # tests and both differential-oracle tests were red in the only
+      # configuration that ships, while the single-crate command their authors
+      # ran all day was green.
+      #
+      # Selecting `-p egret-bin` alongside is what makes this the SHIPPING
+      # resolution rather than some other one; `--lib --test oracle` then
+      # limits it to three test binaries, so it costs the dependency build and
+      # almost nothing else. `cargo test --workspace` below would also have
+      # caught this particular instance — it is not a substitute for this step,
+      # because it reports a broken test rather than a moved resolution, and
+      # because a drift no current test happens to observe is invisible to it.
+      #
+      # `crates/egret-workflow/Cargo.toml` now names the feature so the two
+      # resolutions agree, and
+      # `runners::env::tests::the_arbitrary_precision_sentinel_is_still_spelled_this_way`
+      # fails by name if that declaration is ever dropped. This step is what
+      # covers the NEXT feature, which will be a different one.
+      - name: egret-workflow under the shipping feature resolution
+        run: cargo test -p egret-bin -p egret-workflow --lib --test oracle --no-fail-fast
       - name: Test
         run: cargo test --workspace --no-fail-fast
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a

@@ -11,6 +11,11 @@
 # W2 Task 4 banked 21 (its whole filter batch) and added permanent divergences
 # of its own, all documented below: 57, then 59 after fix round 2, then 60
 # after fix round 3 recorded the null-literal-versus-typo divergence.
+#
+# 128 today. The merge gate banked the last three -- the
+# `context-integer-past-u64` family -- and it banked them by reading
+# `cargo tree` rather than by porting anything: see the note above group 1 of
+# "W2 Task 6, fix round 2".
 
 
 # Pebble THROWS on a String/Number mix; minijinja coerces. Recorded divergence, task-3-report.md S4.
@@ -330,18 +335,22 @@ filter-jq-user-definition
 
 # --- W2 Task 6, fix round 2. Four more, in two groups.
 
-# 1. A context integer wider than 64 bits loses its digits, and NOT in a
-# filter: `serde_json` without `arbitrary_precision` converts such a literal
-# to an `f64` inside its own parser, before any `Visitor` method is called, so
-# nothing in this crate can see the digits. Jackson reads it as a
-# `BigInteger`. The fix is a workspace-wide Cargo feature -- features are
-# additive across the graph, so turning it on changes `serde_json::Value`'s
-# number representation for every crate here -- and that is not W2's call.
-# `runners::filters`' `number(type='BIGINTEGER')` path is byte-exact; this is
-# the CONTEXT path.
-context-integer-past-u64
-context-integer-past-u64-tojson
-context-integer-past-u64-classname
+# 1. BANKED at the merge gate, and the reason it sat here for five tasks is
+# worth keeping. The three `context-integer-past-u64` entries used to live on
+# this line, recorded as permanent: a context integer wider than 64 bits lost
+# its digits because `serde_json` WITHOUT `arbitrary_precision` narrows such a
+# literal to an `f64` inside its own parser, before any `Visitor` method is
+# called. The note said the fix was that Cargo feature, that features are
+# additive across the graph, and that turning it on "is not W2's call".
+#
+# The feature was ALREADY ON in every build this crate ships in -- starlark
+# 0.14.2 enables it, egret-dataapi depends on starlark, and egret-bin pulls
+# egret-dataapi and egret-workflow together. The note reasoned about turning a
+# feature on and never ran `cargo tree` to ask whether it was already on. What
+# the divergence actually measured, for five tasks, was the difference between
+# `cargo test -p egret-workflow` and the binary; declaring the feature in this
+# crate's Cargo.toml and teaching both readers the parser's number sentinel
+# banked all three at once. See `runners::env::OrderedJsonVisitor::visit_map`.
 
 # 2. `(?U)` (UNICODE_CHARACTER_CLASS) redefines the whole POSIX family --
 # \p{Alpha}, \p{Alnum}, \p{Graph}, \p{Print}, \p{Upper}, \p{Lower},
@@ -397,9 +406,16 @@ function-yaml-off-is-a-boolean
 # fact `runners::functions::BoundedVisitor::visit_f64` documents.
 function-yaml-huge-exponent
 
-# DELIBERATE: `serde_json` rejects an out-of-range exponent in its own parser,
-# where Jackson answers `Infinity`. Same layer as the context-integer-past-u64
-# entries -- a dependency's number model, not this crate's.
+# DELIBERATE, and the REASON changed at the merge gate. Kestra answers
+# `Infinity`; egret refuses. It used to refuse because `serde_json` rejected an
+# out-of-range exponent in its own parser. With `arbitrary_precision` declared
+# it does NOT -- it keeps the literal's text and hands it over -- so the
+# refusal is now this crate's own, in `runners::functions::finite_or_malformed`
+# via the sentinel branch of `BoundedVisitor::visit_map`. Same outcome, our
+# layer instead of a dependency's, and
+# `a_huge_exponent_is_refused_by_this_crate_now_and_not_by_serde_json` is what
+# fails if it moves again. NOT the same layer as the context-integer-past-u64
+# entries any more -- those are banked.
 function-fromjson-huge-exponent
 
 # DELIBERATE: Jackson's YAMLParser does NOT resolve an alias -- `b: *x` comes

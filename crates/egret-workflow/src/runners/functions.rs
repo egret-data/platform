@@ -125,7 +125,7 @@ use rand::RngCore;
 
 use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 
-use super::env::OrderedMap;
+use super::env::{self, OrderedMap};
 use super::filters::{is_java_null, java_class_name, pebble_error, Args, DateArgs};
 use super::ionfmt::read_ion;
 use super::javafmt::{parse_iso, Zdt, Zone};
@@ -484,19 +484,7 @@ impl<'de> Visitor<'de> for BoundedVisitor {
     /// text does not reach a `visit_f64`.
     /// `function-yaml-refuses-what-its-own-writer-wrote` is the entry.
     fn visit_f64<E: de::Error>(self, v: f64) -> Result<MjValue, E> {
-        if !v.is_finite() {
-            return Err(de::Error::custom(format!(
-                "Malformed numeric value '{}'",
-                if v.is_nan() {
-                    ".nan"
-                } else if v > 0.0 {
-                    ".inf"
-                } else {
-                    "-.inf"
-                }
-            )));
-        }
-        Ok(MjValue::from(v))
+        finite_or_malformed(v)
     }
 
     fn visit_str<E: de::Error>(self, v: &str) -> Result<MjValue, E> {
@@ -514,14 +502,82 @@ impl<'de> Visitor<'de> for BoundedVisitor {
     /// Insertion order, not sorted: `{"b":1,"a":2}` reads back `{"b":1,"a":2}`
     /// through both readers, which `function-fromjson-key-order` and
     /// `function-yaml-key-order` pin.
+    ///
+    /// **And a number, when the map came from `serde_json`.** This is the
+    /// second of the crate's two readers that `arbitrary_precision` reroutes
+    /// — `env::OrderedJsonVisitor::visit_map` is the other, and its
+    /// doc carries the mechanism. `fromJson` is a JSON reader, so with the
+    /// feature on every float and every past-64-bit integer in its input
+    /// arrives here as a one-entry map under
+    /// `env::ARBITRARY_PRECISION_TOKEN`;
+    /// `function-fromjson-round-trip` is the entry that caught it. The `yaml`
+    /// reader shares this visitor and is unaffected — `serde_norway` has no
+    /// such feature and calls [`BoundedVisitor::visit_f64`] directly.
+    ///
+    /// Recognition is narrow and falls back rather than failing — see
+    /// `env::OrderedJsonVisitor::visit_map`, which carries the
+    /// reasoning and the test that forced it.
+    ///
+    /// One thing is not shared with that method: **a sentinel costs no
+    /// depth.** It is a scalar wearing a map's shape, so its payload is read
+    /// at this map's own depth. Seeding it one level down would make every
+    /// float in a document cost a level of [`MAX_VALUE_DEPTH`], quietly
+    /// moving a bound the crate's writers depend on.
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<MjValue, A::Error> {
         let mut entries: Vec<(String, MjValue)> = Vec::new();
+
         while let Some(key) = map.next_key::<String>()? {
-            let value = map.next_value_seed(Depth(self.0 + 1))?;
+            let sentinel = entries.is_empty() && key == env::ARBITRARY_PRECISION_TOKEN;
+            let depth = if sentinel { self.0 } else { self.0 + 1 };
+            let value = map.next_value_seed(Depth(depth))?;
             entries.push((key, value));
         }
+
+        if let [(key, payload)] = entries.as_slice() {
+            if key == env::ARBITRARY_PRECISION_TOKEN {
+                if let Some(literal) = payload.as_str() {
+                    if let Some(exact) = env::integer_from_literal(literal) {
+                        return Ok(exact);
+                    }
+                    // Not an integer, so if it is a number at all it is a
+                    // float — and it goes through the same non-finite refusal
+                    // `visit_f64` applies, because `serde_json` no longer
+                    // rejects an out-of-range exponent in its own parser once
+                    // `arbitrary_precision` is on. `1e400` reaches this line
+                    // as five characters. See
+                    // `a_huge_exponent_is_refused_by_this_crate_now_and_not_by_serde_json`.
+                    if let Ok(float) = literal.parse::<f64>() {
+                        return finite_or_malformed(float);
+                    }
+                }
+            }
+        }
+
         Ok(MjValue::from_object(OrderedMap::new(entries)))
     }
+}
+
+/// A finite `f64` as a value; a non-finite one as Jackson's own complaint.
+///
+/// Extracted from [`BoundedVisitor::visit_f64`] so the
+/// `arbitrary_precision` sentinel path in
+/// [`BoundedVisitor::visit_map`] applies the identical rule — see that
+/// method's doc. The message names the canonical spelling, so `.Inf` and
+/// `.NaN` are reported as `.inf` and `.nan`.
+fn finite_or_malformed<E: de::Error>(v: f64) -> Result<MjValue, E> {
+    if !v.is_finite() {
+        return Err(de::Error::custom(format!(
+            "Malformed numeric value '{}'",
+            if v.is_nan() {
+                ".nan"
+            } else if v > 0.0 {
+                ".inf"
+            } else {
+                "-.inf"
+            }
+        )));
+    }
+    Ok(MjValue::from(v))
 }
 
 // ---------------------------------------------------------------------------
@@ -3496,6 +3552,68 @@ mod tests {
             message.contains("nests more than 128 levels deep"),
             "{message}"
         );
+    }
+
+    /// `fromJson` decodes `serde_json`'s `arbitrary_precision` sentinel.
+    ///
+    /// The feature is declared by this crate's `Cargo.toml` because the
+    /// shipping binary resolves it on regardless (see
+    /// `env::OrderedJsonVisitor::visit_map`), and with it on **every** float
+    /// and every past-64-bit integer reaches `BoundedVisitor` as a one-entry
+    /// map rather than through `visit_i64`/`visit_u64`/`visit_f64`. Without
+    /// the decode, `fromJson('2.5')` answers
+    /// `{"$serde_json::private::Number":"2.5"}`.
+    ///
+    /// Deliberately asserted through the real `fromJson` rather than by
+    /// calling `visit_map` directly: the point is what the parser hands us,
+    /// and a hand-built `MapAccess` would prove nothing about that.
+    #[test]
+    fn fromjson_decodes_the_arbitrary_precision_sentinel() {
+        // Floats, which are the whole of the sentinel's traffic in practice.
+        assert_eq!(ok("{{ fromJson(json='2.5') }}"), "2.5");
+        assert_eq!(
+            ok("{{ fromJson(json='[1, 2.5, 1.0e100]') }}"),
+            "[1,2.5,1.0E100]"
+        );
+        // An integer past `u64::MAX`: exact, which is the point of the
+        // widest-first ladder in `env::integer_from_literal`.
+        assert_eq!(
+            ok("{{ fromJson(json='18446744073709551616') }}"),
+            "18446744073709551616"
+        );
+        // A map is still a map, and a key that merely LOOKS numeric is not a
+        // sentinel: the sentinel is one entry under that exact key.
+        assert_eq!(
+            ok("{{ fromJson(json='{\"b\": 2.5, \"a\": 1}') }}"),
+            "{\"b\":2.5,\"a\":1}"
+        );
+    }
+
+    /// **`arbitrary_precision` moved this refusal from `serde_json` to us.**
+    ///
+    /// `oracle/baseline.txt`'s `function-fromjson-huge-exponent` used to be
+    /// justified as "`serde_json` rejects an out-of-range exponent in its own
+    /// parser". With the feature on it does not — it keeps the literal's text
+    /// and hands it over — so the refusal is now
+    /// `finite_or_malformed`, reached from the sentinel branch of
+    /// `BoundedVisitor::visit_map`. The entry stays baselined
+    /// (Kestra answers `Infinity`), but for a different reason, and this is
+    /// what fails if that reason changes again.
+    #[test]
+    fn a_huge_exponent_is_refused_by_this_crate_now_and_not_by_serde_json() {
+        let message = err("{{ fromJson(json='1e400') }}");
+        assert!(
+            message.contains("Malformed numeric value '.inf'"),
+            "{message}"
+        );
+        assert!(
+            err("{{ fromJson(json='-1e400') }}").contains("Malformed numeric value '-.inf'"),
+            "{}",
+            err("{{ fromJson(json='-1e400') }}")
+        );
+        // And the exponent that IS representable is still a value, so the
+        // assertion above is about non-finiteness and not about exponents.
+        assert_eq!(ok("{{ fromJson(json='1e300') }}"), "1.0E300");
     }
 
     /// The round trips F3 asked for, end to end: serialise with the filter
