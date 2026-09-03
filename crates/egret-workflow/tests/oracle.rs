@@ -203,7 +203,19 @@ fn shape_ok(id: &str, golden: &GoldenResult, actual: &Outcome) -> bool {
         "function-uuid" => value.len() == 36 && value.matches('-').count() == 4,
         "function-ksuid" => value.len() == 27,
         "function-nanoid" => value.len() == 21,
-        "function-id" => value.len() == 22,
+        // **Not `== 22`, and this is measured rather than relaxed.** `id()` is
+        // `FriendlyId`, which base-62-encodes a random UUIDv4 with **no
+        // padding**, so the digit count is `ceil(log62(value))`: `62^21` is
+        // 4.37e37 against a 2^128 = 3.40e38 space, so 12.8% of ids are 21
+        // characters and 0.2% are 20. The golden file's own earlier value was
+        // `iUBruItK7qj9tMOMNVPAr` -- 21 characters, minted by Kestra -- so
+        // `== 22` would have failed about one run in eight against a faithful
+        // port. What is actually guaranteed is the alphabet and the ceiling.
+        "function-id" => {
+            !value.is_empty()
+                && value.len() <= 22
+                && value.bytes().all(|b| b.is_ascii_alphanumeric())
+        }
         // A timestamp and a base64 blob: pin only that they are non-empty, so
         // this never turns into a second, weaker copy of the real comparison.
         "function-now" | "function-encrypt" => !value.is_empty(),
@@ -472,6 +484,7 @@ fn declared_test_names() -> BTreeSet<String> {
     const SOURCES: &[&str] = &[
         include_str!("../src/runners/env.rs"),
         include_str!("../src/runners/filters.rs"),
+        include_str!("../src/runners/functions.rs"),
         include_str!("../src/runners/ionfmt.rs"),
         include_str!("../src/runners/javafmt.rs"),
         include_str!("../src/runners/javare.rs"),
@@ -550,7 +563,7 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    assert_eq!(on_disk.len(), 8, "a module was added or removed");
+    assert_eq!(on_disk.len(), 9, "a module was added or removed");
 }
 
 #[test]

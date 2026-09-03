@@ -398,6 +398,17 @@ pub(super) struct Zdt {
 }
 
 impl Zdt {
+    /// The wall clock this value carries — `ZonedDateTime.toLocalDateTime()`.
+    ///
+    /// W2 Task 7's calendar functions (`dayOfWeek`, `isWeekend`,
+    /// `isLastWorkingDay`, …) are `DateUtils.parseLocalDate(...)` followed by
+    /// a question about the LOCAL date, never about the instant, so they read
+    /// this rather than re-zoning: `2024-01-06T14:30:00Z` is a Saturday
+    /// because its own wall clock says so, whatever zone is asked about it.
+    pub(super) fn local(&self) -> NaiveDateTime {
+        self.local
+    }
+
     pub(super) fn new(local: NaiveDateTime, zone: Zone) -> Self {
         let (local, offset) = zone.resolve_local(local);
         Zdt {

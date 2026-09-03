@@ -46,7 +46,8 @@
 
 use minijinja::value::{Value as MjValue, ValueKind};
 
-use super::env::write_java_double;
+use super::env::{write_java_double, OrderedMap};
+use super::jqsandbox;
 
 /// Writes `value` as Ion text, compact, into `out`.
 pub(super) fn write_ion(out: &mut String, value: &MjValue) {
@@ -241,6 +242,428 @@ fn is_ion_identifier(s: &str) -> bool {
         }
         Some(_) => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The reader (W2 Task 7 — `fromIon`)
+// ---------------------------------------------------------------------------
+
+/// Reads an Ion **text** stream into one `minijinja::Value` per top-level
+/// value — `FileSerde.readAll(InputStream)`, which is a Jackson
+/// `MappingIterator` over `JacksonMapper.ofIon()`.
+///
+/// # Why this is hand-written too
+///
+/// The module doc above explains why `ion-rs` cannot produce Kestra's *text*,
+/// and that argument is about the writer only. The reader is here for a
+/// different reason and it is worth stating rather than inheriting: this
+/// workspace builds offline against a vendored registry, `ion-rs` is not in
+/// it, and a reader is the smaller half of the format — Kestra's own writer,
+/// twenty lines above, defines the surface that has to round-trip.
+///
+/// # What it does not read, and why that is a refusal rather than a guess
+///
+/// S-expressions, blobs, clobs and timestamps have no `minijinja::Value` that
+/// means the same thing, and `write_ion` never emits one, so nothing egret
+/// writes can produce them. Each is refused **by name** rather than
+/// approximated — the same call `javafmt` makes for the three CLDR pattern
+/// letters. A timestamp in particular would otherwise become a string, which
+/// reads back as a different type with no error anywhere.
+///
+/// # Bounded, because a struct nests
+///
+/// `[[[[…` is author-controlled input and this is a recursive descent over
+/// it, on the render thread. The bound is [`jqsandbox::MAX_VALUE_DEPTH`], the
+/// crate's one value-depth invariant, rather than a fifth number: *no value
+/// anywhere in this crate is more than `MAX_VALUE_DEPTH` deep*.
+pub(super) fn read_ion(text: &str) -> Result<Vec<MjValue>, String> {
+    let mut reader = IonReader {
+        rest: text,
+        depth: 0,
+    };
+    let mut values = Vec::new();
+    reader.skip_ignorable();
+    // `$ion_1_0` is the version marker, not a value.
+    if let Some(rest) = reader.rest.strip_prefix("$ion_1_0") {
+        if !starts_identifier_char(rest) {
+            reader.rest = rest;
+            reader.skip_ignorable();
+        }
+    }
+    while !reader.rest.is_empty() {
+        values.push(reader.value()?);
+        reader.skip_ignorable();
+    }
+    Ok(values)
+}
+
+/// Does `s` begin with a character that would continue an identifier?
+fn starts_identifier_char(s: &str) -> bool {
+    s.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '$' || c == '_')
+}
+
+struct IonReader<'a> {
+    rest: &'a str,
+    depth: usize,
+}
+
+impl IonReader<'_> {
+    fn fail<T>(&self, what: &str) -> Result<T, String> {
+        Err(what.to_string())
+    }
+
+    /// Whitespace, `//` line comments and `/* */` block comments.
+    fn skip_ignorable(&mut self) {
+        loop {
+            let trimmed = self.rest.trim_start();
+            if let Some(after) = trimmed.strip_prefix("//") {
+                self.rest = after.find('\n').map_or("", |at| &after[at..]);
+                continue;
+            }
+            if let Some(after) = trimmed.strip_prefix("/*") {
+                self.rest = after.find("*/").map_or("", |at| &after[at + 2..]);
+                continue;
+            }
+            self.rest = trimmed;
+            return;
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.rest.chars().next()
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.rest = &self.rest[c.len_utf8()..];
+        Some(c)
+    }
+
+    fn value(&mut self) -> Result<MjValue, String> {
+        // Annotations: `sym::sym::value`. Jackson's `IonParser` drops them,
+        // so the value they decorate is what comes back.
+        loop {
+            let save = self.rest;
+            let Ok(Some(_)) = self.symbol_like() else {
+                self.rest = save;
+                break;
+            };
+            let after = self.rest.trim_start();
+            match after.strip_prefix("::") {
+                Some(rest) => {
+                    self.rest = rest;
+                    self.skip_ignorable();
+                }
+                None => {
+                    self.rest = save;
+                    break;
+                }
+            }
+        }
+
+        match self.peek() {
+            None => self.fail("unexpected end of ion"),
+            Some('[') => self.list(),
+            Some('{') => {
+                if self.rest.starts_with("{{") {
+                    return self.fail("egret does not read an ion blob or clob");
+                }
+                self.struct_()
+            }
+            Some('(') => self.fail("egret does not read an ion s-expression"),
+            Some('"') | Some('\'') => {
+                let text = self.string_or_symbol()?;
+                Ok(MjValue::from(text))
+            }
+            Some(_) => self.bare(),
+        }
+    }
+
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > jqsandbox::MAX_VALUE_DEPTH {
+            return Err(format!(
+                "the ion value nests more than {} levels deep, which is what \
+                 every writer in this crate can walk",
+                jqsandbox::MAX_VALUE_DEPTH
+            ));
+        }
+        Ok(())
+    }
+
+    fn list(&mut self) -> Result<MjValue, String> {
+        self.enter()?;
+        let _ = self.bump();
+        let mut items = Vec::new();
+        loop {
+            self.skip_ignorable();
+            match self.peek() {
+                None => return self.fail("unclosed ion list"),
+                Some(']') => {
+                    let _ = self.bump();
+                    break;
+                }
+                Some(',') => {
+                    let _ = self.bump();
+                    continue;
+                }
+                Some(_) => items.push(self.value()?),
+            }
+            self.skip_ignorable();
+            match self.peek() {
+                Some(',') => {
+                    let _ = self.bump();
+                }
+                Some(']') => {
+                    let _ = self.bump();
+                    break;
+                }
+                _ => return self.fail("unclosed ion list"),
+            }
+        }
+        self.depth -= 1;
+        Ok(MjValue::from(items))
+    }
+
+    fn struct_(&mut self) -> Result<MjValue, String> {
+        self.enter()?;
+        let _ = self.bump();
+        let mut entries: Vec<(String, MjValue)> = Vec::new();
+        loop {
+            self.skip_ignorable();
+            match self.peek() {
+                None => return self.fail("unclosed ion struct"),
+                Some('}') => {
+                    let _ = self.bump();
+                    break;
+                }
+                Some(',') => {
+                    let _ = self.bump();
+                    continue;
+                }
+                Some(_) => {}
+            }
+            let Some(field) = self.symbol_like()? else {
+                return self.fail("an ion field name must be a symbol or a string");
+            };
+            self.skip_ignorable();
+            if self.bump() != Some(':') {
+                return self.fail("an ion field name must be followed by ':'");
+            }
+            self.skip_ignorable();
+            let value = self.value()?;
+            // Jackson keeps the LAST of two same-named fields, the way a
+            // `Map.put` does.
+            match entries.iter_mut().find(|(key, _)| *key == field) {
+                Some(slot) => slot.1 = value,
+                None => entries.push((field, value)),
+            }
+            self.skip_ignorable();
+            match self.peek() {
+                Some(',') => {
+                    let _ = self.bump();
+                }
+                Some('}') => {
+                    let _ = self.bump();
+                    break;
+                }
+                _ => return self.fail("unclosed ion struct"),
+            }
+        }
+        self.depth -= 1;
+        Ok(MjValue::from_object(OrderedMap::new(entries)))
+    }
+
+    /// A field name or an annotation: a quoted symbol, a string, or an
+    /// identifier. `None` means the cursor is not on one at all.
+    fn symbol_like(&mut self) -> Result<Option<String>, String> {
+        match self.peek() {
+            Some('\'') | Some('"') => Ok(Some(self.string_or_symbol()?)),
+            Some(c) if c.is_ascii_alphabetic() || c == '$' || c == '_' => {
+                let end = self
+                    .rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '$' || c == '_'))
+                    .unwrap_or(self.rest.len());
+                let name = self.rest[..end].to_string();
+                self.rest = &self.rest[end..];
+                Ok(Some(name))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `"…"`, `'…'` and the triple-quoted long form, which concatenates when
+    /// two of them are adjacent.
+    fn string_or_symbol(&mut self) -> Result<String, String> {
+        if self.rest.starts_with("'''") {
+            let mut out = String::new();
+            loop {
+                self.rest = &self.rest[3..];
+                out.push_str(&self.quoted_body("'''")?);
+                let save = self.rest;
+                self.skip_ignorable();
+                if !self.rest.starts_with("'''") {
+                    self.rest = save;
+                    return Ok(out);
+                }
+            }
+        }
+        let quote = match self.bump() {
+            Some('"') => "\"",
+            Some('\'') => "'",
+            _ => return self.fail("expected an ion string"),
+        };
+        self.quoted_body(quote)
+    }
+
+    /// The body of a quoted form, up to the unescaped `terminator`.
+    fn quoted_body(&mut self, terminator: &str) -> Result<String, String> {
+        let mut out = String::new();
+        loop {
+            if self.rest.starts_with(terminator) {
+                self.rest = &self.rest[terminator.len()..];
+                return Ok(out);
+            }
+            let Some(c) = self.bump() else {
+                return self.fail("unterminated ion string");
+            };
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            let Some(escape) = self.bump() else {
+                return self.fail("unterminated ion escape");
+            };
+            match escape {
+                '0' => out.push('\0'),
+                'a' => out.push('\u{7}'),
+                'b' => out.push('\u{8}'),
+                't' => out.push('\t'),
+                'n' => out.push('\n'),
+                'f' => out.push('\u{c}'),
+                'r' => out.push('\r'),
+                'v' => out.push('\u{b}'),
+                '"' | '\'' | '?' | '\\' | '/' => out.push(escape),
+                // A backslash-newline is a line continuation: it produces
+                // nothing at all.
+                '\n' => {}
+                'x' => out.push(self.hex_escape(2)?),
+                'u' => out.push(self.hex_escape(4)?),
+                'U' => out.push(self.hex_escape(8)?),
+                other => return Err(format!("unknown ion escape \\{other}")),
+            }
+        }
+    }
+
+    fn hex_escape(&mut self, digits: usize) -> Result<char, String> {
+        if self.rest.len() < digits || !self.rest.is_char_boundary(digits) {
+            return self.fail("truncated ion hex escape");
+        }
+        let (hex, rest) = self.rest.split_at(digits);
+        self.rest = rest;
+        u32::from_str_radix(hex, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .ok_or_else(|| format!("invalid ion hex escape \\x{hex}"))
+    }
+
+    /// `null`, `null.<type>`, `true`, `false`, a number, a special float, or
+    /// a bare symbol.
+    fn bare(&mut self) -> Result<MjValue, String> {
+        let end = self
+            .rest
+            .find(|c: char| {
+                c.is_whitespace()
+                    || matches!(c, ',' | ']' | '}' | ')' | '(' | '[' | '{' | '\'' | '"')
+            })
+            .unwrap_or(self.rest.len());
+        let token = &self.rest[..end];
+        if token.is_empty() {
+            return self.fail("unexpected character in ion");
+        }
+        self.rest = &self.rest[end..];
+
+        if token == "null" || token.starts_with("null.") {
+            return Ok(MjValue::from(()));
+        }
+        if token == "true" {
+            return Ok(MjValue::from(true));
+        }
+        if token == "false" {
+            return Ok(MjValue::from(false));
+        }
+        match token {
+            "nan" => return Ok(MjValue::from(f64::NAN)),
+            "+inf" => return Ok(MjValue::from(f64::INFINITY)),
+            "-inf" => return Ok(MjValue::from(f64::NEG_INFINITY)),
+            _ => {}
+        }
+        if let Some(value) = ion_number(token) {
+            return Ok(value);
+        }
+        // A timestamp is a real Ion type with no `minijinja::Value` that
+        // means the same thing, and reading it as text would change its type
+        // silently. Named rather than guessed.
+        if is_ion_timestamp(token) {
+            return Err(format!(
+                "egret does not read the ion timestamp {token}; there is no \
+                 value in this renderer that means the same thing"
+            ));
+        }
+        if is_ion_identifier(token) || token.starts_with('$') {
+            return Ok(MjValue::from(token.to_string()));
+        }
+        Err(format!("unexpected token in ion: {token}"))
+    }
+}
+
+/// `2024-01-15`, `2024-01-15T…`, `2024T`, `2024-01T` — Ion's timestamp shapes
+/// all start with four digits and a `-` or a `T`.
+fn is_ion_timestamp(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() >= 5
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && (bytes[4] == b'-' || bytes[4] == b'T')
+}
+
+/// An Ion int, decimal or float, or `None` if the token is not a number.
+///
+/// The three families are separated by their exponent letter, not by their
+/// shape: `1d3` is a **decimal** and `1e3` is a float, and Ion writes a
+/// decimal's exponent with `d` for exactly that reason (which is why
+/// `write_ion` above spells `BigDecimal`'s `E` as `d`).
+fn ion_number(token: &str) -> Option<MjValue> {
+    let (sign, digits) = match token.strip_prefix('-') {
+        Some(rest) => (-1i64, rest),
+        None => (1i64, token.strip_prefix('+').unwrap_or(token)),
+    };
+    if digits.is_empty() || !digits.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    // Radix forms. Ion allows `_` as a digit separator in every int form.
+    for (prefix, radix) in [("0x", 16), ("0X", 16), ("0b", 2), ("0B", 2)] {
+        if let Some(rest) = digits.strip_prefix(prefix) {
+            let cleaned = rest.replace('_', "");
+            if cleaned.is_empty() {
+                return None;
+            }
+            let magnitude = i64::from_str_radix(&cleaned, radix).ok()?;
+            return Some(MjValue::from(sign * magnitude));
+        }
+    }
+    let cleaned = digits.replace('_', "");
+    if cleaned.bytes().all(|b| b.is_ascii_digit()) {
+        let magnitude: i64 = cleaned.parse().ok()?;
+        return Some(MjValue::from(sign * magnitude));
+    }
+    // A decimal's `d`/`D` exponent, and the bare-`.` form Ion also calls a
+    // decimal. Both become an `f64` here, which is the same representation
+    // `write_ion`'s float branch reads back.
+    let normalised = cleaned.replacen(['d', 'D'], "e", 1);
+    let value: f64 = normalised.parse().ok()?;
+    Some(MjValue::from(sign as f64 * value))
 }
 
 #[cfg(test)]

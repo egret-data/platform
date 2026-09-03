@@ -170,7 +170,7 @@ pub(super) fn register(env: &mut Environment<'static>) {
 /// `date(format='yyyy-MM-dd')` are the same call. minijinja keeps the two
 /// apart, so this puts them back together: a positional argument at index *i*
 /// is the *i*-th declared name.
-struct Args {
+pub(super) struct Args {
     positional: Vec<MjValue>,
     named: Vec<(String, MjValue)>,
 }
@@ -181,7 +181,7 @@ impl Args {
     /// minijinja marks the kwargs map with [`MjValue::is_kwargs`] and passes
     /// it as the last value, so this never has to guess whether a final map
     /// argument was a map or a set of keywords.
-    fn new(rest: Rest<MjValue>) -> Self {
+    pub(super) fn new(rest: Rest<MjValue>) -> Self {
         let mut positional: Vec<MjValue> = rest.0;
         let mut named = Vec::new();
 
@@ -205,7 +205,7 @@ impl Args {
     /// Mirrors Pebble's `args.containsKey(name)`: a name that was not supplied
     /// is `None`, and every Kestra filter in this module tests exactly that
     /// before reading it.
-    fn get(&self, name: &str, index: usize) -> Option<MjValue> {
+    pub(super) fn get(&self, name: &str, index: usize) -> Option<MjValue> {
         self.named
             .iter()
             .find(|(key, _)| key == name)
@@ -222,7 +222,7 @@ impl Args {
 /// these paths are `compare: "error-class"` — but keeping the wording means
 /// a flow author reading an egret error reads the same sentence they would
 /// have read from Kestra.
-fn pebble_error(message: impl Into<String>) -> MjError {
+pub(super) fn pebble_error(message: impl Into<String>) -> MjError {
     MjError::new(ErrorKind::InvalidOperation, message.into())
 }
 
@@ -257,7 +257,7 @@ fn pebble_error(message: impl Into<String>) -> MjError {
 /// `super::env::kestra_is_in` is deliberately different: it is a *function*,
 /// its operands are not filter inputs, and returning the undefined unchanged
 /// is what keeps a typo inside an `isIn` from silently deciding a branch.
-fn is_java_null(value: &MjValue) -> bool {
+pub(super) fn is_java_null(value: &MjValue) -> bool {
     value.is_none() || value.is_undefined()
 }
 
@@ -292,7 +292,7 @@ fn is_java_null(value: &MjValue) -> bool {
 /// stop the result being usable as a number, which is the filter's purpose.
 /// `filter-classname-of-long` and `filter-classname-of-float` are baselined
 /// with that reason.
-fn java_class_name(value: &MjValue) -> String {
+pub(super) fn java_class_name(value: &MjValue) -> String {
     // Checked before `kind()`, because a `BigNumber` is `ValueKind::Plain`
     // and would otherwise land in the catch-all as `java.lang.Object`. It
     // already knows which of the two Java classes it is; the first cut of
@@ -986,7 +986,7 @@ fn escape_value(value: &MjValue, args: &Args) -> Result<MjValue, MjError> {
         for (key, item) in entries {
             out.push((key, escape_value(&item, args)?));
         }
-        return Ok(MjValue::from_object(OrderedMap(out)));
+        return Ok(MjValue::from_object(OrderedMap::new(out)));
     }
     if let Some(items) = as_list(value) {
         let mut out = Vec::with_capacity(items.len());
@@ -1865,7 +1865,7 @@ fn hash_with(value: &MjValue, digest: impl Fn(&[u8]) -> String) -> Result<MjValu
 /// `base` is where that shared block starts in the filter's own argument list:
 /// 0 for `date`, 2 for `dateAdd`. The `timestamp*` filters declare only
 /// `[timeZone, existingFormat]` and build this by hand.
-struct DateArgs {
+pub(super) struct DateArgs {
     format: String,
     zone: Zone,
     existing_format: Option<String>,
@@ -1873,7 +1873,7 @@ struct DateArgs {
 }
 
 impl DateArgs {
-    fn read(args: &Args, base: usize) -> Result<Self, MjError> {
+    pub(super) fn read(args: &Args, base: usize) -> Result<Self, MjError> {
         // `args.containsKey("format") ? (String) args.get("format") : "iso"`.
         // A *present but null* `format` is not the default: it reaches
         // `DateTimeFormatter.ofPattern(null)`, which is an NPE whose message
@@ -1899,7 +1899,7 @@ impl DateArgs {
     }
 
     /// `formatter(format).withLocale(locale).withZone(zone).format(zdt)`.
-    fn render(&self, zdt: &Zdt) -> Result<String, MjError> {
+    pub(super) fn render(&self, zdt: &Zdt) -> Result<String, MjError> {
         Format::resolve(&self.format)
             .and_then(|format| format.format(zdt, &self.zone, self.locale))
             .map_err(pebble_error)
@@ -1909,7 +1909,11 @@ impl DateArgs {
 /// `(String) args.get(name)` — absent and explicitly-null are the same thing
 /// here (Kestra uses a plain `get`, not `containsKey`), and a non-string is a
 /// `ClassCastException`.
-fn optional_string(args: &Args, name: &str, index: usize) -> Result<Option<String>, MjError> {
+pub(super) fn optional_string(
+    args: &Args,
+    name: &str,
+    index: usize,
+) -> Result<Option<String>, MjError> {
     match args.get(name, index) {
         None => Ok(None),
         Some(value) if is_java_null(&value) => Ok(None),
@@ -1918,7 +1922,7 @@ fn optional_string(args: &Args, name: &str, index: usize) -> Result<Option<Strin
 }
 
 /// Java's `(String) x` on an argument that is not one.
-fn cast_to_string(value: &MjValue) -> Result<String, MjError> {
+pub(super) fn cast_to_string(value: &MjValue) -> Result<String, MjError> {
     value.as_str().map(str::to_string).ok_or_else(|| {
         pebble_error(format!(
             "class {} cannot be cast to class java.lang.String",
@@ -2532,7 +2536,7 @@ fn jaq_value(value: JqOut) -> MjValue {
         JqOut::Float(f) => MjValue::from(f),
         JqOut::Text(s) => MjValue::from(s),
         JqOut::Arr(items) => MjValue::from(items.into_iter().map(jaq_value).collect::<Vec<_>>()),
-        JqOut::Obj(entries) => MjValue::from_object(OrderedMap(
+        JqOut::Obj(entries) => MjValue::from_object(OrderedMap::new(
             entries
                 .into_iter()
                 .map(|(k, v)| (k, jaq_value(v)))

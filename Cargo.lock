@@ -3665,6 +3665,7 @@ dependencies = [
  "jaq-std",
  "md-5 0.10.6",
  "minijinja",
+ "rand 0.8.7",
  "regex",
  "serde",
  "serde_json",

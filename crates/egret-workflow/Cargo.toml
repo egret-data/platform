@@ -132,6 +132,17 @@ jaq-core = "3.1"
 jaq-std = "3.0"
 jaq-json = "2.0"
 
+# W2 Task 7: `uuid()`, `id()`, `ksuid()`, `nanoId()` and `randomInt()` are
+# `SecureRandom` / `Math.random()` in Kestra. `rand` is already a workspace
+# dependency at 0.8, so this is a direct edge and no new crate; `getrandom`
+# under it is the same OS entropy source `SecureRandom` reads.
+#
+# `uuid` is deliberately NOT used for `uuid()`: the workspace entry carries
+# `["v4", "serde"]` and Kestra's function is a **v7**, so it would mean adding
+# a feature to a shared dependency for sixteen bytes of layout that this
+# module has to pin against the artifact's bytecode anyway.
+rand.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as

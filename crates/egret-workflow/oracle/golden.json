@@ -2175,7 +2175,7 @@
   "id" : "function-now",
   "expr" : "{{ now() }}",
   "context" : { },
-  "result" : "2026-09-03T09:22:08.921793+07:00"
+  "result" : "2026-09-03T10:28:39.388756+07:00"
 }, {
   "id" : "function-fromjson",
   "expr" : "{{ fromJson(json=raw) }}",
@@ -2226,7 +2226,7 @@
   "context" : {
     "k" : "vWgkeuVCYm5x3qwIU19oyzGfKFRlzLPlisR3dsVwhvY="
   },
-  "result" : "8uyNJQj82flZfuDYxGPlew93K+W72OTMQqx7BXzSxRhBmcDl8vz49Q=="
+  "result" : "Om9mUTGKm91WWqvOw0e2GLpVl39eAZMxfGNW3qrzYWlKoSDKO6socQ=="
 }, {
   "id" : "function-decrypt",
   "expr" : "{{ decrypt(key=k, encrypted=e) }}",
@@ -2260,17 +2260,17 @@
   "id" : "function-uuid",
   "expr" : "{{ uuid() }}",
   "context" : { },
-  "result" : "01a06512-d869-7d2b-93c3-35207353aa73"
+  "result" : "01a0654f-bc2e-77e1-9b39-3ee02840d8b4"
 }, {
   "id" : "function-id",
   "expr" : "{{ id() }}",
   "context" : { },
-  "result" : "iUBruItK7qj9tMOMNVPAr"
+  "result" : "6zfBXkzFz4TRUGLPVSm89M"
 }, {
   "id" : "function-ksuid",
   "expr" : "{{ ksuid() }}",
   "context" : { },
-  "result" : "3InZ83vTAshO5nJccamPFrCRfS8"
+  "result" : "3InhDThVW0J4SHBeVmNCFMk8Z6w"
 }, {
   "id" : "function-fromion",
   "expr" : "{{ fromIon(ion=i) }}",
@@ -2290,12 +2290,12 @@
   "id" : "function-randomint",
   "expr" : "{{ randomInt(lower=1, upper=10) }}",
   "context" : { },
-  "result" : "4"
+  "result" : "1"
 }, {
   "id" : "function-randomport",
   "expr" : "{{ randomPort() }}",
   "context" : { },
-  "result" : "60847"
+  "result" : "49200"
 }, {
   "id" : "function-fileexists",
   "expr" : "{{ fileExists(path='a/b.txt') }}",
@@ -2316,7 +2316,7 @@
   "id" : "function-nanoid",
   "expr" : "{{ nanoId() }}",
   "context" : { },
-  "result" : "_Fd5wjprRTwTpzn-qw1_e"
+  "result" : "aSMjDi-kiauGHwJd_5d-M"
 }, {
   "id" : "function-taskswithstate",
   "expr" : "{{ tasksWithState(state='FAILED') }}",
@@ -5662,4 +5662,784 @@
     "v" : 1
   },
   "result" : "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+}, {
+  "id" : "function-range-positional",
+  "expr" : "{{ range(1, 3) }}",
+  "context" : { },
+  "result" : "[1,2,3]"
+}, {
+  "id" : "function-range-increment",
+  "expr" : "{{ range(start=0, end=10, increment=3) }}",
+  "context" : { },
+  "result" : "[0,3,6,9]"
+}, {
+  "id" : "function-range-descending",
+  "expr" : "{{ range(start=3, end=1, increment=-1) }}",
+  "context" : { },
+  "result" : "[3,2,1]"
+}, {
+  "id" : "function-range-descending-without-a-negative-increment",
+  "expr" : "{{ range(start=3, end=1) }}",
+  "context" : { },
+  "result" : "[]"
+}, {
+  "id" : "function-range-single",
+  "expr" : "{{ range(start=2, end=2) }}",
+  "context" : { },
+  "result" : "[2]"
+}, {
+  "id" : "function-range-chars",
+  "expr" : "{{ range(start='a', end='e') }}",
+  "context" : { },
+  "result" : "[\"a\",\"b\",\"c\",\"d\",\"e\"]"
+}, {
+  "id" : "function-range-chars-descending",
+  "expr" : "{{ range(start='e', end='a', increment=-2) }}",
+  "context" : { },
+  "result" : "[\"e\",\"c\",\"a\"]"
+}, {
+  "id" : "function-range-in-a-for-tag",
+  "expr" : "{% for i in range(start=1, end=3) %}{{ i }}{% endfor %}",
+  "context" : { },
+  "result" : "123"
+}, {
+  "id" : "function-range-increment-zero",
+  "expr" : "{{ range(start=1, end=3, increment=0) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The increment of the range function must be different than 0 ({{ range(start=1, end=3, increment=0) }}:1)"
+  }
+}, {
+  "id" : "function-range-increment-not-a-number",
+  "expr" : "{{ range(start=1, end=3, increment='x') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The increment of the range function must be a number x ({{ range(start=1, end=3, increment='x') }}:1)"
+  }
+}, {
+  "id" : "function-range-two-character-string",
+  "expr" : "{{ range(start='ab', end='e') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Arguments of range function must be of type Number or String with a length of 1 ({{ range(start='ab', end='e') }}:1)"
+  }
+}, {
+  "id" : "function-range-mixed-types",
+  "expr" : "{{ range(start=1, end='e') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Arguments of range function must be of type Number or String with a length of 1 ({{ range(start=1, end='e') }}:1)"
+  }
+}, {
+  "id" : "function-range-over-the-cap",
+  "expr" : "{{ range(start=0, end=1000000) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.kestra.core.runners.pebble.RenderLimitExceededException: The range function cannot produce more than 1000000 elements, but this call would produce 1000001. (?:?)"
+  }
+}, {
+  "id" : "function-range-counts-by-increment",
+  "expr" : "{{ range(start=0, end=2000000, increment=2000000) }}",
+  "context" : { },
+  "result" : "[0,2000000]"
+}, {
+  "id" : "function-fromjson-positional",
+  "expr" : "{{ fromJson('{\"a\": 1}') }}",
+  "context" : { },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-fromjson-scalar",
+  "expr" : "{{ fromJson(json='42') }}",
+  "context" : { },
+  "result" : "42"
+}, {
+  "id" : "function-fromjson-string-scalar",
+  "expr" : "{{ fromJson(json='\"a\"') }}",
+  "context" : { },
+  "result" : "a"
+}, {
+  "id" : "function-fromjson-list",
+  "expr" : "{{ fromJson(json='[1, [2, 3]]') }}",
+  "context" : { },
+  "result" : "[1,[2,3]]"
+}, {
+  "id" : "function-fromjson-key-order",
+  "expr" : "{{ fromJson(json='{\"b\":1,\"a\":2,\"c\":3}') }}",
+  "context" : { },
+  "result" : "{\"b\":1,\"a\":2,\"c\":3}"
+}, {
+  "id" : "function-fromjson-null-map-value",
+  "expr" : "{{ fromJson(json='{\"a\":null,\"b\":1}') }}",
+  "context" : { },
+  "result" : "{\"b\":1}"
+}, {
+  "id" : "function-fromjson-null-input",
+  "expr" : "<{{ fromJson(json=nothing) }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "function-fromjson-json-null",
+  "expr" : "<{{ fromJson(json='null') }}>",
+  "context" : { },
+  "result" : "<>"
+}, {
+  "id" : "function-fromjson-missing-argument",
+  "expr" : "{{ fromJson() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'fromJson' function expects an argument 'json'. ({{ fromJson() }}:1)"
+  }
+}, {
+  "id" : "function-fromjson-not-a-string",
+  "expr" : "{{ fromJson(json=42) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'fromJson' function expects an argument 'json' with type string. ({{ fromJson(json=42) }}:1)"
+  }
+}, {
+  "id" : "function-fromjson-malformed",
+  "expr" : "{{ fromJson(json='{a}') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid json: Unexpected character ('a' (code 97)): was expecting double-quote to start field name\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 2] ({{ fromJson(json='{a}') }}:1)"
+  }
+}, {
+  "id" : "function-fromjson-trailing-content",
+  "expr" : "{{ fromJson(json='1 2') }}",
+  "context" : { },
+  "result" : "1"
+}, {
+  "id" : "function-fromjson-round-trip",
+  "expr" : "{{ fromJson(json=(v | toJson)) }}",
+  "context" : {
+    "v" : {
+      "b" : 1,
+      "a" : [ 1, 2.5, "x" ],
+      "c" : {
+        "d" : true
+      }
+    }
+  },
+  "result" : "{\"b\":1,\"a\":[1,2.5,\"x\"],\"c\":{\"d\":true}}"
+}, {
+  "id" : "function-fromion-positional",
+  "expr" : "{{ fromIon('{a:1}') }}",
+  "context" : { },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-fromion-scalar",
+  "expr" : "{{ fromIon(ion='42') }}",
+  "context" : { },
+  "result" : "42"
+}, {
+  "id" : "function-fromion-first-row-only",
+  "expr" : "{{ fromIon(ion=i) }}",
+  "context" : {
+    "i" : "{a:1}\n{a:2}\n"
+  },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-fromion-all-rows",
+  "expr" : "{{ fromIon(ion=i, allRows=true) }}",
+  "context" : {
+    "i" : "{a:1}\n{a:2}\n"
+  },
+  "result" : "[{\"a\":1},{\"a\":2}]"
+}, {
+  "id" : "function-fromion-all-rows-false",
+  "expr" : "{{ fromIon(ion=i, allRows=false) }}",
+  "context" : {
+    "i" : "{a:1}\n{a:2}\n"
+  },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-fromion-null-map-value",
+  "expr" : "{{ fromIon(ion='{a:null,b:1}') }}",
+  "context" : { },
+  "result" : "{\"b\":1}"
+}, {
+  "id" : "function-fromion-null-input",
+  "expr" : "<{{ fromIon(ion=nothing) }}>",
+  "context" : {
+    "nothing" : null
+  },
+  "result" : "<>"
+}, {
+  "id" : "function-fromion-missing-argument",
+  "expr" : "{{ fromIon() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'fromIon' function expects an argument 'ion'. ({{ fromIon() }}:1)"
+  }
+}, {
+  "id" : "function-fromion-not-a-string",
+  "expr" : "{{ fromIon(ion=42) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'fromIon' function expects an argument 'ion' with type string or byte[]. ({{ fromIon(ion=42) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-malformed",
+  "expr" : "{{ fromIon(ion='{a:') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: Corrupt content to decode; underlying `IonReader` problem: (com.amazon.ion.impl.IonReaderTextRawX$IonReaderTextParsingException) Syntax error at line 1 offset 4: invalid syntax [state:STATE_BEFORE_ANNOTATION_CONTAINED on token:TOKEN_EOF]\n at [Source: UNKNOWN; byte offset: #UNKNOWN] ({{ fromIon(ion='{a:') }}:1)"
+  }
+}, {
+  "id" : "function-fromion-of-the-string-null",
+  "expr" : "{{ fromIon(ion='null') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: t is null in sink.next(t) ({{ fromIon(ion='null') }}:1)"
+  }
+}, {
+  "id" : "function-fromion-round-trip-of-nothing",
+  "expr" : "{{ fromIon(ion=(nothing | toIon)) }}",
+  "context" : {
+    "nothing" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid ion: t is null in sink.next(t) ({{ fromIon(ion=(nothing | toIon)) }}:1)"
+  }
+}, {
+  "id" : "function-fromion-round-trip",
+  "expr" : "{{ fromIon(ion=(v | toIon)) }}",
+  "context" : {
+    "v" : {
+      "b" : 1,
+      "a" : [ 1, 2.5, "x" ],
+      "c" : {
+        "d" : true
+      }
+    }
+  },
+  "result" : "{\"b\":1,\"a\":[1,2.5,\"x\"],\"c\":{\"d\":true}}"
+}, {
+  "id" : "function-yaml-positional",
+  "expr" : "{{ yaml('a: 1') }}",
+  "context" : { },
+  "result" : "{\"a\":1}"
+}, {
+  "id" : "function-yaml-scalar",
+  "expr" : "{{ yaml(yaml='hello') }}",
+  "context" : { },
+  "result" : "hello"
+}, {
+  "id" : "function-yaml-nested",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "a:\n  b:\n    - 1\n    - 2\n"
+  },
+  "result" : "{\"a\":{\"b\":[1,2]}}"
+}, {
+  "id" : "function-yaml-key-order",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "b: 1\na: 2\nc: 3\n"
+  },
+  "result" : "{\"b\":1,\"a\":2,\"c\":3}"
+}, {
+  "id" : "function-yaml-null-map-value",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "a: null\nb: 1\n"
+  },
+  "result" : "{\"b\":1}"
+}, {
+  "id" : "function-yaml-yes-is-a-boolean-or-not",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "a: yes\nb: on\nc: true\nd: y\n"
+  },
+  "result" : "{\"a\":true,\"b\":true,\"c\":true,\"d\":\"y\"}"
+}, {
+  "id" : "function-yaml-octal-looking",
+  "expr" : "{{ yaml(yaml=y) }}",
+  "context" : {
+    "y" : "a: 010\nb: 0o10\nc: 0x10\n"
+  },
+  "result" : "{\"a\":8,\"b\":\"0o10\",\"c\":16}"
+}, {
+  "id" : "function-yaml-null-input",
+  "expr" : "{{ yaml(yaml=nothing) }}",
+  "context" : {
+    "nothing" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'yaml' function expects an argument 'yaml' with type string. ({{ yaml(yaml=nothing) }}:1)"
+  }
+}, {
+  "id" : "function-yaml-missing-argument",
+  "expr" : "{{ yaml() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'yaml' function expects an argument 'yaml'. ({{ yaml() }}:1)"
+  }
+}, {
+  "id" : "function-yaml-not-a-string",
+  "expr" : "{{ yaml(yaml=42) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'yaml' function expects an argument 'yaml' with type string. ({{ yaml(yaml=42) }}:1)"
+  }
+}, {
+  "id" : "function-yaml-malformed",
+  "expr" : "{{ yaml(yaml='a: [') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid yaml: while parsing a flow node\n in 'reader', line 1, column 5:\n    a: [\n        ^\nexpected the node content, but found '<stream end>'\n in 'reader', line 1, column 5:\n    a: [\n        ^\n\n at [Source: (StringReader); line: 1, column: 5] ({{ yaml(yaml='a: [') }}:1)"
+  }
+}, {
+  "id" : "function-yaml-round-trip-of-a-number-shaped-string",
+  "expr" : "{{ yaml(yaml=('42' | yaml)) }}",
+  "context" : { },
+  "result" : "42"
+}, {
+  "id" : "function-yaml-round-trip-of-a-number-shaped-string-class",
+  "expr" : "{{ yaml(yaml=('42' | yaml)) | className }}",
+  "context" : { },
+  "result" : "java.lang.Integer"
+}, {
+  "id" : "function-yaml-round-trip-of-a-float-shaped-string-class",
+  "expr" : "{{ yaml(yaml=('1.5' | yaml)) | className }}",
+  "context" : { },
+  "result" : "java.lang.Double"
+}, {
+  "id" : "function-yaml-round-trip-of-an-exponent-shaped-string",
+  "expr" : "{{ yaml(yaml=('1e5' | yaml)) }}",
+  "context" : { },
+  "result" : "100000.0"
+}, {
+  "id" : "function-yaml-round-trip-of-an-exponent-shaped-string-class",
+  "expr" : "{{ yaml(yaml=('1e5' | yaml)) | className }}",
+  "context" : { },
+  "result" : "java.lang.Double"
+}, {
+  "id" : "function-yaml-refuses-what-its-own-writer-wrote",
+  "expr" : "{{ yaml(yaml=('.inf' | yaml)) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Invalid yaml: Malformed numeric value '.inf'\n at [Source: (StringReader); line: 1, column: 5] ({{ yaml(yaml=('.inf' | yaml)) }}:1)"
+  }
+}, {
+  "id" : "function-yaml-round-trip",
+  "expr" : "{{ yaml(yaml=(v | yaml)) }}",
+  "context" : {
+    "v" : {
+      "b" : 1,
+      "a" : [ 1, 2.5, "x" ],
+      "c" : {
+        "d" : true
+      }
+    }
+  },
+  "result" : "{\"b\":1,\"a\":[1,2.5,\"x\"],\"c\":{\"d\":true}}"
+}, {
+  "id" : "function-dayofweek-from-a-datetime",
+  "expr" : "{{ dayOfWeek(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T14:30:00Z"
+  },
+  "result" : "SATURDAY"
+}, {
+  "id" : "function-dayofweek-from-a-local-datetime",
+  "expr" : "{{ dayOfWeek(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T14:30:00"
+  },
+  "result" : "SATURDAY"
+}, {
+  "id" : "function-dayofweek-positional",
+  "expr" : "{{ dayOfWeek('2024-01-08') }}",
+  "context" : { },
+  "result" : "MONDAY"
+}, {
+  "id" : "function-dayofweek-missing-argument",
+  "expr" : "{{ dayOfWeek() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'dayOfWeek()' function expects a 'date' argument. ({{ dayOfWeek() }}:1)"
+  }
+}, {
+  "id" : "function-dayofweek-unparseable",
+  "expr" : "{{ dayOfWeek(date='not-a-date') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'dayOfWeek()' function could not parse 'date': java.time.format.DateTimeParseException: Text 'not-a-date' could not be parsed at index 0 ({{ dayOfWeek(date='not-a-date') }}:1)"
+  }
+}, {
+  "id" : "function-dayofweek-null",
+  "expr" : "{{ dayOfWeek(date=nothing) }}",
+  "context" : {
+    "nothing" : null
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'dayOfWeek()' function expects a 'date' argument. ({{ dayOfWeek(date=nothing) }}:1)"
+  }
+}, {
+  "id" : "function-dayofmonth-from-a-datetime",
+  "expr" : "{{ dayOfMonth(date=d) }}",
+  "context" : {
+    "d" : "2024-02-29T14:30:00Z"
+  },
+  "result" : "29"
+}, {
+  "id" : "function-dayofmonth-missing-argument",
+  "expr" : "{{ dayOfMonth() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'dayOfMonth()' function expects a 'date' argument. ({{ dayOfMonth() }}:1)"
+  }
+}, {
+  "id" : "function-monthofyear-from-a-datetime",
+  "expr" : "{{ monthOfYear(date=d) }}",
+  "context" : {
+    "d" : "2024-12-06T14:30:00Z"
+  },
+  "result" : "12"
+}, {
+  "id" : "function-monthofyear-missing-argument",
+  "expr" : "{{ monthOfYear() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'monthOfYear()' function expects a 'date' argument. ({{ monthOfYear() }}:1)"
+  }
+}, {
+  "id" : "function-hourofday-keeps-the-parsed-offset",
+  "expr" : "{{ hourOfDay(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T14:30:00+07:00"
+  },
+  "result" : "14"
+}, {
+  "id" : "function-hourofday-local-datetime",
+  "expr" : "{{ hourOfDay(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T23:30:00"
+  },
+  "result" : "23"
+}, {
+  "id" : "function-hourofday-date-only",
+  "expr" : "{{ hourOfDay(date='2024-01-06') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'hourOfDay()' function could not parse 'date': Text '2024-01-06' could not be parsed at index 10 ({{ hourOfDay(date='2024-01-06') }}:1)"
+  }
+}, {
+  "id" : "function-hourofday-missing-argument",
+  "expr" : "{{ hourOfDay() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'hourOfDay()' function expects a 'date' argument. ({{ hourOfDay() }}:1)"
+  }
+}, {
+  "id" : "function-isweekend-weekday",
+  "expr" : "{{ isWeekend(date='2024-01-08') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-isweekend-sunday",
+  "expr" : "{{ isWeekend(date='2024-01-07') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isweekend-from-a-datetime",
+  "expr" : "{{ isWeekend(date=d) }}",
+  "context" : {
+    "d" : "2024-01-06T14:30:00Z"
+  },
+  "result" : "true"
+}, {
+  "id" : "function-isweekend-missing-argument",
+  "expr" : "{{ isWeekend() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isWeekend()' function expects a 'date' argument. ({{ isWeekend() }}:1)"
+  }
+}, {
+  "id" : "function-islastworkingday-false",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-30') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-islastworkingday-walks-back-over-a-weekend",
+  "expr" : "{{ isLastWorkingDay(date='2024-03-29') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-islastworkingday-on-the-weekend-itself",
+  "expr" : "{{ isLastWorkingDay(date='2024-03-31') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-islastworkingday-custom-working-days",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-28', workingDays='SATURDAY,SUNDAY') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-islastworkingday-custom-working-days-false",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-27', workingDays='SATURDAY,SUNDAY') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-islastworkingday-working-days-split-on-whitespace",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-28', workingDays='saturday sunday') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-islastworkingday-blank-working-days",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-31', workingDays='   ') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-islastworkingday-invalid-working-days",
+  "expr" : "{{ isLastWorkingDay(date='2024-01-31', workingDays='FUNDAY') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isLastWorkingDay()' function received an invalid 'workingDays' value: 'FUNDAY'. Expected day names like MONDAY, TUESDAY, etc. ({{ isLastWorkingDay(date='2024-01-31', workingDays='FUNDAY') }}:1)"
+  }
+}, {
+  "id" : "function-islastworkingday-missing-argument",
+  "expr" : "{{ isLastWorkingDay() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isLastWorkingDay()' function expects a 'date' argument. ({{ isLastWorkingDay() }}:1)"
+  }
+}, {
+  "id" : "function-isdayweekinmonth-second",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-08', dayOfWeek='MONDAY', position='SECOND') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-third",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-15', dayOfWeek='MONDAY', position='THIRD') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-fourth",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-22', dayOfWeek='MONDAY', position='FOURTH') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-last",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-29', dayOfWeek='MONDAY', position='LAST') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-false",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-08', dayOfWeek='MONDAY', position='FIRST') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-isdayweekinmonth-lowercase-arguments",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='monday', position='first') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-fourth-is-not-last",
+  "expr" : "{{ isDayWeekInMonth(date='2024-02-26', dayOfWeek='MONDAY', position='LAST') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-isdayweekinmonth-invalid-position",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='MONDAY', position='FIFTH') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isDayWeekInMonth()' function received an invalid 'position' value: 'FIFTH'. Expected one of: FIRST, SECOND, THIRD, FOURTH, LAST. ({{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='MONDAY', position='FIFTH') }}:1)"
+  }
+}, {
+  "id" : "function-isdayweekinmonth-invalid-day-of-week",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='FUNDAY', position='FIRST') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isDayWeekInMonth()' function received an invalid 'dayOfWeek' value: 'FUNDAY'. Expected one of: MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY. ({{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='FUNDAY', position='FIRST') }}:1)"
+  }
+}, {
+  "id" : "function-isdayweekinmonth-missing-position",
+  "expr" : "{{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='MONDAY') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'isDayWeekInMonth()' function expects a 'position' argument. ({{ isDayWeekInMonth(date='2024-01-01', dayOfWeek='MONDAY') }}:1)"
+  }
+}, {
+  "id" : "function-randomint-one-wide-range",
+  "expr" : "{{ randomInt(lower=5, upper=6) }}",
+  "context" : { },
+  "result" : "5"
+}, {
+  "id" : "function-randomint-empty-range",
+  "expr" : "{{ randomInt(lower=5, upper=5) }}",
+  "context" : { },
+  "result" : "5"
+}, {
+  "id" : "function-randomint-negative-range",
+  "expr" : "{{ randomInt(lower=-3, upper=-2) }}",
+  "context" : { },
+  "result" : "-3"
+}, {
+  "id" : "function-randomint-positional",
+  "expr" : "{{ randomInt(7, 8) }}",
+  "context" : { },
+  "result" : "7"
+}, {
+  "id" : "function-randomint-upper-below-lower",
+  "expr" : "{{ randomInt(lower=5, upper=4) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: In 'randomIn()' upper is less than lower ({{ randomInt(lower=5, upper=4) }}:1)"
+  }
+}, {
+  "id" : "function-randomint-missing-arguments",
+  "expr" : "{{ randomInt() }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'randomIn()' function expects an argument lower ({{ randomInt() }}:1)"
+  }
+}, {
+  "id" : "function-randomint-not-a-long",
+  "expr" : "{{ randomInt(lower='1', upper=10) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'randomIn()' function expects an argument lower of type Long. ({{ randomInt(lower='1', upper=10) }}:1)"
+  }
+}, {
+  "id" : "function-nanoid-single-character-alphabet",
+  "expr" : "{{ nanoId(length=6, alphabet='x') }}",
+  "context" : { },
+  "result" : "xxxxxx"
+}, {
+  "id" : "function-nanoid-non-power-of-two-alphabet",
+  "expr" : "{{ nanoId(length=6, alphabet='xxx') }}",
+  "context" : { },
+  "result" : "xxxxxx"
+}, {
+  "id" : "function-nanoid-length-is-ignored-unless-it-is-a-long",
+  "expr" : "{{ nanoId(length='6', alphabet='x') }}",
+  "context" : { },
+  "result" : "xxxxxxxxxxxxxxxxxxxxx"
+}, {
+  "id" : "function-nanoid-alphabet-is-ignored-unless-it-is-a-string",
+  "expr" : "{{ nanoId(length=6, alphabet=5) | regexMatch(regex='^5{6}$') }}",
+  "context" : { },
+  "result" : "false"
+}, {
+  "id" : "function-nanoid-empty-alphabet",
+  "expr" : "{{ nanoId(alphabet='') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'nanoId()' function field 'alphabet' must not be empty ({{ nanoId(alphabet='') }}:1)"
+  }
+}, {
+  "id" : "function-nanoid-length-zero",
+  "expr" : "{{ nanoId(length=0) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'nanoId()' function field 'length' must be greater than: 0 ({{ nanoId(length=0) }}:1)"
+  }
+}, {
+  "id" : "function-nanoid-length-past-the-max",
+  "expr" : "{{ nanoId(length=1001) }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'nanoId()' function field 'length' must be lower than: 1000 ({{ nanoId(length=1001) }}:1)"
+  }
+}, {
+  "id" : "function-nanoid-default-alphabet",
+  "expr" : "{{ nanoId() | regexMatch(regex='^[0-9A-Za-z_-]{21}$') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-uuid-is-a-version-7-uuid",
+  "expr" : "{{ uuid() | regexMatch(regex='^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-ksuid-is-27-base62-characters",
+  "expr" : "{{ ksuid() | regexMatch(regex='^[0-9A-Za-z]{27}$') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-id-is-base62",
+  "expr" : "{{ id() | regexMatch(regex='^[0-9A-Za-z]+$') }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-randomport-is-a-port",
+  "expr" : "{{ randomPort() > 0 }}",
+  "context" : { },
+  "result" : "true"
+}, {
+  "id" : "function-now-goes-through-the-date-formatter",
+  "expr" : "{{ now(format='G', timeZone='UTC') }}",
+  "context" : { },
+  "result" : "AD"
+}, {
+  "id" : "function-now-unknown-format",
+  "expr" : "{{ now(format='nope_format') }}",
+  "context" : { },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.IllegalArgumentException: Unknown pattern letter: o"
+  }
+}, {
+  "id" : "function-nanoid-length-at-the-max",
+  "expr" : "{{ nanoId(length=1000, alphabet='x') }}",
+  "context" : { },
+  "result" : "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}, {
+  "id" : "function-nanoid-alphabet-at-the-max",
+  "expr" : "{{ nanoId(length=4, alphabet=a) | length }}",
+  "context" : {
+    "a" : "ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſƀƁƂƃƄƅƆƇƈƉƊƋƌƍƎƏƐƑƒƓƔƕƖƗƘƙƚƛƜƝƞƟƠơƢƣƤƥƦƧƨƩƪƫƬƭƮƯưƱƲƳƴƵƶƷƸƹƺƻƼƽƾƿǀǁǂǃǄǅǆǇǈǉǊǋǌǍǎǏǐǑǒǓǔǕǖǗǘǙǚǛǜǝǞǟǠǡǢǣǤǥǦǧǨǩǪǫǬǭǮǯǰǱǲǳǴǵǶǷǸǹǺǻǼǽǾǿ"
+  },
+  "result" : "4"
+}, {
+  "id" : "function-nanoid-alphabet-past-the-max",
+  "expr" : "{{ nanoId(length=4, alphabet=a) }}",
+  "context" : {
+    "a" : "ĀāĂăĄąĆćĈĉĊċČčĎďĐđĒēĔĕĖėĘęĚěĜĝĞğĠġĢģĤĥĦħĨĩĪīĬĭĮįİıĲĳĴĵĶķĸĹĺĻļĽľĿŀŁłŃńŅņŇňŉŊŋŌōŎŏŐőŒœŔŕŖŗŘřŚśŜŝŞşŠšŢţŤťŦŧŨũŪūŬŭŮůŰűŲųŴŵŶŷŸŹźŻżŽžſƀƁƂƃƄƅƆƇƈƉƊƋƌƍƎƏƐƑƒƓƔƕƖƗƘƙƚƛƜƝƞƟƠơƢƣƤƥƦƧƨƩƪƫƬƭƮƯưƱƲƳƴƵƶƷƸƹƺƻƼƽƾƿǀǁǂǃǄǅǆǇǈǉǊǋǌǍǎǏǐǑǒǓǔǕǖǗǘǙǚǛǜǝǞǟǠǡǢǣǤǥǦǧǨǩǪǫǬǭǮǯǰǱǲǳǴǵǶǷǸǹǺǻǼǽǾǿx"
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'nanoId()' function field 'alphabet' must not contain more than: 256 characters ({{ nanoId(length=4, alphabet=a) }}:1)"
+  }
 } ]

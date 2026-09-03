@@ -10,6 +10,9 @@
 //! - `filters` is all 35 of Kestra's filters, registered onto that engine.
 //!   Two of its names (`indent`, `string`) override minijinja built-ins
 //!   rather than adding to them.
+//! - `functions` is the 19 of Kestra's 34 functions that reach no service.
+//!   `range` is a third minijinja built-in it overrides — a global this time,
+//!   not a filter, and inclusive where minijinja's is exclusive.
 //! - `javafmt` is Java's `DateTimeFormatter` pattern language, which the six
 //!   date/time filters in `filters` are written against. It is its own module
 //!   because no Rust crate provides that pattern language and because it is
@@ -28,6 +31,7 @@
 
 pub mod env;
 mod filters;
+mod functions;
 mod ionfmt;
 mod javafmt;
 mod javare;

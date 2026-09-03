@@ -129,8 +129,8 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**90** entries carry it today, counted out of `golden.json` rather than added
-up: the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
+**137** entries carry it today, counted out of `golden.json` rather than added
+up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
 wrong-typed inputs, five exceptions its first fix round found, and three more
@@ -166,7 +166,10 @@ task's fix round, 62 of 486 after its second, 66 of 513 after its third,
 76 of 632 after W2 Task 6 -- which BANKED seven (its whole batch of
 filters) and RECORDED seventeen, every one of them a place the two engines
 answer differently rather than a filter that is not ported -- and 78 of
-673 after that task's fix round, 82 of 693 after its second, and **86 of 706** after its third.
+673 after that task's fix round, 82 of 693 after its second, 86 of 706 after its
+third, and **70 of 855** after W2 Task 7 -- which BANKED eighteen (its whole
+batch of pure functions) and RECORDED three: two places the two YAML scalar
+resolvers disagree, and `isPublicHoliday`, which egret refuses.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -678,7 +681,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 706 entries)
+## Corpus (`corpus.json`, 855 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -2452,6 +2455,9 @@ it — and that is the standard a new row has to meet.
 | `filters::write_equality_key` (`distinct`), `filters::escape_value` (`escapeChar`) | any value | render | as above |
 | `javafmt::Pattern::parse_pieces` over `[...]` optional sections | **format string**, from `existingFormat` | render | `javafmt::MAX_OPTIONAL_DEPTH` = 39 568 |
 | `javafmt`'s other formatter walking | format string | render | the format string's own length; no nesting construct |
+| `ionfmt::IonReader::value` <-> `list`/`struct_` (W2 Task 7's `fromIon`) | **a filter argument** | render | `MAX_VALUE_DEPTH`, checked as it descends |
+| `functions::BoundedVisitor` over `serde_norway`'s events (`yaml()`) | **a filter argument** | render | `functions::Depth`, a `DeserializeSeed` carrying `MAX_VALUE_DEPTH`. `serde_norway`'s parser is an event stream with no limit of its own, so this is the ONLY thing standing here |
+| `functions::BoundedVisitor` over `serde_json`'s parser (`fromJson()`) | a filter argument | render | the same `Depth`, and `serde_json`'s own 128 upstream of it |
 
 ### The template parser: what round 4 deferred, and why the deferral was wrong
 
@@ -2700,3 +2706,318 @@ which this round's corpus entries made heavier. Both now accept either bound
 by name, which still fails on `unknown function`, on a generic failure, and on
 a bound that stopped firing.
 
+
+## What W2 Task 7's 119 new entries measured (read before touching a function)
+
+Task 7 ported the **19** registered functions that reach no service —
+`now`, `uuid`, `id`, `ksuid`, `nanoId`, `randomInt`, `randomPort`, `range`,
+`fromJson`, `fromIon`, `yaml`, `dayOfMonth`, `dayOfWeek`, `hourOfDay`,
+`monthOfYear`, `isWeekend`, `isPublicHoliday`, `isLastWorkingDay`,
+`isDayWeekInMonth` — into `runners::functions`. The remaining 15 of the 34 are
+Task 8's.
+
+### The wire name is a `NAME` constant, and eight of them are not the file name
+
+Read out of the artifact's bytecode (`javap -p -c -constants` on every class in
+`io/kestra/core/runners/pebble/functions/`) and cross-checked against
+`host.Oracle dump`. The two agree, at 34.
+
+| wire name | class | note |
+|---|---|---|
+| `range` | `BoundedRangeFunction` | artifact-only; not in the checkout at all |
+| `read` | `ReadFileFunction` | |
+| `fileURI` | `FileURIFunction` | camel-cased `URI` |
+| `id` | `IDFunction` | |
+| `ksuid` | `KSUIDFunction` | |
+| `uuid` | `UUIDFunction` | |
+| `nanoId` | `NanoIDFunction` | lower-case `d` on the wire, upper-case in the class |
+| `fetchContext` **and** `printContext` | `FetchContextFunction` | one class, two `put` calls — `NAME` and `ALIAS` |
+
+The other 26 names match their class stem. **A name taken from a file name
+gives `boundedRange`, `readFile`, `fileUri`, `nanoID` and one missing
+`printContext`** — five functions nothing can call and one that silently is not
+there, none of which any test would notice.
+
+### `KestraFunction.getArgumentDefaults()` is documentation, not behaviour
+
+It is Kestra's own interface method, not Pebble's, and nothing on the render
+path reads it. `RandomIntFunction` declares `lower=0, upper=10` and
+`{{ randomInt() }}` still throws `The 'randomIn()' function expects an argument
+lower`. Measured. An absent argument is absent.
+
+### `range` is the THIRD minijinja name this crate overrides, and the first global
+
+`indent` and `string` are minijinja *filters* Task 4 overrode. `range` is a
+*global*, and `Environment` keeps one map for globals, so `add_function`
+replaces it silently. Derived from the lock file rather than from a list:
+minijinja 2.24.0's `defaults::build_globals` inserts exactly four names under
+the `builtins` feature — `range`, `dict`, `debug`, `namespace`. Of Task 7's
+nineteen, `range` is the only collision.
+
+The two disagree about the answer: `range(1, 3)` is `[1, 2]` in minijinja and
+`[1,2,3]` in Kestra, minijinja's takes no named arguments, and it has no
+character form.
+
+**And an existing test was quietly relying on minijinja's.**
+`runners::env::a_runaway_loop_runs_out_of_fuel` read `range(1000)`, which under
+Kestra's signature is `start=1000` with no `end` — the test failed with an
+argument error rather than exercising fuel. The same trap as `indent` and
+`string`, seen from the caller's side.
+
+### `BoundedRangeFunction`'s guard counts by the INCREMENT
+
+`RenderLimits.ensureAtMost(|end - start| / |increment| + 1, 1000000, ...)`,
+and it runs only when both bounds are numbers and the increment is not zero. So
+`range(start=0, end=2000000, increment=2000000)` spans two million and produces
+two elements; a port that bounded `|end - start|` refuses it.
+`function-range-counts-by-increment` is that entry, and a mutation run confirms
+it is what kills the wrong bound.
+
+**Two shapes of Kestra's own loop do not terminate, and egret refuses both.**
+Neither can have a golden.
+
+- `Math.abs(end - start)` is Java `long` arithmetic and wraps:
+  `range(start=Long.MIN_VALUE, end=Long.MAX_VALUE)` is `abs(-1)` = 1, the guard
+  sees two elements, and the loop then runs 1.8 x 10^19 times. egret computes
+  the count in `i128`.
+- a character range's step is `(int)((long) i + increment)`, so an increment of
+  2^32 leaves the loop variable unchanged. egret refuses it by name.
+
+### The eight non-deterministic ones: what a shape check cannot see
+
+`tests/oracle.rs` compares these for shape. A shape check sees a length. Four
+of them can be pinned **by exact value through the differential** anyway,
+because the arithmetic collapses:
+
+- **`randomInt(lower=5, upper=6)` is `5`, always.** The expression is
+  `(int)(Math.floor(Math.random() * (upper - lower)) + lower)`, so over a
+  one-wide range there is one answer — which pins lower-inclusive and
+  upper-**exclusive** by value where the shape check's `(1..10)` only states
+  them. `lower=5, upper=5` is `5` too: an empty range is not an error.
+- **`nanoId(length=6, alphabet='x')` is `xxxxxx`, always**, and `alphabet='xxx'`
+  is too — a one-character alphabet is deterministic on *both* selection paths
+  (a power-of-two alphabet is masked, anything else is rejection-sampled).
+- **`uuid() | regexMatch(regex='…-7[0-9a-f]{3}-[89ab]…')` is `true`, always**,
+  which pins the version nibble, the variant bits and `java.util.UUID`'s
+  lower-case hex. `ksuid()`, `id()` and `nanoId()`'s alphabets are pinned the
+  same way, and `randomPort() > 0` likewise.
+
+**A regex over a random value is a deterministic boolean the EXACT comparator
+can check.** That is a stronger instrument than the shape list, and it is worth
+reaching for before adding a ninth id to `NON_DETERMINISTIC`.
+
+What each one actually guarantees, read off the jars:
+
+| | class | guarantee |
+|---|---|---|
+| `uuid` | `Generators.timeBasedEpochRandomGenerator()` | **UUIDv7**: 48 bits of Unix ms, version `7`, variant `10`, 74 random bits. The fully-random variant, so two in the same millisecond are unordered |
+| `id` | `FriendlyId` -> `Base62.encode(BigInteger)` | a random **UUIDv4** as an unsigned 128-bit integer, base 62, alphabet `0-9A-Za-z`, **no padding** |
+| `ksuid` | `KsuidGenerator(new SecureRandom())` | 4 big-endian bytes of `epochSecond - 1400000000` + 16 random, base 62, **padded to 27** (`PAD_TO_LENGTH`) |
+| `nanoId` | `NanoIDFunction` | 21 characters from a 64-character alphabet, `0-9A-Za-z-_` in that order |
+| `randomPort` | `new ServerSocket(0).getLocalPort()` | a real bind; the kernel picks, so it is in the host's ephemeral range and never a port in use |
+| `randomInt` | `Math.random()` | `[lower, upper)`, as an `int` |
+| `now` | `AbstractDate.format(ZonedDateTime.now(), ...)` | the same four arguments `date` takes, through the same formatter |
+
+### `id()` is 21 or 22 characters, and the shape check said 22
+
+`Base62.encode` pads nothing, so the digit count is `ceil(log62(value))`.
+`62^21` is 4.37 x 10^37 against a 2^128 = 3.40 x 10^38 space, so **12.8% of ids
+are 21 characters** and 0.2% are 20.
+
+This is not a deduction. The golden file's own **previous** value for
+`function-id` was `iUBruItK7qj9tMOMNVPAr` — 21 characters, minted by Kestra,
+committed, and sitting under a shape check that read `value.len() == 22`. It
+would have failed about one run in eight against a faithful port and passed
+against one that padded. `tests/oracle.rs` now asserts the alphabet and the
+ceiling, and `runners::functions::an_id_is_base62_and_is_not_always_22_characters`
+draws ten thousand and asserts both lengths occur.
+
+### The three round trips, end to end
+
+W2 Task 6 round-tripped the **write** halves and found six values that do not
+come back. Task 7 is the read half, and all six are now pinned with both halves
+inside one expression:
+
+| | |
+|---|---|
+| `{{ yaml(yaml=('42' \| yaml)) \| className }}` | `java.lang.Integer` — a string in, an integer out |
+| `{{ yaml(yaml=('1.5' \| yaml)) \| className }}` | `java.lang.Double` |
+| `{{ yaml(yaml=('1e5' \| yaml)) }}` | `100000.0` |
+| `{{ yaml(yaml=('.inf' \| yaml)) }}` | **throws** `Malformed numeric value '.inf'` |
+| `{{ fromIon(ion=(nothing \| toIon)) }}` | **throws** `Invalid ion: t is null in sink.next(t)` |
+
+`toJson`/`fromJson` and `toIon`/`fromIon` are otherwise lossless, and the
+value-shaped round trips (`fromJson(v | toJson)` and friends) all answer exactly
+what `{{ v }}` does.
+
+### The three readers do not agree about a null argument, or about trailing text
+
+- **`fromJson(json=null)` returns null; `yaml(yaml=null)` throws.**
+  `FromJsonFunction` has an explicit null branch and `YamlFunction` does not —
+  `null instanceof String` is false, so it reaches
+  `The 'yaml' function expects an argument 'yaml' with type string.` Two
+  functions in one batch, two answers to the same input.
+- **`fromJson('1 2')` is `1`, not an error.**
+  `ObjectMapper.readValue(String, ...)` does not enable
+  `FAIL_ON_TRAILING_TOKENS`, so it reads the first value and stops — the same
+  fact `JqFilter`'s `readTree` branch records. `serde_json::from_str` is the
+  opposite, so egret goes through a `StreamDeserializer` and does not call
+  `end()`.
+- **`fromIon` without `allRows` takes the FIRST value and drops the rest**
+  (`findFirst().orElse(null)`), rather than failing on a multi-value stream.
+
+### The `yaml()` reader's plain-scalar resolver is the one recorded divergence
+
+SnakeYAML resolves the YAML 1.1 schema; `serde_norway` resolves the 1.2 core
+schema. Measured through the harness:
+
+| plain scalar | Kestra | egret |
+|---|---|---|
+| `yes`, `on` | `true` | the string |
+| `y`, `n` | the string | the string (they agree) |
+| `010` | `8` — a leading zero is octal | the string |
+| `0o10` | the string | `8` |
+| `0x10` | `16` | `16` (they agree) |
+| `.inf`, `.nan` | **throws**, in Jackson's own numeric coercion | **refused**, with Jackson's sentence |
+
+Only the last row is reproduced, and it is reproduced because it is exactly
+detectable: nothing else in either format produces a non-finite `f64`.
+
+The rest is recorded rather than fixed because **the fix is not available**:
+reproducing it needs to know whether a scalar was *quoted*, and `serde_norway`
+hands a visitor `"yes"` and `yes` identically — `visit_untagged_scalar` funnels
+both into the same call. Re-resolving on the string alone would make
+`a: "010"` answer `8`, which is a new silent wrong answer traded for an old one.
+`function-yaml-yes-is-a-boolean-or-not` and `function-yaml-octal-looking` are
+baselined with this reason. (The crate is called `serde_norway` because of
+exactly this footgun.)
+
+### `isPublicHoliday` is refused, not approximated
+
+Kestra answers it out of `de.focus_shift.jollyday` **2.19.0**, a per-country,
+per-subdivision XML holiday calendar for about seventy countries — pin it
+alongside the JDK and the artifact if that version ever moves, because a
+regenerated `function-ispublicholiday` would move with it. There is no such
+database in this tree and no Rust crate carrying jollyday's data.
+
+egret refuses **by name**, the same call `javafmt` makes for `z`, `v` and `B`,
+whose text lives in a locale database. Supporting one country and refusing the
+rest would be worse: an author cannot predict which. `function-ispublicholiday`
+is baselined with that reason and
+`runners::functions::is_public_holiday_refuses_rather_than_guessing` is the pin.
+
+### `hourOfDay` is the only calendar function that does not use `parseLocalDate`
+
+The other six go through `DateUtils.parseLocalDate`, whose cascade is
+`LocalDate.parse` -> `ZonedDateTime.parse().toLocalDate()` ->
+`LocalDateTime.parse().toLocalDate()`. `hourOfDay` is `ZonedDateTime.parse`
+then `LocalDateTime.parse` and **never** `LocalDate.parse`, so `2024-01-06` is
+`Text '2024-01-06' could not be parsed at index 10` there and fine in all six
+siblings.
+
+`getHour()` is also the hour of the **parsed offset**, not of UTC:
+`2024-01-06T14:30:00+07:00` is `14`.
+
+None of the seven reads `WeekFields`, so W2 Task 5's locale hazard does not
+reach them: `isWeekend` compares the `SATURDAY`/`SUNDAY` enum constants
+directly, `dayOfWeek` returns `DayOfWeek.name()`, and `isLastWorkingDay` reads
+`DayOfWeek.valueOf` over an upper-cased argument. All English, no locale, on
+both engines.
+
+Two smaller facts, both measured:
+
+- **`isLastWorkingDay`'s blank check is `isBlank()`, not `isEmpty()`**, so
+  `workingDays='   '` is the default Monday-to-Friday set rather than an error,
+  and the split is `[,\s]+` so `'saturday sunday'` works.
+- **`FOURTH` is not `LAST`.** `firstInMonth(day).plusWeeks(3)` can leave the
+  month entirely, so a five-occurrence month has a `FOURTH` and a `LAST` that
+  are different days.
+
+### The upstream typo this batch reproduces
+
+All three of `RandomIntFunction`'s messages spell the function **`randomIn()`**,
+missing the `t`: `In 'randomIn()' upper is less than lower`,
+`The 'randomIn()' function expects an argument %s` and
+`... of type Long.` Reproduced, for the same reason `LessThanExpression`'s
+`comparisonPebb` is recorded: a flow author reading an egret error must read the
+sentence Kestra would have shown them. Unlike `comparisonPebb`, this one **is**
+reached by egret, so a version bump that fixed it would move three goldens and
+break three tests.
+
+### Ion is read by hand too, and three constructs are refused
+
+`runners::ionfmt::read_ion` is the reader beside the writer. The writer is
+hand-written because `ion-rs` cannot produce Kestra's text; the reader is
+hand-written for a different reason worth stating — this workspace builds
+offline against a vendored registry and `ion-rs` is not in it.
+
+S-expressions, blobs, clobs and **timestamps** are refused by name rather than
+approximated: none has a `minijinja::Value` that means the same thing, and
+`write_ion` never emits one, so nothing egret writes can produce them. A
+timestamp in particular would otherwise become a string, which reads back as a
+different type with no error anywhere.
+
+### W2 Task 7's attack sweep, and what it found
+
+Per F5, the last step was to attack the batch with shapes it was not designed
+for: 40 probes over the three readers (a million open brackets, a million
+annotations, a million top-level values, unterminated strings, open comments, a
+million-digit number, the billion-laughs alias bomb), `range` at and past both
+its bounds, `nanoId` at its widest alphabet, `randomInt` at the `i64` extremes,
+and a 100 000-letter `now` pattern. **Nothing aborted and nothing hung**; the
+slowest is 4.2 s for a 6 MB Ion document with a million top-level values, which
+is a linear parse Kestra also spends seconds on.
+
+Three real defects fell out of it, and none would have been found by reading the
+diff:
+
+- **`randomInt` PANICKED.** `upper - lower` is Java `long` arithmetic that
+  wraps; a plain Rust `-` is an overflow — a panic in a debug build, a silent
+  wrap in a release one — reachable from
+  `{{ randomInt(lower=-9223372036854775808, upper=9223372036854775807) }}`. A
+  renderer panic is a mismatch in **every** oracle mode, and no corpus entry
+  reached it. `wrapping_sub` is Kestra's arithmetic, and `as i32` is Java's
+  `d2i`, which saturates the same way.
+- **A wide map made every render QUADRATIC.** Every value writer in this crate
+  walks a map as "enumerate the keys, then `get_item` each one" — minijinja's
+  `Object` API — and `OrderedMap::get_value` was a linear `find`. Measured on
+  the render path:
+
+  | keys | `{{ v }}` before | after |
+  |---:|---:|---:|
+  | 1 000 | 8 ms | 5 ms |
+  | 10 000 | 745 ms | 22 ms |
+  | 40 000 | 7 370 ms | 94 ms |
+  | 100 000 (through `yaml()`) | **43 723 ms** | 633 ms |
+
+  **It was already there for a context object** — no Task 7 code involved — and
+  the readers widened its reach to a *filter argument*. `OrderedMap` now builds
+  a lookup index on first use, above a 32-entry threshold below which a scan is
+  cheaper than hashing. The risk the index adds is a duplicate key answering
+  the last occurrence where a scan answers the first; `or_insert` is what keeps
+  them the same and
+  `runners::env::a_wide_map_answers_exactly_what_the_narrow_one_does` exercises
+  both sides of the threshold.
+- **`nanoId`'s rejection loop was quadratic in `length`**, because the
+  condition re-counted `out.chars()`. Bounded at 1000, so half a million wasted
+  steps rather than a vector — fixed on sight.
+
+### The mutation run, and the one equivalent mutant
+
+Sixteen mutations of `runners::functions`, each built before it was believed
+(a mutation that does not compile is not evidence) and each run against the lib
+tests and the whole oracle target. **Twelve killed on the first pass, three
+survived and are now killed, and one is equivalent:**
+
+| survivor | why nothing killed it | what does now |
+|---|---|---|
+| always take the masked selection path | a one-character alphabet answers the same on both paths, and the default 64-character alphabet **is** a power of two, so no case could separate them | a three-character alphabet: masking is `byte & 2`, which yields 0 and 2 and never 1, so the middle letter disappears |
+| `length > 1000` -> `>= 1000` | nothing sat on the boundary | `function-nanoid-length-at-the-max` |
+| `alphabet.len() > 256` -> `>= 256` | as above | `function-nanoid-alphabet-at-the-max`, and `-past-the-max` for the other side |
+
+The equivalent one is `isLastWorkingDay`'s `working.contains(date)` guard:
+deleting it changes no answer, because the walk back from the last day of the
+month always ends on a working day, so `last == date` already implies that
+`date` is one. That is the implementation being redundant, not the tests being
+weak — and Kestra's own code has the same shape. Recorded in the code so the
+next reader does not re-derive it or weaken a test trying to kill it.

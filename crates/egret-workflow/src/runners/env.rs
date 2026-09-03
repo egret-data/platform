@@ -86,6 +86,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use super::filters;
+use super::functions;
 use super::rewrite::{rewrite, RewriteError};
 
 /// `VariableRenderer.MAX_RENDERING_AMOUNT`. A render whose output is itself a
@@ -362,7 +363,7 @@ impl RenderContext {
 
     /// The context as one minijinja value: an order-preserving map object.
     fn to_minijinja(&self) -> MjValue {
-        MjValue::from_object(OrderedMap(self.0.clone()))
+        MjValue::from_object(OrderedMap::new(self.0.clone()))
     }
 }
 
@@ -398,7 +399,41 @@ impl fmt::Display for RenderContext {
 /// Linear lookup is deliberate: a render context is a handful of top-level
 /// names and small nested objects, and a `Vec` is what keeps the order.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct OrderedMap(pub(super) Vec<(String, MjValue)>);
+pub(super) struct OrderedMap {
+    entries: Vec<(String, MjValue)>,
+    /// Built on the first lookup, and only for a map wide enough to need it.
+    ///
+    /// **Every value writer in this crate walks a map as "enumerate the keys,
+    /// then `get_item` each one"**, which is minijinja's `Object` API and not
+    /// something a writer can avoid. With a linear `find` behind `get_value`
+    /// that is O(n^2) per render, and it is reachable from a plain context
+    /// object: measured on the render path, `{{ v }}` over a context map took
+    /// 8 ms at 1 000 keys, **745 ms at 10 000** and **7 370 ms at 40 000**,
+    /// and `yaml(yaml=...)` over a 100 000-key document took **43 seconds**.
+    ///
+    /// Found by W2 Task 7 attacking its own `fromJson`/`fromIon`/`yaml`
+    /// readers, which are the first things in the crate that let a flow author
+    /// build a map that wide from a **filter argument** rather than from a
+    /// context. The cost was already there for a context value; the readers
+    /// widened the reach.
+    ///
+    /// 32 is a threshold, not a bound: below it a linear scan over a `Vec` is
+    /// cheaper than hashing the key, and every map a real flow renders is far
+    /// below it.
+    index: std::sync::OnceLock<std::collections::HashMap<String, usize>>,
+}
+
+/// Below this many entries, `get_value` scans. See [`OrderedMap::index`].
+const ORDERED_MAP_INDEX_THRESHOLD: usize = 32;
+
+impl OrderedMap {
+    pub(super) fn new(entries: Vec<(String, MjValue)>) -> Self {
+        OrderedMap {
+            entries,
+            index: std::sync::OnceLock::new(),
+        }
+    }
+}
 
 impl Object for OrderedMap {
     fn repr(self: &Arc<Self>) -> ObjectRepr {
@@ -407,15 +442,29 @@ impl Object for OrderedMap {
 
     fn get_value(self: &Arc<Self>, key: &MjValue) -> Option<MjValue> {
         let key = key.as_str()?;
-        self.0
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value.clone())
+        if self.entries.len() <= ORDERED_MAP_INDEX_THRESHOLD {
+            return self
+                .entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone());
+        }
+        let index = self.index.get_or_init(|| {
+            // The FIRST occurrence wins, matching the linear `find` above --
+            // a duplicate key would otherwise answer differently depending on
+            // how wide the map happened to be.
+            let mut index = std::collections::HashMap::with_capacity(self.entries.len());
+            for (at, (name, _)) in self.entries.iter().enumerate() {
+                index.entry(name.clone()).or_insert(at);
+            }
+            index
+        });
+        index.get(key).map(|at| self.entries[*at].1.clone())
     }
 
     fn enumerate(self: &Arc<Self>) -> Enumerator {
         Enumerator::Values(
-            self.0
+            self.entries
                 .iter()
                 .map(|(name, _)| MjValue::from(name.clone()))
                 .collect(),
@@ -423,7 +472,7 @@ impl Object for OrderedMap {
     }
 
     fn enumerator_len(self: &Arc<Self>) -> Option<usize> {
-        Some(self.0.len())
+        Some(self.entries.len())
     }
 }
 
@@ -450,7 +499,7 @@ fn json_to_minijinja(value: &JsonValue) -> MjValue {
         JsonValue::Array(items) => {
             MjValue::from(items.iter().map(json_to_minijinja).collect::<Vec<_>>())
         }
-        JsonValue::Object(map) => MjValue::from_object(OrderedMap(
+        JsonValue::Object(map) => MjValue::from_object(OrderedMap::new(
             map.iter()
                 .map(|(k, v)| (k.clone(), json_to_minijinja(v)))
                 .collect(),
@@ -464,7 +513,7 @@ fn json_to_minijinja(value: &JsonValue) -> MjValue {
 /// serde hands a map visitor its entries in document order; going through
 /// `serde_json::Value` first would sort them before this code ever ran. That
 /// is the whole reason this visitor exists rather than a `From` impl.
-struct OrderedJson(MjValue);
+pub(super) struct OrderedJson(pub(super) MjValue);
 
 impl<'de> Deserialize<'de> for OrderedJson {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -542,7 +591,7 @@ impl<'de> Visitor<'de> for OrderedJsonVisitor {
         while let Some((key, OrderedJson(value))) = map.next_entry::<String, OrderedJson>()? {
             entries.push((key, value));
         }
-        Ok(OrderedJson(MjValue::from_object(OrderedMap(entries))))
+        Ok(OrderedJson(MjValue::from_object(OrderedMap::new(entries))))
     }
 }
 
@@ -1164,11 +1213,12 @@ pub fn environment() -> Environment<'static> {
     // log, an output or a downstream task's arguments, and neither of these
     // exists in the language being ported -- removing them costs nothing.
     //
-    // The rest of minijinja's global inventory (`range`, `dict`, `namespace`)
-    // is deliberately left alone here: reconciling it against Kestra's 34
-    // registered functions is Task 7/8's job, and `range` in particular is a
-    // real Kestra function (`BoundedRangeFunction`) with different semantics
-    // from minijinja's, not something to silently keep or silently drop now.
+    // The rest of minijinja's global inventory is `range`, `dict` and
+    // `namespace`. **`range` is Kestra's too**, and W2 Task 7 overrides it in
+    // `super::functions` -- inclusive where minijinja's is exclusive, with
+    // named arguments and a 1 000 000-element cap. `dict` and `namespace`
+    // stay: neither exists in Pebble, but neither leaks anything either, and
+    // reconciling the remaining built-in surface is Task 8's.
     env.remove_global("debug");
     env.remove_filter("pprint");
 
@@ -1185,6 +1235,12 @@ pub fn environment() -> Environment<'static> {
     // `super::filters`' module doc for the table of what each one answered
     // before.
     filters::register(&mut env);
+
+    // W2 Task 7's 19 pure functions. **`range` OVERRIDES a minijinja global**
+    // of the same name, which resolves and answers minijinja's way rather
+    // than erroring as unknown -- the same trap `indent` and `string` are,
+    // one layer up. See `super::functions`' module doc.
+    functions::register(&mut env);
 
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
@@ -1383,6 +1439,49 @@ mod tests {
 
     fn render(template: &str, ctx: JsonValue) -> Result<String, RenderError> {
         render_str(template, &cx(ctx))
+    }
+
+    /// A map past [`ORDERED_MAP_INDEX_THRESHOLD`] answers the same questions
+    /// the linear scan does, including the one the two arms could disagree
+    /// about.
+    ///
+    /// The index exists because every value writer walks a map as "enumerate
+    /// the keys, then `get_item` each one", which made a render quadratic in
+    /// the map's width -- 7 370 ms for a 40 000-key context object, 43 s for a
+    /// 100 000-key `yaml()` argument, both measured on the render path.
+    ///
+    /// The risk the index introduces is a DUPLICATE key: a `HashMap` built by
+    /// insertion would answer the last occurrence where `Vec::find` answers
+    /// the first. `or_insert` is what keeps them the same, and this is what
+    /// says so. Both halves of the threshold are exercised, because a test
+    /// that only used a wide map would pass with the scan deleted.
+    #[test]
+    fn a_wide_map_answers_exactly_what_the_narrow_one_does() {
+        for width in [4usize, ORDERED_MAP_INDEX_THRESHOLD, 5_000] {
+            let mut entries: Vec<(String, MjValue)> = (0..width)
+                .map(|i| (format!("k{i}"), MjValue::from(i)))
+                .collect();
+            // The same name twice: the FIRST wins on both paths.
+            entries.push(("k0".to_string(), MjValue::from("second")));
+            let map = MjValue::from_object(OrderedMap::new(entries));
+
+            assert_eq!(
+                map.get_item(&MjValue::from("k0")).unwrap(),
+                MjValue::from(0usize),
+                "width {width}: a duplicate key must answer its FIRST occurrence"
+            );
+            assert_eq!(
+                map.get_item(&MjValue::from(format!("k{}", width - 1)))
+                    .unwrap(),
+                MjValue::from(width - 1),
+                "width {width}"
+            );
+            assert!(map
+                .get_item(&MjValue::from("absent"))
+                .unwrap()
+                .is_undefined());
+            assert_eq!(map.try_iter().unwrap().count(), width + 1, "width {width}");
+        }
     }
 
     /// `??` falls back for BOTH a present-but-null and an absent variable;
@@ -1836,13 +1935,22 @@ mod tests {
     }
 
     /// Author-supplied source is bounded. Without fuel this hangs.
+    ///
+    /// **The `range` here is Kestra's, not minijinja's.** This test used to
+    /// read `range(1000)` and passed on minijinja's own positional global;
+    /// W2 Task 7 overrode that name with `BoundedRangeFunction`, whose
+    /// arguments are `start`/`end`, and the test then failed with an
+    /// argument error rather than exercising fuel at all. It is the same trap
+    /// `indent` and `string` were, seen from the other side: the override was
+    /// deliberate and the caller was not.
     #[test]
     fn a_runaway_loop_runs_out_of_fuel() {
-        // Nested loops rather than one huge `range`: minijinja caps a single
-        // range's length itself, which would refuse this for a different
-        // reason and leave the fuel setting untested.
+        // Nested loops rather than one huge range: Kestra caps a single
+        // range at 1 000 000 elements, which would refuse this for a
+        // different reason and leave the fuel setting untested.
         let err = render(
-            "{% for a in range(1000) %}{% for b in range(1000) %}x{% endfor %}{% endfor %}",
+            "{% for a in range(start=1, end=1000) %}\
+             {% for b in range(start=1, end=1000) %}x{% endfor %}{% endfor %}",
             json!({}),
         )
         .unwrap_err();

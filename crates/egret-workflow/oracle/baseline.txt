@@ -30,37 +30,35 @@ coalesce-or
 # minijinja's null test is spelled `none`; the corpus correctly keeps Kestra's name.
 coalesce-is-not-null
 
-# function not ported (Tasks 7-8)
-function-now
-function-fromjson
+# function not ported (Task 8: the service-backed ones)
 function-env
 function-encrypt
 function-decrypt
-function-yaml
 function-fetchcontext
 function-printcontext
-function-uuid
-function-id
-function-ksuid
-function-fromion
-function-randomint
-function-randomport
-function-nanoid
 function-taskswithstate
-
-# minijinja HAS `range`, positional-only and exclusive; Kestra's is kwargs and inclusive. Same trap as filter-indent.
-function-range
-
-# function not ported (Tasks 7-8)
-function-ispublicholiday
-function-isdayweekinmonth
-function-isweekend
-function-islastworkingday
-function-dayofweek
-function-hourofday
-function-dayofmonth
-function-monthofyear
 function-loopoutputs
+
+# DELIBERATE (W2 Task 7): the `yaml()` function's plain-scalar resolver is the
+# YAML 1.2 core schema here (`serde_norway`) and SnakeYAML's YAML 1.1 schema in
+# Kestra, so `yes`/`on` are booleans there and strings here, and a leading zero
+# is octal there and not here. Reproducing it needs a scalar's QUOTING STYLE,
+# which `serde_norway` does not expose -- `visit_untagged_scalar` funnels `yes`
+# and `"yes"` into the same visitor call -- and re-resolving on the string alone
+# would make `a: "010"` answer 8, a NEW silent wrong answer traded for an old
+# one. `runners::functions::yaml` carries the table.
+function-yaml-yes-is-a-boolean-or-not
+function-yaml-octal-looking
+
+# DELIBERATE (W2 Task 7): Kestra answers `isPublicHoliday` out of
+# `de.focus_shift.jollyday` 2.19.0, a per-country, per-subdivision XML holiday
+# calendar. There is no such database in this tree and no Rust crate carrying
+# jollyday's data, so egret refuses by name rather than answering a date a flow
+# branches on -- the same call `javafmt` makes for the three CLDR pattern
+# letters. `runners::functions::is_public_holiday` carries the reason;
+# `runners::functions::tests::is_public_holiday_refuses_rather_than_guessing` is
+# the pin.
+function-ispublicholiday
 
 # Pebble test not ported
 test-json-true

@@ -365,3 +365,78 @@ template-unary-minus-chain-past-the-cap
 template-not-chain-past-the-cap
 template-attribute-chain-past-the-cap
 filter-date-optional-sections-past-the-cap
+
+# --- W2 Task 7: the pure functions. Every one of these is a Java exception
+# string, so only the class can be compared; each is paired in
+# `error-class-pairs.txt` with a `#[test] fn` in `runners::functions` that
+# asserts egret's own message, and each was shown to fail before the function
+# existed (they all said `unknown function` on the pre-fix build).
+
+# `BoundedRangeFunction` and the Pebble `RangeFunction` it delegates to.
+function-range-increment-zero
+function-range-increment-not-a-number
+function-range-two-character-string
+function-range-mixed-types
+# `RenderLimits.ensureAtMost(count, 1000000, ...)` -- Kestra's own bound, one
+# of only two call sites in the whole jar.
+function-range-over-the-cap
+
+# `fromJson`: an ABSENT argument throws and a null one returns null, which is
+# the opposite of `yaml` four lines down.
+function-fromjson-missing-argument
+function-fromjson-not-a-string
+function-fromjson-malformed
+
+# `fromIon`.
+function-fromion-missing-argument
+function-fromion-not-a-string
+function-fromion-malformed
+# Upstream defect 6's last row, end to end: `nothing | toIon` is the
+# four-character string `null` and `fromIon` then refuses it.
+function-fromion-of-the-string-null
+function-fromion-round-trip-of-nothing
+
+# `yaml()` has NO null branch, so a null input is the wrong-type error rather
+# than an empty result.
+function-yaml-null-input
+function-yaml-missing-argument
+function-yaml-not-a-string
+function-yaml-malformed
+# The filter writes `.inf` unquoted and its own reader rejects it.
+function-yaml-refuses-what-its-own-writer-wrote
+
+# The calendar functions' two failure modes: no `date` argument, and a `date`
+# that does not parse.
+function-dayofweek-missing-argument
+function-dayofweek-unparseable
+function-dayofweek-null
+function-dayofmonth-missing-argument
+function-monthofyear-missing-argument
+function-isweekend-missing-argument
+function-hourofday-missing-argument
+# `hourOfDay` is the one that does NOT go through `DateUtils.parseLocalDate`,
+# so a date with no time is an error there and fine everywhere else.
+function-hourofday-date-only
+function-islastworkingday-invalid-working-days
+function-islastworkingday-missing-argument
+function-isdayweekinmonth-invalid-position
+function-isdayweekinmonth-invalid-day-of-week
+function-isdayweekinmonth-missing-position
+
+# `randomInt`, whose three messages all spell the function `randomIn()`.
+function-randomint-upper-below-lower
+function-randomint-missing-arguments
+function-randomint-not-a-long
+
+# `nanoId`'s two bounds and its empty-alphabet guard. Both bounds are `>`,
+# not `>=`, so the boundary VALUES are corpus entries that must pass --
+# `function-nanoid-length-at-the-max` and `-alphabet-at-the-max`. A mutation
+# run found `>= ` surviving on both, because nothing sat on the boundary.
+function-nanoid-empty-alphabet
+function-nanoid-length-zero
+function-nanoid-length-past-the-max
+function-nanoid-alphabet-past-the-max
+
+# `now` shares `AbstractDate`'s formatter, so an unknown format NAME is
+# compiled as a PATTERN and fails as `Unknown pattern letter: o`.
+function-now-unknown-format
