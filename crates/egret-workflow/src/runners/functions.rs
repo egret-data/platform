@@ -1600,12 +1600,32 @@ fn fetch_context(state: &State) -> Result<MjValue, MjError> {
     // The render context's own top-level names, as its scope.
     let scope: Vec<String> = state
         .lookup(super::env::CONTEXT_SCOPE_NAMES)
-        .and_then(|names| names.try_iter().ok().map(|it| it.collect::<Vec<_>>()))
-        .map(|names| names.iter().map(super::env::kestra_to_string).collect())
+        .and_then(|names| {
+            names
+                .downcast_object_ref::<super::env::ContextScope>()
+                .map(|held| held.0.clone())
+        })
         .unwrap_or_default();
     // `lambda$execute$0`: a scope whose keys contain `_context` is skipped
-    // whole.
+    // **whole**, and there are two of them here. egret has the render
+    // context's scope and everything a `{% set %}` or a `{% for %}` bound;
+    // Pebble has more, but the two groups reproduce both measured cases:
+    //
+    // | template | context | Kestra |
+    // |---|---|---|
+    // | `{{ fetchContext() }}` | `{"_context":1,"a":2}` | `{}` |
+    // | `{% set y = 9 %}{{ … }}` | the same | `{"y":9}` |
+    // | `{% set _context = 1 %}{{ … }}` | `{"a":2}` | `{"a":2}` |
+    // | `{% for _context in [1] %}{{ … }}` | `{"a":2}` | `{"a":2}` — the loop variable AND `loop` go |
+    //
+    // The first cut read only the context scope, so the last two kept a key
+    // Kestra drops.
+    let in_context = |name: &String| scope.contains(name);
     let drop_the_context_scope = scope.iter().any(|name| name == "_context");
+    let drop_the_local_scope = state
+        .known_variables()
+        .iter()
+        .any(|name| name.as_ref() == "_context" && !scope.iter().any(|s| s == "_context"));
 
     let mut names: Vec<String> = state
         .known_variables()
@@ -1616,7 +1636,8 @@ fn fetch_context(state: &State) -> Result<MjValue, MjError> {
 
     let mut entries: Vec<(String, MjValue)> = Vec::with_capacity(names.len());
     for name in names {
-        if drop_the_context_scope && scope.contains(&name) {
+        let local = !in_context(&name);
+        if (drop_the_context_scope && !local) || (drop_the_local_scope && local) {
             continue;
         }
         let Some(value) = state.lookup(&name) else {

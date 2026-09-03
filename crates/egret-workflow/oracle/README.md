@@ -104,7 +104,7 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **fourteen ids are in this file AND in `baseline.txt`**, because such an
+that: **twenty-three ids are in this file AND in `baseline.txt`**, because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
 until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
 `function-fromion-annotation-of-a-list` without moving the number. Counted out
@@ -136,7 +136,7 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**201** entries carry it today (153 before W2 Task 8, 182 before its fix
+**225** entries carry it today (153 before W2 Task 8, 182 before its fix
 round), counted out of `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
@@ -162,7 +162,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 14 of the 201 are *also* in `baseline.txt`, because egret
+make it pass: 23 of the 225 are *also* in `baseline.txt`, because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -199,7 +199,9 @@ that costs, and **105 of 1047** after W2 Task 8 -- which BANKED seven (every
 function the brief called service-backed that is not) and RECORDED three -- and
 **117 of 1141** after that task's fix round, which fixed 110 measured
 divergences that had NO corpus entry at all and recorded twelve that it
-deliberately did not fix.
+deliberately did not fix, and **130 of 1203** after its second round, which
+BANKED two and recorded fifteen while closing two regressions the first round
+had introduced.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -237,8 +239,11 @@ committed: breaking `kestra_null_coalesce` produced `REGRESSION: 6`, and
 registering a working `json` test without editing the baseline produced
 `PROGRESS NOT BANKED: 2`.
 
-**TEN ids are expected to differ on every regeneration** — this said nine
-until W2 Task 8's regeneration diff showed a tenth: the eight
+**EIGHT ids always differ on every regeneration, and two more differ
+sometimes** — this said nine, then ten, and both were wrong the same way:
+three regenerations gave 8, 10 and 9. The eight always move; the two
+`fromion` ones are Jackson serialiser artifacts that alternate
+*independently*, so any of 8, 9 or 10 is a normal diff. The eight
 non-deterministic ones in `tests/oracle.rs`'s `NON_DETERMINISTIC`, plus
 `function-fromion-annotation-in-a-list` **and
 `function-fromion-annotation-of-a-list`**, whose goldens are a **Jackson
@@ -727,7 +732,7 @@ function.** Implemented in Task 3's fix round: `rewrite` now emits
 `runners::env::kestra_is_in` reproduces all four rows. All four entries
 match.
 
-## Corpus (`corpus.json`, 1 141 entries)
+## Corpus (`corpus.json`, 1 203 entries)
 
 - **37 operator cases**, taken verbatim from the task brief plus several
   follow-up fixes: the `??`/`???` pair (5 entries covering null vs. absent on
@@ -1314,8 +1319,9 @@ this list first, or they will read a moved golden as a regression in egret.
 | 4 | **`AbstractDate.convert`'s 19-digit branch throws away the milliseconds it just read.** It is `Instant.ofEpochMilli(l / 1_000_000).atZone(zone).withNano((int)(l % 1_000_000) * 1000)`, and `withNano` **replaces** the whole nanosecond field — so `ofEpochMilli`'s `.123` is discarded and `1705314600123456789` renders `.456789`, not `.123456789`. | `javap -p -c AbstractDate.class`, the `digitCount == 19` branch: `ldiv` by `1000000`, `Instant.ofEpochMilli`, `atZone`, then `ZonedDateTime.withNano` | `filter-date-epoch-nanos-truncating` |
 
 | 5 | **`jq` never sees a null-valued key.** `JqFilter`'s non-String branch is `JacksonMapper.ofJson().valueToTree(input)`, and that mapper is `NON_NULL`, so a map's null-valued entries are dropped on the way IN: `{{ obj \| jq('keys') }}` on `{a:1,b:null,c:3}` answers `["a","c"]`. A flow author reading `keys` gets fewer keys than the object has, and nothing says so. | `javap -p -c JacksonMapper.class`: `configure()` calls `setDefaultPropertyInclusion(NON_NULL)`, and `JqFilter.apply` calls `ofJson().valueToTree` | `filter-jq-keys-drops-null-values` |
-| 7 | **`Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE`.** There is no positive counterpart in the range, so `Math.abs(long)` overflows and Java returns the input rather than throwing; `Math.abs(int)` does the same at `Integer.MIN_VALUE`. `{{ -9223372036854775808 \| abs }}` is negative on both engines. | `javap -p -c AbsFilter.class` reaching `Math.abs:(J)J`, plus the harness | `filter-abs-long-min-value`; `runners::filters::abs_reproduces_javas_overflow_at_the_minimum` |
 | 6 | **`yaml` writes values its own reader cannot read back, and values it reads back as a DIFFERENT TYPE.** With `MINIMIZE_QUOTES` on and `ALWAYS_QUOTE_NUMBERS_AS_STRINGS` off, a numeric-looking STRING is written unquoted: `{{ '1e5' \| yaml }}` is `1e5`, and `yaml(yaml='1e5')` reads that back as the double `100000.0`. `'42'` comes back as an integer. Worse, `{{ '.inf' \| yaml }}` is `.inf` and Kestra's own `yaml()` function then **throws** `Malformed numeric value '.inf'`. | round-tripped 86 values through `x \| yaml` and back through `yaml(yaml=…)` in the harness: 3 of 86 changed type and 2 more errored, all of them `yaml` | `filter-yaml-number-shaped-string`, `filter-yaml-exponent-shaped-string`, `filter-yaml-writes-what-its-own-reader-refuses` |
+
+| 7 | **`Math.abs(Long.MIN_VALUE)` is `Long.MIN_VALUE`.** There is no positive counterpart in the range, so `Math.abs(long)` overflows and Java returns the input rather than throwing; `Math.abs(int)` does the same at `Integer.MIN_VALUE`. `{{ -9223372036854775808 \| abs }}` is negative on both engines. | `javap -p -c AbsFilter.class` reaching `Math.abs:(J)J`, plus the harness | `filter-abs-long-min-value`; `runners::filters::abs_reproduces_javas_overflow_at_the_minimum` |
 
 ### What is NOT on that list, and why the distinction matters
 
@@ -3949,8 +3955,11 @@ Two classes, neither of them on the axis any of the sixteen fixes was aimed at.
   error on Kestra. `first`, `last`, `join`, `length` and `default` take a
   `Collection` and agree, and `distinct`, `chunk`, `split`, `range` and
   `fromJson` return real mutable Lists, so the class is exactly three
-  producers wide. Recorded, with `filter-sort-of-a-real-list` pinning the other
-  side.
+  producers wide. **That count was wrong and was committed**: fix round 2
+  falsified it with two probes — `split` returns a Java `String[]` and `chunk`
+  an immutable list, and `distinct`, `chunk` and `flatten` cast to `List` on
+  the consumer side. It is five producers by six consumers, fourteen baselined
+  entries, with `filter-sort-of-a-real-list` pinning the other side.
 - **The sixteen new names join the recorded "an undefined root variable"
   class.** `{{ nothere | upper }}` is a `RootAttributeNotFoundException` there
   and renders empty here, exactly as `filter-string-undefined-input` already
@@ -3963,3 +3972,184 @@ Two classes, neither of them on the axis any of the sixteen fixes was aimed at.
 honest shape of this round: 110 measured divergences were fixed and **none of
 them had a corpus entry before**, while the twelve entries added for what is
 deliberately not fixed are new recorded divergences the ratchet now holds.
+
+## W2 Task 8, fix round 2 — two regressions the round before introduced, and a premise that was false
+
+A 350-case differential, run through the artifact **and both builds**, found
+two Criticals. Both were **introduced by the round that was fixing
+divergences**, which is the shape worth remembering: a port undertaken to close
+a gap opened two that the default it replaced did not have.
+
+### `sort` became worse than the minijinja default it replaced
+
+The comparator went through `f64::try_from(..).total_cmp(..)`. That collapses
+every integer past 2^53, and `sort_by` is stable, so a pair it could not tell
+apart kept its **input** order:
+
+| list | Kestra | the f64 comparator |
+|---|---|---|
+| `[9007199254740993, 9007199254740992]` | `…992, …993` | `…993, …992` |
+| `[1234567890123456789, …788]` | `…788, …789` | `…789, …788` |
+| `[9223372036854775807, …806]` | `…806, …807` | `…807, …806` |
+
+**minijinja's own `sort` compares integers exactly, so egret agreed with Kestra
+on all of these before the port.** Epoch nanoseconds, snowflake ids and
+counters are ordinary flow data.
+
+The comparator now branches on the element class — which `sort` has already
+established is *one* class, since a mixed list throws — and integers go through
+`i128`. What the entries could not see, and the reason this was invisible: the
+three `sort` entries the port shipped with all exercise the **type check**, and
+not one of them reaches the comparator. `filter-sort-past-two-to-the-53` is the
+first that does.
+
+### Sixteen filters swallowed an undefined variable
+
+`is_java_null` folds `Undefined` into "Kestra's null". That is right for the
+filters W2 Task 4 wrote — Pebble's `null` is a real literal, minijinja has no
+such name, and six entries pin what Kestra answers for it — and its cost is
+written down: egret cannot tell the literal from a **typo'd variable**.
+
+Applying it at the *entry point* of a filter that previously refused an
+undefined turns that cost into a regression, and fix round 1 did it to sixteen
+names at once:
+
+| expression | Kestra | pre-port | fix round 1 |
+|---|---|---|---|
+| `{{ nothere \| upper }}` | `RootAttributeNotFoundException` | an error | `""` |
+| `{{ obj.missing \| length }}` | `AttributeNotFoundException` | an error | `"0"` |
+
+28 measured cases over 14 names x {missing root, missing attribute}. In a flow
+that turns a typo'd variable from a hard failure into an empty string — and
+**converting a refusal into an answer is the divergence this crate's rules do
+not allow**, which is the rule the same round cited to justify sixteen ports.
+
+`runners::filters::strict_undefined` now runs first in each of them. What that
+costs is recorded rather than hidden: `{{ null | upper }}` — the **literal** —
+renders empty on Kestra and is an error here, because the literal and the typo
+arrive identically. Same trade as `filter-string-undefined-input`, seen from
+the other side, and it is the direction that fails loudly.
+
+**One exception, and it is Pebble's own**: the filter-invocation expression
+catches the attribute exception for `default` specifically, so
+`{{ nothere | default('D') }}` is `D` on Kestra. Measured for a root name and
+for an attribute, and `default` is the one ported filter with no guard.
+
+### The `format` wrapper rested on a false premise
+
+Fix round 1 wrapped `minijinja::filters::format` on the stated premise that the
+two engines agreed on the six specifiers minijinja has. **Two of the six were
+counter-examples, and all five differences were silently wrong values:**
+
+| expression | Java | the wrapper |
+|---|---|---|
+| `'%x' \| format(-255)` | `ffffff01` | `-ff` |
+| `'%.0f' \| format(0.5)` | `1` (HALF_UP) | `0` (half-to-even) |
+| `'%.2f' \| format(1e300)` | the shortest repr, padded | 300 digits of the exact value |
+| `'%s' \| format(true)` | `true` | `True` |
+| `'%s' \| format({'a':1})` | `{a=1}` | `{"a": 1}` |
+
+The last two are **the Python-spelling defect that round existed to kill**,
+still live inside `format`, because the wrapper mapped a null argument and
+passed every other one through untouched.
+
+So the grammar is ported: `runners::javaformat` implements
+`%[N$][flags][width][.precision]conversion` for `s S b B d o x X f e E % n`
+with the flags `- + space 0 , ( #`, and **refuses every other conversion by
+name** — `c`, `g`, `a`, `h` and the `t` family. Refusing is the safe direction;
+a partial implementation would have traded four honest errors for four chances
+at a different number. Measured against a 519-case grid: 491 agree and the 28
+that do not are exactly the four refused conversions.
+
+Three rules in it are not obvious and all three are measured:
+
+- a **null argument** is the four characters `null` through the *string* path
+  for every conversion but `b`/`B` — so `'%.0f' | format(null)` is the empty
+  string, because precision truncates it;
+- `%x`/`%X`/`%o` of a negative print two's complement **at the argument's own
+  width**, and which width comes from `java_class_name`'s Integer/Long
+  magnitude rule;
+- `%f` rounds the **shortest decimal representation**, HALF_UP — not the exact
+  binary value. That is why `1.005` is `1.01` and `1e300` is a 1 and 300 zeros.
+  Rust's `{}` is also shortest-round-trip and positional, so it is the right
+  digit source.
+
+### The two word-boundary predicates were both wrong, in both directions
+
+`capitalize` and `title` used Rust's `char::is_whitespace`.
+`Character.isWhitespace` is **false** for the three non-breaking spaces
+(U+00A0, U+2007, U+202F) and **true** for the four information separators
+(U+001C..U+001F) — opposite on both sets, 16 measured cases. `trim` was right,
+because `String.trim()` is a third rule (`<= U+0020`) and it had that one.
+
+`java_title_case` was `to_uppercase()`, and the doc's dismissal of the
+difference as "one character wide" was wrong twice: the Latin digraphs have a
+**distinct** title case (`\u{1c6}` titles to `\u{1c5}`, not `\u{1c4}`), and the
+Greek iota-subscript family upper-cases to *two* characters where
+`toTitleCase(char)` returns a single precomposed one. Both are now a 35-entry
+table **derived** from `oracle/fixtures/java-title-case.txt`, the JVM's own
+`toTitleCase` map over the BMP, and
+`title_case_matches_the_jvm_over_every_code_point_it_maps` walks all 1 149
+entries — so the derivation cannot rot and a JDK bump fails a test rather than
+moving a golden nobody reads.
+
+### The collection class is five producers and six consumers
+
+Fix round 1 committed "three producers wide". Two probes falsify it:
+
+```
+'a,b,c' | split(',') | reverse    ClassCastException ([Ljava.lang.String;)
+l | chunk(2) | reverse            UnsupportedOperationException
+```
+
+`SplitFilter` returns a Java **array** and `ChunkFilter` an **immutable** list.
+And `distinct`, `chunk` and `flatten` — W2 Task 4's, not this batch's — cast to
+`List` too, so the consumer side is six. Producers whose result is not a
+mutable `List`: `keys`, `values`, `flatten`, `chunk`, `split`. Ten more
+baselined entries; `filter-sort-of-a-real-list` still pins the other side. Two
+of the pairs were **regressions** rather than pre-existing —
+`keys | slice` and `values | slice` agreed before fix round 1, because
+minijinja's `slice` errored on them for its own reasons.
+
+### Two holes in the C1 fix, and one of them was reachable from data
+
+- The `_context` guard read only the render context's own names.
+  `FetchContextFunction` drops **any** scope whose keys contain `_context`:
+  `{% set _context = 1 %}{{ fetchContext() }}` is `{"a":2}` there and kept the
+  key here, and the `{% for %}` case additionally kept `loop`. There are two
+  scope groups in egret — the context's and everything a `{% set %}` or
+  `{% for %}` bound — and both are now dropped independently.
+- **The sentinel was reachable from data.** `CONTEXT_SCOPE_NAMES` was the one
+  global whose value is a `Seq`, and `Seq`'s `PartialEq` is *structural* rather
+  than `is_same_object` — so a context key whose value equalled the sentinel
+  was silently deleted from the answer. Measured:
+  `{"egret context scope": ["egret context scope"]}` renders on Kestra and
+  yielded `{}` here. It is an `ObjectRepr::Plain` object now, which no JSON
+  context can produce, so the identity test is exact rather than nearly exact.
+
+### The fixture's own rule was not enforced
+
+`name-surface.txt`'s header has said since fix round 1 that a **baselined id is
+preferred** "so the row surfaces a known divergence rather than hiding it
+behind a passing sibling". Nothing checked it: swapping the `sort` row from
+`filter-sort-of-keys` to the passing `filter-sort`, reason `-`, survived — which
+is precisely the hiding the rule forbids. `the_built_in_surface_matches_the_engines`
+now computes each row's id family and fails when a baselined member exists and
+the row names something else.
+
+### Counted, and the honest shape of it
+
+**130 of 1203**, from 117 of 1141. Two entries were **banked**
+(`filter-format-argument-index`, which the ported formatter now answers, and
+`filter-length-of-an-undefined`, which the strict guard now refuses), and
+fifteen recorded. The two Criticals were **regressions**, so closing them moved
+110-odd cases back to agreeing without moving the count at all — they had no
+entries when they broke, which is the finding underneath both of them: the
+round that introduced them added 94 entries and not one covered the axis it
+broke.
+
+**And this round nearly repeated it.** Two of its own mutations —
+reverting the `_context` local-scope guard, and making the sentinel a `Seq`
+again — **survived on the first attempt**, because the behaviour had been fixed
+without an entry. Three entries later they fail by name. A fix with no entry is
+a fix the ratchet cannot keep.

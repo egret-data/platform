@@ -72,7 +72,7 @@ filter	batch	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS
 filter	bool	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	capitalize	yes	yes	filter-capitalize	-
 filter	chain	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
-filter	chunk	yes	yes	filter-chunk	-
+filter	chunk	yes	yes	filter-chunk-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type
 filter	className	yes	yes	filter-classname-literal-int	a boxed Java number would stop being usable as a number in minijinja; the class NAME is not observable from a flow
 filter	count	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	d	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
@@ -80,15 +80,15 @@ filter	date	yes	yes	filter-date-pattern-zone-name	the CLDR zone-name text `z`/`z
 filter	dateAdd	yes	yes	filter-dateadd-past-egrets-date-range	egret's dates are chrono's and its range is narrower than `java.time`'s
 filter	default	yes	yes	filter-default	-
 filter	dictsort	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
-filter	distinct	yes	yes	filter-distinct	-
+filter	distinct	yes	yes	filter-distinct-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type
 filter	e	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	endsWith	yes	yes	filter-endswith	-
 filter	escape	yes	yes	filter-escape-js-strategy	only the HTML strategy is ported; `js`, `css` and `url_param` are three character tables this round was not scoped to, and egret refuses them
 filter	escapeChar	yes	yes	filter-escapechar-map-two-keys	java.util.HashMap bucket order, which this crate records rather than ports
 filter	first	yes	yes	filter-first	-
-filter	flatten	yes	yes	filter-flatten	-
+filter	flatten	yes	yes	filter-flatten-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type
 filter	float	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
-filter	format	yes	yes	filter-format-argument-index	Java's `String.format` conversion language (`%,d`, `%N$s`, `%b`) is not ported; the six specifiers minijinja does have were measured to agree
+filter	format	yes	yes	filter-format-g-conversion	`runners::javaformat` implements `s S b B d o x X f e E % n` exactly and refuses `g`, `a`, `c`, `h` and the `t` family BY NAME rather than answering differently
 filter	groupby	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	indent	yes	yes	filter-indent	-
 filter	int	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
@@ -97,7 +97,7 @@ filter	join	yes	yes	filter-join	-
 filter	jq	yes	yes	filter-jq-at-csv	`jackson-jq` at JQ_1_6 and `jaq-std` do not carry the same standard library, in both directions
 filter	keys	yes	yes	filter-keys	-
 filter	last	yes	yes	filter-last	-
-filter	length	yes	yes	filter-length-of-an-undefined	an undefined root variable is a RootAttributeNotFoundException there and reaches the null branch here; the recorded rewriter-vocabulary class, and `length` answers `0` rather than empty
+filter	length	yes	yes	filter-length-literal-null	the same trade as `upper`: the literal and the typo arrive identically, and the alternative turned `{{ nothere | length }}` into `0`
 filter	lines	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	list	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	lower	yes	yes	filter-lower-chained-past-a-worker-stack	-
@@ -118,7 +118,7 @@ filter	regexReplace	yes	yes	filter-regexreplace-escaped-backslash	minijinja's st
 filter	reject	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	rejectattr	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	replace	yes	yes	filter-replace-unknown-named-argument	egret ignores an unknown named argument where Pebble's binder refuses it -- W2 Task 7's recorded class, now with an entry. The map-LITERAL order is a second divergence on this name, at `filter-replace-literal-order`
-filter	reverse	yes	yes	filter-reverse-of-keys	`(List) input`, and `keys` is a Set -- the same one-sequence-type limit as `sort`
+filter	reverse	yes	yes	filter-reverse-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type
 filter	round	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	rsort	yes	no	-	Pebble core; never in a W2 batch
 filter	safe	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
@@ -127,10 +127,10 @@ filter	selectattr	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FI
 filter	sha1	yes	yes	filter-sha1	-
 filter	sha256	yes	no	-	Pebble core. Kestra's own Md5/Sha1/Sha512 filters all carry a copy-pasted 'sha256' javadoc and register three names; the fourth name comes from Pebble instead, and no W2 task owned it
 filter	sha512	yes	yes	filter-sha512	-
-filter	slice	yes	yes	filter-slice-of-keys	`slice` takes a List, String or array, and `keys` is a Set -- the same limit
+filter	slice	yes	yes	filter-slice-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type
 filter	slugify	yes	yes	filter-slugify	-
-filter	sort	yes	yes	filter-sort-of-keys	`keys` hands back a Java Set and `sort` needs a mutable List, so it refuses there and answers here; egret has one sequence type. `filter-sort-of-a-real-list` pins the other side
-filter	split	yes	yes	filter-split	-
+filter	sort	yes	yes	filter-sort-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type; `filter-sort-of-a-real-list` pins the other side
+filter	split	yes	yes	filter-split-lookahead	`split`'s delimiter is a Java regex and inherits `javare`'s unsupported-construct set; under-acceptance, the same class as `filter-regexmatch-lookahead`
 filter	startsWith	yes	yes	filter-startswith	-
 filter	string	yes	yes	filter-string-undefined-input	egret cannot tell Pebble's `null` literal from a typo'd variable at a filter's input; the fix is in the rewriter's vocabulary
 filter	substringAfter	yes	yes	filter-substringafter	-
@@ -147,7 +147,7 @@ filter	toIon	yes	yes	filter-toion	-
 filter	toJson	yes	yes	filter-tojson	-
 filter	trim	yes	yes	filter-trim	-
 filter	unique	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
-filter	upper	yes	yes	filter-upper	-
+filter	upper	yes	yes	filter-upper-literal-null	egret cannot tell Pebble's `null` LITERAL from a typo'd variable -- both arrive as an undefined -- and refuses both. The direction that fails loudly: the alternative turned `{{ nothere | upper }}` into an empty string
 filter	urldecode	yes	yes	filter-urldecode	-
 filter	urlencode	yes	no	-	Pebble core; Kestra registers `urldecode` only, and egret has that one
 filter	values	yes	yes	filter-values	-

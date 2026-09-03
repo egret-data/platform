@@ -336,4 +336,47 @@ filter-sort-of-flatten                              baselined
 # variable" class (see `filter-string-undefined-input`), which the sixteen new
 # filter names join. `length` is the one that answers a VALUE rather than
 # rendering empty, so it gets the entry.
-filter-length-of-an-undefined                       baselined
+filter-length-of-an-undefined                       test:the_ported_filters_refuse_an_undefined_input
+
+# W2 Task 8, fix round 2: an UNDEFINED input. Kestra raises under
+# strictVariables(true) for a missing root attribute and for a missing
+# attribute, and fix round 1 turned sixteen filters from refusing to answering
+# -- 28 measured regressions. `default` is the one exception and Pebble's own:
+# its filter-invocation expression catches the exception so the fallback can
+# work, which is why `filter-default-undefined-*` are NOT here.
+filter-upper-undefined-root                         test:the_ported_filters_refuse_an_undefined_input
+filter-upper-undefined-attribute                    test:the_ported_filters_refuse_an_undefined_input
+filter-length-undefined-root                        test:the_ported_filters_refuse_an_undefined_input
+filter-length-undefined-attribute                   test:the_ported_filters_refuse_an_undefined_input
+filter-sort-undefined-root                          test:the_ported_filters_refuse_an_undefined_input
+filter-sort-undefined-attribute                     test:the_ported_filters_refuse_an_undefined_input
+filter-split-undefined-root                         test:the_ported_filters_refuse_an_undefined_input
+filter-split-undefined-attribute                    test:the_ported_filters_refuse_an_undefined_input
+filter-join-undefined-root                          test:the_ported_filters_refuse_an_undefined_input
+filter-join-undefined-attribute                     test:the_ported_filters_refuse_an_undefined_input
+
+# `runners::javaformat` refuses a conversion it does not implement BY NAME,
+# and Java itself refuses an integer through a float conversion and an unknown
+# conversion character.
+filter-format-integer-through-a-float               test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+filter-format-unknown-conversion                    test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+filter-format-trailing-percent                      test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
+
+# The collection class: which Java collection a filter RETURNS decides whether
+# the next accepts it, five producers by six consumers, and egret has one
+# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
+# so the ratchet is what holds them.
+filter-reverse-of-split                             baselined
+filter-reverse-of-chunk                             baselined
+filter-reverse-of-flatten                           baselined
+filter-sort-of-values                               baselined
+filter-reverse-of-values                            baselined
+filter-slice-of-values                              baselined
+filter-distinct-of-keys                             baselined
+filter-chunk-of-keys                                baselined
+filter-flatten-of-keys                              baselined
+filter-distinct-of-split                            baselined
+
+# `charAt(0)` on an empty String, which is the one branch of `first`/`last`
+# that Pebble and minijinja do not answer the same way.
+filter-first-of-an-empty-string                     test:pebble_core_filters_refuse_a_wrong_input_type

@@ -1500,6 +1500,25 @@ const MINIJINJA_ONLY_TESTS: &[&str] = &[
 /// exists for. This carries the provenance the API does not.
 pub(super) const CONTEXT_SCOPE_NAMES: &str = "egret context scope";
 
+/// The render context's own top-level names, as an **opaque object**.
+///
+/// # Why not a `Seq`
+///
+/// [`super::functions::fetch_context`] decides "is this name the
+/// environment's?" by comparing `State::lookup`'s answer with the global, and
+/// `Value`'s `PartialEq` only falls through to `Object::is_same_object` for
+/// two **objects**. A `Seq` compares *structurally*, so a context key whose
+/// value happened to equal the sentinel was silently deleted from the answer:
+/// measured, `{"egret context scope": ["egret context scope"]}` renders on
+/// Kestra and yielded `{}` here.
+///
+/// An `ObjectRepr::Plain` object cannot be produced by any JSON context, so
+/// the identity test is now exact rather than nearly exact.
+#[derive(Debug)]
+pub(super) struct ContextScope(pub(super) Vec<String>);
+
+impl minijinja::value::Object for ContextScope {}
+
 pub fn environment() -> Environment<'static> {
     let mut env = Environment::new();
 
@@ -1666,12 +1685,9 @@ fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, R
     // this is a global rather than something read off `State`.
     env.add_global(
         CONTEXT_SCOPE_NAMES,
-        MjValue::from(
-            cx.bindings()
-                .iter()
-                .map(|(name, _)| MjValue::from(name.as_str()))
-                .collect::<Vec<_>>(),
-        ),
+        MjValue::from_object(ContextScope(
+            cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
+        )),
     );
     let env = env;
 
@@ -1899,6 +1915,30 @@ mod tests {
                     golden_ids.contains(semantics),
                     "{kind} {name}: `{semantics}` is not a corpus id"
                 );
+                // **The "a baselined id is preferred" rule, enforced.** The
+                // header has said so since fix round 1 and nothing checked it,
+                // so swapping a row from its baselined entry to a passing
+                // sibling -- which is exactly the hiding the rule forbids --
+                // survived. Measured, on the `sort` row.
+                let family: Vec<&str> = golden_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        let stem = format!("{kind}-{}", name.to_lowercase());
+                        *id == stem || id.starts_with(&format!("{stem}-"))
+                    })
+                    .collect();
+                let diverging: Vec<&str> = family
+                    .iter()
+                    .copied()
+                    .filter(|id| baselined_ids.contains(id))
+                    .collect();
+                assert!(
+                    diverging.is_empty() || diverging.contains(&semantics),
+                    "{kind} {name}: `{semantics}` passes while {diverging:?} \
+                     do not -- a row must name a baselined entry when its name has one, \
+                     or the divergence is hidden behind a passing sibling"
+                );
                 let diverges = baselined_ids.contains(semantics);
                 assert_eq!(
                     reason == "-",
@@ -1994,6 +2034,7 @@ mod tests {
             ("env", include_str!("env.rs")),
             ("filters", include_str!("filters.rs")),
             ("functions", include_str!("functions.rs")),
+            ("javaformat", include_str!("javaformat.rs")),
         ];
 
         let mut rows: std::collections::BTreeSet<(String, String)> = Default::default();

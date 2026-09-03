@@ -504,6 +504,7 @@ fn declared_test_names() -> BTreeSet<String> {
         include_str!("../src/runners/functions.rs"),
         include_str!("../src/runners/ionfmt.rs"),
         include_str!("../src/runners/javafmt.rs"),
+        include_str!("../src/runners/javaformat.rs"),
         include_str!("../src/runners/javare.rs"),
         include_str!("../src/runners/jqsandbox.rs"),
         include_str!("../src/runners/rewrite.rs"),
@@ -580,7 +581,7 @@ fn every_runners_module_is_scanned_for_declared_tests() {
              `test:` pairing naming one of its tests would be rejected as nonexistent"
         );
     }
-    assert_eq!(on_disk.len(), 9, "a module was added or removed");
+    assert_eq!(on_disk.len(), 10, "a module was added or removed");
 }
 
 #[test]

@@ -18,6 +18,11 @@
 //!   because no Rust crate provides that pattern language and because it is
 //!   the only part of this crate that is about `java.time` rather than about
 //!   Pebble.
+//! - `javaformat` is `java.util.Formatter`'s `%` grammar, which the `format`
+//!   filter is written against. W2 Task 8's fix round 1 wrapped minijinja's
+//!   own `format` on the premise that the two agreed; its round 2 measured
+//!   five silently different values, two of them in the specifiers the premise
+//!   named, and ported the grammar instead.
 //! - `ionfmt`, `yamlfmt` and `javare` are the same shape of thing for W2
 //!   Task 6's filters: Amazon Ion text as `JacksonMapper.ofIon()` writes it,
 //!   YAML as Jackson's `YAMLGenerator` over SnakeYAML's emitter writes it,
@@ -34,6 +39,7 @@ mod filters;
 mod functions;
 mod ionfmt;
 mod javafmt;
+mod javaformat;
 mod javare;
 mod jqsandbox;
 pub mod rewrite;

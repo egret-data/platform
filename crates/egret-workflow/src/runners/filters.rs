@@ -230,6 +230,15 @@ impl Args {
     /// Mirrors Pebble's `args.containsKey(name)`: a name that was not supplied
     /// is `None`, and every Kestra filter in this module tests exactly that
     /// before reading it.
+    /// The positional arguments alone, in order.
+    ///
+    /// `FormatFilter` declares **no** argument names, so Pebble stores every
+    /// argument under `"0"`, `"1"`, … and `String.format`'s varargs are those
+    /// in order. Nothing else in this module needs them that way.
+    pub(super) fn positional_only(&self) -> Vec<MjValue> {
+        self.positional.clone()
+    }
+
     pub(super) fn get(&self, name: &str, index: usize) -> Option<MjValue> {
         self.named
             .iter()
@@ -268,6 +277,11 @@ pub(super) fn pebble_error(message: impl Into<String>) -> MjError {
 /// filter's input, and Kestra can: `{{ typo | string }}` is a
 /// `RootAttributeNotFoundException` there and renders empty here.
 /// `filter-string-undefined-input` is that entry, baselined.
+///
+/// **This does not apply to the filters W2 Task 8's fix round ported.** Those
+/// refused an undefined before egret owned them, so folding it into "null"
+/// there converts a refusal into an ANSWER rather than trading one wrong
+/// answer for another — see [`strict_undefined`], which they call first.
 ///
 /// **This is not a cost of the choice above.** Measured on minijinja 2.24:
 /// `UndefinedBehavior::Strict` raises for `{{ typo }}` but **not** for
@@ -638,6 +652,7 @@ impl Drop for ReplaceBudget {
 /// of this sentence named `filter-replace-past-the-cap`, which does not exist
 /// in any control file and never did.
 fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("replace", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -736,6 +751,52 @@ fn replace(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 // which names a baselined corpus id per row, so the record is in the ratchet
 // rather than in prose.
 
+/// The guard every filter W2 Task 8's fix round ported runs **first**, before
+/// its `input == null` branch.
+///
+/// # Why this is not [`is_java_null`]
+///
+/// `is_java_null` folds `Undefined` into "Kestra's null", and that is right
+/// for the filters Task 4 wrote: Pebble's `null` is a real literal, minijinja
+/// has no such name, and six corpus entries pin what Kestra answers for it.
+/// The cost is written down in that function's doc — egret cannot tell the
+/// literal from a **typo'd variable**.
+///
+/// Applying it at the *entry point* of a filter that previously refused an
+/// undefined turns that cost into a **regression**, and the fix round's first
+/// cut did exactly that to sixteen names at once:
+///
+/// | expression | Kestra | pre-port | the first cut |
+/// |---|---|---|---|
+/// | `{{ nothere \| upper }}` | `RootAttributeNotFoundException` | an error | `""` |
+/// | `{{ obj.missing \| length }}` | `AttributeNotFoundException` | an error | `"0"` |
+///
+/// 28 measured regressions over 14 names x {missing root, missing attribute}.
+/// In a flow that turns a typo'd variable from a hard failure into an empty
+/// string, and **converting a refusal into an answer is the one divergence
+/// this crate's rules do not allow** — the rule the same round cited to
+/// justify sixteen ports.
+///
+/// So these filters refuse an undefined, exactly as the minijinja built-ins
+/// they replaced did. What that costs, stated rather than hidden:
+/// `{{ null \| upper }}` — the **literal** — renders empty on Kestra and is an
+/// error here, because the literal and the typo arrive identically. That is
+/// the same trade `filter-string-undefined-input` already records, and it is
+/// the direction that fails loudly. `filter-upper-literal-null` is the entry.
+///
+/// The two exceptions are deliberate: `default` and `abs` are reached through
+/// this too, and Kestra raises for an undefined input to *both*.
+fn strict_undefined(filter: &str, value: &MjValue) -> Result<(), MjError> {
+    if value.kind() == ValueKind::Undefined {
+        return Err(pebble_error(format!(
+            "an undefined value reached the '{filter}' filter: Kestra renders under \
+             strictVariables(true), where a missing root attribute or a missing \
+             attribute raises rather than becoming null"
+        )));
+    }
+    Ok(())
+}
+
 /// Pebble's `(String) input` cast, which tolerates a Java `null`.
 ///
 /// `checkcast` lets a `null` through, so `null | capitalize` is `null` and
@@ -763,6 +824,7 @@ fn pebble_string_cast(value: &MjValue) -> Result<Option<String>, MjError> {
 /// `Object::toString`. [`super::env::kestra_to_string`] is the only correct
 /// route and this crate has now learned that four times.
 fn upper(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("upper", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -771,6 +833,7 @@ fn upper(value: MjValue) -> Result<MjValue, MjError> {
 
 /// `LowerFilter` — the mirror of [`upper`].
 fn lower(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("lower", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -788,18 +851,19 @@ fn lower(value: MjValue) -> Result<MjValue, MjError> {
 /// A non-String input is a `ClassCastException`, unlike [`upper`], which
 /// stringifies — the two neighbouring filters really do differ on that.
 fn capitalize(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("capitalize", &value)?;
     let Some(text) = pebble_string_cast(&value)? else {
         return Ok(MjValue::from(()));
     };
     let mut out = String::with_capacity(text.len());
     let mut chars = text.char_indices();
     for (at, c) in chars.by_ref() {
-        if c.is_whitespace() {
+        if java_is_whitespace(c) {
             out.push(c);
             continue;
         }
         // `Character.toTitleCase`, then the remainder untouched.
-        out.extend(java_title_case(c));
+        out.push(java_title_case(c));
         out.push_str(&text[at + c.len_utf8()..]);
         break;
     }
@@ -814,17 +878,18 @@ fn capitalize(value: MjValue) -> Result<MjValue, MjError> {
 /// was `A-B C'D` here. Only `Character.isWhitespace` delimits, so `'1a b'` is
 /// `'1a B'` — the `1` is a word start and title-casing it changes nothing.
 fn title(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("title", &value)?;
     let Some(text) = pebble_string_cast(&value)? else {
         return Ok(MjValue::from(()));
     };
     let mut out = String::with_capacity(text.len());
     let mut at_word_start = true;
     for c in text.chars() {
-        if c.is_whitespace() {
+        if java_is_whitespace(c) {
             out.push(c);
             at_word_start = true;
         } else if at_word_start {
-            out.extend(java_title_case(c));
+            out.push(java_title_case(c));
             at_word_start = false;
         } else {
             out.push(c);
@@ -833,16 +898,98 @@ fn title(value: MjValue) -> Result<MjValue, MjError> {
     Ok(MjValue::from(out))
 }
 
-/// `Character.toTitleCase`, which is `toUpperCase` for every character whose
-/// title case is a single character — every one a flow will meet.
+/// `Character.isWhitespace`, which is **not** Rust's `char::is_whitespace`.
 ///
-/// Rust has no title-case table; `to_uppercase` is an iterator because a few
-/// characters upper-case to more than one (`ß` to `SS`), and Java's
-/// `toTitleCase(char)` cannot express that and returns the character
-/// unchanged. That difference is one character wide, it is recorded rather
-/// than modelled, and no corpus entry reaches it.
-fn java_title_case(c: char) -> impl Iterator<Item = char> {
-    c.to_uppercase()
+/// The two are opposite on both of the sets that matter, and both matter:
+/// Java says **false** for the three non-breaking spaces (U+00A0, U+2007,
+/// U+202F) that Rust calls whitespace, and **true** for the four information
+/// separators (U+001C..U+001F) that Rust does not. 16 measured cases, all in
+/// `capitalize` and `title` — `'\u{a0}ab' | capitalize` is `\u{a0}ab` on
+/// Kestra and was `\u{a0}Ab` here, because the first non-whitespace character
+/// there is the space itself.
+///
+/// The 25 code points are read out of the JVM, not out of a specification:
+/// `Character.isWhitespace(c)` over the whole of Unicode on Corretto 25.
+///
+/// `trim` does not use this — `String.trim()` is `<= U+0020`, a third and
+/// different rule, and it is right where these two were wrong.
+fn java_is_whitespace(c: char) -> bool {
+    matches!(c, '\u{0009}'..='\u{000d}' | '\u{001c}'..='\u{0020}' | '\u{1680}' | '\u{2000}'..='\u{2006}' | '\u{2008}'..='\u{200a}' | '\u{2028}'..='\u{2029}' | '\u{205f}' | '\u{3000}')
+}
+
+/// The code points where `Character.toTitleCase(char)` is neither the
+/// character's single-character uppercase nor the character itself.
+///
+/// **The doc that dismissed this as "one character wide" was wrong twice.**
+/// The Latin digraphs have a distinct title case and the first cut returned
+/// the UPPER case — `'\u{1c6}x' | capitalize` is `\u{1c5}x` on Kestra and was
+/// `\u{1c4}x` here — and the Greek iota-subscript family upper-cases to *two*
+/// characters, where `Character.toTitleCase(char)` returns a single
+/// precomposed one (`\u{1f80}` to `\u{1f88}`) and the first cut, falling back
+/// to "unchanged", returned the input.
+///
+/// 35 code points, and they are **derived, not asserted**: Java's whole
+/// `toTitleCase` map over the BMP is 1 149 entries, of which 1 114 are exactly
+/// the single-character uppercase; these are the rest.
+/// `title_case_matches_the_jvm_over_every_code_point_it_maps` checks all 1 149
+/// against the JVM's own dump, so the derivation cannot rot silently.
+const JAVA_TITLE_CASE: &[(char, char)] = &[
+    ('\u{01c4}', '\u{01c5}'),
+    ('\u{01c6}', '\u{01c5}'),
+    ('\u{01c7}', '\u{01c8}'),
+    ('\u{01c9}', '\u{01c8}'),
+    ('\u{01ca}', '\u{01cb}'),
+    ('\u{01cc}', '\u{01cb}'),
+    ('\u{01f1}', '\u{01f2}'),
+    ('\u{01f3}', '\u{01f2}'),
+    ('\u{1f80}', '\u{1f88}'),
+    ('\u{1f81}', '\u{1f89}'),
+    ('\u{1f82}', '\u{1f8a}'),
+    ('\u{1f83}', '\u{1f8b}'),
+    ('\u{1f84}', '\u{1f8c}'),
+    ('\u{1f85}', '\u{1f8d}'),
+    ('\u{1f86}', '\u{1f8e}'),
+    ('\u{1f87}', '\u{1f8f}'),
+    ('\u{1f90}', '\u{1f98}'),
+    ('\u{1f91}', '\u{1f99}'),
+    ('\u{1f92}', '\u{1f9a}'),
+    ('\u{1f93}', '\u{1f9b}'),
+    ('\u{1f94}', '\u{1f9c}'),
+    ('\u{1f95}', '\u{1f9d}'),
+    ('\u{1f96}', '\u{1f9e}'),
+    ('\u{1f97}', '\u{1f9f}'),
+    ('\u{1fa0}', '\u{1fa8}'),
+    ('\u{1fa1}', '\u{1fa9}'),
+    ('\u{1fa2}', '\u{1faa}'),
+    ('\u{1fa3}', '\u{1fab}'),
+    ('\u{1fa4}', '\u{1fac}'),
+    ('\u{1fa5}', '\u{1fad}'),
+    ('\u{1fa6}', '\u{1fae}'),
+    ('\u{1fa7}', '\u{1faf}'),
+    ('\u{1fb3}', '\u{1fbc}'),
+    ('\u{1fc3}', '\u{1fcc}'),
+    ('\u{1ff3}', '\u{1ffc}'),
+];
+
+/// `Character.toTitleCase(char)`, from the JVM's own table.
+///
+/// Three arms, and the first cut had only the middle one:
+///
+/// 1. a code point with a **distinct title case** — [`JAVA_TITLE_CASE`], 58 of
+///    them — takes it;
+/// 2. otherwise, if the uppercase is a single character, that;
+/// 3. otherwise **the character unchanged**, because
+///    `Character.toTitleCase(char)` returns a `char` and cannot express an
+///    expansion.
+fn java_title_case(c: char) -> char {
+    if let Some((_, title)) = JAVA_TITLE_CASE.iter().find(|(from, _)| *from == c) {
+        return *title;
+    }
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) => single,
+        _ => c,
+    }
 }
 
 /// `TrimFilter` — `String.trim()`, which is **not** Rust's `str::trim`.
@@ -852,6 +999,7 @@ fn java_title_case(c: char) -> impl Iterator<Item = char> {
 /// them. And Pebble's takes **no argument**: `'xxhixx' | trim('x')` is
 /// `xxhixx` on Kestra, where minijinja's honoured the `x`.
 fn trim(value: MjValue, _rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("trim", &value)?;
     let Some(text) = pebble_string_cast(&value)? else {
         return Ok(MjValue::from(()));
     };
@@ -866,6 +1014,7 @@ fn trim(value: MjValue, _rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// raised for all four of those. The UTF-16 part is observable without
 /// contrivance: `'a😀b' | length` is `4` on Kestra and was `3` here.
 fn length(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("length", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(0));
     }
@@ -894,6 +1043,14 @@ fn length(value: MjValue) -> Result<MjValue, MjError> {
 /// `0` and `false` are **not** empty and are kept, which is the boundary worth
 /// pinning in both directions.
 fn default(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    // **No `strict_undefined` here, and that is measured rather than an
+    // oversight.** Pebble's filter-invocation expression special-cases
+    // `default`: it catches the attribute-not-found exception so the filter
+    // can be the fallback it exists to be. `{{ nothere | default('D') }}` and
+    // `{{ obj.missing | default('D') }}` are both `D` on Kestra, where every
+    // other filter in this module raises. `filter-default-undefined-root` and
+    // `-undefined-attribute` are the entries, and they are the reason this
+    // function's guard is absent instead of forgotten.
     let args = Args::new(rest);
     let fallback = args.get("default", 0).unwrap_or_else(|| MjValue::from(()));
     let empty = if is_java_null(&value) {
@@ -930,6 +1087,7 @@ fn default(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// `missing delimiter parameter in split filter`, and the `limit` is a
 /// `(Number)`. [`super::javare::JavaRegex::split`] carries Java's own loop.
 fn split(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("split", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -991,6 +1149,7 @@ fn split(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// `PebbleException`s; and `fromIndex` past the length is `subList`'s own
 /// `fromIndex(4) > toIndex(3)`. Strings, lists and arrays only.
 fn slice(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("slice", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1070,48 +1229,26 @@ fn slice(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 
 /// `FormatFilter` — `String.format(input.toString(), args…)`.
 ///
-/// **Only the three things that were silently or needlessly wrong are ported;
-/// Java's conversion language is NOT.** `minijinja::filters::format` already
-/// agrees with `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and
-/// `%%` — measured, all six — so re-implementing the specifier grammar would
-/// buy nothing and would risk turning four honest errors into four silently
-/// wrong values, which is the direction this crate's rules forbid.
+/// The grammar lives in [`super::javaformat`], which is a port rather than a
+/// wrapper — fix round 1 wrapped `minijinja::filters::format` on the premise
+/// that the two agreed on the six specifiers minijinja has, and **two of the
+/// six were counter-examples**: `'%x' | format(-255)` is `ffffff01` there and
+/// was `-ff` here, and `'%.0f' | format(0.5)` is `1` (HALF_UP) against `0`
+/// (half-to-even). Three more silently differed, two of them the
+/// Python-spelling defect the same round existed to kill:
+/// `'%s' | format(true)` was `True` and `'%s' | format({'a':1})` was
+/// `{"a": 1}`.
 ///
-/// What this wrapper fixes:
-///
-/// | expression | Kestra | egret, before |
-/// |---|---|---|
-/// | `null \| format('x')` | `null` (renders empty) | an error |
-/// | `42 \| format('a')` | `42` — the input is `toString`'d | an error |
-/// | `'%s' \| format(null)` | `null` — `String.valueOf` | `None`, **silently** |
-///
-/// What it does not, and what `oracle/name-surface.txt` records with a
-/// baselined entry each: `%,d` (grouping), `%2$s` (argument index) and `%b`
-/// are Java conversions `minijinja` does not have, and egret raises where
-/// Kestra answers. Under-acceptance, which is the safe direction — an author
-/// gets an error rather than a different number.
-fn format(
-    state: &minijinja::State,
-    value: MjValue,
-    rest: Rest<MjValue>,
-) -> Result<MjValue, MjError> {
+/// A null **input** is null; the input is `toString`'d; and the arguments go
+/// through [`super::env::kestra_to_string`] inside the conversion rather than
+/// being pre-mapped, which is what fixes `%s`.
+fn format(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("format", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
-    // `String.valueOf(o)` per argument: a null argument is the four
-    // characters `null`, not minijinja's `None`.
-    let args: Vec<MjValue> = rest
-        .0
-        .into_iter()
-        .map(|arg| {
-            if is_java_null(&arg) {
-                MjValue::from("null")
-            } else {
-                arg
-            }
-        })
-        .collect();
-    minijinja::filters::format(state, &MjValue::from(kestra_to_string(&value)), Rest(args))
+    let args = Args::new(rest);
+    super::javaformat::format(&kestra_to_string(&value), &args.positional_only()).map(MjValue::from)
 }
 
 /// `AbsFilter` — and it reproduces Java's `Math.abs` **overflow**.
@@ -1131,6 +1268,7 @@ fn format(
 /// not a number is `The 'abs' filter does require a number` — a String is
 /// **not** coerced, unlike `upper`'s input.
 fn abs(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("abs", &value)?;
     if is_java_null(&value) {
         return Err(pebble_error("Can not pass null value to \"abs\" filter."));
     }
@@ -1162,7 +1300,23 @@ fn abs(value: MjValue) -> Result<MjValue, MjError> {
 /// An empty Collection is `null`, and egret raised; an empty String is
 /// `charAt(0)`'s `StringIndexOutOfBoundsException`; and a Map is **not** a
 /// Collection, so `{"a":1} | first` throws there and answered `a` here.
+///
+/// # The String branch walks CHARACTERS where Java walks UTF-16 code units
+///
+/// `charAt(0)` of an astral character is a lone high surrogate; this returns
+/// the whole character. Rust cannot represent a lone surrogate in a `String`
+/// at all, so this is not a fix that was skipped — and it cannot have a corpus
+/// entry either, because the golden file would need a JSON string holding an
+/// unpaired surrogate escape, which no strict JSON parser reads. Recorded here
+/// and in `oracle/README.md` rather than in a fixture that could not hold it.
+///
+/// **Nothing else discriminates the String branch from minijinja's**, which is
+/// worth saying plainly: measured, `'' | first` errors on both engines and
+/// `'abc' | first` is `a` on both, so `filter-first-string` passes the
+/// untouched built-in too. The branch is ported for the Map and empty-list
+/// cases beside it, which do discriminate.
 fn first(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("first", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1188,6 +1342,7 @@ fn first(value: MjValue) -> Result<MjValue, MjError> {
 /// `LastFilter` — [`first`]'s mirror, `charAt(length - 1)` and the last
 /// element.
 fn last(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("last", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1222,6 +1377,7 @@ fn last(value: MjValue) -> Result<MjValue, MjError> {
 /// `(String)` cast, so `join(3)` is a `ClassCastException`; an explicitly null
 /// separator joins with nothing at all, measured.
 fn join(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("join", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1259,6 +1415,7 @@ fn join(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
 /// both measured. That is why the class check below is skipped below two
 /// elements rather than run over every input.
 fn sort(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("sort", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1269,8 +1426,8 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
             .unwrap_or_default(),
         _ => return Err(pebble_error("Unsupported input type for sort filter")),
     };
+    let first_class = items.first().map(java_class_name).unwrap_or_default();
     if items.len() >= 2 {
-        let first_class = java_class_name(&items[0]);
         for item in &items[1..] {
             let class = java_class_name(item);
             if class != first_class {
@@ -1293,22 +1450,58 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
             )));
         }
     }
-    // One class, so one ordering. Strings compare by code point here and by
-    // UTF-16 code unit in Java; the two disagree only for a supplementary
-    // character against U+E000..U+FFFF, which no corpus entry reaches and
-    // which `oracle/name-surface.txt` records.
-    items.sort_by(
-        |a, b| match (a.kind(), f64::try_from(a.clone()), f64::try_from(b.clone())) {
-            (ValueKind::Number, Ok(x), Ok(y)) => x.total_cmp(&y),
-            _ => kestra_to_string(a).cmp(&kestra_to_string(b)),
-        },
+    // **One class, so one comparator -- and an integer class must NEVER reach
+    // `f64`.** The first cut compared every number through
+    // `f64::try_from(..).total_cmp(..)`, which collapses every integer past
+    // 2^53, and `sort_by` is stable, so a pair it could not tell apart kept
+    // its INPUT order:
+    //
+    // | list | Kestra | the f64 comparator |
+    // |---|---|---|
+    // | `[9007199254740993, 9007199254740992]` | `..992, ..993` | `..993, ..992` |
+    // | `[9223372036854775807, 9223372036854775806]` | `..806, ..807` | `..807, ..806` |
+    //
+    // Java sorts a `Long` with `Long.compareTo`, which is exact. **The
+    // pre-port `sort` was minijinja's own, which also compares integers
+    // exactly, so the port introduced a divergence the default it replaced did
+    // not have** -- on epoch nanoseconds, snowflake ids and counters.
+    // `filter-sort-past-two-to-the-53` is the entry, and it is the first in
+    // this family that exercises the COMPARATOR rather than the type check.
+    let integers = matches!(
+        first_class.as_str(),
+        "java.lang.Integer" | "java.lang.Long" | "java.math.BigInteger"
     );
+    items.sort_by(|a, b| {
+        if integers {
+            // `i128` holds every `i64` and every `u64`, so no integer this
+            // crate can carry loses a bit on the way in.
+            return match (i128::try_from(a.clone()), i128::try_from(b.clone())) {
+                (Ok(x), Ok(y)) => x.cmp(&y),
+                // Past `i128` is `BigInteger` territory, and `java_class_name`
+                // has already made the two elements one class.
+                _ => kestra_to_string(a).cmp(&kestra_to_string(b)),
+            };
+        }
+        if first_class == "java.lang.Double" {
+            // `Double.compare`'s total order, which is `total_cmp`: -0.0 below
+            // 0.0 and NaN above everything.
+            if let (Ok(x), Ok(y)) = (f64::try_from(a.clone()), f64::try_from(b.clone())) {
+                return x.total_cmp(&y);
+            }
+        }
+        // `String.compareTo` is UTF-16 code-unit order and `Boolean.compareTo`
+        // is false before true; the text order gives both. Strings disagree
+        // with Java only for a supplementary character against U+E000..U+FFFF,
+        // which `oracle/name-surface.txt` records.
+        kestra_to_string(a).cmp(&kestra_to_string(b))
+    });
     Ok(MjValue::from(items))
 }
 
 /// `ReverseFilter` — `(List) input`, so a String or a Map is a
 /// `ClassCastException` rather than a reversed string.
 fn reverse(value: MjValue) -> Result<MjValue, MjError> {
+    strict_undefined("reverse", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -1342,6 +1535,7 @@ fn reverse(value: MjValue) -> Result<MjValue, MjError> {
 /// `Object::toString`. And `&#x27;` was `&#39;` on Kestra — the same
 /// character, a different spelling, and a byte difference in rendered output.
 fn escape(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
+    strict_undefined("escape", &value)?;
     if is_java_null(&value) {
         return Ok(MjValue::from(()));
     }
@@ -3739,6 +3933,350 @@ mod tests {
             &context,
         )
         .is_ok());
+    }
+
+    /// The sixteen ported filters refuse an **undefined** input, which fix
+    /// round 1 broke in all sixteen at once.
+    ///
+    /// Pairs `filter-upper-undefined-root`/`-attribute` and the same pair for
+    /// `length`, `sort`, `split` and `join`, plus
+    /// `filter-length-of-an-undefined`.
+    ///
+    /// # What this is guarding against, and why the entries alone cannot
+    ///
+    /// Kestra runs with `strictVariables(true)`: a missing root attribute and
+    /// a missing attribute both raise. Before the ports, egret's built-ins
+    /// raised too, so the two agreed. Fix round 1 applied
+    /// [`is_java_null`] — which folds `Undefined` into Kestra's null — at the
+    /// **entry point** of every ported filter, and 28 measured cases turned
+    /// from an error into an answer: `{{ nothere | upper }}` became `""` and
+    /// `{{ obj.missing | length }}` became `"0"`. In a flow that turns a
+    /// typo'd variable name from a hard failure into an empty string.
+    ///
+    /// The corpus entries are `error-class`, which is satisfied by *any*
+    /// failure — so what they pin is only that egret still refuses. This pins
+    /// what it says, and pins the two exceptions:
+    ///
+    /// - **`default` must NOT refuse.** Pebble's filter-invocation expression
+    ///   catches the attribute exception for `default` specifically, so
+    ///   `{{ nothere | default('D') }}` is `D` on Kestra. Measured, both for a
+    ///   root name and for an attribute.
+    /// - a **context** null still reaches the null branch, because it is a
+    ///   `ValueKind::None` and not an undefined.
+    #[test]
+    fn the_ported_filters_refuse_an_undefined_input() {
+        let cx = r#"{"obj": {"a": 1}, "d": ",", "nul": null}"#;
+        for filter in [
+            "upper",
+            "lower",
+            "trim",
+            "capitalize",
+            "title",
+            "escape",
+            "length",
+            "first",
+            "last",
+            "join('-')",
+            "sort",
+            "reverse",
+            "abs",
+            "split(d)",
+            "slice(0,1)",
+            "format('x')",
+            "replace({'a':'b'})",
+        ] {
+            for subject in ["nothere", "obj.missing"] {
+                let template = format!("<{{{{ {subject} | {filter} }}}}>");
+                let message = render(&template, cx).unwrap_or_else(|message| message);
+                assert!(
+                    render(&template, cx).is_err(),
+                    "{template} must be refused; it answered {message:?}"
+                );
+                assert!(
+                    message.contains("an undefined value reached")
+                        || message.contains("Can not pass null value"),
+                    "{template}: {message}"
+                );
+            }
+        }
+
+        // **The exception, and it is Pebble's own.** The filter-invocation
+        // expression catches the attribute exception for `default`, so the
+        // fallback works on a name that does not exist -- measured for a root
+        // name and for an attribute.
+        assert_eq!(render("<{{ nothere | default('D') }}>", cx).unwrap(), "<D>");
+        assert_eq!(
+            render("<{{ obj.missing | default('D') }}>", cx).unwrap(),
+            "<D>"
+        );
+
+        // A CONTEXT null is a `ValueKind::None`, not an undefined, and still
+        // reaches the filter's own null branch.
+        assert_eq!(render("<{{ nul | upper }}>", cx).unwrap(), "<>");
+        assert_eq!(render("{{ nul | length }}", cx).unwrap(), "0");
+
+        // What it costs, and the entry that records it: the `null` LITERAL
+        // arrives as an undefined too, so egret refuses where Kestra renders
+        // nothing. The direction that fails loudly.
+        assert!(render("{{ null | upper }}", cx).is_err());
+    }
+
+    /// `format` refuses what Java refuses **and** what `super::javaformat` does
+    /// not implement, and the two say different things.
+    ///
+    /// Pairs `filter-format-integer-through-a-float`,
+    /// `filter-format-unknown-conversion` and
+    /// `filter-format-trailing-percent`.
+    #[test]
+    fn the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement() {
+        // Java's own refusals.
+        assert!(render("{{ s | format(n) }}", r#"{"s": "%f", "n": 42}"#)
+            .expect_err("an Integer is not a Double")
+            .contains("java.lang.Integer != java.lang.Double"));
+        assert!(render("{{ s | format('a') }}", r#"{"s": "%q"}"#)
+            .expect_err("must be refused")
+            .contains("Conversion"));
+        assert!(render("{{ s | format('a') }}", r#"{"s": "abc%"}"#)
+            .expect_err("a trailing % is not a specifier")
+            .contains("Conversion = '%'"));
+        assert!(render("{{ s | format('a') }}", r#"{"s": "%s-%s"}"#)
+            .expect_err("a missing argument")
+            .contains("Format specifier"));
+
+        // egret's own, and they name the conversion so an author can act.
+        for conversion in ["%g", "%a", "%c", "%h"] {
+            let message = render(
+                "{{ s | format(n) }}",
+                &format!(r#"{{"s": "{conversion}", "n": 1.5}}"#),
+            )
+            .expect_err("must be refused");
+            assert!(
+                message.contains(&format!("'{conversion}' conversion is not implemented")),
+                "{conversion}: {message}"
+            );
+        }
+
+        // The accepted neighbours: every conversion that IS implemented.
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%.2f", "n": 1.5}"#),
+            "1.50"
+        );
+        assert_eq!(ok("{{ s | format(n) }}", r#"{"s": "%d", "n": 42}"#), "42");
+        assert_eq!(ok("{{ s | format(n) }}", r#"{"s": "%x", "n": 42}"#), "2a");
+    }
+
+    /// `java.util.Formatter`'s rules that a wrapper around minijinja's
+    /// `format` got silently wrong.
+    ///
+    /// Five values, and fix round 1 shipped all five: two of them were the
+    /// Python-spelling defect the round existed to kill, still live inside
+    /// `format` because the wrapper mapped only a *null* argument and passed
+    /// every other one through untouched.
+    #[test]
+    fn the_format_filter_is_javas_formatter_and_not_minijinjas() {
+        // Two's complement at the argument's own width, which is the
+        // Integer/Long split.
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%x", "n": -255}"#),
+            "ffffff01"
+        );
+        assert_eq!(
+            ok(
+                "{{ s | format(n) }}",
+                r#"{"s": "%x", "n": -9223372036854775808}"#
+            ),
+            "8000000000000000"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%o", "n": -8}"#),
+            "37777777770"
+        );
+        // HALF_UP over the SHORTEST decimal representation, not half-to-even
+        // over the exact binary value.
+        assert_eq!(ok("{{ s | format(n) }}", r#"{"s": "%.0f", "n": 0.5}"#), "1");
+        assert_eq!(ok("{{ s | format(n) }}", r#"{"s": "%.0f", "n": 1.5}"#), "2");
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%.2f", "n": 1.005}"#),
+            "1.01"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%.2f", "n": 1e300}"#),
+            format!("1{}.00", "0".repeat(300))
+        );
+        // `%s` goes through `kestra_to_string`, which is the whole reason the
+        // wrapper was not enough.
+        assert_eq!(
+            ok("{{ s | format(b) }}", r#"{"s": "%s", "b": true}"#),
+            "true"
+        );
+        assert_eq!(
+            ok("{{ s | format(m) }}", r#"{"s": "%s", "m": {"a": 1}}"#),
+            "{a=1}"
+        );
+        assert_eq!(
+            ok("{{ s | format(l) }}", r#"{"s": "%s", "l": [1, 2]}"#),
+            "[1, 2]"
+        );
+        assert_eq!(ok("{{ s | format('ab') }}", r#"{"s": "%S"}"#), "AB");
+        // A null argument is the four characters `null`, through the STRING
+        // path -- so precision truncates it and `%b` is the exception.
+        assert_eq!(
+            render("<{{ s | format(n) }}>", r#"{"s": "%.0f", "n": null}"#).unwrap(),
+            "<>"
+        );
+        assert_eq!(
+            render("{{ s | format(n) }}", r#"{"s": "%.2f", "n": null}"#).unwrap(),
+            "nu"
+        );
+        assert_eq!(
+            render("{{ s | format(n) }}", r#"{"s": "%b", "n": null}"#).unwrap(),
+            "false"
+        );
+        // Flags, width and the argument index.
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%05d", "n": -255}"#),
+            "-0255"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%(d", "n": -255}"#),
+            "(255)"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%,d", "n": 1234567}"#),
+            "1,234,567"
+        );
+        assert_eq!(
+            ok("{{ s | format('a','b') }}", r#"{"s": "%2$s-%1$s"}"#),
+            "b-a"
+        );
+        assert_eq!(
+            ok("{{ s | format(n) }}", r#"{"s": "%e", "n": 1.23456}"#),
+            "1.234560e+00"
+        );
+        assert_eq!(
+            ok("{{ s | format('a') }}", r#"{"s": "100%% done"}"#),
+            "100% done"
+        );
+    }
+
+    /// `capitalize` and `title` use **Java's** `isWhitespace` and title case,
+    /// and both of the first cut's predicates were wrong in both directions.
+    #[test]
+    fn the_word_boundary_filters_use_javas_own_tables() {
+        // Java says NOT whitespace for the three non-breaking spaces, so the
+        // space itself is the first "word" character and nothing is capitalised.
+        for space in ['\u{a0}', '\u{2007}', '\u{202f}'] {
+            let cx = format!(r#"{{"s": "\u{:04x}ab"}}"#, space as u32);
+            assert_eq!(ok("{{ s | capitalize }}", &cx), format!("{space}ab"));
+        }
+        // and Java says IS whitespace for the four information separators,
+        // which Rust does not.
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{1f}'] {
+            let cx = format!(r#"{{"s": "\u{:04x}ab"}}"#, sep as u32);
+            assert_eq!(ok("{{ s | capitalize }}", &cx), format!("{sep}Ab"));
+        }
+        // The digraphs have a title case that is NOT their upper case.
+        assert_eq!(
+            ok("{{ s | capitalize }}", "{\"s\": \"\\u01c6x\"}"),
+            "\u{1c5}x"
+        );
+        assert_eq!(ok("{{ s | title }}", "{\"s\": \"\\u01c9x\"}"), "\u{1c8}x");
+        // `toTitleCase(char)` cannot expand, so a character whose uppercase is
+        // two characters comes back unchanged.
+        assert_eq!(
+            ok("{{ s | capitalize }}", "{\"s\": \"\\u00dfx\"}"),
+            "\u{df}x"
+        );
+        assert_eq!(
+            ok("{{ s | capitalize }}", "{\"s\": \"\\ufb01x\"}"),
+            "\u{fb01}x"
+        );
+        // ...except where a precomposed title-case character exists, which is
+        // the Greek iota-subscript family.
+        assert_eq!(
+            ok("{{ s | capitalize }}", "{\"s\": \"\\u1f80x\"}"),
+            "\u{1f88}x"
+        );
+    }
+
+    /// [`JAVA_TITLE_CASE`] is DERIVED from the JVM's own dump, and this checks
+    /// the derivation against all 1 149 code points it covers.
+    ///
+    /// The 35-entry table is "where `toTitleCase` is neither the
+    /// single-character uppercase nor the character itself". That is a claim
+    /// about Rust's `char::to_uppercase` as much as about Java, and neither
+    /// half is checkable by reading. `oracle/fixtures/java-title-case.txt` is
+    /// the JVM's answer for every mapped code point; this walks it.
+    #[test]
+    fn title_case_matches_the_jvm_over_every_code_point_it_maps() {
+        const DUMP: &str = include_str!("../../oracle/fixtures/java-title-case.txt");
+        let mut checked = 0usize;
+        for pair in DUMP
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .flat_map(|l| l.split(','))
+            .filter(|p| !p.is_empty())
+        {
+            let (from, to) = pair.split_once(':').expect("<from>:<to>");
+            let from = char::from_u32(u32::from_str_radix(from, 16).expect("hex"))
+                .expect("a BMP code point");
+            let to = char::from_u32(u32::from_str_radix(to, 16).expect("hex"))
+                .expect("a BMP code point");
+            assert_eq!(super::java_title_case(from), to, "U+{:04X}", from as u32);
+            checked += 1;
+        }
+        assert_eq!(checked, 1149, "the dump lost entries");
+        // And the identity half: a character the JVM does not map must come
+        // back unchanged, which the table cannot say on its own.
+        for c in ['a', 'A', '1', ' ', '\u{4e00}'] {
+            assert_eq!(
+                super::java_title_case(c),
+                c.to_uppercase().next().unwrap_or(c)
+            );
+        }
+    }
+
+    /// `sort` compares integers **exactly**, which the first cut's `f64`
+    /// comparator did not.
+    ///
+    /// Pairs nothing — it is an exact-compared entry
+    /// (`filter-sort-past-two-to-the-53`) — and it exists because the three
+    /// `sort` entries the port shipped with all test the **type check** and
+    /// none of them reaches the comparator. Round-tripping through `f64`
+    /// collapses every integer past 2^53, and `sort_by` is stable, so a pair
+    /// it cannot tell apart keeps its input order and the bug is invisible
+    /// unless the input is already out of order.
+    #[test]
+    fn sort_compares_integers_exactly() {
+        assert_eq!(
+            ok(
+                "{{ l | sort }}",
+                r#"{"l": [9007199254740993, 9007199254740992]}"#
+            ),
+            "[9007199254740992,9007199254740993]"
+        );
+        assert_eq!(
+            ok(
+                "{{ l | sort }}",
+                r#"{"l": [9223372036854775807, 9223372036854775806]}"#
+            ),
+            "[9223372036854775806,9223372036854775807]"
+        );
+        assert_eq!(
+            ok(
+                "{{ l | sort }}",
+                r#"{"l": [-9223372036854775807, -9223372036854775808]}"#
+            ),
+            "[-9223372036854775808,-9223372036854775807]"
+        );
+        // Doubles still take `Double.compare`'s total order.
+        assert_eq!(
+            ok("{{ l | sort }}", r#"{"l": [2.5, 1.5, 10.25]}"#),
+            "[1.5,2.5,10.25]"
+        );
+        // And the pre-port default was RIGHT about this, which is the part
+        // worth remembering: minijinja compares integers exactly too.
+        assert_eq!(ok("{{ l | sort }}", r#"{"l": [3, 1, 2]}"#), "[1,2,3]");
     }
 
     // -- W2 Task 8 fix round 1: Pebble's own core filters ----------------

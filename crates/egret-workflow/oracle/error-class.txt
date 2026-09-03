@@ -592,3 +592,46 @@ filter-sort-of-flatten
 # filter names join. `length` is the one that answers a VALUE rather than
 # rendering empty, so it gets the entry.
 filter-length-of-an-undefined
+
+# --- W2 Task 8, fix round 2: an UNDEFINED input. Kestra raises under
+# strictVariables(true) for a missing root attribute and for a missing
+# attribute, and fix round 1 turned sixteen filters from refusing to answering
+# -- 28 measured regressions. `default` is the one exception and Pebble's own:
+# its filter-invocation expression catches the exception so the fallback can
+# work, which is why `filter-default-undefined-*` are NOT here.
+filter-upper-undefined-root
+filter-upper-undefined-attribute
+filter-length-undefined-root
+filter-length-undefined-attribute
+filter-sort-undefined-root
+filter-sort-undefined-attribute
+filter-split-undefined-root
+filter-split-undefined-attribute
+filter-join-undefined-root
+filter-join-undefined-attribute
+
+# `runners::javaformat` refuses a conversion it does not implement BY NAME,
+# and Java itself refuses an integer through a float conversion and an unknown
+# conversion character.
+filter-format-integer-through-a-float
+filter-format-unknown-conversion
+filter-format-trailing-percent
+
+# The collection class: which Java collection a filter RETURNS decides whether
+# the next accepts it, five producers by six consumers, and egret has one
+# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
+# so the ratchet is what holds them.
+filter-reverse-of-split
+filter-reverse-of-chunk
+filter-reverse-of-flatten
+filter-sort-of-values
+filter-reverse-of-values
+filter-slice-of-values
+filter-distinct-of-keys
+filter-chunk-of-keys
+filter-flatten-of-keys
+filter-distinct-of-split
+
+# `charAt(0)` on an empty String, which is the one branch of `first`/`last`
+# that Pebble and minijinja do not answer the same way.
+filter-first-of-an-empty-string

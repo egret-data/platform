@@ -574,7 +574,6 @@ filter-escape-js-strategy
 # `java.util.Formatter` on `%s`, `%5s`, `%05d`, `%.2f`, `%x` and `%%` (measured,
 # all six), so re-implementing the grammar would risk turning honest errors
 # into silently wrong values.
-filter-format-argument-index
 # A map LITERAL iterates in java.util.HashMap bucket order in Pebble and in
 # key-sorted order in minijinja, and because `replace`'s pairs CHAIN the value
 # differs. A map out of the CONTEXT agrees -- LinkedHashMap against OrderedMap,
@@ -593,13 +592,23 @@ test-iterable
 # their own axis: which Java collection a filter RETURNS decides whether the
 # next filter accepts it, and egret has one sequence type.
 #
-# `keys` and `values` hand back a Set/Collection and `flatten` an immutable
-# list. `sort` needs a mutable `List`, `reverse` needs a `List` and `slice`
-# needs a List/String/array, so all three refuse those inputs on Kestra and
-# answer here. `first`, `last`, `join`, `length` and `default` take a
-# `Collection` and agree, and `distinct`, `chunk`, `split`, `range` and
-# `fromJson` all return real mutable Lists -- so the class is three producers
-# wide, which `filter-sort-of-a-real-list` pins from the other side.
+# **Five producers and six consumers**, corrected in fix round 2 -- the first
+# cut committed "three producers wide" and two probes falsified it:
+# `'a,b,c' | split(',') | reverse` is a ClassCastException on `[Ljava.lang.String;`
+# there (SplitFilter returns a Java ARRAY, not a List) and `l | chunk(2) | reverse`
+# is an UnsupportedOperationException (ChunkFilter's list is immutable).
+#
+# producers whose result is not a mutable `List`: `keys` and `values` (a
+# Set/Collection), `flatten` and `chunk` (immutable), `split` (a String[]).
+# consumers that cast: `sort`, `reverse`, `slice` -- and `distinct`, `chunk`
+# and `flatten`, which are W2 Task 4's and were already in this class.
+# `first`, `last`, `join`, `length` and `default` take a `Collection` and
+# agree, and `distinct`, `range` and `fromJson` return real mutable Lists --
+# `filter-sort-of-a-real-list` pins that side.
+#
+# Two of the pairs below are REGRESSIONS from fix round 1 rather than
+# pre-existing: `keys | slice` and `values | slice` agreed before it, because
+# minijinja's `slice` errored on them for its own reasons.
 #
 # Not fixable without giving egret a second sequence type whose only purpose
 # is to be refused, which is implementation structure by this file's own rule.
@@ -612,5 +621,38 @@ filter-sort-of-flatten
 # null branch here. The sixteen new names join a class the other 35 were
 # already in; `length` gets the entry because it answers a VALUE (`0`) rather
 # than rendering empty.
-filter-length-of-an-undefined
+
+# --- W2 Task 8, fix round 2.
+#
+# The rest of the collection class (see the note above): `split` returns a Java
+# array and `chunk`/`flatten` return immutable lists, so six consumers refuse
+# five producers and egret has one sequence type for all of them.
+filter-reverse-of-split
+filter-reverse-of-chunk
+filter-reverse-of-flatten
+filter-sort-of-values
+filter-reverse-of-values
+filter-slice-of-values
+filter-distinct-of-keys
+filter-chunk-of-keys
+filter-flatten-of-keys
+filter-distinct-of-split
+# What refusing an UNDEFINED input costs, and it is the same trade
+# `filter-string-undefined-input` records seen from the other side. egret
+# cannot tell Pebble's `null` LITERAL from a typo'd variable -- both arrive as
+# minijinja's undefined -- and fix round 2 chose the direction that fails
+# loudly, because the alternative turned `{{ nothere | upper }}` from an error
+# into an empty string. Kestra renders these; egret refuses them.
+filter-upper-literal-null
+filter-length-literal-null
+# Java's `%g` and `%c`. `runners::javaformat` implements `s S b B d o x X f e E
+# % n` exactly and refuses the rest BY NAME rather than answering differently;
+# `%a`, `%h` and the `%t` date family are refused the same way and are not
+# separately listed.
+filter-format-g-conversion
+filter-format-c-conversion
+# `javare` refuses the Java regex constructs the `regex` crate cannot express,
+# and `split`'s delimiter inherits that set. Under-acceptance, and the same
+# recorded class as `filter-regexmatch-lookahead`.
+filter-split-lookahead
 
