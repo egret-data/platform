@@ -576,12 +576,13 @@ test-even
 test-odd
 
 # --- W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
-# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# egret HAD one sequence type. `keys` and `values` return a Set/Collection and
 # `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
 # `reverse` (a List) and `slice` (a List, String or array) all refuse them
-# there and answer here. `first`, `last`, `join`, `length` and `default` take a
-# Collection and agree -- so the class is exactly three producers, not every
-# sequence. Found by attacking the sixteen ports off their own axis.
+# there and answered here. Found by attacking the sixteen ports off their own
+# axis. This round said "exactly three producers"; its second said "five by
+# six"; W2a enumerated it and BANKED all four of these -- see
+# `oracle/collection-pairs.txt`.
 filter-sort-of-keys
 filter-reverse-of-keys
 filter-slice-of-keys
@@ -617,10 +618,10 @@ filter-format-integer-through-a-float
 filter-format-unknown-conversion
 filter-format-trailing-percent
 
-# The collection class: which Java collection a filter RETURNS decides whether
-# the next accepts it, five producers by six consumers, and egret has one
-# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
-# so the ratchet is what holds them.
+# The rest of the collection class: which Java collection a filter RETURNS
+# decides whether the next accepts it. These were ALSO baselined; W2a banked
+# all ten and they are held by a named test now. See baseline.txt's note and
+# `oracle/collection-pairs.txt`.
 filter-reverse-of-split
 filter-reverse-of-chunk
 filter-reverse-of-flatten
@@ -727,3 +728,59 @@ null-from-the-context-in-an-if-condition
 # because minijinja's `none` stringifies to Python's spelling in key position.
 # Already wrong, now wrong differently, and it had no entry at all.
 null-literal-as-a-bare-map-key
+# --- W2a. The collection class, ENUMERATED rather than imagined: see
+# `oracle/return-classes.txt` and `oracle/collection-pairs.txt`. Kestra's
+# consumers cast, so which Java collection the previous filter returned decides
+# whether the next one throws -- 38 divergent pairs when first measured, out of
+# a cross that was 2 142 rows then and is 2 898 now. Every one of these
+# is a Java exception string, which is what this mode is for, and thirteen of
+# the fourteen are BANKED work rather than a free pass: egret now refuses them
+# too, and one named test asserts egret's OWN message for each.
+filter-keys-of-keys
+filter-keys-of-values
+filter-chunk-of-values
+filter-distinct-of-values
+filter-flatten-of-values
+filter-chunk-of-split
+filter-flatten-of-split
+filter-sort-of-a-lists-keys
+filter-reverse-of-a-lists-keys
+filter-sort-of-an-empty-flatten
+filter-sort-of-a-one-chunk
+filter-reverse-of-an-immutable-slice
+filter-distinct-of-a-sliced-split
+# Recorded, not fixed: egret ANSWERS here, so this one is in baseline.txt and
+# cannot be born matching. It is the `java.util.HashMap` order class reaching
+# Kestra's re-render loop -- `escapeChar` on a map puts `{#` at the front of
+# the rendered text and Pebble reads that as an unclosed comment.
+filter-regexreplace-of-an-escaped-map
+
+# --- W2a, fix round 1. Two more places the kind decides a refusal, both of
+# which the depth-2 cross could not reach.
+#
+# `reverse` RETURNS ITS INPUT (`checkcast List; Collections.reverse; areturn`
+# on the same local), so the kind survives it -- reachable only at length 0 or
+# 1, because at 2 the reverse itself throws. `collection-pairs.txt` is all
+# depth 2 and could not see it by construction; `propagation-pairs.txt` is.
+filter-sort-of-a-reversed-flatten
+filter-sort-of-a-reversed-keys
+filter-sort-of-a-reversed-chunk
+# And the SUBSCRIPT operator, which is not a filter at all: Pebble's
+# `GetAttributeExpression` handles a `List` and an array and has no
+# `Collection` branch, so `{{ m | keys | first }}` answers and
+# `{{ (m | keys)[0] }}` does not. Re-measured over all 46 producers x five
+# ways of reading each: among non-empty SEQUENCE producers the only ones whose
+# `[0]` refuses are the `Collection` kind -- `keys` and `values` of a map, at
+# both length 1 and length 2. (A `Map` producer refuses too, but that is a
+# missing key rather than an index, and a map is not one of the sequence kinds.
+# Every empty sequence refuses on both engines, which is a range check and not
+# a capability -- which is why the predicate is the kind and not the length.)
+filter-subscript-of-keys
+filter-subscript-of-values
+
+# --- W2a, fix round 2. An ARRAY is never empty to Pebble's `default`:
+# `EmptyTest` is `null || (String && trim().isEmpty()) || (Collection &&
+# isEmpty()) || (Map && isEmpty())` -- four branches and no array branch -- so
+# `{{ ',' | split(',') | default('D') }}` is the empty array, and the filter
+# after it sees an array where egret had substituted a String.
+filter-capitalize-of-a-defaulted-empty-array

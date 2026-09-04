@@ -321,16 +321,19 @@ test-even                                           baselined
 test-odd                                            baselined
 
 # W2 Task 8, fix round 1: the Java COLLECTION INTERFACE is observable and
-# egret has one sequence type. `keys` and `values` return a Set/Collection and
+# egret had one sequence type. `keys` and `values` return a Set/Collection and
 # `flatten` an IMMUTABLE list, so `sort` (which needs a mutable List),
 # `reverse` (a List) and `slice` (a List, String or array) all refuse them
-# there and answer here. `first`, `last`, `join`, `length` and `default` take a
-# Collection and agree -- so the class is exactly three producers, not every
-# sequence. Found by attacking the sixteen ports off their own axis.
-filter-sort-of-keys                                 baselined
-filter-reverse-of-keys                              baselined
-filter-slice-of-keys                                baselined
-filter-sort-of-flatten                              baselined
+# there and answered here. Found by attacking the sixteen ports off their own
+# axis. That round said "three producers", its second said "five producers by
+# six consumers", and W2a ENUMERATED it: five creators and two propagators by
+# NINE consumers, and
+# these four are BANKED rather than baselined -- egret refuses them now, and
+# the test named on each asserts egret's own message.
+filter-sort-of-keys                                 test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-keys                              test:the_collection_kind_gate_refuses_what_java_refuses
+filter-slice-of-keys                                test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-flatten                              test:the_collection_kind_gate_refuses_what_java_refuses
 
 # The recorded "egret cannot tell Pebble's `null` literal from a typo'd
 # variable" class (see `filter-string-undefined-input`), which the sixteen new
@@ -362,20 +365,20 @@ filter-format-integer-through-a-float               test:the_format_filter_refus
 filter-format-unknown-conversion                    test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
 filter-format-trailing-percent                      test:the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement
 
-# The collection class: which Java collection a filter RETURNS decides whether
-# the next accepts it, five producers by six consumers, and egret has one
-# sequence type. See baseline.txt's note; every one of these is ALSO baselined,
-# so the ratchet is what holds them.
-filter-reverse-of-split                             baselined
-filter-reverse-of-chunk                             baselined
-filter-reverse-of-flatten                           baselined
-filter-sort-of-values                               baselined
-filter-reverse-of-values                            baselined
-filter-slice-of-values                              baselined
-filter-distinct-of-keys                             baselined
-filter-chunk-of-keys                                baselined
-filter-flatten-of-keys                              baselined
-filter-distinct-of-split                            baselined
+# The rest of the collection class: which Java collection a filter RETURNS
+# decides whether the next accepts it. These were ALSO baselined and the
+# ratchet was what held them; W2a banked all ten, so the named test is what
+# holds them now. See `oracle/collection-pairs.txt`.
+filter-reverse-of-split                             test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-chunk                             test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-flatten                           test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-values                               test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-values                            test:the_collection_kind_gate_refuses_what_java_refuses
+filter-slice-of-values                              test:the_collection_kind_gate_refuses_what_java_refuses
+filter-distinct-of-keys                             test:the_collection_kind_gate_refuses_what_java_refuses
+filter-chunk-of-keys                                test:the_collection_kind_gate_refuses_what_java_refuses
+filter-flatten-of-keys                              test:the_collection_kind_gate_refuses_what_java_refuses
+filter-distinct-of-split                            test:the_collection_kind_gate_refuses_what_java_refuses
 
 # `charAt(0)` on an empty String, which is the one branch of `first`/`last`
 # that Pebble and minijinja do not answer the same way.
@@ -445,3 +448,37 @@ null-literal-in-an-or-operand                       baselined
 null-literal-in-a-not-operand                       baselined
 null-from-the-context-in-an-if-condition            baselined
 null-literal-as-a-bare-map-key                      baselined
+# --- W2a. The fourteen above were `baselined`: egret ANSWERED where Kestra
+# threw, so the ratchet held them and nothing asserted a refusal, because there
+# was none. There is now, so each names the test that asserts egret's own
+# message -- and the same test carries the thirteen new ids the enumeration
+# earned. One test for twenty-seven ids is deliberate: they are one gate, and
+# the test walks every (kind, consumer) cell of it rather than sampling.
+filter-keys-of-keys                                 test:the_collection_kind_gate_refuses_what_java_refuses
+filter-keys-of-values                               test:the_collection_kind_gate_refuses_what_java_refuses
+filter-chunk-of-values                              test:the_collection_kind_gate_refuses_what_java_refuses
+filter-distinct-of-values                           test:the_collection_kind_gate_refuses_what_java_refuses
+filter-flatten-of-values                            test:the_collection_kind_gate_refuses_what_java_refuses
+filter-chunk-of-split                               test:the_collection_kind_gate_refuses_what_java_refuses
+filter-flatten-of-split                             test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-a-lists-keys                         test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-a-lists-keys                      test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-an-empty-flatten                     test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-a-one-chunk                          test:the_collection_kind_gate_refuses_what_java_refuses
+filter-reverse-of-an-immutable-slice                test:the_collection_kind_gate_refuses_what_java_refuses
+filter-distinct-of-a-sliced-split                   test:the_collection_kind_gate_refuses_what_java_refuses
+# Recorded, not fixed -- the HashMap order reaching the re-render loop.
+# It is in baseline.txt, so it is not born matching.
+filter-regexreplace-of-an-escaped-map               baselined
+
+# --- W2a, fix round 1. The same gate, reached through a propagator and
+# through the subscript operator; the same test walks both.
+filter-sort-of-a-reversed-flatten                   test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-a-reversed-keys                      test:the_collection_kind_gate_refuses_what_java_refuses
+filter-sort-of-a-reversed-chunk                     test:the_collection_kind_gate_refuses_what_java_refuses
+filter-subscript-of-keys                            test:the_collection_kind_gate_refuses_what_java_refuses
+filter-subscript-of-values                          test:the_collection_kind_gate_refuses_what_java_refuses
+
+# --- W2a, fix round 2. The same gate, reached through `default`'s emptiness
+# test rather than through a cast.
+filter-capitalize-of-a-defaulted-empty-array        test:the_collection_kind_gate_refuses_what_java_refuses

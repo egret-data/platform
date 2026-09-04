@@ -414,6 +414,186 @@ fn java_int_value(value: &MjValue) -> Option<i32> {
 // Collection filters
 // ---------------------------------------------------------------------------
 
+/// **What a filter's result IS to the NEXT filter**, which is not the same
+/// question as what it contains.
+///
+/// Kestra's collection filters return whatever Java type their implementation
+/// happens to produce, and the next filter in the chain *casts*. So
+/// `{{ m | keys | sort }}` throws on Kestra and answered here, and no
+/// measurement of `keys` or of `sort` alone can see it — the defect is in the
+/// type flowing through the pipe. W2 Task 8 recorded fourteen such pairs by
+/// hand; W2a enumerated all 63 engine filters through Kestra's own
+/// `className` filter (`oracle/return-classes.txt`) and crossed the result
+/// (`oracle/collection-pairs.txt`), which found **38** divergent pairs and two
+/// consumers the hand-written list had missed (`keys` and, through the
+/// re-render loop, `regexReplace`).
+///
+/// This is deliberately **four capabilities, not a class name**. The engine
+/// has at least nine distinct classes here (`ArrayList`, `ArrayList$SubList`,
+/// `Arrays$ArrayList`, `AbstractList$RandomAccessSubList`,
+/// `ImmutableCollections$ListN`, `ImmutableCollections$SubList`,
+/// `Lists$RandomAccessPartition`, `LinkedHashMap$LinkedKeySet`,
+/// `LinkedHashMap$LinkedValues`) and every consumer's behaviour is decided by
+/// three questions about them: is it a `List`, does `set` work, is it an
+/// array. Carrying the names instead would be `oracle/README.md`'s
+/// copy-structure line, and it would still be wrong on the map side
+/// (`HashMap` vs `LinkedHashMap`), which is a different recorded class.
+/// `className` therefore still answers `java.util.ArrayList` for all of them
+/// and stays a recorded divergence, like `filter-classname-of-long`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JavaSeqKind {
+    /// `java.util.ArrayList` and its mutable views (`ArrayList$SubList`,
+    /// `Arrays$ArrayList`). Every consumer accepts it; this is what a context
+    /// list, `sort`, `distinct`, `reverse`, `jq` and `escapeChar` produce, and
+    /// it is the default for any sequence carrying no tag.
+    MutableList,
+    /// `java.util.ImmutableCollections` — what `Stream.toList()` returns, so
+    /// `flatten` and `keys` of a list or array, and `slice` of either
+    /// (`ImmutableCollections$SubList`).
+    ///
+    /// `AbstractImmutableList` **overrides `sort` to throw unconditionally**,
+    /// so `{{ [] | flatten | sort }}` throws on an EMPTY list — measured, and
+    /// the reason this is not one kind with [`Self::Partition`].
+    ImmutableList,
+    /// Guava's `Lists.partition`, which is `chunk`'s result (and `slice` of
+    /// one, `AbstractList$RandomAccessSubList`).
+    ///
+    /// It does **not** override `sort`, so `List.sort`'s default runs: it
+    /// copies to an array, sorts, then writes back with `ListIterator.set`,
+    /// one call per element. Zero elements means zero calls, so
+    /// `{{ [] | chunk(size=2) | sort }}` is `[]` where the
+    /// `ImmutableCollections` line above throws. Both measured.
+    Partition,
+    /// `Map.keySet()` / `Map.values()` — a `Collection` that is **not a
+    /// `List`**, so every consumer that casts to `List` refuses it.
+    Collection,
+    /// A Java array (`SplitFilter` returns `String[]`). Not a `Collection` at
+    /// all: `sort`, `slice` and `keys` have explicit array branches and the
+    /// other four do not.
+    Array,
+}
+
+impl JavaSeqKind {
+    /// Whether Java's `instanceof List` is true, which is the test
+    /// `distinct`, `chunk`, `flatten` and `reverse` make.
+    fn is_list(self) -> bool {
+        matches!(
+            self,
+            Self::MutableList | Self::ImmutableList | Self::Partition
+        )
+    }
+
+    /// Whether `Collections.sort` — i.e. `List.sort(null)` — throws.
+    ///
+    /// **The length is a parameter and that is measured, not tidiness.** A
+    /// first cut refused every immutable list at every length and turned two
+    /// empty-list expressions Kestra answers into errors, which the cross
+    /// caught by name.
+    fn sort_in_place_throws(self, len: usize) -> bool {
+        match self {
+            Self::ImmutableList => true,
+            Self::Partition => len >= 1,
+            Self::MutableList | Self::Collection | Self::Array => false,
+        }
+    }
+
+    /// Whether `Collections.reverse` throws.
+    ///
+    /// It swaps `size >> 1` pairs, so a list of 0 or 1 elements calls `set`
+    /// **no times** and an immutable one comes back unchanged rather than
+    /// throwing: `{{ [x] | keys | reverse }}` is `[0]`, measured.
+    fn reverse_in_place_throws(self, len: usize) -> bool {
+        matches!(self, Self::ImmutableList | Self::Partition) && len >= 2
+    }
+
+    /// What egret's own refusal calls it. **Not a Java class name**: see the
+    /// type's doc for why the names are deliberately not carried.
+    fn description(self) -> &'static str {
+        match self {
+            Self::MutableList => "a list",
+            Self::ImmutableList | Self::Partition => "an immutable list",
+            Self::Collection => "a map's key or value view, which is not a List",
+            Self::Array => "an array, which is not a List",
+        }
+    }
+}
+
+/// A sequence that remembers which [`JavaSeqKind`] it is.
+///
+/// `ObjectRepr::Seq`, so `ValueKind::Seq`, so every existing reader —
+/// [`as_list`], `try_iter`, `env::write_json`, `env::kestra_to_string`, the
+/// YAML and Ion writers, `jq`'s input conversion — sees exactly what it saw
+/// before. Only the seven consumers that cast look at the tag.
+#[derive(Debug)]
+struct JavaSeq {
+    items: Vec<MjValue>,
+    kind: JavaSeqKind,
+}
+
+impl Object for JavaSeq {
+    fn repr(self: &Arc<Self>) -> ObjectRepr {
+        ObjectRepr::Seq
+    }
+
+    /// The SUBSCRIPT operator, which is a fifth thing the kind decides and the
+    /// one thing here that is not a filter.
+    ///
+    /// Pebble resolves `x[0]` through `GetAttributeExpression`, which handles a
+    /// `List` and an array and has no `Collection` branch, so
+    /// `{{ m | keys | first }}` is `b` and `{{ (m | keys)[0] }}` is
+    /// `AttributeNotFoundException: Attribute [0] of
+    /// [java.util.LinkedHashMap$LinkedKeySet] does not exist` — measured over
+    /// all 46 producers x five ways of reading each, and among non-empty
+    /// SEQUENCE producers the only ones whose `[0]` refuses are the
+    /// `Collection` kind -- `keys` and `values` of a map, at both lengths.
+    /// (Every *empty* sequence refuses too, on both engines, and that is an
+    /// index out of range rather than a capability — which is why the
+    /// predicate is the kind and not the length.)
+    fn get_value(self: &Arc<Self>, key: &MjValue) -> Option<MjValue> {
+        if self.kind == JavaSeqKind::Collection {
+            return None;
+        }
+        let index = usize::try_from(i64::try_from(key.clone()).ok()?).ok()?;
+        self.items.get(index).cloned()
+    }
+
+    /// `Enumerator::Seq` drives minijinja's own iteration *through*
+    /// [`Self::get_value`], so a `Collection` — which must iterate but must not
+    /// subscript — has to yield its values directly instead. `size_hint` on a
+    /// `vec::IntoIter` is exact, so `length`, `default`'s emptiness test and
+    /// `{% for %}` all keep working; measured against Kestra, where a key view
+    /// answers `length`, `first` and a for-loop and refuses only `[0]`.
+    fn enumerate(self: &Arc<Self>) -> Enumerator {
+        if self.kind == JavaSeqKind::Collection {
+            return Enumerator::Iter(Box::new(self.items.clone().into_iter()));
+        }
+        Enumerator::Seq(self.items.len())
+    }
+}
+
+/// Builds a sequence carrying `kind`.
+///
+/// [`JavaSeqKind::MutableList`] is returned as a **plain** minijinja sequence
+/// rather than a tagged one: it is the default that [`java_seq_kind`] reads
+/// for an untagged value, so tagging it would change nothing and would put an
+/// object in the way of every value the crate already produces.
+fn java_seq(kind: JavaSeqKind, items: Vec<MjValue>) -> MjValue {
+    if kind == JavaSeqKind::MutableList {
+        return MjValue::from(items);
+    }
+    MjValue::from_object(JavaSeq { items, kind })
+}
+
+/// The [`JavaSeqKind`] of a value — [`JavaSeqKind::MutableList`] for anything
+/// untagged, which is every list that came from the context, from `fromJson`,
+/// from `range` or from a filter that builds a fresh `ArrayList`.
+fn java_seq_kind(value: &MjValue) -> JavaSeqKind {
+    value
+        .downcast_object_ref::<JavaSeq>()
+        .map(|seq| seq.kind)
+        .unwrap_or(JavaSeqKind::MutableList)
+}
+
 /// `ChunkFilter` — `Lists.partition(list, size)`.
 ///
 /// Guava's `partition` requires a **positive** size (`checkArgument(size >
@@ -434,6 +614,16 @@ fn chunk(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             java_class_name(&value)
         )));
     };
+    // `instanceof List` — see [`JavaSeqKind`]. A map's key or value view and a
+    // `String[]` are sequences here and are not `List`s there, so
+    // `{{ m | keys | chunk(size=2) }}` throws on Kestra.
+    let kind = java_seq_kind(&value);
+    if !kind.is_list() {
+        return Err(pebble_error(format!(
+            "'chunk' filter can only be applied to List. Actual type was: {}",
+            kind.description()
+        )));
+    }
     // `intValue()`, so a fractional size truncates and a size past 2^31 wraps
     // -- see [`java_int_value`]. Kestra's own type check is on `Number`, so a
     // `Double` gets here and is narrowed rather than refused.
@@ -452,11 +642,16 @@ fn chunk(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
         ));
     }
 
+    // `Lists.partition` returns an immutable view whose ELEMENTS are
+    // `list.subList(..)`, so each chunk inherits the input's mutability while
+    // the partition itself never has any. Measured:
+    // `((l | chunk(size=2)) | first) | className` is `ArrayList$SubList` and
+    // `(l | chunk(size=2)) | className` is `Lists$RandomAccessPartition`.
     let chunks: Vec<MjValue> = items
         .chunks(size as usize)
-        .map(|chunk| MjValue::from(chunk.to_vec()))
+        .map(|chunk| java_seq(kind, chunk.to_vec()))
         .collect();
-    Ok(MjValue::from(chunks))
+    Ok(java_seq(JavaSeqKind::Partition, chunks))
 }
 
 /// `ClassNameFilter` — `input.getClass().getName()`.
@@ -1117,6 +1312,23 @@ fn default(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             ValueKind::String => value
                 .as_str()
                 .is_some_and(|s| s.trim_matches(|c: char| c <= '\u{20}').is_empty()),
+            // **An ARRAY is never empty to this filter, however few elements
+            // it has.** `EmptyTest` is `null || (String && trim().isEmpty())
+            // || (Collection && isEmpty()) || (Map && isEmpty())` --
+            // `javap -p -c EmptyTest`, four branches and **no array branch** --
+            // and a Java array is not a `Collection`. So
+            // `{{ ',' | split(',') | default('D') }}` is the empty array there
+            // and was `D` here, and every filter after it then saw a String
+            // where Kestra sees an array: `| capitalize` is a
+            // `ClassCastException` there and answered `D` here.
+            //
+            // Reachable only at length 0 of the `Array` kind -- a cell that
+            // existed in no instrument until `oracle/return-classes.txt`'s
+            // length bucket was derived from the MEASURED length instead of
+            // from the input binding's name. Eight rows, all over-acceptance.
+            ValueKind::Seq | ValueKind::Iterable if java_seq_kind(&value) == JavaSeqKind::Array => {
+                false
+            }
             ValueKind::Seq | ValueKind::Iterable | ValueKind::Map => value
                 .try_iter()
                 .map(|mut i| i.next().is_none())
@@ -1186,7 +1398,11 @@ fn split(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
     let parts = regex
         .split(&input, limit)
         .map_err(|e| pebble_error(format!("Unsupported regex '{delimiter}': {e}")))?;
-    Ok(MjValue::from(
+    // `String.split` returns `String[]`, **an array and not a `List` at all**
+    // — the single fact behind four of W2a's 38 divergent pairs. See
+    // [`JavaSeqKind::Array`].
+    Ok(java_seq(
+        JavaSeqKind::Array,
         parts.into_iter().map(MjValue::from).collect::<Vec<_>>(),
     ))
 }
@@ -1240,8 +1456,20 @@ fn slice(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             .encode_utf16()
             .map(|u| MjValue::from(u64::from(u)))
             .collect(),
-        ValueKind::Seq | ValueKind::Iterable => {
+        // `SliceFilter` has three branches — `List`, `isArray()` and
+        // `String` — and **no `Collection` branch**, so a map's key or value
+        // view is refused here where every other sequence is accepted.
+        ValueKind::Seq | ValueKind::Iterable
+            if java_seq_kind(&value) != JavaSeqKind::Collection =>
+        {
             value.try_iter().map(Iterator::collect).unwrap_or_default()
+        }
+        ValueKind::Seq | ValueKind::Iterable => {
+            return Err(pebble_error(format!(
+                "Slice filter can only be applied to String, List and array inputs. \
+                 Actual type was: {}",
+                java_seq_kind(&value).description()
+            )))
         }
         _ => {
             return Err(pebble_error(format!(
@@ -1281,7 +1509,12 @@ fn slice(value: MjValue, rest: Rest<MjValue>) -> Result<MjValue, MjError> {
             .collect();
         return Ok(MjValue::from(String::from_utf16_lossy(&code_units)));
     }
-    Ok(MjValue::from(picked.to_vec()))
+    // `subList` of a mutable list is mutable and of an immutable one is not;
+    // the array branch copies the range and stays an array. Measured through
+    // `className`: `ArrayList$SubList`, `ImmutableCollections$SubList` and
+    // `[Ljava.lang.String;` respectively. So the kind is INHERITED, which is
+    // why `((l | chunk(size=2)) | slice(0,2)) | reverse` still throws.
+    Ok(java_seq(java_seq_kind(&value), picked.to_vec()))
 }
 
 /// `FormatFilter` — `String.format(input.toString(), args…)`.
@@ -1483,6 +1716,22 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
             .unwrap_or_default(),
         _ => return Err(pebble_error("Unsupported input type for sort filter")),
     };
+    // `SortFilter` is `instanceof List` -> cast, else `instanceof
+    // Comparable[]` -> `Arrays.asList`, else this message; then
+    // `Collections.sort`, which needs `set` and throws on an immutable list.
+    // So an ARRAY sorts (and comes back as the mutable `Arrays$ArrayList`)
+    // while a map's key view does not, and `flatten`'s list does not either.
+    // See [`JavaSeqKind`].
+    let input_kind = java_seq_kind(&value);
+    if input_kind == JavaSeqKind::Collection {
+        return Err(pebble_error("Unsupported input type for sort filter"));
+    }
+    if input_kind.sort_in_place_throws(items.len()) {
+        return Err(pebble_error(
+            "'sort' filter cannot sort an immutable list in place: 'flatten', 'chunk' \
+             and 'keys' return one",
+        ));
+    }
     let first_class = items.first().map(java_class_name).unwrap_or_default();
     if items.len() >= 2 {
         for item in &items[1..] {
@@ -1552,7 +1801,18 @@ fn sort(value: MjValue) -> Result<MjValue, MjError> {
         // which `oracle/name-surface.txt` records.
         kestra_to_string(a).cmp(&kestra_to_string(b))
     });
-    Ok(MjValue::from(items))
+    // **`SortFilter` `areturn`s the list it sorted**, so the kind SURVIVES it
+    // — `{{ [] | chunk(size=2) | sort | className }}` is still
+    // `Lists$RandomAccessPartition`, measured. The one input that does not
+    // come back as itself is an array: that branch is `Arrays.asList(array)`,
+    // a mutable `Arrays$ArrayList`, which is why
+    // `{{ 'a,b,c' | split(',') | sort | reverse }}` answers where
+    // `{{ 'a,b,c' | split(',') | reverse }}` throws.
+    let out_kind = match input_kind {
+        JavaSeqKind::Array => JavaSeqKind::MutableList,
+        kind => kind,
+    };
+    Ok(java_seq(out_kind, items))
 }
 
 /// `ReverseFilter` — `(List) input`, so a String or a Map is a
@@ -1574,8 +1834,31 @@ fn reverse(value: MjValue) -> Result<MjValue, MjError> {
             )))
         }
     };
+    // `ReverseFilter` is a bare `(List) input` and then `Collections.reverse`,
+    // so it is the STRICTEST of the seven: a key view and an array are
+    // `ClassCastException`s and an immutable list is an
+    // `UnsupportedOperationException`. See [`JavaSeqKind`].
+    let kind = java_seq_kind(&value);
+    if !kind.is_list() {
+        return Err(pebble_error(format!(
+            "'reverse' filter can only be applied to a List; this is {}",
+            kind.description()
+        )));
+    }
+    if kind.reverse_in_place_throws(items.len()) {
+        return Err(pebble_error(
+            "'reverse' filter cannot reverse an immutable list in place: 'flatten', \
+             'chunk' and 'keys' return one",
+        ));
+    }
     items.reverse();
-    Ok(MjValue::from(items))
+    // **`Collections.reverse` is `void` and the filter `areturn`s the SAME
+    // local**, so the kind survives — the fact the doc comment above already
+    // quoted and the first cut did not act on. Reachable only at length 0 or
+    // 1, because at length 2 the reverse itself throws:
+    // `{{ [] | flatten | reverse | sort }}` is an
+    // `UnsupportedOperationException` there and was `[]` here.
+    Ok(java_seq(kind, items))
 }
 
 /// The `escape` filter's null and stringify branches.
@@ -1640,6 +1923,15 @@ fn distinct(value: MjValue) -> Result<MjValue, MjError> {
             java_class_name(&value)
         )));
     };
+    // `instanceof List` — see [`JavaSeqKind`]. `{{ m | keys | distinct }}` and
+    // `{{ s | split(',') | distinct }}` both throw on Kestra.
+    let kind = java_seq_kind(&value);
+    if !kind.is_list() {
+        return Err(pebble_error(format!(
+            "Input must be a list, but received : {}",
+            kind.description()
+        )));
+    }
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
@@ -1762,15 +2054,26 @@ fn flatten(value: MjValue) -> Result<MjValue, MjError> {
             "The 'flatten' filter can only be applied to lists.",
         ));
     };
+    // `instanceof List` — see [`JavaSeqKind`]. Same message as the non-list
+    // arm above, because Kestra's is a constant that names no type.
+    if !java_seq_kind(&value).is_list() {
+        return Err(pebble_error(
+            "The 'flatten' filter can only be applied to lists.",
+        ));
+    }
 
     let mut out = Vec::new();
     for item in items {
-        match as_list(&item) {
+        // `lambda$apply$0` is `instanceof List ? list.stream() :
+        // Stream.of(o)`, so the ELEMENT test is the same cast as the input's:
+        // an inner array or key view is kept whole rather than unwrapped.
+        match as_list(&item).filter(|_| java_seq_kind(&item).is_list()) {
             Some(inner) => out.extend(inner),
             None => out.push(item),
         }
     }
-    Ok(MjValue::from(out))
+    // `Stream.toList()`, which is `ImmutableCollections$ListN`.
+    Ok(java_seq(JavaSeqKind::ImmutableList, out))
 }
 
 /// `KeysFilter` — a map's key set, or a list's **indices**.
@@ -1786,11 +2089,25 @@ fn keys(value: MjValue) -> Result<MjValue, MjError> {
             .into_iter()
             .map(|(key, _)| MjValue::from(key))
             .collect();
-        return Ok(MjValue::from(out));
+        // `Map.keySet()` is a VIEW, not a `List` — the producer half of the
+        // class. `{{ m | keys | sort }}` throws on Kestra for this reason.
+        return Ok(java_seq(JavaSeqKind::Collection, out));
     }
     if let Some(items) = as_list(&value) {
+        // `KeysFilter` has a third branch, `getClass().isArray()`, which is
+        // why an array is accepted here where `distinct`, `chunk`, `flatten`
+        // and `reverse` refuse it. A key view reaches none of the three and
+        // falls through to the refusal below.
+        let kind = java_seq_kind(&value);
+        if kind == JavaSeqKind::Collection {
+            return Err(pebble_error(format!(
+                "'keys' filter can only be applied to List, Map, Array. Actual type was: {}",
+                kind.description()
+            )));
+        }
+        // Both the list and the array branch end in `Stream.toList()`.
         let out: Vec<MjValue> = (0..items.len()).map(|i| MjValue::from(i as i64)).collect();
-        return Ok(MjValue::from(out));
+        return Ok(java_seq(JavaSeqKind::ImmutableList, out));
     }
     Err(pebble_error(format!(
         "'keys' filter can only be applied to List, Map, Array. Actual type was: {}",
@@ -1810,7 +2127,9 @@ fn values(value: MjValue) -> Result<MjValue, MjError> {
         )));
     };
     let out: Vec<MjValue> = entries.into_iter().map(|(_, item)| item).collect();
-    Ok(MjValue::from(out))
+    // `Map.values()` is a `Collection` view, not a `List` — see
+    // [`JavaSeqKind::Collection`] and `keys` above.
+    Ok(java_seq(JavaSeqKind::Collection, out))
 }
 
 // ---------------------------------------------------------------------------
@@ -2186,12 +2505,22 @@ fn escape_value(value: &MjValue, args: &Args) -> Result<MjValue, MjError> {
         }
         return Ok(MjValue::from_object(OrderedMap::new(out)));
     }
-    if let Some(items) = as_list(value) {
-        let mut out = Vec::with_capacity(items.len());
-        for item in &items {
-            out.push(escape_value(item, args)?);
+    // `instanceof List`, and it is the SAME cast the other consumers make —
+    // a map's key or value view and a `String[]` are not `List`s, so they fall
+    // past this branch to `toString()` below. `{{ m | keys | escapeChar(…) }}`
+    // is the six characters `[b, a]` on Kestra, not a walked list, and
+    // **both engines' orders are identical**, which is what makes this the
+    // collection class rather than the `HashMap` one it was first filed under.
+    // The gate is here rather than only at the top because Kestra's recursive
+    // helper repeats the same three branches at every depth.
+    if java_seq_kind(value).is_list() {
+        if let Some(items) = as_list(value) {
+            let mut out = Vec::with_capacity(items.len());
+            for item in &items {
+                out.push(escape_value(item, args)?);
+            }
+            return Ok(MjValue::from(out));
         }
-        return Ok(MjValue::from(out));
     }
     // Reached only from inside a container: `escape_char` answers a null
     // *input* with null before calling this. Kestra's `else` branch is
@@ -7403,6 +7732,512 @@ mod tests {
                 r#"{"d": "2024-01-15T10:30:00"}"#
             ),
             "1705314600"
+        );
+    }
+
+    /// Egret's OWN message for every cell of the [`JavaSeqKind`] gate, which
+    /// is what backs the twenty-seven `error-class` ids in
+    /// `oracle/error-class-pairs.txt` that name this test.
+    ///
+    /// error-class comparison is a free pass — it matches on any failure at
+    /// all — so what has to be asserted is that the refusal is *this* refusal.
+    /// The table walks every (kind, consumer) cell rather than sampling, and
+    /// the length column is here because it is the axis a first cut got wrong:
+    /// an EMPTY `chunk` sorts on Kestra and an empty `flatten` does not.
+    #[test]
+    fn the_collection_kind_gate_refuses_what_java_refuses() {
+        // (producer, context) -> a value of each kind.
+        let map = r#"{"m": {"b": 1, "a": 2}}"#;
+        let list = r#"{"l": ["b", "a", "c"]}"#;
+        let text = r#"{"s": "a,b,c", "d": ","}"#;
+
+        const IMMUTABLE_SORT: &str =
+            "'sort' filter cannot sort an immutable list in place: 'flatten', 'chunk' and \
+             'keys' return one";
+        const IMMUTABLE_REVERSE: &str =
+            "'reverse' filter cannot reverse an immutable list in place: 'flatten', 'chunk' \
+             and 'keys' return one";
+
+        // --- Collection: a map's key or value view is not a `List` at all.
+        for producer in ["m | keys", "m | values"] {
+            assert!(err(&format!("{{{{ ({producer}) | sort }}}}"), map)
+                .contains("Unsupported input type for sort filter"));
+            assert!(
+                err(&format!("{{{{ ({producer}) | reverse }}}}"), map).contains(
+                    "'reverse' filter can only be applied to a List; this is a map's key or value \
+                 view, which is not a List"
+                )
+            );
+            assert!(
+                err(&format!("{{{{ ({producer}) | slice(0,2) }}}}"), map).contains(
+                    "Slice filter can only be applied to String, List and array inputs. Actual \
+                 type was: a map's key or value view"
+                )
+            );
+            assert!(err(&format!("{{{{ ({producer}) | distinct }}}}"), map)
+                .contains("Input must be a list, but received : a map's key or value view"));
+            assert!(
+                err(&format!("{{{{ ({producer}) | chunk(2) }}}}"), map).contains(
+                    "'chunk' filter can only be applied to List. Actual type was: a map's key or \
+                 value view"
+                )
+            );
+            assert!(err(&format!("{{{{ ({producer}) | flatten }}}}"), map)
+                .contains("The 'flatten' filter can only be applied to lists."));
+            assert!(
+                err(&format!("{{{{ ({producer}) | keys }}}}"), map).contains(
+                    "'keys' filter can only be applied to List, Map, Array. Actual type was: a \
+                 map's key or value view"
+                )
+            );
+        }
+
+        // --- Array: `SplitFilter` returns `String[]`. `sort`, `slice` and
+        // `keys` have array branches in the engine and the other four do not.
+        assert_eq!(ok("{{ (s | split(d)) | sort }}", text), r#"["a","b","c"]"#);
+        assert_eq!(
+            ok("{{ (s | split(d)) | slice(0,2) }}", text),
+            r#"["a","b"]"#
+        );
+        assert_eq!(ok("{{ (s | split(d)) | keys }}", text), "[0,1,2]");
+        assert!(err("{{ (s | split(d)) | reverse }}", text)
+            .contains("'reverse' filter can only be applied to a List; this is an array"));
+        assert!(err("{{ (s | split(d)) | distinct }}", text)
+            .contains("Input must be a list, but received : an array"));
+        assert!(err("{{ (s | split(d)) | chunk(2) }}", text)
+            .contains("'chunk' filter can only be applied to List. Actual type was: an array"));
+        assert!(err("{{ (s | split(d)) | flatten }}", text)
+            .contains("The 'flatten' filter can only be applied to lists."));
+        // `Arrays.asList` is what `sort` casts an array through, and it IS
+        // mutable, so the result leaves the class entirely.
+        assert_eq!(
+            ok("{{ ((s | split(d)) | sort) | reverse }}", text),
+            r#"["c","b","a"]"#
+        );
+        // …while `slice` copies the range and stays an array.
+        assert!(err("{{ ((s | split(d)) | slice(0,2)) | distinct }}", text)
+            .contains("Input must be a list, but received : an array"));
+
+        // --- ImmutableList (`Stream.toList()`): `sort` is OVERRIDDEN to throw,
+        // so it throws at every length, including zero.
+        for producer in ["l | flatten", "l | keys"] {
+            assert!(err(&format!("{{{{ ({producer}) | sort }}}}"), list).contains(IMMUTABLE_SORT));
+            assert!(
+                err(&format!("{{{{ ({producer}) | reverse }}}}"), list).contains(IMMUTABLE_REVERSE)
+            );
+            // Everything that COPIES is fine — the gate is `set`, not `List`
+            // — and each is pinned to its VALUE, not to being non-empty.
+            let elements = if producer == "l | keys" {
+                ["[0,1,2]", "[[0,1],[2]]", "[0,1]"]
+            } else {
+                [r#"["b","a","c"]"#, r#"[["b","a"],["c"]]"#, r#"["b","a"]"#]
+            };
+            assert_eq!(
+                ok(&format!("{{{{ ({producer}) | distinct }}}}"), list),
+                elements[0]
+            );
+            assert_eq!(
+                ok(&format!("{{{{ ({producer}) | chunk(2) }}}}"), list),
+                elements[1]
+            );
+            assert_eq!(
+                ok(&format!("{{{{ ({producer}) | slice(0,2) }}}}"), list),
+                elements[2]
+            );
+        }
+        assert!(err(r#"{{ (el | flatten) | sort }}"#, r#"{"el": []}"#).contains(IMMUTABLE_SORT));
+        assert_eq!(
+            ok(r#"{{ (el | flatten) | reverse }}"#, r#"{"el": []}"#),
+            "[]"
+        );
+        assert_eq!(
+            ok(r#"{{ (l1 | keys) | reverse }}"#, r#"{"l1": ["b"]}"#),
+            "[0]"
+        );
+        // …and `slice` INHERITS it, which is why the kind is not thrown away
+        // at the first copy.
+        assert!(
+            err("{{ ((l | flatten) | slice(0,2)) | reverse }}", list).contains(IMMUTABLE_REVERSE)
+        );
+
+        // --- Partition (Guava): `sort` is NOT overridden, so `List.sort`'s
+        // default runs and calls `set` once per element. Zero elements is zero
+        // calls, and this row is the reason `Partition` is not folded into
+        // `ImmutableList`.
+        assert_eq!(ok(r#"{{ (el | chunk(2)) | sort }}"#, r#"{"el": []}"#), "[]");
+        assert!(
+            err(r#"{{ (l2 | chunk(2)) | sort }}"#, r#"{"l2": ["b", "a"]}"#)
+                .contains(IMMUTABLE_SORT)
+        );
+        assert_eq!(
+            ok(r#"{{ (el | chunk(2)) | reverse }}"#, r#"{"el": []}"#),
+            "[]"
+        );
+        assert!(err("{{ (l | chunk(2)) | reverse }}", list).contains(IMMUTABLE_REVERSE));
+
+        // --- MutableList: the default, and untagged. Nothing refuses it, and
+        // the VALUE is pinned rather than its shape -- the first cut asserted
+        // only a leading `[` and a non-empty string, so a gate that returned
+        // the wrong elements, or a truncated list, passed it.
+        for (consumer, expected) in [
+            ("sort", r#"["a","b","c"]"#),
+            ("reverse", r#"["c","a","b"]"#),
+            ("distinct", r#"["b","a","c"]"#),
+            ("chunk(2)", r#"[["b","a"],["c"]]"#),
+            ("flatten", r#"["b","a","c"]"#),
+            ("keys", "[0,1,2]"),
+            ("slice(0,2)", r#"["b","a"]"#),
+        ] {
+            assert_eq!(
+                ok(&format!("{{{{ (l | distinct) | {consumer} }}}}"), list),
+                expected,
+                "a plain ArrayList must reach {consumer} AND come back intact"
+            );
+        }
+
+        // --- The ELEMENT side of `flatten` makes the same cast as its input
+        // side, so an inner key view or array is kept whole.
+        assert_eq!(
+            ok("{{ [(m | keys), 'z'] | flatten }}", map),
+            r#"[["b","a"],"z"]"#
+        );
+        assert_eq!(
+            ok("{{ [(s | split(d)), 'z'] | flatten }}", text),
+            r#"[["a","b","c"],"z"]"#
+        );
+
+        // --- W2a fix round 1: `reverse` and `sort` RETURN THEIR INPUT, so the
+        // kind survives them. Reachable only at length 0 or 1, because at 2
+        // the reverse itself throws — the boundary this whole type exists to
+        // model, and the one the depth-2 cross could not reach.
+        let one = r#"{"l1": ["b"], "el": []}"#;
+        assert!(err("{{ ((el | flatten) | reverse) | sort }}", one).contains(IMMUTABLE_SORT));
+        assert!(err("{{ ((l1 | keys) | reverse) | sort }}", one).contains(IMMUTABLE_SORT));
+        assert!(err("{{ ((l1 | chunk(2)) | reverse) | sort }}", one).contains(IMMUTABLE_SORT));
+        // …and the other side: a reversal that is allowed keeps answering.
+        assert_eq!(
+            ok("{{ ((l1 | flatten) | reverse) | reverse }}", one),
+            r#"["b"]"#
+        );
+        assert_eq!(ok("{{ ((el | chunk(2)) | sort) | reverse }}", one), "[]");
+        // An array through `sort` becomes `Arrays$ArrayList`, a mutable List,
+        // so the kind is DROPPED there rather than propagated.
+        assert_eq!(
+            ok("{{ ((s | split(d)) | sort) | reverse }}", text),
+            r#"["c","b","a"]"#
+        );
+
+        // --- W2a fix round 1: `escapeChar` is the ninth consumer.
+        // `instanceof Map` -> `instanceof List` -> `toString()`, so a key or
+        // value view falls to the LAST branch and is stringified whole. Both
+        // engines' orders are identical here, which is why filing this under
+        // the `HashMap` order hid it.
+        assert_eq!(
+            ok("{{ (m | keys) | escapeChar(type='shell') }}", map),
+            "[b, a]"
+        );
+        assert_eq!(
+            ok("{{ (m | values) | escapeChar(type='shell') }}", map),
+            "[1, 2]"
+        );
+        // A real List is still WALKED, which is the other side of that gate.
+        assert_eq!(
+            ok("{{ (l | flatten) | escapeChar(type='shell') }}", list),
+            r#"["b","a","c"]"#
+        );
+
+        // --- W2a fix round 1: the SUBSCRIPT operator, which is not a filter
+        // and which the filter x filter cross therefore could not reach.
+        // Pebble's `GetAttributeExpression` has a `List` branch and an array
+        // branch and no `Collection` branch.
+        assert!(!err("{{ (m | keys)[0] }}", map).is_empty());
+        assert!(!err("{{ (m | values)[0] }}", map).is_empty());
+        assert_eq!(ok("{{ (s | split(d))[0] }}", text), "a");
+        assert_eq!(ok("{{ (l | flatten)[0] }}", list), "b");
+        // …and a key view still ITERATES, still has a length and still
+        // answers `first`. That is the whole reason `Collection` needs its own
+        // enumerator rather than simply refusing `get_value`.
+        assert_eq!(ok("{{ (m | keys) | length }}", map), "2");
+        assert_eq!(ok("{{ (m | keys) | first }}", map), "b");
+        assert_eq!(
+            ok("{% for x in (m | keys) %}{{ x }};{% endfor %}", map),
+            "b;a;"
+        );
+        assert_eq!(ok("{{ (m | keys) | default('D') }}", map), r#"["b","a"]"#);
+        assert_eq!(ok("{{ (em | keys) | default('D') }}", r#"{"em": {}}"#), "D");
+
+        // --- W2a fix round 2: an ARRAY is never empty to `default`.
+        // `EmptyTest` is `null || (String && trim().isEmpty()) ||
+        // (Collection && isEmpty()) || (Map && isEmpty())` -- four branches,
+        // no array branch -- and a Java array is not a `Collection`. Reachable
+        // only at length 0 of the `Array` kind, a cell no instrument held
+        // until the length bucket stopped being read off the input's name.
+        let comma = r#"{"sc": ",", "d": ","}"#;
+        assert_eq!(ok("{{ (sc | split(d)) | default('D') }}", comma), "[]");
+        assert_eq!(
+            ok("{{ ((sc | split(d)) | default('D')) | length }}", comma),
+            "0"
+        );
+        assert!(
+            err("{{ ((sc | split(d)) | default('D')) | capitalize }}", comma)
+                .contains("cannot be cast to class java.lang.String")
+        );
+        // …and a non-empty array is unchanged either way, which is why the
+        // divergence hid: the two engines agree at every length but zero.
+        assert_eq!(
+            ok("{{ (s | split(d)) | default('D') }}", text),
+            r#"["a","b","c"]"#
+        );
+    }
+
+    // ---- W2a: the three answer fixtures ----------------------------------
+
+    /// A probe corpus row: `oracle/fixtures/*.probe.json` is in
+    /// `corpus.json`'s own schema, so the same `host.Oracle generate` writes
+    /// both and a Kestra bump moves the answers visibly.
+    #[derive(serde::Deserialize)]
+    struct FixtureProbe {
+        expr: String,
+        context: serde_json::Value,
+    }
+
+    /// The harness's reply to one probe. `result` is a string when the render
+    /// succeeded and an object carrying `error` when it threw.
+    #[derive(serde::Deserialize)]
+    struct FixtureAnswer {
+        expr: String,
+        result: serde_json::Value,
+    }
+
+    /// JSON's escapes, so a tab-separated file can carry a value containing a
+    /// tab or a newline. The same helper `javare`'s fixture uses.
+    fn fixture_unescape(field: &str) -> String {
+        serde_json::from_str::<String>(&format!("\"{field}\"")).unwrap_or_else(|e| {
+            panic!("{field:?} is not a JSON string body: {e}");
+        })
+    }
+
+    /// The probe corpus, **keyed by the expression itself**.
+    ///
+    /// The first cut keyed this by an id built from the row's own name columns
+    /// and deserialised only `id` and `result`, so both compared columns moved
+    /// together: a probe rewritten to `{{ 1 }}`, with the row still reading
+    /// `keys / m / sort` and the answers regenerated, was fully self-consistent
+    /// and green. `javare.rs`'s fixture -- the precedent this followed -- keys
+    /// its harness map on the probe's own `context["p"]`/`context["s"]` and
+    /// does not have that hole. Keying on the expression closes it the same
+    /// way, and the `expr` column added to all three fixtures is what makes
+    /// the row able to name its own probe.
+    fn fixture_probes(json: &str) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let probes: Vec<FixtureProbe> =
+            serde_json::from_str(json).expect("the probe corpus must parse");
+        let mut by_expr = std::collections::BTreeMap::new();
+        for probe in probes {
+            assert!(
+                by_expr.insert(probe.expr.clone(), probe.context).is_none(),
+                "two probes share an expression, so the key is not a key: {}",
+                probe.expr
+            );
+        }
+        by_expr
+    }
+
+    /// The harness answers, keyed by expression for the same reason.
+    fn fixture_answers(json: &str) -> std::collections::BTreeMap<String, String> {
+        let answers: Vec<FixtureAnswer> =
+            serde_json::from_str(json).expect("the harness answers must parse");
+        answers
+            .into_iter()
+            .map(|answer| {
+                let value = match answer.result {
+                    serde_json::Value::String(text) => text,
+                    _ => "error".to_string(),
+                };
+                (answer.expr, value)
+            })
+            .collect()
+    }
+
+    /// Renders one expression through egret and reduces it to the fixture's
+    /// alphabet: the rendered text, or the single word `error`.
+    fn fixture_render(expr: &str, context: &serde_json::Value) -> String {
+        let cx = RenderContext::from_json_str(&context.to_string())
+            .expect("the probe context must parse");
+        match render_str(expr, &cx) {
+            Ok(text) => text,
+            Err(_) => "error".to_string(),
+        }
+    }
+
+    /// One fixture's shape: how many tab-separated columns, and where the
+    /// `expr`, `kestra`, `egret` and `reason` columns sit.
+    struct FixtureShape {
+        columns: usize,
+        rows: usize,
+        unstable: usize,
+    }
+
+    /// Walks one fixture: every row's egret column is asserted by RENDERING
+    /// the row's own `expr`, every divergent row must carry a reason, every
+    /// agreeing row must carry `-`, and the row count and `unstable` count are
+    /// pinned so the file cannot quietly lose rows or widen its one exemption.
+    fn walk_fixture(fixture: &str, probes_json: &str, shape: FixtureShape) {
+        let probes = fixture_probes(probes_json);
+        let (mut rows, mut unstable) = (0, 0);
+        for line in fixture.lines() {
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            assert_eq!(
+                cols.len(),
+                shape.columns,
+                "{} tab-separated columns: {line}",
+                shape.columns
+            );
+            let names = cols[..shape.columns - 4].join(" | ");
+            let expr = fixture_unescape(cols[shape.columns - 4]);
+            let kestra = fixture_unescape(cols[shape.columns - 3]);
+            let declared = fixture_unescape(cols[shape.columns - 2]);
+            let reason = cols[shape.columns - 1];
+            rows += 1;
+            if kestra == "unstable" {
+                unstable += 1;
+            }
+
+            if kestra == declared {
+                assert_eq!(
+                    reason, "-",
+                    "{names}: the engine and egret agree, so there is nothing to explain"
+                );
+            } else {
+                assert!(
+                    reason.len() > 20,
+                    "{names}: the engine says {kestra} and egret says {declared}; a divergence \
+                     must say why, in the file"
+                );
+            }
+
+            let context = probes.get(&expr).unwrap_or_else(|| {
+                panic!(
+                    "{names}: no probe renders `{expr}` -- the row and the probe corpus have \
+                        drifted apart"
+                )
+            });
+            let actual = fixture_render(&expr, context);
+            assert_eq!(
+                actual, declared,
+                "{names}: the file says egret answers {declared} for `{expr}` and it answers \
+                 {actual}"
+            );
+        }
+        assert_eq!(rows, shape.rows, "the fixture lost rows");
+        assert_eq!(unstable, shape.unstable, "the unstable set changed size");
+    }
+
+    /// The `kestra` column against the **committed harness answers**, keyed by
+    /// the row's own expression, so a hand-edited fixture fails.
+    ///
+    /// `unstable` rows are skipped **here and nowhere else**: their value is a
+    /// Java identity hash, which is exactly why they carry no value. The row
+    /// count of that exemption is pinned by [`walk_fixture`].
+    fn check_kestra_column(fixture: &str, answers_json: &str, columns: usize) {
+        let answers = fixture_answers(answers_json);
+        for line in fixture.lines() {
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            let names = cols[..columns - 4].join(" | ");
+            let expr = fixture_unescape(cols[columns - 4]);
+            let kestra = fixture_unescape(cols[columns - 3]);
+            if kestra == "unstable" {
+                continue;
+            }
+            let measured = answers
+                .get(&expr)
+                .unwrap_or_else(|| panic!("{names}: the harness has no answer for `{expr}`"));
+            assert_eq!(
+                measured, &kestra,
+                "{names}: the fixture says Kestra answers {kestra} for `{expr}` and the \
+                 committed harness answer is {measured}"
+            );
+        }
+    }
+
+    /// All 63 engine filters over a fifteen-input matrix, asked through
+    /// Kestra's own `className` filter — the enumeration W2 Task 8's fix round
+    /// said it did not have.
+    #[test]
+    fn the_return_classes_match_the_engine() {
+        walk_fixture(
+            include_str!("../../oracle/return-classes.txt"),
+            include_str!("../../oracle/fixtures/return-classes.probe.json"),
+            FixtureShape {
+                columns: 6,
+                rows: 945,
+                unstable: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn the_return_class_fixtures_kestra_column_is_the_harnesss_own_answer() {
+        check_kestra_column(
+            include_str!("../../oracle/return-classes.txt"),
+            include_str!("../../oracle/fixtures/return-classes.answers.json"),
+            6,
+        );
+    }
+
+    /// The differential no measurement of a filter in isolation could make:
+    /// 2 898 producer x consumer pairs, of which 38 were egret answering where
+    /// Kestra throws. See [`JavaSeqKind`].
+    #[test]
+    fn the_collection_pairs_match_the_engine() {
+        walk_fixture(
+            include_str!("../../oracle/collection-pairs.txt"),
+            include_str!("../../oracle/fixtures/collection-pairs.probe.json"),
+            FixtureShape {
+                columns: 7,
+                rows: 2898,
+                unstable: 46,
+            },
+        );
+    }
+
+    #[test]
+    fn the_collection_pair_fixtures_kestra_column_is_the_harnesss_own_answer() {
+        check_kestra_column(
+            include_str!("../../oracle/collection-pairs.txt"),
+            include_str!("../../oracle/fixtures/collection-pairs.answers.json"),
+            7,
+        );
+    }
+
+    /// **The depth-3 family, which the depth-2 cross could not see by
+    /// construction.** `reverse` and `sort` return their input, so the kind
+    /// survives them; nothing downstream of either was measured until this
+    /// fixture existed, and five expressions answered here where Kestra throws.
+    #[test]
+    fn the_propagation_pairs_match_the_engine() {
+        walk_fixture(
+            include_str!("../../oracle/propagation-pairs.txt"),
+            include_str!("../../oracle/fixtures/propagation-pairs.probe.json"),
+            FixtureShape {
+                columns: 8,
+                rows: 4347,
+                unstable: 60,
+            },
+        );
+    }
+
+    #[test]
+    fn the_propagation_pair_fixtures_kestra_column_is_the_harnesss_own_answer() {
+        check_kestra_column(
+            include_str!("../../oracle/propagation-pairs.txt"),
+            include_str!("../../oracle/fixtures/propagation-pairs.answers.json"),
+            8,
         );
     }
 }
