@@ -1817,6 +1817,33 @@ pub(crate) fn environment() -> Environment<'static> {
     // one layer up. See `super::functions`' module doc.
     functions::register(&mut env);
 
+    // **`defined` is the ONE test this crate overrides, and it is not a step
+    // into the `is` surface [`MINIJINJA_ONLY_TESTS`] fences off.** That fence
+    // says PORTING the eight is not W2's work; this is one name W2b's own
+    // change broke, put back.
+    //
+    // Pebble's `DefinedTest` is "present **and not null**". Measured against
+    // the artifact, one probe per kind: `0`, `false`, `""`, `[]` and `{}` are
+    // all `true`; a null literal, a context null, an absent root and a missing
+    // attribute are all `false`. minijinja's is "not undefined", so a `none`
+    // is defined there.
+    //
+    // Before W2b that difference was invisible: the `null` literal arrived as
+    // an `Undefined` and answered `false` -- the right answer for the wrong
+    // reason. Translating the literal removed the accident and left the real
+    // divergence showing, and a **context** null had been answering `true`
+    // since long before this package. `null-literal-is-defined` and
+    // `null-from-the-context-is-defined` are the entries; `test-defined` (a
+    // present String) agrees either way and could never have separated them.
+    //
+    // Overriding one name costs one name: `add_test` replaces that binding and
+    // nothing else, and the seven siblings (`empty even iterable json map null
+    // odd`) keep whatever they had. Measured, not assumed -- see
+    // `the_defined_test_is_pebbles_and_it_is_the_only_one_overridden`.
+    env.add_test("defined", |value: MjValue| {
+        value.kind() != ValueKind::Undefined && !value.is_none()
+    });
+
     env.add_function("kestra_null_coalesce", kestra_null_coalesce);
     env.add_function("kestra_undefined_coalesce", kestra_undefined_coalesce);
     env.add_function("kestra_is_in", kestra_is_in);
@@ -2052,6 +2079,84 @@ mod tests {
     /// binds what the file says it does not), adding one (egret refuses what
     /// the file says it binds), flipping an `engine` column without a reason,
     /// adding a reason to an agreeing row, and deleting a row.
+    /// `defined` is Pebble's — "present **and not null**" — and it is the only
+    /// test this crate overrides.
+    ///
+    /// Pairs `null-literal-is-defined` and `null-from-the-context-is-defined`,
+    /// both banked by the override. Every expected value below was measured on
+    /// `io.kestra:core:2.0.0-rc13`, one probe per kind.
+    ///
+    /// # Why the second half is here
+    ///
+    /// [`MINIJINJA_ONLY_TESTS`]' doc fences off the `is` surface: porting the
+    /// engine's eight tests was never given to a W2 task. Overriding one name
+    /// that W2b's own change broke is not porting that surface — but the only
+    /// thing that keeps those two claims apart is that the **other seven stay
+    /// exactly as they were**, and "an `add_test` binds one name" is a
+    /// property of minijinja, not of this crate. So it is asserted rather than
+    /// reasoned about: `even`, `iterable` and `odd` still answer minijinja's
+    /// way (the divergences `name-surface.txt` records for them are unchanged),
+    /// and `empty`, `json`, `map` and `null` are still **unknown** here.
+    ///
+    /// Measured cost of the override, for the record: the ratchet moved from
+    /// `141 of 1288` to `139 of 1288`, both moves being the two entries above,
+    /// with no regression and nothing else touched.
+    #[test]
+    fn the_defined_test_is_pebbles_and_it_is_the_only_one_overridden() {
+        // "Present and not null." A falsy-but-present value is DEFINED, which
+        // is the half a `!value.is_true()`-shaped mistake would get wrong.
+        for (expr, expected) in [
+            ("{{ s is defined }}", "true"),
+            ("{{ zero is defined }}", "true"),
+            ("{{ f is defined }}", "true"),
+            ("{{ empty is defined }}", "true"),
+            ("{{ lst is defined }}", "true"),
+            ("{{ m is defined }}", "true"),
+            ("{{ obj.a is defined }}", "true"),
+            // The four Pebble calls `false`, and the two on the left are the
+            // ones W2b broke and this override fixes.
+            ("{{ null is defined }}", "false"),
+            ("{{ n is defined }}", "false"),
+            ("{{ nothere is defined }}", "false"),
+            ("{{ obj.missing is defined }}", "false"),
+            // `is not` negates it cleanly, and `{% if %}` sees a real boolean
+            // rather than the null that `{% if null %}` chokes on.
+            ("{{ null is not defined }}", "true"),
+            ("{{ s is not defined }}", "false"),
+            ("{% if null is defined %}y{% else %}n{% endif %}", "n"),
+            ("{% if s is defined %}y{% else %}n{% endif %}", "y"),
+        ] {
+            let ctx = json!({
+                "s": "x", "zero": 0, "f": false, "empty": "", "lst": [],
+                "m": {}, "n": null, "obj": {"a": 1}
+            });
+            assert_eq!(
+                render(expr, ctx).unwrap_or_else(|e| panic!("{expr}: {e}")),
+                expected,
+                "{expr}"
+            );
+        }
+
+        // **The fence, asserted.** Three siblings still bind and still answer
+        // minijinja's way; four are still unknown. An `add_test` that reached
+        // further than one name would move one of these.
+        let ctx = json!({"s": "x", "two": 2, "lst": [1]});
+        assert_eq!(render("{{ two is even }}", ctx.clone()).unwrap(), "true");
+        assert_eq!(render("{{ s is even }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(render("{{ two is odd }}", ctx.clone()).unwrap(), "false");
+        assert_eq!(render("{{ s is iterable }}", ctx.clone()).unwrap(), "true");
+        for unknown in ["empty", "json", "map", "null"] {
+            let expr = format!("{{{{ s is {unknown} }}}}");
+            let message = render(&expr, ctx.clone())
+                .expect_err(&format!("{expr} must still be an unknown test"))
+                .to_string();
+            assert!(
+                message.contains("unknown test"),
+                "{expr} must still be UNKNOWN, not answered: {message}"
+            );
+        }
+    }
+
     #[test]
     fn the_built_in_surface_matches_the_engines() {
         const FIXTURE: &str = include_str!("../../oracle/name-surface.txt");

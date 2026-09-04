@@ -97,7 +97,7 @@ filter	join	yes	yes	filter-join	-
 filter	jq	yes	yes	filter-jq-at-csv	`jackson-jq` at JQ_1_6 and `jaq-std` do not carry the same standard library, in both directions
 filter	keys	yes	yes	filter-keys	-
 filter	last	yes	yes	filter-last	-
-filter	length	yes	yes	filter-length-literal-null	the same trade as `upper`: the literal and the typo arrive identically, and the alternative turned `{{ nothere | length }}` into `0`
+filter	length	yes	yes	filter-length-literal-null	-
 filter	lines	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	list	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
 filter	lower	yes	yes	filter-lower-chained-past-a-worker-stack	-
@@ -132,7 +132,7 @@ filter	slugify	yes	yes	filter-slugify	-
 filter	sort	yes	yes	filter-sort-of-keys	the collection class: five producers whose Java collection is not a mutable List (keys, values, flatten, chunk, split) against six consumers that cast to one, and egret has one sequence type; `filter-sort-of-a-real-list` pins the other side
 filter	split	yes	yes	filter-split-lookahead	`split`'s delimiter is a Java regex and inherits `javare`'s unsupported-construct set; under-acceptance, the same class as `filter-regexmatch-lookahead`
 filter	startsWith	yes	yes	filter-startswith	-
-filter	string	yes	yes	filter-string-undefined-input	egret cannot tell Pebble's `null` literal from a typo'd variable at a filter's input; the fix is in the rewriter's vocabulary
+filter	string	yes	yes	filter-string	-
 filter	substringAfter	yes	yes	filter-substringafter	-
 filter	substringAfterLast	yes	yes	filter-substringafterlast	-
 filter	substringBefore	yes	yes	filter-substringbefore	-
@@ -147,7 +147,7 @@ filter	toIon	yes	yes	filter-toion	-
 filter	toJson	yes	yes	filter-tojson	-
 filter	trim	yes	yes	filter-trim	-
 filter	unique	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_FILTERS` removes it -- the engine answers `Filter [x] does not exist.`
-filter	upper	yes	yes	filter-upper-literal-null	egret cannot tell Pebble's `null` LITERAL from a typo'd variable -- both arrive as an undefined -- and refuses both. The direction that fails loudly: the alternative turned `{{ nothere | upper }}` into an empty string
+filter	upper	yes	yes	filter-upper-literal-null	-
 filter	urldecode	yes	yes	filter-urldecode	-
 filter	urlencode	yes	no	-	Pebble core; Kestra registers `urldecode` only, and egret has that one
 filter	values	yes	yes	filter-values	-
@@ -201,7 +201,7 @@ function	tasksWithState	yes	yes	function-taskswithstate	-
 function	uuid	yes	yes	function-uuid	-
 function	yaml	yes	yes	function-yaml-yes-is-a-boolean-or-not	the two YAML scalar resolvers disagree, and re-resolving would trade an old silent wrong answer for a new one
 test	boolean	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	defined	yes	yes	test-defined	-
+test	defined	yes	yes	null-literal-is-defined	-
 test	divisibleby	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	empty	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
 test	endingwith	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
@@ -228,7 +228,7 @@ test	map	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
 test	mapping	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	ne	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	none	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
-test	null	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own
+test	null	yes	no	-	the `is` surface was never given to a W2 task; Pebble's own. minijinja spells this test `none`, so `{{ x is null }}` is `unknown test: test none is unknown` here -- `null-literal-is-null-test` is the baselined entry W2b added for it
 test	number	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
 test	odd	yes	yes	test-odd	the same as `even`
 test	safe	no	no	-	minijinja binds it by default; `env::MINIJINJA_ONLY_TESTS` removes it -- the engine answers `Test [x] does not exist.`
