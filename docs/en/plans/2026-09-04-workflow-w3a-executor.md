@@ -79,7 +79,7 @@ The spec says the corpus is Kestra's, and that how much of it runs standalone is
 
 - [ ] **Step 1: Pin the compose file**
 
-Copy `kestra/docker-compose.yml` from the sibling checkout and make exactly two edits — pin `kestra/kestra:v2.0.0-rc13`, and enable basic-auth, because 2.x refuses unauthenticated API calls:
+Copy `kestra/docker-compose.yml` from the sibling checkout and make exactly **three** edits — pin `kestra/kestra:v2.0.0-rc13`; enable basic-auth, because 2.x refuses unauthenticated API calls; and set `kestra.encryption.secret-key`, because without it `valids/input-log-secret` returns `422 Unable to use a SECRET input/output as encryption is not configured` and the SECRET input type is permanently untestable. Kestra's own test configuration sets that key, so this is config parity, not a behaviour hack. Every edit is recorded in the README with its reason; a fourth edit needs a reason written down before it is made.
 
 ```yaml
         kestra:
@@ -101,7 +101,7 @@ From `../../../kestra/core/src/test/resources/flows/`, copy `valids/*.yaml` (261
 `harvest.py` must:
 1. `docker compose -p w3oracle up -d` and wait for `GET /api/v1/main/flows/search` to return 200 **under basic auth** — note the readiness probe must not treat a non-200 as "not ready": an unauthenticated call returns 401 and a wrong path returns 405, and both look like "still starting". Probe the exact authenticated URL.
 2. `POST /api/v1/main/flows` with `Content-Type: application/x-yaml` for each corpus flow, recording the HTTP status. A 422 here is the `invalids` disposition, not an error.
-3. For each flow that published, `POST /api/v1/main/executions/{namespace}/{id}` and poll `GET /api/v1/main/executions/{eid}` until the state is terminal (`SUCCESS`/`FAILED`/`WARNING`/`KILLED`), with a per-flow timeout.
+3. For each flow that published, `POST /api/v1/main/executions/{namespace}/{id}` and poll `GET /api/v1/main/executions/{eid}` until the state is terminal, with a per-flow timeout. **Terminal is Kestra's own `State.Type.isTerminated()`, not a shorter list you write:** `FAILED, WARNING, SUCCESS, KILLED, CANCELLED, RETRIED, SKIPPED`. An earlier version of this step named only the first four, which mis-files `exit-cancelled` as a timeout. Read the enum from `core/src/main/java/io/kestra/core/models/flows/State.java` and use it verbatim.
 4. **Follow `parentId` to harvest sub-executions.** They are hidden from `/executions/search` — a sub-execution fetchable by id and carrying `parentId` was absent from a 200-row listing that returned all 24 top-level executions. A harvester that lists executions loses every loop iteration silently. Discover them from the parent's log lines (`in sub-execution [[link execution="..."]]`) and by querying Kestra's Postgres directly for `value->>'parentId'`.
 
 - [ ] **Step 3b: Recover the inputs — the YAML alone is not the test case**
@@ -119,8 +119,13 @@ into `corpus.json`:
 
 ```json
 {"id": "valids/finally-parallel", "inputs": {"failed": true},
- "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:errors"}
+ "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:errors",
+ "inputs_alternatives": [{"failed": false}]}
 ```
+
+`inputs_alternatives` carries the other input maps when several Java tests drive
+the same flow with different values — 20 flows do. Keeping only the first would
+discard measured coverage.
 
 Where no Java test drives the flow, or the values are computed rather than
 literal, mark it `not-standalone` with that reason. Do not invent an input
@@ -561,7 +566,22 @@ The spec records this as measured and **not explained**. Before implementing, de
 
 The 28 `invalids` test the one divergence class the programme forbids shipping. They are last because a refusal is only meaningful once there is something to refuse.
 
-- [ ] **Step 1: Classify all 28** by what makes each invalid, from Task 1's recorded publish response. Group them; the groups are the implementation units.
+- [ ] **Step 1: Classify the rejections by CAUSE, not by directory**
+
+Task 1 measured 45 rejections, and **only 27 of them are Kestra refusing a
+flow**. The other 18 are the pinned image lacking a test-only plugin class, or
+the sibling checkout being ahead of `rc13` — the artifact/checkout drift the
+Global Constraints warn about, showing up as data. Read `rejected_class` from
+`corpus.json`; **never infer "invalid" from the `invalids/` directory name**.
+Making egret refuse those 18 would be a defect manufactured out of a naming
+convention.
+
+Task 1 also found that `invalids/loop-switch-failed` is **not an invalid flow at
+all** — Kestra's own `RunContextTest` executes it and asserts `FAILED`. It is 27
+of 28, and that flow belongs to the `runs` side.
+
+Group the genuine refusals by what makes each invalid; the groups are the
+implementation units.
 - [ ] **Step 2: Write the over-acceptance assertion**
 
 ```rust
