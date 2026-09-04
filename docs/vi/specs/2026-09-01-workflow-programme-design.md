@@ -361,12 +361,13 @@ W7 — một bản kiểm kê màn hình không phải một cuộc khảo sát 
 | **W0** Nền & đổi tên | khung crate phản chiếu tên module Kestra; xoá hai placeholder; entitlement `workflows`; đổi `egret-orchestrator` → `egret-provisioner` (hiện nghĩa là cấp phát engine trên k8s, sẽ va với workflow orchestrator) thành một PR cơ học riêng | — |
 | **W1** Model & ngôn ngữ | `models/{flows,tasks,executions,triggers,property}`; parse/validate YAML; bảng draft/version; publish + giải tham chiếu | W0 |
 | **W2** Biểu thức | minijinja + 37 filter + 40 function + viết lại `??`/`?:` + **oracle differential Pebble** | W0 |
-| **W3** Executor lõi | `advance()`; vòng claim; `sequential/parallel/if/switch/dag/loop/loopUntil`; retry/timeout/`errors:`; task `core.log`, `egret.sql` | W1, W2 |
-| **W4** Runner & container | hợp đồng `TaskCommands`; `egret.container`, `egret.python`; stream log; file output; cancel/kill | W3 |
+| **W3a** Máy trạng thái executor | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; oracle vết thực thi Kestra. Không I/O | W1, W2 |
+| **W3b** Executor bền vững | vòng claim; reaper; task `core.log`, `egret.sql` | W3a |
+| **W4** Runner & container | hợp đồng `TaskCommands`; `egret.container`, `egret.python`; stream log; file output; cancel/kill | W3b |
 | **W5** Kestra plugin host | image JVM, `ShimRunContext`, cầu `StorageInterface`, điều phối `kestra.<FQCN>`, giải jar plugin | W4 |
-| **W6** Trigger & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3 |
-| **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution | W1, W3 |
-| **W8** Ngữ nghĩa nâng cao | `pause`/`resume`, `allowFailure`, `loopUntil`, concurrency limit, `WorkingDirectory`, label | W3 |
+| **W6** Trigger & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
+| **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution | W1, W3b |
+| **W8** Ngữ nghĩa nâng cao | `pause`/`resume`, `allowFailure`, `loopUntil`, concurrency limit, `WorkingDirectory`, label | W3b |
 | **W9** Hạ tầng Kestra còn lại | KV store, namespace file, internal storage, output | W4 |
 
 Mỗi gói có spec và plan riêng, như chương trình DBAPI-parity đã làm.
