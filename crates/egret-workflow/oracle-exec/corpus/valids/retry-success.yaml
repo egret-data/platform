@@ -1,0 +1,18 @@
+id: retry-success
+namespace: io.kestra.tests
+
+tasks:
+- id: failed
+  type: io.kestra.plugin.core.log.Log
+  message: "{{ taskrun.attemptsCount == 3 ? 'ok' : ko}}"
+  retry:
+    type: constant
+    interval: PT0.250S
+    maxAttempts: 4
+    maxDuration: PT15S
+    warningOnRetry: true
+
+errors:
+  - id: never-happen
+    type: io.kestra.plugin.core.log.Log
+    message: Never {{task.id}}

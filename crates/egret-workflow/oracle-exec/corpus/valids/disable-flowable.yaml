@@ -1,0 +1,55 @@
+id: disable-flowable
+namespace: io.kestra.tests
+
+tasks:
+  # Each
+  - id: 1-each
+    type: io.kestra.plugin.core.flow.Loop
+    values: '["value 1", "value 2", "value 3"]'
+    tasks:
+      - id: 1-each-1
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}} > {{item.value}}"
+      - id: 1-each-2
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}} > {{item.value}}"
+        disabled: true
+
+  # Parallel
+  - id: 2-parallel
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: 2-parallel-1
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}}"
+      - id: 2-parallel-2
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}}"
+        disabled: true
+
+  # Sequential
+  - id: 3-sequential
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: 3-sequential-1
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}}"
+      - id: 3-sequential-2
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{task.id}}"
+        disabled: true
+
+
+  # Switch
+  - id: 4-switch
+    type: io.kestra.plugin.core.flow.Switch
+    value: "FIRST"
+    cases:
+      FIRST:
+        - id: 4-switch-case-1
+          type: io.kestra.plugin.core.debug.Return
+          format: "{{task.id}}  > {{taskrun.value}}"
+        - id: 4-switch-case-2
+          type: io.kestra.plugin.core.debug.Return
+          format: "{{task.id}}  > {{taskrun.value}}"
+          disabled: true

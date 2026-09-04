@@ -1,0 +1,7 @@
+id: minimal
+namespace: io.kestra.tests2
+
+tasks:
+- id: date
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{taskrun.startDate}}"

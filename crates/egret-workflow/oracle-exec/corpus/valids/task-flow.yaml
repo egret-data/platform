@@ -1,0 +1,30 @@
+id: task-flow
+namespace: io.kestra.tests
+
+inputs:
+  - id: string
+    type: STRING
+
+labels:
+  mainFlowLabel: flowFoo
+  overriding: parent
+
+tasks:
+  - id: launch
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: io.kestra.tests
+    flowId: switch
+    inputs:
+      string: "{{ inputs.string }}"
+    wait: true
+    transmitFailed: true
+    inheritLabels: true
+    labels:
+      launchTaskLabel: launchFoo
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 * * * *"
+    inputs:
+      string: hello

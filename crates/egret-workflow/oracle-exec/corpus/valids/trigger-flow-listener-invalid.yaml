@@ -1,0 +1,20 @@
+id: trigger-flow-listener-invalid
+namespace: io.kestra.tests.trigger
+
+inputs:
+  - id: from-parent
+    type: STRING
+
+tasks:
+  - id: only-invalid
+    type: io.kestra.plugin.core.debug.Return
+    format: "childs: {{inputs['from-parent']}}"
+
+triggers:
+  - id: listen-flow-invalid
+    type: io.kestra.plugin.core.trigger.Flow
+    inputs:
+      from-parent: '{{ outputs.invalid.value }}'
+    dependsOn:
+      - namespace: io.kestra.tests.trigger
+        flowId: trigger-flow

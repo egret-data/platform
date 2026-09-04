@@ -1,0 +1,16 @@
+id: webhook
+namespace: io.kestra.tests
+labels:
+  flow-label-1: flow-label-1
+  flow-label-2: flow-label-2
+
+tasks:
+  - id: out
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{trigger | json }}"
+
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: a-secret-key

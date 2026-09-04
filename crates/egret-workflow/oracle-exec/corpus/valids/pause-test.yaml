@@ -1,0 +1,15 @@
+id: pause-test
+namespace: io.kestra.tests
+
+tasks:
+  - id: pause
+    type: io.kestra.plugin.core.flow.Pause
+  - id: last
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{task.id}} > {{taskrun.startDate}}"
+
+errors:
+  - id: failed-echo
+    type: io.kestra.plugin.core.log.Log
+    description: "Log the error"
+    message: I'm failing {{task.id}}

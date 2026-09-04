@@ -1,0 +1,3764 @@
+[
+ {
+  "id": "valids/additional-plugin",
+  "path": "corpus/valids/additional-plugin.yaml",
+  "flow_id": "additional-plugin",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPluginTestTask",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/after-execution-error",
+  "path": "corpus/valids/after-execution-error.yaml",
+  "flow_id": "after-execution-error",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6xvJ0YyklIlPm8CZKAFzvk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/after-execution-finally",
+  "path": "corpus/valids/after-execution-finally.yaml",
+  "flow_id": "after-execution-finally",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "T0FU3r8IdUNlwrBQqDVGm",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/after-execution-flowable",
+  "path": "corpus/valids/after-execution-flowable.yaml",
+  "flow_id": "after-execution-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "26v5dOXHBVCU7g73mAsG3Q",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/after-execution",
+  "path": "corpus/valids/after-execution.yaml",
+  "flow_id": "after-execution",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6uZSgRdDtDU9WcDt52pF7I",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/alias-task",
+  "path": "corpus/valids/alias-task.yaml",
+  "flow_id": "alias-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.runners.test.TaskWithAlias",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/alias-trigger",
+  "path": "corpus/valids/alias-trigger.yaml",
+  "flow_id": "alias-trigger",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.runners.test.trigger.Alias",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/all-flowable",
+  "path": "corpus/valids/all-flowable.yaml",
+  "flow_id": "all-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3ujxzuAV5whNqgWkVWfCe5",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/allow-failure-with-retry",
+  "path": "corpus/valids/allow-failure-with-retry.yaml",
+  "flow_id": "allow-failure-with-retry",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "execution_id": "Oolk91raQjDV1hbRZlqql",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/allow-failure",
+  "path": "corpus/valids/allow-failure.yaml",
+  "flow_id": "allow-failure",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "crash": "1"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/AllowFailureTest.java:41 failed()",
+  "inputs_alternatives": [
+   {
+    "inputs": {},
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/AllowFailureTest.java:29 success() (@ExecuteFlow, no inputs)"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2oz7glTuqhUfR0aKJ4REPO",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/assert",
+  "path": "corpus/valids/assert.yaml",
+  "flow_id": "assert",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "57RjduoCIVwk0oyUKQED0R",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/cache",
+  "path": "corpus/valids/cache.yaml",
+  "flow_id": "cache",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.runners.TaskCacheTest$CounterTask",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/change-state-errors",
+  "path": "corpus/valids/change-state-errors.yaml",
+  "flow_id": "change-state-errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5cTRiXfoT5yVBog0KzVcVI",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/condition_with_input",
+  "path": "corpus/valids/condition_with_input.yaml",
+  "flow_id": "condition_with_input",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "condition": "fail"
+  },
+  "inputs_from": "webserver/src/test/java/io/kestra/webserver/controllers/api/ExecutionControllerRunnerTest.java:742 replayExecutionWithNewInputs()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "condition": "success"
+    },
+    "inputs_from": "webserver/src/test/java/io/kestra/webserver/controllers/api/ExecutionControllerRunnerTest.java:762 replayExecutionWithNewInputs() replay body"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "35pWEm6zq1tFBkNDSrQln9",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/dag",
+  "path": "corpus/valids/dag.yaml",
+  "flow_id": "dag",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1a2foTcTWJ0ca08kdblyEV",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/disable-error",
+  "path": "corpus/valids/disable-error.yaml",
+  "flow_id": "disable-error",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1uroAMXqOGKxoO10Phxbut",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/disable-flowable",
+  "path": "corpus/valids/disable-flowable.yaml",
+  "flow_id": "disable-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6fZ0xlBnlwFYGxevX6QnDs",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/disable-simple",
+  "path": "corpus/valids/disable-simple.yaml",
+  "flow_id": "disable-simple",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2Y2K9f7LFF7eQlWBuqsKq4",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/dynamic-task",
+  "path": "corpus/valids/dynamic-task.yaml",
+  "flow_id": "dynamic-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/encrypted-string",
+  "path": "corpus/valids/encrypted-string.yaml",
+  "flow_id": "encrypted-string",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/errors",
+  "path": "corpus/valids/errors.yaml",
+  "flow_id": "errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4ouIKzLWFKOCmQyFfFvMir",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/exception-with-output",
+  "path": "corpus/valids/exception-with-output.yaml",
+  "flow_id": "exception-with-output",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.runners.test.TaskThatFail",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/execution",
+  "path": "corpus/valids/execution.yaml",
+  "flow_id": "execution-start-date",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1qxDwtVkzcvL8Z2mKAhDSB",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/exit-cancelled",
+  "path": "corpus/valids/exit-cancelled.yaml",
+  "flow_id": "exit-cancelled",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:45 shouldExitWithCancelled() (@ExecuteFlow, no inputs)",
+  "disposition": "runs",
+  "reason": "CANCELLED",
+  "execution_id": "6ksNZ5KNwvcfeltOzmSuUS",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/exit-killed",
+  "path": "corpus/valids/exit-killed.yaml",
+  "flow_id": "exit-killed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:24 shouldExitAndKillTheExecution() (@ExecuteFlow, no inputs)",
+  "disposition": "runs",
+  "reason": "KILLED",
+  "execution_id": "1wVw2xKB2DsxltiyzUW1UC",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/exit-nested",
+  "path": "corpus/valids/exit-nested.yaml",
+  "flow_id": "exit-nested",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:33 shouldExitAndFailNestedIf() (@ExecuteFlow, no inputs)",
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "xLCMhbOLGYrFv2LfzrIn0",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/exit",
+  "path": "corpus/valids/exit.yaml",
+  "flow_id": "exit",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:16 shouldExitTheExecution() (@ExecuteFlow, no inputs)",
+  "disposition": "runs",
+  "reason": "WARNING",
+  "execution_id": "3pyPyKTiHVS5Cs0vOoS1eE",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/fail-on-condition",
+  "path": "corpus/valids/fail-on-condition.yaml",
+  "flow_id": "fail-on-condition",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "param": "fail"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/FailTest.java:44 failOnCondition()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "param": "success"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/FailTest.java:57 dontFailOnCondition()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4AowaTBfMdCOkOSgnENc0z",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/fail-on-switch",
+  "path": "corpus/valids/fail-on-switch.yaml",
+  "flow_id": "fail-on-switch",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "param": "fail"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/FailTest.java:31 failOnSwitch()",
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3eG7FbmIZfEWxcioQpkeCW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/failed-first",
+  "path": "corpus/valids/failed-first.yaml",
+  "flow_id": "failed-first",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3xNWkqGJIrIsdE3CENuAlL",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/failing-subflow",
+  "path": "corpus/valids/failing-subflow.yaml",
+  "flow_id": "failing-subflow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1f8eQFkdpKLIIMWcPoLPbw",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-allowfailure",
+  "path": "corpus/valids/finally-allowfailure.yaml",
+  "flow_id": "finally-allowfailure",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:141 allowFailureWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:124 allowFailureWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "WARNING",
+  "execution_id": "Nb6UcKS83lWZllmzkn1wS",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-dag",
+  "path": "corpus/valids/finally-dag.yaml",
+  "flow_id": "finally-dag",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/DagTest.java:86 errors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:297 dagWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5lZ9dYEMylxDEep07v20op",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-flow-error-first",
+  "path": "corpus/valids/finally-flow-error-first.yaml",
+  "flow_id": "finally-flow-error-first",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3Fc5Q2AMY84ocEClVeO9rA",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-flow-error",
+  "path": "corpus/valids/finally-flow-error.yaml",
+  "flow_id": "finally-flow-error",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:384 flowErrorBlockWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:367 flowErrorBlockWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1cMlItes3kCjjatY4chf3P",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-flow",
+  "path": "corpus/valids/finally-flow.yaml",
+  "flow_id": "finally-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:350 flowWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:333 flowWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5etf33FSjc3MsoUdi9qsxB",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-loop-parallel",
+  "path": "corpus/valids/finally-loop-parallel.yaml",
+  "flow_id": "finally-loop-parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:266 loopParallelWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:246 loopParallelWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3DZ2yrfkeSnd9hwapcc6Hv",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/finally-loop",
+  "path": "corpus/valids/finally-loop.yaml",
+  "flow_id": "finally-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:216 loopWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:196 loopWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3SZu8WEHGo2DM0n4eIa4l3",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/finally-parallel",
+  "path": "corpus/valids/finally-parallel.yaml",
+  "flow_id": "finally-parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:48 errors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:160 parallelWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6sJoUDzDqOzcmk6tKlJXPs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-sequential-error-first",
+  "path": "corpus/valids/finally-sequential-error-first.yaml",
+  "flow_id": "finally-sequential-error-first",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "o36g9Cv1be9bo8oi95RNC",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-sequential-error",
+  "path": "corpus/valids/finally-sequential-error.yaml",
+  "flow_id": "finally-sequential-error",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:105 sequentialErrorBlockWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:76 sequentialErrorBlockWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2hJr5iHnb5wAjPMsJmHO3V",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/finally-sequential",
+  "path": "corpus/valids/finally-sequential.yaml",
+  "flow_id": "finally-sequential",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:59 sequentialWithErrors()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "failed": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:42 sequentialWithoutErrors()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "29CCL1ObXqJXEw9DidItox",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-parallel-subflow-kill-child",
+  "path": "corpus/valids/flow-concurrency-parallel-subflow-kill-child.yaml",
+  "flow_id": "flow-concurrency-parallel-subflow-kill-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3z2Qi7WPrtZb9vvoWOCAXj",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-parallel-subflow-kill-grandchild",
+  "path": "corpus/valids/flow-concurrency-parallel-subflow-kill-grandchild.yaml",
+  "flow_id": "flow-concurrency-parallel-subflow-kill-grandchild",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3X9lWXKoUcIuXuaSd3ReF1",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-parallel-subflow-kill",
+  "path": "corpus/valids/flow-concurrency-parallel-subflow-kill.yaml",
+  "flow_id": "flow-concurrency-parallel-subflow-kill",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7hTQqyA1fQpZnQB0dHERQz",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-any-mode-flow-a",
+  "path": "corpus/valids/flow-trigger-any-mode-flow-a.yaml",
+  "flow_id": "flow-trigger-any-mode-flow-a",
+  "namespace": "io.kestra.tests.trigger.any.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4NiH32h1FHdpvT1AclQanz",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-any-mode-flow-b",
+  "path": "corpus/valids/flow-trigger-any-mode-flow-b.yaml",
+  "flow_id": "flow-trigger-any-mode-flow-b",
+  "namespace": "io.kestra.tests.trigger.any.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5x8kfW0FmZqE5GYz2v7eOt",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-any-mode-flow-listen",
+  "path": "corpus/valids/flow-trigger-any-mode-flow-listen.yaml",
+  "flow_id": "flow-trigger-any-mode-flow-listen",
+  "namespace": "io.kestra.tests.trigger.any.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1a0Z5ZCfMMdBCTaOeHSiLf",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-at-least-mode-flow-a",
+  "path": "corpus/valids/flow-trigger-at-least-mode-flow-a.yaml",
+  "flow_id": "flow-trigger-at-least-mode-flow-a",
+  "namespace": "io.kestra.tests.trigger.at.least.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3hpJYRRzyJksyTJeLohiaa",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-at-least-mode-flow-b",
+  "path": "corpus/valids/flow-trigger-at-least-mode-flow-b.yaml",
+  "flow_id": "flow-trigger-at-least-mode-flow-b",
+  "namespace": "io.kestra.tests.trigger.at.least.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5jpb7NXJrEhDEwt4QZKM2X",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-at-least-mode-flow-c",
+  "path": "corpus/valids/flow-trigger-at-least-mode-flow-c.yaml",
+  "flow_id": "flow-trigger-at-least-mode-flow-c",
+  "namespace": "io.kestra.tests.trigger.at.least.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7Y2HwbSK3XuGQMZvGgkOG5",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-at-least-mode-flow-listen",
+  "path": "corpus/valids/flow-trigger-at-least-mode-flow-listen.yaml",
+  "flow_id": "flow-trigger-at-least-mode-flow-listen",
+  "namespace": "io.kestra.tests.trigger.at.least.mode",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "enSQXDSqE5vRBfMoyv6Hb",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-depends-on-flow-a",
+  "path": "corpus/valids/flow-trigger-depends-on-flow-a.yaml",
+  "flow_id": "flow-trigger-depends-on-flow-a",
+  "namespace": "io.kestra.tests.trigger.depends.on",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6reLBBeZvAErmsf0issBzs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-depends-on-flow-b",
+  "path": "corpus/valids/flow-trigger-depends-on-flow-b.yaml",
+  "flow_id": "flow-trigger-depends-on-flow-b",
+  "namespace": "io.kestra.tests.trigger.depends.on",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4rhkpBVW4n8H5yXFsJhInF",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-depends-on-flow-listen",
+  "path": "corpus/valids/flow-trigger-depends-on-flow-listen.yaml",
+  "flow_id": "flow-trigger-depends-on-flow-listen",
+  "namespace": "io.kestra.tests.trigger.depends.on",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4ywNVKgEs1hAAneFoo9bHX",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-fire-once-true-flow-a",
+  "path": "corpus/valids/flow-trigger-fire-once-true-flow-a.yaml",
+  "flow_id": "flow-trigger-fire-once-true-flow-a",
+  "namespace": "io.kestra.tests.trigger.fire.once.true",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5uydUDJYQgu5rd57lUEV4Z",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-fire-once-true-flow-b",
+  "path": "corpus/valids/flow-trigger-fire-once-true-flow-b.yaml",
+  "flow_id": "flow-trigger-fire-once-true-flow-b",
+  "namespace": "io.kestra.tests.trigger.fire.once.true",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "39QccLUgCS6e8JR0vi7GWF",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-fire-once-true-flow-listen",
+  "path": "corpus/valids/flow-trigger-fire-once-true-flow-listen.yaml",
+  "flow_id": "flow-trigger-fire-once-true-flow-listen",
+  "namespace": "io.kestra.tests.trigger.fire.once.true",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Unrecognized field \"fireOnce\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \"offset\", \"lookback\", \"deadline\", \"timezone\", \"from\", \"to\", \"every\")",
+  "rejected_class": "valid-in-checkout-refused-by-pinned-image"
+ },
+ {
+  "id": "valids/flow-trigger-invalid-inputs-flow-a",
+  "path": "corpus/valids/flow-trigger-invalid-inputs-flow-a.yaml",
+  "flow_id": "flow-trigger-invalid-inputs-flow-a",
+  "namespace": "io.kestra.tests.trigger.invalid.inputs",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3ca3ALSj9qyvnn4pmEE6c7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-invalid-inputs-flow-listen",
+  "path": "corpus/valids/flow-trigger-invalid-inputs-flow-listen.yaml",
+  "flow_id": "flow-trigger-invalid-inputs-flow-listen",
+  "namespace": "io.kestra.tests.trigger.invalid.inputs",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/flow-trigger-mixed-conditions-flow-a",
+  "path": "corpus/valids/flow-trigger-mixed-conditions-flow-a.yaml",
+  "flow_id": "flow-trigger-mixed-conditions-flow-a",
+  "namespace": "io.kestra.tests.trigger.mixed.conditions",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6wJacUhzkbGgFzj68HcoeR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-mixed-conditions-flow-listen",
+  "path": "corpus/valids/flow-trigger-mixed-conditions-flow-listen.yaml",
+  "flow_id": "flow-trigger-mixed-conditions-flow-listen",
+  "namespace": "io.kestra.tests.trigger.mixed.conditions",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "56g1ZiSSeuA960jAd8wZPN",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-multiple-conditions-flow-a",
+  "path": "corpus/valids/flow-trigger-multiple-conditions-flow-a.yaml",
+  "flow_id": "flow-trigger-multiple-conditions-flow-a",
+  "namespace": "io.kestra.tests.trigger.multiple.conditions",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3VIWa9SUTeHUDSPvrudOzR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-multiple-conditions-flow-listen",
+  "path": "corpus/valids/flow-trigger-multiple-conditions-flow-listen.yaml",
+  "flow_id": "flow-trigger-multiple-conditions-flow-listen",
+  "namespace": "io.kestra.tests.trigger.multiple.conditions",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1e2eNS3K8sIJzzUbqZbfRu",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-multiple-depends-on-flow-a",
+  "path": "corpus/valids/flow-trigger-multiple-depends-on-flow-a.yaml",
+  "flow_id": "flow-trigger-multiple-depends-on-flow-a",
+  "namespace": "io.kestra.tests.trigger.multiple.depends.on",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1zNWt4bz6aVsrmYguOX9Fs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-multiple-depends-on-flow-listen",
+  "path": "corpus/valids/flow-trigger-multiple-depends-on-flow-listen.yaml",
+  "flow_id": "flow-trigger-multiple-depends-on-flow-listen",
+  "namespace": "io.kestra.tests.trigger.multiple.depends.on",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6RXPPdYaFYccinTD71PclS",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-paused-flow",
+  "path": "corpus/valids/flow-trigger-paused-flow.yaml",
+  "flow_id": "flow-trigger-paused-flow",
+  "namespace": "io.kestra.tests.trigger.paused",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3E0FNAdeb3UvvjhEHb3iyx",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-paused-listen",
+  "path": "corpus/valids/flow-trigger-paused-listen.yaml",
+  "flow_id": "flow-trigger-paused-listen",
+  "namespace": "io.kestra.tests.trigger.paused",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4umV73lwsdqmvNP3EOexiK",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-stable-condition-id-flow-a",
+  "path": "corpus/valids/flow-trigger-stable-condition-id-flow-a.yaml",
+  "flow_id": "flow-trigger-stable-condition-id-flow-a",
+  "namespace": "io.kestra.tests.trigger.stable.condition.id",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "46kze7bYhcyhVujPPu0oRY",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-stable-condition-id-flow-b",
+  "path": "corpus/valids/flow-trigger-stable-condition-id-flow-b.yaml",
+  "flow_id": "flow-trigger-stable-condition-id-flow-b",
+  "namespace": "io.kestra.tests.trigger.stable.condition.id",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5eYaEtY7mRA6NZc98OW8H6",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-stable-condition-id-flow-listen",
+  "path": "corpus/valids/flow-trigger-stable-condition-id-flow-listen.yaml",
+  "flow_id": "flow-trigger-stable-condition-id-flow-listen",
+  "namespace": "io.kestra.tests.trigger.stable.condition.id",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1g35c7RHcj7HAWe2ZHnrE7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-when-condition-flow-a",
+  "path": "corpus/valids/flow-trigger-when-condition-flow-a.yaml",
+  "flow_id": "flow-trigger-when-condition-flow-a",
+  "namespace": "io.kestra.tests.trigger.when.condition",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5lIoQYqRQiqPArSiWrRgiI",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-trigger-when-condition-flow-listen",
+  "path": "corpus/valids/flow-trigger-when-condition-flow-listen.yaml",
+  "flow_id": "flow-trigger-when-condition-flow-listen",
+  "namespace": "io.kestra.tests.trigger.when.condition",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "32tr6EMywUWIWZkuVqPA1P",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flowable-fail",
+  "path": "corpus/valids/flowable-fail.yaml",
+  "flow_id": "bad-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.BadSequential",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/flowable-with-parent-fail",
+  "path": "corpus/valids/flowable-with-parent-fail.yaml",
+  "flow_id": "flowable-with-parent-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3cphNXlEJV2E6tTkWM9Bv2",
+  "sub_executions": 4
+ },
+ {
+  "id": "valids/follow-dependencies-partial-child",
+  "path": "corpus/valids/follow-dependencies-partial-child.yaml",
+  "flow_id": "follow-dependencies-partial-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3qv8XQbXos2lIBfKd4tA5h",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/follow-dependencies-partial-parent",
+  "path": "corpus/valids/follow-dependencies-partial-parent.yaml",
+  "flow_id": "follow-dependencies-partial-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2WE5UzTgyRS8ifciJvM5Kc)",
+  "execution_id": "2WE5UzTgyRS8ifciJvM5Kc",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/full",
+  "path": "corpus/valids/full.yaml",
+  "flow_id": "full",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6fIkUb2TQCPiVdsjLdtNVd",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/http-listen-encrypted",
+  "path": "corpus/valids/http-listen-encrypted.yaml",
+  "flow_id": "http-listen-encrypted",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5ALitfTVD6N3rQvlDZ8QvR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/http-listen",
+  "path": "corpus/valids/http-listen.yaml",
+  "flow_id": "http-listen",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1jqa1tHnNqdOlQiWTYxzcI",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/if-condition-fail",
+  "path": "corpus/valids/if-condition-fail.yaml",
+  "flow_id": "if-condition-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6nppyrIvi3SwGp1lhZMhik",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/if-condition",
+  "path": "corpus/valids/if-condition.yaml",
+  "flow_id": "if-condition",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "param": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:41 ifTruthy()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "param": "true"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:54 ifTruthy()"
+   },
+   {
+    "inputs": {
+     "param": 1
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:63 ifTruthy()"
+   },
+   {
+    "inputs": {
+     "param": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:76 ifFalsy()"
+   },
+   {
+    "inputs": {
+     "param": "false"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:85 ifFalsy()"
+   },
+   {
+    "inputs": {
+     "param": 0
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:94 ifFalsy()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5NS5B5m4xLUKt94lu1OupP",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/if-in-flowable",
+  "path": "corpus/valids/if-in-flowable.yaml",
+  "flow_id": "if-in-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "param": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:139 ifInFlowable()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1PSGLmfBM7HEUOQcZVN2S",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/if-in-parallel",
+  "path": "corpus/valids/if-in-parallel.yaml",
+  "flow_id": "if-in-parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "48G1IZtNo4vqrJbm6Y5ZIp",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/if-with-only-disabled-tasks",
+  "path": "corpus/valids/if-with-only-disabled-tasks.yaml",
+  "flow_id": "if-with-only-disabled-tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "34bsyOp7elDqshEdJEhz1O",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/if-without-else",
+  "path": "corpus/valids/if-without-else.yaml",
+  "flow_id": "if-without-else",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "param": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:118 ifWithoutElse()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "param": false
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:127 ifWithoutElse()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "223HLZuUXhnkcSDI4PIeW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/if",
+  "path": "corpus/valids/if.yaml",
+  "flow_id": "if",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "if1": true,
+   "if2": false,
+   "if3": true
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/AbstractRunnerTest.java:670 multipleIf()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4NJsxybX2IGYMzTa4rpyZZ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/input-log-secret",
+  "path": "corpus/valids/input-log-secret.yaml",
+  "flow_id": "input-log-secret",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "nested.key": "pass"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/InputsTest.java:425 shouldMaskSecretInputInLogs()",
+  "disposition": "not-standalone",
+  "reason": "POST execution -> 422:  errors:\n```\nUnable to use a `SECRET` input/output as encryption is not configured\n```",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/inputs-large",
+  "path": "corpus/valids/inputs-large.yaml",
+  "flow_id": "inputs-large",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and reuses InputsTest.inputs' classpath FILE path; computed, not literal.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/inputs-small-files",
+  "path": "corpus/valids/inputs-small-files.yaml",
+  "flow_id": "inputs-small-files",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml as a multipart FILE part; the value is a JVM resource path.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/inputs",
+  "path": "corpus/valids/inputs.yaml",
+  "flow_id": "inputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> application-test.yml) and json2/yaml2 are Java Map objects; the values are computed, not literal.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/invalid-draft-flow",
+  "path": "corpus/valids/invalid-draft-flow.yaml",
+  "flow_id": "invalid-draft-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks: must not be empty\n",
+  "rejected_class": "valid-in-checkout-refused-by-pinned-image"
+ },
+ {
+  "id": "valids/json-input-schema-validation",
+  "path": "corpus/valids/json-input-schema-validation.yaml",
+  "flow_id": "json-input-schema-validation",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "jsonWithSchema": {
+    "name": "kestra"
+   },
+   "jsonWithoutSchema": {
+    "any": "shape"
+   }
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/models/flows/input/JsonInputSchemaFlowIntegrationTest.java:35 shouldRunFlowWhenJsonInputMatchesSchema()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5sP9lcZ7rSJMoUncJRkUqO",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/kv",
+  "path": "corpus/valids/kv.yaml",
+  "flow_id": "kv",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/labels-deserialization",
+  "path": "corpus/valids/labels-deserialization.yaml",
+  "flow_id": "labels-deserialization",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "31kyeUeUN3ZJFjxvv7EfKk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/log-to-file",
+  "path": "corpus/valids/log-to-file.yaml",
+  "flow_id": "log-to-file",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "45psmoCOBP7LiS7YMuIAv8",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/logs",
+  "path": "corpus/valids/logs.yaml",
+  "flow_id": "logs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "36ANRFt3y122zbxiTzdWp1",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/loop-empty",
+  "path": "corpus/valids/loop-empty.yaml",
+  "flow_id": "loop-empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "OwS97YeHbwoG2z7qk51yw",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/loop-expression-context",
+  "path": "corpus/valids/loop-expression-context.yaml",
+  "flow_id": "loop-expression-context",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7Vcgbp3uzAQG8iDhVqKHnF",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-failed-no-transmit",
+  "path": "corpus/valids/loop-failed-no-transmit.yaml",
+  "flow_id": "loop-failed-no-transmit",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6oc5fXS5Q35h4tG48AzwjG",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-failed",
+  "path": "corpus/valids/loop-failed.yaml",
+  "flow_id": "loop-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4D8wIF9HqAn6Zrjc1Z2CTx",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/loop-flowable",
+  "path": "corpus/valids/loop-flowable.yaml",
+  "flow_id": "loop-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4MDRZzKLps3f4KyKJ5XUj6",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-map",
+  "path": "corpus/valids/loop-map.yaml",
+  "flow_id": "loop-map",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6fLUNPOIznjj2dTR0AU2Hc",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-multiple",
+  "path": "corpus/valids/loop-multiple.yaml",
+  "flow_id": "loop-multiple",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "C8Ht0KHx9PtNDvtp4Dh9t",
+  "sub_executions": 6
+ },
+ {
+  "id": "valids/loop-nested",
+  "path": "corpus/valids/loop-nested.yaml",
+  "flow_id": "loop-nested",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5Q8a9ciy03PXsBpbXsMWxF",
+  "sub_executions": 39
+ },
+ {
+  "id": "valids/loop-null",
+  "path": "corpus/valids/loop-null.yaml",
+  "flow_id": "loop-null",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1jGh8bhP3Bk73ixwsNYBKk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/loop-object-in-list",
+  "path": "corpus/valids/loop-object-in-list.yaml",
+  "flow_id": "loop-object-in-list",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "59tFgPk3Oc1vuBNd5ltvwX",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-object",
+  "path": "corpus/valids/loop-object.yaml",
+  "flow_id": "loop-object",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "77PKOXxF815EA9uagZ6f7t",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-outputs-auto",
+  "path": "corpus/valids/loop-outputs-auto.yaml",
+  "flow_id": "loop-outputs-auto",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7b3aKwicrZyexBSKQqxGSe",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-outputs-failed-render",
+  "path": "corpus/valids/loop-outputs-failed-render.yaml",
+  "flow_id": "loop-outputs-failed-render",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2zAlXUr6FQJjrdAYuYMi3r",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/loop-outputs-store",
+  "path": "corpus/valids/loop-outputs-store.yaml",
+  "flow_id": "loop-outputs-store",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "iHH6UGnZwaXVxUPNaLCjK",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-outputs",
+  "path": "corpus/valids/loop-outputs.yaml",
+  "flow_id": "loop-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2VfckyRzV4iPloYUDsBuqT",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-parallel-equal",
+  "path": "corpus/valids/loop-parallel-equal.yaml",
+  "flow_id": "loop-parallel-equal",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3uSWVk1qK3bePQpjqep4gM",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-parallel-less",
+  "path": "corpus/valids/loop-parallel-less.yaml",
+  "flow_id": "loop-parallel-less",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "98qUjw0H9UO12gixshmLW",
+  "sub_executions": 4
+ },
+ {
+  "id": "valids/loop-parallel-more",
+  "path": "corpus/valids/loop-parallel-more.yaml",
+  "flow_id": "loop-parallel-more",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3MkJCO5B0VniNoQq29TFpy",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-parallel-unlimited",
+  "path": "corpus/valids/loop-parallel-unlimited.yaml",
+  "flow_id": "loop-parallel-unlimited",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3P1cg6jyJqsx9HtOOiiRtb",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-pause",
+  "path": "corpus/valids/loop-pause.yaml",
+  "flow_id": "loop-pause",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2pfnNcqa56F7AiLgka5MQe)",
+  "execution_id": "2pfnNcqa56F7AiLgka5MQe",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/loop-serial-multiple-tasks",
+  "path": "corpus/valids/loop-serial-multiple-tasks.yaml",
+  "flow_id": "loop-serial-multiple-tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "UbJ6pUlfdhKIaWT0NEJKT",
+  "sub_executions": 2
+ },
+ {
+  "id": "valids/loop-serial",
+  "path": "corpus/valids/loop-serial.yaml",
+  "flow_id": "loop-serial",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "48UcZnMEJp8RKYzqjDbj1t",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-switch",
+  "path": "corpus/valids/loop-switch.yaml",
+  "flow_id": "loop-switch",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "uEtO3hhWsCdDhHKO1tz41",
+  "sub_executions": 4
+ },
+ {
+  "id": "valids/loop-until-restart",
+  "path": "corpus/valids/loop-until-restart.yaml",
+  "flow_id": "loop-until-restart",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3T48xQmXL1EZMWg4GwehDX",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/loop-values-from-uri",
+  "path": "corpus/valids/loop-values-from-uri.yaml",
+  "flow_id": "loop-values-from-uri",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "PilFtX5OYmFxM2Y35Ef7d",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/loop-with-subflow",
+  "path": "corpus/valids/loop-with-subflow.yaml",
+  "flow_id": "loop-with-subflow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "22VSYGKsqru422xICCA9v5",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/loopuntil-failed-flowable",
+  "path": "corpus/valids/loopuntil-failed-flowable.yaml",
+  "flow_id": "loopuntil-failed-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1It77m9GAOBEgtB78ez83N",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/minimal-bis",
+  "path": "corpus/valids/minimal-bis.yaml",
+  "flow_id": "minimal-bis",
+  "namespace": "io.kestra.tests.minimal.bis",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4f592BGWch6Rb0q3BHuKcu",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/minimal",
+  "path": "corpus/valids/minimal.yaml",
+  "flow_id": "minimal",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "ZHZextBhdQHwjopgQb0jf",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/minimal2",
+  "path": "corpus/valids/minimal2.yaml",
+  "flow_id": "minimal",
+  "namespace": "io.kestra.tests2",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2XeShyyXgMmk2c8fjTu54w",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/null-output",
+  "path": "corpus/valids/null-output.yaml",
+  "flow_id": "null-output",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.NullOutputTask",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/parallel-disabled-tasks",
+  "path": "corpus/valids/parallel-disabled-tasks.yaml",
+  "flow_id": "parallel-disabled-tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6UgqQ1WjHKnCW4YJEi1sk7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/parallel-fail-with-flowable",
+  "path": "corpus/valids/parallel-fail-with-flowable.yaml",
+  "flow_id": "parallel-fail-with-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:67 parallelFailWithFlowable() (@ExecuteFlow, no inputs)",
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2N6HAjz9WH34yuiyyHdzjO",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/parallel-nested",
+  "path": "corpus/valids/parallel-nested.yaml",
+  "flow_id": "parallel-nested",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "iUc0gj6eXCO6ef4kq6Ahz",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/parallel",
+  "path": "corpus/valids/parallel.yaml",
+  "flow_id": "parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "37T1QR5yIbH4Inr3GZNgrQ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-behavior",
+  "path": "corpus/valids/pause-behavior.yaml",
+  "flow_id": "pause-behavior",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "behavior": "FAIL"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:117 runDurationWithBehaviorFail() -> Pause.Behavior.FAIL",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "behavior": "RESUME"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:111 -> Pause.Behavior.RESUME"
+   },
+   {
+    "inputs": {
+     "behavior": "WARN"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:123 -> Pause.Behavior.WARN"
+   },
+   {
+    "inputs": {
+     "behavior": "CANCEL"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:129 -> Pause.Behavior.CANCEL"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "vkIE2Coi2UMHugypquvU9",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-delay",
+  "path": "corpus/valids/pause-delay.yaml",
+  "flow_id": "pause-delay",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2rz2g2LIayYwdaVU5rotm7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-duration-from-input",
+  "path": "corpus/valids/pause-duration-from-input.yaml",
+  "flow_id": "pause-duration-from-input",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:206 runDurationFromInput() (passes null inputs; the DURATION default PT1S applies)",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2BqGNJTfuN3WNI8ArK7rJi",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-errors-finally-after-execution",
+  "path": "corpus/valids/pause-errors-finally-after-execution.yaml",
+  "flow_id": "pause-with-errors-finally-after-execution",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "Xx3pK8eukYeP4unRs5vAG",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-kill-delay",
+  "path": "corpus/valids/pause-kill-delay.yaml",
+  "flow_id": "pause-kill-delay",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "43NFDmmqSig2i8qdPW8z0g",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-test",
+  "path": "corpus/valids/pause-test.yaml",
+  "flow_id": "pause-test",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3vLIA8WINLwVVC0RBRBY48)",
+  "execution_id": "3vLIA8WINLwVVC0RBRBY48",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-timeout-allow-failure",
+  "path": "corpus/valids/pause-timeout-allow-failure.yaml",
+  "flow_id": "pause-timeout-allow-failure",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "execution_id": "1pXWGvPmdInli6rN7xG7zW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause-timeout",
+  "path": "corpus/valids/pause-timeout.yaml",
+  "flow_id": "pause-timeout",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5cXTsgRN0fYyD29rImuqzS",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause_no_tasks",
+  "path": "corpus/valids/pause_no_tasks.yaml",
+  "flow_id": "pause_no_tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7izgNCzkw7PzvXQpASihbT)",
+  "execution_id": "7izgNCzkw7PzvXQpASihbT",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause_on_pause",
+  "path": "corpus/valids/pause_on_pause.yaml",
+  "flow_id": "pause_on_pause",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7OoYcZ5jwx9PQ7mmgzoX0x",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause_on_resume",
+  "path": "corpus/valids/pause_on_resume.yaml",
+  "flow_id": "pause_on_resume",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3BRoPbbrWR9KLoeWjz2PH6)",
+  "execution_id": "3BRoPbbrWR9KLoeWjz2PH6",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/pause_on_resume_optional",
+  "path": "corpus/valids/pause_on_resume_optional.yaml",
+  "flow_id": "pause_on_resume_optional",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution WlgOJjXtqTv49U9FEKXVO)",
+  "execution_id": "WlgOJjXtqTv49U9FEKXVO",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/purge_logs_execution_only",
+  "path": "corpus/valids/purge_logs_execution_only.yaml",
+  "flow_id": "purge_logs_execution_only",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7TRxU4rg3v36STqycaYznK",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/purge_logs_full_arguments",
+  "path": "corpus/valids/purge_logs_full_arguments.yaml",
+  "flow_id": "purge_logs_full_arguments",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "79vu87qg7uVg2CKzZOkqZs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/purge_logs_no_arguments",
+  "path": "corpus/valids/purge_logs_no_arguments.yaml",
+  "flow_id": "purge_logs_no_arguments",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1SCnoAlrWKPZZvN9xVLsBp",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/purge_logs_trigger_only",
+  "path": "corpus/valids/purge_logs_trigger_only.yaml",
+  "flow_id": "purge_logs_trigger_only",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2e9EKMXAz0JcrUfzqlyEld",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/purge_logs_with_batch_size",
+  "path": "corpus/valids/purge_logs_with_batch_size.yaml",
+  "flow_id": "purge_logs_with_batch_size",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6eC1HxvHk8k1DfrE7lD8Xc",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/replay-loop",
+  "path": "corpus/valids/replay-loop.yaml",
+  "flow_id": "replay-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "failed": "FIRST"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/ExecutionServiceTest.java:139 restartLoop()",
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3mV9tF3uMU8pBWgzVKqxu8",
+  "sub_executions": 3
+ },
+ {
+  "id": "valids/replay-revision",
+  "path": "corpus/valids/replay-revision.yaml",
+  "flow_id": "replay-revision",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3Y8eF6FrTro0ICQDCKKFsA",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/replay-sequential-with-error-handler",
+  "path": "corpus/valids/replay-sequential-with-error-handler.yaml",
+  "flow_id": "replay-sequential-with-error-handler",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2Zu7cek1GIqQqTEkSFtdfu",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/replay",
+  "path": "corpus/valids/replay.yaml",
+  "flow_id": "replay",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "39ATIFbGa0d6qh63rUViOR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart-child",
+  "path": "corpus/valids/restart-child.yaml",
+  "flow_id": "restart-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "28YM53dJTg3HkjT1uudaMU",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart-loop",
+  "path": "corpus/valids/restart-loop.yaml",
+  "flow_id": "restart-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2W50MQAt7hLnef25CAfRN7",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/restart-parent-loop",
+  "path": "corpus/valids/restart-parent-loop.yaml",
+  "flow_id": "restart-parent-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3aJeTMQHtXxCTk0B2fE4AJ",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/restart-parent",
+  "path": "corpus/valids/restart-parent.yaml",
+  "flow_id": "restart-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "79qRVYAlCxOzDOJkRRwrVv",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart-with-after-execution",
+  "path": "corpus/valids/restart-with-after-execution.yaml",
+  "flow_id": "restart-with-after-execution",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5BS7d7SIoU4ttNfCHZCvp4",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart-with-finally",
+  "path": "corpus/valids/restart-with-finally.yaml",
+  "flow_id": "restart-with-finally",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2ZwCYxD4z2Z6AgmCtbqLR2",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart_always_failed",
+  "path": "corpus/valids/restart_always_failed.yaml",
+  "flow_id": "restart_always_failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "jV2MqIBb64Ktd9R4nbmIO",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart_last_failed",
+  "path": "corpus/valids/restart_last_failed.yaml",
+  "flow_id": "restart_last_failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6B4rOg5G0LQLCTFi99v5ku",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart_local_errors",
+  "path": "corpus/valids/restart_local_errors.yaml",
+  "flow_id": "restart_local_errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6rSF73udkvR3LJlDoaw1sW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/restart_with_inputs",
+  "path": "corpus/valids/restart_with_inputs.yaml",
+  "flow_id": "restart_with_inputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/resume-validate",
+  "path": "corpus/valids/resume-validate.yaml",
+  "flow_id": "resume-validate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3XNIEnuTjYCn2oRWweU3GL)",
+  "execution_id": "3XNIEnuTjYCn2oRWweU3GL",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-dynamic-task",
+  "path": "corpus/valids/retry-dynamic-task.yaml",
+  "flow_id": "retry-dynamic-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/retry-expo",
+  "path": "corpus/valids/retry-expo.yaml",
+  "flow_id": "retry-expo",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5etFzPrSyfYliIoDNEQrcn",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-fail",
+  "path": "corpus/valids/retry-fail.yaml",
+  "flow_id": "retry-and-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1wnCAd3pjkRklgJilgGIzh",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-failed",
+  "path": "corpus/valids/retry-failed.yaml",
+  "flow_id": "retry-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3ocHuptLLXBtjCiY7bFrcv",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-flowable-child",
+  "path": "corpus/valids/retry-flowable-child.yaml",
+  "flow_id": "retry-flowable-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5D0csFk8nUmM0haPj59VCs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-flowable-nested-child",
+  "path": "corpus/valids/retry-flowable-nested-child.yaml",
+  "flow_id": "retry-flowable-nested-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4hfugJAWOUNOa92mVuVNjo",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-flowable-parallel",
+  "path": "corpus/valids/retry-flowable-parallel.yaml",
+  "flow_id": "retry-flowable-parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1RxIvBwBj7mKHQNox95I6Q",
+  "sub_executions": 2
+ },
+ {
+  "id": "valids/retry-flowable",
+  "path": "corpus/valids/retry-flowable.yaml",
+  "flow_id": "retry-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4bu95in63B7aBmvzUppQyt",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-random",
+  "path": "corpus/valids/retry-random.yaml",
+  "flow_id": "retry-random",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3bczZ8gyykxtuwBpUfgCPD",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-subflow",
+  "path": "corpus/valids/retry-subflow.yaml",
+  "flow_id": "retry-subflow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1vVAWvpEcug3uHW0oZ75ON",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-success-first-attempt",
+  "path": "corpus/valids/retry-success-first-attempt.yaml",
+  "flow_id": "retry-success-first-attempt",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3DyqAo79cxwNFiXYTa6yR0",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-success",
+  "path": "corpus/valids/retry-success.yaml",
+  "flow_id": "retry-success",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "execution_id": "5ehlcolEIdhSeYSgNxqbu3",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-with-flowable-errors",
+  "path": "corpus/valids/retry-with-flowable-errors.yaml",
+  "flow_id": "retry-with-flowable-errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6L5FXsaBMvcwu5aiV3AIqC",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/return",
+  "path": "corpus/valids/return.yaml",
+  "flow_id": "return",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "La4dnMbDrp4amD4p89IQc",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/schedule-trigger",
+  "path": "corpus/valids/schedule-trigger.yaml",
+  "flow_id": "schedule-trigger",
+  "namespace": "io.kestra.tests.schedule",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5KlR7iaRrRrC0WLo0DOZyp",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/scheduled-inputs-defaults",
+  "path": "corpus/valids/scheduled-inputs-defaults.yaml",
+  "flow_id": "scheduled_inputs_defaults",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/secret-input-validation",
+  "path": "corpus/valids/secret-input-validation.yaml",
+  "flow_id": "secret-input-validation",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.readExecutionInputs and asserts it throws.  No test drives an execution.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/secrets",
+  "path": "corpus/valids/secrets.yaml",
+  "flow_id": "secrets",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1sVb4M8eAcGFPZw6Z9aWis",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sequential-sleep",
+  "path": "corpus/valids/sequential-sleep.yaml",
+  "flow_id": "sequential-sleep",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4fVeGwDhH0rLaAqBmYuKAq",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sequential-with-disabled",
+  "path": "corpus/valids/sequential-with-disabled.yaml",
+  "flow_id": "sequential-with-disabled",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5neeM6xeeyuWjJLxLfJARp",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sequential-with-global-errors",
+  "path": "corpus/valids/sequential-with-global-errors.yaml",
+  "flow_id": "sequential-with-global-errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "53yjee5uVT8wn2qNyWXkk2",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sequential-with-local-errors",
+  "path": "corpus/valids/sequential-with-local-errors.yaml",
+  "flow_id": "sequential-with-local-errors",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "47beQ7qxVsSYqHCl7w8izJ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sequential",
+  "path": "corpus/valids/sequential.yaml",
+  "flow_id": "sequential",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "oYj4CmBN1woGxGYCixLe5",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/set-variables-duplicate",
+  "path": "corpus/valids/set-variables-duplicate.yaml",
+  "flow_id": "set-variables-duplicate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5t2rAuSxCBTR43STSV5KYG",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/set-variables",
+  "path": "corpus/valids/set-variables.yaml",
+  "flow_id": "set-variables",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1AYUHd3GGcDOCE1EaGtSNZ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sla-execution-condition",
+  "path": "corpus/valids/sla-execution-condition.yaml",
+  "flow_id": "sla-execution-condition",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "string": "CANCEL"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/SLATestCase.java:62 executionConditionSLAShouldCancel()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "string": "LABEL"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/core/runners/SLATestCase.java:86 executionConditionSLAShouldLabel()"
+   },
+   {
+    "inputs": {},
+    "inputs_from": "core/src/test/java/io/kestra/core/runners/SLATestCase.java:56 executionConditionSLAShouldPass() (no inputs)"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "CANCELLED",
+  "execution_id": "sBAMovKVp1pxxQ8x3NxKP",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sla-max-duration-fail",
+  "path": "corpus/valids/sla-max-duration-fail.yaml",
+  "flow_id": "sla-max-duration-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3sp4MbTDzyHwRLd77Mhm9B",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sla-max-duration-ok",
+  "path": "corpus/valids/sla-max-duration-ok.yaml",
+  "flow_id": "sla-max-duration-ok",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1lAiL7kEOHGgCSgmN8qX5N",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sla-parent-flow",
+  "path": "corpus/valids/sla-parent-flow.yaml",
+  "flow_id": "sla-parent-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4sUC4bflYnmbgpn3tsHaL",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sla-subflow",
+  "path": "corpus/valids/sla-subflow.yaml",
+  "flow_id": "sla-subflow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3MpbV2Ez9pUXGnqP0maExt",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sleep-task-flow",
+  "path": "corpus/valids/sleep-task-flow.yaml",
+  "flow_id": "sleep-task-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7TRtyQm3GnIqWu6iQBRf6W",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-child-with-output",
+  "path": "corpus/valids/subflow-child-with-output.yaml",
+  "flow_id": "subflow-child-with-output",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7l9i4kHksdViZ5BdO0MZ3f",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-child",
+  "path": "corpus/valids/subflow-child.yaml",
+  "flow_id": "subflow-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4fr9SCoziblDu9BsKqXQYM",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-function-child",
+  "path": "corpus/valids/subflow-function-child.yaml",
+  "flow_id": "subflow-function-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "region": "us"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/pebble/functions/SubflowFunctionTest.java:31 shouldRunSubflowAndExposeFlowOutputs()",
+  "inputs_alternatives": [
+   {
+    "inputs": {},
+    "inputs_from": "core/src/test/java/io/kestra/core/runners/pebble/functions/SubflowFunctionTest.java:96 shouldUseSubflowInputDefaultsWhenNotProvided()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3nZV73ujK149Gc0KL1L1e3",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-function-failing",
+  "path": "corpus/valids/subflow-function-failing.yaml",
+  "flow_id": "subflow-function-failing",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6TUgmJ0LAXwGwNeWoVstOC",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-function-mutual-a",
+  "path": "corpus/valids/subflow-function-mutual-a.yaml",
+  "flow_id": "subflow-function-mutual-a",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap (a -> b -> a).",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/subflow-function-mutual-b",
+  "path": "corpus/valids/subflow-function-mutual-b.yaml",
+  "flow_id": "subflow-function-mutual-b",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever reached through subflow-function-mutual-a.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/subflow-function-recursive",
+  "path": "corpus/valids/subflow-function-recursive.yaml",
+  "flow_id": "subflow-function-recursive",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap.  Its input default calls subflow() on its own id, so there is no input map to recover.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/subflow-grand-child",
+  "path": "corpus/valids/subflow-grand-child.yaml",
+  "flow_id": "subflow-grand-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2pVjzqOlmVUDlXe8AYu2Lm",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-inherited-labels-child",
+  "path": "corpus/valids/subflow-inherited-labels-child.yaml",
+  "flow_id": "subflow-inherited-labels-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5ZLvRj4kOyQOiyG5yB1AM6",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-inherited-labels-parent",
+  "path": "corpus/valids/subflow-inherited-labels-parent.yaml",
+  "flow_id": "subflow-inherited-labels-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "1voYwqtSKN7rX06gSVUDGi",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-nullable-input-child",
+  "path": "corpus/valids/subflow-nullable-input-child.yaml",
+  "flow_id": "subflow-nullable-input-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:144); no test posts inputs to it directly.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/subflow-nullable-input-parent",
+  "path": "corpus/valids/subflow-nullable-input-parent.yaml",
+  "flow_id": "subflow-nullable-input-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "integerValue": ""
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SubflowRunnerTest.java:155 shouldPassNullableInputFromParentToSubflow()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4eFecc9wZeN8O8VggDbzMs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-parent-no-wait",
+  "path": "corpus/valids/subflow-parent-no-wait.yaml",
+  "flow_id": "subflow-parent-no-wait",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "58YvuZBC1rjBQtktMJzcny",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-parent-of-failed",
+  "path": "corpus/valids/subflow-parent-of-failed.yaml",
+  "flow_id": "subflow-parent-of-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4DnJqTb5Gq805aZSiIFppD",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-parent-retry",
+  "path": "corpus/valids/subflow-parent-retry.yaml",
+  "flow_id": "subflow-parent-retry",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6GfkMX6O65xgDqFjeRfyel",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-parent",
+  "path": "corpus/valids/subflow-parent.yaml",
+  "flow_id": "subflow-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6RwWIXd45grgZOvPl3Ny1L",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-secret-output-child",
+  "path": "corpus/valids/subflow-secret-output-child.yaml",
+  "flow_id": "subflow-secret-output-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2ylF3ISllfAs3mhJXRXGuc",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-secret-output-parent",
+  "path": "corpus/valids/subflow-secret-output-parent.yaml",
+  "flow_id": "subflow-secret-output-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4EzJxuiFOU2CCSW8zE31x3",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/subflow-to-retry",
+  "path": "corpus/valids/subflow-to-retry.yaml",
+  "flow_id": "subflow-to-retry",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no test posts inputs to it directly.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/switch-impossible",
+  "path": "corpus/valids/switch-impossible.yaml",
+  "flow_id": "switch-impossible",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "string": "impossible"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:108 switchImpossible()",
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "38LIwszA8gEMqQUXVBExYq",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/switch-in-concurrent-loop",
+  "path": "corpus/valids/switch-in-concurrent-loop.yaml",
+  "flow_id": "switch-in-concurrent-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "44uqNBaAvJtnUumCBBgpx6",
+  "sub_executions": 2
+ },
+ {
+  "id": "valids/switch",
+  "path": "corpus/valids/switch.yaml",
+  "flow_id": "switch",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "string": "FIRST"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:39 switchFirst()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "string": "SECOND"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:57 switchSecond()"
+   },
+   {
+    "inputs": {
+     "string": "THIRD"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:74 switchThird()"
+   },
+   {
+    "inputs": {
+     "string": "DEFAULT"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:92 switchDefault()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "2nzI4oMqJ7YOZJY90YLfhP",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-flow-dynamic",
+  "path": "corpus/valids/task-flow-dynamic.yaml",
+  "flow_id": "task-flow-dynamic",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId: 'switch'}) instead of going through flowIO.readExecutionInputs, so it bypasses typed-input validation entirely and never supplies the flow's one DECLARED input, the required STRING `string`.  Over the API that is `422 Missing required input:string`, and there is no value for `string` anywhere in the checkout to recover.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/task-flow-inherited-labels",
+  "path": "corpus/valids/task-flow-inherited-labels.yaml",
+  "flow_id": "task-flow-inherited-labels",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "string": "OK"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FlowCaseTest.java:44 run() via noLabels()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7Q0NAECge8v2NHlzAUsLV3",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-flow",
+  "path": "corpus/valids/task-flow.yaml",
+  "flow_id": "task-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "string": "THIRD"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FlowCaseTest.java:44 run() via waitFailed()",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "string": "OK"
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FlowCaseTest.java:44 run() via waitSuccess()"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3nZAkxYSHobn8vLFQnjW9",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow-listener-invalid",
+  "path": "corpus/valids/trigger-flow-listener-invalid.yaml",
+  "flow_id": "trigger-flow-listener-invalid",
+  "namespace": "io.kestra.tests.trigger",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.  There is no test case to recover.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/trigger-flow-listener-namespace-condition",
+  "path": "corpus/valids/trigger-flow-listener-namespace-condition.yaml",
+  "flow_id": "trigger-flow-listener-namespace-condition",
+  "namespace": "io.kestra.tests.trigger",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62).",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/trigger-flow-listener-no-inputs",
+  "path": "corpus/valids/trigger-flow-listener-no-inputs.yaml",
+  "flow_id": "trigger-flow-listener-no-inputs",
+  "namespace": "io.kestra.tests.trigger",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2GMcxx9WgVjSotgyRlgo5o",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow-listener-with-concurrency-limit",
+  "path": "corpus/valids/trigger-flow-listener-with-concurrency-limit.yaml",
+  "flow_id": "trigger-flow-listener-with-concurrency-limit",
+  "namespace": "io.kestra.tests.trigger.concurrency",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5UZt5uBCHWG2MoiTMmYEYZ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow-listener-with-pause",
+  "path": "corpus/valids/trigger-flow-listener-with-pause.yaml",
+  "flow_id": "trigger-flow-listener-with-pause",
+  "namespace": "io.kestra.tests.trigger.pause",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "5DRoDBbfBAPafzTeaTXL8b",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow-listener",
+  "path": "corpus/valids/trigger-flow-listener.yaml",
+  "flow_id": "trigger-flow-listener",
+  "namespace": "io.kestra.tests.trigger",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of trigger-flow (FlowTriggerCaseTest.java:48); its inputs render from trigger variables that do not exist on a direct execution.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/trigger-flow-with-concurrency-limit",
+  "path": "corpus/valids/trigger-flow-with-concurrency-limit.yaml",
+  "flow_id": "trigger-flow-with-concurrency-limit",
+  "namespace": "io.kestra.tests.trigger.concurrency",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "ZwETzZSt5yW2esSuyHFvL",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow-with-pause",
+  "path": "corpus/valids/trigger-flow-with-pause.yaml",
+  "flow_id": "trigger-flow-with-pause",
+  "namespace": "io.kestra.tests.trigger.pause",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "4aZDKHzjIaFdjsnEyoRHKi",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/trigger-flow",
+  "path": "corpus/valids/trigger-flow.yaml",
+  "flow_id": "trigger-flow",
+  "namespace": "io.kestra.tests.trigger",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6dVSwGX2UXH2M8T7xxZNUR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/unset-variables",
+  "path": "corpus/valids/unset-variables.yaml",
+  "flow_id": "unset-variables",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "21746VU1wBGmJeWWCBRSSs",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/variables-invalid",
+  "path": "corpus/valids/variables-invalid.yaml",
+  "flow_id": "variables-invalid",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "60uR02GJI9C3F0p2CQGjvV",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/variables",
+  "path": "corpus/valids/variables.yaml",
+  "flow_id": "variables",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4iuhnPGs0HnrvVLZwWoWnA",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-child-task-warning",
+  "path": "corpus/valids/waitfor-child-task-warning.yaml",
+  "flow_id": "waitfor-child-task-warning",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "6HAuBCqiHUqy4aqTK3ihCk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-max-duration",
+  "path": "corpus/valids/waitfor-max-duration.yaml",
+  "flow_id": "waitfor-max-duration",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "7dtmnO4hMjeawD3WtGwxW3",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-max-iterations",
+  "path": "corpus/valids/waitfor-max-iterations.yaml",
+  "flow_id": "waitfor-max-iterations",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1Bt2PjyxoLGTRc9fWvMsjr",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-multiple-tasks-failed",
+  "path": "corpus/valids/waitfor-multiple-tasks-failed.yaml",
+  "flow_id": "waitfor-multiple-tasks-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1uXgaTP0kFln7BCDgecrUm",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-multiple-tasks",
+  "path": "corpus/valids/waitfor-multiple-tasks.yaml",
+  "flow_id": "waitfor-multiple-tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "6JlJZFTMKN3w18hzlERt7y",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-nested",
+  "path": "corpus/valids/waitfor-nested.yaml",
+  "flow_id": "waitfor-nested",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "MdqFOrGkCbbKVRRCkbvnj",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor-no-success",
+  "path": "corpus/valids/waitfor-no-success.yaml",
+  "flow_id": "waitfor-no-success",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3oACiWv6JNF2TVG3T92cNg",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/waitfor",
+  "path": "corpus/valids/waitfor.yaml",
+  "flow_id": "waitfor",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7Jnn8scOPDzd9Lr44VlkRF",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-draft",
+  "path": "corpus/valids/webhook-draft.yaml",
+  "flow_id": "webhook-draft",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "14P4yP9sRfWDfo5KU2W5nk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-dynamic-key",
+  "path": "corpus/valids/webhook-dynamic-key.yaml",
+  "flow_id": "webhook-dynamic-key",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "2caYQNyToYxjWgehwqJGRW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-failed",
+  "path": "corpus/valids/webhook-failed.yaml",
+  "flow_id": "webhook-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "3SvYC91aNXkHdlFEZ8mt2i",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-inputs",
+  "path": "corpus/valids/webhook-inputs.yaml",
+  "flow_id": "webhook-inputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "disposition": "not-standalone",
+  "reason": "Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body (ExecutionControllerRunnerTest.java:1491); its inputs come from the webhook body, not from an execution POST.",
+  "inputs": {},
+  "inputs_from": "not recoverable -- see reason"
+ },
+ {
+  "id": "valids/webhook-no-body",
+  "path": "corpus/valids/webhook-no-body.yaml",
+  "flow_id": "webhook-no-body",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4HCTfAWL6hJ5MgYtciAWeY",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-outputs",
+  "path": "corpus/valids/webhook-outputs.yaml",
+  "flow_id": "webhook-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "RUM79tm4sdXYkRn4APoJp",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-plaintext",
+  "path": "corpus/valids/webhook-plaintext.yaml",
+  "flow_id": "webhook-plaintext",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "5cgUzz5GA8jhTcCaN9xoU8",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-plugin-labels",
+  "path": "corpus/valids/webhook-plugin-labels.yaml",
+  "flow_id": "webhook-plugin-labels",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "7IMGnU6oy80mqqCTgrin1V",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-plugin",
+  "path": "corpus/valids/webhook-plugin.yaml",
+  "flow_id": "webhook-plugin",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/webhook-routing-test",
+  "path": "corpus/valids/webhook-routing-test.yaml",
+  "flow_id": "webhook-routing-test",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "427MunNsAh3BfkQsOmAelg",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-secret-key",
+  "path": "corpus/valids/webhook-secret-key.yaml",
+  "flow_id": "webhook-secret-key",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "7VGgMbgUC6n0UODUieyZZ5",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-store-body",
+  "path": "corpus/valids/webhook-store-body.yaml",
+  "flow_id": "webhook-store-body",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "35X7zyUy0BnSDjD7Dl0pG",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-wait",
+  "path": "corpus/valids/webhook-wait.yaml",
+  "flow_id": "webhook-wait",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "execution_id": "3jbY4j3dPmy0vZB0UwLZIm",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook-with-condition",
+  "path": "corpus/valids/webhook-with-condition.yaml",
+  "flow_id": "webhook-with-condition",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "1zOskr3Cj8hTNCtINPDiIN",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/webhook",
+  "path": "corpus/valids/webhook.yaml",
+  "flow_id": "webhook",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4q4pKWiEWpbYRf0jDACeg8",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/workertask-result-too-large",
+  "path": "corpus/valids/workertask-result-too-large.yaml",
+  "flow_id": "workertask-result-too-large",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.runners.test.WorkerTaskResultTooLarge",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-invalid-runif",
+  "path": "corpus/valids/working-directory-invalid-runif.yaml",
+  "flow_id": "working-directory-invalid-runif",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "execution_id": "4TwQHvHg8dORAue7wwo6Wk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/working-directory-loop",
+  "path": "corpus/valids/working-directory-loop.yaml",
+  "flow_id": "working-directory-loop",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-namespace-files-with-namespaces",
+  "path": "corpus/valids/working-directory-namespace-files-with-namespaces.yaml",
+  "flow_id": "working-directory-namespace-files-with-namespaces",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Read",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-namespace-files",
+  "path": "corpus/valids/working-directory-namespace-files.yaml",
+  "flow_id": "working-directory-namespace-files",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Read",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory",
+  "path": "corpus/valids/working-directory.yaml",
+  "flow_id": "working-directory",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "invalids/dag-cyclicdependency",
+  "path": "corpus/invalids/dag-cyclicdependency.yaml",
+  "flow_id": "dag-cyclicdependency",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[dag]: Cyclic dependency detected: task1, task2\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/dag-invalid-subtask",
+  "path": "corpus/invalids/dag-invalid-subtask.yaml",
+  "flow_id": "dag-invalid-subtask",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[task1].tasks[task1].task.message: must not be null\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/dag-notexist-task",
+  "path": "corpus/invalids/dag-notexist-task.yaml",
+  "flow_id": "dag-notexist-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[dag]: Not existing task id in dependency: taskX\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/duplicate-inputs",
+  "path": "corpus/invalids/duplicate-inputs.yaml",
+  "flow_id": "duplicate-inputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Duplicate input with name [first_input]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/duplicate-key",
+  "path": "corpus/invalids/duplicate-key.yaml",
+  "flow_id": "duplicate-key",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Illegal genericflow source: YAML parsing error: Duplicate field 'message'\n at [Source: (StringReader); line: 8, column: 12] (through reference chain: io.kestra.core.models.flows.GenericFlow[\"tasks\"]->java.util.ArrayList[0]) (at line 8)",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/duplicate-parallel",
+  "path": "corpus/invalids/duplicate-parallel.yaml",
+  "flow_id": "duplicate-parallel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Duplicate task id with name [t3]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/duplicate",
+  "path": "corpus/invalids/duplicate.yaml",
+  "flow_id": "duplicate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Duplicate task id with name [date], Duplicate trigger id with name [trigger]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/empty",
+  "path": "corpus/invalids/empty.yaml",
+  "flow_id": "empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks: must not be empty\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/if-without-condition",
+  "path": "corpus/invalids/if-without-condition.yaml",
+  "flow_id": "if-without-condition",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[if].condition: must not be null\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/inputs-bad-type",
+  "path": "corpus/invalids/inputs-bad-type.yaml",
+  "flow_id": "empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: FOO",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/inputs-bad-validator-syntax",
+  "path": "corpus/invalids/inputs-bad-validator-syntax.yaml",
+  "flow_id": "empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: inputs[badValidatorSyntax].validator: invalid pattern [\\]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/inputs-key-with-subtraction-symbol-validation",
+  "path": "corpus/invalids/inputs-key-with-subtraction-symbol-validation.yaml",
+  "flow_id": "inputs-key-with-subtraction-symbol-validation",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of inputs.key-name \u2014 keys with dashes require bracket notation, offending tasks: [hello]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/inputs-validation",
+  "path": "corpus/invalids/inputs-validation.yaml",
+  "flow_id": "inputs-validations",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: inputs[array3]: `itemType` cannot be MULTISELECT\ninputs[multiselect3]: `itemType` cannot be MULTISELECT\ninputs[array1]: `itemType` cannot be ARRAY\ninputs[array2]: `itemType` cannot be SECRET\ninputs[multiselect1]: `itemType` cannot be ARRAY\ninputs[multiselect2]: `itemType` cannot be SECRET\ninputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI\ninputs[array4]: `itemType` cannot be SELECT\ninputs[multiselect4]: `itemType` cannot be SELECT\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/inputs-with-multiple-constraint-violations",
+  "path": "corpus/invalids/inputs-with-multiple-constraint-violations.yaml",
+  "flow_id": "inputs-with-multiple-constraint-violations",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "multi": [
+    "F",
+    "H"
+   ]
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/InputsTest.java:479 multipleConstraintViolations()",
+  "disposition": "rejected",
+  "reason": "publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`\nInvalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`",
+  "rejected_class": "invalid-flow",
+  "sub_executions": 0
+ },
+ {
+  "id": "invalids/inputs",
+  "path": "corpus/invalids/inputs.yaml",
+  "flow_id": "empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: null",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/invalid-parallel",
+  "path": "corpus/invalids/invalid-parallel.yaml",
+  "flow_id": "",
+  "namespace": "",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: id: size must be between 1 and 100\ntasks[para3].tasks: The 'tasks' property cannot be empty\ntasks[para2].tasks: The 'tasks' property cannot be empty\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\nid: must not be blank\nid: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\ntasks[para4].tasks: The 'tasks' property cannot be empty\nnamespace: size must be between 1 and 150\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/invalid-property",
+  "path": "corpus/invalids/invalid-property.yaml",
+  "flow_id": "duplicate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Unrecognized field \"invalid\" (class io.kestra.plugin.core.debug.Return), not marked as ignorable (17 known properties: \"logLevel\", \"timeout\", \"assets\", \"retry\", \"policyRefs\", \"allowWarning\", \"format\", \"version\", \"type\", \"id\", \"description\", \"workerSelector\", \"allowFailure\", \"runIf\", \"logToFile\", \"disabled\", \"taskCache\")",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/invalid-task",
+  "path": "corpus/invalids/invalid-task.yaml",
+  "flow_id": "duplicate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.debug.MissingTwo",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/invalid",
+  "path": "corpus/invalids/invalid.yaml",
+  "flow_id": "my#flow",
+  "namespace": "MY$NAMESPACE",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[null].id: must not be blank\nid: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\ntasks[null].id: must not be null\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/loop-switch-failed",
+  "path": "corpus/invalids/loop-switch-failed.yaml",
+  "flow_id": "loop-switch-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "accepted_though_invalid": true,
+  "execution_id": "7F7kqQKzWVWCf5dH51M4JO",
+  "sub_executions": 2
+ },
+ {
+  "id": "invalids/outputs-key-with-subtraction-symbol-validation",
+  "path": "corpus/invalids/outputs-key-with-subtraction-symbol-validation.yaml",
+  "flow_id": "task_outputs_example",
+  "namespace": "company.team",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Invalid output reference: use outputs[key-name] instead of outputs.key-name \u2014 keys with dashes require bracket notation, offending tasks: [use_output], Invalid output reference: use outputs[key-name] instead of outputs.key-name \u2014 keys with dashes require bracket notation, offending outputs: [final]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/recursive-flow",
+  "path": "corpus/invalids/recursive-flow.yaml",
+  "flow_id": "recursive-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Recursive call to flow [io.kestra.tests.recursive-flow]\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/scheduled-missing-inputs-defaults-2",
+  "path": "corpus/invalids/scheduled-missing-inputs-defaults-2.yaml",
+  "flow_id": "scheduled_missing_inputs_defaults_2",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missing inputs: 'user2'\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/scheduled-missing-inputs-defaults",
+  "path": "corpus/invalids/scheduled-missing-inputs-defaults.yaml",
+  "flow_id": "scheduled_missing_inputs_defaults",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missing inputs: 'user2'\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/switch-invalid",
+  "path": "corpus/invalids/switch-invalid.yaml",
+  "flow_id": "switch-impossible",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[impossible]: No task defined, neither cases or default have any tasks\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/system-labels",
+  "path": "corpus/invalids/system-labels.yaml",
+  "flow_id": "system-labels",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[null].id: must not be null\ntasks[null].id: must not be blank\n: Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/workingdirectory-invalid",
+  "path": "corpus/invalids/workingdirectory-invalid.yaml",
+  "flow_id": "workingdirectory-impossible",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a WorkingDirectory task\n",
+  "rejected_class": "invalid-flow"
+ },
+ {
+  "id": "invalids/workingdirectory-no-tasks",
+  "path": "corpus/invalids/workingdirectory-no-tasks.yaml",
+  "flow_id": "workingdirectory-no-tasks",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty\ntasks[impossible].tasks: The 'tasks' property cannot be empty\n",
+  "rejected_class": "invalid-flow"
+ }
+]

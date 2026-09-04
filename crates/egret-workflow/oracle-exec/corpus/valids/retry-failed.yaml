@@ -1,0 +1,16 @@
+id: retry-failed
+namespace: io.kestra.tests
+
+tasks:
+- id: failed
+  type: io.kestra.plugin.core.execution.Fail
+  retry:
+    type: constant
+    interval: PT0.250S
+    maxAttempts: 5
+    maxDuration: PT15S
+
+errors:
+  - id: t2
+    type: io.kestra.plugin.core.log.Log
+    message: second {{task.id}}

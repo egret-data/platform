@@ -1,0 +1,8 @@
+id: dynamic-task
+namespace: "io.kestra.tests"
+tasks:
+  - id: dynamic
+    type: io.kestra.core.tasks.test.DynamicTask
+  - id: log
+    type: io.kestra.plugin.core.log.Log
+    message: End log

@@ -1,0 +1,15 @@
+id: pause-duration-from-input
+namespace: io.kestra.tests
+
+inputs:
+  - id: delay
+    type: DURATION
+    defaults: PT1S
+
+tasks:
+  - id: pause
+    type: io.kestra.plugin.core.flow.Pause
+    pauseDuration: "{{inputs.delay}}"
+  - id: last
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{task.id}} > {{taskrun.startDate}}"

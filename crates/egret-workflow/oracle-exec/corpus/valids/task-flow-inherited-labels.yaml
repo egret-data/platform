@@ -1,0 +1,19 @@
+id: task-flow-inherited-labels
+namespace: io.kestra.tests
+
+inputs:
+  - id: string
+    type: STRING
+
+tasks:
+  - id: launch
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: io.kestra.tests
+    flowId: switch
+    inputs:
+      string: "{{ inputs.string }}"
+    wait: true
+    transmitFailed: true
+    inheritLabels: true
+    labels:
+      launchTaskLabel: launchFoo

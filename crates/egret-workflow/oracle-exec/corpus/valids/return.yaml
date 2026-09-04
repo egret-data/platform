@@ -1,0 +1,13 @@
+id: return
+namespace: io.kestra.tests
+
+tasks:
+- id: date
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{taskrun.startDate}}"
+- id: task-id
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{task.id}}"
+- id: flow-id
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{flow.id}}"

@@ -1,0 +1,15 @@
+id: variables-invalid
+namespace: io.kestra.tests
+
+tasks:
+  - id: date
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{taskrun.startDate}}"
+  - id: parent-seq
+    type: io.kestra.plugin.core.flow.Switch
+    value: "{{inputs.invalid}}"
+    cases:
+      FIRST:
+        - id: t1
+          type: io.kestra.plugin.core.debug.Return
+          format: "{{task.id}} > {{taskrun.startDate}}"

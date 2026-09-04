@@ -1,0 +1,18 @@
+id: variables
+namespace: io.kestra.tests
+
+variables:
+  first: "1"
+  second: "{{vars.first}} > 2"
+  third: "{{vars.second}} > 3"
+
+tasks:
+  - id: variable
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{render(vars.third)}}"
+  - id: env
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{envs.test1}} {{envs.test2}}"
+  - id: global
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{globals.string}} {{globals.int}} {{globals.bool}} {{globals.nested.int}}"

@@ -1,0 +1,16 @@
+id: kv
+namespace: io.kestra.tests
+inputs:
+  - id: namespace
+    type: STRING
+    defaults: "io.kestra.tests"
+  - id: errorOnMissing
+    type: BOOL
+    defaults: false
+tasks:
+  - id: get
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{ kv('my-key').field ?? null }}"
+  - id: getWithArgs
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{ kv('my-key', inputs.namespace, inputs.errorOnMissing).field }}"
