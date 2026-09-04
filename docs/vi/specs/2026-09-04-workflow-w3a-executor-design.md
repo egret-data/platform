@@ -112,10 +112,20 @@ hở, không bao giờ để độn độ phủ.
 
 Hai giới hạn, nói trước thay vì phát hiện sau:
 
-1. File YAML là **đầu vào**; phần khẳng định nằm trong mã test Java. Flow nào
-   được test Java lái bằng thiết lập đặc biệt — worker giả, lỗi tiêm vào — sẽ
-   không tái hiện khi chạy độc lập. **Task đầu tiên của plan là đo xem bao nhiêu
-   trong 261 flow chạy được độc lập**, và con số đó là kết quả, không phải giả định.
+1. File YAML là **đầu vào**; phần khẳng định nằm trong mã Java — 401 lớp test,
+   67 557 dòng, 2 645 `@Test` chỉ riêng `core`. Phần lớn khẳng định đó là kích
+   thước `taskRunList` và trạng thái từng task, thứ mà một execution đã thu về
+   chứa sẵn ở dạng rộng hơn. Hai thứ chúng mang mà một lần thu trần thì không:
+   **53 trong 261 `valids` khai `inputs:`**, và GIÁ TRỊ nằm trong mã Java chứ
+   không nằm trong YAML — `ParallelTest.errors()` lái `finally-parallel.yaml`
+   bằng `Map.of("failed", true)`. Chạy mà không truyền input thì **không hỏng ồn
+   ào**; nó chạy nhánh còn lại và sinh ra một golden trông ổn mà chẳng kiểm gì.
+   Những giá trị đó phải được truy hồi theo từng flow, hoặc đánh dấu flow là
+   không chạy độc lập được.
+   Và flow nào được test Java lái bằng thiết lập đặc biệt — worker giả, lỗi tiêm
+   vào — thì không tái hiện độc lập được.
+   **Task đầu tiên của plan là đo xem bao nhiêu trong 261 flow chạy được độc
+   lập**, và con số đó là kết quả, không phải giả định.
 2. Khớp trên 261 flow vẫn không chặn được hành vi ở flow thứ 262. Ratchet chống
    hồi quy; nó không chứng minh độ phủ. README phải nói điều đó bằng đúng giọng
    `oracle/README.md` đang dùng.
@@ -160,8 +170,16 @@ Mười lần chạy đầu thì không.
 ### 3.4 Luật chuẩn hoá
 
 1. Thay mọi id sinh ra bằng thứ tự xuất hiện lần đầu.
-2. Bỏ mọi trường đồng hồ. Thời lượng **bỏ**, không chia khoảng: một khoảng thời
-   lượng là một khẳng định về tốc độ khoác áo khẳng định về tính đúng.
+2. Bỏ mọi trường đồng hồ — nhưng **suy ra quan hệ xảy-ra-trước** trước đã.
+   Chính test của Kestra mang **39 khẳng định thứ tự trong 12 file** dạng
+   `a2.startDate.isAfter(a1.endDate)`. Đó không phải khẳng định về tốc độ; đó là
+   khẳng định `a2` **tuần tự sau** `a1`, tức đúng cái lý do tồn tại của một
+   `sequential` lồng trong `parallel`. Một bộ chuẩn hoá bỏ sạch đồng hồ thì
+   **không nhìn thấy** một flowable ngừng tuần tự hoá. Phát ra
+   `before`/`after`/`overlapping` cho từng cặp có thứ tự, chỉ giữ những cặp
+   **ổn định qua năm lần thu**, và công bố số cặp bị loại. Bản thân thời lượng
+   thì bỏ, không chia khoảng: một khoảng thời lượng là khẳng định về tốc độ
+   khoác áo khẳng định về tính đúng.
 3. Giữ nguyên thứ tự `taskRunList` — §3.3 đã giành được quyền đó.
 4. Giữ nguyên dãy `state.histories[].state`; bỏ ngày của chúng.
 5. Đi theo `parentId` để thu sub-execution. Chúng **bị giấu khỏi

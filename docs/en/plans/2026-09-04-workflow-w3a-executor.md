@@ -73,7 +73,7 @@ crates/egret-workflow/
 - Create: `crates/egret-workflow/oracle-exec/README.md` (the corpus + provenance sections; the rules sections come in Task 2)
 
 **Interfaces:**
-- Produces: `corpus.json` entries of the shape `{"id": "valids/parallel", "path": "corpus/valids/parallel.yaml", "disposition": "runs" | "rejected" | "not-standalone", "reason": "..."}`. Every later task consumes this.
+- Produces: `corpus.json` entries of the shape `{"id": "valids/parallel", "path": "corpus/valids/parallel.yaml", "disposition": "runs" | "rejected" | "not-standalone", "reason": "...", "inputs": {...}, "inputs_from": "..."}`. Every later task consumes this.
 
 The spec says the corpus is Kestra's, and that how much of it runs standalone is **a result, not an assumption**. This task produces that number.
 
@@ -103,6 +103,32 @@ From `../../../kestra/core/src/test/resources/flows/`, copy `valids/*.yaml` (261
 2. `POST /api/v1/main/flows` with `Content-Type: application/x-yaml` for each corpus flow, recording the HTTP status. A 422 here is the `invalids` disposition, not an error.
 3. For each flow that published, `POST /api/v1/main/executions/{namespace}/{id}` and poll `GET /api/v1/main/executions/{eid}` until the state is terminal (`SUCCESS`/`FAILED`/`WARNING`/`KILLED`), with a per-flow timeout.
 4. **Follow `parentId` to harvest sub-executions.** They are hidden from `/executions/search` — a sub-execution fetchable by id and carrying `parentId` was absent from a 200-row listing that returned all 24 top-level executions. A harvester that lists executions loses every loop iteration silently. Discover them from the parent's log lines (`in sub-execution [[link execution="..."]]`) and by querying Kestra's Postgres directly for `value->>'parentId'`.
+
+- [ ] **Step 3b: Recover the inputs — the YAML alone is not the test case**
+
+**53 of the 261 `valids` declare `inputs:`.** The YAML declares that an input
+exists; the *value* lives in the Java test beside it, e.g.
+`ParallelTest.errors()` drives `flows/valids/finally-parallel.yaml` with
+`Map.of("failed", true)`. A bare `POST /executions/{ns}/{id}` either fails or —
+worse — runs the flow's other branch and produces a golden that looks fine and
+tests nothing.
+
+For each of the 53, read the Java test that references the flow
+(`grep -rl "<flow-name>" core/src/test/java`) and record the inputs it passes
+into `corpus.json`:
+
+```json
+{"id": "valids/finally-parallel", "inputs": {"failed": true},
+ "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:errors"}
+```
+
+Where no Java test drives the flow, or the values are computed rather than
+literal, mark it `not-standalone` with that reason. Do not invent an input
+value: a guessed input produces a golden for a flow nobody tests.
+
+Post the inputs at execution time (Kestra accepts them as multipart form fields
+on the execution POST — **verify the exact wire format against the artifact**
+before writing the harvester around it).
 
 - [ ] **Step 4: Run it and write down what happened**
 
@@ -156,14 +182,39 @@ One golden entry per corpus id:
      "state": ["CREATED", "RUNNING", "SUCCESS"],
      "attempts": [["CREATED", "RUNNING", "SUCCESS"]]}
   ],
+  "order": [[0, 1, "before"]],
   "spawned": []
 }
 ```
 
+`order` holds only the pairs whose relation was stable across five harvests.
+
 Rules, each traceable to a measurement in the spec:
 
 1. Replace every generated id with its **ordinal in first-appearance order**; `parent` is that ordinal, not a ksuid.
-2. **Drop every clock field.** `startDate`, `endDate`, `duration`, every `histories[].date`, `metadata.originalCreatedDate`. Durations are dropped, not bucketed — a duration bucket is a timing assertion wearing a correctness costume.
+2. **Drop every clock field, but derive the happens-before relation first.**
+   `startDate`, `endDate`, `duration`, every `histories[].date`,
+   `metadata.originalCreatedDate` are dropped. Durations are dropped, not
+   bucketed — a duration bucket is a timing assertion wearing a correctness
+   costume.
+
+   **But dropping them outright loses something Kestra's own tests assert.**
+   There are **39 ordering assertions across 12 test files** of the form
+   `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()` — that is not a
+   timing claim, it is the claim that `a2` **serialised after** `a1`, which is
+   exactly the semantics a `sequential` nested in a `parallel` exists to
+   provide. A normaliser that drops all clocks cannot see a flowable that stops
+   serialising.
+
+   So before dropping, compute for every ordered pair of runs one of
+   `before` / `after` / `overlapping`, and emit the relation as
+   `"order": [[i, j, "before"], ...]`.
+
+   The relation is only trustworthy where it is **stable**. Harvest each flow
+   **five times** and keep only the pairs whose relation is identical in all
+   five; drop the rest and publish the dropped count in `runnable.txt`. This is
+   the same discipline the creation-order experiment used: a relation observed
+   once is a coincidence, and genuinely parallel branches will flip.
 3. **Keep `runs` in Kestra's `taskRunList` order.** It is creation order; §3.3 of the spec earned that with a discriminating experiment.
 4. Keep `histories[].state` sequences verbatim.
 5. `spawned` holds sub-execution traces of the same shape, ordered by the parent run they belong to.

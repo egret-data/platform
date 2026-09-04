@@ -117,11 +117,21 @@ have been **measured** as gaps, never to pad coverage.
 
 Two limits, stated rather than discovered later:
 
-1. The YAML files are *inputs*; the assertions live in Java test code. A flow
-   that its Java test drives with special setup — a mocked worker, an injected
-   failure — will not reproduce standalone. **The first task in the plan is to
-   measure how many of the 261 run standalone**, and that number is a result, not
-   an assumption.
+1. The YAML files are *inputs*; the assertions live in Java test code — 401
+   test classes, 67 557 lines, 2 645 `@Test` methods in `core` alone. Most of
+   those assertions are `taskRunList` sizes and per-task states, which a
+   harvested execution captures as a superset. Two things they carry that a
+   plain harvest does not:
+   **53 of the 261 `valids` declare `inputs:`**, and the VALUE lives in the Java
+   test, not the YAML — `ParallelTest.errors()` drives `finally-parallel.yaml`
+   with `Map.of("failed", true)`. Running it without that input does not fail
+   loudly; it runs the other branch and produces a golden that looks fine and
+   tests nothing. Those values must be recovered per flow or the flow marked
+   not-standalone.
+   And a flow its Java test drives with special setup — a mocked worker, an
+   injected failure — will not reproduce standalone at all.
+   **The first task in the plan is to measure how many of the 261 run
+   standalone**, and that number is a result, not an assumption.
 2. Agreeing on 261 flows still does not bound behaviour on the 262nd. The
    ratchet prevents regression; it does not prove coverage. The README must say
    so in the same voice `oracle/README.md` uses.
@@ -169,8 +179,16 @@ experiment that can falsify it. The first ten runs could not.
 ### 3.4 Normalisation rules
 
 1. Replace every generated id with its ordinal in first-appearance order.
-2. Drop every clock field. Durations are dropped, not bucketed: a duration
-   bucket is a timing assertion wearing a correctness costume.
+2. Drop every clock field — but derive the **happens-before relation** first.
+   Kestra's own tests carry **39 ordering assertions across 12 files** of the
+   form `a2.startDate.isAfter(a1.endDate)`. That is not a timing claim; it is
+   the claim that `a2` serialised after `a1`, which is the whole point of a
+   `sequential` nested in a `parallel`. A normaliser that drops all clocks
+   cannot see a flowable that stops serialising. Emit `before`/`after`/
+   `overlapping` per ordered pair, keep only the pairs stable across five
+   harvests, and publish the dropped count. Durations themselves are dropped,
+   not bucketed: a duration bucket is a timing assertion wearing a correctness
+   costume.
 3. Keep `taskRunList` order verbatim — §3.3 earned the right to.
 4. Keep `state.histories[].state` sequences verbatim; drop their dates.
 5. Follow `parentId` to harvest sub-executions. They are **hidden from
