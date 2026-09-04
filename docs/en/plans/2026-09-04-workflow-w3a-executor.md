@@ -79,7 +79,9 @@ The spec says the corpus is Kestra's, and that how much of it runs standalone is
 
 - [ ] **Step 1: Pin the compose file**
 
-Copy `kestra/docker-compose.yml` from the sibling checkout and make exactly **three** edits — pin `kestra/kestra:v2.0.0-rc13`; enable basic-auth, because 2.x refuses unauthenticated API calls; and set `kestra.encryption.secret-key`, because without it `valids/input-log-secret` returns `422 Unable to use a SECRET input/output as encryption is not configured` and the SECRET input type is permanently untestable. Kestra's own test configuration sets that key, so this is config parity, not a behaviour hack. Every edit is recorded in the README with its reason; a fourth edit needs a reason written down before it is made.
+Copy `kestra/docker-compose.yml` from the sibling checkout and make exactly **two** edits — pin `kestra/kestra:v2.0.0-rc13`, and enable basic-auth, because 2.x refuses unauthenticated API calls.
+
+A third edit, `kestra.encryption.secret-key`, is **allowed but deliberately not taken**, and the README must price it rather than leave it implicit. Without it `valids/input-log-secret` returns `422 Unable to use a SECRET input/output as encryption is not configured`, so the SECRET input type is untestable here. Taking it costs a full re-harvest and recovers exactly one flow, and that flow exercises no W3a flowable — an input's TYPE is W1's concern. W8 or W1 may want it; W3a does not. Every edit is recorded in the README with its reason, and a further edit needs its reason written down before it is made.
 
 ```yaml
         kestra:
@@ -170,6 +172,17 @@ git -c user.email=hoangquocvietbk2.13@gmail.com commit -m "feat(workflow): W3a T
 **Interfaces:**
 - Consumes: Task 1's `corpus.json`.
 - Produces: the normalised-trace JSON shape below, which Tasks 3-8 are judged against, and `fn advance(plan, state, now) -> Vec<Command>` as a stub whose signature later tasks fill in.
+
+**Before you build a single golden, read this.** Task 1 found that
+`valids/pause-behavior`'s four documented behaviours — `FAIL`, `RESUME`, `WARN`,
+`CANCEL` — all produce the **identical execution** on `v2.0.0-rc13`: `FAILED`,
+one task run, identical histories. Kestra's own `PauseTest.java:374-380` asserts
+`RESUME` gives `SUCCESS` with two task runs. The checkout and the artifact
+disagree, and **the artifact governs**: build that flow's golden from what the
+pinned image did, never from what the Java test says it should do. The same
+question applies to any flow whose golden looks suspiciously insensitive to a
+property — if a documented input has no observable effect, record that as a
+measured fact rather than assuming you mis-drove it.
 
 - [ ] **Step 1: Define the normalised trace**
 
