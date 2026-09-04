@@ -1,0 +1,15 @@
+id: working-directory-taskrun
+namespace: io.kestra.tests
+
+tasks:
+  - id: parallel
+    type: io.kestra.plugin.core.flow.Loop
+    concurrencyLimit: 0
+    values: ["1"]
+    tasks:
+      - id: workingDir
+        type: io.kestra.plugin.core.flow.WorkingDirectory
+        tasks:
+          - id: log-taskrun
+            type: io.kestra.plugin.core.debug.Return
+            format:  "{{ item.value }}"

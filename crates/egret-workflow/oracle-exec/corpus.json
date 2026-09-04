@@ -19,7 +19,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6xvJ0YyklIlPm8CZKAFzvk",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "fail",
+    "hello",
+    "end"
+   ],
+   "task_states": {
+    "fail": "FAILED",
+    "hello": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "uMFaYMSra1esu15BOGLTA",
   "sub_executions": 0
  },
  {
@@ -31,7 +45,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "T0FU3r8IdUNlwrBQqDVGm",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "hello",
+    "finally",
+    "end"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "finally": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "5sLVN52XkRUcSls1oYOS2A",
   "sub_executions": 0
  },
  {
@@ -43,7 +71,23 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "26v5dOXHBVCU7g73mAsG3Q",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 4,
+   "task_ids": [
+    "mytask",
+    "after_if",
+    "after_if_log",
+    "after_end"
+   ],
+   "task_states": {
+    "mytask": "SUCCESS",
+    "after_if": "SUCCESS",
+    "after_if_log": "SUCCESS",
+    "after_end": "SUCCESS"
+   }
+  },
+  "execution_id": "3jj39l2kaApAUzO6606eAj",
   "sub_executions": 0
  },
  {
@@ -55,7 +99,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6uZSgRdDtDU9WcDt52pF7I",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "mytask",
+    "end"
+   ],
+   "task_states": {
+    "mytask": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "3l6G7sjX1tuRKEIK5aGnOE",
   "sub_executions": 0
  },
  {
@@ -89,7 +145,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3ujxzuAV5whNqgWkVWfCe5",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "1-each",
+    "error-1st",
+    "error-2nd"
+   ],
+   "task_states": {
+    "1-each": "FAILED",
+    "error-1st": "SUCCESS",
+    "error-2nd": "SUCCESS"
+   }
+  },
+  "execution_id": "3HpiQ6fikyaFw8jq52yQ4d",
   "sub_executions": 1
  },
  {
@@ -101,7 +171,27 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "WARNING",
-  "execution_id": "Oolk91raQjDV1hbRZlqql",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 6,
+   "task_ids": [
+    "hello",
+    "retry_block",
+    "failing_task",
+    "error_handler",
+    "finally_task",
+    "downstream_task"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "retry_block": "WARNING",
+    "failing_task": "FAILED",
+    "error_handler": "SUCCESS",
+    "finally_task": "SUCCESS",
+    "downstream_task": "SUCCESS"
+   }
+  },
+  "execution_id": "7mh2euin0hVf61MaNmLwZx",
   "sub_executions": 0
  },
  {
@@ -123,7 +213,35 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2oz7glTuqhUfR0aKJ4REPO",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 10,
+   "task_ids": [
+    "first",
+    "1-1-allow-failure",
+    "1-1-1_seq",
+    "1-1-1-1",
+    "ko",
+    "local-error",
+    "1-2-todo",
+    "switch",
+    "crash",
+    "global-error"
+   ],
+   "task_states": {
+    "first": "WARNING",
+    "1-1-allow-failure": "WARNING",
+    "1-1-1_seq": "FAILED",
+    "1-1-1-1": "SUCCESS",
+    "ko": "FAILED",
+    "local-error": "SUCCESS",
+    "1-2-todo": "SUCCESS",
+    "switch": "FAILED",
+    "crash": "FAILED",
+    "global-error": "SUCCESS"
+   }
+  },
+  "execution_id": "7UXbYRDo5dbLZNZXGjOPGW",
   "sub_executions": 0
  },
  {
@@ -135,7 +253,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "57RjduoCIVwk0oyUKQED0R",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "before",
+    "fail"
+   ],
+   "task_states": {
+    "before": "SUCCESS",
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "5mhKjNfV5mErgo74GsxyXf",
   "sub_executions": 0
  },
  {
@@ -158,7 +288,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5cTRiXfoT5yVBog0KzVcVI",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "before_task",
+    "make_error",
+    "print_error_log"
+   ],
+   "task_states": {
+    "before_task": "SUCCESS",
+    "make_error": "FAILED",
+    "print_error_log": "SUCCESS"
+   }
+  },
+  "execution_id": "1lGYEvzZJzlPsFvtO9FHTm",
   "sub_executions": 0
  },
  {
@@ -182,7 +326,19 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "35pWEm6zq1tFBkNDSrQln9",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "hello",
+    "fail"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "75S8DpJBzuWwzLiTvfLwDD",
   "sub_executions": 0
  },
  {
@@ -194,7 +350,29 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1a2foTcTWJ0ca08kdblyEV",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 7,
+   "task_ids": [
+    "dag",
+    "task1",
+    "task2",
+    "task3",
+    "task4",
+    "task6",
+    "task5"
+   ],
+   "task_states": {
+    "dag": "SUCCESS",
+    "task1": "SUCCESS",
+    "task2": "SUCCESS",
+    "task3": "SUCCESS",
+    "task4": "SUCCESS",
+    "task6": "SUCCESS",
+    "task5": "SUCCESS"
+   }
+  },
+  "execution_id": "6WPnWd8yluuazg9QU4Olse",
   "sub_executions": 0
  },
  {
@@ -206,7 +384,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1uroAMXqOGKxoO10Phxbut",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "failed",
+    "t2",
+    "t4"
+   ],
+   "task_states": {
+    "failed": "FAILED",
+    "t2": "SUCCESS",
+    "t4": "SUCCESS"
+   }
+  },
+  "execution_id": "2GKHvcKgAhgdSu0JnMyK0r",
   "sub_executions": 0
  },
  {
@@ -218,7 +410,29 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6fZ0xlBnlwFYGxevX6QnDs",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 7,
+   "task_ids": [
+    "1-each",
+    "2-parallel",
+    "2-parallel-1",
+    "3-sequential",
+    "3-sequential-1",
+    "4-switch",
+    "4-switch-case-1"
+   ],
+   "task_states": {
+    "1-each": "SUCCESS",
+    "2-parallel": "SUCCESS",
+    "2-parallel-1": "SUCCESS",
+    "3-sequential": "SUCCESS",
+    "3-sequential-1": "SUCCESS",
+    "4-switch": "FAILED",
+    "4-switch-case-1": "FAILED"
+   }
+  },
+  "execution_id": "4lo0uXjtyQ9id47OtR9E6U",
   "sub_executions": 3
  },
  {
@@ -230,7 +444,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2Y2K9f7LFF7eQlWBuqsKq4",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "t1",
+    "t3"
+   ],
+   "task_states": {
+    "t1": "SUCCESS",
+    "t3": "SUCCESS"
+   }
+  },
+  "execution_id": "3gnPskz6XpOjFAEFVpABw",
   "sub_executions": 0
  },
  {
@@ -243,6 +469,37 @@
   "disposition": "rejected",
   "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask",
   "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/empty-variables",
+  "path": "corpus/valids/empty-variables.yml",
+  "flow_id": "empty-variables",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "emptyKey": "{ \"foo\": \"\" }",
+   "emptySubObject": "{\"json\":{\"someEmptyObject\":{}}}"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/EmptyVariablesTest.java:35 emptyVariables() (JSON inputs are passed as JSON TEXT, not as objects)",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "log-not-existing-output",
+    "log-empty-input",
+    "log-empty-sub-object-input"
+   ],
+   "task_states": {
+    "log-not-existing-output": "SUCCESS",
+    "log-empty-input": "SUCCESS",
+    "log-empty-sub-object-input": "SUCCESS"
+   }
+  },
+  "execution_id": "2sG6qoZGBgqA2jyN1M53Xq",
+  "sub_executions": 0
  },
  {
   "id": "valids/encrypted-string",
@@ -264,7 +521,29 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4ouIKzLWFKOCmQyFfFvMir",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 7,
+   "task_ids": [
+    "failed",
+    "t2",
+    "t3",
+    "t3-t1",
+    "t3-t1-t1",
+    "t3-t1-t1-t1",
+    "t3-t1-t1-t1-last"
+   ],
+   "task_states": {
+    "failed": "FAILED",
+    "t2": "SUCCESS",
+    "t3": "SUCCESS",
+    "t3-t1": "SUCCESS",
+    "t3-t1-t1": "SUCCESS",
+    "t3-t1-t1-t1": "SUCCESS",
+    "t3-t1-t1-t1-last": "SUCCESS"
+   }
+  },
+  "execution_id": "5RzNx0agTZLmoHKvnbwji3",
   "sub_executions": 0
  },
  {
@@ -279,6 +558,17 @@
   "rejected_class": "task-type-not-in-image"
  },
  {
+  "id": "valids/executable-fail",
+  "path": "corpus/valids/executable-fail.yml",
+  "flow_id": "executable-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.BadExecutable",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
   "id": "valids/execution",
   "path": "corpus/valids/execution.yaml",
   "flow_id": "execution-start-date",
@@ -287,7 +577,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1qxDwtVkzcvL8Z2mKAhDSB",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "5PQEWdGNRQ5O1iOieV1iSK",
   "sub_executions": 0
  },
  {
@@ -301,7 +601,19 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:45 shouldExitWithCancelled() (@ExecuteFlow, no inputs)",
   "disposition": "runs",
   "reason": "CANCELLED",
-  "execution_id": "6ksNZ5KNwvcfeltOzmSuUS",
+  "observed": {
+   "state": "CANCELLED",
+   "taskruns": 2,
+   "task_ids": [
+    "if",
+    "exit"
+   ],
+   "task_states": {
+    "if": "CANCELLED",
+    "exit": "CANCELLED"
+   }
+  },
+  "execution_id": "7XNcpUkWMpbKIO0mkN5wba",
   "sub_executions": 0
  },
  {
@@ -315,7 +627,19 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:24 shouldExitAndKillTheExecution() (@ExecuteFlow, no inputs)",
   "disposition": "runs",
   "reason": "KILLED",
-  "execution_id": "1wVw2xKB2DsxltiyzUW1UC",
+  "observed": {
+   "state": "KILLED",
+   "taskruns": 2,
+   "task_ids": [
+    "if",
+    "exit"
+   ],
+   "task_states": {
+    "if": "KILLED",
+    "exit": "KILLED"
+   }
+  },
+  "execution_id": "1QKmEj4frVrvjJCEmVJMDj",
   "sub_executions": 0
  },
  {
@@ -329,7 +653,23 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:33 shouldExitAndFailNestedIf() (@ExecuteFlow, no inputs)",
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "xLCMhbOLGYrFv2LfzrIn0",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 4,
+   "task_ids": [
+    "if_some_bool",
+    "was_true",
+    "nested_bool_check",
+    "nested_was_false"
+   ],
+   "task_states": {
+    "if_some_bool": "FAILED",
+    "was_true": "SUCCESS",
+    "nested_bool_check": "FAILED",
+    "nested_was_false": "FAILED"
+   }
+  },
+  "execution_id": "1U6A7Jxe9EgXYoL4T9meUC",
   "sub_executions": 0
  },
  {
@@ -343,7 +683,19 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/ExitTest.java:16 shouldExitTheExecution() (@ExecuteFlow, no inputs)",
   "disposition": "runs",
   "reason": "WARNING",
-  "execution_id": "3pyPyKTiHVS5Cs0vOoS1eE",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 2,
+   "task_ids": [
+    "if",
+    "exit"
+   ],
+   "task_states": {
+    "if": "WARNING",
+    "exit": "WARNING"
+   }
+  },
+  "execution_id": "4JqqKIbr0nNPsxhmDYWbYu",
   "sub_executions": 0
  },
  {
@@ -367,7 +719,19 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4AowaTBfMdCOkOSgnENc0z",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "before",
+    "fail"
+   ],
+   "task_states": {
+    "before": "SUCCESS",
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "6133UBRkuga0I1UYIs4Fna",
   "sub_executions": 0
  },
  {
@@ -383,7 +747,17 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/execution/FailTest.java:31 failOnSwitch()",
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3eG7FbmIZfEWxcioQpkeCW",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "switch"
+   ],
+   "task_states": {
+    "switch": "FAILED"
+   }
+  },
+  "execution_id": "70gDT280pvEvdT4Zn4b7di",
   "sub_executions": 0
  },
  {
@@ -395,7 +769,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3xNWkqGJIrIsdE3CENuAlL",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "t1"
+   ],
+   "task_states": {
+    "t1": "FAILED"
+   }
+  },
+  "execution_id": "5bhtcEA1dptwy4b8SkcMbq",
   "sub_executions": 0
  },
  {
@@ -407,7 +791,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1f8eQFkdpKLIIMWcPoLPbw",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "per-item"
+   ],
+   "task_states": {
+    "per-item": "FAILED"
+   }
+  },
+  "execution_id": "6F9tzZbiYyiaIeXvTmQZUj",
   "sub_executions": 0
  },
  {
@@ -431,7 +825,29 @@
   ],
   "disposition": "runs",
   "reason": "WARNING",
-  "execution_id": "Nb6UcKS83lWZllmzkn1wS",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 7,
+   "task_ids": [
+    "seq",
+    "if",
+    "ko",
+    "e1",
+    "e2",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "seq": "WARNING",
+    "if": "FAILED",
+    "ko": "FAILED",
+    "e1": "SUCCESS",
+    "e2": "SUCCESS",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "3HRQiKjGQryepus3ZpGBZc",
   "sub_executions": 0
  },
  {
@@ -455,7 +871,33 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5lZ9dYEMylxDEep07v20op",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 9,
+   "task_ids": [
+    "dag",
+    "t1",
+    "t2",
+    "t3",
+    "ko",
+    "e1",
+    "e2",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "dag": "FAILED",
+    "t1": "SUCCESS",
+    "t2": "SUCCESS",
+    "t3": "FAILED",
+    "ko": "FAILED",
+    "e1": "SUCCESS",
+    "e2": "SUCCESS",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "2a0k2SXQQIVFimlLc7H026",
   "sub_executions": 0
  },
  {
@@ -467,7 +909,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3Fc5Q2AMY84ocEClVeO9rA",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "ko",
+    "a1"
+   ],
+   "task_states": {
+    "ko": "FAILED",
+    "a1": "SUCCESS"
+   }
+  },
+  "execution_id": "6o8p5L8YGY40Men7VoDBom",
   "sub_executions": 0
  },
  {
@@ -491,7 +945,27 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1cMlItes3kCjjatY4chf3P",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 6,
+   "task_ids": [
+    "if",
+    "ko",
+    "e1",
+    "e2",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "if": "FAILED",
+    "ko": "FAILED",
+    "e1": "SUCCESS",
+    "e2": "SUCCESS",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "2cFofAPQdATFd4jArITder",
   "sub_executions": 0
  },
  {
@@ -515,7 +989,23 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5etf33FSjc3MsoUdi9qsxB",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 4,
+   "task_ids": [
+    "if",
+    "ko",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "if": "FAILED",
+    "ko": "FAILED",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "46zqFBLsR0Of6RDtW72rjy",
   "sub_executions": 0
  },
  {
@@ -539,7 +1029,17 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3DZ2yrfkeSnd9hwapcc6Hv",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "each"
+   ],
+   "task_states": {
+    "each": "FAILED"
+   }
+  },
+  "execution_id": "Tadjo6RjS54LtsObquAGM",
   "sub_executions": 3
  },
  {
@@ -563,7 +1063,17 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3SZu8WEHGo2DM0n4eIa4l3",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "each"
+   ],
+   "task_states": {
+    "each": "FAILED"
+   }
+  },
+  "execution_id": "5lBIaZ7IGFYImRbBCBM8QC",
   "sub_executions": 3
  },
  {
@@ -587,7 +1097,35 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6sJoUDzDqOzcmk6tKlJXPs",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 10,
+   "task_ids": [
+    "seq",
+    "p1",
+    "p2",
+    "p3",
+    "if",
+    "ko",
+    "e1",
+    "e2",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "seq": "FAILED",
+    "p1": "SUCCESS",
+    "p2": "SUCCESS",
+    "p3": "SUCCESS",
+    "if": "FAILED",
+    "ko": "FAILED",
+    "e1": "SUCCESS",
+    "e2": "SUCCESS",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "4m6psae3T6eVUyGzuFoMuN",
   "sub_executions": 0
  },
  {
@@ -599,7 +1137,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "o36g9Cv1be9bo8oi95RNC",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "seq",
+    "ko",
+    "a1"
+   ],
+   "task_states": {
+    "seq": "FAILED",
+    "ko": "FAILED",
+    "a1": "SUCCESS"
+   }
+  },
+  "execution_id": "TzmpHgnBpXVsv7lsElDvx",
   "sub_executions": 0
  },
  {
@@ -623,7 +1175,29 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2hJr5iHnb5wAjPMsJmHO3V",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 7,
+   "task_ids": [
+    "seq",
+    "if",
+    "ko",
+    "e1",
+    "e2",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "seq": "FAILED",
+    "if": "FAILED",
+    "ko": "FAILED",
+    "e1": "SUCCESS",
+    "e2": "SUCCESS",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "60w5EtK3YQ6UDQyHe0FbVV",
   "sub_executions": 0
  },
  {
@@ -647,7 +1221,91 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "29CCL1ObXqJXEw9DidItox",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 5,
+   "task_ids": [
+    "seq",
+    "if",
+    "ko",
+    "a1",
+    "a2"
+   ],
+   "task_states": {
+    "seq": "FAILED",
+    "if": "FAILED",
+    "ko": "FAILED",
+    "a1": "SUCCESS",
+    "a2": "SUCCESS"
+   }
+  },
+  "execution_id": "1egpeyY2griZiVAE6lN6m",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-cancel-pause",
+  "path": "corpus/valids/flow-concurrency-cancel-pause.yml",
+  "flow_id": "flow-concurrency-cancel-pause",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "pause"
+   ],
+   "task_states": {
+    "pause": "SUCCESS"
+   }
+  },
+  "execution_id": "5cSqqfo8i9rsGUpysqKn8L",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-cancel",
+  "path": "corpus/valids/flow-concurrency-cancel.yml",
+  "flow_id": "flow-concurrency-cancel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "1wTHvjLdU3Bv9RoG5vrDgP",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-fail",
+  "path": "corpus/valids/flow-concurrency-fail.yml",
+  "flow_id": "flow-concurrency-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "1Ajtg5GWdbGtixsRvZTQhh",
   "sub_executions": 0
  },
  {
@@ -659,7 +1317,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3z2Qi7WPrtZb9vvoWOCAXj",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "flow1"
+   ],
+   "task_states": {
+    "flow1": "FAILED"
+   }
+  },
+  "execution_id": "u1Sad8UtqqIOYwm7u1Sj4",
   "sub_executions": 0
  },
  {
@@ -671,7 +1339,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3X9lWXKoUcIuXuaSd3ReF1",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "6SAhatyt6Co6pRI4vb5Nim",
   "sub_executions": 0
  },
  {
@@ -683,7 +1361,243 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7hTQqyA1fQpZnQB0dHERQz",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "parallel",
+    "flow1",
+    "flow2"
+   ],
+   "task_states": {
+    "parallel": "SUCCESS",
+    "flow1": "SUCCESS",
+    "flow2": "SUCCESS"
+   }
+  },
+  "execution_id": "3fO0bRrYL80FOxC2Qmfci7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue-after-execution",
+  "path": "corpus/valids/flow-concurrency-queue-after-execution.yml",
+  "flow_id": "flow-concurrency-queue-after-execution",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "sleep",
+    "afterExecution"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS",
+    "afterExecution": "SUCCESS"
+   }
+  },
+  "execution_id": "4GfGGZVD5Q3lFBhNsKe39L",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue-fail",
+  "path": "corpus/valids/flow-concurrency-queue-fail.yml",
+  "flow_id": "flow-concurrency-queue-fail",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "sleep",
+    "fail"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS",
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "4Efj9RLQQAahyip5d2qavI",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue-killed-after-execution",
+  "path": "corpus/valids/flow-concurrency-queue-killed-after-execution.yml",
+  "flow_id": "flow-concurrency-queue-killed-after-execution",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "sleep",
+    "afterExecution"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS",
+    "afterExecution": "SUBMITTED"
+   }
+  },
+  "execution_id": "7FpAz7kNJaiUfVTEch1E06",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue-killed",
+  "path": "corpus/valids/flow-concurrency-queue-killed.yml",
+  "flow_id": "flow-concurrency-queue-killed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "22I7w4pkvZtJomU4Ozi9o4",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue-pause",
+  "path": "corpus/valids/flow-concurrency-queue-pause.yml",
+  "flow_id": "flow-concurrency-queue-pause",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "pause"
+   ],
+   "task_states": {
+    "pause": "SUCCESS"
+   }
+  },
+  "execution_id": "5uRUmDHTx32O5tWVjGPM5r",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-queue",
+  "path": "corpus/valids/flow-concurrency-queue.yml",
+  "flow_id": "flow-concurrency-queue",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "1Pu0TVgfYQrQ8kWkXw1rZf",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-sla-assert-cancel",
+  "path": "corpus/valids/flow-concurrency-sla-assert-cancel.yml",
+  "flow_id": "flow-concurrency-sla-assert-cancel",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "CANCELLED",
+  "observed": {
+   "state": "CANCELLED",
+   "taskruns": 0,
+   "task_ids": [],
+   "task_states": {}
+  },
+  "execution_id": "3QsZQcrcdvlAOu4zFNp3ZE",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-sla-fail-child",
+  "path": "corpus/valids/flow-concurrency-sla-fail-child.yml",
+  "flow_id": "flow-concurrency-sla-fail-child",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "KILLED"
+   }
+  },
+  "execution_id": "3yZB0BeFLGrpWwC2GAmB0F",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-sla-fail-parent",
+  "path": "corpus/valids/flow-concurrency-sla-fail-parent.yml",
+  "flow_id": "flow-concurrency-sla-fail-parent",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "7VYYL09GZDLTdsLBeEMoP4",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-concurrency-subflow",
+  "path": "corpus/valids/flow-concurrency-subflow.yml",
+  "flow_id": "flow-concurrency-subflow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "SUCCESS"
+   }
+  },
+  "execution_id": "4czdAf7UNuqqdlomuHbMB3",
   "sub_executions": 0
  },
  {
@@ -695,7 +1609,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4NiH32h1FHdpvT1AclQanz",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "5f1oGU2YEKP3zDAY32WqbO",
   "sub_executions": 0
  },
  {
@@ -707,7 +1631,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5x8kfW0FmZqE5GYz2v7eOt",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "5KRP5wxLiuvTbqqEK1Yzll",
   "sub_executions": 0
  },
  {
@@ -719,7 +1653,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1a0Z5ZCfMMdBCTaOeHSiLf",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "2g7SNsdq4oeFWmFEGbwBa0",
   "sub_executions": 0
  },
  {
@@ -731,7 +1675,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3hpJYRRzyJksyTJeLohiaa",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "7lRArbUICs5UEq2QlRs4uO",
   "sub_executions": 0
  },
  {
@@ -743,7 +1697,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5jpb7NXJrEhDEwt4QZKM2X",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "2UCCfXlIwMdXgkrW6mBdoG",
   "sub_executions": 0
  },
  {
@@ -755,7 +1719,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7Y2HwbSK3XuGQMZvGgkOG5",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "d9w0sE1s457GMttR1I9Ns",
   "sub_executions": 0
  },
  {
@@ -767,7 +1741,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "enSQXDSqE5vRBfMoyv6Hb",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "5IWcwiPhqLrhbTYkcQGz7z",
   "sub_executions": 0
  },
  {
@@ -779,7 +1763,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6reLBBeZvAErmsf0issBzs",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "3rgQrGmYRDihW8z89pEUS",
   "sub_executions": 0
  },
  {
@@ -791,7 +1785,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4rhkpBVW4n8H5yXFsJhInF",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "17S3PwAAfD4nCvRU9iuzSZ",
   "sub_executions": 0
  },
  {
@@ -803,7 +1807,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4ywNVKgEs1hAAneFoo9bHX",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "2f6QkntI68DhwaqIteVm1F",
   "sub_executions": 0
  },
  {
@@ -815,7 +1829,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5uydUDJYQgu5rd57lUEV4Z",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "6MFthmDjzq8kuqV6PzLNGW",
   "sub_executions": 0
  },
  {
@@ -827,7 +1851,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "39QccLUgCS6e8JR0vi7GWF",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "7g7Nm7FIxyEKsb4qHarmIC",
   "sub_executions": 0
  },
  {
@@ -839,7 +1873,7 @@
   "publish_status": 422,
   "disposition": "rejected",
   "reason": "publish -> 422: Unrecognized field \"fireOnce\" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: \"offset\", \"lookback\", \"deadline\", \"timezone\", \"from\", \"to\", \"every\")",
-  "rejected_class": "valid-in-checkout-refused-by-pinned-image"
+  "rejected_class": "checkout-drift"
  },
  {
   "id": "valids/flow-trigger-invalid-inputs-flow-a",
@@ -850,7 +1884,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3ca3ALSj9qyvnn4pmEE6c7",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "7LH0adudlDhI8FwU7kQ13W",
   "sub_executions": 0
  },
  {
@@ -874,7 +1918,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6wJacUhzkbGgFzj68HcoeR",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "XyjR8aDqY6po2UwhcDMcR",
   "sub_executions": 0
  },
  {
@@ -886,7 +1940,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "56g1ZiSSeuA960jAd8wZPN",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "12NzyRXCcmaM104nsqxqB6",
   "sub_executions": 0
  },
  {
@@ -898,7 +1962,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3VIWa9SUTeHUDSPvrudOzR",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "3vf4aU1h9nfTbcEEMXgAWU",
   "sub_executions": 0
  },
  {
@@ -910,7 +1984,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1e2eNS3K8sIJzzUbqZbfRu",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "60b4j6M96Mj56JjlkKBvgz",
   "sub_executions": 0
  },
  {
@@ -922,7 +2006,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1zNWt4bz6aVsrmYguOX9Fs",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "31BHVO2tB07A4p58N78A8p",
   "sub_executions": 0
  },
  {
@@ -934,7 +2028,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6RXPPdYaFYccinTD71PclS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "1IsZwdTqnjuZ0RM22U0CGA",
   "sub_executions": 0
  },
  {
@@ -946,7 +2050,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3E0FNAdeb3UvvjhEHb3iyx",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "only"
+   ],
+   "task_states": {
+    "pause": "SUCCESS",
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "4MGvOLlirqFTF2JlLf1L74",
   "sub_executions": 0
  },
  {
@@ -958,7 +2074,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4umV73lwsdqmvNP3EOexiK",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "14JoaaVHklMN2rSzMMTdTy",
   "sub_executions": 0
  },
  {
@@ -970,7 +2096,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "46kze7bYhcyhVujPPu0oRY",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "13mx62n01w5ZuPAQ6k9rIY",
   "sub_executions": 0
  },
  {
@@ -982,7 +2118,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5eYaEtY7mRA6NZc98OW8H6",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "3d6bpnnmrkA0q53doCzA1Y",
   "sub_executions": 0
  },
  {
@@ -994,7 +2140,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1g35c7RHcj7HAWe2ZHnrE7",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "4i6pwNxVodvs4oxKgWHlmI",
   "sub_executions": 0
  },
  {
@@ -1006,7 +2162,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5lIoQYqRQiqPArSiWrRgiI",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "2BfggBeW4IiRMnW6gCP2az",
   "sub_executions": 0
  },
  {
@@ -1018,7 +2184,105 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "32tr6EMywUWIWZkuVqPA1P",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "6D2oJP4cyzsBA7m4JfHpup",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-with-array-outputs",
+  "path": "corpus/valids/flow-with-array-outputs.yml",
+  "flow_id": "flow-with-array-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "2WYfpRSlpDvx4TU4bZ2khR",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-with-optional-outputs",
+  "path": "corpus/valids/flow-with-optional-outputs.yml",
+  "flow_id": "flow-with-optional-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "4w5XCtUttXO93uQZbYbhSB",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-with-outputs-failed",
+  "path": "corpus/valids/flow-with-outputs-failed.yml",
+  "flow_id": "flow-with-outputs-failed",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "6yfWgdM3UsKGyQOkrRTgMS",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/flow-with-outputs",
+  "path": "corpus/valids/flow-with-outputs.yml",
+  "flow_id": "flow-with-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "53i7wMz4kKd41W7dzhYPiD",
   "sub_executions": 0
  },
  {
@@ -1041,7 +2305,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3cphNXlEJV2E6tTkWM9Bv2",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "vision"
+   ],
+   "task_states": {
+    "vision": "FAILED"
+   }
+  },
+  "execution_id": "1bpP1xhHCIS7KZhBRZIDdq",
   "sub_executions": 4
  },
  {
@@ -1053,7 +2327,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3qv8XQbXos2lIBfKd4tA5h",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "log"
+   ],
+   "task_states": {
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "70AUlwjYBuRym2QNJNKrf3",
   "sub_executions": 0
  },
  {
@@ -1064,8 +2348,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2WE5UzTgyRS8ifciJvM5Kc)",
-  "execution_id": "2WE5UzTgyRS8ifciJvM5Kc",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3SMD3d3xE0jTFZGnn38Nx0)",
+  "execution_id": "3SMD3d3xE0jTFZGnn38Nx0",
   "sub_executions": 0
  },
  {
@@ -1077,7 +2361,41 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6fIkUb2TQCPiVdsjLdtNVd",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 13,
+   "task_ids": [
+    "t1",
+    "t2",
+    "t3",
+    "t5",
+    "t5-t1",
+    "t5-t2",
+    "t5-t3",
+    "t5-t4",
+    "t5-t4-t1",
+    "t5-t4-t1-t1",
+    "t5-t4-t1-t1-t1",
+    "t5-t4-t1-t1-t1-last",
+    "last"
+   ],
+   "task_states": {
+    "t1": "SUCCESS",
+    "t2": "SUCCESS",
+    "t3": "SUCCESS",
+    "t5": "SUCCESS",
+    "t5-t1": "SUCCESS",
+    "t5-t2": "SUCCESS",
+    "t5-t3": "SUCCESS",
+    "t5-t4": "SUCCESS",
+    "t5-t4-t1": "SUCCESS",
+    "t5-t4-t1-t1": "SUCCESS",
+    "t5-t4-t1-t1-t1": "SUCCESS",
+    "t5-t4-t1-t1-t1-last": "SUCCESS",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "5DXZspsDPrdgPEz4W7FCKj",
   "sub_executions": 0
  },
  {
@@ -1089,7 +2407,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5ALitfTVD6N3rQvlDZ8QvR",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "578XwaNW9U7SdaZgMJHxGD",
   "sub_executions": 0
  },
  {
@@ -1101,7 +2429,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1jqa1tHnNqdOlQiWTYxzcI",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "2qKaG12zWgnJrIsIiBXQ21",
   "sub_executions": 0
  },
  {
@@ -1113,7 +2451,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6nppyrIvi3SwGp1lhZMhik",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "if"
+   ],
+   "task_states": {
+    "if": "FAILED"
+   }
+  },
+  "execution_id": "5C9SP5f6pHFz2HoJBaaRDM",
   "sub_executions": 0
  },
  {
@@ -1161,7 +2509,19 @@
   ],
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5NS5B5m4xLUKt94lu1OupP",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "if",
+    "when-true"
+   ],
+   "task_states": {
+    "if": "SUCCESS",
+    "when-true": "SUCCESS"
+   }
+  },
+  "execution_id": "7bQUMHy0OF7jmkBDqipfcz",
   "sub_executions": 0
  },
  {
@@ -1177,7 +2537,17 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:139 ifInFlowable()",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1PSGLmfBM7HEUOQcZVN2S",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "for_each"
+   ],
+   "task_states": {
+    "for_each": "SUCCESS"
+   }
+  },
+  "execution_id": "4zpnl9OdGnqnpjfd66WfW",
   "sub_executions": 3
  },
  {
@@ -1189,7 +2559,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "48G1IZtNo4vqrJbm6Y5ZIp",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "for_each",
+    "assert"
+   ],
+   "task_states": {
+    "for_each": "SUCCESS",
+    "assert": "SUCCESS"
+   }
+  },
+  "execution_id": "6A6Ofsouh5HiiQCFf39dVL",
   "sub_executions": 3
  },
  {
@@ -1201,7 +2583,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "34bsyOp7elDqshEdJEhz1O",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "if"
+   ],
+   "task_states": {
+    "if": "SUCCESS"
+   }
+  },
+  "execution_id": "5IuKSxUXd5zYPLd6hI17fJ",
   "sub_executions": 0
  },
  {
@@ -1225,7 +2617,19 @@
   ],
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "223HLZuUXhnkcSDI4PIeW",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "if",
+    "when-true"
+   ],
+   "task_states": {
+    "if": "SUCCESS",
+    "when-true": "SUCCESS"
+   }
+  },
+  "execution_id": "5HHuJdeh7GLQRWGBu7AsVb",
   "sub_executions": 0
  },
  {
@@ -1243,7 +2647,39 @@
   "inputs_from": "core/src/test/java/io/kestra/core/runners/AbstractRunnerTest.java:670 multipleIf()",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4NJsxybX2IGYMzTa4rpyZZ",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 12,
+   "task_ids": [
+    "parallel",
+    "if-1",
+    "if-2",
+    "if-3",
+    "log-parallel-1",
+    "if-1-log",
+    "if-3-log",
+    "log-parallel-2",
+    "log-parallel-3",
+    "log-parallel-4",
+    "log-parallel-5",
+    "log-parallel-6"
+   ],
+   "task_states": {
+    "parallel": "SUCCESS",
+    "if-1": "SUCCESS",
+    "if-2": "SUCCESS",
+    "if-3": "SUCCESS",
+    "log-parallel-1": "SUCCESS",
+    "if-1-log": "SUCCESS",
+    "if-3-log": "SUCCESS",
+    "log-parallel-2": "SUCCESS",
+    "log-parallel-3": "SUCCESS",
+    "log-parallel-4": "SUCCESS",
+    "log-parallel-5": "SUCCESS",
+    "log-parallel-6": "SUCCESS"
+   }
+  },
+  "execution_id": "3th3QXf2PX8gpifAfAypLZ",
   "sub_executions": 0
  },
  {
@@ -1306,7 +2742,7 @@
   "publish_status": 422,
   "disposition": "rejected",
   "reason": "publish -> 422: tasks: must not be empty\n",
-  "rejected_class": "valid-in-checkout-refused-by-pinned-image"
+  "rejected_class": "refused-by-both"
  },
  {
   "id": "valids/json-input-schema-validation",
@@ -1326,7 +2762,19 @@
   "inputs_from": "core/src/test/java/io/kestra/core/models/flows/input/JsonInputSchemaFlowIntegrationTest.java:35 shouldRunFlowWhenJsonInputMatchesSchema()",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5sP9lcZ7rSJMoUncJRkUqO",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "withSchema",
+    "withoutSchema"
+   ],
+   "task_states": {
+    "withSchema": "SUCCESS",
+    "withoutSchema": "SUCCESS"
+   }
+  },
+  "execution_id": "3vaNQGlqIzTFiOXSLLiTpu",
   "sub_executions": 0
  },
  {
@@ -1350,7 +2798,143 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "31kyeUeUN3ZJFjxvv7EfKk",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "t1"
+   ],
+   "task_states": {
+    "t1": "SUCCESS"
+   }
+  },
+  "execution_id": "4RmgHygniz9qiwa74uNoND",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/labels-update-nested-value-list",
+  "path": "corpus/valids/labels-update-nested-value-list.yml",
+  "flow_id": "labels-update-nested-value-list",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "list_form_nested_value"
+   ],
+   "task_states": {
+    "list_form_nested_value": "SUCCESS"
+   }
+  },
+  "execution_id": "3d7o88Uy16BLYi2096e86K",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/labels-update-nested-value-map",
+  "path": "corpus/valids/labels-update-nested-value-map.yml",
+  "flow_id": "labels-update-nested-value-map",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "list_form_nested_value"
+   ],
+   "task_states": {
+    "list_form_nested_value": "SUCCESS"
+   }
+  },
+  "execution_id": "3C5q84dt6ahKpzkSxuRS1b",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/labels-update-task-deduplicate",
+  "path": "corpus/valids/labels-update-task-deduplicate.yml",
+  "flow_id": "labels-update-task-deduplicate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "from-string",
+    "from-list"
+   ],
+   "task_states": {
+    "from-string": "SUCCESS",
+    "from-list": "SUCCESS"
+   }
+  },
+  "execution_id": "2urLYaKqD2zc6IEp2k6ALG",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/labels-update-task-empty",
+  "path": "corpus/valids/labels-update-task-empty.yml",
+  "flow_id": "labels-update-task-empty",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "from-string"
+   ],
+   "task_states": {
+    "from-string": "FAILED"
+   }
+  },
+  "execution_id": "4nP6psJF4sNbSaSRsT4IiK",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/labels-update-task",
+  "path": "corpus/valids/labels-update-task.yml",
+  "flow_id": "labels-update-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "labelsJson": "{\"keyFromJson\": \"valueFromJson\"}",
+   "labelsMapKey": "keyFromMap",
+   "labelsMapValue": "valueFromMap",
+   "labelsListKey": "keyFromList",
+   "labelsListValue": "valueFromList"
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/RuntimeLabelsTest.java:39 update()",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 4,
+   "task_ids": [
+    "from-render",
+    "from-map",
+    "from-list",
+    "override-labels"
+   ],
+   "task_states": {
+    "from-render": "SUCCESS",
+    "from-map": "SUCCESS",
+    "from-list": "SUCCESS",
+    "override-labels": "SUCCESS"
+   }
+  },
+  "execution_id": "69R8d9ahYmrBuX1g3uNoC8",
   "sub_executions": 0
  },
  {
@@ -1362,7 +2946,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "45psmoCOBP7LiS7YMuIAv8",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "6o2rtXbB48F9a3DGFxTKLU",
   "sub_executions": 0
  },
  {
@@ -1374,7 +2968,25 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "36ANRFt3y122zbxiTzdWp1",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 5,
+   "task_ids": [
+    "t1",
+    "t2",
+    "t3",
+    "t4",
+    "t5"
+   ],
+   "task_states": {
+    "t1": "SUCCESS",
+    "t2": "SUCCESS",
+    "t3": "SUCCESS",
+    "t4": "SUCCESS",
+    "t5": "SUCCESS"
+   }
+  },
+  "execution_id": "3bSkYhMezHlXFZT684MUk4",
   "sub_executions": 0
  },
  {
@@ -1386,7 +2998,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "OwS97YeHbwoG2z7qk51yw",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "1_each",
+    "2_end"
+   ],
+   "task_states": {
+    "1_each": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "4GsTv2YdkLVhrYHZDfKOp7",
   "sub_executions": 0
  },
  {
@@ -1398,7 +3022,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7Vcgbp3uzAQG8iDhVqKHnF",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "before",
+    "loop"
+   ],
+   "task_states": {
+    "before": "SUCCESS",
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "3UfHrftVIqYRDtRpp9eCYZ",
   "sub_executions": 3
  },
  {
@@ -1410,7 +3046,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6oc5fXS5Q35h4tG48AzwjG",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "19MPlKGhY2sMZSIVlGfIvh",
   "sub_executions": 3
  },
  {
@@ -1422,7 +3068,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4D8wIF9HqAn6Zrjc1Z2CTx",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "FAILED"
+   }
+  },
+  "execution_id": "1PpgEGwZ2NI5roGjOv0VEn",
   "sub_executions": 1
  },
  {
@@ -1434,7 +3090,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4MDRZzKLps3f4KyKJ5XUj6",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "2hVjFXC49vL6lhLkVHP6rA",
   "sub_executions": 3
  },
  {
@@ -1446,7 +3112,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6fLUNPOIznjj2dTR0AU2Hc",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "Yw86r4CWAIZWsxzvltDlp",
   "sub_executions": 3
  },
  {
@@ -1458,7 +3134,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "C8Ht0KHx9PtNDvtp4Dh9t",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "loop1",
+    "loop2"
+   ],
+   "task_states": {
+    "loop1": "SUCCESS",
+    "loop2": "SUCCESS"
+   }
+  },
+  "execution_id": "5eLgxZaXqYCcd3G2UXHNQt",
   "sub_executions": 6
  },
  {
@@ -1470,7 +3158,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5Q8a9ciy03PXsBpbXsMWxF",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop1"
+   ],
+   "task_states": {
+    "loop1": "SUCCESS"
+   }
+  },
+  "execution_id": "4LJjzvv6iYcA5euGfT7Nj2",
   "sub_executions": 39
  },
  {
@@ -1482,7 +3180,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1jGh8bhP3Bk73ixwsNYBKk",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "1_each"
+   ],
+   "task_states": {
+    "1_each": "FAILED"
+   }
+  },
+  "execution_id": "DQftkd5PBqp0ew83ytjun",
   "sub_executions": 0
  },
  {
@@ -1494,7 +3202,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "59tFgPk3Oc1vuBNd5ltvwX",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "1_each",
+    "2_end"
+   ],
+   "task_states": {
+    "1_each": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "3GKIxPaNmAQ7v7APSLNRPI",
   "sub_executions": 3
  },
  {
@@ -1506,7 +3226,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "77PKOXxF815EA9uagZ6f7t",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "1_each",
+    "2_end"
+   ],
+   "task_states": {
+    "1_each": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "3CCOnKqaLVl36AOTkz4ViF",
   "sub_executions": 3
  },
  {
@@ -1518,7 +3250,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7b3aKwicrZyexBSKQqxGSe",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "write",
+    "loop",
+    "end"
+   ],
+   "task_states": {
+    "write": "SUCCESS",
+    "loop": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "7GnkBMts1sAdm79wn7WfsG",
   "sub_executions": 3
  },
  {
@@ -1530,7 +3276,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2zAlXUr6FQJjrdAYuYMi3r",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "FAILED"
+   }
+  },
+  "execution_id": "2cIy650dUqxr0JuVcIHGK7",
   "sub_executions": 1
  },
  {
@@ -1542,7 +3298,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "iHH6UGnZwaXVxUPNaLCjK",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "loop",
+    "end"
+   ],
+   "task_states": {
+    "loop": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "6RuAT00h7Fp08k64QqGYkC",
   "sub_executions": 3
  },
  {
@@ -1554,7 +3322,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2VfckyRzV4iPloYUDsBuqT",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "loop",
+    "end"
+   ],
+   "task_states": {
+    "loop": "SUCCESS",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "7aqUaadhb1Jzfa21XzH1Qz",
   "sub_executions": 3
  },
  {
@@ -1566,7 +3346,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3uSWVk1qK3bePQpjqep4gM",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "2gfrWcrpavFfZ4bWyyhBtJ",
   "sub_executions": 3
  },
  {
@@ -1578,7 +3368,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "98qUjw0H9UO12gixshmLW",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "CZYBkklhHpOLM14CwKYxJ",
   "sub_executions": 4
  },
  {
@@ -1590,7 +3390,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3MkJCO5B0VniNoQq29TFpy",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "68oGktxpJNlopVsbQmRNmM",
   "sub_executions": 3
  },
  {
@@ -1602,7 +3412,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3P1cg6jyJqsx9HtOOiiRtb",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "1edp6XmHY428QZJNzorMeL",
   "sub_executions": 3
  },
  {
@@ -1613,8 +3433,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2pfnNcqa56F7AiLgka5MQe)",
-  "execution_id": "2pfnNcqa56F7AiLgka5MQe",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2dwShrnMADR4nyTRVfC1GB)",
+  "execution_id": "2dwShrnMADR4nyTRVfC1GB",
   "sub_executions": 0
  },
  {
@@ -1626,7 +3446,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "UbJ6pUlfdhKIaWT0NEJKT",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "2egFwWqZvM5equsxVl3JbO",
   "sub_executions": 2
  },
  {
@@ -1638,7 +3468,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "48UcZnMEJp8RKYzqjDbj1t",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "6XvAsTDgyDzF2UREECdrBI",
   "sub_executions": 3
  },
  {
@@ -1650,7 +3490,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "uEtO3hhWsCdDhHKO1tz41",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "t1",
+    "2_each",
+    "2_end"
+   ],
+   "task_states": {
+    "t1": "SUCCESS",
+    "2_each": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "43ZoqBaFyHtcJMlKZqfonk",
   "sub_executions": 4
  },
  {
@@ -1662,7 +3516,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3T48xQmXL1EZMWg4GwehDX",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "loop_test",
+    "return_test"
+   ],
+   "task_states": {
+    "loop_test": "FAILED",
+    "return_test": "SUCCESS"
+   }
+  },
+  "execution_id": "2TU4l9amQHHp1mq5USLHym",
   "sub_executions": 0
  },
  {
@@ -1674,7 +3540,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "PilFtX5OYmFxM2Y35Ef7d",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "write",
+    "loop"
+   ],
+   "task_states": {
+    "write": "SUCCESS",
+    "loop": "SUCCESS"
+   }
+  },
+  "execution_id": "4qZLOKh0FutfSZS2V5uLgW",
   "sub_executions": 3
  },
  {
@@ -1686,7 +3564,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "22VSYGKsqru422xICCA9v5",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "FAILED"
+   }
+  },
+  "execution_id": "5X3vMfPiJK5Cg0F69ozKx0",
   "sub_executions": 1
  },
  {
@@ -1698,7 +3586,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1It77m9GAOBEgtB78ez83N",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "loop",
+    "loop_dag",
+    "log"
+   ],
+   "task_states": {
+    "loop": "FAILED",
+    "loop_dag": "SUCCESS",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "1qz4vZKiynIdRL0vz8T2G0",
   "sub_executions": 0
  },
  {
@@ -1710,7 +3612,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4f592BGWch6Rb0q3BHuKcu",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "date"
+   ],
+   "task_states": {
+    "date": "SUCCESS"
+   }
+  },
+  "execution_id": "2o7KzSjCYrCfzgQLXXxZ2A",
   "sub_executions": 0
  },
  {
@@ -1722,7 +3634,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "ZHZextBhdQHwjopgQb0jf",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "date"
+   ],
+   "task_states": {
+    "date": "SUCCESS"
+   }
+  },
+  "execution_id": "7glS8fFBBBV4BmZ7Kgqtwv",
   "sub_executions": 0
  },
  {
@@ -1734,7 +3656,39 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2XeShyyXgMmk2c8fjTu54w",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "date"
+   ],
+   "task_states": {
+    "date": "SUCCESS"
+   }
+  },
+  "execution_id": "6mH21V7kKnnSTrSRPFicOQ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/npe-labels-update-task",
+  "path": "corpus/valids/npe-labels-update-task.yml",
+  "flow_id": "npe-labels-update-task",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "labels"
+   ],
+   "task_states": {
+    "labels": "SUCCESS"
+   }
+  },
+  "execution_id": "WsASjehcmYqkLHHmj2V3I",
   "sub_executions": 0
  },
  {
@@ -1749,6 +3703,30 @@
   "rejected_class": "task-type-not-in-image"
  },
  {
+  "id": "valids/output-values",
+  "path": "corpus/valids/output-values.yml",
+  "flow_id": "output-values",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "return",
+    "read"
+   ],
+   "task_states": {
+    "return": "SUCCESS",
+    "read": "SUCCESS"
+   }
+  },
+  "execution_id": "5c9xBHZgBiEKuyIU8dOE8Z",
+  "sub_executions": 0
+ },
+ {
   "id": "valids/parallel-disabled-tasks",
   "path": "corpus/valids/parallel-disabled-tasks.yaml",
   "flow_id": "parallel-disabled-tasks",
@@ -1757,7 +3735,29 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6UgqQ1WjHKnCW4YJEi1sk7",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 7,
+   "task_ids": [
+    "parallel",
+    "sequence1",
+    "sequence2",
+    "task1",
+    "task3",
+    "task2",
+    "task4"
+   ],
+   "task_states": {
+    "parallel": "SUCCESS",
+    "sequence1": "SUCCESS",
+    "sequence2": "SUCCESS",
+    "task1": "SUCCESS",
+    "task3": "SUCCESS",
+    "task2": "SUCCESS",
+    "task4": "SUCCESS"
+   }
+  },
+  "execution_id": "11hJAyXApPyl5h1SZejLRx",
   "sub_executions": 0
  },
  {
@@ -1771,7 +3771,25 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/ParallelTest.java:67 parallelFailWithFlowable() (@ExecuteFlow, no inputs)",
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2N6HAjz9WH34yuiyyHdzjO",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 5,
+   "task_ids": [
+    "parallel",
+    "if-1",
+    "if-2",
+    "sleep",
+    "fail_missing_variable"
+   ],
+   "task_states": {
+    "parallel": "FAILED",
+    "if-1": "FAILED",
+    "if-2": "FAILED",
+    "sleep": "FAILED",
+    "fail_missing_variable": "FAILED"
+   }
+  },
+  "execution_id": "5m3fCJfn87KZihstCIKzhI",
   "sub_executions": 0
  },
  {
@@ -1783,7 +3801,37 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "iUc0gj6eXCO6ef4kq6Ahz",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 11,
+   "task_ids": [
+    "1_par",
+    "1-1",
+    "1-2",
+    "1-3_par",
+    "1-4_end",
+    "1-3-1",
+    "1-3-2_par",
+    "1-3-3_end",
+    "1-3-2-1",
+    "1-3-2-2_end",
+    "2_end"
+   ],
+   "task_states": {
+    "1_par": "SUCCESS",
+    "1-1": "SUCCESS",
+    "1-2": "SUCCESS",
+    "1-3_par": "SUCCESS",
+    "1-4_end": "SUCCESS",
+    "1-3-1": "SUCCESS",
+    "1-3-2_par": "SUCCESS",
+    "1-3-3_end": "SUCCESS",
+    "1-3-2-1": "SUCCESS",
+    "1-3-2-2_end": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "zxemKOt7YStkz0PtoR5KA",
   "sub_executions": 0
  },
  {
@@ -1795,7 +3843,31 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "37T1QR5yIbH4Inr3GZNgrQ",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 8,
+   "task_ids": [
+    "parent",
+    "t1",
+    "t2",
+    "t3",
+    "t4",
+    "t5",
+    "t6",
+    "last"
+   ],
+   "task_states": {
+    "parent": "SUCCESS",
+    "t1": "SUCCESS",
+    "t2": "SUCCESS",
+    "t3": "SUCCESS",
+    "t4": "SUCCESS",
+    "t5": "SUCCESS",
+    "t6": "SUCCESS",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "7lwwHbtlc4lIxtPpP95kuT",
   "sub_executions": 0
  },
  {
@@ -1831,7 +3903,17 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "vkIE2Coi2UMHugypquvU9",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "pause"
+   ],
+   "task_states": {
+    "pause": "FAILED"
+   }
+  },
+  "execution_id": "3SDB6QD1x2DWd198XwU5BK",
   "sub_executions": 0
  },
  {
@@ -1843,7 +3925,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2rz2g2LIayYwdaVU5rotm7",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "last"
+   ],
+   "task_states": {
+    "pause": "SUCCESS",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "7TeFRERtv3xJDOYjKc5r0l",
   "sub_executions": 0
  },
  {
@@ -1857,7 +3951,19 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:206 runDurationFromInput() (passes null inputs; the DURATION default PT1S applies)",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2BqGNJTfuN3WNI8ArK7rJi",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "last"
+   ],
+   "task_states": {
+    "pause": "SUCCESS",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "438Q3BOGXgfMys4n96NtPI",
   "sub_executions": 0
  },
  {
@@ -1869,7 +3975,23 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "Xx3pK8eukYeP4unRs5vAG",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 4,
+   "task_ids": [
+    "pause",
+    "logError",
+    "logFinally",
+    "logAfter"
+   ],
+   "task_states": {
+    "pause": "FAILED",
+    "logError": "SUCCESS",
+    "logFinally": "SUCCESS",
+    "logAfter": "SUCCESS"
+   }
+  },
+  "execution_id": "6yapLdXwDd7rkihX8JfzSW",
   "sub_executions": 0
  },
  {
@@ -1881,7 +4003,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "43NFDmmqSig2i8qdPW8z0g",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "last"
+   ],
+   "task_states": {
+    "pause": "SUCCESS",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "24A16agyO8FMxGUQYZXI2i",
   "sub_executions": 0
  },
  {
@@ -1892,8 +4026,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3vLIA8WINLwVVC0RBRBY48)",
-  "execution_id": "3vLIA8WINLwVVC0RBRBY48",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1ZW5lGvK2ScBLgZUIvtSAf)",
+  "execution_id": "1ZW5lGvK2ScBLgZUIvtSAf",
   "sub_executions": 0
  },
  {
@@ -1905,7 +4039,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "WARNING",
-  "execution_id": "1pXWGvPmdInli6rN7xG7zW",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "last"
+   ],
+   "task_states": {
+    "pause": "WARNING",
+    "last": "SUCCESS"
+   }
+  },
+  "execution_id": "2380ek5P5yke30G16ou5sp",
   "sub_executions": 0
  },
  {
@@ -1917,7 +4063,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5cXTsgRN0fYyD29rImuqzS",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "pause"
+   ],
+   "task_states": {
+    "pause": "FAILED"
+   }
+  },
+  "execution_id": "159gb6PYfH7TNqQFI420GU",
   "sub_executions": 0
  },
  {
@@ -1928,8 +4084,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7izgNCzkw7PzvXQpASihbT)",
-  "execution_id": "7izgNCzkw7PzvXQpASihbT",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7GFH6PEaV1GhYMCA54He7e)",
+  "execution_id": "7GFH6PEaV1GhYMCA54He7e",
   "sub_executions": 0
  },
  {
@@ -1941,7 +4097,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7OoYcZ5jwx9PQ7mmgzoX0x",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "pause",
+    "hello"
+   ],
+   "task_states": {
+    "pause": "SUCCESS",
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "1wxRbWIkhv1p3jUKsfO8YI",
   "sub_executions": 0
  },
  {
@@ -1952,8 +4120,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3BRoPbbrWR9KLoeWjz2PH6)",
-  "execution_id": "3BRoPbbrWR9KLoeWjz2PH6",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution oCoOH05fB3UfywkcB6O1L)",
+  "execution_id": "oCoOH05fB3UfywkcB6O1L",
   "sub_executions": 0
  },
  {
@@ -1964,8 +4132,46 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution WlgOJjXtqTv49U9FEKXVO)",
-  "execution_id": "WlgOJjXtqTv49U9FEKXVO",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7IpclqIhSItQg9cUGao1X)",
+  "execution_id": "7IpclqIhSItQg9cUGao1X",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/primitive-labels-flow",
+  "path": "corpus/valids/primitive-labels-flow.yml",
+  "flow_id": "primitive-labels-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {
+   "intLabel": 42,
+   "boolLabel": true,
+   "floatLabel": 3.14
+  },
+  "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/RuntimeLabelsTest.java:105 primitiveTypeLabels() (floatLabel is the Java float literal 3.14f)",
+  "inputs_alternatives": [
+   {
+    "inputs": {
+     "intLabel": 42,
+     "boolLabel": true,
+     "floatLabel": 3.14
+    },
+    "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/RuntimeLabelsTest.java:148 primitiveTypeLabelsOverrideExistingLabels() -- same inputs, different execution LABELS"
+   }
+  ],
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "update-labels"
+   ],
+   "task_states": {
+    "update-labels": "SUCCESS"
+   }
+  },
+  "execution_id": "5jJIYL5KodJwcNc5zVJGHX",
   "sub_executions": 0
  },
  {
@@ -1977,7 +4183,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7TRxU4rg3v36STqycaYznK",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "purge_logs"
+   ],
+   "task_states": {
+    "purge_logs": "SUCCESS"
+   }
+  },
+  "execution_id": "3ITLfTMnikdYgy1zf1OBqs",
   "sub_executions": 0
  },
  {
@@ -1989,7 +4205,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "79vu87qg7uVg2CKzZOkqZs",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "purge_logs"
+   ],
+   "task_states": {
+    "purge_logs": "SUCCESS"
+   }
+  },
+  "execution_id": "Wv627gUWfC72yxAC0aAjJ",
   "sub_executions": 0
  },
  {
@@ -2001,7 +4227,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1SCnoAlrWKPZZvN9xVLsBp",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "purge_logs"
+   ],
+   "task_states": {
+    "purge_logs": "SUCCESS"
+   }
+  },
+  "execution_id": "2nvkeSD8zAjDKuajvTUjtD",
   "sub_executions": 0
  },
  {
@@ -2013,7 +4249,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2e9EKMXAz0JcrUfzqlyEld",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "purge_logs"
+   ],
+   "task_states": {
+    "purge_logs": "SUCCESS"
+   }
+  },
+  "execution_id": "3xZnT8tj2AIm3m4NUFxqkn",
   "sub_executions": 0
  },
  {
@@ -2025,7 +4271,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6eC1HxvHk8k1DfrE7lD8Xc",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "purge_logs"
+   ],
+   "task_states": {
+    "purge_logs": "SUCCESS"
+   }
+  },
+  "execution_id": "4R9GZN4HQpTajUBFrzpvwB",
   "sub_executions": 0
  },
  {
@@ -2041,7 +4297,17 @@
   "inputs_from": "core/src/test/java/io/kestra/core/runners/ExecutionServiceTest.java:139 restartLoop()",
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3mV9tF3uMU8pBWgzVKqxu8",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "1_each"
+   ],
+   "task_states": {
+    "1_each": "FAILED"
+   }
+  },
+  "execution_id": "2khGSLMqoEHP8Karj7yW0J",
   "sub_executions": 3
  },
  {
@@ -2053,7 +4319,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3Y8eF6FrTro0ICQDCKKFsA",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "print"
+   ],
+   "task_states": {
+    "print": "FAILED"
+   }
+  },
+  "execution_id": "PMUQOk63vu8bKGYXmPAFQ",
   "sub_executions": 0
  },
  {
@@ -2065,7 +4341,23 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2Zu7cek1GIqQqTEkSFtdfu",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 4,
+   "task_ids": [
+    "before",
+    "sequential",
+    "failing-task",
+    "error-handler"
+   ],
+   "task_states": {
+    "before": "SUCCESS",
+    "sequential": "FAILED",
+    "failing-task": "FAILED",
+    "error-handler": "SUCCESS"
+   }
+  },
+  "execution_id": "4SNtPZXhCfL4qKlnoow82X",
   "sub_executions": 0
  },
  {
@@ -2077,7 +4369,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "39ATIFbGa0d6qh63rUViOR",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "output",
+    "log"
+   ],
+   "task_states": {
+    "output": "SUCCESS",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "3tP6Thy6oDlsfi9JaXghG8",
   "sub_executions": 0
  },
  {
@@ -2089,7 +4393,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "28YM53dJTg3HkjT1uudaMU",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "helloSubflow1",
+    "failFirstTime"
+   ],
+   "task_states": {
+    "helloSubflow1": "SUCCESS",
+    "failFirstTime": "FAILED"
+   }
+  },
+  "execution_id": "3AHcAhVyogeyqZHT2pmNzy",
   "sub_executions": 0
  },
  {
@@ -2101,7 +4417,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2W50MQAt7hLnef25CAfRN7",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "loop"
+   ],
+   "task_states": {
+    "loop": "FAILED"
+   }
+  },
+  "execution_id": "72DGmfZPow7QaOH3aG3UDK",
   "sub_executions": 1
  },
  {
@@ -2113,7 +4439,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3aJeTMQHtXxCTk0B2fE4AJ",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "hello",
+    "each"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "each": "FAILED"
+   }
+  },
+  "execution_id": "6YtYW8fEJkIDJ2WCLnBbpf",
   "sub_executions": 1
  },
  {
@@ -2125,7 +4463,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "79qRVYAlCxOzDOJkRRwrVv",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "hello",
+    "callSubflow"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "callSubflow": "FAILED"
+   }
+  },
+  "execution_id": "2kGmeQGRN2kjVd6jBik4SD",
   "sub_executions": 0
  },
  {
@@ -2137,7 +4487,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5BS7d7SIoU4ttNfCHZCvp4",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "hello",
+    "fail_randomly",
+    "end"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "fail_randomly": "FAILED",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "4VxkS59G2g9msduAqoVqx5",
   "sub_executions": 0
  },
  {
@@ -2149,7 +4513,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2ZwCYxD4z2Z6AgmCtbqLR2",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "hello",
+    "fail_randomly",
+    "end"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "fail_randomly": "FAILED",
+    "end": "SUCCESS"
+   }
+  },
+  "execution_id": "7N7dilFosB51APU9wfIdTX",
   "sub_executions": 0
  },
  {
@@ -2161,7 +4539,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "jV2MqIBb64Ktd9R4nbmIO",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "failStep",
+    "errorHandler"
+   ],
+   "task_states": {
+    "failStep": "FAILED",
+    "errorHandler": "SUCCESS"
+   }
+  },
+  "execution_id": "1bnDRkJRc0t0ASwI6B7kgb",
   "sub_executions": 0
  },
  {
@@ -2173,7 +4563,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6B4rOg5G0LQLCTFi99v5ku",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "a",
+    "b",
+    "c"
+   ],
+   "task_states": {
+    "a": "SUCCESS",
+    "b": "SUCCESS",
+    "c": "FAILED"
+   }
+  },
+  "execution_id": "2Yf12J8IJud61j0WmvmcBQ",
   "sub_executions": 0
  },
  {
@@ -2185,7 +4589,25 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6rSF73udkvR3LJlDoaw1sW",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 5,
+   "task_ids": [
+    "before",
+    "sequential",
+    "close",
+    "failStep",
+    "errorHandler"
+   ],
+   "task_states": {
+    "before": "SUCCESS",
+    "sequential": "FAILED",
+    "close": "SUCCESS",
+    "failStep": "FAILED",
+    "errorHandler": "SUCCESS"
+   }
+  },
+  "execution_id": "7aaL4t5l5R2tWjQMnzTED6",
   "sub_executions": 0
  },
  {
@@ -2208,8 +4630,8 @@
   "declares_inputs": false,
   "publish_status": 200,
   "disposition": "not-standalone",
-  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3XNIEnuTjYCn2oRWweU3GL)",
-  "execution_id": "3XNIEnuTjYCn2oRWweU3GL",
+  "reason": "reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1BgqjSUVOdYnmTB2nGP9a5)",
+  "execution_id": "1BgqjSUVOdYnmTB2nGP9a5",
   "sub_executions": 0
  },
  {
@@ -2232,7 +4654,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5etFzPrSyfYliIoDNEQrcn",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "failed"
+   ],
+   "task_states": {
+    "failed": "FAILED"
+   }
+  },
+  "execution_id": "5hVwWLloPPskNCKnxb2gxa",
   "sub_executions": 0
  },
  {
@@ -2244,7 +4676,107 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1wnCAd3pjkRklgJilgGIzh",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "keepFailingWithRetry",
+    "error"
+   ],
+   "task_states": {
+    "keepFailingWithRetry": "FAILED",
+    "error": "SUCCESS"
+   }
+  },
+  "execution_id": "6nf5a3MGHnCIY4C9tmDbz6",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-failed-flow-attempts",
+  "path": "corpus/valids/retry-failed-flow-attempts.yml",
+  "flow_id": "retry-failed-flow-attempts",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "5Hcr8KuifJnvv3BuWyIDhV",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-failed-flow-duration",
+  "path": "corpus/valids/retry-failed-flow-duration.yml",
+  "flow_id": "retry-failed-flow-duration",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "5yaJpTGdWsWucbpPsujOPf",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-failed-task-attempts",
+  "path": "corpus/valids/retry-failed-task-attempts.yml",
+  "flow_id": "retry-failed-task-attempts",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "63R58dJZ6j5kGdaxXz4SfW",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-failed-task-duration",
+  "path": "corpus/valids/retry-failed-task-duration.yml",
+  "flow_id": "retry-failed-task-duration",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "7hgeS4ZjleS4Zr1snpdRJl",
   "sub_executions": 0
  },
  {
@@ -2256,7 +4788,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3ocHuptLLXBtjCiY7bFrcv",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "failed",
+    "t2"
+   ],
+   "task_states": {
+    "failed": "FAILED",
+    "t2": "SUCCESS"
+   }
+  },
+  "execution_id": "4y1ibNyymKM8ORpd6ICtVl",
   "sub_executions": 0
  },
  {
@@ -2268,7 +4812,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5D0csFk8nUmM0haPj59VCs",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "flowable",
+    "child"
+   ],
+   "task_states": {
+    "flowable": "FAILED",
+    "child": "FAILED"
+   }
+  },
+  "execution_id": "69T1tGLlYpGyNnQVsdghdY",
   "sub_executions": 0
  },
  {
@@ -2280,7 +4836,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4hfugJAWOUNOa92mVuVNjo",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "flowable",
+    "flowable2",
+    "child"
+   ],
+   "task_states": {
+    "flowable": "FAILED",
+    "flowable2": "FAILED",
+    "child": "FAILED"
+   }
+  },
+  "execution_id": "4ryEcpo8LVkmmjclhUllC4",
   "sub_executions": 0
  },
  {
@@ -2292,7 +4862,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1RxIvBwBj7mKHQNox95I6Q",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "flowable"
+   ],
+   "task_states": {
+    "flowable": "FAILED"
+   }
+  },
+  "execution_id": "4bRzoQGXbWLYCFIAr8dOWe",
   "sub_executions": 2
  },
  {
@@ -2304,7 +4884,107 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4bu95in63B7aBmvzUppQyt",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "flowable",
+    "child"
+   ],
+   "task_states": {
+    "flowable": "FAILED",
+    "child": "FAILED"
+   }
+  },
+  "execution_id": "6GCYHNZChYDDVLrfgzAMLT",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-new-execution-flow-attempts",
+  "path": "corpus/valids/retry-new-execution-flow-attempts.yml",
+  "flow_id": "retry-new-execution-flow-attempts",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "RETRIED",
+  "observed": {
+   "state": "RETRIED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "RETRIED"
+   }
+  },
+  "execution_id": "dyth7VuvVeo3n9b8MxdO7",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-new-execution-flow-duration",
+  "path": "corpus/valids/retry-new-execution-flow-duration.yml",
+  "flow_id": "retry-new-execution-flow-duration",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "RETRIED",
+  "observed": {
+   "state": "RETRIED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "RETRIED"
+   }
+  },
+  "execution_id": "2TasB2bGPh900e7XqLeMhq",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-new-execution-task-attempts",
+  "path": "corpus/valids/retry-new-execution-task-attempts.yml",
+  "flow_id": "retry-new-execution-task-attempts",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "RETRIED",
+  "observed": {
+   "state": "RETRIED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "RETRIED"
+   }
+  },
+  "execution_id": "7e8YBON6nsMtznlceozZkm",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/retry-new-execution-task-duration",
+  "path": "corpus/valids/retry-new-execution-task-duration.yml",
+  "flow_id": "retry-new-execution-task-duration",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "RETRIED",
+  "observed": {
+   "state": "RETRIED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "RETRIED"
+   }
+  },
+  "execution_id": "13FcI5O8Fg6FSqmW79WV8L",
   "sub_executions": 0
  },
  {
@@ -2316,7 +4996,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3bczZ8gyykxtuwBpUfgCPD",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "failed"
+   ],
+   "task_states": {
+    "failed": "FAILED"
+   }
+  },
+  "execution_id": "7OqSpTXukZB8ZGlUIsREln",
   "sub_executions": 0
  },
  {
@@ -2328,7 +5018,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1vVAWvpEcug3uHW0oZ75ON",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "4eivpYrBk3zeuQAOYYGAtr",
   "sub_executions": 0
  },
  {
@@ -2340,7 +5040,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3DyqAo79cxwNFiXYTa6yR0",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "not-retry-and-no-warning"
+   ],
+   "task_states": {
+    "not-retry-and-no-warning": "SUCCESS"
+   }
+  },
+  "execution_id": "17Jq6xFerSC50zJRRo5QUm",
   "sub_executions": 0
  },
  {
@@ -2352,7 +5062,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "WARNING",
-  "execution_id": "5ehlcolEIdhSeYSgNxqbu3",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 1,
+   "task_ids": [
+    "failed"
+   ],
+   "task_states": {
+    "failed": "WARNING"
+   }
+  },
+  "execution_id": "1Z8Tx93tBLP43tbbCv4cjw",
   "sub_executions": 0
  },
  {
@@ -2364,7 +5084,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6L5FXsaBMvcwu5aiV3AIqC",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "set_kv",
+    "retry_block",
+    "run_script"
+   ],
+   "task_states": {
+    "set_kv": "SUCCESS",
+    "retry_block": "SUCCESS",
+    "run_script": "SUCCESS"
+   }
+  },
+  "execution_id": "3JMefH6qIN0WXx5TxCf1cB",
   "sub_executions": 0
  },
  {
@@ -2376,7 +5110,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "La4dnMbDrp4amD4p89IQc",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "date",
+    "task-id",
+    "flow-id"
+   ],
+   "task_states": {
+    "date": "SUCCESS",
+    "task-id": "SUCCESS",
+    "flow-id": "SUCCESS"
+   }
+  },
+  "execution_id": "2fmHApjD3y7Y8t6kAQU8GU",
   "sub_executions": 0
  },
  {
@@ -2388,7 +5136,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5KlR7iaRrRrC0WLo0DOZyp",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "log"
+   ],
+   "task_states": {
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "7WbvVY7VRxAcPjw6IckMpu",
   "sub_executions": 0
  },
  {
@@ -2424,7 +5182,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1sVb4M8eAcGFPZw6Z9aWis",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "get-secret"
+   ],
+   "task_states": {
+    "get-secret": "FAILED"
+   }
+  },
+  "execution_id": "2GuE4ndGeR9Xq9oJUVb4Sk",
   "sub_executions": 0
  },
  {
@@ -2436,7 +5204,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4fVeGwDhH0rLaAqBmYuKAq",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "seq",
+    "sleep"
+   ],
+   "task_states": {
+    "seq": "SUCCESS",
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "b6VHz9CSqk4d2pTSmAs45",
   "sub_executions": 0
  },
  {
@@ -2448,7 +5228,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5neeM6xeeyuWjJLxLfJARp",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "Sequential",
+    "log"
+   ],
+   "task_states": {
+    "Sequential": "SUCCESS",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "7JYSz2eqCZYlWOfaMCnQ6Q",
   "sub_executions": 0
  },
  {
@@ -2460,7 +5252,27 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "53yjee5uVT8wn2qNyWXkk2",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 6,
+   "task_ids": [
+    "parent-seq",
+    "t1",
+    "t2_seq",
+    "t2-t1",
+    "error-t1",
+    "error-t2"
+   ],
+   "task_states": {
+    "parent-seq": "FAILED",
+    "t1": "SUCCESS",
+    "t2_seq": "FAILED",
+    "t2-t1": "FAILED",
+    "error-t1": "SUCCESS",
+    "error-t2": "SUCCESS"
+   }
+  },
+  "execution_id": "6D3Rbsll8F74dTDyH64pRd",
   "sub_executions": 0
  },
  {
@@ -2472,7 +5284,27 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "47beQ7qxVsSYqHCl7w8izJ",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 6,
+   "task_ids": [
+    "parent-seq",
+    "t1",
+    "t2_seq",
+    "t2-t1",
+    "error-t1",
+    "error-t2"
+   ],
+   "task_states": {
+    "parent-seq": "FAILED",
+    "t1": "SUCCESS",
+    "t2_seq": "FAILED",
+    "t2-t1": "FAILED",
+    "error-t1": "SUCCESS",
+    "error-t2": "SUCCESS"
+   }
+  },
+  "execution_id": "57WRQmaUBQ69rsY8G0zEHh",
   "sub_executions": 0
  },
  {
@@ -2484,7 +5316,37 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "oYj4CmBN1woGxGYCixLe5",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 11,
+   "task_ids": [
+    "1-seq",
+    "1-1",
+    "1-2",
+    "1-3_seq",
+    "1-3-1",
+    "1-3-2_seq",
+    "1-3-2-1",
+    "1-3-2-2_end",
+    "1-3-3_end",
+    "1-4_end",
+    "2_end"
+   ],
+   "task_states": {
+    "1-seq": "SUCCESS",
+    "1-1": "SUCCESS",
+    "1-2": "SUCCESS",
+    "1-3_seq": "SUCCESS",
+    "1-3-1": "SUCCESS",
+    "1-3-2_seq": "SUCCESS",
+    "1-3-2-1": "SUCCESS",
+    "1-3-2-2_end": "SUCCESS",
+    "1-3-3_end": "SUCCESS",
+    "1-4_end": "SUCCESS",
+    "2_end": "SUCCESS"
+   }
+  },
+  "execution_id": "1tOA83TjRJBsErtypeFUA7",
   "sub_executions": 0
  },
  {
@@ -2496,7 +5358,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5t2rAuSxCBTR43STSV5KYG",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "set-vars"
+   ],
+   "task_states": {
+    "set-vars": "FAILED"
+   }
+  },
+  "execution_id": "5eKyduH6S9giQQaJ8JKd1i",
   "sub_executions": 0
  },
  {
@@ -2508,7 +5380,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1AYUHd3GGcDOCE1EaGtSNZ",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "set-vars",
+    "output"
+   ],
+   "task_states": {
+    "set-vars": "SUCCESS",
+    "output": "SUCCESS"
+   }
+  },
+  "execution_id": "lLHz67Fky37gQ4EO9p9N0",
   "sub_executions": 0
  },
  {
@@ -2536,7 +5420,13 @@
   ],
   "disposition": "runs",
   "reason": "CANCELLED",
-  "execution_id": "sBAMovKVp1pxxQ8x3NxKP",
+  "observed": {
+   "state": "CANCELLED",
+   "taskruns": 0,
+   "task_ids": [],
+   "task_states": {}
+  },
+  "execution_id": "5wb4lOvbgjtMxcEtYxhT78",
   "sub_executions": 0
  },
  {
@@ -2548,7 +5438,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3sp4MbTDzyHwRLd77Mhm9B",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "KILLED"
+   }
+  },
+  "execution_id": "2ngOyt8IfQ2PWg2KX2fd50",
   "sub_executions": 0
  },
  {
@@ -2560,7 +5460,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1lAiL7kEOHGgCSgmN8qX5N",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "7WcSyCWqEaq0zkEIcnTwbs",
   "sub_executions": 0
  },
  {
@@ -2572,7 +5482,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4sUC4bflYnmbgpn3tsHaL",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "5dvqjEHou1GXlCnLOaxTwg",
   "sub_executions": 0
  },
  {
@@ -2584,7 +5504,101 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3MpbV2Ez9pUXGnqP0maExt",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "KILLED"
+   }
+  },
+  "execution_id": "mjbyEakYhOUhPHsrYFrn8",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sleep-long-after-execution-flowable",
+  "path": "corpus/valids/sleep-long-after-execution-flowable.yml",
+  "flow_id": "sleep-long-after-execution-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "sleep-long",
+    "after-if",
+    "after-if-log"
+   ],
+   "task_states": {
+    "sleep-long": "SUCCESS",
+    "after-if": "RUNNING",
+    "after-if-log": "SUBMITTED"
+   }
+  },
+  "execution_id": "5ncfrGPMNRsGzL3Ol8T0Xx",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sleep-long",
+  "path": "corpus/valids/sleep-long.yml",
+  "flow_id": "sleep-long",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "sleep-long",
+    "output"
+   ],
+   "task_states": {
+    "sleep-long": "SUCCESS",
+    "output": "SUCCESS"
+   }
+  },
+  "execution_id": "1E4mbw53GGPYXbSHV58m0Y",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sleep-short",
+  "path": "corpus/valids/sleep-short.yml",
+  "flow_id": "sleep-short",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 7,
+   "task_ids": [
+    "log",
+    "sleep1",
+    "sleep2",
+    "sleep3",
+    "sleep4",
+    "sleep5",
+    "sleep6"
+   ],
+   "task_states": {
+    "log": "SUCCESS",
+    "sleep1": "SUCCESS",
+    "sleep2": "SUCCESS",
+    "sleep3": "SUCCESS",
+    "sleep4": "SUCCESS",
+    "sleep5": "SUCCESS",
+    "sleep6": "SUCCESS"
+   }
+  },
+  "execution_id": "2ArdgWvpxeuwE5XzYp17bw",
   "sub_executions": 0
  },
  {
@@ -2596,7 +5610,39 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7TRtyQm3GnIqWu6iQBRf6W",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "GCrfBat0eqBgDaAy0TfhD",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/sleep",
+  "path": "corpus/valids/sleep.yml",
+  "flow_id": "sleep",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "sleep"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS"
+   }
+  },
+  "execution_id": "1MZHcjhQU8eYbZqgxCUM43",
   "sub_executions": 0
  },
  {
@@ -2608,7 +5654,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7l9i4kHksdViZ5BdO0MZ3f",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "2Ha5qjsmtkseEUQ9xfDLO5",
   "sub_executions": 0
  },
  {
@@ -2620,7 +5676,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4fr9SCoziblDu9BsKqXQYM",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "5UTcIDVdBbxwWwQeDGhbC5",
   "sub_executions": 0
  },
  {
@@ -2642,7 +5708,17 @@
   ],
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3nZV73ujK149Gc0KL1L1e3",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "6ad05yFfpZS2UFrFSV6RRd",
   "sub_executions": 0
  },
  {
@@ -2654,7 +5730,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6TUgmJ0LAXwGwNeWoVstOC",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "fail"
+   ],
+   "task_states": {
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "492zsrGEHmqd47zQ8Y1YX1",
   "sub_executions": 0
  },
  {
@@ -2702,7 +5788,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2pVjzqOlmVUDlXe8AYu2Lm",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "firstLevel"
+   ],
+   "task_states": {
+    "firstLevel": "SUCCESS"
+   }
+  },
+  "execution_id": "z3bEOBKzwelOvbLbV73Fm",
   "sub_executions": 0
  },
  {
@@ -2714,7 +5810,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5ZLvRj4kOyQOiyG5yB1AM6",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return"
+   ],
+   "task_states": {
+    "return": "SUCCESS"
+   }
+  },
+  "execution_id": "U9AhqZStOl7ii3hDlxUEf",
   "sub_executions": 0
  },
  {
@@ -2726,7 +5832,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "1voYwqtSKN7rX06gSVUDGi",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "launch"
+   ],
+   "task_states": {
+    "launch": "SUCCESS"
+   }
+  },
+  "execution_id": "7dTur2zVknDnWXEaiYiGOZ",
   "sub_executions": 0
  },
  {
@@ -2754,7 +5870,17 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SubflowRunnerTest.java:155 shouldPassNullableInputFromParentToSubflow()",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4eFecc9wZeN8O8VggDbzMs",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "SUCCESS"
+   }
+  },
+  "execution_id": "5m31yGBsg2n4IdOhsYetdG",
   "sub_executions": 0
  },
  {
@@ -2766,7 +5892,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "58YvuZBC1rjBQtktMJzcny",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "SUCCESS"
+   }
+  },
+  "execution_id": "3V09K7JT0S84D7F9htJLeH",
   "sub_executions": 0
  },
  {
@@ -2778,7 +5914,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4DnJqTb5Gq805aZSiIFppD",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "7AoyInILEo6Zahkd4rJg3x",
   "sub_executions": 0
  },
  {
@@ -2790,7 +5936,25 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6GfkMX6O65xgDqFjeRfyel",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 5,
+   "task_ids": [
+    "parallel",
+    "seq1",
+    "seq2",
+    "subflow1",
+    "subflow2"
+   ],
+   "task_states": {
+    "parallel": "FAILED",
+    "seq1": "FAILED",
+    "seq2": "FAILED",
+    "subflow1": "FAILED",
+    "subflow2": "FAILED"
+   }
+  },
+  "execution_id": "49BWM2jwfBGcug1hicPw4y",
   "sub_executions": 0
  },
  {
@@ -2802,7 +5966,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6RwWIXd45grgZOvPl3Ny1L",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "SUCCESS"
+   }
+  },
+  "execution_id": "RBH0lF2RpzBRaOrh0n9fe",
   "sub_executions": 0
  },
  {
@@ -2814,7 +5988,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2ylF3ISllfAs3mhJXRXGuc",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "516Asb5rkYCOY0pnPVphRe",
   "sub_executions": 0
  },
  {
@@ -2826,7 +6010,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4EzJxuiFOU2CCSW8zE31x3",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "subflow"
+   ],
+   "task_states": {
+    "subflow": "FAILED"
+   }
+  },
+  "execution_id": "7R05AJU90fhKpnpJnRzhDN",
   "sub_executions": 0
  },
  {
@@ -2854,7 +6048,17 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:108 switchImpossible()",
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "38LIwszA8gEMqQUXVBExYq",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "impossible"
+   ],
+   "task_states": {
+    "impossible": "FAILED"
+   }
+  },
+  "execution_id": "3minRqjnGZx9nVzZeHFBge",
   "sub_executions": 0
  },
  {
@@ -2866,7 +6070,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "44uqNBaAvJtnUumCBBgpx6",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "iterate_and_check_name"
+   ],
+   "task_states": {
+    "iterate_and_check_name": "SUCCESS"
+   }
+  },
+  "execution_id": "1qdxxCQHEZhAzqz5aSzTjv",
   "sub_executions": 2
  },
  {
@@ -2902,7 +6116,167 @@
   ],
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "2nzI4oMqJ7YOZJY90YLfhP",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "parent-seq",
+    "t1"
+   ],
+   "task_states": {
+    "parent-seq": "SUCCESS",
+    "t1": "SUCCESS"
+   }
+  },
+  "execution_id": "2uk0PT60UyWKRSr3cVD9EQ",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-failure-executable-flow",
+  "path": "corpus/valids/task-allow-failure-executable-flow.yml",
+  "flow_id": "task-allow-failure-executable-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 2,
+   "task_ids": [
+    "fail",
+    "log"
+   ],
+   "task_states": {
+    "fail": "WARNING",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "3gPNq4bDHGyY4Ps4KHNlBC",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-failure-flowable",
+  "path": "corpus/valids/task-allow-failure-flowable.yml",
+  "flow_id": "task-allow-failure-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 3,
+   "task_ids": [
+    "seq",
+    "fail",
+    "log-allowed"
+   ],
+   "task_states": {
+    "seq": "WARNING",
+    "fail": "FAILED",
+    "log-allowed": "SUCCESS"
+   }
+  },
+  "execution_id": "o9gqf81wiiWFESleQA6Mh",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-failure-runnable",
+  "path": "corpus/valids/task-allow-failure-runnable.yml",
+  "flow_id": "task-allow-failure-runnable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "WARNING",
+  "observed": {
+   "state": "WARNING",
+   "taskruns": 2,
+   "task_ids": [
+    "fail",
+    "log"
+   ],
+   "task_states": {
+    "fail": "WARNING",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "3SX7CGK8E1QtRYD1WOpYhu",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-warning-executable-flow",
+  "path": "corpus/valids/task-allow-warning-executable-flow.yml",
+  "flow_id": "task-allow-warning-executable-flow",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "fail",
+    "log"
+   ],
+   "task_states": {
+    "fail": "SUCCESS",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "Vj7ugNqxByQlEjDSO2qOg",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-warning-flowable",
+  "path": "corpus/valids/task-allow-warning-flowable.yml",
+  "flow_id": "task-allow-warning-flowable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "seq",
+    "fail",
+    "log-allowed"
+   ],
+   "task_states": {
+    "seq": "SUCCESS",
+    "fail": "FAILED",
+    "log-allowed": "SUCCESS"
+   }
+  },
+  "execution_id": "1AiDKH612SNtxjCuYCVpLk",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-allow-warning-runnable",
+  "path": "corpus/valids/task-allow-warning-runnable.yml",
+  "flow_id": "task-allow-warning-runnable",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "fail",
+    "log"
+   ],
+   "task_states": {
+    "fail": "SUCCESS",
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "40A3z44erc3TCY2kMV7101",
   "sub_executions": 0
  },
  {
@@ -2930,7 +6304,17 @@
   "inputs_from": "core/src/test/java/io/kestra/plugin/core/flow/FlowCaseTest.java:44 run() via noLabels()",
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7Q0NAECge8v2NHlzAUsLV3",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "launch"
+   ],
+   "task_states": {
+    "launch": "SUCCESS"
+   }
+  },
+  "execution_id": "59HOfmF2qOXjC6P6XoLe7B",
   "sub_executions": 0
  },
  {
@@ -2954,7 +6338,133 @@
   ],
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3nZAkxYSHobn8vLFQnjW9",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "launch"
+   ],
+   "task_states": {
+    "launch": "FAILED"
+   }
+  },
+  "execution_id": "RequuHRK2MlIBmZWyDN3M",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-runif-executionupdating",
+  "path": "corpus/valids/task-runif-executionupdating.yml",
+  "flow_id": "task-runif-executionupdating",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 5,
+   "task_ids": [
+    "output",
+    "unsetVariables",
+    "setVariables",
+    "skipSetVariables",
+    "skipUnsetVariables"
+   ],
+   "task_states": {
+    "output": "SUCCESS",
+    "unsetVariables": "SUCCESS",
+    "setVariables": "SUCCESS",
+    "skipSetVariables": "SKIPPED",
+    "skipUnsetVariables": "SKIPPED"
+   }
+  },
+  "execution_id": "4I8qe5LYVpN4LiGMQNNipq",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-runif-taskswithstate",
+  "path": "corpus/valids/task-runif-taskswithstate.yml",
+  "flow_id": "task-runif-taskswithstate",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 4,
+   "task_ids": [
+    "hello",
+    "will_fail",
+    "write_execution_context",
+    "skipped_when_failures_exist"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "will_fail": "FAILED",
+    "write_execution_context": "SUCCESS",
+    "skipped_when_failures_exist": "SKIPPED"
+   }
+  },
+  "execution_id": "1yA09Z8xBd1xqvkcFBvJFc",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-runif-workingdirectory",
+  "path": "corpus/valids/task-runif-workingdirectory.yml",
+  "flow_id": "task-runif-workingdirectory",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": true,
+  "publish_status": 200,
+  "inputs": {},
+  "inputs_from": "core/src/test/java/io/kestra/core/runners/TaskWithRunIfTest.java:31 runIfWorkingDirectory() (@ExecuteFlow, no inputs; the MULTISELECT default [\"orders\"] applies)",
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "fileSystem",
+    "log_orders",
+    "log_test"
+   ],
+   "task_states": {
+    "fileSystem": "SUCCESS",
+    "log_orders": "SUCCESS",
+    "log_test": "SKIPPED"
+   }
+  },
+  "execution_id": "3ZXWYZGeSeBEerdsGt26OV",
+  "sub_executions": 0
+ },
+ {
+  "id": "valids/task-runif",
+  "path": "corpus/valids/task-runif.yml",
+  "flow_id": "task-runif",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 5,
+   "task_ids": [
+    "output",
+    "executed",
+    "notexecuted",
+    "notexecutedflowable",
+    "willfailedtheflow"
+   ],
+   "task_states": {
+    "output": "SUCCESS",
+    "executed": "SUCCESS",
+    "notexecuted": "SKIPPED",
+    "notexecutedflowable": "SKIPPED",
+    "willfailedtheflow": "FAILED"
+   }
+  },
+  "execution_id": "2Da5TWzY6zaEWYeNe8Fb5s",
   "sub_executions": 0
  },
  {
@@ -2990,7 +6500,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2GMcxx9WgVjSotgyRlgo5o",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "only-no-input"
+   ],
+   "task_states": {
+    "only-no-input": "FAILED"
+   }
+  },
+  "execution_id": "1GQqBNh4M2htGAxs3TblMh",
   "sub_executions": 0
  },
  {
@@ -3002,7 +6522,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5UZt5uBCHWG2MoiTMmYEYZ",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "FAILED"
+   }
+  },
+  "execution_id": "4p1IHIl7ZBl69QGeEFvbgt",
   "sub_executions": 0
  },
  {
@@ -3014,7 +6544,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "5DRoDBbfBAPafzTeaTXL8b",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "FAILED"
+   }
+  },
+  "execution_id": "6qZ1YWlqWWCG6pkUS5jb4n",
   "sub_executions": 0
  },
  {
@@ -3038,7 +6578,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "ZwETzZSt5yW2esSuyHFvL",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "sleep",
+    "log",
+    "sleep_2"
+   ],
+   "task_states": {
+    "sleep": "SUCCESS",
+    "log": "SUCCESS",
+    "sleep_2": "SUCCESS"
+   }
+  },
+  "execution_id": "2PnzysLxbGrsDmWmclshTw",
   "sub_executions": 0
  },
  {
@@ -3050,7 +6604,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "4aZDKHzjIaFdjsnEyoRHKi",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "hello",
+    "pause",
+    "hello_again"
+   ],
+   "task_states": {
+    "hello": "SUCCESS",
+    "pause": "SUCCESS",
+    "hello_again": "SUCCESS"
+   }
+  },
+  "execution_id": "3trIzpBgljckmBKxjlcHpM",
   "sub_executions": 0
  },
  {
@@ -3062,7 +6630,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6dVSwGX2UXH2M8T7xxZNUR",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "only"
+   ],
+   "task_states": {
+    "only": "SUCCESS"
+   }
+  },
+  "execution_id": "4euIBkZkLLiafJUICODxtr",
   "sub_executions": 0
  },
  {
@@ -3074,7 +6652,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "21746VU1wBGmJeWWCBRSSs",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "set-vars",
+    "unset-variables",
+    "output"
+   ],
+   "task_states": {
+    "set-vars": "SUCCESS",
+    "unset-variables": "SUCCESS",
+    "output": "SUCCESS"
+   }
+  },
+  "execution_id": "4EO4KfAkW3gZjHnaDlzAcM",
   "sub_executions": 0
  },
  {
@@ -3086,7 +6678,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "60uR02GJI9C3F0p2CQGjvV",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "date",
+    "parent-seq"
+   ],
+   "task_states": {
+    "date": "SUCCESS",
+    "parent-seq": "FAILED"
+   }
+  },
+  "execution_id": "WjCdYXMJ8RoBDbbTWUI3a",
   "sub_executions": 0
  },
  {
@@ -3098,7 +6702,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4iuhnPGs0HnrvVLZwWoWnA",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "variable",
+    "env"
+   ],
+   "task_states": {
+    "variable": "SUCCESS",
+    "env": "FAILED"
+   }
+  },
+  "execution_id": "7lX6wZjuT5OmCds21l7FIo",
   "sub_executions": 0
  },
  {
@@ -3110,7 +6726,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "6HAuBCqiHUqy4aqTK3ihCk",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "loop",
+    "allow_failure",
+    "check_migration_task"
+   ],
+   "task_states": {
+    "loop": "FAILED",
+    "allow_failure": "WARNING",
+    "check_migration_task": "SUCCESS"
+   }
+  },
+  "execution_id": "7eDdgrbSVyiXgpxvRpKZpF",
   "sub_executions": 0
  },
  {
@@ -3122,7 +6752,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "7dtmnO4hMjeawD3WtGwxW3",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "waitfor",
+    "output_values"
+   ],
+   "task_states": {
+    "waitfor": "FAILED",
+    "output_values": "SUCCESS"
+   }
+  },
+  "execution_id": "4iL0SsoU2hYtMQIu9e1FCp",
   "sub_executions": 0
  },
  {
@@ -3134,7 +6776,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1Bt2PjyxoLGTRc9fWvMsjr",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "waitfor",
+    "output_values"
+   ],
+   "task_states": {
+    "waitfor": "FAILED",
+    "output_values": "SUCCESS"
+   }
+  },
+  "execution_id": "1SERYCuFcOGboQCuaDypPN",
   "sub_executions": 0
  },
  {
@@ -3146,7 +6800,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1uXgaTP0kFln7BCDgecrUm",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 3,
+   "task_ids": [
+    "waitfor",
+    "output_values",
+    "fail"
+   ],
+   "task_states": {
+    "waitfor": "FAILED",
+    "output_values": "SUCCESS",
+    "fail": "FAILED"
+   }
+  },
+  "execution_id": "5SzTK066a5BN344W9hSnNd",
   "sub_executions": 0
  },
  {
@@ -3158,7 +6826,21 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "6JlJZFTMKN3w18hzlERt7y",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 3,
+   "task_ids": [
+    "waitfor",
+    "echo",
+    "output_values"
+   ],
+   "task_states": {
+    "waitfor": "SUCCESS",
+    "echo": "SUCCESS",
+    "output_values": "SUCCESS"
+   }
+  },
+  "execution_id": "44jXRXrZCFYN7r5Wzrg4KN",
   "sub_executions": 0
  },
  {
@@ -3170,7 +6852,29 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "MdqFOrGkCbbKVRRCkbvnj",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 7,
+   "task_ids": [
+    "loop_1",
+    "loop_1_return",
+    "loop_2",
+    "loop_2_return",
+    "loop_3",
+    "loop_3_return",
+    "loop_3_log"
+   ],
+   "task_states": {
+    "loop_1": "SUCCESS",
+    "loop_1_return": "SUCCESS",
+    "loop_2": "SUCCESS",
+    "loop_2_return": "SUCCESS",
+    "loop_3": "SUCCESS",
+    "loop_3_return": "SUCCESS",
+    "loop_3_log": "SUCCESS"
+   }
+  },
+  "execution_id": "6j0ROdpxssc3UCb8eHKGK6",
   "sub_executions": 0
  },
  {
@@ -3182,7 +6886,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3oACiWv6JNF2TVG3T92cNg",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "waitfor",
+    "output_values"
+   ],
+   "task_states": {
+    "waitfor": "SUCCESS",
+    "output_values": "SUCCESS"
+   }
+  },
+  "execution_id": "5y2xu3Ck5NxFNs7TyHEOcH",
   "sub_executions": 0
  },
  {
@@ -3194,7 +6910,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7Jnn8scOPDzd9Lr44VlkRF",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "waitfor",
+    "output_values"
+   ],
+   "task_states": {
+    "waitfor": "SUCCESS",
+    "output_values": "SUCCESS"
+   }
+  },
+  "execution_id": "uGDm3dtT9YGYpjn89Rx1e",
   "sub_executions": 0
  },
  {
@@ -3206,7 +6934,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "14P4yP9sRfWDfo5KU2W5nk",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return_value"
+   ],
+   "task_states": {
+    "return_value": "SUCCESS"
+   }
+  },
+  "execution_id": "1f4RpPA8YJc30rJBeuhAhm",
   "sub_executions": 0
  },
  {
@@ -3218,7 +6956,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "2caYQNyToYxjWgehwqJGRW",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "2oH3DQhTbGSRWPuXJnU7r8",
   "sub_executions": 0
  },
  {
@@ -3230,7 +6978,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "3SvYC91aNXkHdlFEZ8mt2i",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "1mcrPlEQXQozCAJgaJUpHY",
   "sub_executions": 0
  },
  {
@@ -3254,7 +7012,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4HCTfAWL6hJ5MgYtciAWeY",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "199Ppy1ITX6oh4bYnXRoBb",
   "sub_executions": 0
  },
  {
@@ -3266,7 +7034,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "RUM79tm4sdXYkRn4APoJp",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 2,
+   "task_ids": [
+    "out",
+    "second"
+   ],
+   "task_states": {
+    "out": "SUCCESS",
+    "second": "SUCCESS"
+   }
+  },
+  "execution_id": "43tzK17wID2zLDKB96DOqx",
   "sub_executions": 0
  },
  {
@@ -3278,7 +7058,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "5cgUzz5GA8jhTcCaN9xoU8",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "return_value"
+   ],
+   "task_states": {
+    "return_value": "SUCCESS"
+   }
+  },
+  "execution_id": "7aCRdCSAJslG3gbTfm6z1u",
   "sub_executions": 0
  },
  {
@@ -3290,7 +7080,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "7IMGnU6oy80mqqCTgrin1V",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "log"
+   ],
+   "task_states": {
+    "log": "SUCCESS"
+   }
+  },
+  "execution_id": "4119q0DlrUW4hZfuEMvNVY",
   "sub_executions": 0
  },
  {
@@ -3313,7 +7113,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "427MunNsAh3BfkQsOmAelg",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "log_request"
+   ],
+   "task_states": {
+    "log_request": "FAILED"
+   }
+  },
+  "execution_id": "3X8CJoBCENC3iOpaYzqDwq",
   "sub_executions": 0
  },
  {
@@ -3325,7 +7135,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "7VGgMbgUC6n0UODUieyZZ5",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "2ZofAN0T4nAkIN0o9WBph0",
   "sub_executions": 0
  },
  {
@@ -3337,7 +7157,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "35X7zyUy0BnSDjD7Dl0pG",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "6t3zoYLJgPr1f20EwEJgij",
   "sub_executions": 0
  },
  {
@@ -3349,7 +7179,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "SUCCESS",
-  "execution_id": "3jbY4j3dPmy0vZB0UwLZIm",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "hello"
+   ],
+   "task_states": {
+    "hello": "SUCCESS"
+   }
+  },
+  "execution_id": "DKGIxBKGG29GX7nUISZF3",
   "sub_executions": 0
  },
  {
@@ -3361,7 +7201,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "1zOskr3Cj8hTNCtINPDiIN",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "K1p1pjre57GbHflCTZbDN",
   "sub_executions": 0
  },
  {
@@ -3373,7 +7223,17 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4q4pKWiEWpbYRf0jDACeg8",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "out"
+   ],
+   "task_states": {
+    "out": "FAILED"
+   }
+  },
+  "execution_id": "3UR1UL5QfYfTxR0OK2tWuy",
   "sub_executions": 0
  },
  {
@@ -3388,6 +7248,28 @@
   "rejected_class": "task-type-not-in-image"
  },
  {
+  "id": "valids/working-directory-cache",
+  "path": "corpus/valids/working-directory-cache.yml",
+  "flow_id": "working-directory-cache",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-inputs",
+  "path": "corpus/valids/working-directory-inputs.yml",
+  "flow_id": "working-directory-inputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
   "id": "valids/working-directory-invalid-runif",
   "path": "corpus/valids/working-directory-invalid-runif.yaml",
   "flow_id": "working-directory-invalid-runif",
@@ -3396,7 +7278,19 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
-  "execution_id": "4TwQHvHg8dORAue7wwo6Wk",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 2,
+   "task_ids": [
+    "workingDirectory",
+    "s1"
+   ],
+   "task_states": {
+    "workingDirectory": "FAILED",
+    "s1": "SUCCESS"
+   }
+  },
+  "execution_id": "3bWWrwCzrgCEh8Lhk8da8Q",
   "sub_executions": 0
  },
  {
@@ -3431,6 +7325,83 @@
   "disposition": "rejected",
   "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Read",
   "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-outputs",
+  "path": "corpus/valids/working-directory-outputs.yml",
+  "flow_id": "working-directory-outputs",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-secret-output",
+  "path": "corpus/valids/working-directory-secret-output.yml",
+  "flow_id": "working-directory-secret-output",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-taskrun-encrypted",
+  "path": "corpus/valids/working-directory-taskrun-encrypted.yml",
+  "flow_id": "working-directory-taskrun-encrypted",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 422,
+  "disposition": "rejected",
+  "reason": "publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted",
+  "rejected_class": "task-type-not-in-image"
+ },
+ {
+  "id": "valids/working-directory-taskrun-nested",
+  "path": "corpus/valids/working-directory-taskrun-nested.yml",
+  "flow_id": "working-directory-taskrun-nested",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "parallel"
+   ],
+   "task_states": {
+    "parallel": "SUCCESS"
+   }
+  },
+  "execution_id": "4O9vqrdNbpuIaTg2J903Wf",
+  "sub_executions": 1
+ },
+ {
+  "id": "valids/working-directory-taskrun",
+  "path": "corpus/valids/working-directory-taskrun.yml",
+  "flow_id": "working-directory-taskrun",
+  "namespace": "io.kestra.tests",
+  "declares_inputs": false,
+  "publish_status": 200,
+  "disposition": "runs",
+  "reason": "SUCCESS",
+  "observed": {
+   "state": "SUCCESS",
+   "taskruns": 1,
+   "task_ids": [
+    "parallel"
+   ],
+   "task_states": {
+    "parallel": "SUCCESS"
+   }
+  },
+  "execution_id": "1Bn37QWLemwIfsW9xkAJ0H",
+  "sub_executions": 1
  },
  {
   "id": "valids/working-directory",
@@ -3583,7 +7554,7 @@
   "declares_inputs": true,
   "publish_status": 422,
   "disposition": "rejected",
-  "reason": "publish -> 422: inputs[array3]: `itemType` cannot be MULTISELECT\ninputs[multiselect3]: `itemType` cannot be MULTISELECT\ninputs[array1]: `itemType` cannot be ARRAY\ninputs[array2]: `itemType` cannot be SECRET\ninputs[multiselect1]: `itemType` cannot be ARRAY\ninputs[multiselect2]: `itemType` cannot be SECRET\ninputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI\ninputs[array4]: `itemType` cannot be SELECT\ninputs[multiselect4]: `itemType` cannot be SELECT\n",
+  "reason": "publish -> 422: inputs[multiselect3]: `itemType` cannot be MULTISELECT\ninputs[array1]: `itemType` cannot be ARRAY\ninputs[multiselect1]: `itemType` cannot be ARRAY\ninputs[array2]: `itemType` cannot be SECRET\ninputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI\ninputs[array3]: `itemType` cannot be MULTISELECT\ninputs[array4]: `itemType` cannot be SELECT\ninputs[multiselect2]: `itemType` cannot be SECRET\ninputs[multiselect4]: `itemType` cannot be SELECT\n",
   "rejected_class": "invalid-flow"
  },
  {
@@ -3601,7 +7572,7 @@
   },
   "inputs_from": "core/src/test/java/io/kestra/core/runners/InputsTest.java:479 multipleConstraintViolations()",
   "disposition": "rejected",
-  "reason": "publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`\nInvalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`",
+  "reason": "publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`\nInvalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`",
   "rejected_class": "invalid-flow",
   "sub_executions": 0
  },
@@ -3624,7 +7595,7 @@
   "declares_inputs": false,
   "publish_status": 422,
   "disposition": "rejected",
-  "reason": "publish -> 422: id: size must be between 1 and 100\ntasks[para3].tasks: The 'tasks' property cannot be empty\ntasks[para2].tasks: The 'tasks' property cannot be empty\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\nid: must not be blank\nid: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\ntasks[para4].tasks: The 'tasks' property cannot be empty\nnamespace: size must be between 1 and 150\n",
+  "reason": "publish -> 422: tasks[para3].tasks: The 'tasks' property cannot be empty\nid: size must be between 1 and 100\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\nid: must not be blank\nid: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\nnamespace: size must be between 1 and 150\ntasks[para2].tasks: The 'tasks' property cannot be empty\ntasks[para4].tasks: The 'tasks' property cannot be empty\n",
   "rejected_class": "invalid-flow"
  },
  {
@@ -3657,7 +7628,7 @@
   "declares_inputs": false,
   "publish_status": 422,
   "disposition": "rejected",
-  "reason": "publish -> 422: tasks[null].id: must not be blank\nid: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\ntasks[null].id: must not be null\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\n",
+  "reason": "publish -> 422: id: must match \"^[a-zA-Z0-9][a-zA-Z0-9._-]*\"\ntasks[null].id: must not be blank\nnamespace: must match \"^[a-z0-9][a-z0-9._-]*\"\ntasks[null].id: must not be null\n",
   "rejected_class": "invalid-flow"
  },
  {
@@ -3669,8 +7640,18 @@
   "publish_status": 200,
   "disposition": "runs",
   "reason": "FAILED",
+  "observed": {
+   "state": "FAILED",
+   "taskruns": 1,
+   "task_ids": [
+    "foreach"
+   ],
+   "task_states": {
+    "foreach": "FAILED"
+   }
+  },
   "accepted_though_invalid": true,
-  "execution_id": "7F7kqQKzWVWCf5dH51M4JO",
+  "execution_id": "1ZhRk51Hrj4PH93Zgqu7of",
   "sub_executions": 2
  },
  {
@@ -3736,7 +7717,7 @@
   "declares_inputs": false,
   "publish_status": 422,
   "disposition": "rejected",
-  "reason": "publish -> 422: tasks[null].id: must not be null\ntasks[null].id: must not be blank\n: Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id\n",
+  "reason": "publish -> 422: tasks[null].id: must not be blank\n: Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id\ntasks[null].id: must not be null\n",
   "rejected_class": "invalid-flow"
  },
  {
@@ -3758,7 +7739,7 @@
   "declares_inputs": false,
   "publish_status": 422,
   "disposition": "rejected",
-  "reason": "publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty\ntasks[impossible].tasks: The 'tasks' property cannot be empty\n",
+  "reason": "publish -> 422: tasks[impossible].tasks: The 'tasks' property cannot be empty\ntasks[impossible]: The 'tasks' property cannot be empty\n",
   "rejected_class": "invalid-flow"
  }
 ]

@@ -38,3 +38,7 @@ deploy/trino/catalog/*.properties
 
 # Claude Code local scratch / worktrees
 .claude/
+
+# Python bytecode from oracle-exec/harvest.py
+__pycache__/
+*.pyc

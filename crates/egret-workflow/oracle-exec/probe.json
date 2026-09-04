@@ -1,0 +1,246 @@
+{
+  "invalids/loop-switch-failed": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/allow-failure": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/AllowFailureTest.java:29 success() (@ExecuteFlow, no inputs)",
+    "alt_inputs": {},
+    "differs": true,
+    "probed": true,
+    "why": "the alternative input is REFUSED (422: Missing required input:crash), so a swap is visible"
+  },
+  "valids/condition_with_input": {
+    "alt_from": "webserver/src/test/java/io/kestra/webserver/controllers/api/ExecutionControllerRunnerTest.java:762 replayExecutionWithNewInputs() replay body",
+    "alt_inputs": {
+      "condition": "success"
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED"
+  },
+  "valids/empty-variables": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/exit": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/exit-cancelled": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/exit-killed": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/exit-nested": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/fail-on-condition": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/execution/FailTest.java:57 dontFailOnCondition()",
+    "alt_inputs": {
+      "param": "success"
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; taskruns 3 != 2; task fail SUCCESS != FAILED"
+  },
+  "valids/fail-on-switch": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/finally-allowfailure": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:124 allowFailureWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != WARNING; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
+  },
+  "valids/finally-dag": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:297 dagWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; taskruns 7 != 9; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
+  },
+  "valids/finally-flow": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:333 flowWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; task ko None != FAILED"
+  },
+  "valids/finally-flow-error": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:367 flowErrorBlockWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; taskruns 4 != 6; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
+  },
+  "valids/finally-loop": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:196 loopWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED"
+  },
+  "valids/finally-loop-parallel": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:246 loopParallelWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED"
+  },
+  "valids/finally-parallel": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:160 parallelWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; taskruns 8 != 10; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
+  },
+  "valids/finally-sequential": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:42 sequentialWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; task ko None != FAILED"
+  },
+  "valids/finally-sequential-error": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FinallyTest.java:76 sequentialErrorBlockWithoutErrors()",
+    "alt_inputs": {
+      "failed": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
+  },
+  "valids/if": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/if-condition": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:76 ifFalsy()",
+    "alt_inputs": {
+      "param": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "task when-true None != SUCCESS"
+  },
+  "valids/if-in-flowable": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/if-without-else": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/IfTest.java:127 ifWithoutElse()",
+    "alt_inputs": {
+      "param": false
+    },
+    "differs": true,
+    "probed": true,
+    "why": "taskruns 1 != 2; task when-true None != SUCCESS"
+  },
+  "valids/json-input-schema-validation": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/labels-update-task": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/parallel-fail-with-flowable": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/pause-behavior": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:111 -> Pause.Behavior.RESUME; core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:123 -> Pause.Behavior.WARN; core/src/test/java/io/kestra/plugin/core/flow/PauseTest.java:129 -> Pause.Behavior.CANCEL",
+    "alt_inputs": [
+      {
+        "behavior": "RESUME"
+      },
+      {
+        "behavior": "WARN"
+      },
+      {
+        "behavior": "CANCEL"
+      }
+    ],
+    "differs": false,
+    "probed": true,
+    "why": "all 3 documented alternative(s) satisfy this row's assertions too: {\"behavior\": \"RESUME\"}, {\"behavior\": \"WARN\"}, {\"behavior\": \"CANCEL\"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The behavior property, rendered from an input, has no observable effect on this artifact, though PauseTest.java:374-380 asserts RESUME -> SUCCESS with 2 task runs.  So this row's `agrees` is a coincidence, not evidence that the input landed, and Task 2 must not build a golden for this flow from the checkout's semantics."
+  },
+  "valids/pause-duration-from-input": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/primitive-labels-flow": {
+    "probed": false,
+    "why": "the 1 documented alternative(s) pass the SAME input values (they vary something else, e.g. the execution labels), so none of them can move the observation"
+  },
+  "valids/replay-loop": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/sla-execution-condition": {
+    "alt_from": "core/src/test/java/io/kestra/core/runners/SLATestCase.java:86 executionConditionSLAShouldLabel()",
+    "alt_inputs": {
+      "string": "LABEL"
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != CANCELLED"
+  },
+  "valids/subflow-nullable-input-parent": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/switch": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/SwitchTest.java:57 switchSecond()",
+    "alt_inputs": {
+      "string": "SECOND"
+    },
+    "differs": true,
+    "probed": true,
+    "why": "task[1] t2 != t1"
+  },
+  "valids/switch-impossible": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/task-flow": {
+    "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/FlowCaseTest.java:44 run() via waitSuccess()",
+    "alt_inputs": {
+      "string": "OK"
+    },
+    "differs": true,
+    "probed": true,
+    "why": "state SUCCESS != FAILED"
+  },
+  "valids/task-flow-inherited-labels": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  },
+  "valids/task-runif-workingdirectory": {
+    "probed": false,
+    "why": "no alternative input is documented for this flow"
+  }
+}

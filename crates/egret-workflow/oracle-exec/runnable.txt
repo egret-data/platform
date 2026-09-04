@@ -5,15 +5,15 @@ Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.
 Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,
 core/src/test/resources/flows/{valids,invalids}.
 
-total flows                289
-  runs                     218
-  rejected                 45
+total flows                345
+  runs                     268
+  rejected                 51
   not-standalone           26
   unclassified             0
 
-valids (261)
-  runs                     217
-  rejected                 18
+valids (317)
+  runs                     267
+  rejected                 24
   not-standalone           26
   unclassified             0
 
@@ -25,11 +25,14 @@ invalids (28)
 
 rejected, by class
   invalid-flow                                 27
-  task-type-not-in-image                       16
-  valid-in-checkout-refused-by-pinned-image    2
+  task-type-not-in-image                       22
+  checkout-drift                               1
+  refused-by-both                              1
+  TOTAL                                        51
 
   Only `invalid-flow` is evidence that egret must refuse a flow.
-  The other two are the pinned image lacking something the checkout has.
+  Every other class is the pinned image or the checkout differing
+  from each other, which Task 8 must NOT read as a refusal.
 
 invalids this Kestra ACCEPTS: 1
   invalids/loop-switch-failed  ->  runs (FAILED)
@@ -37,7 +40,7 @@ invalids this Kestra ACCEPTS: 1
   invalids/ when the EXECUTION is expected to fail as well as when the flow
   is rejected; the pinned runtime distinguishes them and this is the split.
 
-sub-executions harvested by following parentId: 131
+sub-executions harvested by following parentId: 133
 
 
 not-standalone -- 26
@@ -45,7 +48,7 @@ not-standalone -- 26
 valids/flow-trigger-invalid-inputs-flow-listen
     Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.
 valids/follow-dependencies-partial-parent
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2WE5UzTgyRS8ifciJvM5Kc)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3SMD3d3xE0jTFZGnn38Nx0)
 valids/input-log-secret
     POST execution -> 422:  errors:
 ```
@@ -60,19 +63,19 @@ valids/inputs-small-files
 valids/kv
     No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.
 valids/loop-pause
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2pfnNcqa56F7AiLgka5MQe)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2dwShrnMADR4nyTRVfC1GB)
 valids/pause-test
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3vLIA8WINLwVVC0RBRBY48)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1ZW5lGvK2ScBLgZUIvtSAf)
 valids/pause_no_tasks
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7izgNCzkw7PzvXQpASihbT)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7GFH6PEaV1GhYMCA54He7e)
 valids/pause_on_resume
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3BRoPbbrWR9KLoeWjz2PH6)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution oCoOH05fB3UfywkcB6O1L)
 valids/pause_on_resume_optional
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution WlgOJjXtqTv49U9FEKXVO)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7IpclqIhSItQg9cUGao1X)
 valids/restart_with_inputs
     ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.
 valids/resume-validate
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares no pauseDuration, so it waits for an explicit resume that a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3XNIEnuTjYCn2oRWweU3GL)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1BgqjSUVOdYnmTB2nGP9a5)
 valids/scheduled-inputs-defaults
     Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
 valids/secret-input-validation
@@ -99,7 +102,7 @@ valids/webhook-inputs
     Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body (ExecutionControllerRunnerTest.java:1491); its inputs come from the webhook body, not from an execution POST.
 
 
-rejected -- 45
+rejected -- 51
 ------------------------------------------------------------------------
 invalids/dag-cyclicdependency  [invalid-flow]
     publish -> 422: tasks[dag]: Cyclic dependency detected: task1, task2
@@ -139,34 +142,34 @@ invalids/inputs-key-with-subtraction-symbol-validation  [invalid-flow]
     publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of inputs.key-name — keys with dashes require bracket notation, offending tasks: [hello]
 
 invalids/inputs-validation  [invalid-flow]
-    publish -> 422: inputs[array3]: `itemType` cannot be MULTISELECT
-inputs[multiselect3]: `itemType` cannot be MULTISELECT
+    publish -> 422: inputs[multiselect3]: `itemType` cannot be MULTISELECT
 inputs[array1]: `itemType` cannot be ARRAY
-inputs[array2]: `itemType` cannot be SECRET
 inputs[multiselect1]: `itemType` cannot be ARRAY
-inputs[multiselect2]: `itemType` cannot be SECRET
+inputs[array2]: `itemType` cannot be SECRET
 inputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI
+inputs[array3]: `itemType` cannot be MULTISELECT
 inputs[array4]: `itemType` cannot be SELECT
+inputs[multiselect2]: `itemType` cannot be SECRET
 inputs[multiselect4]: `itemType` cannot be SELECT
 
 invalids/inputs-with-multiple-constraint-violations  [invalid-flow]
-    publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`
-Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`
+    publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`
+Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`
 invalids/invalid  [invalid-flow]
-    publish -> 422: tasks[null].id: must not be blank
-id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
-tasks[null].id: must not be null
+    publish -> 422: id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
+tasks[null].id: must not be blank
 namespace: must match "^[a-z0-9][a-z0-9._-]*"
+tasks[null].id: must not be null
 
 invalids/invalid-parallel  [invalid-flow]
-    publish -> 422: id: size must be between 1 and 100
-tasks[para3].tasks: The 'tasks' property cannot be empty
-tasks[para2].tasks: The 'tasks' property cannot be empty
+    publish -> 422: tasks[para3].tasks: The 'tasks' property cannot be empty
+id: size must be between 1 and 100
 namespace: must match "^[a-z0-9][a-z0-9._-]*"
 id: must not be blank
 id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
-tasks[para4].tasks: The 'tasks' property cannot be empty
 namespace: size must be between 1 and 150
+tasks[para2].tasks: The 'tasks' property cannot be empty
+tasks[para4].tasks: The 'tasks' property cannot be empty
 
 invalids/invalid-property  [invalid-flow]
     publish -> 422: Unrecognized field "invalid" (class io.kestra.plugin.core.debug.Return), not marked as ignorable (17 known properties: "logLevel", "timeout", "assets", "retry", "policyRefs", "allowWarning", "format", "version", "type", "id", "description", "workerSelector", "allowFailure", "runIf", "logToFile", "disabled", "taskCache")
@@ -188,16 +191,16 @@ invalids/switch-invalid  [invalid-flow]
     publish -> 422: tasks[impossible]: No task defined, neither cases or default have any tasks
 
 invalids/system-labels  [invalid-flow]
-    publish -> 422: tasks[null].id: must not be null
-tasks[null].id: must not be blank
+    publish -> 422: tasks[null].id: must not be blank
 : Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id
+tasks[null].id: must not be null
 
 invalids/workingdirectory-invalid  [invalid-flow]
     publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a WorkingDirectory task
 
 invalids/workingdirectory-no-tasks  [invalid-flow]
-    publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty
-tasks[impossible].tasks: The 'tasks' property cannot be empty
+    publish -> 422: tasks[impossible].tasks: The 'tasks' property cannot be empty
+tasks[impossible]: The 'tasks' property cannot be empty
 
 valids/additional-plugin  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPluginTestTask
@@ -213,11 +216,13 @@ valids/encrypted-string  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
 valids/exception-with-output  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.runners.test.TaskThatFail
-valids/flow-trigger-fire-once-true-flow-listen  [valid-in-checkout-refused-by-pinned-image]
+valids/executable-fail  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.BadExecutable
+valids/flow-trigger-fire-once-true-flow-listen  [checkout-drift]
     publish -> 422: Unrecognized field "fireOnce" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: "offset", "lookback", "deadline", "timezone", "from", "to", "every")
 valids/flowable-fail  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.tasks.test.BadSequential
-valids/invalid-draft-flow  [valid-in-checkout-refused-by-pinned-image]
+valids/invalid-draft-flow  [refused-by-both]
     publish -> 422: tasks: must not be empty
 
 valids/null-output  [task-type-not-in-image]
@@ -230,19 +235,29 @@ valids/workertask-result-too-large  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.runners.test.WorkerTaskResultTooLarge
 valids/working-directory  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-cache  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-inputs  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
 valids/working-directory-loop  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
 valids/working-directory-namespace-files  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
 valids/working-directory-namespace-files-with-namespaces  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
+valids/working-directory-outputs  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-secret-output  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+valids/working-directory-taskrun-encrypted  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
 
 
 unclassified -- 0
 ------------------------------------------------------------------------
 
 
-runs -- 218
+runs -- 268
 ------------------------------------------------------------------------
 invalids/loop-switch-failed                                    FAILED  (+2 sub)
 valids/after-execution                                         SUCCESS
@@ -259,6 +274,7 @@ valids/dag                                                     SUCCESS
 valids/disable-error                                           FAILED
 valids/disable-flowable                                        FAILED  (+3 sub)
 valids/disable-simple                                          SUCCESS
+valids/empty-variables                                         SUCCESS
 valids/errors                                                  FAILED
 valids/execution                                               SUCCESS
 valids/exit                                                    WARNING
@@ -280,9 +296,22 @@ valids/finally-parallel                                        FAILED
 valids/finally-sequential                                      FAILED
 valids/finally-sequential-error                                FAILED
 valids/finally-sequential-error-first                          FAILED
+valids/flow-concurrency-cancel                                 SUCCESS
+valids/flow-concurrency-cancel-pause                           SUCCESS
+valids/flow-concurrency-fail                                   SUCCESS
 valids/flow-concurrency-parallel-subflow-kill                  SUCCESS
 valids/flow-concurrency-parallel-subflow-kill-child            FAILED
 valids/flow-concurrency-parallel-subflow-kill-grandchild       SUCCESS
+valids/flow-concurrency-queue                                  SUCCESS
+valids/flow-concurrency-queue-after-execution                  SUCCESS
+valids/flow-concurrency-queue-fail                             FAILED
+valids/flow-concurrency-queue-killed                           SUCCESS
+valids/flow-concurrency-queue-killed-after-execution           SUCCESS
+valids/flow-concurrency-queue-pause                            SUCCESS
+valids/flow-concurrency-sla-assert-cancel                      CANCELLED
+valids/flow-concurrency-sla-fail-child                         FAILED
+valids/flow-concurrency-sla-fail-parent                        FAILED
+valids/flow-concurrency-subflow                                SUCCESS
 valids/flow-trigger-any-mode-flow-a                            SUCCESS
 valids/flow-trigger-any-mode-flow-b                            SUCCESS
 valids/flow-trigger-any-mode-flow-listen                       SUCCESS
@@ -309,6 +338,10 @@ valids/flow-trigger-stable-condition-id-flow-b                 SUCCESS
 valids/flow-trigger-stable-condition-id-flow-listen            SUCCESS
 valids/flow-trigger-when-condition-flow-a                      SUCCESS
 valids/flow-trigger-when-condition-flow-listen                 SUCCESS
+valids/flow-with-array-outputs                                 SUCCESS
+valids/flow-with-optional-outputs                              SUCCESS
+valids/flow-with-outputs                                       SUCCESS
+valids/flow-with-outputs-failed                                FAILED
 valids/flowable-with-parent-fail                               FAILED  (+4 sub)
 valids/follow-dependencies-partial-child                       SUCCESS
 valids/full                                                    SUCCESS
@@ -323,6 +356,11 @@ valids/if-with-only-disabled-tasks                             SUCCESS
 valids/if-without-else                                         SUCCESS
 valids/json-input-schema-validation                            SUCCESS
 valids/labels-deserialization                                  SUCCESS
+valids/labels-update-nested-value-list                         SUCCESS
+valids/labels-update-nested-value-map                          SUCCESS
+valids/labels-update-task                                      SUCCESS
+valids/labels-update-task-deduplicate                          SUCCESS
+valids/labels-update-task-empty                                FAILED
 valids/log-to-file                                             SUCCESS
 valids/logs                                                    SUCCESS
 valids/loop-empty                                              SUCCESS
@@ -354,6 +392,8 @@ valids/loopuntil-failed-flowable                               FAILED
 valids/minimal                                                 SUCCESS
 valids/minimal-bis                                             SUCCESS
 valids/minimal2                                                SUCCESS
+valids/npe-labels-update-task                                  SUCCESS
+valids/output-values                                           SUCCESS
 valids/parallel                                                SUCCESS
 valids/parallel-disabled-tasks                                 SUCCESS
 valids/parallel-fail-with-flowable                             FAILED
@@ -366,6 +406,7 @@ valids/pause-kill-delay                                        SUCCESS
 valids/pause-timeout                                           FAILED
 valids/pause-timeout-allow-failure                             WARNING
 valids/pause_on_pause                                          SUCCESS
+valids/primitive-labels-flow                                   SUCCESS
 valids/purge_logs_execution_only                               SUCCESS
 valids/purge_logs_full_arguments                               SUCCESS
 valids/purge_logs_no_arguments                                 SUCCESS
@@ -387,10 +428,18 @@ valids/restart_local_errors                                    FAILED
 valids/retry-expo                                              FAILED
 valids/retry-fail                                              FAILED
 valids/retry-failed                                            FAILED
+valids/retry-failed-flow-attempts                              FAILED
+valids/retry-failed-flow-duration                              FAILED
+valids/retry-failed-task-attempts                              FAILED
+valids/retry-failed-task-duration                              FAILED
 valids/retry-flowable                                          FAILED
 valids/retry-flowable-child                                    FAILED
 valids/retry-flowable-nested-child                             FAILED
 valids/retry-flowable-parallel                                 FAILED  (+2 sub)
+valids/retry-new-execution-flow-attempts                       RETRIED
+valids/retry-new-execution-flow-duration                       RETRIED
+valids/retry-new-execution-task-attempts                       RETRIED
+valids/retry-new-execution-task-duration                       RETRIED
 valids/retry-random                                            FAILED
 valids/retry-subflow                                           FAILED
 valids/retry-success                                           WARNING
@@ -411,6 +460,10 @@ valids/sla-max-duration-fail                                   FAILED
 valids/sla-max-duration-ok                                     SUCCESS
 valids/sla-parent-flow                                         FAILED
 valids/sla-subflow                                             FAILED
+valids/sleep                                                   SUCCESS
+valids/sleep-long                                              SUCCESS
+valids/sleep-long-after-execution-flowable                     SUCCESS
+valids/sleep-short                                             SUCCESS
 valids/sleep-task-flow                                         SUCCESS
 valids/subflow-child                                           FAILED
 valids/subflow-child-with-output                               SUCCESS
@@ -429,8 +482,18 @@ valids/subflow-secret-output-parent                            FAILED
 valids/switch                                                  SUCCESS
 valids/switch-impossible                                       FAILED
 valids/switch-in-concurrent-loop                               SUCCESS  (+2 sub)
+valids/task-allow-failure-executable-flow                      WARNING
+valids/task-allow-failure-flowable                             WARNING
+valids/task-allow-failure-runnable                             WARNING
+valids/task-allow-warning-executable-flow                      SUCCESS
+valids/task-allow-warning-flowable                             SUCCESS
+valids/task-allow-warning-runnable                             SUCCESS
 valids/task-flow                                               FAILED
 valids/task-flow-inherited-labels                              SUCCESS
+valids/task-runif                                              FAILED
+valids/task-runif-executionupdating                            SUCCESS
+valids/task-runif-taskswithstate                               FAILED
+valids/task-runif-workingdirectory                             SUCCESS
 valids/trigger-flow                                            SUCCESS
 valids/trigger-flow-listener-no-inputs                         FAILED
 valids/trigger-flow-listener-with-concurrency-limit            FAILED
@@ -462,44 +525,197 @@ valids/webhook-store-body                                      FAILED
 valids/webhook-wait                                            SUCCESS
 valids/webhook-with-condition                                  FAILED
 valids/working-directory-invalid-runif                         FAILED
+valids/working-directory-taskrun                               SUCCESS  (+1 sub)
+valids/working-directory-taskrun-nested                        SUCCESS  (+1 sub)
 
 
 
 input recovery cross-check
 ------------------------------------------------------------------------
-Each recovered input is checked against the terminal state the SAME Java
-test asserts.  A wrong input does not error -- it runs the other branch --
-so this is what makes the recovery falsifiable rather than asserted.
+Each recovered input is checked against what the SAME Java test asserts:
+the terminal state, the taskRunList size, a task id at a position, and
+per-task states.  A wrong input does not error -- it runs the other
+branch -- so a state-only check is not enough: several of these flows end
+SUCCESS either way.
 
-  agrees   invalids/loop-switch-failed                          FAILED     RunContextTest.java:344 failedTasksVariable()
-  agrees   valids/allow-failure                                 FAILED     AllowFailureTest.java:54 failed()
-  agrees   valids/condition_with_input                          FAILED     ExecutionControllerRunnerTest.java:747 replayExecutionWithNewInputs()
-  agrees   valids/exit                                          WARNING    ExitTest.java:18 shouldExitTheExecution()
-  agrees   valids/exit-cancelled                                CANCELLED  ExitTest.java:47 shouldExitWithCancelled()
-  agrees   valids/exit-killed                                   KILLED     ExitTest.java:26 shouldExitAndKillTheExecution()
-  agrees   valids/exit-nested                                   FAILED     ExitTest.java:35 shouldExitAndFailNestedIf()
-  agrees   valids/fail-on-condition                             FAILED     FailTest.java:50 failOnCondition()
-  agrees   valids/fail-on-switch                                FAILED     FailTest.java:37 failOnSwitch()
-  agrees   valids/finally-allowfailure                          WARNING    FinallyTest.java:146 allowFailureWithErrors()
-  agrees   valids/finally-dag                                   FAILED     DagTest.java:93 errors()
-  agrees   valids/finally-flow                                  FAILED     FinallyTest.java:355 flowWithErrors()
-  agrees   valids/finally-flow-error                            FAILED     FinallyTest.java:389 flowErrorBlockWithErrors()
-  agrees   valids/finally-loop                                  FAILED     FinallyTest.java:221 loopWithErrors()
-  agrees   valids/finally-parallel                              FAILED     ParallelTest.java:53 errors()
-  agrees   valids/finally-sequential                            FAILED     FinallyTest.java:64 sequentialWithErrors()
-  agrees   valids/finally-sequential-error                      FAILED     FinallyTest.java:110 sequentialErrorBlockWithErrors()
-  agrees   valids/if                                            SUCCESS    AbstractRunnerTest.java:675 multipleIf()
-  agrees   valids/if-condition                                  SUCCESS    IfTest.java:47 ifTruthy()
-  agrees   valids/if-without-else                               SUCCESS    IfTest.java:124 ifWithoutElse()
-  agrees   valids/json-input-schema-validation                  SUCCESS    JsonInputSchemaFlowIntegrationTest.java:50
-  agrees   valids/parallel-fail-with-flowable                   FAILED     ParallelTest.java:69 parallelFailWithFlowable()
-  agrees   valids/pause-behavior                                FAILED     PauseTest.java:376 runDurationWithBehavior(FAIL)
-  agrees   valids/replay-loop                                   FAILED     ExecutionServiceTest.java:140 restartLoop()
-  agrees   valids/sla-execution-condition                       CANCELLED  SLATestCase.java:64 executionConditionSLAShouldCancel()
-  agrees   valids/subflow-nullable-input-parent                 SUCCESS    SubflowRunnerTest.java:161
-  agrees   valids/switch                                        SUCCESS    SwitchTest.java:39 switchFirst()
-  agrees   valids/switch-impossible                             FAILED     SwitchTest.java:117 switchImpossible()
-  agrees   valids/task-flow                                     FAILED     FlowCaseTest.java:33 waitFailed()
-  n/a      valids/working-directory                             not exercised: rejected
+  agrees   invalids/loop-switch-failed                          [state,taskruns]
+           RunContextTest.java:344-345 failedTasksVariable()
+  agrees   valids/allow-failure                                 [state,taskruns,task_states]
+           AllowFailureTest.java:50-55 failed()
+  agrees   valids/condition_with_input                          [state]
+           ExecutionControllerRunnerTest.java:747 replayExecutionWithNewInputs()
+  agrees   valids/empty-variables                               [state,taskruns]
+           EmptyVariablesTest.java:39-41 emptyVariables()
+  agrees   valids/exit                                          [state,taskruns]
+           ExitTest.java:18-20 shouldExitTheExecution()
+  agrees   valids/exit-cancelled                                [state,taskruns]
+           ExitTest.java:47-50 shouldExitWithCancelled()
+  agrees   valids/exit-killed                                   [state,taskruns]
+           ExitTest.java:26-29 shouldExitAndKillTheExecution()
+  agrees   valids/exit-nested                                   [state,taskruns,task_states]
+           ExitTest.java:35-41 shouldExitAndFailNestedIf()
+  agrees   valids/fail-on-condition                             [state,taskruns,task_states]
+           FailTest.java:48-50 failOnCondition()
+  agrees   valids/fail-on-switch                                [state,taskruns,task_states]
+           FailTest.java:35-37 failOnSwitch()
+  agrees   valids/finally-allowfailure                          [state,taskruns,task_states]
+           FinallyTest.java:145-151 allowFailureWithErrors()
+  agrees   valids/finally-dag                                   [state,taskruns,task_states]
+           DagTest.java:92-98 errors()
+  agrees   valids/finally-flow                                  [state,taskruns,task_states]
+           FinallyTest.java:354-358 flowWithErrors()
+  agrees   valids/finally-flow-error                            [state,taskruns,task_states]
+           FinallyTest.java:388-394 flowErrorBlockWithErrors()
+  agrees   valids/finally-loop                                  [state,taskruns]
+           FinallyTest.java:220-221 loopWithErrors()
+  agrees   valids/finally-loop-parallel                         [state,taskruns]
+           FinallyTest.java:271-272 loopParallelWithErrors()
+  agrees   valids/finally-parallel                              [state,taskruns,task_states]
+           ParallelTest.java:52-58 errors()
+  agrees   valids/finally-sequential                            [state,taskruns,task_states]
+           FinallyTest.java:63-67 sequentialWithErrors()
+  agrees   valids/finally-sequential-error                      [state,taskruns,task_states]
+           FinallyTest.java:109-115 sequentialErrorBlockWithErrors()
+  agrees   valids/if                                            [state,taskruns]
+           AbstractRunnerTest.java:673-674 multipleIf()
+  agrees   valids/if-condition                                  [state,taskruns,task_states]
+           IfTest.java:45-47 ifTruthy()
+  agrees   valids/if-in-flowable                                [taskruns]
+           IfTest.java:145 ifInFlowable() (no execution-state assertion; the state assertions are on the sub-executions)
+  agrees   valids/if-without-else                               [state,taskruns,task_states]
+           IfTest.java:122-124 ifWithoutElse()
+  n/a      valids/input-log-secret                              [state,taskruns]
+           not exercised: not-standalone
+  agrees   valids/json-input-schema-validation                  [state,taskruns]
+           JsonInputSchemaFlowIntegrationTest.java:50-51
+  agrees   valids/labels-update-task                            [state,taskruns]
+           RuntimeLabelsTest.java:54-55 update()
+  agrees   valids/parallel-fail-with-flowable                   [state,taskruns]
+           ParallelTest.java:69-70 parallelFailWithFlowable()
+  agrees   valids/pause-behavior                                [state,taskruns]
+           PauseTest.java:376-380 runDurationWithBehavior(FAIL)
+  agrees   valids/pause-duration-from-input                     [state,taskruns]
+           PauseTest.java:200-202 runDurationFromInput()
+  agrees   valids/primitive-labels-flow                         [state,taskruns]
+           RuntimeLabelsTest.java:115-116 primitiveTypeLabels()
+  agrees   valids/replay-loop                                   [state,taskruns]
+           ExecutionServiceTest.java:140-141 restartLoop()
+  agrees   valids/sla-execution-condition                       [state]
+           SLATestCase.java:64 executionConditionSLAShouldCancel()
+  agrees   valids/subflow-nullable-input-parent                 [state]
+           SubflowRunnerTest.java:161 shouldPassNullableInputFromParentToSubflow()
+  agrees   valids/switch                                        [task_at]
+           SwitchTest.java:47 switchFirst() -- getTaskRunList().get(1).getTaskId()
+  agrees   valids/switch-impossible                             [state]
+           SwitchTest.java:117 switchImpossible()
+  agrees   valids/task-flow                                     [state,taskruns]
+           FlowCaseTest.java:33 waitFailed() -> run(..., FAILED, ..., 4, ...)
+  agrees   valids/task-flow-inherited-labels                    [state,taskruns]
+           FlowCaseTest.java:37 noLabels() -> run("OK", SUCCESS, ..., false, ...)
+  agrees   valids/task-runif-workingdirectory                   [state,taskruns,task_states]
+           TaskWithRunIfTest.java:33-36 runIfWorkingDirectory()
+  n/a      valids/working-directory                             [state,taskruns]
+           not exercised: rejected
 
-  agrees 29   differs 0   not exercised 1   (of 30)
+  agrees 37   differs 0   not exercised 2   (of 39 rows)
+
+
+discrimination probe -- which rows CAN report a difference
+------------------------------------------------------------------------
+A check that passes with or without the thing it verifies is not a check.
+For every row whose flow has a documented ALTERNATIVE input, the flow was
+executed again with that alternative and the row re-evaluated: the row
+discriminates only if the alternative FAILS it.  This is measured, not
+argued.
+
+  unprobed      invalids/loop-switch-failed
+                no alternative input is documented for this flow
+  discriminates valids/allow-failure
+                with {}: the alternative input is REFUSED (422: Missing required input:crash), so a swap is visible
+  discriminates valids/condition_with_input
+                with {"condition": "success"}: state SUCCESS != FAILED
+  unprobed      valids/empty-variables
+                no alternative input is documented for this flow
+  unprobed      valids/exit
+                no alternative input is documented for this flow
+  unprobed      valids/exit-cancelled
+                no alternative input is documented for this flow
+  unprobed      valids/exit-killed
+                no alternative input is documented for this flow
+  unprobed      valids/exit-nested
+                no alternative input is documented for this flow
+  discriminates valids/fail-on-condition
+                with {"param": "success"}: state SUCCESS != FAILED; taskruns 3 != 2; task fail SUCCESS != FAILED
+  unprobed      valids/fail-on-switch
+                no alternative input is documented for this flow
+  discriminates valids/finally-allowfailure
+                with {"failed": false}: state SUCCESS != WARNING; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-dag
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 7 != 9; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-flow
+                with {"failed": false}: state SUCCESS != FAILED; task ko None != FAILED
+  discriminates valids/finally-flow-error
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 4 != 6; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-loop
+                with {"failed": false}: state SUCCESS != FAILED
+  discriminates valids/finally-loop-parallel
+                with {"failed": false}: state SUCCESS != FAILED
+  discriminates valids/finally-parallel
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 8 != 10; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-sequential
+                with {"failed": false}: state SUCCESS != FAILED; task ko None != FAILED
+  discriminates valids/finally-sequential-error
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  unprobed      valids/if
+                no alternative input is documented for this flow
+  discriminates valids/if-condition
+                with {"param": false}: task when-true None != SUCCESS
+  unprobed      valids/if-in-flowable
+                no alternative input is documented for this flow
+  discriminates valids/if-without-else
+                with {"param": false}: taskruns 1 != 2; task when-true None != SUCCESS
+  unprobed      valids/json-input-schema-validation
+                no alternative input is documented for this flow
+  unprobed      valids/labels-update-task
+                no alternative input is documented for this flow
+  unprobed      valids/parallel-fail-with-flowable
+                no alternative input is documented for this flow
+  CANNOT        valids/pause-behavior
+                all 3 documented alternative(s) satisfy this row's assertions too: {"behavior": "RESUME"}, {"behavior": "WARN"}, {"behavior": "CANCEL"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The behavior property, rendered from an input, has no observable effect on this artifact, though PauseTest.java:374-380 asserts RESUME -> SUCCESS with 2 task runs.  So this row's `agrees` is a coincidence, not evidence that the input landed, and Task 2 must not build a golden for this flow from the checkout's semantics.
+  unprobed      valids/pause-duration-from-input
+                no alternative input is documented for this flow
+  unprobed      valids/primitive-labels-flow
+                the 1 documented alternative(s) pass the SAME input values (they vary something else, e.g. the execution labels), so none of them can move the observation
+  unprobed      valids/replay-loop
+                no alternative input is documented for this flow
+  discriminates valids/sla-execution-condition
+                with {"string": "LABEL"}: state SUCCESS != CANCELLED
+  unprobed      valids/subflow-nullable-input-parent
+                no alternative input is documented for this flow
+  discriminates valids/switch
+                with {"string": "SECOND"}: task[1] t2 != t1
+  unprobed      valids/switch-impossible
+                no alternative input is documented for this flow
+  discriminates valids/task-flow
+                with {"string": "OK"}: state SUCCESS != FAILED
+  unprobed      valids/task-flow-inherited-labels
+                no alternative input is documented for this flow
+  unprobed      valids/task-runif-workingdirectory
+                no alternative input is documented for this flow
+
+  proven discriminating 17   proven non-discriminating 1   unprobed 19
+
+  `unprobed` means no ALTERNATIVE input is documented for that flow, so
+  there is nothing to swap in.  Such a row is not claimed to discriminate.
+
+
+recovered inputs with no checkable assertion
+------------------------------------------------------------------------
+  invalids/inputs-with-multiple-constraint-violations
+    InputsTest.java:476 asserts that reading the inputs THROWS; there is no execution to check.  The refusal itself is the `rejected` disposition.
+  valids/subflow-function-child
+    SubflowFunctionTest.java:31 asserts the RENDERED STRING the subflow() Pebble function returns ("dc-us"), never an execution document.
+
+  recovered input values          40
+    with an EXPECTED row          38
+    with no checkable assertion   2

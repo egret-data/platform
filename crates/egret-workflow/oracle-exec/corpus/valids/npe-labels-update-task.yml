@@ -1,0 +1,7 @@
+id: npe-labels-update-task
+namespace: io.kestra.tests
+tasks:
+  - id: labels
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      someLabel: "{{ taskrun.id }}"

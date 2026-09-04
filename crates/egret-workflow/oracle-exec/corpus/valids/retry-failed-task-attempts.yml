@@ -1,0 +1,12 @@
+id: retry-failed-task-attempts
+namespace: io.kestra.tests
+
+tasks:
+  - id: fail
+    type: io.kestra.plugin.core.execution.Fail
+    retry:
+      behavior: RETRY_FAILED_TASK
+      type: constant
+      maxAttempts: 4
+      interval: PT1S
+

@@ -1,0 +1,16 @@
+id: task-allow-failure-flowable
+namespace: io.kestra.tests
+
+tasks:
+  - id: seq
+    type: io.kestra.plugin.core.flow.Sequential
+    allowFailure: true
+    tasks:
+      - id: fail
+        type: io.kestra.plugin.core.execution.Fail
+      - id: log-not-allowed
+        type: io.kestra.plugin.core.log.Log
+        message: not allowed
+  - id: log-allowed
+    type: io.kestra.plugin.core.log.Log
+    message: I'm allowed
