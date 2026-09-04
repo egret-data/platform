@@ -173,16 +173,38 @@ git -c user.email=hoangquocvietbk2.13@gmail.com commit -m "feat(workflow): W3a T
 - Consumes: Task 1's `corpus.json`.
 - Produces: the normalised-trace JSON shape below, which Tasks 3-8 are judged against, and `fn advance(plan, state, now) -> Vec<Command>` as a stub whose signature later tasks fill in.
 
-**Before you build a single golden, read this.** Task 1 found that
-`valids/pause-behavior`'s four documented behaviours — `FAIL`, `RESUME`, `WARN`,
-`CANCEL` — all produce the **identical execution** on `v2.0.0-rc13`: `FAILED`,
-one task run, identical histories. Kestra's own `PauseTest.java:374-380` asserts
-`RESUME` gives `SUCCESS` with two task runs. The checkout and the artifact
-disagree, and **the artifact governs**: build that flow's golden from what the
-pinned image did, never from what the Java test says it should do. The same
-question applies to any flow whose golden looks suspiciously insensitive to a
-property — if a documented input has no observable effect, record that as a
-measured fact rather than assuming you mis-drove it.
+**Before you build a single golden, read this.** `valids/pause-behavior` is
+driven with `behavior: "{{ inputs.behavior }}"`, and on `v2.0.0-rc13` all four
+values — `FAIL`, `RESUME`, `WARN`, `CANCEL` — produce the **identical
+execution**: `FAILED`, one task run, histories
+`CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED`. Kestra's own
+`PauseTest.java:376-380` asserts `RESUME` gives `SUCCESS` with two task runs.
+
+**Do not conclude that rc13 ignores `behavior`.** An earlier version of this
+warning said exactly that and it is false. Published with LITERAL values on the
+same image, the property works perfectly and matches the checkout:
+
+| flow | state | task runs |
+|---|---|---|
+| literal `RESUME` | `SUCCESS` | 2 |
+| literal `WARN` | `WARNING` | 2 |
+| literal `FAIL` | `FAILED` | 1 |
+| literal `CANCEL` | `CANCELLED` | 1 |
+| omitted | `SUCCESS` | 2 |
+
+What fails is narrower and stranger: **rendering a Pebble expression into a
+`Property<Behavior>` fails silently at resume time and takes the task down with
+it** — for every value, including the one that would have failed anyway. So that
+row's apparent agreement is a coincidence twice over: the flow never reaches the
+`FAIL` behaviour, it dies rendering.
+
+Build the golden from what the pinned image did. But record the CAUSE
+correctly — "rendering the property from an input fails on this artifact", not
+"the property has no effect" — because the second sentence would send whoever
+implements `pause` in W8 hunting for a feature that is already there. And more
+generally: when a documented input appears to have no observable effect,
+**find out why before writing it down**. A wrong reason is how a question gets
+closed.
 
 - [ ] **Step 1: Define the normalised trace**
 
