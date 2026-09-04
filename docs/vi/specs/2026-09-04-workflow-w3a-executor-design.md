@@ -173,8 +173,14 @@ Mười lần chạy đầu thì không.
 
 1. Thay mọi id sinh ra bằng thứ tự xuất hiện lần đầu.
 2. Bỏ mọi trường đồng hồ — nhưng **suy ra quan hệ xảy-ra-trước** trước đã.
-   Chính test của Kestra mang **39 khẳng định thứ tự trong 12 file** dạng
-   `a2.startDate.isAfter(a1.endDate)`. Đó không phải khẳng định về tốc độ; đó là
+   Chính test của Kestra mang **4 khẳng định thứ tự, trong 2 file**
+   (`ParallelTest.errors()` và `DagTest.errors()`) dạng
+   `a2.startDate.isAfter(a1.endDate)`. Bản trước của câu này ghi 39 trong 12 —
+   đó là `grep -c 'isAfter|isBefore'` thô, đếm mọi phép so thời gian trong cả
+   suite chứ không phải những chỗ khẳng định hai task run đã tuần tự hoá. Bốn
+   là ít, và luật dưới đây vẫn đáng giữ: đúng bốn cái đó là các ca
+   `sequential` lồng trong `parallel` và phụ thuộc `dag` — chính thứ ngữ nghĩa
+   mà một bộ chuẩn hoá bỏ đồng hồ sẽ xoá mất. Đó không phải khẳng định về tốc độ; đó là
    khẳng định `a2` **tuần tự sau** `a1`, tức đúng cái lý do tồn tại của một
    `sequential` lồng trong `parallel`. Một bộ chuẩn hoá bỏ sạch đồng hồ thì
    **không nhìn thấy** một flowable ngừng tuần tự hoá. Phát ra

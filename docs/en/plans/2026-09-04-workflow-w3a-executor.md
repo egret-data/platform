@@ -239,8 +239,11 @@ Rules, each traceable to a measurement in the spec:
    costume.
 
    **But dropping them outright loses something Kestra's own tests assert.**
-   There are **39 ordering assertions across 12 test files** of the form
-   `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()` — that is not a
+   There are **4 ordering assertions, in 2 test files** — `ParallelTest.errors()`
+   and `DagTest.errors()` — of the form
+   `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()`. (An earlier version
+   said 39 across 12: that was a raw grep for `isAfter|isBefore`, which counts
+   every temporal comparison in the suite.) That is not a
    timing claim, it is the claim that `a2` **serialised after** `a1`, which is
    exactly the semantics a `sequential` nested in a `parallel` exists to
    provide. A normaliser that drops all clocks cannot see a flowable that stops

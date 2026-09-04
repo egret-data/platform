@@ -183,8 +183,14 @@ experiment that can falsify it. The first ten runs could not.
 
 1. Replace every generated id with its ordinal in first-appearance order.
 2. Drop every clock field — but derive the **happens-before relation** first.
-   Kestra's own tests carry **39 ordering assertions across 12 files** of the
-   form `a2.startDate.isAfter(a1.endDate)`. That is not a timing claim; it is
+   Kestra's own tests carry **4 ordering assertions, in 2 files**
+   (`ParallelTest.errors()` and `DagTest.errors()`), of the form
+   `a2.startDate.isAfter(a1.endDate)`. An earlier version of this sentence said
+   39 across 12 — that was a raw `grep -c 'isAfter|isBefore'`, which counts every
+   temporal comparison in the suite, not the ones asserting that two task runs
+   serialised. Four is few, and the rule below still earns its place: those four
+   are exactly the `sequential`-inside-`parallel` and `dag`-dependency cases,
+   which is the semantics a clock-dropping normaliser would erase. That is not a timing claim; it is
    the claim that `a2` serialised after `a1`, which is the whole point of a
    `sequential` nested in a `parallel`. A normaliser that drops all clocks
    cannot see a flowable that stops serialising. Emit `before`/`after`/
