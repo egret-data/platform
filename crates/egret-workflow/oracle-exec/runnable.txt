@@ -3,36 +3,39 @@ W3a execution oracle -- how much of Kestra's own corpus runs standalone
 
 Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.
 Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,
-core/src/test/resources/flows/{valids,invalids}.
+core/src/test/resources/flows/{valids,invalids}, BOTH .yaml and .yml.
 
 total flows                345
   runs                     268
   rejected                 51
   not-standalone           26
-  unclassified             0
+  TOTAL                    345
 
 valids (317)
   runs                     267
   rejected                 24
   not-standalone           26
-  unclassified             0
+  TOTAL                    317
 
 invalids (28)
   runs                     1
   rejected                 27
-  not-standalone           0
-  unclassified             0
+  TOTAL                    28
 
 rejected, by class
-  invalid-flow                                 27
+  invalid-flow                                 27  <- Task 8 evidence
   task-type-not-in-image                       22
   checkout-drift                               1
-  refused-by-both                              1
+  refused-by-both                              1  <- Task 8 evidence
   TOTAL                                        51
 
-  Only `invalid-flow` is evidence that egret must refuse a flow.
-  Every other class is the pinned image or the checkout differing
-  from each other, which Task 8 must NOT read as a refusal.
+  Evidence that egret must refuse a flow -- and nothing else is:
+    invalid-flow                               27
+    refused-by-both                            1
+  The remaining classes are NOT refusals:
+    checkout-drift                             1  -- the flow is VALID; the pinned image is older than the checkout
+    task-type-not-in-image                     22  -- the flow is VALID; its task type is a Kestra test-source class the image does not ship
+    unclassified-rejection                     0  -- UNKNOWN -- not shown to be a refusal and not shown to be drift; read the raw message before using it for anything
 
 invalids this Kestra ACCEPTS: 1
   invalids/loop-switch-failed  ->  runs (FAILED)
@@ -41,65 +44,6 @@ invalids this Kestra ACCEPTS: 1
   is rejected; the pinned runtime distinguishes them and this is the split.
 
 sub-executions harvested by following parentId: 133
-
-
-not-standalone -- 26
-------------------------------------------------------------------------
-valids/flow-trigger-invalid-inputs-flow-listen
-    Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.
-valids/follow-dependencies-partial-parent
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3SMD3d3xE0jTFZGnn38Nx0)
-valids/input-log-secret
-    POST execution -> 422:  errors:
-```
-Unable to use a `SECRET` input/output as encryption is not configured
-```
-valids/inputs
-    FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> application-test.yml) and json2/yaml2 are Java Map objects; the values are computed, not literal.
-valids/inputs-large
-    RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and reuses InputsTest.inputs' classpath FILE path; computed, not literal.
-valids/inputs-small-files
-    ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml as a multipart FILE part; the value is a JVM resource path.
-valids/kv
-    No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.
-valids/loop-pause
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2dwShrnMADR4nyTRVfC1GB)
-valids/pause-test
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1ZW5lGvK2ScBLgZUIvtSAf)
-valids/pause_no_tasks
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7GFH6PEaV1GhYMCA54He7e)
-valids/pause_on_resume
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution oCoOH05fB3UfywkcB6O1L)
-valids/pause_on_resume_optional
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7IpclqIhSItQg9cUGao1X)
-valids/restart_with_inputs
-    ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.
-valids/resume-validate
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1BgqjSUVOdYnmTB2nGP9a5)
-valids/scheduled-inputs-defaults
-    Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
-valids/secret-input-validation
-    InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.readExecutionInputs and asserts it throws.  No test drives an execution.
-valids/subflow-function-mutual-a
-    SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap (a -> b -> a).
-valids/subflow-function-mutual-b
-    Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever reached through subflow-function-mutual-a.
-valids/subflow-function-recursive
-    SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap.  Its input default calls subflow() on its own id, so there is no input map to recover.
-valids/subflow-nullable-input-child
-    Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:144); no test posts inputs to it directly.
-valids/subflow-to-retry
-    Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no test posts inputs to it directly.
-valids/task-flow-dynamic
-    FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId: 'switch'}) instead of going through flowIO.readExecutionInputs, so it bypasses typed-input validation entirely and never supplies the flow's one DECLARED input, the required STRING `string`.  Over the API that is `422 Missing required input:string`, and there is no value for `string` anywhere in the checkout to recover.
-valids/trigger-flow-listener
-    Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of trigger-flow (FlowTriggerCaseTest.java:48); its inputs render from trigger variables that do not exist on a direct execution.
-valids/trigger-flow-listener-invalid
-    Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.  There is no test case to recover.
-valids/trigger-flow-listener-namespace-condition
-    Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62).
-valids/webhook-inputs
-    Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body (ExecutionControllerRunnerTest.java:1491); its inputs come from the webhook body, not from an execution POST.
 
 
 rejected -- 51
@@ -253,8 +197,63 @@ valids/working-directory-taskrun-encrypted  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
 
 
-unclassified -- 0
+not-standalone -- 26
 ------------------------------------------------------------------------
+valids/flow-trigger-invalid-inputs-flow-listen
+    Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.
+valids/follow-dependencies-partial-parent
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3SMD3d3xE0jTFZGnn38Nx0)
+valids/input-log-secret
+    POST execution -> 422:  errors:
+```
+Unable to use a `SECRET` input/output as encryption is not configured
+```
+valids/inputs
+    FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> application-test.yml) and json2/yaml2 are Java Map objects; the values are computed, not literal.
+valids/inputs-large
+    RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and reuses InputsTest.inputs' classpath FILE path; computed, not literal.
+valids/inputs-small-files
+    ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml as a multipart FILE part; the value is a JVM resource path.
+valids/kv
+    No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.
+valids/loop-pause
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2dwShrnMADR4nyTRVfC1GB)
+valids/pause-test
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1ZW5lGvK2ScBLgZUIvtSAf)
+valids/pause_no_tasks
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7GFH6PEaV1GhYMCA54He7e)
+valids/pause_on_resume
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution oCoOH05fB3UfywkcB6O1L)
+valids/pause_on_resume_optional
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7IpclqIhSItQg9cUGao1X)
+valids/restart_with_inputs
+    ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.
+valids/resume-validate
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1BgqjSUVOdYnmTB2nGP9a5)
+valids/scheduled-inputs-defaults
+    Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
+valids/secret-input-validation
+    InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.readExecutionInputs and asserts it throws.  No test drives an execution.
+valids/subflow-function-mutual-a
+    SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap (a -> b -> a).
+valids/subflow-function-mutual-b
+    Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever reached through subflow-function-mutual-a.
+valids/subflow-function-recursive
+    SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap.  Its input default calls subflow() on its own id, so there is no input map to recover.
+valids/subflow-nullable-input-child
+    Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:144); no test posts inputs to it directly.
+valids/subflow-to-retry
+    Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no test posts inputs to it directly.
+valids/task-flow-dynamic
+    FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId: 'switch'}) instead of going through flowIO.readExecutionInputs, so it bypasses typed-input validation entirely and never supplies the flow's one DECLARED input, the required STRING `string`.  Over the API that is `422 Missing required input:string`, and there is no value for `string` anywhere in the checkout to recover.
+valids/trigger-flow-listener
+    Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of trigger-flow (FlowTriggerCaseTest.java:48); its inputs render from trigger variables that do not exist on a direct execution.
+valids/trigger-flow-listener-invalid
+    Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.  There is no test case to recover.
+valids/trigger-flow-listener-namespace-condition
+    Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62).
+valids/webhook-inputs
+    Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body (ExecutionControllerRunnerTest.java:1491); its inputs come from the webhook body, not from an execution POST.
 
 
 runs -- 268
@@ -602,7 +601,7 @@ SUCCESS either way.
            ExecutionServiceTest.java:140-141 restartLoop()
   agrees   valids/sla-execution-condition                       [state]
            SLATestCase.java:64 executionConditionSLAShouldCancel()
-  agrees   valids/subflow-nullable-input-parent                 [state]
+  agrees   valids/subflow-nullable-input-parent                 [state]   WEAK
            SubflowRunnerTest.java:161 shouldPassNullableInputFromParentToSubflow()
   agrees   valids/switch                                        [task_at]
            SwitchTest.java:47 switchFirst() -- getTaskRunList().get(1).getTaskId()
@@ -618,6 +617,11 @@ SUCCESS either way.
            not exercised: rejected
 
   agrees 37   differs 0   not exercised 2   (of 39 rows)
+
+  WEAK rows (1): state-only, non-error state, and not proven
+  discriminating.  Counted in `agrees` above, but they would agree with
+  any input that merely finishes successfully -- do not cite them.
+    valids/subflow-nullable-input-parent
 
 
 discrimination probe -- which rows CAN report a difference

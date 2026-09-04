@@ -621,21 +621,32 @@ def read_corpus():
     return entries
 
 
-INVALID_TYPE_RE = re.compile(r"Invalid type: (\S+)")
+# A 422 body carries EVERY constraint violation, newline-separated -- measured:
+# invalids/invalid-parallel returns 8 of them.  So matching `Invalid type:`
+# anywhere in the message is not evidence that a missing type is the ONLY thing
+# wrong: a valids/ flow with an unknown type PLUS a real structural violation
+# would file into a bucket Task 8 ignores, and the structural violation would
+# vanish.  A task `description` containing the literal text would match too.
+INVALID_TYPE_LINE = re.compile(r"^Invalid type: (\S+)$")
 
-# A `valids` flow the PINNED IMAGE refuses may be either of two very different
-# things, and only one of them is evidence for Task 8.  Neither may be inferred
-# from the absence of something in the error message: a bucket that collects by
-# default is not a measurement, and this is precisely the bucket Task 8 is told
-# to ignore, so a mis-file into it is invisible by construction.
-#
-# Both tables are therefore CURATED, each entry carrying the checkout line that
-# proves the claim.  Anything not in them and not matching `Invalid type:` gets
-# `unclassified-rejection` with the raw message, which is an open question rather
-# than a dismissal.
+# Positive evidence that the missing type is a Kestra TEST-SOURCE class rather
+# than a real plugin the image should have had.  Two shapes, both measured over
+# the 22 flows that land here:
+#   io.kestra.core.tasks.test.Encrypted        -- a `.test.` package segment
+#   ...WorkingDirectoryTest$LocalFiles         -- nested in a *Test outer class
+# Every one of the 22 was resolved to a file under src/test/java in the checkout
+# at 96893b589a; `io.kestra.core.runners.test.trigger.Alias` is an `aliases =`
+# declaration on core/src/test/java/io/kestra/core/runners/test/TriggerWithAlias.java.
+TEST_SOURCE_FQCN = re.compile(r"(^|\.)test\.|Test\$")
 
-# The checkout has a feature the pinned artifact does not.  NOT evidence for
-# Task 8: the flow is valid, this Kestra is just older.
+PUBLISH_PREFIX = re.compile(r"^publish -> \d+: |^publish -> 200; POST execution -> \d+: ")
+
+
+def violations(why):
+    """The individual constraint violations inside one 422 body."""
+    return [ln.strip() for ln in PUBLISH_PREFIX.sub("", why).splitlines() if ln.strip()]
+
+
 CHECKOUT_DRIFT = {
     "valids/flow-trigger-fire-once-true-flow-listen":
         "The trigger sets `fireOnce`, which the checkout declares at "
@@ -657,21 +668,31 @@ REFUSED_BY_BOTH = {
         "constraint violations (empty `tasks` violates @NotEmpty)\" and asserts 422.",
 }
 
+# The complete vocabulary rejected_class() may return.  write_runnable() refuses
+# to print a table containing anything else, so a class added here-but-not-there
+# (or a record whose class was dropped) is a hard failure rather than a row that
+# quietly reads as drift.
+KNOWN_REJECTED_CLASSES = (
+    "invalid-flow",
+    "refused-by-both",
+    "checkout-drift",
+    "task-type-not-in-image",
+    "unclassified-rejection",
+)
+
 
 def rejected_class(entry, why):
-    """Why a 4xx publish happened.  Four different things wear the same status.
+    """Why a 4xx publish happened.  Five classes, each entered on POSITIVE evidence.
 
-    Each class is entered on POSITIVE evidence only:
+      invalid-flow            the flow is in invalids/      (evidence: the directory)
+      checkout-drift          curated CHECKOUT_DRIFT        (evidence: a checkout line)
+      refused-by-both         curated REFUSED_BY_BOTH       (evidence: a checkout line)
+      task-type-not-in-image  the body's ONLY violation is `Invalid type: X` and X
+                              is shaped like a Kestra test-source class
+      unclassified-rejection  everything else -- an OPEN QUESTION, not drift and not
+                              a refusal.  Nothing lands here by default reasoning.
 
-      invalid-flow             the flow is in invalids/            (evidence: the directory)
-      task-type-not-in-image   the message says `Invalid type: X`  (evidence: the message)
-      checkout-drift           curated, CHECKOUT_DRIFT             (evidence: a checkout line)
-      refused-by-both          curated, REFUSED_BY_BOTH            (evidence: a checkout line)
-      unclassified-rejection   everything else -- an open question, not a bucket
-
-    Task 8 may take `invalid-flow` and `refused-by-both` as evidence that egret
-    must refuse a flow.  It may take neither `checkout-drift` nor
-    `unclassified-rejection`: the first is a valid flow, the second is unknown.
+    Task 8 may take TASK8_EVIDENCE as evidence that egret must refuse a flow.
     """
     if entry["kind"] == "invalids":
         return "invalid-flow"
@@ -679,12 +700,48 @@ def rejected_class(entry, why):
         return "checkout-drift"
     if entry["id"] in REFUSED_BY_BOTH:
         return "refused-by-both"
-    if INVALID_TYPE_RE.search(why):
-        return "task-type-not-in-image"
+    vs = violations(why)
+    if len(vs) == 1:
+        m = INVALID_TYPE_LINE.match(vs[0])
+        if m and TEST_SOURCE_FQCN.search(m.group(1)):
+            return "task-type-not-in-image"
     return "unclassified-rejection"
 
 
+# The classes Task 8 may read as "egret must refuse this flow".  The prose in
+# runnable.txt is generated from this tuple and from NON_EVIDENCE_REASON, so a
+# class moving between them cannot leave a sentence behind that says the
+# opposite -- which is exactly what happened once: the file told Task 8 to ignore
+# `refused-by-both`, a class that holds a flow Kestra refuses in both places.
 TASK8_EVIDENCE = ("invalid-flow", "refused-by-both")
+
+NON_EVIDENCE_REASON = {
+    "checkout-drift":
+        "the flow is VALID; the pinned image is older than the checkout",
+    "task-type-not-in-image":
+        "the flow is VALID; its task type is a Kestra test-source class the image "
+        "does not ship",
+    "unclassified-rejection":
+        "UNKNOWN -- not shown to be a refusal and not shown to be drift; read the "
+        "raw message before using it for anything",
+}
+
+# Every disposition write_runnable() will print.  Anything outside this
+# vocabulary is a hard failure, so a record with a novel disposition can never
+# be silently dropped from the header table.
+KNOWN_DISPOSITIONS = ("runs", "rejected", "not-standalone", "unclassified")
+
+# Every key an EXPECTED row may carry, and the ones that make it an assertion.
+EXPECTED_ROW_KEYS = {"state", "taskruns", "task_at", "task_states", "from"}
+ASSERTION_KEYS = ("state", "taskruns", "task_at", "task_states")
+
+# Kestra's State.Type, read from the checkout.  Used to reject a typo'd state
+# in an EXPECTED row rather than compare against a value nothing can produce.
+STATE_TYPES = {
+    "CREATED", "SUBMITTED", "RUNNING", "PAUSED", "RESTARTED", "KILLING", "SUCCESS",
+    "WARNING", "FAILED", "KILLED", "CANCELLED", "QUEUED", "RETRYING", "RETRIED",
+    "SKIPPED", "BREAKPOINT", "RESUBMITTED",
+}
 
 
 def detail(body):
@@ -859,6 +916,49 @@ def run_flow(entry, pg):
     return "runs", doc["state"]["current"], root, sub_states, observe(doc)
 
 
+def expected_row_problems():
+    """An EXPECTED row is DATA that decides what gets checked, so its shape has to
+    be checked too.
+
+    `"taskrun": 999` -- a typo of `taskruns` -- was silently ignored: check_row
+    never looks for it, the row still printed `agrees`, and the `[state,taskruns]`
+    label came from the same lookup that missed it.  That is the same
+    invisible-by-construction shape as a bucket that collects by default.
+    """
+    bad = []
+    for cid, row in sorted(EXPECTED.items()):
+        unknown = set(row) - EXPECTED_ROW_KEYS
+        if unknown:
+            bad.append(f"EXPECTED[{cid!r}] has unknown key(s) {sorted(unknown)}; "
+                       f"allowed: {sorted(EXPECTED_ROW_KEYS)}")
+        if not isinstance(row.get("from"), str) or not row.get("from"):
+            bad.append(f"EXPECTED[{cid!r}] has no `from` provenance string")
+        if not any(k in row for k in ASSERTION_KEYS):
+            bad.append(f"EXPECTED[{cid!r}] asserts nothing; it would always agree")
+        if "state" in row and row["state"] not in STATE_TYPES:
+            bad.append(f"EXPECTED[{cid!r}].state {row['state']!r} is not a State.Type")
+        if "taskruns" in row and not (isinstance(row["taskruns"], int)
+                                      and not isinstance(row["taskruns"], bool)
+                                      and row["taskruns"] >= 0):
+            bad.append(f"EXPECTED[{cid!r}].taskruns {row['taskruns']!r} is not a count")
+        if "task_at" in row:
+            if not isinstance(row["task_at"], dict):
+                bad.append(f"EXPECTED[{cid!r}].task_at is not a dict")
+            else:
+                for i, tid in row["task_at"].items():
+                    if not isinstance(i, int) or not isinstance(tid, str):
+                        bad.append(f"EXPECTED[{cid!r}].task_at[{i!r}] is not int -> str")
+        if "task_states" in row:
+            if not isinstance(row["task_states"], dict):
+                bad.append(f"EXPECTED[{cid!r}].task_states is not a dict")
+            else:
+                for tid, st in row["task_states"].items():
+                    if not isinstance(tid, str) or st not in STATE_TYPES:
+                        bad.append(f"EXPECTED[{cid!r}].task_states[{tid!r}] = {st!r} "
+                                   "is not a task id -> State.Type")
+    return bad
+
+
 def validate_tables(entries):
     """Every table key must name a real corpus entry.
 
@@ -873,10 +973,14 @@ def validate_tables(entries):
                         ("EXPECTED", EXPECTED),
                         ("NO_ASSERTION", NO_ASSERTION),
                         ("CHECKOUT_DRIFT", CHECKOUT_DRIFT),
-                        ("REFUSED_BY_BOTH", REFUSED_BY_BOTH)):
+                        ("REFUSED_BY_BOTH", REFUSED_BY_BOTH),
+                        # NON_DISCRIMINATING_NOTES was missing from this list, so a
+                        # typo'd key there was a note that could never print.
+                        ("NON_DISCRIMINATING_NOTES", NON_DISCRIMINATING_NOTES)):
         for k in table:
             if k not in ids:
                 problems.append(f"{name}[{k!r}] names no corpus flow")
+    problems.extend(expected_row_problems())
     overlap = set(INPUTS) & set(NOT_STANDALONE_INPUTS)
     if overlap:
         problems.append(f"in both INPUTS and NOT_STANDALONE_INPUTS: {sorted(overlap)}")
@@ -1016,6 +1120,165 @@ def probe_discrimination(entries, out, pg):
     return result
 
 
+def load_committed():
+    """Read corpus.json + probe.json for the offline rewrite, and CHECK them.
+
+    Regenerating runnable.txt offline is what stops a defect in the summary from
+    costing a multi-hour re-harvest.  But the rewrite path never touches
+    `corpus/`, so with 56 entries deleted from corpus.json it happily reproduced
+    the pre-fix header -- `total flows 289 / runs 218` -- exit 0, no warning.  A
+    reproducibility tool that can reproduce the defect is not one.
+    """
+    with open(os.path.join(HERE, "corpus.json"), encoding="utf-8") as f:
+        out = json.load(f)
+    out = out if isinstance(out, list) else out.get("entries", [])
+    with open(os.path.join(HERE, "probe.json"), encoding="utf-8") as f:
+        probe = json.load(f)
+
+    corpus_ids = {e["id"] for e in read_corpus()}
+    json_ids = {r["id"] for r in out}
+    if corpus_ids != json_ids:
+        missing = sorted(corpus_ids - json_ids)[:5]
+        extra = sorted(json_ids - corpus_ids)[:5]
+        bail(f"corpus.json covers {len(json_ids)} flows but corpus/ holds "
+             f"{len(corpus_ids)}; missing from corpus.json e.g. {missing}, "
+             f"not in corpus/ e.g. {extra}.  Re-harvest; do not rewrite.")
+
+    # rejected_class is a pure function of (directory, message) and the curated
+    # tables, so it can be RE-DERIVED here.  If the classifier has changed since
+    # the harvest, corpus.json is stale in a way no count would reveal -- the
+    # totals would still add up while the classes underneath them had moved.
+    by_entry = {e["id"]: e for e in read_corpus()}
+    drifted = [r["id"] for r in out if r.get("disposition") == "rejected"
+               and rejected_class(by_entry[r["id"]], r["reason"]) != r.get("rejected_class")]
+    if drifted:
+        bail(f"{len(drifted)} rejected record(s) no longer classify the way corpus.json "
+             f"stored them, e.g. {drifted[:5]}; the classifier changed after the harvest. "
+             "Re-harvest; do not rewrite.")
+
+    want_probe = sorted(cid for cid, r in ((r["id"], r) for r in out)
+                        if cid in EXPECTED and r.get("disposition") == "runs")
+    absent = [cid for cid in want_probe if cid not in probe]
+    if absent:
+        bail(f"{len(absent)} row(s) that ran and have an EXPECTED entry have no "
+             f"probe.json record, e.g. {absent[:5]}; they would silently print as "
+             "`unprobed`.  Re-harvest; do not rewrite.")
+    return out, probe
+
+
+def self_test():
+    """Prove each guard FIRES, by mutating the committed data.
+
+    A guard nobody has seen fail is a guard nobody has seen.  One of these was
+    `assert sum(by_class.values()) == len(rej)` -- a tautology, since both sides
+    came from iterating the same list once -- and it survived four mutations
+    before anyone noticed.  Each case below is a mutation that MUST raise.
+    """
+    import copy
+    out, probe = load_committed()
+
+    def must_bail(name, fn):
+        try:
+            fn()
+        except SystemExit as e:
+            print(f"  FIRES   {name}\n            {str(e)[:150]}")
+            return True
+        print(f"  SILENT  {name}  <-- the guard did not fire")
+        return False
+
+    print("[self-test] every guard below must fire on its mutation")
+    ok = True
+
+    # 1. a record with a disposition outside the vocabulary
+    m = copy.deepcopy(out)
+    m[0]["disposition"] = "probably-fine"
+    ok &= must_bail("unknown disposition is not silently dropped",
+                    lambda: write_runnable(m, probe))
+
+    # 2. rejected_class blanked / dropped / unknown
+    for label, mutate in (
+        ("rejected_class = None", lambda r: r.update(rejected_class=None)),
+        ("rejected_class deleted", lambda r: r.pop("rejected_class", None)),
+        ("rejected_class = ''", lambda r: r.update(rejected_class="")),
+        ("rejected_class unknown", lambda r: r.update(rejected_class="looks-fine")),
+    ):
+        m = copy.deepcopy(out)
+        mutate(next(r for r in m if r["disposition"] == "rejected"))
+        ok &= must_bail(label, lambda m=m: write_runnable(m, probe))
+
+    # 3. corpus.json short of corpus/
+    m = [r for r in copy.deepcopy(out) if not r["id"].endswith("-duration")]
+    ok &= must_bail("corpus.json missing flows that exist in corpus/",
+                    lambda: _rewrite_with(m, probe))
+
+    # 4. probe.json short of the rows that ran
+    ok &= must_bail("probe.json missing a row that ran",
+                    lambda: _rewrite_with(out, {k: v for k, v in list(probe.items())[5:]}))
+
+    # 4b. corpus.json storing a class the current classifier would not produce
+    m = copy.deepcopy(out)
+    next(r for r in m if r.get("rejected_class") == "task-type-not-in-image")[
+        "rejected_class"] = "checkout-drift"
+    ok &= must_bail("corpus.json class the current classifier disagrees with",
+                    lambda: _reclassify_check(m))
+
+    # 5. an EXPECTED row with a typo'd assertion key
+    saved = dict(EXPECTED)
+    try:
+        cid = "valids/exit"
+        EXPECTED[cid] = dict(saved[cid], taskrun=999)
+        ok &= must_bail("EXPECTED row with a typo'd key",
+                        lambda: _raise_if(expected_row_problems()))
+        EXPECTED[cid] = dict(saved[cid], state="SUKCESS")
+        ok &= must_bail("EXPECTED row with a state that is not a State.Type",
+                        lambda: _raise_if(expected_row_problems()))
+    finally:
+        EXPECTED.clear()
+        EXPECTED.update(saved)
+
+    # 6. a curated-note key that names no flow
+    NON_DISCRIMINATING_NOTES["valids/does-not-exist"] = "x"
+    try:
+        ok &= must_bail("NON_DISCRIMINATING_NOTES key naming no flow",
+                        lambda: validate_tables(read_corpus()))
+    finally:
+        NON_DISCRIMINATING_NOTES.pop("valids/does-not-exist", None)
+
+    if not ok:
+        raise SystemExit("[self-test] at least one guard did not fire")
+    print("[self-test] all guards fired")
+
+
+def _reclassify_check(out):
+    """load_committed()'s re-derivation check, on in-memory data (for --self-test)."""
+    by_entry = {e["id"]: e for e in read_corpus()}
+    drifted = [r["id"] for r in out if r.get("disposition") == "rejected"
+               and rejected_class(by_entry[r["id"]], r["reason"]) != r.get("rejected_class")]
+    if drifted:
+        bail(f"{len(drifted)} rejected record(s) no longer classify the way corpus.json "
+             f"stored them, e.g. {drifted[:5]}")
+
+
+def _raise_if(problems):
+    if problems:
+        bail("; ".join(problems))
+
+
+def _rewrite_with(out, probe):
+    """load_committed()'s checks, applied to in-memory data (for --self-test)."""
+    corpus_ids = {e["id"] for e in read_corpus()}
+    json_ids = {r["id"] for r in out}
+    if corpus_ids != json_ids:
+        bail(f"corpus.json covers {len(json_ids)} flows but corpus/ holds "
+             f"{len(corpus_ids)}")
+    want = [r["id"] for r in out
+            if r["id"] in EXPECTED and r.get("disposition") == "runs"]
+    absent = [cid for cid in want if cid not in probe]
+    if absent:
+        bail(f"{len(absent)} row(s) that ran have no probe.json record, "
+             f"e.g. {absent[:5]}")
+
+
 # --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -1025,16 +1288,18 @@ def main():
     ap.add_argument("--down", action="store_true", help="docker compose down -v and exit")
     ap.add_argument("--rewrite-runnable", action="store_true",
                     help="regenerate runnable.txt from committed corpus.json + probe.json; no Kestra needed")
+    ap.add_argument("--self-test", action="store_true",
+                    help="mutate the committed data and prove every guard fires; no Kestra needed")
     args = ap.parse_args()
 
     if args.rewrite_runnable:
-        with open(os.path.join(HERE, "corpus.json"), encoding="utf-8") as f:
-            out = json.load(f)
-        out = out if isinstance(out, list) else out.get("entries", [])
-        with open(os.path.join(HERE, "probe.json"), encoding="utf-8") as f:
-            probe = json.load(f)
+        out, probe = load_committed()
         write_runnable(out, probe)
         print("rewrote runnable.txt from corpus.json + probe.json")
+        return
+
+    if args.self_test:
+        self_test()
         return
 
     if args.down:
@@ -1138,8 +1403,39 @@ def main():
     print("\n[done] corpus.json + runnable.txt written")
 
 
+def bail(msg):
+    """Guards raise; they never `assert`.
+
+    `python3 -O` strips assert statements, so a guard written as an assert is a
+    guard that silently disappears under a flag anyone may pass.
+    """
+    raise SystemExit("harvest.py guard failed: " + msg)
+
+
+def disposition_table(records, label, total_label="TOTAL"):
+    """Rows for every disposition PRESENT, never a hand-written list.
+
+    A hand-written list next to `buckets.setdefault()` printed rows summing to
+    338 of 345 and exited 0 -- seven flows invisible in the file this package
+    calls its honest denominator.  Fixing one instance of that is not evidence
+    the class is gone; this is the only place either table is built.
+    """
+    seen = Counter(r["disposition"] for r in records)
+    unknown = sorted(set(seen) - set(KNOWN_DISPOSITIONS))
+    if unknown:
+        bail(f"{label}: disposition(s) {unknown} are outside KNOWN_DISPOSITIONS "
+             f"{list(KNOWN_DISPOSITIONS)}; add them there or fix the record")
+    names = [d for d in KNOWN_DISPOSITIONS if d in seen]
+    rows = [f"  {d:<24} {seen[d]}" for d in names]
+    printed = sum(seen[d] for d in names)
+    if printed != len(records):
+        bail(f"{label}: rows sum to {printed} but there are {len(records)} records")
+    rows.append(f"  {total_label:<24} {printed}")
+    return rows
+
+
 def write_runnable(out, probe):
-    buckets = {"runs": [], "rejected": [], "not-standalone": [], "unclassified": []}
+    buckets = {}
     for r in out:
         buckets.setdefault(r["disposition"], []).append(r)
 
@@ -1149,38 +1445,51 @@ def write_runnable(out, probe):
     lines.append("")
     lines.append("Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.")
     lines.append("Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,")
-    lines.append("core/src/test/resources/flows/{valids,invalids}.")
+    lines.append("core/src/test/resources/flows/{valids,invalids}, BOTH .yaml and .yml.")
     lines.append("")
     lines.append(f"total flows                {len(out)}")
-    for k in ("runs", "rejected", "not-standalone", "unclassified"):
-        lines.append(f"  {k:<24} {len(buckets.get(k, []))}")
+    lines.extend(disposition_table(out, "overall"))
     lines.append("")
     v = [r for r in out if r["id"].startswith("valids/")]
     iv = [r for r in out if r["id"].startswith("invalids/")]
+    if len(v) + len(iv) != len(out):
+        bail(f"{len(out) - len(v) - len(iv)} record(s) are in neither valids/ nor invalids/")
     for label, group in (("valids", v), ("invalids", iv)):
         lines.append(f"{label} ({len(group)})")
-        for k in ("runs", "rejected", "not-standalone", "unclassified"):
-            lines.append(f"  {k:<24} {sum(1 for r in group if r['disposition'] == k)}")
+        lines.extend(disposition_table(group, label))
         lines.append("")
 
     rej = buckets.get("rejected", [])
-    # DERIVED from the data, never a hand-written class list.  An earlier
-    # version enumerated three names it expected: it printed a 0 for a class
-    # that no longer exists and omitted `checkout-drift` and `refused-by-both`
-    # entirely, so the table summed to 49 while `rejected` said 51.  Two flows
-    # were invisible in the one file this package calls its honest denominator.
-    # A summary that lists what its author expected is not a measurement.
+    # DERIVED from the data, never a hand-written class list, AND checked against
+    # the vocabulary rejected_class() is the only producer of.  A record whose
+    # class was dropped, blanked or renamed fails here instead of quietly reading
+    # as one of the classes Task 8 ignores.
     lines.append("rejected, by class")
-    by_class = Counter(r.get("rejected_class") or "unclassified-rejection" for r in rej)
+    strays = sorted({r["id"] for r in rej
+                     if r.get("rejected_class") not in KNOWN_REJECTED_CLASSES})
+    if strays:
+        bail(f"{len(strays)} rejected record(s) carry no known rejected_class, e.g. "
+             f"{strays[:3]}; expected one of {list(KNOWN_REJECTED_CLASSES)}")
+    by_class = Counter(r["rejected_class"] for r in rej)
     for cls, n in sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0])):
-        lines.append(f"  {cls:<44} {n}")
-    assert sum(by_class.values()) == len(rej), (
-        f"class table {sum(by_class.values())} != rejected {len(rej)}")
+        mark = "  <- Task 8 evidence" if cls in TASK8_EVIDENCE else ""
+        lines.append(f"  {cls:<44} {n}{mark}")
+    if sum(by_class.values()) != len(rej):
+        bail(f"class table {sum(by_class.values())} != rejected {len(rej)}")
     lines.append(f"  {'TOTAL':<44} {sum(by_class.values())}")
     lines.append("")
-    lines.append("  Only `invalid-flow` is evidence that egret must refuse a flow.")
-    lines.append("  Every other class is the pinned image or the checkout differing")
-    lines.append("  from each other, which Task 8 must NOT read as a refusal.")
+    # Generated from TASK8_EVIDENCE, not written beside it.  The hand-written
+    # version said "only invalid-flow", which told Task 8 to ignore
+    # `refused-by-both` -- a class holding a flow Kestra refuses in both places.
+    lines.append("  Evidence that egret must refuse a flow -- and nothing else is:")
+    for cls in TASK8_EVIDENCE:
+        lines.append(f"    {cls:<42} {by_class.get(cls, 0)}")
+    lines.append("  The remaining classes are NOT refusals:")
+    for cls in KNOWN_REJECTED_CLASSES:
+        if cls in TASK8_EVIDENCE:
+            continue
+        lines.append(f"    {cls:<42} {by_class.get(cls, 0)}  -- "
+                     f"{NON_EVIDENCE_REASON[cls]}")
     lines.append("")
 
     accepted = [r for r in out if r.get("accepted_though_invalid")]
@@ -1197,24 +1506,29 @@ def write_runnable(out, probe):
     lines.append(f"sub-executions harvested by following parentId: {subs}")
     lines.append("")
 
-    for k in ("not-standalone", "rejected", "unclassified"):
-        rows = buckets.get(k, [])
+    # Same derivation as the header: every bucket present gets a detail section,
+    # `runs` last because it is the long one.  The literal list this replaced gave
+    # a novel disposition no header row AND no detail section, from the same
+    # hand-written tuple in two places.
+    detail_order = ([d for d in KNOWN_DISPOSITIONS if d in buckets and d != "runs"]
+                    + (["runs"] if "runs" in buckets else []))
+    if sum(len(buckets[d]) for d in detail_order) != len(out):
+        bail(f"detail sections cover {sum(len(buckets[d]) for d in detail_order)} "
+             f"of {len(out)} records")
+    for k in detail_order:
+        rows = buckets[k]
         lines.append("")
         lines.append(f"{k} -- {len(rows)}")
         lines.append("-" * 72)
         for r in sorted(rows, key=lambda x: x["id"]):
-            cls = f"  [{r['rejected_class']}]" if r.get("rejected_class") else ""
-            lines.append(f"{r['id']}{cls}")
-            lines.append(f"    {r.get('reason', '')}")
+            if k == "runs":
+                extra = f"  (+{r['sub_executions']} sub)" if r.get("sub_executions") else ""
+                lines.append(f"{r['id']:<62} {r.get('reason', '')}{extra}")
+            else:
+                cls = f"  [{r['rejected_class']}]" if r.get("rejected_class") else ""
+                lines.append(f"{r['id']}{cls}")
+                lines.append(f"    {r.get('reason', '')}")
         lines.append("")
-
-    lines.append("")
-    lines.append(f"runs -- {len(buckets['runs'])}")
-    lines.append("-" * 72)
-    for r in sorted(buckets["runs"], key=lambda x: x["id"]):
-        extra = f"  (+{r['sub_executions']} sub)" if r.get("sub_executions") else ""
-        lines.append(f"{r['id']:<62} {r.get('reason', '')}{extra}")
-    lines.append("")
 
     lines.append("")
     lines.append("")
@@ -1248,12 +1562,31 @@ def write_runnable(out, probe):
         else:
             rows.append((cid, "agrees", row["from"], asserts))
             agree += 1
+    # A row is WEAK when its only assertion is the terminal state, that state is a
+    # non-error one, and the probe never proved the row can move.  Such a row would
+    # read `agrees` for any input that merely finishes successfully.  Derived, so a
+    # new row of that shape is labelled without anyone remembering to.
+    weak = []
     for cid, verdict, why, asserts in rows:
-        lines.append(f"  {verdict:<8} {cid:<52} [{asserts}]")
+        pr = probe.get(cid) or {}
+        is_weak = (verdict == "agrees" and asserts == "state"
+                   and EXPECTED[cid].get("state") in ("SUCCESS", "WARNING")
+                   and not pr.get("differs"))
+        if is_weak:
+            weak.append(cid)
+        lines.append(f"  {verdict:<8} {cid:<52} [{asserts}]"
+                     + ("   WEAK" if is_weak else ""))
         lines.append(f"           {why}")
     lines.append("")
     lines.append(f"  agrees {agree}   differs {differ}   not exercised {skipped}"
                  f"   (of {len(EXPECTED)} rows)")
+    if weak:
+        lines.append("")
+        lines.append(f"  WEAK rows ({len(weak)}): state-only, non-error state, and not proven")
+        lines.append("  discriminating.  Counted in `agrees` above, but they would agree with")
+        lines.append("  any input that merely finishes successfully -- do not cite them.")
+        for cid in weak:
+            lines.append(f"    {cid}")
     lines.append("")
 
     lines.append("")
