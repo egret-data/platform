@@ -45,6 +45,23 @@ invalids this Kestra ACCEPTS: 1
 
 sub-executions harvested by following parentId: 133
 
+happens-before pairs, over the five harvest rounds
+  kept (identical in all 5 rounds)             1104
+  dropped, relation flipped between rounds     13
+  dropped, a run had no start or no end        0
+  TOTAL                                        1117
+
+  A relation observed once is a coincidence, and genuinely parallel
+  branches flip.  Only the pairs that came out the same in all five
+  rounds are in golden.json; the rest are dropped and counted here.
+
+traces that did NOT reproduce across all 5 rounds: 2
+  valids/retry-failed-task-duration  (rounds differing from round 1: [3, 4])
+  valids/waitfor-max-duration  (rounds differing from round 1: [2, 4])
+  These get NO golden entry and are never compared.  A trace the oracle
+  itself does not reproduce five times running cannot judge egret: an
+  implementation matching round 1 would be right by luck.
+
 
 rejected -- 51
 ------------------------------------------------------------------------

@@ -564,6 +564,22 @@ def compose(*args, check=True):
     return subprocess.run(cmd, cwd=HERE, check=check)
 
 
+def image_tag():
+    """The pinned image, read from docker-compose.yml.
+
+    Restating the tag in a second place is how a "pinned" artifact quietly stops
+    being the one the container ran.  A moving tag is a moving golden, and a
+    provenance line that names the wrong image is worse than none.
+    """
+    src = open(os.path.join(HERE, "docker-compose.yml"), encoding="utf-8").read()
+    m = re.search(r"^\s*image:\s*(kestra/kestra:\S+)\s*$", src, re.M)
+    if not m:
+        bail("docker-compose.yml has no `image: kestra/kestra:<tag>` line")
+    if m.group(1).endswith(":latest"):
+        bail(f"docker-compose.yml pins {m.group(1)}: a moving tag is a moving golden")
+    return m.group(1)
+
+
 def pg_container():
     r = subprocess.run(
         ["docker", "compose", "-p", PROJECT, "ps", "-q", "postgres"],
@@ -1034,11 +1050,19 @@ NON_DISCRIMINATING_NOTES = {
     "valids/pause-behavior":
         "MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, "
         "CANCEL -- produce the identical execution (FAILED, 1 task run, histories "
-        "CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The behavior property, "
-        "rendered from an input, has no observable effect on this artifact, though "
-        "PauseTest.java:374-380 asserts RESUME -> SUCCESS with 2 task runs.  So this "
-        "row's `agrees` is a coincidence, not evidence that the input landed, and Task 2 "
-        "must not build a golden for this flow from the checkout's semantics.",
+        "CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that "
+        "`behavior` is unimplemented on this artifact: published with LITERAL values on a "
+        "fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, "
+        "FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- "
+        "the checkout's semantics reproduced exactly.  What fails is narrower: this corpus "
+        "flow writes `behavior: \"{{ inputs.behavior }}\"`, and rendering a Pebble "
+        "expression into a `Property<Behavior>` fails at resume time and takes the task "
+        "down with it, for EVERY value including the one that would have failed anyway.  "
+        "The execution document does record `inputs: {\"behavior\": \"FAIL\"}`, so the "
+        "input landed -- the task dies rendering it.  So this row's `agrees` is a "
+        "coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at "
+        "all.  Task 2 builds this flow's golden from what the pinned image did, and "
+        "whoever implements `pause` must not read this as a missing feature.",
 }
 
 
@@ -1176,6 +1200,8 @@ def self_test():
     """
     import copy
     out, probe = load_committed()
+    golden, stab = load_task2()
+    task2 = (golden, stab)
 
     def must_bail(name, fn):
         try:
@@ -1193,7 +1219,7 @@ def self_test():
     m = copy.deepcopy(out)
     m[0]["disposition"] = "probably-fine"
     ok &= must_bail("unknown disposition is not silently dropped",
-                    lambda: write_runnable(m, probe))
+                    lambda: write_runnable(m, probe, task2))
 
     # 2. rejected_class blanked / dropped / unknown
     for label, mutate in (
@@ -1204,7 +1230,7 @@ def self_test():
     ):
         m = copy.deepcopy(out)
         mutate(next(r for r in m if r["disposition"] == "rejected"))
-        ok &= must_bail(label, lambda m=m: write_runnable(m, probe))
+        ok &= must_bail(label, lambda m=m: write_runnable(m, probe, task2))
 
     # 3. corpus.json short of corpus/
     m = [r for r in copy.deepcopy(out) if not r["id"].endswith("-duration")]
@@ -1235,6 +1261,25 @@ def self_test():
     finally:
         EXPECTED.clear()
         EXPECTED.update(saved)
+
+    # 5b. Task 2's two artifacts describing different harvests
+    mg = copy.deepcopy(golden)
+    ms = copy.deepcopy(stab)
+    ms["flows"].pop(next(e["id"] for e in mg if e.get("verdict") == "runs"))
+    ok &= must_bail("a golden entry with no stability record",
+                    lambda: write_runnable(out, probe, (mg, ms)))
+
+    mg = copy.deepcopy(golden)
+    e = next(e for e in mg if e.get("verdict") == "runs" and e["runs"])
+    e["runs"].append(dict(e["runs"][0]))
+    ok &= must_bail("golden.json run counts that stability.json cannot account for",
+                    lambda: write_runnable(out, probe, (mg, stab)))
+
+    mg = copy.deepcopy(golden)
+    e = next(e for e in mg if e.get("verdict") == "runs" and e["order"])
+    e["order"] = e["order"][:-1]
+    ok &= must_bail("golden.json order pairs that the stability filter did not keep",
+                    lambda: write_runnable(out, probe, (mg, stab)))
 
     # 6. a curated-note key that names no flow
     NON_DISCRIMINATING_NOTES["valids/does-not-exist"] = "x"
@@ -1280,6 +1325,295 @@ def _rewrite_with(out, probe):
 
 
 # --------------------------------------------------------------------------
+# raw execution traces -- Task 2's input
+# --------------------------------------------------------------------------
+# corpus.json records `observed` (state, taskrun count, task ids, task states):
+# enough to cross-check a recovered input, nowhere near enough to build a
+# semantic trace.  Task 2 needs the histories, the attempts, the parent taskrun
+# links and the sub-executions, so `--traces N` re-executes every `runs` flow N
+# times and writes the REDUCED raw documents to traces.json.  normalise.py turns
+# those into golden.json; nothing downstream talks to Kestra.
+#
+# N is 5 because the happens-before relation is only kept where it is stable
+# across all five (plan Task 2 step 1 rule 2): a relation observed once is a
+# coincidence, and genuinely parallel branches flip.
+TRACE_ROUNDS = 5
+
+# The taskrun-level state vocabulary the reduction keeps VERBATIM.  Measured on
+# the artifact, and wider than the executor's draft `RunState`: a worker task
+# passes through SUBMITTED, which no flowable does, and a retried one repeats
+# CREATED.  Dropping SUBMITTED would be normalising away the one field that
+# distinguishes a task the worker ran from a flowable the executor ran.
+TRACE_STATE_KEYS = ("state", "date")
+
+
+def reduce_state(st):
+    """One `state` object: the current value, the history, and the two clocks.
+
+    The clocks are kept HERE and dropped in normalise.py, on purpose.  The
+    happens-before relation is derived from them, and a derivation whose input
+    is not committed cannot be audited or re-run offline -- which is the same
+    property `--rewrite-runnable` exists to give runnable.txt.
+    """
+    st = st or {}
+    return {
+        "current": st.get("current"),
+        "histories": [[h.get("state"), h.get("date")] for h in st.get("histories") or []],
+        "startDate": st.get("startDate"),
+        "endDate": st.get("endDate"),
+    }
+
+
+def spawn_link(doc):
+    """Which of the PARENT's taskruns spawned this sub-execution, and with what.
+
+    A LOOP sub-execution's `loopRun` names all three things the trace needs:
+    `taskRunId` (the flowable in the PARENT execution that spawned it), `index`
+    (its position in the loop's values) and `value` (the iteration value itself).
+    Measured on valids/loop-object:
+    `{"taskId": "1_each", "taskRunId": "2uNX...", "index": 0, "value": "value 1"}`.
+
+    `index` is the only stable order for siblings.  Creation instant is NOT: a
+    concurrent loop creates its sub-executions in an order that flipped between
+    rounds on nine corpus flows, which is a fact about the scheduler and not
+    about the flow.
+
+    The `parent.taskRunList` last entry says the same thing and is CROSS-CHECKED
+    rather than used: reading a link off the wrong field would put
+    sub-executions under the wrong run, and once the ids are gone that reads
+    exactly like a measurement.  Anything with no `loopRun` returns None rather
+    than a guess.
+    """
+    loop = doc.get("loopRun") or {}
+    by = loop.get("taskRunId")
+    trl = (loop.get("parent") or {}).get("taskRunList") or []
+    if by and trl and trl[-1].get("id") != by:
+        bail(f"execution {doc.get('id')}: loopRun.taskRunId is {by} but "
+             f"loopRun.parent.taskRunList's last entry is {trl[-1].get('id')}; "
+             "the two ways of reading the spawn link disagree")
+    return by, loop.get("index"), loop.get("value")
+
+
+def reduce_execution(doc):
+    """Everything normalise.py reads, and nothing else.
+
+    Outputs, labels, worker ids, revisions and the tenant are dropped at capture
+    time: they are Kestra's record-keeping, not its semantics, and the Global
+    Constraints say the comparison is on a semantic trace and never on Kestra's
+    JSON layout.
+    """
+    runs = []
+    for t in doc.get("taskRunList") or []:
+        runs.append({
+            "id": t.get("id"),
+            "taskId": t.get("taskId"),
+            "parentTaskRunId": t.get("parentTaskRunId"),
+            "value": t.get("value"),
+            "state": reduce_state(t.get("state")),
+            "attempts": [reduce_state(a.get("state")) for a in t.get("attempts") or []],
+        })
+    by, index, value = spawn_link(doc)
+    return {
+        "id": doc.get("id"),
+        "parentId": doc.get("parentId"),
+        "kind": doc.get("kind"),
+        "flowId": doc.get("flowId"),
+        "namespace": doc.get("namespace"),
+        "spawnedBy": by,
+        "loopIndex": index,
+        "loopValue": value,
+        "state": reduce_state(doc.get("state")),
+        "runs": runs,
+    }
+
+
+def execute_once(entry, inputs, pg):
+    """One execution of one flow, with everything it spawned.
+
+    Returns (root_reduced, [descendant_reduced], error).  `error` is a string
+    whenever the root or anything under it did not settle inside the same bounds
+    the Task 1 harvest used -- never a partial trace passed off as a whole one.
+
+    **Terminal is not the same as finished.**  The obvious loop -- discover the
+    descendants once, wait for them, stop when none are pending -- stops
+    immediately when the first discovery returns nothing, and a sub-execution
+    whose row lands a beat later is then simply absent, silently, with a
+    plausible trace written.  That is measured, not feared: it cost every
+    `retry-new-execution-*` flow BOTH of its executions in the first capture,
+    and `--verify-traces` is what found it.
+
+    The signal is exact.  `RETRIED` is Kestra saying a replacement execution is
+    coming, and over 40 observations (four flows x five rounds x two children)
+    **every** `RETRIED` execution had exactly one child and every other terminal
+    state had none.  The replacement's `startDate` ran 1.07 s to 5.92 s after the
+    `RETRIED` execution's `endDate`, so waiting for it needs a rule and not a
+    sleep: settle when nothing is pending AND no `RETRIED` execution is
+    childless.
+    """
+    ns, fid = entry["namespace"], entry["flow_id"]
+    body, ctype = multipart(inputs or {})
+    status, resp = http("POST", f"{BASE}/{TENANT}/executions/{ns}/{fid}", body, ctype)
+    if status != 200:
+        return None, [], f"POST execution -> {status}: {detail(resp)}"
+
+    root = json.loads(resp)["id"]
+    doc, err = await_terminal(root, EXEC_TIMEOUT)
+    if doc is None:
+        return None, [], f"execution {root} {err}"
+
+    docs, pending, why = {}, set(), None
+    deadline = time.time() + SUB_TIMEOUT
+    while True:
+        docs = {}
+        pending = set()
+        for eid in {root} | descendants(root, pg):
+            s, b = http("GET", f"{BASE}/{TENANT}/executions/{eid}")
+            if s != 200:
+                pending.add(eid)
+                continue
+            d = json.loads(b)
+            if d.get("state", {}).get("current") in TERMINAL:
+                docs[eid] = d
+            else:
+                pending.add(eid)
+        parents = {d.get("parentId") for d in docs.values()}
+        childless = {eid for eid, d in docs.items()
+                     if d.get("state", {}).get("current") == "RETRIED" and eid not in parents}
+        if not pending and not childless:
+            break
+        if time.time() >= deadline:
+            why = (f"{len(pending)} execution(s) never reached a terminal state"
+                   if pending else
+                   f"{len(childless)} RETRIED execution(s) never got the replacement "
+                   "execution that state promises")
+            return None, [], why
+        time.sleep(POLL)
+
+    subs = sorted(set(docs) - {root})
+    return reduce_execution(docs[root]), [reduce_execution(docs[k]) for k in subs], None
+
+
+def capture_traces(rounds):
+    """Execute every `runs` flow `rounds` times and write traces.json.
+
+    Rounds are ROUND-major, not flow-major: round 1 runs all 268 flows before
+    round 2 starts any.  Five back-to-back executions of one flow share a warm
+    JVM, a warm page cache and a quiet queue, which is exactly the condition
+    under which a race does not show -- and the stability filter this feeds is
+    only worth anything if the five samples are not correlated by construction.
+    """
+    out, _ = load_committed()
+    entries = {e["id"]: e for e in read_corpus()}
+    validate_tables(list(entries.values()))
+    assert_clean(list(entries.values()))
+
+    wanted = [r for r in out if r.get("disposition") == "runs"]
+    print(f"[traces] {len(wanted)} `runs` flows x {rounds} rounds")
+
+    published = 0
+    for e in entries.values():
+        status, _ = http("POST", f"{BASE}/{TENANT}/flows",
+                         e["source"].encode("utf-8"), "application/x-yaml")
+        published += 1 if status == 200 else 0
+    print(f"[traces] published {published}/{len(entries)} flows")
+
+    pg = pg_container()
+    flows = {r["id"]: [] for r in wanted}
+    for rnd in range(1, rounds + 1):
+        t0 = time.time()
+        for i, rec in enumerate(wanted, 1):
+            e = entries[rec["id"]]
+            root, subs, err = execute_once(e, rec.get("inputs") or {}, pg)
+            flows[rec["id"]].append(
+                {"round": rnd, "error": err, "root": root, "descendants": subs})
+            if err or i % 50 == 0:
+                print(f"[traces r{rnd}] [{i:3}/{len(wanted)}] {rec['id']:<58} "
+                      f"{err or root['state']['current']}")
+        print(f"[traces] round {rnd} done in {time.time() - t0:.0f}s")
+
+    doc = {"rounds": rounds, "image": image_tag(), "flows": flows}
+    check_traces(doc, out)
+    with open(os.path.join(HERE, "traces.json"), "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1, sort_keys=False)
+        f.write("\n")
+    print(f"[traces] traces.json written: {len(flows)} flows x {rounds} rounds")
+
+
+def verify_traces():
+    """Re-ask Kestra for everything traces.json captured, long after the fact.
+
+    The capture stops polling for sub-executions the moment none are pending,
+    and a sub-execution whose row lands a beat later is then simply absent --
+    silently, with a plausible trace written.  That is not hypothetical: Task 1's
+    corpus.json records ONE sub-execution for `valids/loop-with-subflow` and this
+    capture recorded TWO in every round, because the flow's `Loop` has two
+    values.  An undercount by one is exactly the defect that reads like a
+    measurement.
+
+    So every captured execution is fetched again -- minutes to hours later, with
+    the flows long finished -- reduced the same way, and required to be
+    IDENTICAL.  A descendant that was going to appear has appeared by now.
+    """
+    with open(os.path.join(HERE, "traces.json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    pg = pg_container()
+    checked = grown = 0
+    problems = []
+    for cid in sorted(doc["flows"]):
+        for r in doc["flows"][cid]:
+            root_id = r["root"]["id"]
+            now = descendants(root_id, pg)
+            was = {d["id"] for d in r["descendants"]}
+            if now != was:
+                grown += 1
+                problems.append(f"{cid} r{r['round']}: descendants were {sorted(was)}, "
+                                f"are now {sorted(now)}")
+            for captured in [r["root"], *r["descendants"]]:
+                checked += 1
+                status, body = http("GET", f"{BASE}/{TENANT}/executions/{captured['id']}")
+                if status != 200:
+                    problems.append(f"{cid} r{r['round']}: execution {captured['id']} "
+                                    f"re-read -> {status}")
+                    continue
+                again = reduce_execution(json.loads(body))
+                if again != captured:
+                    problems.append(f"{cid} r{r['round']}: execution {captured['id']} "
+                                    "re-reads differently than it was captured")
+    if problems:
+        bail(f"{len(problems)} captured execution(s) do not re-read the way they were "
+             f"captured ({grown} grew a sub-execution):\n  " + "\n  ".join(problems[:20]))
+    print(f"[verify] {checked} captured execution(s) re-read identically, and every "
+          f"descendant set is unchanged")
+
+
+def check_traces(doc, out):
+    """traces.json must cover exactly the `runs` flows, `rounds` times, with no
+    round that failed to run.
+
+    The failure this prevents is the quiet one: a round that errored on 30 flows
+    still produces a traces.json that normalise.py will happily read, and the
+    golden it writes would then be built from whichever rounds happened to
+    survive -- a denominator nobody stated.
+    """
+    want = {r["id"] for r in out if r.get("disposition") == "runs"}
+    got = set(doc.get("flows", {}))
+    if want != got:
+        bail(f"traces.json covers {len(got)} flows but corpus.json has {len(want)} "
+             f"with disposition `runs`; missing e.g. {sorted(want - got)[:5]}, "
+             f"extra e.g. {sorted(got - want)[:5]}")
+    rounds = doc.get("rounds")
+    bad_len = [cid for cid, rs in doc["flows"].items() if len(rs) != rounds]
+    if bad_len:
+        bail(f"{len(bad_len)} flow(s) do not have all {rounds} rounds, "
+             f"e.g. {bad_len[:5]}")
+    errored = [f"{cid} r{r['round']}: {r['error']}"
+               for cid, rs in sorted(doc["flows"].items()) for r in rs if r["error"]]
+    if errored:
+        bail(f"{len(errored)} capture(s) failed; a golden built from the rounds that "
+             f"survived has a denominator nobody stated: {errored[:5]}")
+
+
+# --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-down", action="store_true",
@@ -1288,6 +1622,12 @@ def main():
     ap.add_argument("--down", action="store_true", help="docker compose down -v and exit")
     ap.add_argument("--rewrite-runnable", action="store_true",
                     help="regenerate runnable.txt from committed corpus.json + probe.json; no Kestra needed")
+    ap.add_argument("--traces", type=int, metavar="N", nargs="?", const=TRACE_ROUNDS,
+                    help=f"execute every `runs` flow N times (default {TRACE_ROUNDS}) and "
+                         "write traces.json, the input normalise.py turns into golden.json")
+    ap.add_argument("--verify-traces", action="store_true",
+                    help="re-read every execution traces.json captured and require it to be "
+                         "identical; needs the same Kestra still running")
     ap.add_argument("--self-test", action="store_true",
                     help="mutate the committed data and prove every guard fires; no Kestra needed")
     args = ap.parse_args()
@@ -1304,6 +1644,23 @@ def main():
 
     if args.down:
         compose("down", "-v")
+        return
+
+    if args.verify_traces:
+        wait_ready()
+        verify_traces()
+        return
+
+    if args.traces:
+        # The same structural clean start the full harvest has, for the same
+        # reason: a partial leftover produces a plausible artifact with a quietly
+        # wrong denominator.
+        if not args.no_up:
+            if not args.no_down:
+                compose("down", "-v")
+            compose("up", "-d")
+        wait_ready()
+        capture_traces(args.traces)
         return
 
     if not args.no_up:
@@ -1412,6 +1769,105 @@ def bail(msg):
     raise SystemExit("harvest.py guard failed: " + msg)
 
 
+def load_task2():
+    """golden.json + stability.json, Task 2's committed outputs.
+
+    `runnable.txt` is the file this package calls its honest denominator, so the
+    happens-before numbers belong in it and not only in a script's stdout.  Both
+    files are committed, so `--rewrite-runnable` still needs no Kestra.
+    """
+    out = {}
+    for name in ("golden.json", "stability.json"):
+        path = os.path.join(HERE, name)
+        if not os.path.exists(path):
+            bail(f"{name} is missing; run `python3 normalise.py` first "
+                 "(it needs traces.json, which `--traces` writes)")
+        with open(path, encoding="utf-8") as f:
+            out[name] = json.load(f)
+    return out["golden.json"], out["stability.json"]
+
+
+def pairs_in(node):
+    """How many ordered pairs one normalised trace HAS, counting sub-executions.
+
+    Derived from golden.json.  The point is that it is a SECOND derivation:
+    stability.json says how many pairs it kept and dropped, golden.json says how
+    many runs there are, and n*(n-1)/2 must reconcile the two.  A stability file
+    that has drifted from the golden -- a re-normalisation that wrote one and not
+    the other -- fails here instead of printing a table that adds up with itself.
+    """
+    n = len(node.get("runs") or [])
+    return n * (n - 1) // 2 + sum(pairs_in(sub) for sub in node.get("spawned") or [])
+
+
+def order_in(node):
+    """How many order pairs one normalised trace CARRIES, sub-executions included.
+
+    The counterpart to `pairs_in`: that one says how many pairs a trace has,
+    this one how many survived the filter.  Both must reconcile with
+    stability.json, from opposite directions.
+    """
+    return len(node.get("order") or []) + sum(
+        order_in(sub) for sub in node.get("spawned") or [])
+
+
+def order_table(golden, stab):
+    """The happens-before relation: kept, and what had to be dropped.
+
+    Kestra's own tests read `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()`
+    FOUR times, in ParallelTest.errors() and DagTest.errors() -- counted at
+    checkout 96893b589, not the 39 the plan claims.  That is a claim about
+    SERIALISATION, and a normaliser that drops all clocks cannot see a flowable
+    that stops serialising -- so the relation is derived before the clocks go,
+    and kept only where all five rounds agreed.
+    """
+    lines = ["happens-before pairs, over the five harvest rounds"]
+    by_id = {e["id"]: e for e in golden if e.get("verdict") == "runs"}
+    missing = sorted(set(by_id) - set(stab["flows"]))
+    if missing:
+        bail(f"{len(missing)} golden entr(y/ies) have no stability record, e.g. "
+             f"{missing[:5]}; the two files describe different harvests")
+
+    kept = unstable = unmeasurable = 0
+    for cid, entry in sorted(by_id.items()):
+        rec = stab["flows"][cid]
+        have = (rec["pairs_kept"] + rec["pairs_dropped_unstable"]
+                + rec["pairs_dropped_unmeasurable"])
+        want = pairs_in(entry)
+        if have != want:
+            bail(f"{cid}: stability.json accounts for {have} pair(s) but golden.json's "
+                 f"run counts give {want}; one of the two files is stale")
+        written = order_in(entry)
+        if written != rec["pairs_kept"]:
+            bail(f"{cid}: golden.json carries {written} order pair(s) across the whole "
+                 f"trace but stability.json kept {rec['pairs_kept']}; the stability "
+                 "filter and the golden writer disagree")
+        kept += rec["pairs_kept"]
+        unstable += rec["pairs_dropped_unstable"]
+        unmeasurable += rec["pairs_dropped_unmeasurable"]
+
+    lines.append(f"  {'kept (identical in all 5 rounds)':<44} {kept}")
+    lines.append(f"  {'dropped, relation flipped between rounds':<44} {unstable}")
+    lines.append(f"  {'dropped, a run had no start or no end':<44} {unmeasurable}")
+    lines.append(f"  {'TOTAL':<44} {kept + unstable + unmeasurable}")
+    lines.append("")
+    lines.append("  A relation observed once is a coincidence, and genuinely parallel")
+    lines.append("  branches flip.  Only the pairs that came out the same in all five")
+    lines.append("  rounds are in golden.json; the rest are dropped and counted here.")
+    lines.append("")
+    lines.append(f"traces that did NOT reproduce across all 5 rounds: "
+                 f"{len(stab['unstable_traces'])}")
+    for cid in stab["unstable_traces"]:
+        rec = stab["flows"][cid]
+        lines.append(f"  {cid}  (rounds differing from round 1: "
+                     f"{rec['rounds_differing_from_round_1']})")
+    lines.append("  These get NO golden entry and are never compared.  A trace the oracle")
+    lines.append("  itself does not reproduce five times running cannot judge egret: an")
+    lines.append("  implementation matching round 1 would be right by luck.")
+    lines.append("")
+    return lines
+
+
 def disposition_table(records, label, total_label="TOTAL"):
     """Rows for every disposition PRESENT, never a hand-written list.
 
@@ -1434,7 +1890,7 @@ def disposition_table(records, label, total_label="TOTAL"):
     return rows
 
 
-def write_runnable(out, probe):
+def write_runnable(out, probe, task2=None):
     buckets = {}
     for r in out:
         buckets.setdefault(r["disposition"], []).append(r)
@@ -1505,6 +1961,12 @@ def write_runnable(out, probe):
     subs = sum(r.get("sub_executions", 0) for r in out)
     lines.append(f"sub-executions harvested by following parentId: {subs}")
     lines.append("")
+
+    # Task 2's numbers.  Optional only so that a re-harvest can write
+    # runnable.txt before normalise.py has seen the new traces; the default
+    # path reads the committed files and fails if they are absent.
+    golden, stab = task2 if task2 is not None else load_task2()
+    lines.extend(order_table(golden, stab))
 
     # Same derivation as the header: every bucket present gets a detail section,
     # `runs` last because it is the long one.  The literal list this replaced gave

@@ -6,8 +6,10 @@ provenance**: which Kestra, which flows, how the input values were recovered,
 and — the point of Task 1 — **how much of the corpus actually runs standalone**,
 which is a measured result and not an assumption.
 
-The normalisation rules, `golden.json` and the ratchet arrive in Task 2. This
-file will grow those sections; nothing here is superseded by them.
+Task 2 added the rest and superseded nothing: **the normalised trace**, the
+happens-before relation, `golden.json`, `stability.json` and the ratchet in
+`crates/egret-workflow/tests/executor.rs`. Those sections start at *The
+normalised trace*.
 
 Every number below is a number `harvest.py` prints. If this file and
 `runnable.txt` ever disagree, `runnable.txt` is right and this file is stale —
@@ -23,10 +25,20 @@ checkout at run time — the flows are copied in.
 ```bash
 cd crates/egret-workflow/oracle-exec
 python3 harvest.py                    # down -v, up, publish, execute, probe, write both outputs
-python3 harvest.py --rewrite-runnable # regenerate runnable.txt offline from corpus.json + probe.json
+python3 harvest.py --traces 5         # down -v, up, publish, execute every `runs` flow 5x -> traces.json
+python3 harvest.py --verify-traces    # re-read every captured execution; requires the SAME Kestra still up
+python3 normalise.py                  # traces.json + corpus.json -> golden.json + stability.json
+python3 harvest.py --rewrite-runnable # regenerate runnable.txt offline from the committed files
 python3 harvest.py --self-test        # mutate the committed data, prove every guard fires
+python3 normalise.py --self-test      # the same, for the normaliser's guards
 python3 harvest.py --down             # docker compose down -v
 ```
+
+`--traces` and the full harvest are two different measurements of the same
+Kestra and are run separately: the harvest asks *which flows run at all* and
+writes `corpus.json`, `--traces` asks *what exactly did they do, five times* and
+writes `traces.json`. `normalise.py` never talks to Kestra, so a defect in the
+normalisation costs a re-run of one second and not of an hour.
 
 A full harvest takes roughly 35 minutes, most of it the seven flows that pause
 and are waited out to their timeout, plus the discrimination probe's second
@@ -352,12 +364,26 @@ proven discriminating 17   proven non-discriminating 1   unprobed 19
   exists: `valids/pause-behavior`. On v2.0.0-rc13 all four documented behaviours
   — `FAIL`, `RESUME`, `WARN`, `CANCEL` — produce the identical execution
   (`FAILED`, 1 task run, histories
-  `CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED`), although
-  `PauseTest.java:374-380` asserts `RESUME → SUCCESS` with 2 task runs. The
-  `behavior` property, rendered from an input, has no observable effect on this
-  artifact. So that row's `agrees` is a **coincidence**, not evidence the input
-  landed, and Task 2 must not build a golden for this flow from the checkout's
-  semantics.
+  `CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED`).
+
+  **The cause is not that `behavior` is unimplemented on this artifact**, and an
+  earlier revision of this file said so, which would have sent whoever
+  implements `pause` hunting for a feature that is already there. Published with
+  **literal** values on a fresh `rc13`, the same flow gives `RESUME → SUCCESS`
+  with 2 task runs, `WARN → WARNING` with 2, `FAIL → FAILED` with 1, `CANCEL →
+  CANCELLED` with 1, and the property omitted → `SUCCESS` with 2 — the
+  checkout's semantics reproduced exactly, `PauseTest.java:374-380` included.
+
+  What fails is narrower. The corpus flow writes
+  `behavior: "{{ inputs.behavior }}"`, and **rendering a Pebble expression into
+  a `Property<Behavior>` fails at resume time and takes the task down with it**,
+  for every value including the one that would have failed anyway. The execution
+  document does record `inputs: {"behavior": "FAIL"}`, so the input landed; the
+  task dies rendering it.
+
+  So that row's `agrees` is a coincidence in the **strong** sense — the flow
+  never reaches the `FAIL` behaviour at all — and Task 2 builds this flow's
+  golden from what the pinned image did.
 - **19** are unprobed because no alternative input is documented for the flow —
   there is nothing to swap in. Seventeen of them carry a `taskruns`, `task_at`
   or `task_states` assertion that a branch flip would move, so they are strong;
@@ -482,6 +508,415 @@ Guards `raise` and never `assert`: `python3 -O` strips assert statements, so a
 guard written as an assert is a guard that disappears under a flag anyone may
 pass. `--self-test` mutates the committed data eleven ways and requires every
 guard to fire; it needs no Kestra and takes about a second.
+
+## The normalised trace
+
+`golden.json` holds one entry per **comparable** corpus id, written by
+`normalise.py` from `traces.json`. The shape:
+
+`valids/parallel`, abridged to its first two of eight runs and first two of 28
+order pairs — the rest is more of the same:
+
+```json
+{
+  "id": "valids/parallel",
+  "verdict": "runs",
+  "execution": ["CREATED", "RUNNING", "SUCCESS"],
+  "runs": [
+    {"task": "parent", "value": null, "parent": null,
+     "state": ["CREATED", "RUNNING", "SUCCESS"],
+     "attempts": [["CREATED", "RUNNING", "SUCCESS"]]},
+    {"task": "t1", "value": null, "parent": 0,
+     "state": ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+     "attempts": [["CREATED", "RUNNING", "SUCCESS"]]}
+  ],
+  "order": [[0, 1, "overlapping"], [0, 2, "overlapping"]],
+  "spawned": []
+}
+```
+
+A `refused` entry carries no trace at all — `{"id", "verdict": "refused",
+"rejected_class"}` — because the only thing compared for it is that egret's plan
+build **fails**.
+
+The rules, each traceable to a measurement:
+
+1. **Every generated id is replaced by its ordinal in first-appearance order**,
+   and `parent` is that ordinal rather than a ksuid. `normalise.py` numbers by
+   index into `taskRunList` and **checks** that every `parentTaskRunId` resolves
+   to an *earlier* index — if it did not, ordinal-by-index and
+   ordinal-by-first-appearance would be two different numberings, and the golden
+   would silently be using whichever one the script happened to implement.
+
+2. **Every clock is dropped — but the happens-before relation is derived
+   first.** `startDate`, `endDate`, `duration`, every `histories[].date` and
+   `metadata.originalCreatedDate` are gone from the golden. Durations are
+   dropped, not bucketed: a duration bucket is a timing assertion wearing a
+   correctness costume. See *The happens-before relation*.
+
+3. **`runs` keeps Kestra's `taskRunList` order**, which is creation order.
+
+4. **`histories[].state` sequences are kept verbatim.** See *The state
+   vocabulary, measured* for what that turns out to include.
+
+5. **`spawned` holds sub-execution traces of the same shape**, each carrying
+   the `parent_run` ordinal that spawned it and the `value` it was spawned with,
+   **ordered by parent run and then by `loopRun.index`**. See *What the
+   sub-executions turned out to carry*.
+
+### What the sub-executions turned out to carry
+
+134 of the 142 sub-executions this capture recovered are
+`kind: "LOOP"`, and each carries a `loopRun` object naming all three things the
+trace needs:
+
+```json
+{"taskId": "1_each", "taskRunId": "2uNX…", "index": 0, "value": "value 1"}
+```
+
+Three measurements came out of reading it, and each of the three changed the
+normaliser.
+
+- **Order by `index`, not by when it was created.** The first pass ordered
+  siblings by creation instant, and **nine** flows then failed the five-round
+  stability check with the *same* sub-executions in a *different* sequence —
+  `loop-object`, `loop-object-in-list`, `if-in-parallel`,
+  `switch-in-concurrent-loop` among them. A concurrent loop creates its
+  iterations in whatever order the scheduler picks; that is a fact about the
+  scheduler, not about the flow. `index` is the flow's own numbering and is what
+  `Command::SpawnExecution` will be judged on. Ksuids are not a tiebreak either:
+  a ksuid orders at one-second resolution, so siblings created in the same
+  second sort at random.
+
+- **`TaskRun.value` is null everywhere in this corpus** — all 840 runs in
+  `golden.json`, in all five rounds. The plan's normalised shape has a `value`
+  on each run
+  "for a loop iteration's value", and on this artifact that is not where it
+  lives: the iteration value is on the sub-execution's `loopRun.value`. The
+  field is kept on runs, always null, and carried on `spawned` where the value
+  actually is.
+
+- **`parentTaskRunId` can cross the execution boundary.** Measured on
+  `invalids/loop-switch-failed`: the LOOP sub-execution's top-level taskruns
+  (`switch`, `errorforeach`) name the *root* execution's `foreach` taskrun as
+  their parent. Inside their own execution they have no parent, and the link
+  they express is the one `parent_run` already carries — so an id equal to this
+  execution's own spawn link normalises to `null`. The exemption is exactly one
+  id wide: anything else is still a hard failure, because "not found means null"
+  would silently swallow a real broken link.
+
+The spawn link itself is read from `loopRun.taskRunId` and **cross-checked**
+against `loopRun.parent.taskRunList`'s last entry, which says the same thing;
+the two disagreeing is a hard failure. Reading a link off the wrong field would
+put sub-executions under the wrong run, and once the ids are gone that reads
+exactly like a measurement.
+
+The other 8 have no `loopRun` at all. They are what
+`RetryBehavior: CREATE_NEW_EXECUTION` produces — a **replacement execution** for
+the whole flow, not a task spawning a child — so they get `parent_run: null` and
+sort by creation instant. `valids/retry-new-execution-task-attempts` reads:
+
+```
+root       CREATED RUNNING FAILED RETRIED
+ └ child   CREATED RUNNING FAILED RETRIED
+    └ …    CREATED RUNNING FAILED
+```
+
+### 142, not the 133 `corpus.json` records
+
+The Task 1 harvest counted **133** sub-executions; this one counts
+**142** in every one of the five rounds. The nine extra are not a
+different Kestra — they are nine that the first capture, and Task 1's, both
+missed:
+
+- **8** are the `retry-new-execution-*` flows' replacement executions, two each.
+  All four of those flows had **zero** sub-executions recorded, and they are
+  Task 7's entire subject.
+- **1** is `valids/loop-with-subflow`, whose `Loop` has two values and therefore
+  two iterations; the earlier captures recorded one.
+
+The cause is structural, and it is worth writing down because the obvious loop
+has it: the sub-execution poll stops the moment nothing is *pending*, so it
+stops immediately when the first `descendants()` call returns nothing, and a row
+that lands a beat later is simply absent — silently, with a plausible trace
+written. **Terminal is not the same as finished.**
+
+For the retry case the signal turns out to be exact. `RETRIED` is Kestra saying
+a replacement execution is coming, and over 40 observations (four flows × five
+rounds × two children) **every** `RETRIED` execution had exactly one child while
+every other terminal state had none; the replacement's `startDate` ran 1.07 s to
+5.92 s after the `RETRIED` execution's `endDate`. So the capture settles on a
+rule rather than a sleep: nothing pending **and** no childless `RETRIED`.
+
+`harvest.py --verify-traces` is what found all of this, and it is why
+`traces.json` can be trusted rather than merely believed. With the same Kestra
+still running it fetches **every** captured execution again — long after the
+flows finished — and requires each to reduce **identically** and its descendant
+set to be unchanged. Anything that was going to appear has appeared by then. It
+is a separate command, not part of the capture, because a check that runs inside
+the thing it checks shares its clock.
+
+Current result: **2050 captured executions re-read identically, and every
+descendant set unchanged.**
+
+### What the oracle feeds in, and why that is not circular
+
+`advance()` does not decide whether a `Log` task succeeds — Kestra's executor
+does not either; its *worker* does. So `tests/executor.rs` supplies exactly one
+thing from the golden: **the terminal state of a run whose `PlanTask` is
+`Runnable`**. Everything else — which runs are created, in what order, under
+which parent, with what history, and what the execution's own state does — is
+egret's, and is what is compared.
+
+Feeding a *flowable's* state would be circular, and is not done: a `Sequential`,
+`Parallel`, `Dag`, `If`, `Switch` or `Loop` run's state is the executor's
+decision and is exactly what this oracle exists to judge.
+
+## The happens-before relation
+
+Dropping the clocks outright would lose something Kestra's own tests assert.
+
+**The count, measured.** The plan says "39 ordering assertions across 12 test
+files"; that did not reproduce, and the honest figure is smaller and sharper.
+At checkout `96893b589`, `getState().getStartDate().isAfter(` appears **4
+times, in 2 files** — `ParallelTest.errors()` and `DagTest.errors()`, two
+assertions each. (Widening to every `isAfter`/`isBefore` in a test that mentions
+a date gives 35 lines in 15 files, but almost all of those are KV expiry and
+repository timestamps, not run ordering.) The wider number is not what this
+section rests on, so it is stated as what it is rather than repeated.
+
+The four are all of one form:
+
+```java
+assertThat(execution.findTaskRunsByTaskId("a2").getFirst().getState().getStartDate()
+    .isAfter(execution.findTaskRunsByTaskId("a1").getFirst().getState().getEndDate().orElseThrow()))
+    .isTrue();
+```
+
+That is not a timing claim; it is the claim that `a2` **serialised after** `a1`,
+which is exactly the semantics a `sequential` nested in a `parallel` exists to
+provide. A normaliser that drops all clocks cannot see a flowable that stops
+serialising — and four is enough for that to matter, because the four are the
+only assertions in Kestra's suite that distinguish `parallel` and `dag` from
+"the same tasks in some order".
+
+**The golden reproduces all four.** They drive `finally-parallel` and
+`finally-dag` with `{"failed": true}`, which is exactly the input Task 1
+recovered for both. `golden.json` gives those two flows 10 and 9 runs — the
+sizes the Java tests assert — and carries `a1 → a2 before` and `e1 → e2 before`
+in each. Nothing was written to make that come out; it is what the harvest
+measured, checked against the Java afterwards.
+
+So for every ordered pair of runs in every execution, `normalise.py` computes
+one of `before` / `after` / `overlapping` — strictly, matching the Java form, so
+two runs sharing a timestamp are `overlapping` and never `before` — and only
+then throws the timestamps away.
+
+**The relation is kept only where it is stable.** `harvest.py --traces 5`
+executes every `runs` flow five times, round-major — all 268 flows in round
+1 before round 2 starts any — because five back-to-back executions of one flow
+share a warm JVM, a warm page cache and a quiet queue, which is exactly the
+condition under which a race does not show. A pair survives only if all five
+rounds agreed:
+
+```
+  kept (identical in all 5 rounds)             1104
+  dropped, relation flipped between rounds     13
+  dropped, a run had no start or no end        0
+  TOTAL                                        1117
+```
+
+The dropped pairs are not a defect; they are the measurement. `runnable.txt`
+prints the same table over the same flows — the ones that reached the golden —
+and `stability.json` lists every dropped pair with the five relations it was
+seen as.
+
+The kept pairs are **743 `before`, 361 `overlapping`
+and 0 `after`**. `after` is empty and that is not an accident: a
+pair is only ever emitted as `(i, j)` with `i < j` in `taskRunList` order, which
+is creation order, so a run that finished before an earlier-created one even
+started would have to be a task created late and finished first. No corpus flow
+does that, five times running.
+
+`tests/executor.rs` derives the same relation from egret with the same
+predicate over **`advance()` round numbers** instead of timestamps. That is the
+point: a pure state machine has no clock, and its rounds are exactly what
+serialisation means to it.
+
+### Traces that did not reproduce
+
+Five rounds also measure something the plan did not ask for and that turned out
+to be worth publishing: whether the trace *itself* — runs, states, attempts,
+sub-executions, everything but the order — is identical every time.
+
+It is not, for 2 of the 268 flows that ran:
+
+- `valids/retry-failed-task-duration` — rounds [3, 4] differed from round 1.
+- `valids/waitfor-max-duration` — rounds [2, 4] differed from round 1.
+
+Where it is not, the flow gets **no golden entry**, is listed in `runnable.txt`
+and in `stability.json`, and is counted in the exclusion table below. A trace
+the oracle does not reproduce five times running cannot judge egret: an
+implementation matching round 1 would be right by luck and one matching round 3
+would be marked wrong. Silently keeping round 1 is the version of this that
+looks fine.
+
+## What `golden.json` covers, and what it excludes
+
+| | count |
+|---|---|
+| compared — `verdict: "runs"` | 266 |
+| compared — `verdict: "refused"` | 28 |
+| **golden.json total** | **294** |
+| excluded — `not-standalone` | 26 |
+| excluded — rejections that are not refusal evidence | 23 |
+| excluded — traces that did not reproduce across five rounds | 2 |
+| **excluded total** | **51** |
+| **TOTAL** | **345** |
+
+Every one of the 345 corpus flows is in exactly one row, and
+`tests/executor.rs::every_corpus_flow_is_compared_or_excluded_by_name` fails
+naming any flow that is in none of them. An entry that is silently skipped is
+worse than one that is honestly excluded: the coverage claim keeps its
+denominator and loses its numerator.
+
+The second exclusion is the one worth being careful about. Task 1 measured that
+`rejected` is four different things wearing one status code, and only
+`invalid-flow` (27) and `refused-by-both` (1) are evidence
+that egret must refuse a flow. `task-type-not-in-image` (22) and
+`checkout-drift` (1) are the pinned image and the sibling checkout
+differing. A golden that demanded a refusal for those would manufacture
+23 defects out of a packaging accident, and Task 8 would implement them.
+
+## The state vocabulary, measured
+
+Rule 4 keeps history state sequences verbatim, and verbatim turns out to be
+wider than the executor's draft `RunState`. Measured over every golden entry:
+
+| state | run histories that contain it |
+|---|---|
+| `CREATED` | 840 |
+| `RUNNING` | 828 |
+| `SUCCESS` | 639 |
+| `SUBMITTED` | 580 |
+| `FAILED` | 184 |
+| `PAUSED` | 20 |
+| `RETRYING` | 20 |
+| `WARNING` | 12 |
+| `RETRIED` | 8 |
+| `SKIPPED` | 6 |
+| `KILLED` | 5 |
+| `CANCELLED` | 2 |
+
+Two of these are load-bearing:
+
+- **`SUBMITTED`** appears on tasks the *worker* ran and never on a flowable the
+  *executor* ran — measured on `valids/parallel`, where `parent` (the `Parallel`
+  itself) goes `CREATED RUNNING SUCCESS` while each of `t1`..`t6` goes `CREATED
+  SUBMITTED RUNNING SUCCESS`. It is the only thing in the record that separates
+  the two, so dropping it would be normalising away a distinction rather than a
+  representation.
+- **`RETRYING`**, and a repeated **`CREATED`**, are how a retried task's history
+  reads: `valids/retry-failed-task-attempts` gives one taskrun with four
+  attempts and a history of `CREATED SUBMITTED RUNNING FAILED RETRYING` four
+  times over.
+
+`executor::RunState` currently has six members and cannot represent
+`CANCELLED`, `PAUSED`, `RETRIED`, `SKIPPED`, `SUBMITTED` or `WARNING`. That is
+left as the plan drafted it — Task 3 owns the type — and recorded here rather
+than worked around in the normaliser, because a
+normaliser that quietly maps an unrepresentable state onto a representable one
+is a normaliser that hides the gap it was built to expose.
+
+## What Task 2 had to add to the interfaces
+
+The plan's Task 3 lists the types; Task 2 needs three things it does not
+mention, and adding them quietly would be the seam defect this programme keeps
+finding.
+
+- **`build_plan(source) -> Result<Plan, PlanError>`.** The ratchet has to turn a
+  corpus YAML into something `advance()` can be driven over, and Task 8 has to
+  assert that a refusal *is* a refusal. Task 3's `plan_of(corpus_id)` is a
+  crate-internal unit-test helper, and an integration test cannot see it.
+- **`apply(&mut ExecutionState, &Command)`.** `advance()` decides; something has
+  to record. It is in the crate rather than in the test because the oracle is a
+  *caller* and W3b's worker will be another, and two callers writing their own
+  bookkeeping is two chances for the thing compared to differ from the thing
+  shipped. It carries no decision: every branch is a mechanical write of what
+  the command already says.
+- **`Command::ScheduleRetry { not_before: Tick }`.** The plan's draft
+  `command.rs` spells this `Instant` while its own `state.rs` explains at length
+  why `Tick` exists. `Tick` wins; the divergence is recorded here rather than
+  left for a reader to rediscover.
+
+## The ratchet, and the four arms
+
+`tests/executor.rs` is a ratchet, not a pass/fail. `advance()` is a stub at Task
+2, so **every** comparable entry mismatches and all 294 are in
+`baseline.txt`. A test that is simply red for six tasks measures nothing — a new
+mismatch would be invisible in the noise — so it fails in **both** directions:
+an id not in the baseline that mismatches is a regression, and an id in the
+baseline that now matches must have its line deleted in the commit that earned
+it.
+
+`assemble_failures` is a pure function carrying four arms, and each was **shown
+red on purpose** before this was committed. A green run sits exactly at
+baseline, so `stale`, `regressions` and `banked` are all empty on every passing
+run and nothing else would ever construct a `Findings` — an arm nobody has seen
+fail is an arm nobody has seen.
+
+| arm | fails when | proven by |
+|---|---|---|
+| `panics` | the state machine panicked, or would not settle inside the step bound | neutering the arm (`if false && …`) kills `a_panic_fails_even_when_the_ratchet_is_satisfied` and nothing else |
+| `stale` | a baseline line names an id `golden.json` does not have | neutering kills `a_stale_baseline_line_fails_and_names_it`; and a bogus line added to the real file fails the real ratchet, naming it |
+| `regressions` | an id **not** in the baseline mismatches | neutering kills `a_regression_outside_the_baseline_fails_and_carries_its_detail`; and deleting a real baseline line fails the real ratchet, naming it with its detail |
+| `banked` | an id **in** the baseline now matches | neutering kills `progress_that_is_not_banked_fails_and_names_it`; and making `build_plan` refuse one flow fails the real ratchet, naming the line to delete |
+
+**A panic is never covered by the baseline.** A baselined id means "egret does
+not reproduce this trace yet"; it never means "egret may crash here". Not
+settling inside the step bound is reported the same way and for the same reason:
+an implementation that spins is a broken instrument, not a wrong answer.
+
+## What this oracle does not prove
+
+The corpus is Kestra's own test suite, which is a sample of an infinite space.
+The ratchet prevents regression; it does not bound behaviour on a flow nobody
+wrote. Beyond that, the specific holes, each with its count:
+
+- **26 `not-standalone` flows are never compared at all.** They have a
+  corpus entry and no golden entry. Kestra itself cannot run them without what
+  the Java test brings — a resume, a trigger, an uploadable file, a mocked
+  worker, or an input value that is computed rather than literal.
+- **23 rejections are not evidence of anything about the flow**, and are
+  excluded for that reason. Nothing in this package tests what egret does with
+  them.
+- **2 flows did not reproduce across five rounds** and are excluded:
+  `retry-failed-task-duration` (three attempts in some rounds, four in others —
+  a *duration*-bounded retry counts whatever fits) and `waitfor-max-duration`.
+  Both are bounded by wall-clock duration, so this is the flow being
+  nondeterministic and not the harness.
+- **13 ordered pairs were dropped**, all of them because the relation flipped
+  between rounds; none because a run had no start or no end. The kept 1104 —
+  743 `before`, 361 `overlapping` — are the whole of what this oracle asserts
+  about serialisation.
+- **A kept `before` is not always reachable by a clockless implementation.** The
+  relation egret produces comes from `advance()` round numbers, so two branches
+  a `parallel` starts together and finishes together are `overlapping` no matter
+  how long each took. Where Kestra's scheduler happened to serialise two
+  branches the same way five times running, the golden records `before` and
+  egret will say `overlapping` — a mismatch that is about the instrument, not
+  about the flowable. None is known to exist today because nothing is
+  implemented yet; Tasks 4 and 6 are the ones that will find out, and the honest
+  answer if it happens is to record the pairs, not to weaken the relation.
+- **Sub-executions are harvested but not yet produced.** `Command::SpawnExecution`
+  arrives in Task 6; until then egret's side of `spawned` is always empty, so
+  every one of the 41 golden entries that carries a sub-execution
+  mismatches on that field alone. Those entries look compared and are not, until
+  Task 6 says otherwise — which is why the count is here.
+- **`agrees` on `valids/pause-behavior` is a coincidence in the strong sense.**
+  See the discrimination-probe section: the flow dies rendering
+  `behavior: "{{ inputs.behavior }}"` into a `Property<Behavior>` and never
+  reaches the behaviour at all.
 
 ## The API surface, measured
 
