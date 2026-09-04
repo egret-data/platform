@@ -55,12 +55,70 @@ biến thể `Command::SpawnExecution`: hàm thuần mô hình hoá trọn ngữ
 thuần, còn **thực thi** lệnh đó là việc của W3b/W6. W3a so vết của execution
 cha; phần so xuyên sub-execution đến khi có bộ sinh thật.
 
+### 2.3 Trung thành phải phủ gì, và KHÔNG cần phủ gì
+
+Hai mục tiêu tích hợp đã được xác nhận, và chúng đặt ngân sách trung thành ở hai
+chỗ khác nhau:
+
+| mục tiêu | phải trùng cái gì | gói nào trả |
+|---|---|---|
+| chạy được plugin JAR của Kestra | bề mặt plugin chạm tới — `DefaultRunContext`: render biểu thức, storage, logger, working dir | W2 (xong), W4, W5, W9 |
+| nhận YAML Kestra / cho user Kestra chuyển sang | ngữ nghĩa flow: task nào chạy, thứ tự nào, trạng thái và cấu trúc attempt ra sao | W1, **W3** |
+
+Một plugin **không bao giờ** quan sát `advance()`. Máy trạng thái quyết định
+*khi nào* một task được gọi, không phải *nó thấy gì*. Nên độ trung thành của
+executor không mua được gì cho tương thích plugin, và W3a không được tiêu ngân
+sách vào đó.
+
+**Chạy song song với một Kestra sống KHÔNG phải mục tiêu.** Đó là yêu cầu duy
+nhất buộc bản ghi execution/log/state của egret phải trùng **ĐỊNH DẠNG** với
+Kestra, và nó nằm ngoài. Vì vậy oracle so **vết đã chuẩn hoá về ngữ nghĩa** —
+danh tính task, thứ tự, dãy trạng thái, số attempt — chứ không so bố cục JSON
+của Kestra. Bản ghi execution của egret được tự do có hình dạng riêng.
+
+Một hệ quả tức thì: mục `boom` lặp hai lần ở §4 phải được tái tạo như **ngữ
+nghĩa retry** (hai attempt; execution đi qua `RETRYING`), không phải như một
+phần tử mảng lặp lại. Nếu hoá ra đó là hiện vật tuần tự hoá trong bản ghi của
+Kestra chứ không phải sự thật ngữ nghĩa, egret **không** sao chép.
+
 ## 3. Dụng cụ
 
 Bài học W2 không phải "oracle vi sai thì hay". Nó là: **mọi lỗi đáng kể đều do
 ĐO ra, không cái nào do suy luận** — sáu lần một test "hiển nhiên phủ" một ca đã
 sống sót qua đúng biến thể lẽ ra phải giết nó. W3a chịu cùng cách đối xử: một
 corpus flow, một golden thu từ Kestra thật, và một ratchet.
+
+### 3.0 Corpus là của chính Kestra, không phải của tôi
+
+W2 liệt kê được bề mặt của nó: 63 filter trên một ma trận hữu hạn, nên "chúng ta
+phủ hết" là mệnh đề kiểm được. Các cách đan xen thực thi thì **không** hữu hạn,
+và một corpus do tôi viết chỉ chứng minh rằng *những flow tôi nghĩ ra* thì khớp
+— đúng luận điệu mà W2a sinh ra để phá.
+
+Kestra đã liệt kê giúp rồi. Test resources của nó chứa **346 file flow YAML**,
+trong đó `core/src/test/resources/flows` mang **261 `valids`** và **28
+`invalids`**. Đó không phải phỏng đoán của tôi về cái gì quan trọng; đó là phát
+biểu của chính dự án về việc executor của nó phải làm gì, tích luỹ suốt đời dự
+án. Phân bố trên sáu flowable của W3a: `Loop` 40 flow, `If` 24, `Sequential` 21,
+`Switch` 11, `Parallel` 10, `Dag` 3.
+
+**28 file `invalids` là phần quý nhất.** Đó là những flow Kestra **từ chối**, nên
+chúng kiểm đúng lớp lệch mà chương trình nói không được ship — egret trả lời chỗ
+Kestra ném lỗi. Một corpus tự viết gần như không bao giờ sinh ra loại mục này, vì
+người viết đang nghĩ theo hướng "cái gì phải chạy".
+
+Đây là corpus nền. Mục tự viết chỉ thêm vào để bù những chỗ **đã đo được** là
+hở, không bao giờ để độn độ phủ.
+
+Hai giới hạn, nói trước thay vì phát hiện sau:
+
+1. File YAML là **đầu vào**; phần khẳng định nằm trong mã test Java. Flow nào
+   được test Java lái bằng thiết lập đặc biệt — worker giả, lỗi tiêm vào — sẽ
+   không tái hiện khi chạy độc lập. **Task đầu tiên của plan là đo xem bao nhiêu
+   trong 261 flow chạy được độc lập**, và con số đó là kết quả, không phải giả định.
+2. Khớp trên 261 flow vẫn không chặn được hành vi ở flow thứ 262. Ratchet chống
+   hồi quy; nó không chứng minh độ phủ. README phải nói điều đó bằng đúng giọng
+   `oracle/README.md` đang dùng.
 
 ### 3.1 Chạy với cái gì
 
@@ -156,9 +214,11 @@ Kế thừa nguyên vẹn từ spec chương trình và W2:
 
 ## 6. Rủi ro
 
-1. **Corpus là chọn, không phải liệt kê.** W2 liệt kê được bề mặt của nó — 63
-   filter, một ma trận hữu hạn. Các cách đan xen thực thi thì không hữu hạn.
-   Plan phải nói corpus phủ gì, và quan trọng hơn, **không** phủ gì.
+1. **Độ phủ bị chặn bởi test suite của Kestra, không phải bởi không gian trạng
+   thái.** §3.0 thay một corpus lẽ ra do tôi chọn bằng 261+28 flow chính Kestra
+   duy trì — nền mạnh hơn hẳn — nhưng vẫn là một mẫu của một không gian vô hạn.
+   README phải nói corpus phủ gì và, quan trọng hơn, **không** phủ gì; và con số
+   "chạy được độc lập" từ task đầu tiên của plan phải được công bố, không làm tròn lên.
 2. **`SpawnExecution` không kiểm được đầu-cuối trong W3a.** Chưa có gì thực thi
    nó tới W3b/W6. W3a khẳng định lệnh **được phát ra**; đó là mức yếu hơn phần
    còn lại của oracle và phải được ghi nhãn như vậy, không được tính là đã phủ.

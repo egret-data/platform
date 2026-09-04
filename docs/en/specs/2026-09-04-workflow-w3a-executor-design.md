@@ -57,6 +57,33 @@ semantics completely and stays pure, and *executing* that command is W3b/W6's
 problem. The oracle compares the parent trace in W3a; the cross-sub-execution
 comparison lands when a real spawner exists.
 
+### 2.3 What fidelity must cover, and what it need not
+
+Two integration goals are confirmed, and they draw the fidelity budget in
+different places:
+
+| goal | what must match | which package pays |
+|---|---|---|
+| run Kestra plugin JARs | the surface a plugin touches — `DefaultRunContext`: expression rendering, storage, logger, working dir | W2 (done), W4, W5, W9 |
+| accept Kestra YAML / migrate Kestra users | flow semantics: which task runs, in what order, with what state and attempt structure | W1, **W3** |
+
+A plugin never observes `advance()`. The state machine decides *when* a task is
+called, not *what it sees*. So executor fidelity buys nothing for plugin
+compatibility, and W3a must not spend its budget there.
+
+**Running side by side with a live Kestra is NOT a goal.** That is the only
+requirement that would force egret's execution, log and state records to share
+Kestra's *format*, and it is out. The oracle therefore compares a **normalised
+semantic trace** — task identity, order, state sequence, attempt counts — and
+not Kestra's JSON field layout. egret's own execution record is free to have its
+own shape.
+
+One consequence, immediately: the duplicate `boom` entry in §4 must be
+reproduced as **retry semantics** (two attempts; the execution passes through
+`RETRYING`), not as a repeated array element. If it turns out to be a
+serialisation artefact of Kestra's record rather than a semantic fact, egret
+does not copy it.
+
 ## 3. The instrument
 
 W2's finding was not that a differential oracle is nice to have. It was that
@@ -64,6 +91,40 @@ W2's finding was not that a differential oracle is nice to have. It was that
 six times a test that "obviously" covered a case survived the mutation that
 should have killed it. W3a gets the same treatment: a corpus of flows, a golden
 harvested from real Kestra, and a ratchet.
+
+### 3.0 The corpus is Kestra's own, not mine
+
+W2 could enumerate its surface: 63 filters over a finite matrix, so "we covered
+all of them" was a checkable claim. Execution interleavings are not finite, and
+a corpus I write proves only that *the flows I thought of* agree — the exact
+argument W2a was created to destroy.
+
+Kestra has already done the enumeration. Its own test resources hold **346 flow
+YAML files**, of which `core/src/test/resources/flows` carries **261 `valids`**
+and **28 `invalids`**. Those are not my guesses about what matters; they are the
+project's own statement of what its executor must do, accumulated over its life.
+Distribution across W3a's six flowables: `Loop` 40 flows, `If` 24, `Sequential`
+21, `Switch` 11, `Parallel` 10, `Dag` 3.
+
+**The 28 `invalids` are the most valuable part.** They are flows Kestra
+*refuses*, so they test the one divergence class the programme says must not
+ship — egret answering where Kestra throws. A hand-written corpus almost never
+produces such entries, because whoever writes it is thinking about what should
+run.
+
+This is the base corpus. Hand-written entries are added only to fill gaps that
+have been **measured** as gaps, never to pad coverage.
+
+Two limits, stated rather than discovered later:
+
+1. The YAML files are *inputs*; the assertions live in Java test code. A flow
+   that its Java test drives with special setup — a mocked worker, an injected
+   failure — will not reproduce standalone. **The first task in the plan is to
+   measure how many of the 261 run standalone**, and that number is a result, not
+   an assumption.
+2. Agreeing on 261 flows still does not bound behaviour on the 262nd. The
+   ratchet prevents regression; it does not prove coverage. The README must say
+   so in the same voice `oracle/README.md` uses.
 
 ### 3.1 What it runs against
 
@@ -166,9 +227,12 @@ Inherited from the programme spec and W2, unchanged:
 
 ## 6. Risks
 
-1. **The corpus is chosen, not enumerated.** W2 could enumerate its surface —
-   63 filters, a finite matrix. Execution interleavings are not finite. The plan
-   must say what the corpus covers and, more importantly, what it does not.
+1. **Coverage is bounded by Kestra's test suite, not by the state space.**
+   §3.0 replaces a corpus I would have chosen with the 261+28 Kestra itself
+   maintains, which is a far stronger base — but it is still a sample of an
+   infinite space. The README must state what the corpus covers and, more
+   importantly, what it does not, and the standalone-runnable count from the
+   plan's first task must be published rather than rounded up.
 2. **`SpawnExecution` cannot be end-to-end verified in W3a.** Nothing executes
    it until W3b/W6. W3a asserts the command is emitted; that is weaker than the
    rest of the oracle and must be labelled as such rather than counted as
