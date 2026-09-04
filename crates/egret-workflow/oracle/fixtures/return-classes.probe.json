@@ -1,0 +1,7898 @@
+[
+ {
+  "id": "rc-abbreviate-l",
+  "expr": "{{ (l | abbreviate(5)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-abbreviate-l1",
+  "expr": "{{ (l1 | abbreviate(5)) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-abbreviate-ll",
+  "expr": "{{ (ll | abbreviate(5)) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-abbreviate-m",
+  "expr": "{{ (m | abbreviate(5)) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-abbreviate-m1",
+  "expr": "{{ (m1 | abbreviate(5)) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-abbreviate-s",
+  "expr": "{{ (s | abbreviate(5)) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-abbreviate-sc",
+  "expr": "{{ (sc | abbreviate(5)) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-abbreviate-n",
+  "expr": "{{ (n | abbreviate(5)) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-abbreviate-nul",
+  "expr": "{{ (nul | abbreviate(5)) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-abbreviate-el",
+  "expr": "{{ (el | abbreviate(5)) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-abbreviate-em",
+  "expr": "{{ (em | abbreviate(5)) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-abbreviate-dt",
+  "expr": "{{ (dt | abbreviate(5)) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-abbreviate-ns",
+  "expr": "{{ (ns | abbreviate(5)) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-abbreviate-b",
+  "expr": "{{ (b | abbreviate(5)) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-abbreviate-b64",
+  "expr": "{{ (b64 | abbreviate(5)) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-abs-l",
+  "expr": "{{ (l | abs) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-abs-l1",
+  "expr": "{{ (l1 | abs) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-abs-ll",
+  "expr": "{{ (ll | abs) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-abs-m",
+  "expr": "{{ (m | abs) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-abs-m1",
+  "expr": "{{ (m1 | abs) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-abs-s",
+  "expr": "{{ (s | abs) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-abs-sc",
+  "expr": "{{ (sc | abs) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-abs-n",
+  "expr": "{{ (n | abs) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-abs-nul",
+  "expr": "{{ (nul | abs) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-abs-el",
+  "expr": "{{ (el | abs) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-abs-em",
+  "expr": "{{ (em | abs) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-abs-dt",
+  "expr": "{{ (dt | abs) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-abs-ns",
+  "expr": "{{ (ns | abs) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-abs-b",
+  "expr": "{{ (b | abs) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-abs-b64",
+  "expr": "{{ (b64 | abs) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-base64decode-l",
+  "expr": "{{ (l | base64decode) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-base64decode-l1",
+  "expr": "{{ (l1 | base64decode) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-base64decode-ll",
+  "expr": "{{ (ll | base64decode) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-base64decode-m",
+  "expr": "{{ (m | base64decode) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-base64decode-m1",
+  "expr": "{{ (m1 | base64decode) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-base64decode-s",
+  "expr": "{{ (s | base64decode) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-base64decode-sc",
+  "expr": "{{ (sc | base64decode) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-base64decode-n",
+  "expr": "{{ (n | base64decode) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-base64decode-nul",
+  "expr": "{{ (nul | base64decode) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-base64decode-el",
+  "expr": "{{ (el | base64decode) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-base64decode-em",
+  "expr": "{{ (em | base64decode) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-base64decode-dt",
+  "expr": "{{ (dt | base64decode) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-base64decode-ns",
+  "expr": "{{ (ns | base64decode) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-base64decode-b",
+  "expr": "{{ (b | base64decode) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-base64decode-b64",
+  "expr": "{{ (b64 | base64decode) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-base64encode-l",
+  "expr": "{{ (l | base64encode) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-base64encode-l1",
+  "expr": "{{ (l1 | base64encode) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-base64encode-ll",
+  "expr": "{{ (ll | base64encode) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-base64encode-m",
+  "expr": "{{ (m | base64encode) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-base64encode-m1",
+  "expr": "{{ (m1 | base64encode) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-base64encode-s",
+  "expr": "{{ (s | base64encode) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-base64encode-sc",
+  "expr": "{{ (sc | base64encode) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-base64encode-n",
+  "expr": "{{ (n | base64encode) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-base64encode-nul",
+  "expr": "{{ (nul | base64encode) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-base64encode-el",
+  "expr": "{{ (el | base64encode) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-base64encode-em",
+  "expr": "{{ (em | base64encode) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-base64encode-dt",
+  "expr": "{{ (dt | base64encode) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-base64encode-ns",
+  "expr": "{{ (ns | base64encode) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-base64encode-b",
+  "expr": "{{ (b | base64encode) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-base64encode-b64",
+  "expr": "{{ (b64 | base64encode) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-capitalize-l",
+  "expr": "{{ (l | capitalize) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-capitalize-l1",
+  "expr": "{{ (l1 | capitalize) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-capitalize-ll",
+  "expr": "{{ (ll | capitalize) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-capitalize-m",
+  "expr": "{{ (m | capitalize) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-capitalize-m1",
+  "expr": "{{ (m1 | capitalize) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-capitalize-s",
+  "expr": "{{ (s | capitalize) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-capitalize-sc",
+  "expr": "{{ (sc | capitalize) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-capitalize-n",
+  "expr": "{{ (n | capitalize) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-capitalize-nul",
+  "expr": "{{ (nul | capitalize) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-capitalize-el",
+  "expr": "{{ (el | capitalize) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-capitalize-em",
+  "expr": "{{ (em | capitalize) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-capitalize-dt",
+  "expr": "{{ (dt | capitalize) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-capitalize-ns",
+  "expr": "{{ (ns | capitalize) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-capitalize-b",
+  "expr": "{{ (b | capitalize) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-capitalize-b64",
+  "expr": "{{ (b64 | capitalize) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-chunk-l",
+  "expr": "{{ (l | chunk(size=2)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-chunk-l1",
+  "expr": "{{ (l1 | chunk(size=2)) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-chunk-ll",
+  "expr": "{{ (ll | chunk(size=2)) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-chunk-m",
+  "expr": "{{ (m | chunk(size=2)) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-chunk-m1",
+  "expr": "{{ (m1 | chunk(size=2)) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-chunk-s",
+  "expr": "{{ (s | chunk(size=2)) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-chunk-sc",
+  "expr": "{{ (sc | chunk(size=2)) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-chunk-n",
+  "expr": "{{ (n | chunk(size=2)) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-chunk-nul",
+  "expr": "{{ (nul | chunk(size=2)) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-chunk-el",
+  "expr": "{{ (el | chunk(size=2)) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-chunk-em",
+  "expr": "{{ (em | chunk(size=2)) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-chunk-dt",
+  "expr": "{{ (dt | chunk(size=2)) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-chunk-ns",
+  "expr": "{{ (ns | chunk(size=2)) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-chunk-b",
+  "expr": "{{ (b | chunk(size=2)) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-chunk-b64",
+  "expr": "{{ (b64 | chunk(size=2)) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-className-l",
+  "expr": "{{ (l | className) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-className-l1",
+  "expr": "{{ (l1 | className) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-className-ll",
+  "expr": "{{ (ll | className) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-className-m",
+  "expr": "{{ (m | className) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-className-m1",
+  "expr": "{{ (m1 | className) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-className-s",
+  "expr": "{{ (s | className) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-className-sc",
+  "expr": "{{ (sc | className) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-className-n",
+  "expr": "{{ (n | className) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-className-nul",
+  "expr": "{{ (nul | className) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-className-el",
+  "expr": "{{ (el | className) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-className-em",
+  "expr": "{{ (em | className) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-className-dt",
+  "expr": "{{ (dt | className) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-className-ns",
+  "expr": "{{ (ns | className) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-className-b",
+  "expr": "{{ (b | className) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-className-b64",
+  "expr": "{{ (b64 | className) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-date-l",
+  "expr": "{{ (l | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-date-l1",
+  "expr": "{{ (l1 | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-date-ll",
+  "expr": "{{ (ll | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-date-m",
+  "expr": "{{ (m | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-date-m1",
+  "expr": "{{ (m1 | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-date-s",
+  "expr": "{{ (s | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-date-sc",
+  "expr": "{{ (sc | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-date-n",
+  "expr": "{{ (n | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-date-nul",
+  "expr": "{{ (nul | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-date-el",
+  "expr": "{{ (el | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-date-em",
+  "expr": "{{ (em | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-date-dt",
+  "expr": "{{ (dt | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-date-ns",
+  "expr": "{{ (ns | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-date-b",
+  "expr": "{{ (b | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-date-b64",
+  "expr": "{{ (b64 | date('yyyy-MM-dd', timeZone='UTC')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-dateAdd-l",
+  "expr": "{{ (l | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-dateAdd-l1",
+  "expr": "{{ (l1 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-dateAdd-ll",
+  "expr": "{{ (ll | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-dateAdd-m",
+  "expr": "{{ (m | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-dateAdd-m1",
+  "expr": "{{ (m1 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-dateAdd-s",
+  "expr": "{{ (s | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-dateAdd-sc",
+  "expr": "{{ (sc | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-dateAdd-n",
+  "expr": "{{ (n | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-dateAdd-nul",
+  "expr": "{{ (nul | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-dateAdd-el",
+  "expr": "{{ (el | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-dateAdd-em",
+  "expr": "{{ (em | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-dateAdd-dt",
+  "expr": "{{ (dt | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-dateAdd-ns",
+  "expr": "{{ (ns | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-dateAdd-b",
+  "expr": "{{ (b | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-dateAdd-b64",
+  "expr": "{{ (b64 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-default-l",
+  "expr": "{{ (l | default('D')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-default-l1",
+  "expr": "{{ (l1 | default('D')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-default-ll",
+  "expr": "{{ (ll | default('D')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-default-m",
+  "expr": "{{ (m | default('D')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-default-m1",
+  "expr": "{{ (m1 | default('D')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-default-s",
+  "expr": "{{ (s | default('D')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-default-sc",
+  "expr": "{{ (sc | default('D')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-default-n",
+  "expr": "{{ (n | default('D')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-default-nul",
+  "expr": "{{ (nul | default('D')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-default-el",
+  "expr": "{{ (el | default('D')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-default-em",
+  "expr": "{{ (em | default('D')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-default-dt",
+  "expr": "{{ (dt | default('D')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-default-ns",
+  "expr": "{{ (ns | default('D')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-default-b",
+  "expr": "{{ (b | default('D')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-default-b64",
+  "expr": "{{ (b64 | default('D')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-distinct-l",
+  "expr": "{{ (l | distinct) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-distinct-l1",
+  "expr": "{{ (l1 | distinct) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-distinct-ll",
+  "expr": "{{ (ll | distinct) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-distinct-m",
+  "expr": "{{ (m | distinct) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-distinct-m1",
+  "expr": "{{ (m1 | distinct) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-distinct-s",
+  "expr": "{{ (s | distinct) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-distinct-sc",
+  "expr": "{{ (sc | distinct) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-distinct-n",
+  "expr": "{{ (n | distinct) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-distinct-nul",
+  "expr": "{{ (nul | distinct) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-distinct-el",
+  "expr": "{{ (el | distinct) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-distinct-em",
+  "expr": "{{ (em | distinct) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-distinct-dt",
+  "expr": "{{ (dt | distinct) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-distinct-ns",
+  "expr": "{{ (ns | distinct) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-distinct-b",
+  "expr": "{{ (b | distinct) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-distinct-b64",
+  "expr": "{{ (b64 | distinct) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-endsWith-l",
+  "expr": "{{ (l | endsWith(value='c')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-endsWith-l1",
+  "expr": "{{ (l1 | endsWith(value='c')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-endsWith-ll",
+  "expr": "{{ (ll | endsWith(value='c')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-endsWith-m",
+  "expr": "{{ (m | endsWith(value='c')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-endsWith-m1",
+  "expr": "{{ (m1 | endsWith(value='c')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-endsWith-s",
+  "expr": "{{ (s | endsWith(value='c')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-endsWith-sc",
+  "expr": "{{ (sc | endsWith(value='c')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-endsWith-n",
+  "expr": "{{ (n | endsWith(value='c')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-endsWith-nul",
+  "expr": "{{ (nul | endsWith(value='c')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-endsWith-el",
+  "expr": "{{ (el | endsWith(value='c')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-endsWith-em",
+  "expr": "{{ (em | endsWith(value='c')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-endsWith-dt",
+  "expr": "{{ (dt | endsWith(value='c')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-endsWith-ns",
+  "expr": "{{ (ns | endsWith(value='c')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-endsWith-b",
+  "expr": "{{ (b | endsWith(value='c')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-endsWith-b64",
+  "expr": "{{ (b64 | endsWith(value='c')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-escape-l",
+  "expr": "{{ (l | escape) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-escape-l1",
+  "expr": "{{ (l1 | escape) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-escape-ll",
+  "expr": "{{ (ll | escape) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-escape-m",
+  "expr": "{{ (m | escape) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-escape-m1",
+  "expr": "{{ (m1 | escape) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-escape-s",
+  "expr": "{{ (s | escape) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-escape-sc",
+  "expr": "{{ (sc | escape) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-escape-n",
+  "expr": "{{ (n | escape) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-escape-nul",
+  "expr": "{{ (nul | escape) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-escape-el",
+  "expr": "{{ (el | escape) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-escape-em",
+  "expr": "{{ (em | escape) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-escape-dt",
+  "expr": "{{ (dt | escape) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-escape-ns",
+  "expr": "{{ (ns | escape) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-escape-b",
+  "expr": "{{ (b | escape) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-escape-b64",
+  "expr": "{{ (b64 | escape) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-escapeChar-l",
+  "expr": "{{ (l | escapeChar(type='single')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-escapeChar-l1",
+  "expr": "{{ (l1 | escapeChar(type='single')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-escapeChar-ll",
+  "expr": "{{ (ll | escapeChar(type='single')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-escapeChar-m",
+  "expr": "{{ (m | escapeChar(type='single')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-escapeChar-m1",
+  "expr": "{{ (m1 | escapeChar(type='single')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-escapeChar-s",
+  "expr": "{{ (s | escapeChar(type='single')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-escapeChar-sc",
+  "expr": "{{ (sc | escapeChar(type='single')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-escapeChar-n",
+  "expr": "{{ (n | escapeChar(type='single')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-escapeChar-nul",
+  "expr": "{{ (nul | escapeChar(type='single')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-escapeChar-el",
+  "expr": "{{ (el | escapeChar(type='single')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-escapeChar-em",
+  "expr": "{{ (em | escapeChar(type='single')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-escapeChar-dt",
+  "expr": "{{ (dt | escapeChar(type='single')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-escapeChar-ns",
+  "expr": "{{ (ns | escapeChar(type='single')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-escapeChar-b",
+  "expr": "{{ (b | escapeChar(type='single')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-escapeChar-b64",
+  "expr": "{{ (b64 | escapeChar(type='single')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-first-l",
+  "expr": "{{ (l | first) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-first-l1",
+  "expr": "{{ (l1 | first) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-first-ll",
+  "expr": "{{ (ll | first) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-first-m",
+  "expr": "{{ (m | first) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-first-m1",
+  "expr": "{{ (m1 | first) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-first-s",
+  "expr": "{{ (s | first) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-first-sc",
+  "expr": "{{ (sc | first) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-first-n",
+  "expr": "{{ (n | first) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-first-nul",
+  "expr": "{{ (nul | first) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-first-el",
+  "expr": "{{ (el | first) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-first-em",
+  "expr": "{{ (em | first) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-first-dt",
+  "expr": "{{ (dt | first) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-first-ns",
+  "expr": "{{ (ns | first) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-first-b",
+  "expr": "{{ (b | first) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-first-b64",
+  "expr": "{{ (b64 | first) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-flatten-l",
+  "expr": "{{ (l | flatten) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-flatten-l1",
+  "expr": "{{ (l1 | flatten) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-flatten-ll",
+  "expr": "{{ (ll | flatten) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-flatten-m",
+  "expr": "{{ (m | flatten) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-flatten-m1",
+  "expr": "{{ (m1 | flatten) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-flatten-s",
+  "expr": "{{ (s | flatten) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-flatten-sc",
+  "expr": "{{ (sc | flatten) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-flatten-n",
+  "expr": "{{ (n | flatten) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-flatten-nul",
+  "expr": "{{ (nul | flatten) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-flatten-el",
+  "expr": "{{ (el | flatten) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-flatten-em",
+  "expr": "{{ (em | flatten) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-flatten-dt",
+  "expr": "{{ (dt | flatten) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-flatten-ns",
+  "expr": "{{ (ns | flatten) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-flatten-b",
+  "expr": "{{ (b | flatten) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-flatten-b64",
+  "expr": "{{ (b64 | flatten) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-format-l",
+  "expr": "{{ (l | format('x')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-format-l1",
+  "expr": "{{ (l1 | format('x')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-format-ll",
+  "expr": "{{ (ll | format('x')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-format-m",
+  "expr": "{{ (m | format('x')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-format-m1",
+  "expr": "{{ (m1 | format('x')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-format-s",
+  "expr": "{{ (s | format('x')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-format-sc",
+  "expr": "{{ (sc | format('x')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-format-n",
+  "expr": "{{ (n | format('x')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-format-nul",
+  "expr": "{{ (nul | format('x')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-format-el",
+  "expr": "{{ (el | format('x')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-format-em",
+  "expr": "{{ (em | format('x')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-format-dt",
+  "expr": "{{ (dt | format('x')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-format-ns",
+  "expr": "{{ (ns | format('x')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-format-b",
+  "expr": "{{ (b | format('x')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-format-b64",
+  "expr": "{{ (b64 | format('x')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-indent-l",
+  "expr": "{{ (l | indent(amount=2)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-indent-l1",
+  "expr": "{{ (l1 | indent(amount=2)) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-indent-ll",
+  "expr": "{{ (ll | indent(amount=2)) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-indent-m",
+  "expr": "{{ (m | indent(amount=2)) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-indent-m1",
+  "expr": "{{ (m1 | indent(amount=2)) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-indent-s",
+  "expr": "{{ (s | indent(amount=2)) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-indent-sc",
+  "expr": "{{ (sc | indent(amount=2)) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-indent-n",
+  "expr": "{{ (n | indent(amount=2)) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-indent-nul",
+  "expr": "{{ (nul | indent(amount=2)) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-indent-el",
+  "expr": "{{ (el | indent(amount=2)) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-indent-em",
+  "expr": "{{ (em | indent(amount=2)) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-indent-dt",
+  "expr": "{{ (dt | indent(amount=2)) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-indent-ns",
+  "expr": "{{ (ns | indent(amount=2)) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-indent-b",
+  "expr": "{{ (b | indent(amount=2)) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-indent-b64",
+  "expr": "{{ (b64 | indent(amount=2)) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-join-l",
+  "expr": "{{ (l | join('-')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-join-l1",
+  "expr": "{{ (l1 | join('-')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-join-ll",
+  "expr": "{{ (ll | join('-')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-join-m",
+  "expr": "{{ (m | join('-')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-join-m1",
+  "expr": "{{ (m1 | join('-')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-join-s",
+  "expr": "{{ (s | join('-')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-join-sc",
+  "expr": "{{ (sc | join('-')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-join-n",
+  "expr": "{{ (n | join('-')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-join-nul",
+  "expr": "{{ (nul | join('-')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-join-el",
+  "expr": "{{ (el | join('-')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-join-em",
+  "expr": "{{ (em | join('-')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-join-dt",
+  "expr": "{{ (dt | join('-')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-join-ns",
+  "expr": "{{ (ns | join('-')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-join-b",
+  "expr": "{{ (b | join('-')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-join-b64",
+  "expr": "{{ (b64 | join('-')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-jq-l",
+  "expr": "{{ (l | jq('.')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-jq-l1",
+  "expr": "{{ (l1 | jq('.')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-jq-ll",
+  "expr": "{{ (ll | jq('.')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-jq-m",
+  "expr": "{{ (m | jq('.')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-jq-m1",
+  "expr": "{{ (m1 | jq('.')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-jq-s",
+  "expr": "{{ (s | jq('.')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-jq-sc",
+  "expr": "{{ (sc | jq('.')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-jq-n",
+  "expr": "{{ (n | jq('.')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-jq-nul",
+  "expr": "{{ (nul | jq('.')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-jq-el",
+  "expr": "{{ (el | jq('.')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-jq-em",
+  "expr": "{{ (em | jq('.')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-jq-dt",
+  "expr": "{{ (dt | jq('.')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-jq-ns",
+  "expr": "{{ (ns | jq('.')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-jq-b",
+  "expr": "{{ (b | jq('.')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-jq-b64",
+  "expr": "{{ (b64 | jq('.')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-keys-l",
+  "expr": "{{ (l | keys) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-keys-l1",
+  "expr": "{{ (l1 | keys) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-keys-ll",
+  "expr": "{{ (ll | keys) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-keys-m",
+  "expr": "{{ (m | keys) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-keys-m1",
+  "expr": "{{ (m1 | keys) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-keys-s",
+  "expr": "{{ (s | keys) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-keys-sc",
+  "expr": "{{ (sc | keys) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-keys-n",
+  "expr": "{{ (n | keys) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-keys-nul",
+  "expr": "{{ (nul | keys) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-keys-el",
+  "expr": "{{ (el | keys) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-keys-em",
+  "expr": "{{ (em | keys) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-keys-dt",
+  "expr": "{{ (dt | keys) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-keys-ns",
+  "expr": "{{ (ns | keys) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-keys-b",
+  "expr": "{{ (b | keys) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-keys-b64",
+  "expr": "{{ (b64 | keys) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-last-l",
+  "expr": "{{ (l | last) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-last-l1",
+  "expr": "{{ (l1 | last) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-last-ll",
+  "expr": "{{ (ll | last) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-last-m",
+  "expr": "{{ (m | last) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-last-m1",
+  "expr": "{{ (m1 | last) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-last-s",
+  "expr": "{{ (s | last) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-last-sc",
+  "expr": "{{ (sc | last) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-last-n",
+  "expr": "{{ (n | last) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-last-nul",
+  "expr": "{{ (nul | last) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-last-el",
+  "expr": "{{ (el | last) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-last-em",
+  "expr": "{{ (em | last) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-last-dt",
+  "expr": "{{ (dt | last) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-last-ns",
+  "expr": "{{ (ns | last) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-last-b",
+  "expr": "{{ (b | last) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-last-b64",
+  "expr": "{{ (b64 | last) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-length-l",
+  "expr": "{{ (l | length) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-length-l1",
+  "expr": "{{ (l1 | length) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-length-ll",
+  "expr": "{{ (ll | length) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-length-m",
+  "expr": "{{ (m | length) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-length-m1",
+  "expr": "{{ (m1 | length) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-length-s",
+  "expr": "{{ (s | length) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-length-sc",
+  "expr": "{{ (sc | length) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-length-n",
+  "expr": "{{ (n | length) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-length-nul",
+  "expr": "{{ (nul | length) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-length-el",
+  "expr": "{{ (el | length) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-length-em",
+  "expr": "{{ (em | length) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-length-dt",
+  "expr": "{{ (dt | length) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-length-ns",
+  "expr": "{{ (ns | length) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-length-b",
+  "expr": "{{ (b | length) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-length-b64",
+  "expr": "{{ (b64 | length) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-lower-l",
+  "expr": "{{ (l | lower) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-lower-l1",
+  "expr": "{{ (l1 | lower) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-lower-ll",
+  "expr": "{{ (ll | lower) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-lower-m",
+  "expr": "{{ (m | lower) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-lower-m1",
+  "expr": "{{ (m1 | lower) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-lower-s",
+  "expr": "{{ (s | lower) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-lower-sc",
+  "expr": "{{ (sc | lower) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-lower-n",
+  "expr": "{{ (n | lower) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-lower-nul",
+  "expr": "{{ (nul | lower) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-lower-el",
+  "expr": "{{ (el | lower) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-lower-em",
+  "expr": "{{ (em | lower) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-lower-dt",
+  "expr": "{{ (dt | lower) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-lower-ns",
+  "expr": "{{ (ns | lower) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-lower-b",
+  "expr": "{{ (b | lower) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-lower-b64",
+  "expr": "{{ (b64 | lower) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-md5-l",
+  "expr": "{{ (l | md5) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-md5-l1",
+  "expr": "{{ (l1 | md5) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-md5-ll",
+  "expr": "{{ (ll | md5) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-md5-m",
+  "expr": "{{ (m | md5) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-md5-m1",
+  "expr": "{{ (m1 | md5) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-md5-s",
+  "expr": "{{ (s | md5) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-md5-sc",
+  "expr": "{{ (sc | md5) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-md5-n",
+  "expr": "{{ (n | md5) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-md5-nul",
+  "expr": "{{ (nul | md5) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-md5-el",
+  "expr": "{{ (el | md5) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-md5-em",
+  "expr": "{{ (em | md5) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-md5-dt",
+  "expr": "{{ (dt | md5) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-md5-ns",
+  "expr": "{{ (ns | md5) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-md5-b",
+  "expr": "{{ (b | md5) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-md5-b64",
+  "expr": "{{ (b64 | md5) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-merge-l",
+  "expr": "{{ (l | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-merge-l1",
+  "expr": "{{ (l1 | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-merge-ll",
+  "expr": "{{ (ll | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-merge-m",
+  "expr": "{{ (m | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-merge-m1",
+  "expr": "{{ (m1 | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-merge-s",
+  "expr": "{{ (s | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-merge-sc",
+  "expr": "{{ (sc | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-merge-n",
+  "expr": "{{ (n | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-merge-nul",
+  "expr": "{{ (nul | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-merge-el",
+  "expr": "{{ (el | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "el": []
+  }
+ },
+ {
+  "id": "rc-merge-em",
+  "expr": "{{ (em | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-merge-dt",
+  "expr": "{{ (dt | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-merge-ns",
+  "expr": "{{ (ns | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-merge-b",
+  "expr": "{{ (b | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "b": true
+  }
+ },
+ {
+  "id": "rc-merge-b64",
+  "expr": "{{ (b64 | merge(l)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-nindent-l",
+  "expr": "{{ (l | nindent(amount=2)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-nindent-l1",
+  "expr": "{{ (l1 | nindent(amount=2)) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-nindent-ll",
+  "expr": "{{ (ll | nindent(amount=2)) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-nindent-m",
+  "expr": "{{ (m | nindent(amount=2)) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-nindent-m1",
+  "expr": "{{ (m1 | nindent(amount=2)) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-nindent-s",
+  "expr": "{{ (s | nindent(amount=2)) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-nindent-sc",
+  "expr": "{{ (sc | nindent(amount=2)) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-nindent-n",
+  "expr": "{{ (n | nindent(amount=2)) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-nindent-nul",
+  "expr": "{{ (nul | nindent(amount=2)) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-nindent-el",
+  "expr": "{{ (el | nindent(amount=2)) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-nindent-em",
+  "expr": "{{ (em | nindent(amount=2)) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-nindent-dt",
+  "expr": "{{ (dt | nindent(amount=2)) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-nindent-ns",
+  "expr": "{{ (ns | nindent(amount=2)) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-nindent-b",
+  "expr": "{{ (b | nindent(amount=2)) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-nindent-b64",
+  "expr": "{{ (b64 | nindent(amount=2)) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-nl2br-l",
+  "expr": "{{ (l | nl2br) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-nl2br-l1",
+  "expr": "{{ (l1 | nl2br) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-nl2br-ll",
+  "expr": "{{ (ll | nl2br) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-nl2br-m",
+  "expr": "{{ (m | nl2br) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-nl2br-m1",
+  "expr": "{{ (m1 | nl2br) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-nl2br-s",
+  "expr": "{{ (s | nl2br) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-nl2br-sc",
+  "expr": "{{ (sc | nl2br) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-nl2br-n",
+  "expr": "{{ (n | nl2br) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-nl2br-nul",
+  "expr": "{{ (nul | nl2br) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-nl2br-el",
+  "expr": "{{ (el | nl2br) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-nl2br-em",
+  "expr": "{{ (em | nl2br) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-nl2br-dt",
+  "expr": "{{ (dt | nl2br) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-nl2br-ns",
+  "expr": "{{ (ns | nl2br) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-nl2br-b",
+  "expr": "{{ (b | nl2br) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-nl2br-b64",
+  "expr": "{{ (b64 | nl2br) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-number-l",
+  "expr": "{{ (l | number) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-number-l1",
+  "expr": "{{ (l1 | number) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-number-ll",
+  "expr": "{{ (ll | number) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-number-m",
+  "expr": "{{ (m | number) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-number-m1",
+  "expr": "{{ (m1 | number) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-number-s",
+  "expr": "{{ (s | number) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-number-sc",
+  "expr": "{{ (sc | number) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-number-n",
+  "expr": "{{ (n | number) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-number-nul",
+  "expr": "{{ (nul | number) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-number-el",
+  "expr": "{{ (el | number) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-number-em",
+  "expr": "{{ (em | number) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-number-dt",
+  "expr": "{{ (dt | number) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-number-ns",
+  "expr": "{{ (ns | number) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-number-b",
+  "expr": "{{ (b | number) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-number-b64",
+  "expr": "{{ (b64 | number) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-numberformat-l",
+  "expr": "{{ (l | numberformat('#')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-numberformat-l1",
+  "expr": "{{ (l1 | numberformat('#')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-numberformat-ll",
+  "expr": "{{ (ll | numberformat('#')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-numberformat-m",
+  "expr": "{{ (m | numberformat('#')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-numberformat-m1",
+  "expr": "{{ (m1 | numberformat('#')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-numberformat-s",
+  "expr": "{{ (s | numberformat('#')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-numberformat-sc",
+  "expr": "{{ (sc | numberformat('#')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-numberformat-n",
+  "expr": "{{ (n | numberformat('#')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-numberformat-nul",
+  "expr": "{{ (nul | numberformat('#')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-numberformat-el",
+  "expr": "{{ (el | numberformat('#')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-numberformat-em",
+  "expr": "{{ (em | numberformat('#')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-numberformat-dt",
+  "expr": "{{ (dt | numberformat('#')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-numberformat-ns",
+  "expr": "{{ (ns | numberformat('#')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-numberformat-b",
+  "expr": "{{ (b | numberformat('#')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-numberformat-b64",
+  "expr": "{{ (b64 | numberformat('#')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-raw-l",
+  "expr": "{{ (l | raw) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-raw-l1",
+  "expr": "{{ (l1 | raw) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-raw-ll",
+  "expr": "{{ (ll | raw) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-raw-m",
+  "expr": "{{ (m | raw) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-raw-m1",
+  "expr": "{{ (m1 | raw) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-raw-s",
+  "expr": "{{ (s | raw) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-raw-sc",
+  "expr": "{{ (sc | raw) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-raw-n",
+  "expr": "{{ (n | raw) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-raw-nul",
+  "expr": "{{ (nul | raw) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-raw-el",
+  "expr": "{{ (el | raw) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-raw-em",
+  "expr": "{{ (em | raw) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-raw-dt",
+  "expr": "{{ (dt | raw) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-raw-ns",
+  "expr": "{{ (ns | raw) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-raw-b",
+  "expr": "{{ (b | raw) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-raw-b64",
+  "expr": "{{ (b64 | raw) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-regexExtract-l",
+  "expr": "{{ (l | regexExtract(regex='a')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexExtract-l1",
+  "expr": "{{ (l1 | regexExtract(regex='a')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexExtract-ll",
+  "expr": "{{ (ll | regexExtract(regex='a')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-regexExtract-m",
+  "expr": "{{ (m | regexExtract(regex='a')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-regexExtract-m1",
+  "expr": "{{ (m1 | regexExtract(regex='a')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-regexExtract-s",
+  "expr": "{{ (s | regexExtract(regex='a')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-regexExtract-sc",
+  "expr": "{{ (sc | regexExtract(regex='a')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-regexExtract-n",
+  "expr": "{{ (n | regexExtract(regex='a')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-regexExtract-nul",
+  "expr": "{{ (nul | regexExtract(regex='a')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-regexExtract-el",
+  "expr": "{{ (el | regexExtract(regex='a')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-regexExtract-em",
+  "expr": "{{ (em | regexExtract(regex='a')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-regexExtract-dt",
+  "expr": "{{ (dt | regexExtract(regex='a')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-regexExtract-ns",
+  "expr": "{{ (ns | regexExtract(regex='a')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-regexExtract-b",
+  "expr": "{{ (b | regexExtract(regex='a')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-regexExtract-b64",
+  "expr": "{{ (b64 | regexExtract(regex='a')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-regexMatch-l",
+  "expr": "{{ (l | regexMatch(regex='a')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexMatch-l1",
+  "expr": "{{ (l1 | regexMatch(regex='a')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexMatch-ll",
+  "expr": "{{ (ll | regexMatch(regex='a')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-regexMatch-m",
+  "expr": "{{ (m | regexMatch(regex='a')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-regexMatch-m1",
+  "expr": "{{ (m1 | regexMatch(regex='a')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-regexMatch-s",
+  "expr": "{{ (s | regexMatch(regex='a')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-regexMatch-sc",
+  "expr": "{{ (sc | regexMatch(regex='a')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-regexMatch-n",
+  "expr": "{{ (n | regexMatch(regex='a')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-regexMatch-nul",
+  "expr": "{{ (nul | regexMatch(regex='a')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-regexMatch-el",
+  "expr": "{{ (el | regexMatch(regex='a')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-regexMatch-em",
+  "expr": "{{ (em | regexMatch(regex='a')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-regexMatch-dt",
+  "expr": "{{ (dt | regexMatch(regex='a')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-regexMatch-ns",
+  "expr": "{{ (ns | regexMatch(regex='a')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-regexMatch-b",
+  "expr": "{{ (b | regexMatch(regex='a')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-regexMatch-b64",
+  "expr": "{{ (b64 | regexMatch(regex='a')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-regexReplace-l",
+  "expr": "{{ (l | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexReplace-l1",
+  "expr": "{{ (l1 | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-regexReplace-ll",
+  "expr": "{{ (ll | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-regexReplace-m",
+  "expr": "{{ (m | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-regexReplace-m1",
+  "expr": "{{ (m1 | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-regexReplace-s",
+  "expr": "{{ (s | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-regexReplace-sc",
+  "expr": "{{ (sc | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-regexReplace-n",
+  "expr": "{{ (n | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-regexReplace-nul",
+  "expr": "{{ (nul | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-regexReplace-el",
+  "expr": "{{ (el | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-regexReplace-em",
+  "expr": "{{ (em | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-regexReplace-dt",
+  "expr": "{{ (dt | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-regexReplace-ns",
+  "expr": "{{ (ns | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-regexReplace-b",
+  "expr": "{{ (b | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-regexReplace-b64",
+  "expr": "{{ (b64 | regexReplace(regex='a', replacement='#')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-replace-l",
+  "expr": "{{ (l | replace({'a': 'b'})) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ],
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-l1",
+  "expr": "{{ (l1 | replace({'a': 'b'})) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ],
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-ll",
+  "expr": "{{ (ll | replace({'a': 'b'})) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ],
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-m",
+  "expr": "{{ (m | replace({'a': 'b'})) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   },
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-m1",
+  "expr": "{{ (m1 | replace({'a': 'b'})) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   },
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-s",
+  "expr": "{{ (s | replace({'a': 'b'})) | className }}",
+  "context": {
+   "s": "a,b,c",
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-sc",
+  "expr": "{{ (sc | replace({'a': 'b'})) | className }}",
+  "context": {
+   "sc": ",",
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-n",
+  "expr": "{{ (n | replace({'a': 'b'})) | className }}",
+  "context": {
+   "n": 42,
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-nul",
+  "expr": "{{ (nul | replace({'a': 'b'})) | className }}",
+  "context": {
+   "nul": null,
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-el",
+  "expr": "{{ (el | replace({'a': 'b'})) | className }}",
+  "context": {
+   "el": [],
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-em",
+  "expr": "{{ (em | replace({'a': 'b'})) | className }}",
+  "context": {
+   "em": {},
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-dt",
+  "expr": "{{ (dt | replace({'a': 'b'})) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z",
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-ns",
+  "expr": "{{ (ns | replace({'a': 'b'})) | className }}",
+  "context": {
+   "ns": "42",
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-b",
+  "expr": "{{ (b | replace({'a': 'b'})) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-replace-b64",
+  "expr": "{{ (b64 | replace({'a': 'b'})) | className }}",
+  "context": {
+   "b": true,
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-reverse-l",
+  "expr": "{{ (l | reverse) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-reverse-l1",
+  "expr": "{{ (l1 | reverse) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-reverse-ll",
+  "expr": "{{ (ll | reverse) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-reverse-m",
+  "expr": "{{ (m | reverse) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-reverse-m1",
+  "expr": "{{ (m1 | reverse) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-reverse-s",
+  "expr": "{{ (s | reverse) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-reverse-sc",
+  "expr": "{{ (sc | reverse) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-reverse-n",
+  "expr": "{{ (n | reverse) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-reverse-nul",
+  "expr": "{{ (nul | reverse) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-reverse-el",
+  "expr": "{{ (el | reverse) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-reverse-em",
+  "expr": "{{ (em | reverse) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-reverse-dt",
+  "expr": "{{ (dt | reverse) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-reverse-ns",
+  "expr": "{{ (ns | reverse) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-reverse-b",
+  "expr": "{{ (b | reverse) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-reverse-b64",
+  "expr": "{{ (b64 | reverse) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-rsort-l",
+  "expr": "{{ (l | rsort) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-rsort-l1",
+  "expr": "{{ (l1 | rsort) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-rsort-ll",
+  "expr": "{{ (ll | rsort) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-rsort-m",
+  "expr": "{{ (m | rsort) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-rsort-m1",
+  "expr": "{{ (m1 | rsort) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-rsort-s",
+  "expr": "{{ (s | rsort) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-rsort-sc",
+  "expr": "{{ (sc | rsort) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-rsort-n",
+  "expr": "{{ (n | rsort) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-rsort-nul",
+  "expr": "{{ (nul | rsort) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-rsort-el",
+  "expr": "{{ (el | rsort) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-rsort-em",
+  "expr": "{{ (em | rsort) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-rsort-dt",
+  "expr": "{{ (dt | rsort) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-rsort-ns",
+  "expr": "{{ (ns | rsort) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-rsort-b",
+  "expr": "{{ (b | rsort) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-rsort-b64",
+  "expr": "{{ (b64 | rsort) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-sha1-l",
+  "expr": "{{ (l | sha1) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha1-l1",
+  "expr": "{{ (l1 | sha1) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha1-ll",
+  "expr": "{{ (ll | sha1) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-sha1-m",
+  "expr": "{{ (m | sha1) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-sha1-m1",
+  "expr": "{{ (m1 | sha1) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-sha1-s",
+  "expr": "{{ (s | sha1) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-sha1-sc",
+  "expr": "{{ (sc | sha1) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-sha1-n",
+  "expr": "{{ (n | sha1) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-sha1-nul",
+  "expr": "{{ (nul | sha1) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-sha1-el",
+  "expr": "{{ (el | sha1) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-sha1-em",
+  "expr": "{{ (em | sha1) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-sha1-dt",
+  "expr": "{{ (dt | sha1) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-sha1-ns",
+  "expr": "{{ (ns | sha1) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-sha1-b",
+  "expr": "{{ (b | sha1) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-sha1-b64",
+  "expr": "{{ (b64 | sha1) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-sha256-l",
+  "expr": "{{ (l | sha256) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha256-l1",
+  "expr": "{{ (l1 | sha256) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha256-ll",
+  "expr": "{{ (ll | sha256) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-sha256-m",
+  "expr": "{{ (m | sha256) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-sha256-m1",
+  "expr": "{{ (m1 | sha256) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-sha256-s",
+  "expr": "{{ (s | sha256) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-sha256-sc",
+  "expr": "{{ (sc | sha256) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-sha256-n",
+  "expr": "{{ (n | sha256) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-sha256-nul",
+  "expr": "{{ (nul | sha256) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-sha256-el",
+  "expr": "{{ (el | sha256) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-sha256-em",
+  "expr": "{{ (em | sha256) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-sha256-dt",
+  "expr": "{{ (dt | sha256) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-sha256-ns",
+  "expr": "{{ (ns | sha256) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-sha256-b",
+  "expr": "{{ (b | sha256) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-sha256-b64",
+  "expr": "{{ (b64 | sha256) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-sha512-l",
+  "expr": "{{ (l | sha512) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha512-l1",
+  "expr": "{{ (l1 | sha512) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-sha512-ll",
+  "expr": "{{ (ll | sha512) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-sha512-m",
+  "expr": "{{ (m | sha512) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-sha512-m1",
+  "expr": "{{ (m1 | sha512) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-sha512-s",
+  "expr": "{{ (s | sha512) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-sha512-sc",
+  "expr": "{{ (sc | sha512) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-sha512-n",
+  "expr": "{{ (n | sha512) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-sha512-nul",
+  "expr": "{{ (nul | sha512) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-sha512-el",
+  "expr": "{{ (el | sha512) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-sha512-em",
+  "expr": "{{ (em | sha512) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-sha512-dt",
+  "expr": "{{ (dt | sha512) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-sha512-ns",
+  "expr": "{{ (ns | sha512) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-sha512-b",
+  "expr": "{{ (b | sha512) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-sha512-b64",
+  "expr": "{{ (b64 | sha512) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-slice-l",
+  "expr": "{{ (l | slice(0,2)) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-slice-l1",
+  "expr": "{{ (l1 | slice(0,2)) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-slice-ll",
+  "expr": "{{ (ll | slice(0,2)) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-slice-m",
+  "expr": "{{ (m | slice(0,2)) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-slice-m1",
+  "expr": "{{ (m1 | slice(0,2)) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-slice-s",
+  "expr": "{{ (s | slice(0,2)) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-slice-sc",
+  "expr": "{{ (sc | slice(0,2)) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-slice-n",
+  "expr": "{{ (n | slice(0,2)) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-slice-nul",
+  "expr": "{{ (nul | slice(0,2)) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-slice-el",
+  "expr": "{{ (el | slice(0,2)) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-slice-em",
+  "expr": "{{ (em | slice(0,2)) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-slice-dt",
+  "expr": "{{ (dt | slice(0,2)) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-slice-ns",
+  "expr": "{{ (ns | slice(0,2)) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-slice-b",
+  "expr": "{{ (b | slice(0,2)) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-slice-b64",
+  "expr": "{{ (b64 | slice(0,2)) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-slugify-l",
+  "expr": "{{ (l | slugify) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-slugify-l1",
+  "expr": "{{ (l1 | slugify) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-slugify-ll",
+  "expr": "{{ (ll | slugify) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-slugify-m",
+  "expr": "{{ (m | slugify) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-slugify-m1",
+  "expr": "{{ (m1 | slugify) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-slugify-s",
+  "expr": "{{ (s | slugify) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-slugify-sc",
+  "expr": "{{ (sc | slugify) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-slugify-n",
+  "expr": "{{ (n | slugify) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-slugify-nul",
+  "expr": "{{ (nul | slugify) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-slugify-el",
+  "expr": "{{ (el | slugify) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-slugify-em",
+  "expr": "{{ (em | slugify) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-slugify-dt",
+  "expr": "{{ (dt | slugify) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-slugify-ns",
+  "expr": "{{ (ns | slugify) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-slugify-b",
+  "expr": "{{ (b | slugify) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-slugify-b64",
+  "expr": "{{ (b64 | slugify) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-sort-l",
+  "expr": "{{ (l | sort) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-sort-l1",
+  "expr": "{{ (l1 | sort) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-sort-ll",
+  "expr": "{{ (ll | sort) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-sort-m",
+  "expr": "{{ (m | sort) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-sort-m1",
+  "expr": "{{ (m1 | sort) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-sort-s",
+  "expr": "{{ (s | sort) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-sort-sc",
+  "expr": "{{ (sc | sort) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-sort-n",
+  "expr": "{{ (n | sort) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-sort-nul",
+  "expr": "{{ (nul | sort) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-sort-el",
+  "expr": "{{ (el | sort) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-sort-em",
+  "expr": "{{ (em | sort) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-sort-dt",
+  "expr": "{{ (dt | sort) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-sort-ns",
+  "expr": "{{ (ns | sort) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-sort-b",
+  "expr": "{{ (b | sort) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-sort-b64",
+  "expr": "{{ (b64 | sort) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-split-l",
+  "expr": "{{ (l | split(',')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-split-l1",
+  "expr": "{{ (l1 | split(',')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-split-ll",
+  "expr": "{{ (ll | split(',')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-split-m",
+  "expr": "{{ (m | split(',')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-split-m1",
+  "expr": "{{ (m1 | split(',')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-split-s",
+  "expr": "{{ (s | split(',')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-split-sc",
+  "expr": "{{ (sc | split(',')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-split-n",
+  "expr": "{{ (n | split(',')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-split-nul",
+  "expr": "{{ (nul | split(',')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-split-el",
+  "expr": "{{ (el | split(',')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-split-em",
+  "expr": "{{ (em | split(',')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-split-dt",
+  "expr": "{{ (dt | split(',')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-split-ns",
+  "expr": "{{ (ns | split(',')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-split-b",
+  "expr": "{{ (b | split(',')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-split-b64",
+  "expr": "{{ (b64 | split(',')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-startsWith-l",
+  "expr": "{{ (l | startsWith(value='a')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-startsWith-l1",
+  "expr": "{{ (l1 | startsWith(value='a')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-startsWith-ll",
+  "expr": "{{ (ll | startsWith(value='a')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-startsWith-m",
+  "expr": "{{ (m | startsWith(value='a')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-startsWith-m1",
+  "expr": "{{ (m1 | startsWith(value='a')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-startsWith-s",
+  "expr": "{{ (s | startsWith(value='a')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-startsWith-sc",
+  "expr": "{{ (sc | startsWith(value='a')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-startsWith-n",
+  "expr": "{{ (n | startsWith(value='a')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-startsWith-nul",
+  "expr": "{{ (nul | startsWith(value='a')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-startsWith-el",
+  "expr": "{{ (el | startsWith(value='a')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-startsWith-em",
+  "expr": "{{ (em | startsWith(value='a')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-startsWith-dt",
+  "expr": "{{ (dt | startsWith(value='a')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-startsWith-ns",
+  "expr": "{{ (ns | startsWith(value='a')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-startsWith-b",
+  "expr": "{{ (b | startsWith(value='a')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-startsWith-b64",
+  "expr": "{{ (b64 | startsWith(value='a')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-string-l",
+  "expr": "{{ (l | string) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-string-l1",
+  "expr": "{{ (l1 | string) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-string-ll",
+  "expr": "{{ (ll | string) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-string-m",
+  "expr": "{{ (m | string) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-string-m1",
+  "expr": "{{ (m1 | string) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-string-s",
+  "expr": "{{ (s | string) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-string-sc",
+  "expr": "{{ (sc | string) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-string-n",
+  "expr": "{{ (n | string) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-string-nul",
+  "expr": "{{ (nul | string) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-string-el",
+  "expr": "{{ (el | string) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-string-em",
+  "expr": "{{ (em | string) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-string-dt",
+  "expr": "{{ (dt | string) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-string-ns",
+  "expr": "{{ (ns | string) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-string-b",
+  "expr": "{{ (b | string) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-string-b64",
+  "expr": "{{ (b64 | string) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-substringAfter-l",
+  "expr": "{{ (l | substringAfter(separator=',')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfter-l1",
+  "expr": "{{ (l1 | substringAfter(separator=',')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfter-ll",
+  "expr": "{{ (ll | substringAfter(separator=',')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfter-m",
+  "expr": "{{ (m | substringAfter(separator=',')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-substringAfter-m1",
+  "expr": "{{ (m1 | substringAfter(separator=',')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-substringAfter-s",
+  "expr": "{{ (s | substringAfter(separator=',')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-substringAfter-sc",
+  "expr": "{{ (sc | substringAfter(separator=',')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-substringAfter-n",
+  "expr": "{{ (n | substringAfter(separator=',')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-substringAfter-nul",
+  "expr": "{{ (nul | substringAfter(separator=',')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-substringAfter-el",
+  "expr": "{{ (el | substringAfter(separator=',')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-substringAfter-em",
+  "expr": "{{ (em | substringAfter(separator=',')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-substringAfter-dt",
+  "expr": "{{ (dt | substringAfter(separator=',')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-substringAfter-ns",
+  "expr": "{{ (ns | substringAfter(separator=',')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-substringAfter-b",
+  "expr": "{{ (b | substringAfter(separator=',')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-substringAfter-b64",
+  "expr": "{{ (b64 | substringAfter(separator=',')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-l",
+  "expr": "{{ (l | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-l1",
+  "expr": "{{ (l1 | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-ll",
+  "expr": "{{ (ll | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-m",
+  "expr": "{{ (m | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-m1",
+  "expr": "{{ (m1 | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-s",
+  "expr": "{{ (s | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-sc",
+  "expr": "{{ (sc | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-n",
+  "expr": "{{ (n | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-nul",
+  "expr": "{{ (nul | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-el",
+  "expr": "{{ (el | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-em",
+  "expr": "{{ (em | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-dt",
+  "expr": "{{ (dt | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-ns",
+  "expr": "{{ (ns | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-b",
+  "expr": "{{ (b | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-substringAfterLast-b64",
+  "expr": "{{ (b64 | substringAfterLast(separator=',')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-substringBefore-l",
+  "expr": "{{ (l | substringBefore(separator=',')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBefore-l1",
+  "expr": "{{ (l1 | substringBefore(separator=',')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBefore-ll",
+  "expr": "{{ (ll | substringBefore(separator=',')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBefore-m",
+  "expr": "{{ (m | substringBefore(separator=',')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-substringBefore-m1",
+  "expr": "{{ (m1 | substringBefore(separator=',')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-substringBefore-s",
+  "expr": "{{ (s | substringBefore(separator=',')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-substringBefore-sc",
+  "expr": "{{ (sc | substringBefore(separator=',')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-substringBefore-n",
+  "expr": "{{ (n | substringBefore(separator=',')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-substringBefore-nul",
+  "expr": "{{ (nul | substringBefore(separator=',')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-substringBefore-el",
+  "expr": "{{ (el | substringBefore(separator=',')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-substringBefore-em",
+  "expr": "{{ (em | substringBefore(separator=',')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-substringBefore-dt",
+  "expr": "{{ (dt | substringBefore(separator=',')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-substringBefore-ns",
+  "expr": "{{ (ns | substringBefore(separator=',')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-substringBefore-b",
+  "expr": "{{ (b | substringBefore(separator=',')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-substringBefore-b64",
+  "expr": "{{ (b64 | substringBefore(separator=',')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-l",
+  "expr": "{{ (l | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-l1",
+  "expr": "{{ (l1 | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-ll",
+  "expr": "{{ (ll | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-m",
+  "expr": "{{ (m | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-m1",
+  "expr": "{{ (m1 | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-s",
+  "expr": "{{ (s | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-sc",
+  "expr": "{{ (sc | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-n",
+  "expr": "{{ (n | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-nul",
+  "expr": "{{ (nul | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-el",
+  "expr": "{{ (el | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-em",
+  "expr": "{{ (em | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-dt",
+  "expr": "{{ (dt | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-ns",
+  "expr": "{{ (ns | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-b",
+  "expr": "{{ (b | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-substringBeforeLast-b64",
+  "expr": "{{ (b64 | substringBeforeLast(separator=',')) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-timestamp-l",
+  "expr": "{{ (l | timestamp) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestamp-l1",
+  "expr": "{{ (l1 | timestamp) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestamp-ll",
+  "expr": "{{ (ll | timestamp) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-timestamp-m",
+  "expr": "{{ (m | timestamp) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-timestamp-m1",
+  "expr": "{{ (m1 | timestamp) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-timestamp-s",
+  "expr": "{{ (s | timestamp) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-timestamp-sc",
+  "expr": "{{ (sc | timestamp) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-timestamp-n",
+  "expr": "{{ (n | timestamp) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-timestamp-nul",
+  "expr": "{{ (nul | timestamp) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-timestamp-el",
+  "expr": "{{ (el | timestamp) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-timestamp-em",
+  "expr": "{{ (em | timestamp) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-timestamp-dt",
+  "expr": "{{ (dt | timestamp) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-timestamp-ns",
+  "expr": "{{ (ns | timestamp) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-timestamp-b",
+  "expr": "{{ (b | timestamp) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-timestamp-b64",
+  "expr": "{{ (b64 | timestamp) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-timestampMicro-l",
+  "expr": "{{ (l | timestampMicro) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMicro-l1",
+  "expr": "{{ (l1 | timestampMicro) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMicro-ll",
+  "expr": "{{ (ll | timestampMicro) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMicro-m",
+  "expr": "{{ (m | timestampMicro) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-timestampMicro-m1",
+  "expr": "{{ (m1 | timestampMicro) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-timestampMicro-s",
+  "expr": "{{ (s | timestampMicro) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-timestampMicro-sc",
+  "expr": "{{ (sc | timestampMicro) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-timestampMicro-n",
+  "expr": "{{ (n | timestampMicro) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-timestampMicro-nul",
+  "expr": "{{ (nul | timestampMicro) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-timestampMicro-el",
+  "expr": "{{ (el | timestampMicro) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-timestampMicro-em",
+  "expr": "{{ (em | timestampMicro) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-timestampMicro-dt",
+  "expr": "{{ (dt | timestampMicro) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-timestampMicro-ns",
+  "expr": "{{ (ns | timestampMicro) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-timestampMicro-b",
+  "expr": "{{ (b | timestampMicro) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-timestampMicro-b64",
+  "expr": "{{ (b64 | timestampMicro) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-timestampMilli-l",
+  "expr": "{{ (l | timestampMilli) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMilli-l1",
+  "expr": "{{ (l1 | timestampMilli) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMilli-ll",
+  "expr": "{{ (ll | timestampMilli) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampMilli-m",
+  "expr": "{{ (m | timestampMilli) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-timestampMilli-m1",
+  "expr": "{{ (m1 | timestampMilli) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-timestampMilli-s",
+  "expr": "{{ (s | timestampMilli) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-timestampMilli-sc",
+  "expr": "{{ (sc | timestampMilli) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-timestampMilli-n",
+  "expr": "{{ (n | timestampMilli) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-timestampMilli-nul",
+  "expr": "{{ (nul | timestampMilli) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-timestampMilli-el",
+  "expr": "{{ (el | timestampMilli) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-timestampMilli-em",
+  "expr": "{{ (em | timestampMilli) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-timestampMilli-dt",
+  "expr": "{{ (dt | timestampMilli) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-timestampMilli-ns",
+  "expr": "{{ (ns | timestampMilli) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-timestampMilli-b",
+  "expr": "{{ (b | timestampMilli) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-timestampMilli-b64",
+  "expr": "{{ (b64 | timestampMilli) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-timestampNano-l",
+  "expr": "{{ (l | timestampNano) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampNano-l1",
+  "expr": "{{ (l1 | timestampNano) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampNano-ll",
+  "expr": "{{ (ll | timestampNano) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-timestampNano-m",
+  "expr": "{{ (m | timestampNano) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-timestampNano-m1",
+  "expr": "{{ (m1 | timestampNano) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-timestampNano-s",
+  "expr": "{{ (s | timestampNano) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-timestampNano-sc",
+  "expr": "{{ (sc | timestampNano) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-timestampNano-n",
+  "expr": "{{ (n | timestampNano) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-timestampNano-nul",
+  "expr": "{{ (nul | timestampNano) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-timestampNano-el",
+  "expr": "{{ (el | timestampNano) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-timestampNano-em",
+  "expr": "{{ (em | timestampNano) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-timestampNano-dt",
+  "expr": "{{ (dt | timestampNano) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-timestampNano-ns",
+  "expr": "{{ (ns | timestampNano) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-timestampNano-b",
+  "expr": "{{ (b | timestampNano) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-timestampNano-b64",
+  "expr": "{{ (b64 | timestampNano) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-title-l",
+  "expr": "{{ (l | title) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-title-l1",
+  "expr": "{{ (l1 | title) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-title-ll",
+  "expr": "{{ (ll | title) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-title-m",
+  "expr": "{{ (m | title) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-title-m1",
+  "expr": "{{ (m1 | title) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-title-s",
+  "expr": "{{ (s | title) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-title-sc",
+  "expr": "{{ (sc | title) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-title-n",
+  "expr": "{{ (n | title) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-title-nul",
+  "expr": "{{ (nul | title) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-title-el",
+  "expr": "{{ (el | title) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-title-em",
+  "expr": "{{ (em | title) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-title-dt",
+  "expr": "{{ (dt | title) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-title-ns",
+  "expr": "{{ (ns | title) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-title-b",
+  "expr": "{{ (b | title) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-title-b64",
+  "expr": "{{ (b64 | title) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-toIon-l",
+  "expr": "{{ (l | toIon) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-toIon-l1",
+  "expr": "{{ (l1 | toIon) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-toIon-ll",
+  "expr": "{{ (ll | toIon) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-toIon-m",
+  "expr": "{{ (m | toIon) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-toIon-m1",
+  "expr": "{{ (m1 | toIon) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-toIon-s",
+  "expr": "{{ (s | toIon) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-toIon-sc",
+  "expr": "{{ (sc | toIon) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-toIon-n",
+  "expr": "{{ (n | toIon) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-toIon-nul",
+  "expr": "{{ (nul | toIon) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-toIon-el",
+  "expr": "{{ (el | toIon) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-toIon-em",
+  "expr": "{{ (em | toIon) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-toIon-dt",
+  "expr": "{{ (dt | toIon) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-toIon-ns",
+  "expr": "{{ (ns | toIon) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-toIon-b",
+  "expr": "{{ (b | toIon) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-toIon-b64",
+  "expr": "{{ (b64 | toIon) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-toJson-l",
+  "expr": "{{ (l | toJson) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-toJson-l1",
+  "expr": "{{ (l1 | toJson) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-toJson-ll",
+  "expr": "{{ (ll | toJson) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-toJson-m",
+  "expr": "{{ (m | toJson) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-toJson-m1",
+  "expr": "{{ (m1 | toJson) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-toJson-s",
+  "expr": "{{ (s | toJson) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-toJson-sc",
+  "expr": "{{ (sc | toJson) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-toJson-n",
+  "expr": "{{ (n | toJson) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-toJson-nul",
+  "expr": "{{ (nul | toJson) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-toJson-el",
+  "expr": "{{ (el | toJson) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-toJson-em",
+  "expr": "{{ (em | toJson) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-toJson-dt",
+  "expr": "{{ (dt | toJson) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-toJson-ns",
+  "expr": "{{ (ns | toJson) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-toJson-b",
+  "expr": "{{ (b | toJson) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-toJson-b64",
+  "expr": "{{ (b64 | toJson) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-trim-l",
+  "expr": "{{ (l | trim) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-trim-l1",
+  "expr": "{{ (l1 | trim) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-trim-ll",
+  "expr": "{{ (ll | trim) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-trim-m",
+  "expr": "{{ (m | trim) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-trim-m1",
+  "expr": "{{ (m1 | trim) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-trim-s",
+  "expr": "{{ (s | trim) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-trim-sc",
+  "expr": "{{ (sc | trim) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-trim-n",
+  "expr": "{{ (n | trim) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-trim-nul",
+  "expr": "{{ (nul | trim) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-trim-el",
+  "expr": "{{ (el | trim) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-trim-em",
+  "expr": "{{ (em | trim) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-trim-dt",
+  "expr": "{{ (dt | trim) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-trim-ns",
+  "expr": "{{ (ns | trim) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-trim-b",
+  "expr": "{{ (b | trim) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-trim-b64",
+  "expr": "{{ (b64 | trim) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-upper-l",
+  "expr": "{{ (l | upper) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-upper-l1",
+  "expr": "{{ (l1 | upper) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-upper-ll",
+  "expr": "{{ (ll | upper) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-upper-m",
+  "expr": "{{ (m | upper) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-upper-m1",
+  "expr": "{{ (m1 | upper) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-upper-s",
+  "expr": "{{ (s | upper) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-upper-sc",
+  "expr": "{{ (sc | upper) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-upper-n",
+  "expr": "{{ (n | upper) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-upper-nul",
+  "expr": "{{ (nul | upper) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-upper-el",
+  "expr": "{{ (el | upper) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-upper-em",
+  "expr": "{{ (em | upper) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-upper-dt",
+  "expr": "{{ (dt | upper) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-upper-ns",
+  "expr": "{{ (ns | upper) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-upper-b",
+  "expr": "{{ (b | upper) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-upper-b64",
+  "expr": "{{ (b64 | upper) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-urldecode-l",
+  "expr": "{{ (l | urldecode) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-urldecode-l1",
+  "expr": "{{ (l1 | urldecode) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-urldecode-ll",
+  "expr": "{{ (ll | urldecode) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-urldecode-m",
+  "expr": "{{ (m | urldecode) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-urldecode-m1",
+  "expr": "{{ (m1 | urldecode) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-urldecode-s",
+  "expr": "{{ (s | urldecode) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-urldecode-sc",
+  "expr": "{{ (sc | urldecode) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-urldecode-n",
+  "expr": "{{ (n | urldecode) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-urldecode-nul",
+  "expr": "{{ (nul | urldecode) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-urldecode-el",
+  "expr": "{{ (el | urldecode) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-urldecode-em",
+  "expr": "{{ (em | urldecode) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-urldecode-dt",
+  "expr": "{{ (dt | urldecode) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-urldecode-ns",
+  "expr": "{{ (ns | urldecode) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-urldecode-b",
+  "expr": "{{ (b | urldecode) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-urldecode-b64",
+  "expr": "{{ (b64 | urldecode) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-urlencode-l",
+  "expr": "{{ (l | urlencode) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-urlencode-l1",
+  "expr": "{{ (l1 | urlencode) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-urlencode-ll",
+  "expr": "{{ (ll | urlencode) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-urlencode-m",
+  "expr": "{{ (m | urlencode) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-urlencode-m1",
+  "expr": "{{ (m1 | urlencode) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-urlencode-s",
+  "expr": "{{ (s | urlencode) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-urlencode-sc",
+  "expr": "{{ (sc | urlencode) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-urlencode-n",
+  "expr": "{{ (n | urlencode) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-urlencode-nul",
+  "expr": "{{ (nul | urlencode) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-urlencode-el",
+  "expr": "{{ (el | urlencode) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-urlencode-em",
+  "expr": "{{ (em | urlencode) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-urlencode-dt",
+  "expr": "{{ (dt | urlencode) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-urlencode-ns",
+  "expr": "{{ (ns | urlencode) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-urlencode-b",
+  "expr": "{{ (b | urlencode) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-urlencode-b64",
+  "expr": "{{ (b64 | urlencode) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-values-l",
+  "expr": "{{ (l | values) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-values-l1",
+  "expr": "{{ (l1 | values) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-values-ll",
+  "expr": "{{ (ll | values) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-values-m",
+  "expr": "{{ (m | values) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-values-m1",
+  "expr": "{{ (m1 | values) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-values-s",
+  "expr": "{{ (s | values) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-values-sc",
+  "expr": "{{ (sc | values) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-values-n",
+  "expr": "{{ (n | values) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-values-nul",
+  "expr": "{{ (nul | values) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-values-el",
+  "expr": "{{ (el | values) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-values-em",
+  "expr": "{{ (em | values) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-values-dt",
+  "expr": "{{ (dt | values) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-values-ns",
+  "expr": "{{ (ns | values) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-values-b",
+  "expr": "{{ (b | values) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-values-b64",
+  "expr": "{{ (b64 | values) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ },
+ {
+  "id": "rc-yaml-l",
+  "expr": "{{ (l | yaml) | className }}",
+  "context": {
+   "l": [
+    "b",
+    "a",
+    "c"
+   ]
+  }
+ },
+ {
+  "id": "rc-yaml-l1",
+  "expr": "{{ (l1 | yaml) | className }}",
+  "context": {
+   "l1": [
+    "b"
+   ]
+  }
+ },
+ {
+  "id": "rc-yaml-ll",
+  "expr": "{{ (ll | yaml) | className }}",
+  "context": {
+   "ll": [
+    [
+     "b",
+     "a"
+    ],
+    [
+     "c"
+    ]
+   ]
+  }
+ },
+ {
+  "id": "rc-yaml-m",
+  "expr": "{{ (m | yaml) | className }}",
+  "context": {
+   "m": {
+    "b": 1,
+    "a": 2
+   }
+  }
+ },
+ {
+  "id": "rc-yaml-m1",
+  "expr": "{{ (m1 | yaml) | className }}",
+  "context": {
+   "m1": {
+    "b": 1
+   }
+  }
+ },
+ {
+  "id": "rc-yaml-s",
+  "expr": "{{ (s | yaml) | className }}",
+  "context": {
+   "s": "a,b,c"
+  }
+ },
+ {
+  "id": "rc-yaml-sc",
+  "expr": "{{ (sc | yaml) | className }}",
+  "context": {
+   "sc": ","
+  }
+ },
+ {
+  "id": "rc-yaml-n",
+  "expr": "{{ (n | yaml) | className }}",
+  "context": {
+   "n": 42
+  }
+ },
+ {
+  "id": "rc-yaml-nul",
+  "expr": "{{ (nul | yaml) | className }}",
+  "context": {
+   "nul": null
+  }
+ },
+ {
+  "id": "rc-yaml-el",
+  "expr": "{{ (el | yaml) | className }}",
+  "context": {
+   "el": []
+  }
+ },
+ {
+  "id": "rc-yaml-em",
+  "expr": "{{ (em | yaml) | className }}",
+  "context": {
+   "em": {}
+  }
+ },
+ {
+  "id": "rc-yaml-dt",
+  "expr": "{{ (dt | yaml) | className }}",
+  "context": {
+   "dt": "2024-01-15T10:30:00Z"
+  }
+ },
+ {
+  "id": "rc-yaml-ns",
+  "expr": "{{ (ns | yaml) | className }}",
+  "context": {
+   "ns": "42"
+  }
+ },
+ {
+  "id": "rc-yaml-b",
+  "expr": "{{ (b | yaml) | className }}",
+  "context": {
+   "b": true
+  }
+ },
+ {
+  "id": "rc-yaml-b64",
+  "expr": "{{ (b64 | yaml) | className }}",
+  "context": {
+   "b64": "YWJj"
+  }
+ }
+]

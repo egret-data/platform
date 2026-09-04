@@ -1,0 +1,1035 @@
+# WHAT EACH FILTER RETURNS: all 63 filters the engine binds, crossed with a
+# fifteen-input matrix, asked through Kestra's OWN `className` filter.
+#
+# W2a. W2 Task 8's fix round recorded the collection class as fourteen corpus
+# entries and said in its own report why that number could not be trusted:
+# "those are the pairs I thought to cross -- nothing enumerates the return
+# collection of the other 40 filters." A hand-written list produced "three",
+# then "five". This file is the enumeration that replaces the list, and
+# `collection-pairs.txt` beside it is what the enumeration was for.
+#
+# The instrument is the engine itself: `className` is a Kestra filter, so
+# `{{ (<input> | <filter>) | className }}` asks Pebble what its own types are.
+# No reflection and no bytecode -- one `host.Oracle generate`.
+#
+# Format, tab separated:
+#
+#   filter  input  expr  kestra  egret  reason
+#
+# `input` names a binding in the matrix: `l` a three-element list, `l1` a
+# ONE-element list, `ll` a nested list, `m` a two-key map, `m1` a ONE-key map,
+# `s` the string `a,b,c`, `sc` the single character `,`, `n` the integer 42,
+# `nul` an explicit null, `el` an empty list, `em` an empty map, `dt` an ISO
+# instant, `ns` the string `42`, `b` a boolean, `b64` a base64 string.
+#
+# `dt`, `ns`, `b` and `b64` exist because without them `date`, `dateAdd`, the
+# four `timestamp*`, `number`, `abs`, `numberformat` and `base64decode` answer
+# nothing but an exception and their return class is unmeasured -- the first
+# cut of this file had that hole and 279 of its 756 cells were exceptions.
+#
+# `l1` and `m1` exist because **the LENGTH is part of this task's rule and the
+# matrix carried only two of its three buckets.** `Collections.reverse` calls
+# `set` no times below two elements and `List.sort`'s default calls it once per
+# element, so 0, 1 and "many" are three different behaviours. The first fix
+# round's own defect was reachable only at 0 and 1, and the propagation fixture
+# built on a matrix with no length-1 member saw ONE of its five expressions;
+# with `l1` it sees five. A dedup key that cannot express a distinction cannot
+# preserve a representative of it.
+#
+# `sc` exists because `",".split(",")` is the EMPTY array, and it is the only
+# way this matrix reaches length 0 of the `Array` kind. Round 2 also stopped
+# deriving the bucket from the input BINDING and started deriving it from the
+# measured length of the produced value: the binding is exact for a list or a
+# map and meaningless for a string, so every `split` result had been landing in
+# the "many" bucket whatever its actual length, and the `Array` kind existed at
+# one length only in a file whose header claimed three. Filling it found a live
+# over-acceptance in `default` -- see the fix-round section of `README.md`.
+#
+# `kestra` and `egret` are the rendered class name, or `error`. Values are
+# JSON-escaped so a tab can never be one. `expr` is the rendered expression,
+# verbatim, and the probe and answer maps are keyed by IT rather than by an id
+# derived from the row -- see `collection-pairs.txt` for what that closed.
+#
+# A row whose two columns AGREE must carry `-`, and a row whose columns
+# DIFFER must carry a reason. `runners::filters::the_return_classes_match_the_engine`
+# asserts every egret cell by rendering it, and
+# `..::the_return_class_fixtures_kestra_column_is_the_harnesss_own_answer`
+# asserts the kestra column against `fixtures/return-classes.answers.json`, so
+# a hand-edited fixture fails and a Kestra bump moves it visibly. See
+# `oracle/README.md`, "Regenerating the answer fixtures".
+#
+# WHAT IT FOUND, and it is not what the corpus said. Eight filters return
+# something that is not a plain `java.util.ArrayList`:
+#
+#   split       [Ljava.lang.String;                           an ARRAY, not a List at all
+#   chunk       com.google.common.collect.Lists$RandomAccessPartition
+#   flatten     java.util.ImmutableCollections$ListN
+#   keys        java.util.ImmutableCollections$ListN (list/array) / LinkedHashMap$LinkedKeySet (map)
+#   values      java.util.LinkedHashMap$LinkedValues
+#   slice       java.util.ArrayList$SubList
+#   escapeChar  java.util.HashMap (map input)
+#   merge       java.util.HashMap (map) / java.util.ArrayList (list)
+#
+# But eight is the answer to the CLASS question, not to the behaviour one:
+# `slice`'s `SubList` is a mutable `List` and every consumer accepts it, and
+# `escapeChar`/`merge` return a Map whose only observable difference is its
+# ORDER (already recorded). The producers that make the NEXT filter behave
+# differently are five -- `keys`, `values`, `flatten`, `chunk`, `split` -- and
+# that half of Task 8's number was right. `collection-pairs.txt` is where the
+# behaviour is measured, and it puts the CONSUMER side at eight, not six.
+#
+# One more divergence off the collection axis, recorded here: `first`/`last`
+# on a String return a `java.lang.Character` where egret has no character type
+# separate from a one-character string.
+#
+# And one CORRECTION rather than a divergence, which the first cut of this file
+# reported as a third: `timestampMicro` and `timestampNano` really do return a
+# `java.lang.String` where `timestamp` and `timestampMilli` return a `Long` --
+# but egret answers `java.lang.String` for both too, so the two engines AGREE
+# and those rows carry `-`. It corrects the brief's table; it is not a
+# divergence, and calling it one was an error of this file's first cut.
+abbreviate	l	{{ (l | abbreviate(5)) | className }}	error	error	-
+abbreviate	l1	{{ (l1 | abbreviate(5)) | className }}	error	error	-
+abbreviate	ll	{{ (ll | abbreviate(5)) | className }}	error	error	-
+abbreviate	m	{{ (m | abbreviate(5)) | className }}	error	error	-
+abbreviate	m1	{{ (m1 | abbreviate(5)) | className }}	error	error	-
+abbreviate	s	{{ (s | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	sc	{{ (sc | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	n	{{ (n | abbreviate(5)) | className }}	error	error	-
+abbreviate	nul	{{ (nul | abbreviate(5)) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	el	{{ (el | abbreviate(5)) | className }}	error	error	-
+abbreviate	em	{{ (em | abbreviate(5)) | className }}	error	error	-
+abbreviate	dt	{{ (dt | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	ns	{{ (ns | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abbreviate	b	{{ (b | abbreviate(5)) | className }}	error	error	-
+abbreviate	b64	{{ (b64 | abbreviate(5)) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+abs	l	{{ (l | abs) | className }}	error	error	-
+abs	l1	{{ (l1 | abs) | className }}	error	error	-
+abs	ll	{{ (ll | abs) | className }}	error	error	-
+abs	m	{{ (m | abs) | className }}	error	error	-
+abs	m1	{{ (m1 | abs) | className }}	error	error	-
+abs	s	{{ (s | abs) | className }}	error	error	-
+abs	sc	{{ (sc | abs) | className }}	error	error	-
+abs	n	{{ (n | abs) | className }}	java.lang.Integer	java.lang.Integer	-
+abs	nul	{{ (nul | abs) | className }}	error	error	-
+abs	el	{{ (el | abs) | className }}	error	error	-
+abs	em	{{ (em | abs) | className }}	error	error	-
+abs	dt	{{ (dt | abs) | className }}	error	error	-
+abs	ns	{{ (ns | abs) | className }}	error	error	-
+abs	b	{{ (b | abs) | className }}	error	error	-
+abs	b64	{{ (b64 | abs) | className }}	error	error	-
+base64decode	l	{{ (l | base64decode) | className }}	error	error	-
+base64decode	l1	{{ (l1 | base64decode) | className }}	error	error	-
+base64decode	ll	{{ (ll | base64decode) | className }}	error	error	-
+base64decode	m	{{ (m | base64decode) | className }}	error	error	-
+base64decode	m1	{{ (m1 | base64decode) | className }}	error	error	-
+base64decode	s	{{ (s | base64decode) | className }}	error	error	-
+base64decode	sc	{{ (sc | base64decode) | className }}	error	error	-
+base64decode	n	{{ (n | base64decode) | className }}	error	error	-
+base64decode	nul	{{ (nul | base64decode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64decode	el	{{ (el | base64decode) | className }}	error	error	-
+base64decode	em	{{ (em | base64decode) | className }}	error	error	-
+base64decode	dt	{{ (dt | base64decode) | className }}	error	error	-
+base64decode	ns	{{ (ns | base64decode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64decode	b	{{ (b | base64decode) | className }}	error	error	-
+base64decode	b64	{{ (b64 | base64decode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	l	{{ (l | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	l1	{{ (l1 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	ll	{{ (ll | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	m	{{ (m | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	m1	{{ (m1 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	s	{{ (s | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	sc	{{ (sc | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	n	{{ (n | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	nul	{{ (nul | base64encode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	el	{{ (el | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	em	{{ (em | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	dt	{{ (dt | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	ns	{{ (ns | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	b	{{ (b | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+base64encode	b64	{{ (b64 | base64encode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+capitalize	l	{{ (l | capitalize) | className }}	error	error	-
+capitalize	l1	{{ (l1 | capitalize) | className }}	error	error	-
+capitalize	ll	{{ (ll | capitalize) | className }}	error	error	-
+capitalize	m	{{ (m | capitalize) | className }}	error	error	-
+capitalize	m1	{{ (m1 | capitalize) | className }}	error	error	-
+capitalize	s	{{ (s | capitalize) | className }}	java.lang.String	java.lang.String	-
+capitalize	sc	{{ (sc | capitalize) | className }}	java.lang.String	java.lang.String	-
+capitalize	n	{{ (n | capitalize) | className }}	error	error	-
+capitalize	nul	{{ (nul | capitalize) | className }}			-
+capitalize	el	{{ (el | capitalize) | className }}	error	error	-
+capitalize	em	{{ (em | capitalize) | className }}	error	error	-
+capitalize	dt	{{ (dt | capitalize) | className }}	java.lang.String	java.lang.String	-
+capitalize	ns	{{ (ns | capitalize) | className }}	java.lang.String	java.lang.String	-
+capitalize	b	{{ (b | capitalize) | className }}	error	error	-
+capitalize	b64	{{ (b64 | capitalize) | className }}	java.lang.String	java.lang.String	-
+chunk	l	{{ (l | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+chunk	l1	{{ (l1 | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+chunk	ll	{{ (ll | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+chunk	m	{{ (m | chunk(size=2)) | className }}	error	error	-
+chunk	m1	{{ (m1 | chunk(size=2)) | className }}	error	error	-
+chunk	s	{{ (s | chunk(size=2)) | className }}	error	error	-
+chunk	sc	{{ (sc | chunk(size=2)) | className }}	error	error	-
+chunk	n	{{ (n | chunk(size=2)) | className }}	error	error	-
+chunk	nul	{{ (nul | chunk(size=2)) | className }}			-
+chunk	el	{{ (el | chunk(size=2)) | className }}	com.google.common.collect.Lists$RandomAccessPartition	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+chunk	em	{{ (em | chunk(size=2)) | className }}	error	error	-
+chunk	dt	{{ (dt | chunk(size=2)) | className }}	error	error	-
+chunk	ns	{{ (ns | chunk(size=2)) | className }}	error	error	-
+chunk	b	{{ (b | chunk(size=2)) | className }}	error	error	-
+chunk	b64	{{ (b64 | chunk(size=2)) | className }}	error	error	-
+className	l	{{ (l | className) | className }}	java.lang.String	java.lang.String	-
+className	l1	{{ (l1 | className) | className }}	java.lang.String	java.lang.String	-
+className	ll	{{ (ll | className) | className }}	java.lang.String	java.lang.String	-
+className	m	{{ (m | className) | className }}	java.lang.String	java.lang.String	-
+className	m1	{{ (m1 | className) | className }}	java.lang.String	java.lang.String	-
+className	s	{{ (s | className) | className }}	java.lang.String	java.lang.String	-
+className	sc	{{ (sc | className) | className }}	java.lang.String	java.lang.String	-
+className	n	{{ (n | className) | className }}	java.lang.String	java.lang.String	-
+className	nul	{{ (nul | className) | className }}			-
+className	el	{{ (el | className) | className }}	java.lang.String	java.lang.String	-
+className	em	{{ (em | className) | className }}	java.lang.String	java.lang.String	-
+className	dt	{{ (dt | className) | className }}	java.lang.String	java.lang.String	-
+className	ns	{{ (ns | className) | className }}	java.lang.String	java.lang.String	-
+className	b	{{ (b | className) | className }}	java.lang.String	java.lang.String	-
+className	b64	{{ (b64 | className) | className }}	java.lang.String	java.lang.String	-
+date	l	{{ (l | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	l1	{{ (l1 | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	ll	{{ (ll | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	m	{{ (m | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	m1	{{ (m1 | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	s	{{ (s | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	sc	{{ (sc | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	n	{{ (n | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	java.lang.String	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+date	nul	{{ (nul | date('yyyy-MM-dd', timeZone='UTC')) | className }}			-
+date	el	{{ (el | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	em	{{ (em | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	dt	{{ (dt | date('yyyy-MM-dd', timeZone='UTC')) | className }}	java.lang.String	java.lang.String	-
+date	ns	{{ (ns | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	b	{{ (b | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+date	b64	{{ (b64 | date('yyyy-MM-dd', timeZone='UTC')) | className }}	error	error	-
+dateAdd	l	{{ (l | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	l1	{{ (l1 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	ll	{{ (ll | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	m	{{ (m | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	m1	{{ (m1 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	s	{{ (s | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	sc	{{ (sc | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	n	{{ (n | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	java.lang.String	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+dateAdd	nul	{{ (nul | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}			-
+dateAdd	el	{{ (el | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	em	{{ (em | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	dt	{{ (dt | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	java.lang.String	java.lang.String	-
+dateAdd	ns	{{ (ns | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	b	{{ (b | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+dateAdd	b64	{{ (b64 | dateAdd(1, 'DAYS', 'iso', 'UTC')) | className }}	error	error	-
+default	l	{{ (l | default('D')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+default	l1	{{ (l1 | default('D')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+default	ll	{{ (ll | default('D')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+default	m	{{ (m | default('D')) | className }}	java.util.LinkedHashMap	java.util.LinkedHashMap	-
+default	m1	{{ (m1 | default('D')) | className }}	java.util.LinkedHashMap	java.util.LinkedHashMap	-
+default	s	{{ (s | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	sc	{{ (sc | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	n	{{ (n | default('D')) | className }}	java.lang.Integer	java.lang.Integer	-
+default	nul	{{ (nul | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	el	{{ (el | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	em	{{ (em | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	dt	{{ (dt | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	ns	{{ (ns | default('D')) | className }}	java.lang.String	java.lang.String	-
+default	b	{{ (b | default('D')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+default	b64	{{ (b64 | default('D')) | className }}	java.lang.String	java.lang.String	-
+distinct	l	{{ (l | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
+distinct	l1	{{ (l1 | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
+distinct	ll	{{ (ll | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
+distinct	m	{{ (m | distinct) | className }}	error	error	-
+distinct	m1	{{ (m1 | distinct) | className }}	error	error	-
+distinct	s	{{ (s | distinct) | className }}	error	error	-
+distinct	sc	{{ (sc | distinct) | className }}	error	error	-
+distinct	n	{{ (n | distinct) | className }}	error	error	-
+distinct	nul	{{ (nul | distinct) | className }}	java.lang.String	java.lang.String	-
+distinct	el	{{ (el | distinct) | className }}	java.util.ArrayList	java.util.ArrayList	-
+distinct	em	{{ (em | distinct) | className }}	error	error	-
+distinct	dt	{{ (dt | distinct) | className }}	error	error	-
+distinct	ns	{{ (ns | distinct) | className }}	error	error	-
+distinct	b	{{ (b | distinct) | className }}	error	error	-
+distinct	b64	{{ (b64 | distinct) | className }}	error	error	-
+endsWith	l	{{ (l | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	l1	{{ (l1 | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	ll	{{ (ll | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	m	{{ (m | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	m1	{{ (m1 | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	s	{{ (s | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	sc	{{ (sc | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	n	{{ (n | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	nul	{{ (nul | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	el	{{ (el | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	em	{{ (em | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	dt	{{ (dt | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	ns	{{ (ns | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	b	{{ (b | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+endsWith	b64	{{ (b64 | endsWith(value='c')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+escape	l	{{ (l | escape) | className }}	java.lang.String	java.lang.String	-
+escape	l1	{{ (l1 | escape) | className }}	java.lang.String	java.lang.String	-
+escape	ll	{{ (ll | escape) | className }}	java.lang.String	java.lang.String	-
+escape	m	{{ (m | escape) | className }}	java.lang.String	java.lang.String	-
+escape	m1	{{ (m1 | escape) | className }}	java.lang.String	java.lang.String	-
+escape	s	{{ (s | escape) | className }}	java.lang.String	java.lang.String	-
+escape	sc	{{ (sc | escape) | className }}	java.lang.String	java.lang.String	-
+escape	n	{{ (n | escape) | className }}	java.lang.String	java.lang.String	-
+escape	nul	{{ (nul | escape) | className }}			-
+escape	el	{{ (el | escape) | className }}	java.lang.String	java.lang.String	-
+escape	em	{{ (em | escape) | className }}	java.lang.String	java.lang.String	-
+escape	dt	{{ (dt | escape) | className }}	java.lang.String	java.lang.String	-
+escape	ns	{{ (ns | escape) | className }}	java.lang.String	java.lang.String	-
+escape	b	{{ (b | escape) | className }}	java.lang.String	java.lang.String	-
+escape	b64	{{ (b64 | escape) | className }}	java.lang.String	java.lang.String	-
+escapeChar	l	{{ (l | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+escapeChar	l1	{{ (l1 | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+escapeChar	ll	{{ (ll | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+escapeChar	m	{{ (m | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+escapeChar	m1	{{ (m1 | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+escapeChar	s	{{ (s | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	sc	{{ (sc | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	n	{{ (n | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	nul	{{ (nul | escapeChar(type='single')) | className }}			-
+escapeChar	el	{{ (el | escapeChar(type='single')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+escapeChar	em	{{ (em | escapeChar(type='single')) | className }}	java.util.HashMap	java.util.LinkedHashMap	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+escapeChar	dt	{{ (dt | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	ns	{{ (ns | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	b	{{ (b | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+escapeChar	b64	{{ (b64 | escapeChar(type='single')) | className }}	java.lang.String	java.lang.String	-
+first	l	{{ (l | first) | className }}	java.lang.String	java.lang.String	-
+first	l1	{{ (l1 | first) | className }}	java.lang.String	java.lang.String	-
+first	ll	{{ (ll | first) | className }}	java.util.ArrayList	java.util.ArrayList	-
+first	m	{{ (m | first) | className }}	error	error	-
+first	m1	{{ (m1 | first) | className }}	error	error	-
+first	s	{{ (s | first) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+first	sc	{{ (sc | first) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+first	n	{{ (n | first) | className }}	error	error	-
+first	nul	{{ (nul | first) | className }}			-
+first	el	{{ (el | first) | className }}			-
+first	em	{{ (em | first) | className }}	error	error	-
+first	dt	{{ (dt | first) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+first	ns	{{ (ns | first) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+first	b	{{ (b | first) | className }}	error	error	-
+first	b64	{{ (b64 | first) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+flatten	l	{{ (l | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+flatten	l1	{{ (l1 | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+flatten	ll	{{ (ll | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+flatten	m	{{ (m | flatten) | className }}	error	error	-
+flatten	m1	{{ (m1 | flatten) | className }}	error	error	-
+flatten	s	{{ (s | flatten) | className }}	error	error	-
+flatten	sc	{{ (sc | flatten) | className }}	error	error	-
+flatten	n	{{ (n | flatten) | className }}	error	error	-
+flatten	nul	{{ (nul | flatten) | className }}			-
+flatten	el	{{ (el | flatten) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+flatten	em	{{ (em | flatten) | className }}	error	error	-
+flatten	dt	{{ (dt | flatten) | className }}	error	error	-
+flatten	ns	{{ (ns | flatten) | className }}	error	error	-
+flatten	b	{{ (b | flatten) | className }}	error	error	-
+flatten	b64	{{ (b64 | flatten) | className }}	error	error	-
+format	l	{{ (l | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	l1	{{ (l1 | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	ll	{{ (ll | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	m	{{ (m | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	m1	{{ (m1 | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	s	{{ (s | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	sc	{{ (sc | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	n	{{ (n | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	nul	{{ (nul | format('x')) | className }}			-
+format	el	{{ (el | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	em	{{ (em | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	dt	{{ (dt | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	ns	{{ (ns | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	b	{{ (b | format('x')) | className }}	java.lang.String	java.lang.String	-
+format	b64	{{ (b64 | format('x')) | className }}	java.lang.String	java.lang.String	-
+indent	l	{{ (l | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	l1	{{ (l1 | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	ll	{{ (ll | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	m	{{ (m | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	m1	{{ (m1 | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	s	{{ (s | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	sc	{{ (sc | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	n	{{ (n | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	nul	{{ (nul | indent(amount=2)) | className }}			-
+indent	el	{{ (el | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	em	{{ (em | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	dt	{{ (dt | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	ns	{{ (ns | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	b	{{ (b | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+indent	b64	{{ (b64 | indent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+join	l	{{ (l | join('-')) | className }}	java.lang.String	java.lang.String	-
+join	l1	{{ (l1 | join('-')) | className }}	java.lang.String	java.lang.String	-
+join	ll	{{ (ll | join('-')) | className }}	java.lang.String	java.lang.String	-
+join	m	{{ (m | join('-')) | className }}	error	error	-
+join	m1	{{ (m1 | join('-')) | className }}	error	error	-
+join	s	{{ (s | join('-')) | className }}	error	error	-
+join	sc	{{ (sc | join('-')) | className }}	error	error	-
+join	n	{{ (n | join('-')) | className }}	error	error	-
+join	nul	{{ (nul | join('-')) | className }}			-
+join	el	{{ (el | join('-')) | className }}	java.lang.String	java.lang.String	-
+join	em	{{ (em | join('-')) | className }}	error	error	-
+join	dt	{{ (dt | join('-')) | className }}	error	error	-
+join	ns	{{ (ns | join('-')) | className }}	error	error	-
+join	b	{{ (b | join('-')) | className }}	error	error	-
+join	b64	{{ (b64 | join('-')) | className }}	error	error	-
+jq	l	{{ (l | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	l1	{{ (l1 | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	ll	{{ (ll | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	m	{{ (m | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	m1	{{ (m1 | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	s	{{ (s | jq('.')) | className }}	error	error	-
+jq	sc	{{ (sc | jq('.')) | className }}	error	error	-
+jq	n	{{ (n | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	nul	{{ (nul | jq('.')) | className }}			-
+jq	el	{{ (el | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	em	{{ (em | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	dt	{{ (dt | jq('.')) | className }}	error	error	-
+jq	ns	{{ (ns | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	b	{{ (b | jq('.')) | className }}	java.util.ArrayList	java.util.ArrayList	-
+jq	b64	{{ (b64 | jq('.')) | className }}	error	error	-
+keys	l	{{ (l | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	l1	{{ (l1 | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	ll	{{ (ll | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	m	{{ (m | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	m1	{{ (m1 | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	s	{{ (s | keys) | className }}	error	error	-
+keys	sc	{{ (sc | keys) | className }}	error	error	-
+keys	n	{{ (n | keys) | className }}	error	error	-
+keys	nul	{{ (nul | keys) | className }}			-
+keys	el	{{ (el | keys) | className }}	java.util.ImmutableCollections$ListN	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	em	{{ (em | keys) | className }}	java.util.LinkedHashMap$LinkedKeySet	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+keys	dt	{{ (dt | keys) | className }}	error	error	-
+keys	ns	{{ (ns | keys) | className }}	error	error	-
+keys	b	{{ (b | keys) | className }}	error	error	-
+keys	b64	{{ (b64 | keys) | className }}	error	error	-
+last	l	{{ (l | last) | className }}	java.lang.String	java.lang.String	-
+last	l1	{{ (l1 | last) | className }}	java.lang.String	java.lang.String	-
+last	ll	{{ (ll | last) | className }}	java.util.ArrayList	java.util.ArrayList	-
+last	m	{{ (m | last) | className }}	error	error	-
+last	m1	{{ (m1 | last) | className }}	error	error	-
+last	s	{{ (s | last) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+last	sc	{{ (sc | last) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+last	n	{{ (n | last) | className }}	error	error	-
+last	nul	{{ (nul | last) | className }}			-
+last	el	{{ (el | last) | className }}			-
+last	em	{{ (em | last) | className }}	error	error	-
+last	dt	{{ (dt | last) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+last	ns	{{ (ns | last) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+last	b	{{ (b | last) | className }}	error	error	-
+last	b64	{{ (b64 | last) | className }}	java.lang.Character	java.lang.String	Pebble's `first`/`last` on a String return a `java.lang.Character`; egret has no character type separate from a one-character string
+length	l	{{ (l | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	l1	{{ (l1 | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	ll	{{ (ll | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	m	{{ (m | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	m1	{{ (m1 | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	s	{{ (s | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	sc	{{ (sc | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	n	{{ (n | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	nul	{{ (nul | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	el	{{ (el | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	em	{{ (em | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	dt	{{ (dt | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	ns	{{ (ns | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	b	{{ (b | length) | className }}	java.lang.Integer	java.lang.Integer	-
+length	b64	{{ (b64 | length) | className }}	java.lang.Integer	java.lang.Integer	-
+lower	l	{{ (l | lower) | className }}	java.lang.String	java.lang.String	-
+lower	l1	{{ (l1 | lower) | className }}	java.lang.String	java.lang.String	-
+lower	ll	{{ (ll | lower) | className }}	java.lang.String	java.lang.String	-
+lower	m	{{ (m | lower) | className }}	java.lang.String	java.lang.String	-
+lower	m1	{{ (m1 | lower) | className }}	java.lang.String	java.lang.String	-
+lower	s	{{ (s | lower) | className }}	java.lang.String	java.lang.String	-
+lower	sc	{{ (sc | lower) | className }}	java.lang.String	java.lang.String	-
+lower	n	{{ (n | lower) | className }}	java.lang.String	java.lang.String	-
+lower	nul	{{ (nul | lower) | className }}			-
+lower	el	{{ (el | lower) | className }}	java.lang.String	java.lang.String	-
+lower	em	{{ (em | lower) | className }}	java.lang.String	java.lang.String	-
+lower	dt	{{ (dt | lower) | className }}	java.lang.String	java.lang.String	-
+lower	ns	{{ (ns | lower) | className }}	java.lang.String	java.lang.String	-
+lower	b	{{ (b | lower) | className }}	java.lang.String	java.lang.String	-
+lower	b64	{{ (b64 | lower) | className }}	java.lang.String	java.lang.String	-
+md5	l	{{ (l | md5) | className }}	error	error	-
+md5	l1	{{ (l1 | md5) | className }}	error	error	-
+md5	ll	{{ (ll | md5) | className }}	error	error	-
+md5	m	{{ (m | md5) | className }}	error	error	-
+md5	m1	{{ (m1 | md5) | className }}	error	error	-
+md5	s	{{ (s | md5) | className }}	java.lang.String	java.lang.String	-
+md5	sc	{{ (sc | md5) | className }}	java.lang.String	java.lang.String	-
+md5	n	{{ (n | md5) | className }}	error	error	-
+md5	nul	{{ (nul | md5) | className }}			-
+md5	el	{{ (el | md5) | className }}	error	error	-
+md5	em	{{ (em | md5) | className }}	error	error	-
+md5	dt	{{ (dt | md5) | className }}	java.lang.String	java.lang.String	-
+md5	ns	{{ (ns | md5) | className }}	java.lang.String	java.lang.String	-
+md5	b	{{ (b | md5) | className }}	error	error	-
+md5	b64	{{ (b64 | md5) | className }}	java.lang.String	java.lang.String	-
+merge	l	{{ (l | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	l1	{{ (l1 | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	ll	{{ (ll | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m	{{ (m | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	m1	{{ (m1 | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	s	{{ (s | merge(l)) | className }}	error	error	-
+merge	sc	{{ (sc | merge(l)) | className }}	error	error	-
+merge	n	{{ (n | merge(l)) | className }}	error	error	-
+merge	nul	{{ (nul | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	el	{{ (el | merge(l)) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	em	{{ (em | merge(l)) | className }}	java.util.HashMap	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+merge	dt	{{ (dt | merge(l)) | className }}	error	error	-
+merge	ns	{{ (ns | merge(l)) | className }}	error	error	-
+merge	b	{{ (b | merge(l)) | className }}	error	error	-
+merge	b64	{{ (b64 | merge(l)) | className }}	error	error	-
+nindent	l	{{ (l | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	l1	{{ (l1 | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	ll	{{ (ll | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	m	{{ (m | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	m1	{{ (m1 | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	s	{{ (s | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	sc	{{ (sc | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	n	{{ (n | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	nul	{{ (nul | nindent(amount=2)) | className }}			-
+nindent	el	{{ (el | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	em	{{ (em | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	dt	{{ (dt | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	ns	{{ (ns | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	b	{{ (b | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nindent	b64	{{ (b64 | nindent(amount=2)) | className }}	java.lang.String	java.lang.String	-
+nl2br	l	{{ (l | nl2br) | className }}	error	error	-
+nl2br	l1	{{ (l1 | nl2br) | className }}	error	error	-
+nl2br	ll	{{ (ll | nl2br) | className }}	error	error	-
+nl2br	m	{{ (m | nl2br) | className }}	error	error	-
+nl2br	m1	{{ (m1 | nl2br) | className }}	error	error	-
+nl2br	s	{{ (s | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	sc	{{ (sc | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	n	{{ (n | nl2br) | className }}	error	error	-
+nl2br	nul	{{ (nul | nl2br) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	el	{{ (el | nl2br) | className }}	error	error	-
+nl2br	em	{{ (em | nl2br) | className }}	error	error	-
+nl2br	dt	{{ (dt | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	ns	{{ (ns | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+nl2br	b	{{ (b | nl2br) | className }}	error	error	-
+nl2br	b64	{{ (b64 | nl2br) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+number	l	{{ (l | number) | className }}	error	error	-
+number	l1	{{ (l1 | number) | className }}	error	error	-
+number	ll	{{ (ll | number) | className }}	error	error	-
+number	m	{{ (m | number) | className }}	error	error	-
+number	m1	{{ (m1 | number) | className }}	error	error	-
+number	s	{{ (s | number) | className }}	error	error	-
+number	sc	{{ (sc | number) | className }}	error	error	-
+number	n	{{ (n | number) | className }}	error	error	-
+number	nul	{{ (nul | number) | className }}			-
+number	el	{{ (el | number) | className }}	error	error	-
+number	em	{{ (em | number) | className }}	error	error	-
+number	dt	{{ (dt | number) | className }}	error	error	-
+number	ns	{{ (ns | number) | className }}	java.lang.Integer	java.lang.Integer	-
+number	b	{{ (b | number) | className }}	error	error	-
+number	b64	{{ (b64 | number) | className }}	error	error	-
+numberformat	l	{{ (l | numberformat('#')) | className }}	error	error	-
+numberformat	l1	{{ (l1 | numberformat('#')) | className }}	error	error	-
+numberformat	ll	{{ (ll | numberformat('#')) | className }}	error	error	-
+numberformat	m	{{ (m | numberformat('#')) | className }}	error	error	-
+numberformat	m1	{{ (m1 | numberformat('#')) | className }}	error	error	-
+numberformat	s	{{ (s | numberformat('#')) | className }}	error	error	-
+numberformat	sc	{{ (sc | numberformat('#')) | className }}	error	error	-
+numberformat	n	{{ (n | numberformat('#')) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+numberformat	nul	{{ (nul | numberformat('#')) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+numberformat	el	{{ (el | numberformat('#')) | className }}	error	error	-
+numberformat	em	{{ (em | numberformat('#')) | className }}	error	error	-
+numberformat	dt	{{ (dt | numberformat('#')) | className }}	error	error	-
+numberformat	ns	{{ (ns | numberformat('#')) | className }}	error	error	-
+numberformat	b	{{ (b | numberformat('#')) | className }}	error	error	-
+numberformat	b64	{{ (b64 | numberformat('#')) | className }}	error	error	-
+raw	l	{{ (l | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	l1	{{ (l1 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	ll	{{ (ll | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	m	{{ (m | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	m1	{{ (m1 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	s	{{ (s | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	sc	{{ (sc | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	n	{{ (n | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	nul	{{ (nul | raw) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	el	{{ (el | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	em	{{ (em | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	dt	{{ (dt | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	ns	{{ (ns | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	b	{{ (b | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+raw	b64	{{ (b64 | raw) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+regexExtract	l	{{ (l | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
+regexExtract	l1	{{ (l1 | regexExtract(regex='a')) | className }}			-
+regexExtract	ll	{{ (ll | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
+regexExtract	m	{{ (m | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
+regexExtract	m1	{{ (m1 | regexExtract(regex='a')) | className }}			-
+regexExtract	s	{{ (s | regexExtract(regex='a')) | className }}	java.lang.String	java.lang.String	-
+regexExtract	sc	{{ (sc | regexExtract(regex='a')) | className }}			-
+regexExtract	n	{{ (n | regexExtract(regex='a')) | className }}			-
+regexExtract	nul	{{ (nul | regexExtract(regex='a')) | className }}			-
+regexExtract	el	{{ (el | regexExtract(regex='a')) | className }}			-
+regexExtract	em	{{ (em | regexExtract(regex='a')) | className }}			-
+regexExtract	dt	{{ (dt | regexExtract(regex='a')) | className }}			-
+regexExtract	ns	{{ (ns | regexExtract(regex='a')) | className }}			-
+regexExtract	b	{{ (b | regexExtract(regex='a')) | className }}			-
+regexExtract	b64	{{ (b64 | regexExtract(regex='a')) | className }}			-
+regexMatch	l	{{ (l | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	l1	{{ (l1 | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	ll	{{ (ll | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	m	{{ (m | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	m1	{{ (m1 | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	s	{{ (s | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	sc	{{ (sc | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	n	{{ (n | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	nul	{{ (nul | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	el	{{ (el | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	em	{{ (em | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	dt	{{ (dt | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	ns	{{ (ns | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	b	{{ (b | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexMatch	b64	{{ (b64 | regexMatch(regex='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+regexReplace	l	{{ (l | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	l1	{{ (l1 | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	ll	{{ (ll | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	m	{{ (m | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	m1	{{ (m1 | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	s	{{ (s | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	sc	{{ (sc | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	n	{{ (n | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	nul	{{ (nul | regexReplace(regex='a', replacement='#')) | className }}			-
+regexReplace	el	{{ (el | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	em	{{ (em | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	dt	{{ (dt | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	ns	{{ (ns | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	b	{{ (b | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+regexReplace	b64	{{ (b64 | regexReplace(regex='a', replacement='#')) | className }}	java.lang.String	java.lang.String	-
+replace	l	{{ (l | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	l1	{{ (l1 | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	ll	{{ (ll | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	m	{{ (m | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	m1	{{ (m1 | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	s	{{ (s | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	sc	{{ (sc | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	n	{{ (n | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	nul	{{ (nul | replace({'a': 'b'})) | className }}			-
+replace	el	{{ (el | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	em	{{ (em | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	dt	{{ (dt | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	ns	{{ (ns | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	b	{{ (b | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+replace	b64	{{ (b64 | replace({'a': 'b'})) | className }}	java.lang.String	java.lang.String	-
+reverse	l	{{ (l | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
+reverse	l1	{{ (l1 | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
+reverse	ll	{{ (ll | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
+reverse	m	{{ (m | reverse) | className }}	error	error	-
+reverse	m1	{{ (m1 | reverse) | className }}	error	error	-
+reverse	s	{{ (s | reverse) | className }}	error	error	-
+reverse	sc	{{ (sc | reverse) | className }}	error	error	-
+reverse	n	{{ (n | reverse) | className }}	error	error	-
+reverse	nul	{{ (nul | reverse) | className }}			-
+reverse	el	{{ (el | reverse) | className }}	java.util.ArrayList	java.util.ArrayList	-
+reverse	em	{{ (em | reverse) | className }}	error	error	-
+reverse	dt	{{ (dt | reverse) | className }}	error	error	-
+reverse	ns	{{ (ns | reverse) | className }}	error	error	-
+reverse	b	{{ (b | reverse) | className }}	error	error	-
+reverse	b64	{{ (b64 | reverse) | className }}	error	error	-
+rsort	l	{{ (l | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	l1	{{ (l1 | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	ll	{{ (ll | rsort) | className }}	error	error	-
+rsort	m	{{ (m | rsort) | className }}	error	error	-
+rsort	m1	{{ (m1 | rsort) | className }}	error	error	-
+rsort	s	{{ (s | rsort) | className }}	error	error	-
+rsort	sc	{{ (sc | rsort) | className }}	error	error	-
+rsort	n	{{ (n | rsort) | className }}	error	error	-
+rsort	nul	{{ (nul | rsort) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	el	{{ (el | rsort) | className }}	java.util.ArrayList	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+rsort	em	{{ (em | rsort) | className }}	error	error	-
+rsort	dt	{{ (dt | rsort) | className }}	error	error	-
+rsort	ns	{{ (ns | rsort) | className }}	error	error	-
+rsort	b	{{ (b | rsort) | className }}	error	error	-
+rsort	b64	{{ (b64 | rsort) | className }}	error	error	-
+sha1	l	{{ (l | sha1) | className }}	error	error	-
+sha1	l1	{{ (l1 | sha1) | className }}	error	error	-
+sha1	ll	{{ (ll | sha1) | className }}	error	error	-
+sha1	m	{{ (m | sha1) | className }}	error	error	-
+sha1	m1	{{ (m1 | sha1) | className }}	error	error	-
+sha1	s	{{ (s | sha1) | className }}	java.lang.String	java.lang.String	-
+sha1	sc	{{ (sc | sha1) | className }}	java.lang.String	java.lang.String	-
+sha1	n	{{ (n | sha1) | className }}	error	error	-
+sha1	nul	{{ (nul | sha1) | className }}			-
+sha1	el	{{ (el | sha1) | className }}	error	error	-
+sha1	em	{{ (em | sha1) | className }}	error	error	-
+sha1	dt	{{ (dt | sha1) | className }}	java.lang.String	java.lang.String	-
+sha1	ns	{{ (ns | sha1) | className }}	java.lang.String	java.lang.String	-
+sha1	b	{{ (b | sha1) | className }}	error	error	-
+sha1	b64	{{ (b64 | sha1) | className }}	java.lang.String	java.lang.String	-
+sha256	l	{{ (l | sha256) | className }}	error	error	-
+sha256	l1	{{ (l1 | sha256) | className }}	error	error	-
+sha256	ll	{{ (ll | sha256) | className }}	error	error	-
+sha256	m	{{ (m | sha256) | className }}	error	error	-
+sha256	m1	{{ (m1 | sha256) | className }}	error	error	-
+sha256	s	{{ (s | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	sc	{{ (sc | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	n	{{ (n | sha256) | className }}	error	error	-
+sha256	nul	{{ (nul | sha256) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	el	{{ (el | sha256) | className }}	error	error	-
+sha256	em	{{ (em | sha256) | className }}	error	error	-
+sha256	dt	{{ (dt | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	ns	{{ (ns | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha256	b	{{ (b | sha256) | className }}	error	error	-
+sha256	b64	{{ (b64 | sha256) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+sha512	l	{{ (l | sha512) | className }}	error	error	-
+sha512	l1	{{ (l1 | sha512) | className }}	error	error	-
+sha512	ll	{{ (ll | sha512) | className }}	error	error	-
+sha512	m	{{ (m | sha512) | className }}	error	error	-
+sha512	m1	{{ (m1 | sha512) | className }}	error	error	-
+sha512	s	{{ (s | sha512) | className }}	java.lang.String	java.lang.String	-
+sha512	sc	{{ (sc | sha512) | className }}	java.lang.String	java.lang.String	-
+sha512	n	{{ (n | sha512) | className }}	error	error	-
+sha512	nul	{{ (nul | sha512) | className }}			-
+sha512	el	{{ (el | sha512) | className }}	error	error	-
+sha512	em	{{ (em | sha512) | className }}	error	error	-
+sha512	dt	{{ (dt | sha512) | className }}	java.lang.String	java.lang.String	-
+sha512	ns	{{ (ns | sha512) | className }}	java.lang.String	java.lang.String	-
+sha512	b	{{ (b | sha512) | className }}	error	error	-
+sha512	b64	{{ (b64 | sha512) | className }}	java.lang.String	java.lang.String	-
+slice	l	{{ (l | slice(0,2)) | className }}	java.util.ArrayList$SubList	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+slice	l1	{{ (l1 | slice(0,2)) | className }}	error	error	-
+slice	ll	{{ (ll | slice(0,2)) | className }}	java.util.ArrayList$SubList	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+slice	m	{{ (m | slice(0,2)) | className }}	error	error	-
+slice	m1	{{ (m1 | slice(0,2)) | className }}	error	error	-
+slice	s	{{ (s | slice(0,2)) | className }}	java.lang.String	java.lang.String	-
+slice	sc	{{ (sc | slice(0,2)) | className }}	error	error	-
+slice	n	{{ (n | slice(0,2)) | className }}	error	error	-
+slice	nul	{{ (nul | slice(0,2)) | className }}			-
+slice	el	{{ (el | slice(0,2)) | className }}	error	error	-
+slice	em	{{ (em | slice(0,2)) | className }}	error	error	-
+slice	dt	{{ (dt | slice(0,2)) | className }}	java.lang.String	java.lang.String	-
+slice	ns	{{ (ns | slice(0,2)) | className }}	java.lang.String	java.lang.String	-
+slice	b	{{ (b | slice(0,2)) | className }}	error	error	-
+slice	b64	{{ (b64 | slice(0,2)) | className }}	java.lang.String	java.lang.String	-
+slugify	l	{{ (l | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	l1	{{ (l1 | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	ll	{{ (ll | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	m	{{ (m | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	m1	{{ (m1 | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	s	{{ (s | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	sc	{{ (sc | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	n	{{ (n | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	nul	{{ (nul | slugify) | className }}			-
+slugify	el	{{ (el | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	em	{{ (em | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	dt	{{ (dt | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	ns	{{ (ns | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	b	{{ (b | slugify) | className }}	java.lang.String	java.lang.String	-
+slugify	b64	{{ (b64 | slugify) | className }}	java.lang.String	java.lang.String	-
+sort	l	{{ (l | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
+sort	l1	{{ (l1 | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
+sort	ll	{{ (ll | sort) | className }}	error	error	-
+sort	m	{{ (m | sort) | className }}	error	error	-
+sort	m1	{{ (m1 | sort) | className }}	error	error	-
+sort	s	{{ (s | sort) | className }}	error	error	-
+sort	sc	{{ (sc | sort) | className }}	error	error	-
+sort	n	{{ (n | sort) | className }}	error	error	-
+sort	nul	{{ (nul | sort) | className }}			-
+sort	el	{{ (el | sort) | className }}	java.util.ArrayList	java.util.ArrayList	-
+sort	em	{{ (em | sort) | className }}	error	error	-
+sort	dt	{{ (dt | sort) | className }}	error	error	-
+sort	ns	{{ (ns | sort) | className }}	error	error	-
+sort	b	{{ (b | sort) | className }}	error	error	-
+sort	b64	{{ (b64 | sort) | className }}	error	error	-
+split	l	{{ (l | split(',')) | className }}	error	error	-
+split	l1	{{ (l1 | split(',')) | className }}	error	error	-
+split	ll	{{ (ll | split(',')) | className }}	error	error	-
+split	m	{{ (m | split(',')) | className }}	error	error	-
+split	m1	{{ (m1 | split(',')) | className }}	error	error	-
+split	s	{{ (s | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+split	sc	{{ (sc | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+split	n	{{ (n | split(',')) | className }}	error	error	-
+split	nul	{{ (nul | split(',')) | className }}			-
+split	el	{{ (el | split(',')) | className }}	error	error	-
+split	em	{{ (em | split(',')) | className }}	error	error	-
+split	dt	{{ (dt | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+split	ns	{{ (ns | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+split	b	{{ (b | split(',')) | className }}	error	error	-
+split	b64	{{ (b64 | split(',')) | className }}	[Ljava.lang.String;	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+startsWith	l	{{ (l | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	l1	{{ (l1 | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	ll	{{ (ll | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	m	{{ (m | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	m1	{{ (m1 | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	s	{{ (s | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	sc	{{ (sc | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	n	{{ (n | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	nul	{{ (nul | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	el	{{ (el | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	em	{{ (em | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	dt	{{ (dt | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	ns	{{ (ns | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	b	{{ (b | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+startsWith	b64	{{ (b64 | startsWith(value='a')) | className }}	java.lang.Boolean	java.lang.Boolean	-
+string	l	{{ (l | string) | className }}	java.lang.String	java.lang.String	-
+string	l1	{{ (l1 | string) | className }}	java.lang.String	java.lang.String	-
+string	ll	{{ (ll | string) | className }}	java.lang.String	java.lang.String	-
+string	m	{{ (m | string) | className }}	java.lang.String	java.lang.String	-
+string	m1	{{ (m1 | string) | className }}	java.lang.String	java.lang.String	-
+string	s	{{ (s | string) | className }}	java.lang.String	java.lang.String	-
+string	sc	{{ (sc | string) | className }}	java.lang.String	java.lang.String	-
+string	n	{{ (n | string) | className }}	java.lang.String	java.lang.String	-
+string	nul	{{ (nul | string) | className }}			-
+string	el	{{ (el | string) | className }}	java.lang.String	java.lang.String	-
+string	em	{{ (em | string) | className }}	java.lang.String	java.lang.String	-
+string	dt	{{ (dt | string) | className }}	java.lang.String	java.lang.String	-
+string	ns	{{ (ns | string) | className }}	java.lang.String	java.lang.String	-
+string	b	{{ (b | string) | className }}	java.lang.String	java.lang.String	-
+string	b64	{{ (b64 | string) | className }}	java.lang.String	java.lang.String	-
+substringAfter	l	{{ (l | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	l1	{{ (l1 | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	ll	{{ (ll | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	m	{{ (m | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	m1	{{ (m1 | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	s	{{ (s | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	sc	{{ (sc | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	n	{{ (n | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	nul	{{ (nul | substringAfter(separator=',')) | className }}			-
+substringAfter	el	{{ (el | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	em	{{ (em | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	dt	{{ (dt | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	ns	{{ (ns | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	b	{{ (b | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfter	b64	{{ (b64 | substringAfter(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	l	{{ (l | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	l1	{{ (l1 | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	ll	{{ (ll | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	m	{{ (m | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	m1	{{ (m1 | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	s	{{ (s | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	sc	{{ (sc | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	n	{{ (n | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	nul	{{ (nul | substringAfterLast(separator=',')) | className }}			-
+substringAfterLast	el	{{ (el | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	em	{{ (em | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	dt	{{ (dt | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	ns	{{ (ns | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	b	{{ (b | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringAfterLast	b64	{{ (b64 | substringAfterLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	l	{{ (l | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	l1	{{ (l1 | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	ll	{{ (ll | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	m	{{ (m | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	m1	{{ (m1 | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	s	{{ (s | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	sc	{{ (sc | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	n	{{ (n | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	nul	{{ (nul | substringBefore(separator=',')) | className }}			-
+substringBefore	el	{{ (el | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	em	{{ (em | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	dt	{{ (dt | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	ns	{{ (ns | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	b	{{ (b | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBefore	b64	{{ (b64 | substringBefore(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	l	{{ (l | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	l1	{{ (l1 | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	ll	{{ (ll | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	m	{{ (m | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	m1	{{ (m1 | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	s	{{ (s | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	sc	{{ (sc | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	n	{{ (n | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	nul	{{ (nul | substringBeforeLast(separator=',')) | className }}			-
+substringBeforeLast	el	{{ (el | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	em	{{ (em | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	dt	{{ (dt | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	ns	{{ (ns | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	b	{{ (b | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+substringBeforeLast	b64	{{ (b64 | substringBeforeLast(separator=',')) | className }}	java.lang.String	java.lang.String	-
+timestamp	l	{{ (l | timestamp) | className }}	error	error	-
+timestamp	l1	{{ (l1 | timestamp) | className }}	error	error	-
+timestamp	ll	{{ (ll | timestamp) | className }}	error	error	-
+timestamp	m	{{ (m | timestamp) | className }}	error	error	-
+timestamp	m1	{{ (m1 | timestamp) | className }}	error	error	-
+timestamp	s	{{ (s | timestamp) | className }}	error	error	-
+timestamp	sc	{{ (sc | timestamp) | className }}	error	error	-
+timestamp	n	{{ (n | timestamp) | className }}	error	java.lang.Integer	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+timestamp	nul	{{ (nul | timestamp) | className }}			-
+timestamp	el	{{ (el | timestamp) | className }}	error	error	-
+timestamp	em	{{ (em | timestamp) | className }}	error	error	-
+timestamp	dt	{{ (dt | timestamp) | className }}	java.lang.Long	java.lang.Integer	a boxed Java number would stop being usable as a number here -- the same limit as `filter-classname-of-long`
+timestamp	ns	{{ (ns | timestamp) | className }}	error	error	-
+timestamp	b	{{ (b | timestamp) | className }}	error	error	-
+timestamp	b64	{{ (b64 | timestamp) | className }}	error	error	-
+timestampMicro	l	{{ (l | timestampMicro) | className }}	error	error	-
+timestampMicro	l1	{{ (l1 | timestampMicro) | className }}	error	error	-
+timestampMicro	ll	{{ (ll | timestampMicro) | className }}	error	error	-
+timestampMicro	m	{{ (m | timestampMicro) | className }}	error	error	-
+timestampMicro	m1	{{ (m1 | timestampMicro) | className }}	error	error	-
+timestampMicro	s	{{ (s | timestampMicro) | className }}	error	error	-
+timestampMicro	sc	{{ (sc | timestampMicro) | className }}	error	error	-
+timestampMicro	n	{{ (n | timestampMicro) | className }}	error	java.lang.String	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+timestampMicro	nul	{{ (nul | timestampMicro) | className }}			-
+timestampMicro	el	{{ (el | timestampMicro) | className }}	error	error	-
+timestampMicro	em	{{ (em | timestampMicro) | className }}	error	error	-
+timestampMicro	dt	{{ (dt | timestampMicro) | className }}	java.lang.String	java.lang.String	-
+timestampMicro	ns	{{ (ns | timestampMicro) | className }}	error	error	-
+timestampMicro	b	{{ (b | timestampMicro) | className }}	error	error	-
+timestampMicro	b64	{{ (b64 | timestampMicro) | className }}	error	error	-
+timestampMilli	l	{{ (l | timestampMilli) | className }}	error	error	-
+timestampMilli	l1	{{ (l1 | timestampMilli) | className }}	error	error	-
+timestampMilli	ll	{{ (ll | timestampMilli) | className }}	error	error	-
+timestampMilli	m	{{ (m | timestampMilli) | className }}	error	error	-
+timestampMilli	m1	{{ (m1 | timestampMilli) | className }}	error	error	-
+timestampMilli	s	{{ (s | timestampMilli) | className }}	error	error	-
+timestampMilli	sc	{{ (sc | timestampMilli) | className }}	error	error	-
+timestampMilli	n	{{ (n | timestampMilli) | className }}	error	java.lang.Integer	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+timestampMilli	nul	{{ (nul | timestampMilli) | className }}			-
+timestampMilli	el	{{ (el | timestampMilli) | className }}	error	error	-
+timestampMilli	em	{{ (em | timestampMilli) | className }}	error	error	-
+timestampMilli	dt	{{ (dt | timestampMilli) | className }}	java.lang.Long	java.lang.Long	-
+timestampMilli	ns	{{ (ns | timestampMilli) | className }}	error	error	-
+timestampMilli	b	{{ (b | timestampMilli) | className }}	error	error	-
+timestampMilli	b64	{{ (b64 | timestampMilli) | className }}	error	error	-
+timestampNano	l	{{ (l | timestampNano) | className }}	error	error	-
+timestampNano	l1	{{ (l1 | timestampNano) | className }}	error	error	-
+timestampNano	ll	{{ (ll | timestampNano) | className }}	error	error	-
+timestampNano	m	{{ (m | timestampNano) | className }}	error	error	-
+timestampNano	m1	{{ (m1 | timestampNano) | className }}	error	error	-
+timestampNano	s	{{ (s | timestampNano) | className }}	error	error	-
+timestampNano	sc	{{ (sc | timestampNano) | className }}	error	error	-
+timestampNano	n	{{ (n | timestampNano) | className }}	error	java.lang.String	`AbstractDate.convert` has a `Long` branch and a `String` branch and NONE for `Integer`, so a context integer falls through to `(String) input`; the recorded class of `filter-date-epoch-seconds-context`
+timestampNano	nul	{{ (nul | timestampNano) | className }}			-
+timestampNano	el	{{ (el | timestampNano) | className }}	error	error	-
+timestampNano	em	{{ (em | timestampNano) | className }}	error	error	-
+timestampNano	dt	{{ (dt | timestampNano) | className }}	java.lang.String	java.lang.String	-
+timestampNano	ns	{{ (ns | timestampNano) | className }}	error	error	-
+timestampNano	b	{{ (b | timestampNano) | className }}	error	error	-
+timestampNano	b64	{{ (b64 | timestampNano) | className }}	error	error	-
+title	l	{{ (l | title) | className }}	error	error	-
+title	l1	{{ (l1 | title) | className }}	error	error	-
+title	ll	{{ (ll | title) | className }}	error	error	-
+title	m	{{ (m | title) | className }}	error	error	-
+title	m1	{{ (m1 | title) | className }}	error	error	-
+title	s	{{ (s | title) | className }}	java.lang.String	java.lang.String	-
+title	sc	{{ (sc | title) | className }}	java.lang.String	java.lang.String	-
+title	n	{{ (n | title) | className }}	error	error	-
+title	nul	{{ (nul | title) | className }}			-
+title	el	{{ (el | title) | className }}	error	error	-
+title	em	{{ (em | title) | className }}	error	error	-
+title	dt	{{ (dt | title) | className }}	java.lang.String	java.lang.String	-
+title	ns	{{ (ns | title) | className }}	java.lang.String	java.lang.String	-
+title	b	{{ (b | title) | className }}	error	error	-
+title	b64	{{ (b64 | title) | className }}	java.lang.String	java.lang.String	-
+toIon	l	{{ (l | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	l1	{{ (l1 | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	ll	{{ (ll | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	m	{{ (m | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	m1	{{ (m1 | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	s	{{ (s | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	sc	{{ (sc | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	n	{{ (n | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	nul	{{ (nul | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	el	{{ (el | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	em	{{ (em | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	dt	{{ (dt | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	ns	{{ (ns | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	b	{{ (b | toIon) | className }}	java.lang.String	java.lang.String	-
+toIon	b64	{{ (b64 | toIon) | className }}	java.lang.String	java.lang.String	-
+toJson	l	{{ (l | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	l1	{{ (l1 | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	ll	{{ (ll | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	m	{{ (m | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	m1	{{ (m1 | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	s	{{ (s | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	sc	{{ (sc | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	n	{{ (n | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	nul	{{ (nul | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	el	{{ (el | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	em	{{ (em | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	dt	{{ (dt | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	ns	{{ (ns | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	b	{{ (b | toJson) | className }}	java.lang.String	java.lang.String	-
+toJson	b64	{{ (b64 | toJson) | className }}	java.lang.String	java.lang.String	-
+trim	l	{{ (l | trim) | className }}	error	error	-
+trim	l1	{{ (l1 | trim) | className }}	error	error	-
+trim	ll	{{ (ll | trim) | className }}	error	error	-
+trim	m	{{ (m | trim) | className }}	error	error	-
+trim	m1	{{ (m1 | trim) | className }}	error	error	-
+trim	s	{{ (s | trim) | className }}	java.lang.String	java.lang.String	-
+trim	sc	{{ (sc | trim) | className }}	java.lang.String	java.lang.String	-
+trim	n	{{ (n | trim) | className }}	error	error	-
+trim	nul	{{ (nul | trim) | className }}			-
+trim	el	{{ (el | trim) | className }}	error	error	-
+trim	em	{{ (em | trim) | className }}	error	error	-
+trim	dt	{{ (dt | trim) | className }}	java.lang.String	java.lang.String	-
+trim	ns	{{ (ns | trim) | className }}	java.lang.String	java.lang.String	-
+trim	b	{{ (b | trim) | className }}	error	error	-
+trim	b64	{{ (b64 | trim) | className }}	java.lang.String	java.lang.String	-
+upper	l	{{ (l | upper) | className }}	java.lang.String	java.lang.String	-
+upper	l1	{{ (l1 | upper) | className }}	java.lang.String	java.lang.String	-
+upper	ll	{{ (ll | upper) | className }}	java.lang.String	java.lang.String	-
+upper	m	{{ (m | upper) | className }}	java.lang.String	java.lang.String	-
+upper	m1	{{ (m1 | upper) | className }}	java.lang.String	java.lang.String	-
+upper	s	{{ (s | upper) | className }}	java.lang.String	java.lang.String	-
+upper	sc	{{ (sc | upper) | className }}	java.lang.String	java.lang.String	-
+upper	n	{{ (n | upper) | className }}	java.lang.String	java.lang.String	-
+upper	nul	{{ (nul | upper) | className }}			-
+upper	el	{{ (el | upper) | className }}	java.lang.String	java.lang.String	-
+upper	em	{{ (em | upper) | className }}	java.lang.String	java.lang.String	-
+upper	dt	{{ (dt | upper) | className }}	java.lang.String	java.lang.String	-
+upper	ns	{{ (ns | upper) | className }}	java.lang.String	java.lang.String	-
+upper	b	{{ (b | upper) | className }}	java.lang.String	java.lang.String	-
+upper	b64	{{ (b64 | upper) | className }}	java.lang.String	java.lang.String	-
+urldecode	l	{{ (l | urldecode) | className }}	error	error	-
+urldecode	l1	{{ (l1 | urldecode) | className }}	error	error	-
+urldecode	ll	{{ (ll | urldecode) | className }}	error	error	-
+urldecode	m	{{ (m | urldecode) | className }}	error	error	-
+urldecode	m1	{{ (m1 | urldecode) | className }}	error	error	-
+urldecode	s	{{ (s | urldecode) | className }}	java.lang.String	java.lang.String	-
+urldecode	sc	{{ (sc | urldecode) | className }}	java.lang.String	java.lang.String	-
+urldecode	n	{{ (n | urldecode) | className }}	error	error	-
+urldecode	nul	{{ (nul | urldecode) | className }}			-
+urldecode	el	{{ (el | urldecode) | className }}	error	error	-
+urldecode	em	{{ (em | urldecode) | className }}	error	error	-
+urldecode	dt	{{ (dt | urldecode) | className }}	java.lang.String	java.lang.String	-
+urldecode	ns	{{ (ns | urldecode) | className }}	java.lang.String	java.lang.String	-
+urldecode	b	{{ (b | urldecode) | className }}	error	error	-
+urldecode	b64	{{ (b64 | urldecode) | className }}	java.lang.String	java.lang.String	-
+urlencode	l	{{ (l | urlencode) | className }}	error	error	-
+urlencode	l1	{{ (l1 | urlencode) | className }}	error	error	-
+urlencode	ll	{{ (ll | urlencode) | className }}	error	error	-
+urlencode	m	{{ (m | urlencode) | className }}	error	error	-
+urlencode	m1	{{ (m1 | urlencode) | className }}	error	error	-
+urlencode	s	{{ (s | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	sc	{{ (sc | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	n	{{ (n | urlencode) | className }}	error	error	-
+urlencode	nul	{{ (nul | urlencode) | className }}		error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	el	{{ (el | urlencode) | className }}	error	error	-
+urlencode	em	{{ (em | urlencode) | className }}	error	error	-
+urlencode	dt	{{ (dt | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	ns	{{ (ns | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+urlencode	b	{{ (b | urlencode) | className }}	error	error	-
+urlencode	b64	{{ (b64 | urlencode) | className }}	java.lang.String	error	Pebble core, and egret binds no filter of this name -- under-acceptance, recorded row-by-row in `name-surface.txt`
+values	l	{{ (l | values) | className }}	error	error	-
+values	l1	{{ (l1 | values) | className }}	error	error	-
+values	ll	{{ (ll | values) | className }}	error	error	-
+values	m	{{ (m | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+values	m1	{{ (m1 | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+values	s	{{ (s | values) | className }}	error	error	-
+values	sc	{{ (sc | values) | className }}	error	error	-
+values	n	{{ (n | values) | className }}	error	error	-
+values	nul	{{ (nul | values) | className }}			-
+values	el	{{ (el | values) | className }}	error	error	-
+values	em	{{ (em | values) | className }}	java.util.LinkedHashMap$LinkedValues	java.util.ArrayList	an internal Java class name; `oracle/README.md`'s copy-behaviour-not-structure rule keeps it out and the behaviour behind it is measured by the other rows
+values	dt	{{ (dt | values) | className }}	error	error	-
+values	ns	{{ (ns | values) | className }}	error	error	-
+values	b	{{ (b | values) | className }}	error	error	-
+values	b64	{{ (b64 | values) | className }}	error	error	-
+yaml	l	{{ (l | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	l1	{{ (l1 | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	ll	{{ (ll | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	m	{{ (m | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	m1	{{ (m1 | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	s	{{ (s | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	sc	{{ (sc | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	n	{{ (n | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	nul	{{ (nul | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	el	{{ (el | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	em	{{ (em | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	dt	{{ (dt | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	ns	{{ (ns | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	b	{{ (b | yaml) | className }}	java.lang.String	java.lang.String	-
+yaml	b64	{{ (b64 | yaml) | className }}	java.lang.String	java.lang.String	-

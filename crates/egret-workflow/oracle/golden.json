@@ -9756,4 +9756,460 @@
   "expr" : "{% if false %}a{% elseif true %}b{% else %}c{% endif %}",
   "context" : { },
   "result" : "b"
+
+}, {
+  "id" : "filter-keys-of-keys",
+  "expr" : "{{ (m | keys) | keys }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'keys' filter can only be applied to List, Map, Array. Actual type was: java.util.LinkedHashMap$LinkedKeySet ({{ (m | keys) | keys }}:1)"
+  }
+}, {
+  "id" : "filter-keys-of-values",
+  "expr" : "{{ (m | values) | keys }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'keys' filter can only be applied to List, Map, Array. Actual type was: java.util.LinkedHashMap$LinkedValues ({{ (m | values) | keys }}:1)"
+  }
+}, {
+  "id" : "filter-chunk-of-values",
+  "expr" : "{{ (m | values) | chunk(2) }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'chunk' filter can only be applied to List. Actual type was: java.util.LinkedHashMap$LinkedValues ({{ (m | values) | chunk(2) }}:1)"
+  }
+}, {
+  "id" : "filter-distinct-of-values",
+  "expr" : "{{ (m | values) | distinct }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Input must be a list, but received : java.util.LinkedHashMap$LinkedValues ({{ (m | values) | distinct }}:1)"
+  }
+}, {
+  "id" : "filter-flatten-of-values",
+  "expr" : "{{ (m | values) | flatten }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'flatten' filter can only be applied to lists. ({{ (m | values) | flatten }}:1)"
+  }
+}, {
+  "id" : "filter-chunk-of-split",
+  "expr" : "{{ (s | split(d)) | chunk(2) }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: 'chunk' filter can only be applied to List. Actual type was: [Ljava.lang.String; ({{ (s | split(d)) | chunk(2) }}:1)"
+  }
+}, {
+  "id" : "filter-flatten-of-split",
+  "expr" : "{{ (s | split(d)) | flatten }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: The 'flatten' filter can only be applied to lists. ({{ (s | split(d)) | flatten }}:1)"
+  }
+}, {
+  "id" : "filter-sort-of-a-lists-keys",
+  "expr" : "{{ (l | keys) | sort }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-reverse-of-a-lists-keys",
+  "expr" : "{{ (l | keys) | reverse }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-sort-of-an-empty-flatten",
+  "expr" : "{{ (el | flatten) | sort }}",
+  "context" : {
+    "el" : [ ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-sort-of-an-empty-chunk",
+  "expr" : "{{ (el | chunk(2)) | sort }}",
+  "context" : {
+    "el" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-sort-of-a-one-chunk",
+  "expr" : "{{ (l2 | chunk(2)) | sort }}",
+  "context" : {
+    "l2" : [ "b", "a" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-reverse-of-an-empty-flatten",
+  "expr" : "{{ (el | flatten) | reverse }}",
+  "context" : {
+    "el" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-reverse-of-a-one-element-keys",
+  "expr" : "{{ (l1 | keys) | reverse }}",
+  "context" : {
+    "l1" : [ "b" ]
+  },
+  "result" : "[0]"
+}, {
+  "id" : "filter-reverse-of-an-immutable-slice",
+  "expr" : "{{ ((l | flatten) | slice(0,2)) | reverse }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-distinct-of-a-sliced-split",
+  "expr" : "{{ ((s | split(d)) | slice(0,2)) | distinct }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.PebbleException: Input must be a list, but received : [Ljava.lang.String; ({{ ((s | split(d)) | slice(0,2)) | distinct }}:1)"
+  }
+}, {
+  "id" : "filter-sort-of-split",
+  "expr" : "{{ (s | split(d)) | sort }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[\"a\",\"b\",\"c\"]"
+}, {
+  "id" : "filter-keys-of-split",
+  "expr" : "{{ (s | split(d)) | keys }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[0,1,2]"
+}, {
+  "id" : "filter-slice-of-split",
+  "expr" : "{{ (s | split(d)) | slice(0,2) }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[\"a\",\"b\"]"
+}, {
+  "id" : "filter-reverse-of-a-sorted-split",
+  "expr" : "{{ ((s | split(d)) | sort) | reverse }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[\"c\",\"b\",\"a\"]"
+}, {
+  "id" : "filter-flatten-keeps-an-inner-key-view",
+  "expr" : "{{ [(m | keys), 'z'] | flatten }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "[[\"b\",\"a\"],\"z\"]"
+}, {
+  "id" : "filter-flatten-keeps-an-inner-array",
+  "expr" : "{{ [(s | split(d)), 'z'] | flatten }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[[\"a\",\"b\",\"c\"],\"z\"]"
+}, {
+  "id" : "filter-slice-of-chunk",
+  "expr" : "{{ (l | chunk(2)) | slice(0,2) }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "result" : "[[\"b\",\"a\"],[\"c\"]]"
+}, {
+  "id" : "filter-regexreplace-of-an-escaped-map",
+  "expr" : "{{ (m | escapeChar(type='single')) | regexReplace(regex='a', replacement='#') }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.ParserException: Unclosed comment. ({#=2, b=1}:1)"
+  }
+}, {
+  "id" : "filter-classname-of-split",
+  "expr" : "{{ (s | split(d)) | className }}",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "[Ljava.lang.String;"
+}, {
+  "id" : "filter-classname-of-keys",
+  "expr" : "{{ (m | keys) | className }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "java.util.LinkedHashMap$LinkedKeySet"
+}, {
+  "id" : "filter-classname-of-chunk",
+  "expr" : "{{ (l | chunk(2)) | className }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "result" : "com.google.common.collect.Lists$RandomAccessPartition"
+}, {
+  "id" : "filter-sort-of-a-reversed-flatten",
+  "expr" : "{{ ((el | flatten) | reverse) | sort }}",
+  "context" : {
+    "el" : [ ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-sort-of-a-reversed-keys",
+  "expr" : "{{ ((l1 | keys) | reverse) | sort }}",
+  "context" : {
+    "l1" : [ "b" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-sort-of-a-reversed-chunk",
+  "expr" : "{{ ((l1 | chunk(2)) | reverse) | sort }}",
+  "context" : {
+    "l1" : [ "b" ]
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.UnsupportedOperationException: null"
+  }
+}, {
+  "id" : "filter-reverse-of-a-reversed-flatten",
+  "expr" : "{{ ((l1 | flatten) | reverse) | reverse }}",
+  "context" : {
+    "l1" : [ "b" ]
+  },
+  "result" : "[\"b\"]"
+}, {
+  "id" : "filter-reverse-of-a-sorted-chunk",
+  "expr" : "{{ ((el | chunk(2)) | sort) | reverse }}",
+  "context" : {
+    "el" : [ ]
+  },
+  "result" : "[]"
+}, {
+  "id" : "filter-escapechar-of-keys",
+  "expr" : "{{ (m | keys) | escapeChar(type='shell') }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "[b, a]"
+}, {
+  "id" : "filter-escapechar-of-values",
+  "expr" : "{{ (m | values) | escapeChar(type='shell') }}",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "[1, 2]"
+}, {
+  "id" : "filter-escapechar-of-flatten",
+  "expr" : "{{ (l | flatten) | escapeChar(type='shell') }}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "result" : "[\"b\",\"a\",\"c\"]"
+}, {
+  "id" : "filter-subscript-of-keys",
+  "expr" : "<{{ (m | keys)[0] }}>",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.AttributeNotFoundException: Attribute [0] of [java.util.LinkedHashMap$LinkedKeySet] does not exist or can not be accessed and strict variables is set to true. (<{{ (m | keys)[0] }}>:1)"
+  }
+}, {
+  "id" : "filter-subscript-of-values",
+  "expr" : "<{{ (m | values)[0] }}>",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "io.pebbletemplates.pebble.error.AttributeNotFoundException: Attribute [0] of [java.util.LinkedHashMap$LinkedValues] does not exist or can not be accessed and strict variables is set to true. (<{{ (m | values)[0] }}>:1)"
+  }
+}, {
+  "id" : "filter-subscript-of-split",
+  "expr" : "<{{ (s | split(d))[0] }}>",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "<a>"
+}, {
+  "id" : "filter-subscript-of-flatten",
+  "expr" : "<{{ (l | flatten)[0] }}>",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "result" : "<b>"
+}, {
+  "id" : "filter-length-of-keys",
+  "expr" : "<{{ (m | keys) | length }}>",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "<2>"
+}, {
+  "id" : "filter-first-of-keys",
+  "expr" : "<{{ (m | keys) | first }}>",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "<b>"
+}, {
+  "id" : "filter-for-over-keys",
+  "expr" : "<{% for x in (m | keys) %}{{ x }};{% endfor %}>",
+  "context" : {
+    "m" : {
+      "b" : 1,
+      "a" : 2
+    }
+  },
+  "result" : "<b;a;>"
+}, {
+  "id" : "filter-default-of-an-empty-array",
+  "expr" : "<{{ (sc | split(d)) | default('D') }}>",
+  "context" : {
+    "sc" : ",",
+    "d" : ","
+  },
+  "result" : "<[]>"
+}, {
+  "id" : "filter-capitalize-of-a-defaulted-empty-array",
+  "expr" : "{{ ((sc | split(d)) | default('D')) | capitalize }}",
+  "context" : {
+    "sc" : ",",
+    "d" : ","
+  },
+  "compare" : "error-class",
+  "result" : {
+    "error" : "java.lang.ClassCastException: class [Ljava.lang.String; cannot be cast to class java.lang.String ([Ljava.lang.String; and java.lang.String are in module java.base of loader 'bootstrap')"
+  }
+}, {
+  "id" : "filter-length-of-a-defaulted-empty-array",
+  "expr" : "<{{ ((sc | split(d)) | default('D')) | length }}>",
+  "context" : {
+    "sc" : ",",
+    "d" : ","
+  },
+  "result" : "<0>"
+}, {
+  "id" : "filter-default-of-a-nonempty-array",
+  "expr" : "<{{ (s | split(d)) | default('D') }}>",
+  "context" : {
+    "s" : "a,b,c",
+    "d" : ","
+  },
+  "result" : "<[\"a\",\"b\",\"c\"]>"
+}, {
+  "id" : "filter-default-of-an-empty-key-view",
+  "expr" : "<{{ (em | keys) | default('D') }}>",
+  "context" : {
+    "em" : { }
+  },
+  "result" : "<D>"
+}, {
+  "id" : "loop-index-and-revindex",
+  "expr" : "{% for x in l %}{{ loop.index }}/{{ loop.length }}/{{ loop.revindex }}|{% endfor %}",
+  "context" : {
+    "l" : [ "b", "a", "c" ]
+  },
+  "result" : "0/3/2|1/3/1|2/3/0|"
 } ]

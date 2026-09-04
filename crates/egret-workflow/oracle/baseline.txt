@@ -12,7 +12,11 @@
 # of its own, all documented below: 57, then 59 after fix round 2, then 60
 # after fix round 3 recorded the null-literal-versus-typo divergence.
 #
-# 128 today. The merge gate banked the last three -- the
+# 121 today; 128 when this note was written and 131 after W2b. W2a banked
+# fourteen -- the whole collection class, which the block below had recorded as
+# unfixable -- and recorded four.
+#
+# The merge gate banked the last three -- the
 # `context-integer-past-u64` family -- and it banked them by reading
 # `cargo tree` rather than by porting anything: see the note above group 1 of
 # "W2 Task 6, fix round 2".
@@ -594,32 +598,45 @@ test-iterable
 
 # --- W2 Task 8, fix round 1, found by attacking the sixteen filter ports OFF
 # their own axis: which Java collection a filter RETURNS decides whether the
-# next filter accepts it, and egret has one sequence type.
+# next filter accepts it, and egret had one sequence type.
 #
-# **Five producers and six consumers**, corrected in fix round 2 -- the first
-# cut committed "three producers wide" and two probes falsified it:
-# `'a,b,c' | split(',') | reverse` is a ClassCastException on `[Ljava.lang.String;`
-# there (SplitFilter returns a Java ARRAY, not a List) and `l | chunk(2) | reverse`
-# is an UnsupportedOperationException (ChunkFilter's list is immutable).
+# **This block said "three producers wide", then "five producers and six
+# consumers". W2a ENUMERATED it instead of counting the pairs somebody thought
+# to cross, and the number is EIGHT in one sense and FIVE in another** --
+# `oracle/return-classes.txt` asks Kestra's own `className` filter about all 63
+# filters over what is now a fifteen-input matrix, and eight of them return
+# something that
+# is not a plain `java.util.ArrayList`: the five already named here plus
+# `slice` (`ArrayList$SubList`) and `escapeChar`/`merge` (`java.util.HashMap`).
+# But `SubList` is a mutable `List` that every consumer accepts, and the two
+# `HashMap`s only change an ORDER, so the producers that make the next filter
+# BEHAVE differently really are five. The consumer side was the number that was
+# wrong: `oracle/collection-pairs.txt` crosses 34 generated producers with all
+# 63 filters and finds NINE consumers, not six -- `keys` refuses a map's key
+# view (`{{ m | keys | keys }}`); `escapeChar` is `instanceof Map` ->
+# `instanceof List` -> `toString()`, so a key view falls to the LAST branch;
+# and `regexReplace` is the HashMap order reaching the re-render loop. W2a's
+# first cut said EIGHT and filed `escapeChar` under the HashMap order, whose
+# two rows have IDENTICAL orders on both engines -- a wrong reason does not
+# only mislead a reader, it closes the question, and that is what hid the
+# ninth. A TENTH thing the kind decides is the subscript operator, which no
+# filter x filter cross can reach because it is not a filter.
 #
-# producers whose result is not a mutable `List`: `keys` and `values` (a
-# Set/Collection), `flatten` and `chunk` (immutable), `split` (a String[]).
-# consumers that cast: `sort`, `reverse`, `slice` -- and `distinct`, `chunk`
-# and `flatten`, which are W2 Task 4's and were already in this class.
-# `first`, `last`, `join`, `length` and `default` take a `Collection` and
-# agree, and `distinct`, `range` and `fromJson` return real mutable Lists --
-# `filter-sort-of-a-real-list` pins that side.
+# And the producer count is five CREATORS plus two PROPAGATORS: `reverse` and
+# `sort` return their input, so a divergent class survives them. See
+# `oracle/propagation-pairs.txt`, which exists because the depth-2 cross could
+# not see that by construction.
 #
-# Two of the pairs below are REGRESSIONS from fix round 1 rather than
-# pre-existing: `keys | slice` and `values | slice` agreed before it, because
-# minijinja's `slice` errored on them for its own reasons.
+# All fourteen entries that were here are BANKED. The claim they rested on --
+# "not fixable without giving egret a second sequence type whose only purpose
+# is to be refused, which is implementation structure by this file's own rule"
+# -- was wrong, and the cross is what shows why: the CLASS NAME is structure,
+# but "does this flow error or answer" is behaviour, and that is what
+# `runners::filters::JavaSeqKind` models. It is four capabilities (is it a
+# `List`, does `set` work, is it an array, and at what length) standing in for
+# nine Java class names, none of which egret carries. `className` still answers
+# `java.util.ArrayList` and is still recorded, below.
 #
-# Not fixable without giving egret a second sequence type whose only purpose
-# is to be refused, which is implementation structure by this file's own rule.
-filter-sort-of-keys
-filter-reverse-of-keys
-filter-slice-of-keys
-filter-sort-of-flatten
 # The same recorded class as `filter-string-undefined-input`: an undefined root
 # variable is a `RootAttributeNotFoundException` there and reaches a filter's
 # null branch here. The sixteen new names join a class the other 35 were
@@ -628,19 +645,8 @@ filter-sort-of-flatten
 
 # --- W2 Task 8, fix round 2.
 #
-# The rest of the collection class (see the note above): `split` returns a Java
-# array and `chunk`/`flatten` return immutable lists, so six consumers refuse
-# five producers and egret has one sequence type for all of them.
-filter-reverse-of-split
-filter-reverse-of-chunk
-filter-reverse-of-flatten
-filter-sort-of-values
-filter-reverse-of-values
-filter-slice-of-values
-filter-distinct-of-keys
-filter-chunk-of-keys
-filter-flatten-of-keys
-filter-distinct-of-split
+# (The rest of the collection class was here -- ten more pairs -- and W2a
+# banked every one of them. See the note above.)
 # (W2 Task 8 fix round 2's `filter-upper-literal-null` and
 # `filter-length-literal-null` were here: the cost of refusing an UNDEFINED
 # input while the `null` LITERAL was indistinguishable from a typo. W2b made
@@ -788,3 +794,42 @@ null-literal-as-a-bare-map-key
 # real divergence with no entry, and it would have made a null entry agree by
 # luck, so the null one was dropped and this one written instead.
 tag-elseif-is-pebbles-spelling
+# --- W2a. RECORDED, not fixed.
+#
+# `className` still answers `java.util.ArrayList` for every sequence. The
+# behaviour behind the nine distinct classes IS ported -- see
+# `runners::filters::JavaSeqKind`, four capabilities rather than nine names --
+# but the names themselves are `oracle/README.md`'s copy-structure line, they
+# would still be wrong on the map side (`HashMap` vs `LinkedHashMap`), and a
+# port of them would rot the day Guava or the JDK renames an inner class.
+# `oracle/return-classes.txt` carries all 63 filters' answers instead.
+filter-classname-of-split
+filter-classname-of-keys
+filter-classname-of-chunk
+# The `java.util.HashMap` order `escapeChar` imposes, reaching Kestra's
+# RE-RENDER LOOP: the rendered map starts `{#=2, ...}` there, and `{#` is an
+# unclosed Pebble comment. egret keeps insertion order, so it never produces
+# the token and answers. The ORDER is the recorded divergence
+# (`filter-escapechar-map-two-keys`); this entry is what it costs downstream,
+# and it is the eighth consumer W2a's cross found, in the order they were
+# found. `escapeChar` is the ninth and was found a round later, so the list in
+# `README.md` -- which reads keys / escapeChar / regexReplace, the order the
+# three appear in the code -- puts `regexReplace` last. Chronology here,
+# code order there; this sentence is the one that says they differ.
+filter-regexreplace-of-an-escaped-map
+
+# --- W2a, fix round 2. RECORDED, and not a collection question at all.
+#
+# **Pebble's loop variable is 0-BASED and minijinja's is 1-based**, and
+# `revindex` shifts with it: `0/3/2|1/3/1|2/3/0|` there against
+# `1/3/3|2/3/2|3/3/1|` here. `loop.length` agrees. Pebble has no `loop.index0`
+# at all (`AttributeNotFoundException`), so there is no spelling that means the
+# same thing on both sides.
+#
+# It is pre-existing -- it reproduces on a bare context list with no filter in
+# the expression -- and the `{% for %}` surface was never given to a W2 task.
+# It is recorded HERE, rather than left unwritten, because this branch commits
+# `filter-for-over-keys`, whose whole argument is that a key view still
+# iterates: a reader who finds that entry green would reasonably conclude the
+# loop is modelled, and the loop VARIABLE silently is not.
+loop-index-and-revindex

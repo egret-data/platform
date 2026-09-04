@@ -104,7 +104,8 @@ an entry matches on any failure at all, so it is born matching and cannot fail
 **for the reason it was written** — a refusal that becomes a different refusal
 is invisible. It is not literally unfailable, and an earlier version of this
 sentence ("never enters `baseline.txt`, and can never fail") was wrong about
-that: **thirty-one ids are in this file AND in `baseline.txt`**, because such an
+that: **eighteen ids are in this file AND in `baseline.txt`** (thirty-one until
+W2a banked fourteen of them and added one back), because such an
 entry still fails when egret *succeeds* where Kestra threw. (This said "five"
 until W2 Task 8, and it was already stale at six -- Task 7's fix round 3 added
 `function-fromion-annotation-of-a-list` without moving the number. Counted out
@@ -136,8 +137,9 @@ Verified by deliberate breakage before committing: an unpaired new entry, a
 renamed paired test, a false `baselined` claim and a quietly-added
 `unported:` all fail, each naming the id.
 
-**251** entries carry it today (245 before W2b's fix round, 240 before W2b, 153 before W2 Task 8, 182 before its fix
-round), counted out of `golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
+**271** entries carry it today (251 after W2b's fix round, 245 before it, 240
+before W2b, 153 before W2 Task 8, 182 before its fix round), counted out of
+`golden.json` rather than added up (39 of them W2 Task 7's, listed at the end of `error-class.txt`): the four `*-mixed` comparisons (Pebble throws on a String/Number mix), the
 eight registered-but-null-backed functions, `raw-multiline`, the three `isin-*`
 entries where an absent variable raises, **twelve from W2 Task 4** — four
 wrong-typed inputs, five exceptions its first fix round found, and three more
@@ -162,7 +164,7 @@ whose deliverable was refusals; Task 8 added 29, which is 17% of the file for
 7% of the corpus, and every one of them is `test:`-paired — the pairing file
 now has **no `unported:` line left in it**, and `UNPORTED_ERROR_CLASS` in
 `tests/oracle.rs` is empty. Note that marking an entry error-class does **not**
-make it pass: 31 of the 251 are *also* in `baseline.txt`, because egret
+make it pass: 18 of the 271 are *also* in `baseline.txt`, because egret
 *succeeds* where Kestra throws — a real divergence, and it stays visible.
 
 ## `name-surface.txt` — which names each side has at all
@@ -209,7 +211,9 @@ three and RECORDED six -- and **139 of 1288** after its fix rounds, which
 RECORDED ten and BANKED two: `null` in a BOOLEAN context, where translating the
 literal removed the accidental reason egret used to fail for and left
 minijinja's own semantics showing, and where `is defined` -- the one of the five
-a crate can reach -- is closed by overriding a single test.
+a crate can reach -- is closed by overriding a single test -- and **130 of 1336**
+after W2a, which added 48, BANKED **fourteen** (every pair W2 Task 8 had recorded
+as unfixable) and RECORDED four.
 The test fails in **both** directions:
 
 - an id **not** in the baseline mismatches — a regression;
@@ -3200,6 +3204,20 @@ baselined (Kestra answers a string) and
 A refusal is allowed and is recorded; a plausible wrong answer is not. Six more
 of them, all measured, all now refusals:
 
+> **The rule has exactly two ruled exceptions, and they are here rather than
+> only in the section that earned them.** Nine rows on this branch are egret
+> answering where Kestra throws, and both classes are ruled RECORDED:
+>
+> | class | rows | why it is not fixed |
+> |---|---:|---|
+> | the `java.util.HashMap` order reaching Kestra's **re-render loop** as `{#` | 3 | fixing it means porting `String.hashCode`'s bucket layout, which is squarely the copy-structure line |
+> | a context `Integer` reaching a date-family filter | 6 | the split is **literal-vs-context provenance** for the same digits inside int32; no predicate over the *value* can recover it, and closing it would break `filter-date-epoch-seconds-literal` |
+>
+> They are counted out of `return-classes.txt`, `collection-pairs.txt` and
+> `propagation-pairs.txt`, not carried forward. Anyone reading the heading
+> above as an absolute is reading it without its exceptions; anyone adding a
+> third exception is changing this rule and should say so here.
+
 | | Kestra | egret, before |
 |---|---|---|
 | `fromIon('007')`, `'00'`, `'-007'` | throws — Ion forbids a leading zero | `7` |
@@ -3990,6 +4008,13 @@ Two classes, neither of them on the axis any of the sixteen fixes was aimed at.
   an immutable list, and `distinct`, `chunk` and `flatten` cast to `List` on
   the consumer side. It is five producers by six consumers, fourteen baselined
   entries, with `filter-sort-of-a-real-list` pinning the other side.
+  **The consumer count is wrong too, and this is the third time it was
+  committed** — W2a enumerated the class instead of counting the pairs someone
+  thought to cross, and it is five creators plus two propagators by NINE
+  consumers, all fourteen now banked. W2a's own first cut said EIGHT and was
+  corrected by its review, which makes this the FOURTH commit of a wrong count
+  for the same class. See "What W2a's entries measured" at the end of this
+  file.
 - **The sixteen new names join the recorded "an undefined root variable"
   class.** `{{ nothere | upper }}` is a `RootAttributeNotFoundException` there
   and renders empty here, exactly as `filter-string-undefined-input` already
@@ -4124,6 +4149,13 @@ entries — so the derivation cannot rot and a JDK bump fails a test rather than
 moving a golden nobody reads.
 
 ### The collection class is five producers and six consumers
+
+> **Superseded by W2a**, which is the third time this heading's number moved
+> and not the last: the CONSUMER side is NINE, not six and not the eight W2a's
+> own first cut committed, and all fourteen entries below are banked. See
+> "What W2a's entries measured" at the end of this file. What is still right
+> here is the count of producers that CREATE a divergent class, and the two
+> probes.
 
 Fix round 1 committed "three producers wide". Two probes falsify it:
 
@@ -4717,3 +4749,693 @@ The honest shape of it: the four boolean-context entries are a **masked
 divergence made visible**, not a fix's damage; `is defined` was the one of the
 five a crate could reach and it is closed; and the remaining eight are held by
 the ratchet rather than by prose.
+## What W2a's entries measured (read before touching a collection filter)
+
+> **The four round figures below are historical, and deliberately not
+> renumbered.** They were measured against `10a484ee` — W2b's first commit —
+> which is the base W2a was written on and ran four rounds against. W2a was
+> then rebased onto W2b's tip, which had added ten entries and eight baseline
+> lines of its own, so the branch's ratchet is **130 of 1336**, not the
+> `122 of 1326` those sections close on. The DELTAS in them are still exact;
+> only the totals belong to a base that is no longer in this history.
+> Renumbering them would state a measurement that was never run, which is the
+> failure this section spends four rounds documenting.
+
+W2a is one question that no measurement of a filter *in isolation* can answer:
+**a filter's result in Kestra is a specific Java collection type, and the NEXT
+filter casts.** `{{ m | keys | sort }}` threw there and answered here, and
+neither `keys` nor `sort` is wrong on its own.
+
+W2 Task 8's fix round recorded fourteen such pairs and said in its own report
+why fourteen could not be trusted -- *"those are the pairs I thought to cross
+-- nothing enumerates the return collection of the other 40 filters."* The
+count had already been "three", then "five". So W2a replaced the list with an
+enumeration and a generated cross, both committed as answer fixtures beside
+`regex-classes.txt` and `jq-surface.txt`:
+
+| fixture | what it holds | rows |
+|---|---|---:|
+| `return-classes.txt` | all 63 engine filters x a twelve-input matrix, asked through Kestra's own `className` filter | 756 |
+| `collection-pairs.txt` | every distinct (producer, returned class, empty?) the enumeration found, crossed with all 63 filters | 2 142 |
+
+The instrument is the engine itself. `className` is a Kestra filter, so
+`{{ (<input> | <filter>) | className }}` asks Pebble what its own types are --
+no reflection and no bytecode, one `host.Oracle generate`.
+
+### The producer count is eight, and the number that mattered was the CONSUMER count
+
+Eight filters return something that is not a plain `java.util.ArrayList`:
+
+| filter | Java returns |
+|---|---|
+| `split` | `[Ljava.lang.String;` -- an ARRAY, not a `List` at all |
+| `chunk` | `com.google.common.collect.Lists$RandomAccessPartition` |
+| `flatten` | `java.util.ImmutableCollections$ListN` |
+| `keys` | `ImmutableCollections$ListN` (list/array) / `LinkedHashMap$LinkedKeySet` (map) |
+| `values` | `java.util.LinkedHashMap$LinkedValues` |
+| `slice` | `java.util.ArrayList$SubList` |
+| `escapeChar` | `java.util.HashMap` (map input) |
+| `merge` | `java.util.HashMap` (map) / `java.util.ArrayList` (list) |
+
+**But eight is the answer to the class question, not to the behaviour one.**
+`slice`'s `SubList` is a mutable `List` that every consumer accepts, and
+`escapeChar`/`merge` return a `Map` whose only observable difference is its
+ORDER -- already the recorded `filter-escapechar-map-two-keys` class. The
+producers that change what the *next* filter does are five, which is what Task
+8's fix round said. The number it had wrong was the other one: the cross found
+**nine consumers, not six** — and the first cut of this section said eight.
+The three it missed are
+
+- **`keys`**, which accepts `Map`, `List` and `isArray()` and therefore refuses
+  a map's key view: `{{ m | keys | keys }}` and `{{ m | values | keys }}` throw;
+- **`escapeChar`**, which is `instanceof Map` → `instanceof List` →
+  `toString()`, so a key or value view falls to the **last** branch:
+  `{{ m | keys | escapeChar(type='shell') }}` is the six characters `[b, a]`
+  there and was a walked list here. See the fix-round section below for why
+  this one took a second review to find;
+- **`regexReplace`**, which is not really a cast at all -- `escapeChar` on a map
+  renders `{#=2, b=1}` in `HashMap` order, and Kestra's **re-render loop** reads
+  the leading `{#` as an unclosed Pebble comment. That one is recorded, not
+  fixed: the order is the divergence and the parse error is downstream of it.
+
+A **tenth** thing the kind decides is not a filter at all — the subscript
+operator — and no filter × filter cross can reach it. See the fix round.
+
+38 of the pairs were egret answering where Kestra throws. All but the
+`regexReplace` one are refusals now.
+
+### `JavaSeqKind` is four capabilities, and `className` is still a recorded divergence
+
+The fix is a tag on the sequence value, not a class name. There are at least
+nine distinct Java classes in play (`ArrayList`, `ArrayList$SubList`,
+`Arrays$ArrayList`, `AbstractList$RandomAccessSubList`,
+`ImmutableCollections$ListN`, `ImmutableCollections$SubList`,
+`Lists$RandomAccessPartition`, `LinkedHashMap$LinkedKeySet`,
+`LinkedHashMap$LinkedValues`) and every consumer's behaviour follows from four
+questions about them: is it a `List`, does `set` work, is it an array, and at
+what length. `runners::filters::JavaSeqKind` carries those and nothing else —
+and the subscript operator, added in the fix round, needs no fifth question:
+it refuses exactly `Collection`, which the model already had.
+
+That keeps the copy-behaviour-not-structure line where this file has always put
+it. **`className` still answers `java.util.ArrayList` for every sequence** and
+`filter-classname-of-split`, `-of-keys` and `-of-chunk` are baselined, for the
+same reason `filter-classname-of-long` is: the name is not observable from a
+flow, carrying it would rot the day Guava or the JDK renames an inner class,
+and it would still be wrong on the map side. The behaviour behind the names IS
+ported, and `collection-pairs.txt` is where it is measured.
+
+The previous round's ruling -- *"not fixable without giving egret a second
+sequence type whose only purpose is to be refused, which is implementation
+structure by this file's own rule"* -- was the thing to disagree with, and the
+disagreement is one sentence: **the class name is structure, but "does this
+flow error or answer" is behaviour**, and over-acceptance is the one divergence
+this file's rules do not allow — subject to the two ruled exceptions recorded
+beside that rule, neither of which is a collection question.
+
+### The LENGTH is part of the rule, and a first cut got it wrong
+
+`ImmutableList` and `Partition` are two kinds because Java's two immutable
+lists refuse `sort` at *different* lengths, measured:
+
+| | `sort` throws | `reverse` throws |
+|---|---|---|
+| `ImmutableCollections` (`flatten`, `keys`) | **always, including on an empty list** -- `AbstractImmutableList` overrides `sort` | at length >= 2 |
+| `Lists.partition` (`chunk`) | at length >= 1 -- `List.sort`'s default calls `ListIterator.set` once per element | at length >= 2 |
+| `Arrays$ArrayList` (an array through `sort`) | never | never |
+
+`Collections.reverse` swaps `size >> 1` pairs, so a 0- or 1-element list calls
+`set` no times and comes back unchanged: `{{ [x] | keys | reverse }}` is `[0]`
+and `{{ [] | chunk(size=2) | sort }}` is `[]`. A first cut refused every
+immutable list at every length and turned four expressions Kestra answers into
+errors; the cross named all four. `filter-sort-of-an-empty-chunk` and
+`filter-reverse-of-a-one-element-keys` are the entries that hold the boundary.
+
+The kind is **inherited through `slice`** (`subList` of a mutable list is
+mutable, of an immutable one is not, and of an array is still an array) and
+**lost through `sort` of an array** (`Arrays.asList` is mutable), both measured
+at depth 3 through `className`. And `flatten`'s ELEMENT test is the same
+`instanceof List` as its input test, so an inner key view or array is kept
+whole rather than unwrapped -- `filter-flatten-keeps-an-inner-key-view`.
+
+### `unstable` is decided by REORDERING, because re-running proves nothing
+
+Fifteen cells of `collection-pairs.txt` carry `unstable` in the Kestra column
+instead of a value. They are `split` piped into a filter that stringifies its
+input, and what they render is a Java array's `toString` -- its class name and
+its **identity hash**, e.g. `[Ljava.lang.String;@7e38a7fe`.
+
+**Two runs of the harness in file order agree perfectly**, because the JVM's
+identity hash is a deterministic PRNG over a deterministic allocation sequence.
+Re-running is therefore not an instability test. Rendering the probe corpus
+**reversed** moves exactly those cells, and that is how the column is decided --
+mechanically, and by a rule the fixture states rather than by eye. (Two further
+rows of the same class do not move, only because their answer discards the
+hash; they carry their value and the same reason.)
+
+There is deliberately **no corpus entry** for any of them: a golden that moves
+when the corpus is reordered is a golden nobody can review.
+
+### One divergence off the collection axis, and one CORRECTION that is not one
+
+- `first`/`last` on a String return a `java.lang.Character` there and a
+  one-character `String` here. egret has no character type distinct from a
+  string, and eight rows of `return-classes.txt` record it.
+- `timestampMicro` and `timestampNano` really do return a `java.lang.String`
+  where `timestamp` and `timestampMilli` return a `Long` — which corrects the
+  brief's table, and **is not a divergence**: egret answers `java.lang.String`
+  for both too, so those rows carry `-`. The first cut of this section reported
+  it as a third divergence and was wrong; the fixture said so at the time and
+  nobody read the column.
+
+And one hole the enumeration exposed rather than closed: **ten of the 63 names
+the engine binds have no corpus entry at all** -- `abbreviate`,
+`base64decode`, `base64encode`, `merge`, `nl2br`, `numberformat`, `raw`,
+`rsort`, `sha256`, `urlencode`. They are Pebble-core filters egret does not
+bind, and they account for 465 of the cross's remaining divergent rows.
+
+**That is TEN rows of `name-surface.txt`, not one**, and the first cut of this
+section said "the same one row repeated". It is also not always the *consumer*
+that fails: in many of those rows the unbound name is the **producer**, so the
+expression never reaches a consumer at all. The substance holds — every one of
+those rows has its producer, its propagator or its consumer among the ten, with
+no exceptions — but "one row" was a compression that misdescribes both halves.
+
+### Regenerating the three W2a fixtures
+
+The same shape as `regex-classes.txt` and `jq-surface.txt`, plus the reversal:
+
+```bash
+export JAVA_HOME=/Users/1pro-l4r8/Library/Java/JavaVirtualMachines/amazon-corretto-25.jdk/Contents/Home
+cd crates/egret-workflow/oracle
+mvn -q -o compile
+CP=$(mvn -q -o dependency:build-classpath -Dmdep.outputFile=/dev/stdout | tail -1)
+
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate \
+    fixtures/return-classes.probe.json fixtures/return-classes.answers.json
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate \
+    fixtures/collection-pairs.probe.json fixtures/collection-pairs.answers.json
+"$JAVA_HOME/bin/java" -cp "target/classes:$CP" host.Oracle generate \
+    fixtures/propagation-pairs.probe.json fixtures/propagation-pairs.answers.json
+```
+
+To re-derive the `unstable` set, render a REVERSED copy of
+`fixtures/collection-pairs.probe.json` and diff the two answer files by id.
+
+### The mutation run
+
+Two mutations, each built and run in its own `CARGO_TARGET_DIR` and each
+restored with the restore **proven by `diff`** and re-run green before the
+next:
+
+| mutation | what died |
+|---|---|
+| `chunk`'s gate neutered to `if !kind.is_list() && false` | `the_collection_kind_gate_refuses_what_java_refuses`; `the_collection_pairs_match_the_engine`, naming `keys(m) \| chunk`; and the oracle with **REGRESSION: 3** -- `filter-chunk-of-keys`, `filter-chunk-of-split`, `filter-chunk-of-values`, which is exactly `chunk`'s pairs and nothing else |
+| the length threshold folded: `Partition => len >= 1` becomes `len >= 1 \|\| len == 0` | the same two unit tests, naming `chunk(el) \| sort`, and the oracle with **REGRESSION: 1** -- `filter-sort-of-an-empty-chunk`, the one entry that exists because an empty Guava partition sorts and an empty `Stream.toList()` does not |
+
+The second is the one worth having: it is the mistake the first cut of this fix
+actually made, it compiles, it is one token wide, and before
+`filter-sort-of-an-empty-chunk` existed nothing in the corpus could have seen
+it -- the cross found it by name.
+
+### Counted
+
+**121 of 1305**, from 131 of 1278. Twenty-seven entries. **BANKED fourteen** --
+every pair W2 Task 8 had recorded as unfixable -- and **RECORDED four**
+(`filter-classname-of-split`, `-of-keys`, `-of-chunk` and
+`filter-regexreplace-of-an-escaped-map`). The thirteen new refusals and the
+fourteen banked ones are all `error-class`, and all twenty-seven are paired to
+one test, `runners::filters::the_collection_kind_gate_refuses_what_java_refuses`,
+which walks every (kind, consumer) cell rather than sampling.
+
+What the flat count hides, the same way it did in Task 8's rounds: counted row
+by row, exactly **fourteen** of the 38 divergent pairs had a corpus entry of
+the same (producer, input, consumer) shape, so 24 of the 38 were fixed with
+nothing in the corpus that could have failed. Eleven of those 24 have one now;
+the other thirteen -- all of them the empty-map and empty-list variants -- are
+held by `collection-pairs.txt`, which asserts every one of its 2 142 rows by
+rendering it.
+
+## W2a, fix round 1 — a fact quoted three lines above the code that contradicts it
+
+A review ran **4 344 fresh probes of its own construction** against real Pebble
+and against `10a484ee`, verified all eight of W2a's `javap` claims against the
+artifact, reproduced `return-classes.answers.json` 756/756 and
+`collection-pairs.answers.json` 2 127/2 142 with the fifteen misses being
+exactly the fifteen `unstable` rows, and **independently reproduced the
+reordering mechanism** — reversing the probe corpus moves exactly those cells
+while two file-order runs agree perfectly. It then found three things.
+
+### `reverse` returned its input and the port did not
+
+`ReverseFilter` is `checkcast List; Collections.reverse(list); areturn` **on
+the same local**. `Collections.reverse` is `void`. So the filter returns its
+INPUT, and the kind survives it. `runners::filters::reverse` rebuilt a plain
+sequence and threw the kind away:
+
+| | Kestra | egret, before |
+|---|---|---|
+| `{{ [] \| flatten \| reverse \| sort }}` | `UnsupportedOperationException` | `[]` |
+| `{{ ['b'] \| keys \| reverse \| sort }}` | `UnsupportedOperationException` | `[0]` |
+| `{{ ['b'] \| chunk(size=2) \| reverse \| sort }}` | `UnsupportedOperationException` | `[["b"]]` |
+
+Reachable only at length 0 or 1 — at 2 the reverse itself throws — which is
+**precisely the boundary this task went to trouble to model**. `sort` has the
+same shape and `areturn`s the list it sorted; its propagation is observable
+only through `className` on an empty partition, because after `sort` the only
+surviving immutable case is length 0 and nothing downstream throws there.
+
+Two things about it matter more than the bug.
+
+**The doc comment three lines above the defect stated the fact that falsifies
+it** — *"`ReverseFilter` is a bare `(List) input` and then
+`Collections.reverse`"*. The evidence was read, written down, and the
+consequence was not drawn. This file now records that shape three times.
+
+**And the cross could not see it by construction.** Every producer in
+`collection-pairs.txt` is one filter applied to a context value, so all its
+rows are depth 2 and no consumer is ever measured downstream of `reverse`.
+A depth-3 run existed during W2a and was not committed, so nothing held it.
+`propagation-pairs.txt` is the answer, and its own first cut caught **one** of
+the five — see the length note below.
+
+### The ninth consumer, hidden by a wrong reason
+
+`EscapeCharFilter.apply` is `instanceof Map` → `instanceof List` →
+`toString()` (`javap -p -c`, and the recursive helper repeats all three at
+every depth), so a key or value view falls to the **last** branch:
+
+```
+{{ (m|keys)   | escapeChar('shell') }}   Kestra [b, a]    egret ["b","a"]
+{{ (m|values) | escapeChar('shell') }}   Kestra [1, 2]    egret ["1","2"]
+```
+
+**Both engines' orders are identical** in those two rows — and W2a had filed
+them under *"`escapeChar` and `merge` return a `java.util.HashMap`, so the
+iteration order is `String.hashCode`'s buckets"*. That reason is false for
+them, and it is what closed the question: a row with a reason reads as
+explained. **A wrong reason does not merely mislead a reader, it stops anyone
+looking.** Correcting the two rows drops the genuine `HashMap` class from 24 to
+22 — every one of the 22 audited and confirmed to be a real order difference —
+and takes the consumer count from eight to **nine**.
+
+### The subscript operator, and why it is NOT a fifth capability
+
+`{{ (m | keys)[0] }}` is `AttributeNotFoundException: Attribute [0] of
+[LinkedHashMap$LinkedKeySet] does not exist` on Kestra and was `b` here.
+Pre-existing, and the review proposed recording it as *"a fifth capability the
+model does not carry: indexability"*.
+
+**Measured over all 34 producers × five ways of reading them, that framing is
+wrong and the fix is cheap.** `[0]` refuses on **every empty sequence** on both
+engines — that is an index out of range, not a capability — and among the
+non-empty ones the only two that refuse are the two map views. So the predicate
+is exactly `kind == Collection`, which `JavaSeqKind` **already carries**. What
+was missing was not a capability but a *reader*: the subscript is an operator,
+not a filter, and a filter × filter cross cannot reach it.
+
+It is fixed rather than recorded. `JavaSeq::get_value` refuses a `Collection`,
+and because `Enumerator::Seq` drives minijinja's own iteration *through*
+`get_value`, a `Collection` yields `Enumerator::Iter` instead — `size_hint` on
+a `vec::IntoIter` is exact, so `length`, `first`, `default`'s emptiness test and
+`{% for %}` all keep working, exactly as they do on Kestra, which answers all
+four for a key view and refuses only `[0]`.
+
+### The fixture tests could not see a probe that was not the row
+
+Both looked the probe up by an **id derived from the row's own columns** and
+deserialised only `id` and `result`, so both compared columns moved together: a
+probe rewritten to `{{ 1 }}`, with the row still reading `keys / m / sort` and
+the answers regenerated, was fully self-consistent and green. `javare.rs`, the
+precedent W2a followed, keys its harness map on the probe's own
+`context["p"]`/`context["s"]` and does not have that hole.
+
+All three fixtures now carry an **`expr` column** and both maps are keyed by
+it. Verified by deliberate breakage: rewriting one probe to `{{ 1 }}` fails
+with *"keys | m | sort: no probe renders `{{ (m | keys) | sort }}` — the row
+and the probe corpus have drifted apart"*, by name.
+
+### The length bucket, and a generated family being only as wide as its key
+
+`propagation-pairs.txt`'s first cut deduplicated producers by
+`(propagator, class, empty?)` — the same rule `collection-pairs.txt` used — and
+caught **one** of the five `reverse` expressions. The other four need a
+producer of length **1**, and the matrix had no length-1 member, so no dedup key
+could keep a representative of one.
+
+The matrix gained `l1` and `m1`, the key became `(propagator, class, length
+bucket)` with the bucket 0, 1 or many, and the same fixture then catches five.
+`Collections.reverse` calls `set` no times below two elements and `List.sort`'s
+default calls it once per element: three lengths, three behaviours, and a
+two-valued key cannot express that. **A generated family is only as wide as the
+axes its dedup key names**, and the axis this one dropped was the one the whole
+type exists to model.
+
+### What the counts became
+
+|  | first cut | fix round |
+|---|---:|---:|
+| input matrix | 12 | **14** |
+| `return-classes.txt` | 756 | **882** |
+| producers | 34 | **50** |
+| `collection-pairs.txt` | 2 142 | **3 150** |
+| `propagation-pairs.txt` | — | **4 914** |
+| consumers the kind decides | 8 | **9**, and a tenth that is an operator |
+| the `HashMap` order class | 24 | **22** |
+
+Over-acceptance across both crosses is **3** — `{{ m | escapeChar(…) |
+regexReplace(…) }}` and its **two** propagated twins, all three the recorded
+`{#` re-render class — down from 38 + 5. (This said 2 when written, and the
+count was 3 at the time; the fix round below corrects it to nine rows across
+two classes once `return-classes.txt` is counted too, and the two statements
+sat 120 lines apart contradicting each other.)
+
+### The mutation run
+
+Four mutations, all sharing one scratch `CARGO_TARGET_DIR` (never the real
+one), each restored with the restore **proven by `diff`** and re-run green
+before the next:
+
+| mutation | what died |
+|---|---|
+| `reverse` returns `MjValue::from(items)` again | `the_collection_kind_gate_refuses_what_java_refuses`; `the_propagation_pairs_match_the_engine`, naming `chunk \| l1 \| reverse \| sort`; oracle **REGRESSION: 3** — the three `filter-sort-of-a-reversed-*` entries |
+| `escapeChar`'s list gate neutered to `\|\| true` | the gate test, naming `{{ (m \| keys) \| escapeChar(type='single') }}`; `the_collection_pairs_match_the_engine`; oracle **REGRESSION: 2** |
+| `JavaSeq::get_value`'s `Collection` arm neutered | the gate test; oracle **REGRESSION: 2** — `filter-subscript-of-{keys,values}` |
+| `JavaSeq::enumerate`'s `Collection` arm neutered | the gate test *and* oracle **REGRESSION: 11** — `filter-keys`, `filter-keys-order`, `filter-first-of-keys`, `filter-for-over-keys`, `filter-flatten-keeps-an-inner-key-view` and more, all rendering `[null,null]` |
+
+The fourth is the one worth keeping: it shows the two halves of the
+`Collection` handling are coupled, and that the "must not refuse" assertions
+added this round — `length`, `first`, `{% for %}` and `default` over a key view
+— are load-bearing rather than decorative. The first cut's versions of those
+arms asserted only a leading `[` and a non-empty string; they are pinned to
+their values now.
+
+### Counted
+
+**121 of 1320**, from 121 of 1305. Fifteen entries, **no change to the
+baseline**: seven of the fifteen fail against `037ed87e` (the three `reverse`
+propagations, the two `escapeChar` views, the two subscripts) and eight are
+over-refusal guards for the new gates — the side that must keep answering.
+
+Measured the same way for the first commit's twenty-seven: **eight passed
+pre-fix too** — `filter-sort-of-an-empty-chunk`,
+`filter-reverse-of-an-empty-flatten`, `filter-reverse-of-a-one-element-keys`,
+`filter-sort-of-split`, `filter-keys-of-split`, `filter-slice-of-split`,
+`filter-reverse-of-a-sorted-split` and `filter-slice-of-chunk`. All eight are
+legitimate over-refusal guards and one of them killed W2a's second mutation,
+but the first report framed all twenty-seven as earned by the enumeration and
+disclosed only two as boundary entries. Both numbers come from checking the
+historical `filters.rs` out, building it and rendering the entries, not from
+reasoning about them.
+
+## W2a, fix round 2 — the axis a header claimed and the key could not express
+
+A re-review generated 6 946 expressions (34 producers × 17 propagator chains of
+length 0-3 × 12 consumers, subscript included, lengths 0-5) and found **zero
+regressions**: agreed-at-`10a484ee`-and-diverges-at-head was 0, fixed 400,
+over-acceptance 397 → 3. It established two things worth more than any fix.
+
+**The propagation family earns its rows.** Six one-token mutations — `reverse`
+drops the tag, `slice` drops the tag, `sort` keeps `Array` — are **invisible to
+the depth-2 cross** and die only in the depth-3 family. It is also the only
+thing holding the `escapeChar` gate against widening on the array side; the
+hand-written gate test does not pin `split | escapeChar`.
+
+**Depth 4 is bounded by the shape of the model, not by hope** — and the first
+cut of this paragraph gave the wrong reason for it. It said "every propagator's
+kind transition is the identity except `sort: Array → MutableList`", which is
+false for **five of the eleven**. The measured table, re-derivable from the
+`className` rows of `collection-pairs.txt` and `propagation-pairs.txt`:
+
+| | propagators | transition |
+|---|---|---|
+| identity | `default` `reverse` `rsort` `slice` | the kind comes back unchanged |
+| constant | `escapeChar` `first` `last` `merge` | always `MutableList` |
+| constant | `keys` | always `ImmutableList` |
+| varies | `sort` | identity, except `Array → MutableList` |
+| vacuous | `values` | requires a `Map`, so it never applies to a sequence at all |
+
+**The conclusion survives for a different reason than the one first written:**
+every constant's target, and `sort`'s one non-identity target, is `MutableList`
+or `ImmutableList`, and both are already reachable at depth 1 — so composition
+adds no kind and the reachable set closes after one propagator. The honest
+sentence, now in `propagation-pairs.txt`: *depth 3 is measured and committed;
+depth 4 is not measured; the kind lattice closes after one propagator, so a
+depth-4-only kind regression cannot exist unless `JavaSeqKind` gains
+history-dependence.* "Unmeasured" alone reads as a hole and this one is closed
+by a five-element lattice.
+
+That it was the right conclusion for the wrong reason is worth keeping. **On
+this branch a wrong reason is the recorded way a question gets closed** — it is
+what hid the ninth consumer — and the depth-4 argument is the single place a
+future reader will stop looking.
+
+### The length axis was still not filled, and filling it found a live defect
+
+The review's last minor was that `propagation-pairs.txt` **claims a
+three-valued length axis it does not carry** — `Array` appeared at one length
+only — and judged there was no live risk, because every `Collection`/`Array`
+gate is length-independent and the length-sensitive readers are held at depth 2.
+
+The first half is right and the diagnosis is deeper than "two producers are
+missing": **the bucket was read off the input BINDING**, which is exact for a
+list or a map and meaningless for a string, so every `split` result landed in
+the "many" bucket whatever its actual length. Round 2 derives the bucket from
+the **measured length of the produced value** (a `| length` probe beside every
+`| className` one) and adds `sc` — `","`, whose split is the empty array, the
+only way this matrix reaches length 0 of `Array`. Tabulated rather than
+assumed, all six kinds now carry all three buckets.
+
+**The second half is wrong, and filling the axis is what showed it.** Eight
+rows appeared where egret answers and Kestra throws:
+
+```
+{{ ',' | split(',') | default('D') }}               Kestra []   egret D
+{{ ',' | split(',') | default('D') | capitalize }}  Kestra CCE  egret D
+```
+
+`EmptyTest` is `null || (String && trim().isEmpty()) || (Collection &&
+isEmpty()) || (Map && isEmpty())` — `javap -p -c`, four branches and **no array
+branch** — and a Java array is not a `Collection`, so Pebble's `default` never
+substitutes for one however few elements it has. egret's `default` matched on
+`ValueKind::Seq` and substituted. Every filter after it then saw a `String`
+where Kestra sees an array.
+
+The gate that escaped is **not a `Collection`/`Array` cast at all** — it is
+`default`'s emptiness test, which is both kind- and length-sensitive and which
+nothing had classified as part of this class. It is reachable at exactly one
+cell: length 0 of the `Array` kind, which existed in no instrument until the
+key could express it. The two engines agree at every other length, which is why
+it hid.
+
+That is the third time on this branch the same shape has appeared, and it is
+worth stating plainly: **"I could not construct a mutant that escapes" is not
+the same as "the axis is safe to leave unfilled."** The first is a statement
+about the mutants someone thought of; the second is a statement about the
+space. Filling the axis cost one probe family and found a real over-acceptance
+in a filter nobody was looking at.
+
+### The over-acceptance count, corrected
+
+`propagation-pairs.txt` said its two remaining rows were "the only
+over-acceptance left in either cross". Counted out of all three fixtures rather
+than asserted, this branch commits **nine over-accepting rows across two
+classes**:
+
+| class | rows | where |
+|---|---:|---|
+| the HashMap order reaching the re-render loop as `{#` | 3 | 1 in `collection-pairs.txt`, 2 in `propagation-pairs.txt` |
+| a context `Integer` reaching a date-family filter | 6 | `return-classes.txt`, through `date`, `dateAdd` and the four `timestamp*` |
+
+The second is the pre-existing `filter-date-epoch-seconds-context` class —
+`AbstractDate.convert` has a `Long` branch and a `String` branch and none for
+`Integer`. Both classes are ruled recorded; the ruling was written when only
+the first was named, and it now names both.
+
+### `loop.index` is 0-based there and 1-based here
+
+Recorded, not fixed, and **not a collection question**: it reproduces on a bare
+context list with no filter in the expression. `loop.index`/`loop.revindex` are
+`0/3/2|1/3/1|2/3/0|` on Kestra and `1/3/3|2/3/2|3/3/1|` here; `loop.length`
+agrees; and Pebble has no `loop.index0` at all
+(`AttributeNotFoundException`), so there is no spelling that means the same
+thing on both sides. `loop-index-and-revindex` is baselined with that reason.
+
+It is recorded **because this branch commits `filter-for-over-keys`**, whose
+whole argument is that a key view still iterates. A reader who finds that entry
+green would reasonably conclude the loop is modelled. The loop *variable*
+silently is not.
+
+### Two wordings and an ordinal
+
+- A source comment said the value "is the four characters `[b, a]`". It is six.
+  The README said six and the test asserts six — a comment arithmetically wrong
+  about the value it exists to explain.
+- `baseline.txt` calls `regexReplace` the eighth consumer and `README.md` lists
+  the three missed ones as keys / escapeChar / regexReplace, which reads as
+  ninth. Both orderings are now labelled: chronological in `baseline.txt`
+  (`regexReplace` was #8, `escapeChar` became #9 a round later), code order in
+  the README.
+
+### The mutation run
+
+One mutation, in its own scratch `CARGO_TARGET_DIR`, restore proven by `diff`
+and re-run green: neutering the `Array`-is-never-empty arm killed the gate
+test, `the_collection_pairs_match_the_engine` (naming
+`split | sc | default`), and the oracle with **REGRESSION: 3** —
+`filter-default-of-an-empty-array`,
+`filter-length-of-a-defaulted-empty-array` and
+`filter-capitalize-of-a-defaulted-empty-array`.
+
+> **That list, and this round's commit message, were an UNDER-claim.** Re-run
+> across the whole crate rather than the three targets that were expected to
+> care, deleting the arm fails **four** tests, not three:
+> `the_collection_kind_gate_refuses_what_java_refuses`,
+> `the_collection_pairs_match_the_engine`,
+> **`the_propagation_pairs_match_the_engine`** and the oracle's
+> `render_corpus_matches_golden` (420 lib tests, 3 failed; oracle 10, 1
+> failed). The propagation fixture was not named because the mutation was
+> checked with `-- runners::filters::tests::the_collection`, a filter that
+> excludes it by name. A mutation run that filters the tests it expects to kill
+> can only confirm the expectation — the honest form is the whole target, and
+> the number here is now measured that way.
+
+### Counted
+
+**122 of 1326**, from 121 of 1320. Six entries, one new baseline line
+(`loop-index-and-revindex`, recorded). The producer set went 50 → **46** and
+`collection-pairs.txt` 3 150 → **2 898**.
+
+For `collection-pairs.txt` that reduction really is a pure duplicate-collapse:
+every dropped producer shares its `(filter, class, bucket)` key with one that
+was kept. **For `propagation-pairs.txt` it is not, and the first cut of this
+paragraph said it was.** Thirteen triples were dropped, nine collapse onto a
+representative and **four do not** — `jq|el|first`, `jq|el|last`, `jq|l1|first`
+and `jq|l1|last`, i.e. `first`/`last` over a plain `ArrayList` at lengths 0 and
+1, which the previous key carried and this one does not.
+
+The cause is this branch's own lesson turned on the new key: the depth-3
+producers derive from the depth-2 deduped set, and the depth-2 key is the class
+and length of the *produced* value, which cannot express the length of the
+**element** `first`/`last` extracts — `jq|el`, `jq|l1` and `jq|l` are all
+`(ArrayList, 1)` while `first` of them is length 0, 1 and 3.
+
+The four cells were **measured** before the trade was accepted: 4 × 63 = 252
+expressions through both engines, of which 140 agree, 96 agree by both
+refusing, 16 are the recorded unbound-name class, and **none** is an
+over-acceptance or a differing answer. Four cells lost, four gained (`default`
+and `sort` over `Array` at lengths 0 and 1). Carrying them would take a fourth
+axis — the length of the *element* — on the depth-2 set, which 252 agreeing
+rows do not justify. See `propagation-pairs.txt`, which now names the loss.
+
+Fewer rows, and the axis the header claims is the axis the key carries — for
+the three axes the key names.
+
+## W2a, fix round 3 — what a reduction lost, and a right answer with a wrong reason
+
+No behaviour changed in this round. A check of 1 296 expressions (36 producers
+× {plain, `| default('D')`} × 18 consumers) through real Pebble and through
+egret at **both** commits came back clean: zero regressions, 12 fixed,
+over-acceptance 2 → 0, no panics. The `default` arm matches `EmptyTest` branch
+for branch over all 36 producers — including that NBSP and U+200B are **not**
+trimmed on either side, and that `split | sort | default` is `D` on both, so
+the arm does not over-reach. The producer set was re-derived from scratch
+through real Pebble and came back as **exactly the committed 46 triples, zero
+missing and zero extra**, with `sc` confirmed as the only route to `Array`
+length 0.
+
+Four things were wrong in the record, and three of them are this task's own
+subject matter.
+
+### The reduction was not free, and three places said it was
+
+`collection-pairs` 50 → 46 is a clean dedup. **`propagation-pairs` is not.**
+Thirteen `(producer, input, propagator)` triples were dropped; nine share their
+`(propagator, class, bucket)` key with a triple that was kept, and four do not:
+
+```
+jq|el|first -> (first, ArrayList, 0)     no representative
+jq|el|last  -> (last,  ArrayList, 0)     no representative
+jq|l1|first -> (first, ArrayList, 1)     no representative
+jq|l1|last  -> (last,  ArrayList, 1)     no representative
+```
+
+Verified by computing every dropped triple's key through the artifact rather
+than by reading the diff: nine collapse, four do not. `first`/`last` over a
+plain `ArrayList` is now carried at "many" only, where the previous key carried
+0, 1 and many.
+
+**The cause is this branch's own lesson turned on the new key.** The depth-3
+producers derive from the depth-2 deduped set, and the depth-2 key is the class
+and length of the *produced* value — which cannot express the length of the
+**element** that `first`/`last` extracts. `jq|el`, `jq|l1` and `jq|l` are all
+`(ArrayList, 1)`, each a one-element list holding its input, so only one
+survives depth 2, while `first` of them has length 0, 1 and 3.
+
+The trade is acceptable and it was **measured** before it was accepted: the
+four cells are 4 × 63 = 252 expressions, of which 140 agree, 96 agree by both
+refusing, 16 are the recorded unbound-name class, and **none** is an
+over-acceptance or a differing answer. Four cells lost, four gained (`default`
+and `sort` over `Array` at lengths 0 and 1). Carrying them needs a fourth axis
+— the element's length — on the depth-2 set, which 252 agreeing rows do not
+buy. What was not acceptable is three places describing it as pure
+duplicate-collapse; all three now name the loss, the measurement and the price
+of reversing it.
+
+### The exception clause never reached the rule
+
+"Over-acceptance is the one divergence this crate's rules do not allow" stood
+unqualified at its own heading and was repeated absolutely 1 400 lines later,
+while nine documented violations sat under it and the exception lived only in a
+fix-round section. **A rule and its exceptions have to be in the same place** or
+the rule is read as absolute by exactly the reader it is written for. The
+clause is now beside the heading, as a table of the two ruled classes with the
+reason each is not fixed, and the second restatement carries the qualifier.
+
+The second class was checked rather than taken on trust: the split is
+**literal-versus-context provenance for the same digits inside int32**, which
+no predicate over the *value* can recover, and closing it would break
+`filter-date-epoch-seconds-literal`.
+
+### The depth-4 argument was right for the wrong reason
+
+See the round-2 section above, now corrected: five of the eleven propagators
+are not identity transitions. The conclusion holds because those five are
+**constant** and their targets are already reachable at depth 1 — not because
+they are the identity. `values` is neither: it requires a `Map`, so it is
+**vacuous** on the sequence lattice.
+
+### Three stale numbers, in the commit whose thesis was that a header's claim is not the axis
+
+`propagation-pairs.txt` said "all 34 producers" beside a line saying 46, and
+"all 2 142 rows are depth 2" about a file with 2 898; `collection-pairs.txt`
+restored a `2 142` denominator that round 1 had deliberately removed, and still
+said "Thirteen cells move" where the file carries 46 `unstable` rows and the
+test asserts 46. The propagation twin had been updated to "Sixty move" and this
+one had not. All corrected, and the historical figure is now labelled as
+historical instead of read as current.
+
+### Counted
+
+**122 of 1326** against `10a484ee`, unchanged — no corpus entry, no baseline
+line, no behaviour. This round is entirely the record. The one number that
+moved is a claim about the previous round's mutation, which is now four tests
+rather than three, measured across the whole crate.
+
+**On the rebased branch the ratchet is `130 of 1336` (baseline: 130)**, from
+`139 of 1288` at W2b's tip. The merge of the two corpora was by `id`: the base
+is a prefix of both sides, no added id collides, and the only entries both
+sides had edited are ten whose golden is NONDETERMINISTIC — `now`, `uuid`,
+`id`, `ksuid`, `nanoId`, `randomInt`, `randomPort`, `encrypt`'s IV and two
+`fromIon` exception texts — where neither side is more correct and W2b's
+values were kept so this branch's diff carries only its own entries.
+
+Four figures in the sections above this one were **recomputed** on the merged
+tree rather than picked from a side, and the recomputation caught one of W2a's
+own: the `error-class` total read **259** where the file carried **265**, a
+stale number that survived the round whose subject was stale numbers. The
+`error-class` ∩ `baseline.txt` count is the one that proves picking a side
+would have been wrong — 25 at the base, 31 at W2b's tip, 12 at W2a's, and
+**18** merged. It is smaller than either side because W2a DELETES baseline
+lines when it banks, so the intersection is not monotone and no choice between
+two claims could have produced it.
