@@ -55,13 +55,13 @@ export interface StarRocksConfigBody {
   tlsEnabled?: boolean | null;
   /**
      * FE (`fe.conf`) override keys → merged over egret's managed base by the
-     * orchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
+     * provisioner. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
      * are rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.
      * @nullable
      */
   feConfig?: StarRocksConfigBodyFeConfig;
   /**
-     * CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.
+     * CN (`cn.conf`) override keys → rendered into a ConfigMap by the provisioner.
      * Omitted ⇒ preserved on update.
      * @nullable
      */

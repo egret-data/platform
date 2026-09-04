@@ -8,7 +8,7 @@
 
 /**
  * FE (`fe.conf`) override keys → merged over egret's managed base by the
- * orchestrator. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
+ * provisioner. egret-managed keys ([`egret_engine_mgmt_api::SR_PROTECTED_FE_KEYS`])
  * are rejected up front by [`validate_sr_fe_config`]. Omitted ⇒ preserved on update.
  * @nullable
  */

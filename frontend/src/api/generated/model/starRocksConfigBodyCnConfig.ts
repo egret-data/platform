@@ -7,7 +7,7 @@
  */
 
 /**
- * CN (`cn.conf`) override keys → rendered into a ConfigMap by the orchestrator.
+ * CN (`cn.conf`) override keys → rendered into a ConfigMap by the provisioner.
  * Omitted ⇒ preserved on update.
  * @nullable
  */
