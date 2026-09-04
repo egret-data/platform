@@ -94,7 +94,7 @@ Record in the README that these are the only two edits, and why each is needed.
 
 - [ ] **Step 2: Copy the corpus with provenance**
 
-From `../../../kestra/core/src/test/resources/flows/`, copy `valids/*.yaml` (261) and `invalids/*.yaml` (28) into `oracle-exec/corpus/`. Record in the README the source path and the checkout commit (`git -C ../../../kestra rev-parse HEAD`), so a future reader can tell which Kestra the corpus came from.
+From `../../../kestra/core/src/test/resources/flows/`, copy `valids/*.yaml` AND `valids/*.yml` (261 + 56 = **317** — the two extensions are one corpus; measuring with a `*.yaml` glob silently drops the entire retry matrix) and `invalids/*.yaml` (28) into `oracle-exec/corpus/`. Record in the README the source path and the checkout commit (`git -C ../../../kestra rev-parse HEAD`), so a future reader can tell which Kestra the corpus came from.
 
 - [ ] **Step 3: Write the harvester**
 
@@ -106,14 +106,14 @@ From `../../../kestra/core/src/test/resources/flows/`, copy `valids/*.yaml` (261
 
 - [ ] **Step 3b: Recover the inputs — the YAML alone is not the test case**
 
-**53 of the 261 `valids` declare `inputs:`.** The YAML declares that an input
+**53 of the 317 `valids` declare `inputs:`.** The YAML declares that an input
 exists; the *value* lives in the Java test beside it, e.g.
 `ParallelTest.errors()` drives `flows/valids/finally-parallel.yaml` with
 `Map.of("failed", true)`. A bare `POST /executions/{ns}/{id}` either fails or —
 worse — runs the flow's other branch and produces a golden that looks fine and
 tests nothing.
 
-For each of the 53, read the Java test that references the flow
+For each of them, read the Java test that references the flow
 (`grep -rl "<flow-name>" core/src/test/java`) and record the inputs it passes
 into `corpus.json`:
 
@@ -137,7 +137,7 @@ before writing the harvester around it).
 
 - [ ] **Step 4: Run it and write down what happened**
 
-Run the harvester over all 289 flows. Classify each into `corpus.json`:
+Run the harvester over all 345 flows. Classify each into `corpus.json`:
 
 | disposition | meaning |
 |---|---|
@@ -301,11 +301,13 @@ pub struct RetryPolicy {
     pub warning_on_retry: bool,
 }
 
-/// The artifact's `Constant` retry carries six properties; `behavior` is one of
-/// them and its variants must be MEASURED from the schema before this enum is
-/// finalised, not guessed from the name.
+/// The artifact's `Constant` retry carries six properties. The variants are
+/// MEASURED, not guessed: the eight `valids/retry-*.yml` flows Task 1 recovered
+/// spell them `RETRY_FAILED_TASK` and `CREATE_NEW_EXECUTION` on the wire, and
+/// the four `CREATE_NEW_EXECUTION` flows terminate in `RETRIED` — a state my
+/// first draft of the terminal list did not even contain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RetryBehavior { RetryFailedTask, CreateNewExecution }
+pub enum RetryBehavior { RetryFailedTask, CreateNewExecution }  // wire: RETRY_FAILED_TASK / CREATE_NEW_EXECUTION
 ```
 
 Derive `Clone, Debug, PartialEq, Eq` on `Plan`, `PlanTask`, `TaskKind` and

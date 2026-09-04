@@ -96,8 +96,10 @@ và một corpus do tôi viết chỉ chứng minh rằng *những flow tôi ngh
 — đúng luận điệu mà W2a sinh ra để phá.
 
 Kestra đã liệt kê giúp rồi. Test resources của nó chứa **346 file flow YAML**,
-trong đó `core/src/test/resources/flows` mang **261 `valids`** và **28
-`invalids`**. Đó không phải phỏng đoán của tôi về cái gì quan trọng; đó là phát
+trong đó `core/src/test/resources/flows` mang **317 `valids`** và **28
+`invalids`**. Hai đuôi file là MỘT corpus: bản trước của đoạn này ghi 261, vì
+nó được đo bằng glob `*.yaml` — cái glob đó lặng lẽ bỏ 56 file, trong đó có
+trọn ma trận hành vi retry. Đó không phải phỏng đoán của tôi về cái gì quan trọng; đó là phát
 biểu của chính dự án về việc executor của nó phải làm gì, tích luỹ suốt đời dự
 án. Phân bố trên sáu flowable của W3a: `Loop` 40 flow, `If` 24, `Sequential` 21,
 `Switch` 11, `Parallel` 10, `Dag` 3.
@@ -116,7 +118,7 @@ Hai giới hạn, nói trước thay vì phát hiện sau:
    67 557 dòng, 2 645 `@Test` chỉ riêng `core`. Phần lớn khẳng định đó là kích
    thước `taskRunList` và trạng thái từng task, thứ mà một execution đã thu về
    chứa sẵn ở dạng rộng hơn. Hai thứ chúng mang mà một lần thu trần thì không:
-   **53 trong 261 `valids` khai `inputs:`**, và GIÁ TRỊ nằm trong mã Java chứ
+   **53 trong 317 `valids` khai `inputs:`**, và GIÁ TRỊ nằm trong mã Java chứ
    không nằm trong YAML — `ParallelTest.errors()` lái `finally-parallel.yaml`
    bằng `Map.of("failed", true)`. Chạy mà không truyền input thì **không hỏng ồn
    ào**; nó chạy nhánh còn lại và sinh ra một golden trông ổn mà chẳng kiểm gì.
@@ -124,9 +126,9 @@ Hai giới hạn, nói trước thay vì phát hiện sau:
    không chạy độc lập được.
    Và flow nào được test Java lái bằng thiết lập đặc biệt — worker giả, lỗi tiêm
    vào — thì không tái hiện độc lập được.
-   **Task đầu tiên của plan là đo xem bao nhiêu trong 261 flow chạy được độc
+   **Task đầu tiên của plan là đo xem bao nhiêu trong 317 flow chạy được độc
    lập**, và con số đó là kết quả, không phải giả định.
-2. Khớp trên 261 flow vẫn không chặn được hành vi ở flow thứ 262. Ratchet chống
+2. Khớp trên 317 flow vẫn không chặn được hành vi ở flow thứ 318. Ratchet chống
    hồi quy; nó không chứng minh độ phủ. README phải nói điều đó bằng đúng giọng
    `oracle/README.md` đang dùng.
 
@@ -233,7 +235,7 @@ Kế thừa nguyên vẹn từ spec chương trình và W2:
 ## 6. Rủi ro
 
 1. **Độ phủ bị chặn bởi test suite của Kestra, không phải bởi không gian trạng
-   thái.** §3.0 thay một corpus lẽ ra do tôi chọn bằng 261+28 flow chính Kestra
+   thái.** §3.0 thay một corpus lẽ ra do tôi chọn bằng 317+28 flow chính Kestra
    duy trì — nền mạnh hơn hẳn — nhưng vẫn là một mẫu của một không gian vô hạn.
    README phải nói corpus phủ gì và, quan trọng hơn, **không** phủ gì; và con số
    "chạy được độc lập" từ task đầu tiên của plan phải được công bố, không làm tròn lên.

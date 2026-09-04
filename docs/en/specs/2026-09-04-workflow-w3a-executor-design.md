@@ -99,9 +99,12 @@ all of them" was a checkable claim. Execution interleavings are not finite, and
 a corpus I write proves only that *the flows I thought of* agree — the exact
 argument W2a was created to destroy.
 
-Kestra has already done the enumeration. Its own test resources hold **346 flow
-YAML files**, of which `core/src/test/resources/flows` carries **261 `valids`**
-and **28 `invalids`**. Those are not my guesses about what matters; they are the
+Kestra has already done the enumeration. Its own test resources hold **437 flow
+files** — 346 `.yaml` and 91 `.yml` — of which `core/src/test/resources/flows`
+carries **317 `valids`** and **28 `invalids`**. The two extensions are one
+corpus: an earlier version of this paragraph said 261, because it was measured
+with a `*.yaml` glob that silently dropped 56 files including the entire retry
+behaviour matrix. Those are not my guesses about what matters; they are the
 project's own statement of what its executor must do, accumulated over its life.
 Distribution across W3a's six flowables: `Loop` 40 flows, `If` 24, `Sequential`
 21, `Switch` 11, `Parallel` 10, `Dag` 3.
@@ -122,7 +125,7 @@ Two limits, stated rather than discovered later:
    those assertions are `taskRunList` sizes and per-task states, which a
    harvested execution captures as a superset. Two things they carry that a
    plain harvest does not:
-   **53 of the 261 `valids` declare `inputs:`**, and the VALUE lives in the Java
+   **53 of the 317 `valids` declare `inputs:`**, and the VALUE lives in the Java
    test, not the YAML — `ParallelTest.errors()` drives `finally-parallel.yaml`
    with `Map.of("failed", true)`. Running it without that input does not fail
    loudly; it runs the other branch and produces a golden that looks fine and
@@ -130,9 +133,9 @@ Two limits, stated rather than discovered later:
    not-standalone.
    And a flow its Java test drives with special setup — a mocked worker, an
    injected failure — will not reproduce standalone at all.
-   **The first task in the plan is to measure how many of the 261 run
+   **The first task in the plan is to measure how many of the 317 run
    standalone**, and that number is a result, not an assumption.
-2. Agreeing on 261 flows still does not bound behaviour on the 262nd. The
+2. Agreeing on 317 flows still does not bound behaviour on the 318th. The
    ratchet prevents regression; it does not prove coverage. The README must say
    so in the same voice `oracle/README.md` uses.
 
@@ -246,7 +249,7 @@ Inherited from the programme spec and W2, unchanged:
 ## 6. Risks
 
 1. **Coverage is bounded by Kestra's test suite, not by the state space.**
-   §3.0 replaces a corpus I would have chosen with the 261+28 Kestra itself
+   §3.0 replaces a corpus I would have chosen with the 317+28 Kestra itself
    maintains, which is a far stronger base — but it is still a sample of an
    infinite space. The README must state what the corpus covers and, more
    importantly, what it does not, and the standalone-runnable count from the
