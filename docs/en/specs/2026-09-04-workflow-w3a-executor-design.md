@@ -237,10 +237,19 @@ obvious:
   `(taskId, value, parentTaskRunId)`. The path is also closed by construction:
   `Execution.withTaskRun` is `Collections.replaceAll(...)` followed by a
   `throw`, with no append. So the plan's ruling (reproduce the semantics, not
-  the repeated element) was answering a question that did not exist. The
-  execution history through `RETRYING` is real and is reproduced; the duplicate
-  entry is not. Recorded rather than deleted, because a spike observation that
-  survived into a spec for four tasks is worth leaving visible.
+  the repeated element) was answering a question that did not exist.
+
+  **And the misreading is identifiable.** A review stood the pinned image up and
+  ran the spike's own flow at both settings: `maxAttempts: 2` gives `CREATED
+  RUNNING FAILED RETRYING RUNNING FAILED` — one cycle fewer than the history this
+  spec recorded for it. The recorded history is byte-identical to what
+  `maxAttempts: 3` produces, and to `golden.json`'s entry for `valids/retry-fail`.
+  So the spike was reading a three-attempt run's `attempts` array as repeated
+  `taskRunList` entries: **the entries were attempts.** The execution history
+  through `RETRYING` is real and is reproduced; the duplicate entry never existed.
+
+  Recorded rather than deleted, because a spike observation that reached a spec,
+  survived four tasks, and shaped a ruling is worth leaving visible.
 
 ## 5. Fidelity rules
 
