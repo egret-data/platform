@@ -25,6 +25,18 @@ task **does not reproduce** — 2050 captured execution records holding 4215
 taskruns contain not one duplicate. See *What Task 7 had to change, and what it
 banked*.
 
+**Task 7's fix round 1 answered six mutations that killed nothing**, and a
+reader should take these over the round-0 sentences they replace. Two guards
+Kestra has and this executor cannot reach — `handleEnd`'s and the retry pass's
+`isRetrying` early returns — were **deleted** rather than shipped as comments;
+one was made **unrepresentable** (a `NonZeroU32` in place of an `attempts == 0`
+check, so the mutation is unwritable rather than unkilled); three were kept and
+made reachable by tests written for them; and one is *provably* equivalent on
+this corpus and now carries the derivation that says so. The replay itself was
+killed mid-mutation once, by a `head -20` on its own output, and it was the
+harness's poison check rather than the discipline that caught the file it left
+behind.
+
 Task 6 (`loop`, `Command::SpawnExecution`) changed five, and a reader should
 take these over everything below: the feed table gained a **fourth bucket**
 (*spawner*) and moved to `565 fed / 55 spawner / 108 flowable / 112 unplanned`,
@@ -1689,7 +1701,7 @@ removes.
 **Removing is equivalent to ACCEPTING, and that is what makes it not a
 weakening.** egret's relation domain is measured, not assumed: over all
 comparable entries it produced **501 ordered pairs and zero `after`** at Task 4
-(555 after Task 6; the zero has never moved). A pair is
+(555 after Task 6, **656** after Task 7; the zero has never moved). A pair is
 dropped from the golden precisely because Kestra flipped on it between rounds,
 which over a two-valued domain means Kestra was *observed producing both
 values*. So "drop the pair" is today exactly "accept either relation Kestra was
@@ -1700,8 +1712,10 @@ because a run's left endpoint is its creation step and creation is monotonic in
 run order — so it is asserted rather than argued. Task 6's spawned executions
 were the thing named as able to break it, and they do not: a `Loop` creates no
 run for its body at all, so it adds no creation that could land out of order.
-The population is **555** after Task 6, and the assertion of zero `after` is
-unchanged.
+The population is **656** after Task 7 (555 after Task 6), and the assertion of
+zero `after` is unchanged. Task 7 adds 101 pairs and every one of them is made
+by an `errors:` run — a run that exists is in a pair with every other run of its
+execution — so the growth is a new *population*, not a new relation.
 
 **The cost, stated and demonstrated rather than implied.** On the dropped pairs
 egret may report *anything*. That is shown on `valids/parallel-nested`, a
@@ -2527,6 +2541,293 @@ They fall into three groups:
 `cargo fmt` ran after the mutation set; nothing it touched changed by more than
 whitespace.
 
+## What Task 7 had to change, and what it banked
+
+Task 7 implements `retry:` and `errors:`. It banks **16** of the 179 Task 6
+left, taking `baseline.txt` to **163** — the largest single bank since Task 3,
+and the reason is that the two subjects are one subject: `errors:` is the list a
+failure runs *instead of* `tasks:`, and a retry is the thing that decides
+whether the failure is final.
+
+| banked | what earns it |
+|---|---|
+| `valids/retry-failed-task-attempts` | `maxAttempts: 4` on the task. Four attempts, and the execution's `FAILED RETRYING RUNNING` three times over |
+| `valids/retry-failed-flow-attempts` | the same shape with the retry on the **flow** — the third source in the precedence |
+| `valids/retry-fail` | a retry that exhausts, then a flow-level `errors:`, and a second root task that is never created |
+| `valids/retry-failed` | five attempts, `maxDuration: PT15S` that never bites, then `errors:` |
+| `valids/retry-expo` | `type: exponential`, and the lower-case `PT0.25s` a case-sensitive duration parser drops silently |
+| `valids/retry-random` | `type: random`, whose delay `advance()` cannot draw and does not need to |
+| `valids/retry-flowable` | `retry:` written on a `Sequential`: the flowable gets **one** attempt, its child gets three |
+| `valids/retry-flowable-child` | the same, one level of nesting apart |
+| `valids/retry-flowable-nested-child` | two levels: `flowable` and `flowable2` both stay `RUNNING` for all three attempts |
+| `valids/errors` | flow-level `errors:` with a four-deep `Parallel` chain inside it, and an execution that ends `FAILED` although every error task SUCCEEDED |
+| `valids/change-state-errors` | a mid-list failure, an `errors:`, and the third root task never created |
+| `valids/sequential-with-global-errors` | the error runs at the root (`parent: null`) |
+| `valids/sequential-with-local-errors` | the identical flow with the identical `errors:` moved onto the inner `Sequential`: the error runs hang off **it** |
+| `valids/replay-sequential-with-error-handler` | a task-level `errors:` on a `Sequential` inside a root list that has already run one task |
+| `valids/restart_local_errors` | the same, plus a third root task that is never created because the `Sequential` ended `FAILED` |
+| `valids/restart_always_failed` | a flow-level `errors:` on a flow whose only task fails |
+
+The control was run **before any code**, in the main tree at `d8730508` with
+`git status --porcelain` empty:
+
+```text
+oracle-exec ratchet: 294 golden entries, 179 mismatching, 179 baselined, 0 broken,
+  25 ordered pair(s) removed
+```
+
+and after:
+
+```text
+oracle-exec ratchet: 294 golden entries, 163 mismatching, 163 baselined, 0 broken,
+  30 ordered pair(s) removed
+```
+
+### `timeout:` is not the executor's, and the plan's own step said it was
+
+The plan gives Task 7 "`retry`, `timeout` and `errors:`" and its Step 3 says
+"`timeout` is a deadline compared against the `now` parameter". Measured against
+the artifact, it is not one at all:
+
+- `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`
+  wraps `task.run(runContext)` in `callWithTimeout` — the **worker** enforces it;
+- `core/src/main/java/io/kestra/core/services/FlowService.java:574` emits
+  "cannot use the 'timeout' property as it's only relevant for runnable tasks"
+  for every non-`RunnableTask`, with `Pause` the single exception.
+
+So the only `timeout:` an `advance()` will ever enforce is a `Pause`'s, and
+`Pause` is W8's. `PlanTask::timeout` is still `None` and no line of Task 7
+implements a deadline. What Task 7 *does* own of the elapsed-time rules is
+`RetryPolicy::max_duration`.
+
+### The double `taskRunList` entry does not reproduce
+
+The plan's Step 2 records, from the spec, that Kestra's own record showed a
+retried task as **two `taskRunList` entries**, and asks Task 7 to determine
+before implementing whether that is a semantic fact or a serialisation artefact.
+
+**It is neither. It does not occur on this artifact at all.** Measured two ways,
+so that a capture anomaly in one could not hide it in the other:
+
+- over `traces.json`, **2050 execution records** (268 flows × 5 rounds, roots and
+  every descendant) holding **4215 taskruns**: zero have two entries with the
+  same taskrun id, and zero have two with the same
+  `(taskId, value, parentTaskRunId)`. The 4215 is the same population this file
+  quotes for the happens-before endpoint measurement, reached by a different
+  route. `no_captured_execution_has_a_duplicate_taskrun` re-derives it on every
+  run;
+- from the artifact, the path is closed by construction.
+  `ExecutorService.java:611` marks the run `RETRYING` **in place**, and
+  `ExecutionService.retryTask` (`ExecutionService.java:135`) installs the new
+  attempt through `Execution.withTaskRun`, whose body is
+  `Collections.replaceAll(newTaskRunList, findTaskRunByTaskRunId(id), taskRun)`
+  followed by `throw new IllegalStateException` when the replace finds nothing.
+  It replaces or it throws. There is no append.
+
+So egret reproducing one entry with several attempts is not a trade-off against
+Kestra's record shape — it *is* Kestra's record shape. Whatever produced the
+spec's observation was not this image's `taskRunList`.
+
+### One empty list, two answers, decided by who is asking
+
+`Execution.findTaskDependingFlowState` returns `emptyList()` for two different
+reasons and the artifact reads them **differently depending on the caller**:
+
+| caller | guard | answer for the empty list |
+|---|---|---|
+| a flowable, `FlowableUtils.resolveState` | `if (execution.hasFailedNoRetry(...))` | keep running |
+| the execution, `ExecutorService.handleEnd` | `execution.isTerminated(currentTasks)` | `0 == 0` — take a state |
+
+That single difference is the whole of why `valids/retry-failed`'s execution
+reads `CREATED RUNNING FAILED RETRYING RUNNING FAILED …`, one `FAILED` per
+attempt, while `valids/retry-flowable`'s reads `CREATED RUNNING RETRYING RUNNING
+RETRYING RUNNING FAILED` with no `FAILED` until the end. `flowable::Current` is
+that four-way distinction as a type and `sequential::drive` keys on
+`parent.is_none()` — the flow's own list — for the question they answer
+differently.
+
+The other half of the same function: **`guessFinalState` is passed `tasks`,
+never the list actually driven**, in both `resolveState` and `onEnd`. That is why
+`valids/errors`, whose two error tasks both SUCCEED, ends `FAILED`.
+
+### The retry precedence, and the flowable that is never retried
+
+Three sources, in `ExecutorService.java:576-599`'s order: the task's own
+`retry:`, else the nearest **ancestor** with one, else the flow's — and when an
+ancestor has one the flow's is **not** consulted. `retry::policy_for` is that
+precedence in one place.
+
+The pass itself is gated on `task instanceof RunnableTask<?> || task instanceof
+Subflow`, so **a flowable is never retried whatever its own `retry:` says**.
+`valids/retry-flowable` is the measurement: its `retry:` sits on a `Sequential`,
+and the `Sequential` has **one** attempt while its child has three.
+
+Kestra keeps that `Sequential` alive by a mechanism egret does not port —
+`ExecutorService.java:615-618` filters the parent's own worker result out of the
+batch whenever a child is being retried — because `hasFailedNoRetry` alone would
+have ended it (it asks only the failing task's *own* `retry:`, and the child has
+none). `flowable::current_list` asks once, with the full precedence, and reaches
+the same answer for everything in this corpus. Where the two constructions could
+differ is a retry owned by a grandparent, since Java's filter names only
+`getParentTaskRunId()`; they do not differ in fact, because the grandparent's
+state is a function of the parent's and the parent is already held — measured on
+`valids/retry-flowable-nested-child`.
+
+### `errors:` did NOT make `fail_the_rest` comparable
+
+*What Task 4 had to change* records that `fail_the_rest` — a `Parallel` failing
+its still-in-flight siblings while already-terminated ones keep their state — is
+unfalsifiable by this oracle, and the plan predicted `errors:` would change that.
+**It did not, and the reason is the corpus rather than the implementation.**
+
+The two golden shapes the rule rests on are `valids/parallel-fail-with-flowable`
+(an in-flight sibling, and **no `errors:`**) and `valids/finally-parallel` (an
+`errors:` — and a `finally:` — whose three surviving siblings had **already
+SUCCEEDED** before the failure: `p1`/`p2`/`p3` end at `01.248`–`01.261` in
+`traces.json` and the failure is at `01.297`). No corpus `Parallel` has both an
+`errors:` and a sibling still running when one branch fails, so the composition
+of the two rules is written in `parallel::drive` and exercised by nothing. And
+`valids/finally-parallel` cannot bank while `finally:` is unimplemented.
+
+What *is* comparable, and was already: the rule's **bound**. M89 deletes the
+`!is_terminal` filter — the part that says an already-finished sibling keeps its
+state — and the ratchet reports it. M98 deletes the whole body.
+
+### Task 7's mutations
+
+**Twenty-six after fix round 1**, plus three that no longer exist as mutations —
+see below. Each `-` → `+` is the literal edit, so the table can be replayed
+rather than believed. Every one was applied to a file **anchored to
+`git show HEAD:<path>`** (never to the working tree), **built first**
+(`cargo build -p egret-workflow --tests`, 0 errors asserted) and only then run
+against the **whole crate** (`cargo test -p egret-workflow --no-fail-fast`),
+never a name-filtered subset. Restore is `shutil.copyfile` (fresh mtime, so
+cargo always rebuilds), verified after each mutation and against the anchor for
+all seven files at the end. **Every count is from one replay of the final
+tree**, except M97's — see the note after the table.
+
+The harness refuses to start if any mutation's `-` text is missing from its
+file, or if any file differs from `HEAD`. That check earned its place inside
+this task: round 0's first attempt was piped into `head -20`, which exited after
+twenty lines and killed the replay with `SIGPIPE` **part-way through a
+mutation**, leaving `sequential.rs` mutated in the tree. The next invocation
+refused to run and named the file. That is the same failure Task 6 recorded, met
+again in a new disguise, and it is the guard rather than the discipline that
+caught it.
+
+| # | file | `-` | `+` | victims (replayed) |
+|---|---|---|---|---|
+| M68 | `retry.rs` | `if policy.max_attempts.is_some_and(\|max\| count >= max) {` | `if false && …` | 6 (incl. ratchet, **9 broken**) |
+| M69 | `retry.rs` | `if next.0 > origin.0.saturating_add(millis(&max)) {` | `if false && …` | 3 (incl. ratchet, 1 broken) |
+| M70 | `retry.rs` | `RetryBehavior::RetryFailedTask => (attempts, task_run.started_at()?),` | `… => (attempts, Tick(0)),` | 1 |
+| M71 | `retry.rs` | `RetryBehavior::CreateNewExecution => (1, Tick(0)),` | `… => (1, task_run.started_at()?),` | 1 |
+| M72 | `retry.rs` | `let mut parent = state.runs[run].parent;` | `let mut parent: Option<RunIx> = None;` | 2 (incl. ratchet, 1 regression) |
+| M73 | `retry.rs` | `plan.retry.as_ref()` closing `policy_for` | `None` | 3 (incl. ratchet, 1 regression) |
+| M74 | `retry.rs` | the `if !matches!(… Runnable …) { continue; }` in `scan` | *(deleted)* | 4 (incl. ratchet, 1 regression) |
+| M75 | `retry.rs` | `factor.powi(count as i32 - 1)` | `factor.powi(count as i32)` | 1 |
+| M76 | `retry.rs` | `RetryDelay::Random { min_interval, .. } => *min_interval,` | `… { max_interval, .. } => *max_interval,` | 1 |
+| M77 | `retry.rs` | `take_unit(&mut rest, ['S', 's'], &mut fields)?` | `take_unit(&mut rest, ['S', 'S'], …)?` | 4 (incl. ratchet, 1 regression) |
+| M78 | `retry.rs` | `not_before.is_some_and(\|t\| t <= now)` | `not_before.is_some()` | 4 (incl. ratchet, 1 broken) |
+| M79 | `retry.rs` | one `SetExecutionState { Running }` then the due runs | one of each, per due run | 1 |
+| M80 | `state.rs` | the `Some(a) if !a.history.last().is_some_and(…is_terminal())` arm | `if let Some(a) = r.attempts.last_mut()` | 5 (incl. ratchet, **9 regressions**) |
+| M81 | `state.rs` | `Success \| Failed \| Retried \| Killed` in `is_terminal` | `Success \| Failed \| Killed` | 2 (incl. ratchet, 4 broken) |
+| M82 | `flowable/mod.rs` | the `return Current::RetryPending` block | `let _ = will_retry;` | 3 (incl. ratchet, 7 broken) |
+| M83 | `flowable/mod.rs` | `if errors.is_empty() { Ended } else { Errors(errors) }` | `Current::Ended` | 5 (incl. ratchet, **9 regressions**) |
+| M84 | `sequential.rs` | `None => Step::Done(aggregate(state, children, parent)),` | `None => Step::Done(RunState::Success),` | 4 (incl. ratchet, **9 regressions**) |
+| M85 | `sequential.rs` | the `Current::RetryPending if is_flow` arm | *(deleted — both collapse to `Waiting`)* | **8** (incl. ratchet, 2 broken) |
+| M88 | `mod.rs` | the `if !reopened.is_empty() { return reopened; }` block | `let reopened: Vec<Command> = Vec::new();` | 7 (incl. ratchet, **16 broken**) |
+| M89 | `parallel.rs` | `.filter(\|&ix\| !is_terminal(state, ix))` in `fail_the_rest` | *(deleted)* | 5 (incl. ratchet, 5 broken) |
+| M90 | `plan.rs` | `out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;` | `let _ = &seq.errors;` | 5 (incl. ratchet, 3 regressions) |
+| M91 | `plan.rs` | `retry: super::retry::policy_of(task.retry.as_ref()),` | `retry: None,` | **10** (incl. ratchet, 8 regressions) |
+| M92 | `plan.rs` | `retry: super::retry::policy_of(flow.retry.as_ref()),` | `retry: None,` | 4 (incl. ratchet, 1 regression) |
+| M93 | `plan.rs` | the `own_errors` half of `children_of` | `let mut out: Vec<TaskIx> = Vec::new();` | **0 — and provably so; see below** |
+| M95 | `sequential.rs` | `Some(s) if s.is_terminal() => {}` in `walk` | Task 3's `if *s != Success { return Done(*s) }` | 1 |
+| M96 | `mod.rs` | `work.extend(retry::scan(plan, state, now));` | the scan's commands placed **before** the drive's | 7 (incl. ratchet, **12 broken**) |
+| M97 | `retry.rs` | `ix = state.runs[cur].parent;` in the `markParents` walk | `ix = None;` | 1 |
+| M98 | `parallel.rs` | `fail_the_rest`'s whole `doomed.sort_unstable(); …collect()` tail | `Vec::new()` | 1 |
+
+Messages worth quoting, because they are the ones a maintainer will see:
+
+- M68: `` `maxAttempts: 4` is four attempts in total, not four RETRIES: Kestra's guard is `attemptNumber() >= maxAttempts` `` — and 9 entries go `STUCK`, because a retry that never exhausts never lets its execution finish.
+- M77: `PT0.25s must parse as Java's Duration.parse reads it` — a case-sensitive seconds designator drops `valids/retry-expo`'s whole policy in silence, because a policy that cannot be read is a task that does not retry.
+- M80: ``attempt 0 must not carry the RETRYING that follows it`` — and **9 baselined entries stop matching**, which is the whole retry slice.
+- M85: ``the execution takes FAILED on every round a retry is pending`` — the largest victim count in the table, and it is one `if` about who is asking.
+- M91: ``21 corpus flows declare a readable `retry:` `` — ten victims for one field.
+
+**Three mutations exist in round 0's table and not in this one, and none was
+dropped for being inconvenient.**
+
+- **M86 and M87** neutered Kestra's two `isRetrying` guards in `advance` —
+  `handleEnd`'s early return, and the retry pass's own
+  `!executor.getExecution().getState().isRetrying()`. Both killed **nothing**
+  across the whole crate, so both guards were **deleted** rather than shipped
+  with a comment nobody could check, which is the answer
+  `parallel::drive_concurrent` already records for Kestra's "first created,
+  leave". What makes them unreachable is a property of `retry::scan`: it writes
+  `Retrying` onto the run and onto the execution in the same round, so no later
+  round can see a `Failed` run while the execution is `RETRYING`. The trigger to
+  watch for is a caller that applies a command batch **partially** — W3b's
+  message-driven driver, the same trigger the `Parallel` guard names.
+- **M94** neutered `if attempts == 0` in `next_retry_at`, and killed nothing.
+  The condition is real — with zero attempts, `count >= max_attempts` is false
+  and a `CREATE_NEW_EXECUTION` policy would schedule a retry for a run that
+  never ran — but unreachable, because `scan` only offers `Failed` runs and
+  every run this corpus can fail has started an attempt. So it is now a
+  `NonZeroU32`, and the mutation is **unwritable** rather than unkilled: there
+  is no line left to delete.
+
+**M93 has no victims and that is a measurement rather than a gap.**
+`Plan::children_of` walks `errors` because Java's
+`AbstractBranch.allChildTasks()` is `concat(tasks, errors, _finally)`, and a
+task hanging off an `errors:` inside a loop body is as absent from the parent's
+`taskRunList` as one hanging off `tasks:`. The walk is kept — it is the
+artifact's — and its cost here is derived rather than argued:
+`an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach` shows
+that **not one of the 89 loop-body tasks is reached through an `errors:` list**,
+so the two walks name the same set and the mutation is *equivalent* on this
+corpus. A mutation that cannot change the answer cannot be killed; what the test
+adds is the proof that it cannot, and the assertion that fails the day a corpus
+makes it non-zero.
+
+**M97's row is the one exception to "one replay of the final tree", and the
+reason is that round 2's formulation was not a mutation at all.** It read
+`while let Some(cur) = ix.take()`, and the loop body's very next
+`ix = state.runs[cur].parent;` overwrites whatever `take()` left — the two trees
+are identical in behaviour, which is why it reported 0 victims. It was
+reformulated as `ix = None;` and re-run alone. That cannot disturb any other
+row: a no-op mutation produces a tree byte-equivalent in behaviour to the
+unmutated one, so no other row's victim set was ever computed against anything
+but the final tree.
+
+**Seven rows do not include the ratchet, and they fall into three groups.**
+
+- **M70, M71, M75, M76, M79, M97 — rules the corpus does not reach.** The two
+  `maxDuration` origins differ only for a run whose first attempt starts late,
+  which the oracle's clock rule never produces; the exponential exponent and the
+  random bound are invisible because the trace carries no clocks; the single
+  `RUNNING` needs two retries due in one round; the `markParents` walk needs a
+  `CREATE_NEW_EXECUTION` retry on a *nested* task, and all four
+  `retry-new-execution-*` flows fail a root one. Each is held by a unit test
+  written for it, and four of those tests exist **because** the first replay
+  found the mutation unkilled.
+- **M95 — the sequential walk's failure short-circuit.** Re-adding Task 3's
+  `return Done(*s)` leaves the ratchet exactly where it is and fails only
+  `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`.
+  The two readings agree on `FAILED` — which is the only non-success terminal
+  the corpus puts mid-list — so what separates them is a `KILLED` or `RETRIED`
+  child, and `current_list` switching the list out is what ends the sequence
+  either way.
+- **M98 — `fail_the_rest`'s body.** Deleting it outright is caught by **one**
+  unit test, `one_invalid_sibling_fails_every_sibling`, and by nothing else.
+  That is *What Task 4 had to change* confirmed rather than closed: the plan
+  predicted `errors:` would make this rule comparable and it did not, for the
+  reason recorded above — no corpus `Parallel` has both an `errors:` and a
+  sibling still in flight. Its **bound** is comparable (M89 moves the ratchet);
+  its **body** is not.
+
+`cargo fmt` ran after the mutation set; nothing it touched changed by more than
+whitespace.
+
 ## States and constructs no W3a task claims
 
 The plan carries this table too (`docs/en/plans/2026-09-04-workflow-w3a-executor.md`,
@@ -2542,6 +2843,9 @@ owner is how a suppression list starts.
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
+| `WARNING` | 10 golden `runs` entries, including `valids/retry-success` and `valids/task-allow-failure-runnable` | `AllowFailure` and `retry.warningOnRetry` | **unclaimed — and this table's state list said Task 7 owned it.** Task 7 reads `warningOnRetry` into `RetryPolicy` and does nothing with it, because `RunState` cannot hold `WARNING`; `AllowFailure` is planned opaque |
+| `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
+| the replay a `CREATE_NEW_EXECUTION` retry starts | 4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned` | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6/W3b, with `Subflow` and the `Loop` iteration** — it is a third kind of sub-execution and `ExecutionState` has no field for any of them |
 
 `Loop` left this table in Task 6's commit and one row was added in the same one.
 **That row is not runs that arrived at Task 6, and Task 6's first draft of this
@@ -2634,17 +2938,18 @@ wrote. Beyond that, the specific holes, each with its count:
   produces a relation for every pair, the golden does not, and comparing an
   assertion against an absence was costing `valids/parallel-nested` a bank on 3
   pairs the golden itself declines to state. Because egret's relation domain is
-  measured at `{before, overlapping}` (**555** pairs after Task 6, 557 after
-  Task 5, zero `after`), a dropped pair
+  measured at `{before, overlapping}` (**656** pairs after Task 7, 555 after
+  Task 6, 557 after Task 5, zero `after`), a dropped pair
   is one Kestra was seen producing *both* values for, so dropping it is exactly
   accepting either. Derived and guarded by three tests — see *What Task 4 had to
   change, and what it banked*. Driven through the real `advance()` the
-  projection removes **25 pairs across 7 entries** at Task 6 and at Task 5 (22
-  across 6 at Task 4) — unchanged, because a `Loop` creates no run and so
-  produces no new pair. The two pairs lost from 557 are `valids/loop-empty`'s
-  and `valids/loop-null`'s, both banked: `loop-null`'s `Loop` now FAILS at
-  `CREATED`, so its second root task is never created and the flow has one run
-  and no pair at all.
+  projection removes **30 pairs across 9 entries** at Task 7 (25 across 7 at
+  Tasks 5 and 6, 22 across 6 at Task 4). Task 7's 101 new pairs are all made by
+  `errors:` runs — a run that exists is in a pair with every other run of its
+  execution — and its two new entries are `valids/disable-error` (3) and
+  `valids/exit-killed` (2), which reach an `errors:` list for the first time and
+  whose run sets differ from Kestra's for reasons that are not Task 7's
+  (`disabled:`, which belongs to no package in the programme spec, and `Exit`).
 - **A kept `before` is not always reachable by a clockless implementation.
   Task 4 found the first; Task 5 found three more, on a second entry.** The
   relation egret produces comes from
@@ -2686,15 +2991,40 @@ wrote. Beyond that, the specific holes, each with its count:
   for its body at all** — every iteration is a separate sub-execution — so it
   adds no run whose creation could land in the same round as a termination
   Kestra had already seen. The order test says the same in the other direction:
-  its removal map is unchanged at 25 pairs across the same 7 entries. Task 7 is
-  the next candidate.
+  its removal map is unchanged at 25 pairs across the same 7 entries.
+
+  **Task 7 was named as the next candidate and did not answer it**, which is
+  recorded rather than glossed. It banked 16 entries and added 101 ordered pairs
+  without a single one of them costing a bank — every entry it set out to bank
+  banked whole — but "no entry is blocked *only* on an `order` pair" is a claim
+  about the 163 that remain, and nobody has re-derived that population since
+  Task 4 named `valids/dag` and Task 5 named `valids/if`. Whoever needs the
+  answer should derive it rather than read this bullet's silence as one.
 - **Nothing keyed on elapsed time is reachable, and there were TWO independent
   causes. Task 3 closed the second; the first stands.**
-  1. *The environment, which stands.* `now` moves only to a `not_before`
-     something is already waiting for, so no tier advances the clock because a
-     task took a while. Tasks 5 and 7 could fix that inside this oracle. Until
-     one does, an implementation whose `maxDuration` is correct and one whose
-     `maxDuration` is ignored produce the same trace here.
+  1. *The environment, which stands, and Task 7 measured what it costs.* `now`
+     moves only to a `not_before` something is already waiting for, so no tier
+     advances the clock because a task took a while. Tasks 5 and 7 could have
+     fixed that inside this oracle; neither did.
+
+     The cost is now a number rather than a worry. **`valids/retry-failed-flow-duration`
+     is bounded by `maxDuration: PT7S` and `interval: PT2S` with no
+     `maxAttempts` at all.** Kestra ran **three** attempts; egret runs
+     **four** — 0, 2000, 4000, 6000, and the fifth would be 8000, which is after
+     0 + 7000. Every attempt here costs zero elapsed time, so more of them fit
+     inside the same window, and the entry stays baselined for that and for
+     nothing else. `a_retry_is_bounded_by_max_attempts_and_separately_by_max_duration`
+     asserts the four rather than the three, with the reason on the assertion:
+     an implementation cannot be judged against a number the instrument cannot
+     produce. Its sibling `valids/retry-failed-task-duration` was already
+     excluded from the golden for being nondeterministic across five harvests
+     — three attempts in some rounds, four in others — which is the same
+     mechanism seen from Kestra's side.
+
+     So an implementation whose `maxDuration` is correct and one whose
+     `maxDuration` is ignored still produce the same *banked* traces here. What
+     separates them is `a_retry_is_bounded_by…`, which is a unit test, and the
+     two mutations that delete each bound.
   2. *The state type — **closed**.* `ExecutionState` and `TaskRun` carried no
      instant at all except `not_before`, so `advance()` had nothing to subtract
      `now` from. Task 3 added `Attempt::started_at`, written by
@@ -2715,7 +3045,10 @@ wrote. Beyond that, the specific holes, each with its count:
   reach are `RetryPolicy::max_duration`, `WaitFor`'s `maxDuration`, a `Pause`
   delay and a `Pause`'s own `timeout` — not `timeout:` in general.
 - **No banked entry takes an `else` branch, so the ratchet cannot see a
-  predicate that is wrong in the truthy direction** (round 1, measured). Of the
+  predicate that is wrong in the truthy direction** (round 1, measured; still
+  true after Task 7, and checked rather than assumed — **not one of Task 7's 16
+  entries contains an `If` or a `Switch` at all**, so the population this bullet
+  is about did not move). Of the
   eight entries Task 5 banks, no `else` branch and no `defaults` list is ever
   driven: `valids/switch` matches its `FIRST` case, `valids/fail-on-switch`
   matches nothing and has no `defaults`, two entries fail at the render before
@@ -2797,23 +3130,59 @@ wrote. Beyond that, the specific holes, each with its count:
   quoted **182**, which was the count from *before* the `defaults:` fix banked
   the eighth entry: the ratchet's count was read and the binary was not.
 
-- **`PlanTask::retry`, `PlanTask::timeout` and `PlanTask::errors` are dead
-  fields today**, and for three different reasons. `build_plan` leaves the first
-  two `None` because Kestra spells both as `Property<Duration>` — unrendered
-  source — and rendering one needs a `RenderContext` a pure builder must not
-  acquire; Task 7 owns where that render happens. `errors` is empty for a
-  different and worse reason: W1's `models::Sequential` and every other
-  `AbstractBranch` port in `models/task.rs` **drop** the Java class's
-  `errors`/`finally` fields, so there is nothing in the parsed flow to read them
-  from. Task 7 has to widen the model before it can implement `errors:` at all.
+- **`PlanTask::timeout` is a dead field and will stay one; the other two are
+  not, and the reason the first pair was ever grouped was wrong.** This bullet
+  used to say `build_plan` left `retry` and `timeout` `None` "because Kestra
+  spells both as `Property<Duration>`". Measured at the artifact, that is true
+  of exactly one of them: `Task.java:59` is `protected Property<Duration>
+  timeout;` and `Task.java:56` is `protected AbstractRetry retry;`, a plain
+  POJO whose every field (`maxDuration`, `maxAttempts`, `Constant.interval`,
+  `Exponential.interval`/`maxInterval`, `Random.minInterval`/`maxInterval`) is a
+  plain `java.time.Duration` or `Integer`. **Kestra never renders a retry**, so
+  a pure builder can read one, and Task 7's does. The `Property` wrapper around
+  those durations is W1's own, added where Kestra has none.
+
+  `timeout:` stays dead for a *different* reason, and it is not a reason a later
+  W3 task can close: the **worker** enforces it
+  (`WorkerTaskCallable.java:58` wraps `task.run(runContext)` in
+  `callWithTimeout`), and Kestra's own validator refuses it on every
+  non-`RunnableTask` (`FlowService.java:574`), with `Pause` the single
+  exception. W4 owns it. The plan's Task 7 step said "`timeout` is a deadline
+  compared against the `now` parameter"; it is not, and no line of Task 7
+  implements one.
+
+  `errors` was a model gap and is closed: W1's `Sequential`, `Parallel`, `If`,
+  `Switch` and `Dag` now all carry `errors` (Java declares it on all five —
+  `AbstractBranch`, `If.java:111`, `Switch.java:112`, `Dag.java:106`), and
+  `build_plan` flattens it. **`finally` deliberately does not follow**: no W3a
+  task implements it, and a field nothing reads is a second dead field rather
+  than a smaller version of the same fix. That costs the whole `finally-*`
+  family — `finally-parallel`, `finally-dag`, `finally-sequential`,
+  `finally-loop`, `finally-flow` and their variants, all still baselined — and
+  two of them, `valids/finally-dag` and `valids/finally-parallel`, are the ONLY
+  corpus flows that put an `errors:` on a `Dag` or a `Parallel`, so those two
+  arms of the implementation are reached by no comparable entry at all.
+  `every_corpus_errors_list_is_on_a_flowable_egret_plans` derives that
+  distribution: 17 flows write a flow-level `errors:` and 9 tasks write one, of
+  which 7 are on a `Sequential`, 1 on a `Parallel` and 1 on a `Dag`; `If` and
+  `Switch` carry the field because Java does and no corpus flow writes one
+  there.
 - **Sub-executions are ASKED FOR and still not produced, and Task 6 did not
   close this.** `Command::SpawnExecution` is emitted; nothing executes one until
   W3b/W6, and `ExecutionState` holds no field for a sub-execution. So egret's
   side of `spawned` is still **always empty** and every one of the **41** golden
-  entries that carries a sub-execution mismatches on that field alone. **33 of
+  entries that carries a sub-execution mismatches on that field alone. **38 of
   the 41 now differ on nothing else** — they reproduce every run, parent,
   history, attempt and kept ordered pair Kestra recorded, and are baselined
-  purely for a field egret does not fill.
+  purely for a field egret does not fill. It was 33 at Task 6; the five Task 7
+  adds are the four `retry-new-execution-*` entries and
+  `valids/retry-flowable-parallel`. A `CREATE_NEW_EXECUTION` retry ends its
+  execution `RETRIED` and Kestra then **replays the whole flow as a different
+  execution**, which is a sub-execution of a second kind: it carries
+  `parent_run: null` rather than a loop run, and nothing in `Command` can ask
+  for one. The remaining three are `valids/disable-flowable` (`disabled:`,
+  unclaimed) and `valids/loop-outputs-auto` / `valids/loop-values-from-uri`
+  (the ION-file `values:` shape).
 
   Those entries look compared and are not.
   `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` is the
