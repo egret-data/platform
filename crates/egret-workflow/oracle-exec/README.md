@@ -11,6 +11,20 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+Task 7 (`retry`, `errors:`) changed six, and a reader should take these over
+everything below and over Task 6's note: `PlanTask::retry` and `PlanTask::errors`
+are **no longer dead fields** — Task 3's stated reason for the first was wrong
+about Kestra and is corrected in place; **`timeout:` is not implemented and never
+will be by `advance()`**, because the artifact enforces it in the *worker*; the
+feed table moved again, to `575 fed / 55 spawner / 108 flowable / 102 unplanned`;
+`RunState` gained `RETRIED` and now holds **8** of the golden's 13 states; the
+sub-execution hole is **38 of 41**, not 33, because the four
+`retry-new-execution-*` entries now reproduce everything except the replacement
+execution; and the double `taskRunList` entry the spec recorded for a retried
+task **does not reproduce** — 2050 captured execution records holding 4215
+taskruns contain not one duplicate. See *What Task 7 had to change, and what it
+banked*.
+
 Task 6 (`loop`, `Command::SpawnExecution`) changed five, and a reader should
 take these over everything below: the feed table gained a **fourth bucket**
 (*spawner*) and moved to `565 fed / 55 spawner / 108 flowable / 112 unplanned`,
@@ -1012,10 +1026,10 @@ is in exactly one bucket:
 
 | bucket | count | what it is |
 |---|---|---|
-| **fed** | 565 | the run's task is a `Runnable` in the plan. For the **376** at top level its terminal is supplied and is not compared; the other **189** are inside a sub-execution egret never creates, so nothing is supplied to them and nothing is compared about them either |
+| **fed** | 575 | the run's task is a `Runnable` in the plan. For the **386** at top level its terminal is supplied and is not compared; the other **189** are inside a sub-execution egret never creates, so nothing is supplied to them and nothing is compared about them either |
 | **spawner** | 55 | the run's task is a `Loop`. For the **40** at top level, planned and driven here with its terminal **fed anyway** — it is a function of sub-executions this oracle does not run; the other **15** are inside a sub-execution, as above. Task 6's, and the price of the sub-execution hole |
 | **flowable** | 108 | the run's task is one the executor drives **and decides for** itself (`Sequential`, `Parallel`, `Dag`, `If`, `Switch`), so its state is compared |
-| **unplanned** | 112 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
+| **unplanned** | 102 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
 | **TOTAL** | **840** | |
 
 Task 3's figures were `390 / 23 / 427`; Task 4 moved 63 runs out of *unplanned*,
@@ -1042,6 +1056,16 @@ is a classification of Kestra's runs by egret's plan, not a claim about
 coverage. That was always true of it; Task 6 is the first task large enough to
 make it matter, and the pair `(189, 15)` is asserted so the descriptions stay
 true of every run they cover.
+
+**Task 7 moves exactly 10**, `unplanned` 112 → 102 and `fed` 565 → 575, and
+every one of them is the run of a task written inside a **task-level `errors:`**
+list — which had no `PlanTask` at all until Task 7 widened W1's model. The flow's
+own `errors:` is not among them: `Plan::errors` has been populated since Task 3.
+The over-feed does **not** move with them (79, unchanged): an `errors:` task is a
+`Runnable` that carries `SUBMITTED`, so it belongs in `fed` on both readings.
+`planning_the_loop_removed_forty_spurious_submitted_emissions` derives that 10
+rather than folding it into its constants, so its reproduction of Task 5's four
+committed figures is still a reproduction and not an agreement with itself.
 
 These five move as Tasks 7-8 teach `build_plan` more, which is why they are
 asserted in the test rather than only printed here: a task that changes the
@@ -1364,35 +1388,45 @@ execution histories and **never** in a run history. Going the other way,
 `SKIPPED` and `SUBMITTED` appear only in run histories.
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
-unrepresentable. **Task 3 added `SUBMITTED` and no other**, so the enum has seven
-and **6 of the 13 remain unrepresentable**: `PAUSED`, `RESTARTED`, `WARNING`,
-`SKIPPED`, `RETRIED`, `CANCELLED`. Each is recorded here rather than worked
+unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`**, so the
+enum has eight and **5 of the 13 remain unrepresentable**: `PAUSED`, `RESTARTED`,
+`WARNING`, `SKIPPED`, `CANCELLED`. Each is recorded here rather than worked
 around in the normaliser, because a normaliser that quietly maps an
 unrepresentable state onto a representable one is a normaliser that hides the gap
 it was built to expose.
 
-**What the one addition bought, and what the six still cost.** Of the 266 `runs`
-entries, **35** use only the six members the plan drafted, and **229** use only
-the seven — so `SUBMITTED` alone is what moved the reachable set by 194 entries,
+**What each addition bought, and what the five still cost.** Of the 266 `runs`
+entries, **35** use only the six members the plan drafted, **229** use only the
+seven and **233** use only the eight — so `SUBMITTED` alone is what moved the
+reachable set by 194 entries and `RETRIED` moves it by 4,
 and it was the single cheapest thing any task could do to this oracle. It is
 also not optional for Task 3's own slice: `SUBMITTED` is in 580 of the golden's
 840 run histories and on every task the worker ran, so a sequential flow of
 `Return` tasks cannot match without it.
 
-The other six, with the number of `runs` entries whose trace uses each and the
+**And `RETRIED`'s 4 buy no bank at all**, which is worth saying beside the
+number: the four entries it covers are exactly the `retry-new-execution-*`
+flows, and every one of them carries a **replacement execution** in `spawned`
+that egret cannot create. The state was still worth adding — without it those
+four are `FAILED` where Kestra recorded `RETRIED`, which is a wrong answer rather
+than a missing one — but it moved them from *wrong on several fields* to *right
+on everything except the field nothing produces*. See the sub-execution hole.
+
+The other five, with the number of `runs` entries whose trace uses each and the
 task that owns it:
 
 | state | `runs` entries | owner |
 |---|---|---|
 | `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
 | `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
-| `WARNING` | 10 | Task 7 (`AllowFailure`, `warningOnRetry`) |
+| `WARNING` | 10 | `AllowFailure` and `warningOnRetry` — **not Task 7's**, and this row said it was. `warningOnRetry` turns a retried task's eventual SUCCESS into WARNING, so `valids/retry-success` and `valids/task-allow-failure-runnable` need it; `AllowFailure` is planned opaque and belongs to W8. Unclaimed |
 | `SKIPPED` | 4 | `disabled: true`, which no W3a task claims |
-| `RETRIED` | 4 | Task 7 (`CREATE_NEW_EXECUTION`) |
 | `CANCELLED` | 3 | flow concurrency, which no W3a task claims |
 
 A later task adding one of these adds it here too; the counts are what
-`normalise.py` measured over `golden.json`.
+`tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`
+derives over `golden.json` on every run — they were prose beside a derivation
+until Task 7 had to move them.
 
 ## What Task 2 had to add to the interfaces
 

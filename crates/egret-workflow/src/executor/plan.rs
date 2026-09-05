@@ -12,7 +12,11 @@ use crate::models::{Task, TaskKind as ModelKind};
 pub type TaskIx = usize;
 
 /// The published, reference-resolved flow. Built once, never mutated.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+// No `Eq`: `RetryDelay::Exponential::delay_factor` is Kestra's own `Double`
+// (`Exponential.java`'s `delayFactor`), and a float has no total equality. It
+// reaches here through `PlanTask::retry`, so the whole chain is `PartialEq`
+// only -- which is all any caller uses.
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct Plan {
     /// Flattened; children are addressed by index. Pre-order, so a parent
     /// always precedes its children — an ordering convenience for a reader,
@@ -22,6 +26,14 @@ pub struct Plan {
     pub roots: Vec<TaskIx>,
     /// The flow's top-level `errors:`.
     pub errors: Vec<TaskIx>,
+    /// The flow's own `retry:`, `Flow.java`'s `AbstractRetry retry`.
+    ///
+    /// It is the **last** of Kestra's three sources, consulted only for a run
+    /// whose task has no `retry:` and none of whose ancestors has one --
+    /// `ExecutorService.java:576-599`. See
+    /// [`retry::policy_for`](super::retry::policy_for), which is that
+    /// precedence in one place.
+    pub retry: Option<RetryPolicy>,
 }
 
 impl Plan {
@@ -86,7 +98,23 @@ impl Plan {
     /// One place, so a new [`TaskKind`] cannot be added to the plan and left
     /// out of the walk — which is how `is_loop_body` would quietly start
     /// answering `false` for a body nested in whatever the new kind is.
+    ///
+    /// **`errors` is part of it, and that is Kestra's own walk**:
+    /// `AbstractBranch.allChildTasks()` is `ListUtils.concat(tasks, errors,
+    /// _finally)`. Task 7 is the first task for which the list is ever
+    /// non-empty, and including it moves the number
+    /// `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount`
+    /// derives — which is why that test derives it rather than remembering it.
     fn children_of(&self, ix: TaskIx) -> Vec<TaskIx> {
+        let own_errors = self.tasks[ix].errors.iter().copied();
+        let mut out: Vec<TaskIx> = own_errors.collect();
+        out.extend(self.direct_task_children(ix));
+        out
+    }
+
+    /// [`Plan::children_of`] without the `errors:` list — the `tasks:` half
+    /// alone.
+    fn direct_task_children(&self, ix: TaskIx) -> Vec<TaskIx> {
         match &self.tasks[ix].kind {
             TaskKind::Runnable { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
@@ -104,20 +132,41 @@ impl Plan {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlanTask {
     /// The author's task id, as written.
     pub id: String,
     pub kind: TaskKind,
-    /// **Always `None` from Task 3's [`build_plan`], and the reason is not
-    /// laziness.** Kestra's `retry.interval`/`maxDuration` are
-    /// `Property<Duration>` — unrendered source text — and rendering one needs
-    /// a `RenderContext` this pure builder does not have and must not acquire.
-    /// Task 7 owns `retry:` and owns deciding where that render happens.
+    /// This task's own `retry:`.
+    ///
+    /// **Task 3's reason for leaving this `None` was wrong, measured.** It
+    /// said "Kestra's `retry.interval`/`maxDuration` are `Property<Duration>`
+    /// — unrendered source text — and rendering one needs a `RenderContext`
+    /// this pure builder does not have". In the artifact they are not:
+    /// `core/src/main/java/io/kestra/core/models/tasks/Task.java:56` is
+    /// `protected AbstractRetry retry;` — a plain POJO — and every field
+    /// inside it (`AbstractRetry.maxDuration`, `AbstractRetry.maxAttempts`,
+    /// `Constant.interval`, `Exponential.interval`/`maxInterval`,
+    /// `Random.minInterval`/`maxInterval`) is a plain `java.time.Duration` or
+    /// `Integer`. Kestra never renders a retry. The `Property` wrapper is
+    /// **W1's own**, added by `models::RetryCommon` where Kestra has none —
+    /// line 59 of the same Java file, `protected Property<Duration> timeout;`,
+    /// is what that sentence describes, and `timeout` is a different field
+    /// with a different owner (see [`PlanTask::timeout`]).
+    ///
+    /// So a pure builder can read a retry after all, and does: the source text
+    /// of each duration is parsed as an ISO-8601 literal by
+    /// [`retry::parse_duration`](super::retry::parse_duration). A field whose
+    /// source is not a literal leaves the whole policy `None` — measured
+    /// unreachable from this corpus by
+    /// `every_corpus_retry_is_written_in_literals`.
     pub retry: Option<RetryPolicy>,
-    /// **Always `None` from Task 3's [`build_plan`]**, for the same
-    /// `Property<Duration>` reason as [`PlanTask::retry`] — and for a second
-    /// one, measured: in this artifact `timeout:` is enforced by the **worker**
+    /// **Still always `None`, and after Task 7 there is only one reason
+    /// left.** The `Property<Duration>` half of this comment is the only place
+    /// it is true — `Task.java:59` really is `protected Property<Duration>
+    /// timeout;` — but it is not the reason, because W3a never enforces this
+    /// field at all. Measured: in this artifact `timeout:` is enforced by the
+    /// **worker**
     /// (`worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`
     /// wraps `task.run` in `callWithTimeout`), not by the executor. Kestra's own
     /// validator says so out loud —
@@ -129,12 +178,22 @@ pub struct PlanTask {
     pub timeout: Option<Duration>,
     /// This task's own `errors:`.
     ///
-    /// **Always empty from Task 3's [`build_plan`], and this one is a model
-    /// gap, not a decision.** W1's `models::Sequential` (and every other
-    /// `AbstractBranch` port in `models/task.rs`) drops the Java class's
-    /// `errors`/`finally` fields — "W1 is the model, not the executor" — so
-    /// there is nothing in the parsed flow to read them from. Task 7 owns
-    /// `errors:` and has to widen `models::Sequential` first.
+    /// **Populated from Task 7, which had to widen W1's model first.** Task 3
+    /// recorded this as a model gap rather than a decision: `models::Sequential`
+    /// and `models::Parallel` dropped the Java class's `errors`/`finally`
+    /// fields, so there was nothing in the parsed flow to read. Task 7 added
+    /// `errors` to both (and only those two — the other `AbstractBranch` ports
+    /// stay opaque `Runnable`s, so a field on them would be unreadable by
+    /// construction) and left `finally` out, because no W3a task implements it
+    /// and a second dead field is not a smaller version of the same fix.
+    ///
+    /// Empty means Kestra's `errors: null`, and the two are not distinguishable
+    /// here for the same reason `Switch::default` records: W1's field is a bare
+    /// `Vec<Task>`. Kestra *can* tell them apart —
+    /// `findTaskDependingFlowState` branches on `resolvedErrors == null` — but
+    /// only where `finally` is also present, which W3a does not implement, so
+    /// the two spellings reach the same answer everywhere this executor can
+    /// look.
     pub errors: Vec<TaskIx>,
 }
 
@@ -281,15 +340,72 @@ pub struct DagNode {
     pub depends_on: Vec<TaskIx>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A task's, an ancestor's or the flow's `retry:`, as far as a pure builder
+/// can read it — which, measured, is all of it. See [`PlanTask::retry`].
+///
+/// **`max_attempts` is `Option<u32>` and Task 3's draft had a bare `u32`.**
+/// `AbstractRetry.maxAttempts` is a nullable `Integer` and its absence is not
+/// "zero": `TaskRun.nextRetryDate` guards with `retry.getMaxAttempts() != null
+/// && this.attemptNumber() >= retry.getMaxAttempts()`, so an absent
+/// `maxAttempts` means *no attempt cap at all* and the retry is bounded only by
+/// `maxDuration`. Two corpus flows are written that way —
+/// `valids/retry-failed-flow-duration` and `valids/retry-failed-task-duration`
+/// — and a `0` default would have stopped both before their first retry.
+///
+/// **`interval` became [`RetryDelay`] for the same class of reason.** Only
+/// `constant` has an `interval`; `exponential` has `interval`/`maxInterval`/
+/// `delayFactor` and `random` has `minInterval`/`maxInterval`, and the corpus
+/// uses all three (`valids/retry-expo`, `valids/retry-random`). Flattening
+/// them onto one `Duration` would have made two of the three unrepresentable.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RetryPolicy {
-    /// Kestra spells it `maxAttempts`, measured.
-    pub max_attempts: u32,
-    /// A span, not a clock read.
-    pub interval: Duration,
+    /// Kestra spells it `maxAttempts`, measured. `None` is Kestra's own
+    /// `null` — no cap.
+    pub max_attempts: Option<u32>,
+    /// How long to wait before the next attempt. A span, not a clock read.
+    pub delay: RetryDelay,
     pub max_duration: Option<Duration>,
     pub behavior: RetryBehavior,
+    /// `AbstractRetry.warningOnRetry`, default `false`. **Read by nothing in
+    /// W3a and that is stated rather than hidden**: it turns a retried task's
+    /// eventual success into `WARNING`, which [`RunState`](super::RunState)
+    /// cannot hold — `valids/retry-success` and
+    /// `valids/task-allow-failure-runnable` are the two entries that need it
+    /// and both stay baselined for that reason.
     pub warning_on_retry: bool,
+}
+
+/// `AbstractRetry`'s three `@JsonSubTypes`, reduced to the one method
+/// `advance` calls: `nextRetryDate(attemptCount, lastAttempt)`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RetryDelay {
+    /// `Constant.java:38` — `lastAttempt.plus(interval)`, ignoring the count.
+    Constant { interval: Duration },
+    /// `Exponential.java:51` — `interval * delayFactor^(attemptCount - 1)`,
+    /// capped at `maxInterval`. `delay_factor` is `None` for Kestra's own
+    /// `delayFactor == null ? 2d : delayFactor`.
+    Exponential {
+        interval: Duration,
+        max_interval: Duration,
+        delay_factor: Option<f64>,
+    },
+    /// `Random.java:42` — `random.nextLong(minInterval, maxInterval)`.
+    ///
+    /// **`advance` is pure and takes the lower bound**, which is a divergence
+    /// and is recorded as one. Nothing this oracle compares can see it: the
+    /// normalised trace carries no clock, the delay reaches only
+    /// [`Command::ScheduleRetry`](super::Command)'s `not_before`, and the
+    /// oracle's own tier 4 jumps `now` to whatever that is. What a wrong value
+    /// *could* change is how many attempts fit inside a `maxDuration`, so the
+    /// choice is not free in general — `valids/retry-random` is bounded by
+    /// `maxAttempts: 3` with `maxDuration: PT15S` against a worst case of
+    /// 3 × 0.5 s, so it cannot be reached there.
+    /// `a_random_retry_delay_is_inside_kestras_own_bounds` pins the bounds so a
+    /// later task that wants a real RNG has the assertion already written.
+    Random {
+        min_interval: Duration,
+        max_interval: Duration,
+    },
 }
 
 /// Wire spellings `RETRY_FAILED_TASK` / `CREATE_NEW_EXECUTION`, measured from
@@ -396,6 +512,7 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
         tasks,
         roots,
         errors,
+        retry: super::retry::policy_of(flow.retry.as_ref()),
     })
 }
 
@@ -430,7 +547,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         kind: TaskKind::Runnable {
             type_id: task.r#type.clone(),
         },
-        retry: None,
+        retry: super::retry::policy_of(task.retry.as_ref()),
         timeout: None,
         errors: Vec::new(),
     });
@@ -440,12 +557,17 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
     // other, but matching on the parsed variant alone would also catch a
     // future model change that maps a second type onto it.
     match (&task.kind, task.r#type.as_str()) {
+        // `errors` is flattened AFTER `tasks` for both, so `out` stays
+        // pre-order and the error subtree sits behind the task subtree it
+        // handles -- which is also the order Kestra creates their runs in.
         (ModelKind::Sequential(seq), SEQUENTIAL_TYPE) => {
             let children = flatten_list(out, &seq.tasks, depth + 1)?;
+            out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;
             out[ix].kind = TaskKind::Sequential { tasks: children };
         }
         (ModelKind::Parallel(par), PARALLEL_TYPE) => {
             let children = flatten_list(out, &par.tasks, depth + 1)?;
+            out[ix].errors = flatten_list(out, &par.errors, depth + 1)?;
             out[ix].kind = TaskKind::Parallel {
                 tasks: children,
                 concurrency: literal_concurrency(par.concurrent.as_ref()),
@@ -464,6 +586,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             })?;
             let then_ = flatten_list(out, &cond.then, depth + 1)?;
             let else_ = flatten_list(out, &cond.r#else, depth + 1)?;
+            out[ix].errors = flatten_list(out, &cond.errors, depth + 1)?;
             out[ix].kind = TaskKind::If {
                 condition,
                 then_,
@@ -485,6 +608,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 cases.push((key.clone(), flatten_list(out, tasks, depth + 1)?));
             }
             let default = flatten_list(out, &sw.defaults, depth + 1)?;
+            out[ix].errors = flatten_list(out, &sw.errors, depth + 1)?;
             out[ix].kind = TaskKind::Switch {
                 value,
                 cases,
@@ -530,6 +654,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             out[ix].kind = TaskKind::Dag {
                 nodes: flatten_dag(out, &task.id, &nodes, depth + 1)?,
             };
+            out[ix].errors = flatten_list(out, &dag.errors, depth + 1)?;
         }
         _ => {}
     }

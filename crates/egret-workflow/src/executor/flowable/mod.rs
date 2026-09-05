@@ -41,6 +41,124 @@ pub(crate) enum Step {
     Done(RunState),
 }
 
+/// Which of a flowable's two lists is driven right now — Kestra's
+/// [`Execution.findTaskDependingFlowState`], with `finally` left out because
+/// no W3a task implements it.
+///
+/// Java returns a `List<ResolvedTask>` and overloads the empty one with two
+/// different meanings, which is what this enum separates:
+///
+/// | Java | here | why they differ |
+/// |---|---|---|
+/// | `resolvedTasks` | [`Current::Tasks`] | nothing has failed yet |
+/// | `resolvedErrors` | [`Current::Errors`] | something failed for good and there is an `errors:` |
+/// | `emptyList()` from the retry branch | [`Current::RetryPending`] | a failure that will be retried |
+/// | `emptyList()` from the no-errors branch | [`Current::Ended`] | a failure for good with no `errors:` |
+///
+/// The two empties are not interchangeable and the artifact proves it twice
+/// over. `FlowableUtils.resolveState`'s empty arm returns a state **only** if
+/// `hasFailedNoRetry`, so a flowable whose child is about to be retried keeps
+/// running — `valids/retry-flowable`'s `Sequential` stays `RUNNING` across all
+/// three of its child's attempts and only then ends `FAILED`. But
+/// `ExecutorService.handleEnd`'s `execution.isTerminated(currentTasks)` is
+/// `0 == 0` for the *same* empty list, so the **execution** takes its state on
+/// every one of those rounds — which is where `valids/retry-failed`'s
+/// `CREATED RUNNING FAILED RETRYING RUNNING FAILED …` comes from. One empty
+/// list, two answers, decided by who is asking.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Current<'a> {
+    Tasks(&'a [TaskIx]),
+    Errors(&'a [TaskIx]),
+    RetryPending,
+    Ended,
+}
+
+/// [`Current`], for one list and its `errors:`.
+///
+/// # "will be retried" is asked with the FULL precedence, and Kestra asks it
+/// two different ways
+///
+/// Java's `hasFailedNoRetry` calls `taskRun.shouldBeRetried(resolvedTask
+/// .getTask().getRetry())` — the failing task's **own** `retry:` and nothing
+/// else. That alone would end `valids/retry-flowable`'s `Sequential` on its
+/// child's first failure, because the child has no `retry:` of its own; the
+/// retry lives on the `Sequential`. Kestra keeps the `Sequential` alive by a
+/// *second*, unrelated mechanism — `ExecutorService.java:615-618` filters the
+/// parent's own worker result out of the batch whenever a child is being
+/// retried — and the measured result is that the `Sequential` stays `RUNNING`.
+///
+/// This asks once, with [`retry::policy_for`](crate::executor::retry::policy_for)'s
+/// full task → ancestor → flow precedence, which reaches the same answer for
+/// everything in this corpus without the second mechanism. Where the two
+/// constructions *could* differ is a retry owned by a **grand**parent: Java's
+/// filter names only `getParentTaskRunId()`, one level. It does not differ in
+/// fact, because the grandparent's own state is a function of the parent's and
+/// the parent is already held — measured on `valids/retry-flowable-nested-child`,
+/// where `flowable` and `flowable2` both stay `RUNNING` for all three attempts.
+pub(crate) fn current_list<'a>(
+    plan: &Plan,
+    state: &ExecutionState,
+    tasks: &'a [TaskIx],
+    errors: &'a [TaskIx],
+    parent: Option<RunIx>,
+    now: Tick,
+) -> Current<'a> {
+    let errors_started = errors
+        .iter()
+        .any(|&task| run_of(state, parent, task).is_some());
+    let failed: Vec<RunIx> = tasks
+        .iter()
+        .filter_map(|&task| run_of(state, parent, task))
+        .filter(|&ix| latest(state, ix) == Some(RunState::Failed))
+        .collect();
+
+    if !errors_started && failed.is_empty() {
+        return Current::Tasks(tasks);
+    }
+    // `hasFailedNoRetry`: is there a failure that will NOT be retried?
+    let will_retry = |&ix: &RunIx| {
+        crate::executor::retry::policy_for(plan, state, ix)
+            .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))
+            .is_some()
+    };
+    if !errors_started && failed.iter().all(will_retry) {
+        return Current::RetryPending;
+    }
+    if errors.is_empty() {
+        Current::Ended
+    } else {
+        Current::Errors(errors)
+    }
+}
+
+/// Kestra's `Execution.guessFinalState` over the runs of `tasks` under
+/// `parent`, narrowed to what [`RunState`] can hold.
+///
+/// **`tasks`, never the list that is actually being driven.** Both
+/// `FlowableUtils.resolveState` and `ExecutorService.onEnd` pass the `tasks`
+/// list to `guessFinalState` even when `currentTasks` is the `errors` list, and
+/// that is why `valids/errors` — whose two error tasks both SUCCEED — ends
+/// `FAILED` rather than `SUCCESS`. An aggregate over the driven list would get
+/// every `errors:` entry in the corpus exactly backwards.
+pub(crate) fn aggregate(
+    state: &ExecutionState,
+    tasks: &[TaskIx],
+    parent: Option<RunIx>,
+) -> RunState {
+    let mut out = RunState::Success;
+    for &task in tasks {
+        let Some(ix) = run_of(state, parent, task) else {
+            continue;
+        };
+        match latest(state, ix) {
+            Some(RunState::Killed) => return RunState::Killed,
+            Some(RunState::Failed) => out = RunState::Failed,
+            _ => {}
+        }
+    }
+    out
+}
+
 /// The run a list created for `task` under `parent`, if it has created one.
 ///
 /// Every list this executor drives creates at most one run per child — a
@@ -142,16 +260,21 @@ pub(crate) fn descend(
     task: TaskIx,
     now: Tick,
 ) -> Step {
+    let errors = plan.tasks[task].errors.as_slice();
     let step = match &plan.tasks[task].kind {
         TaskKind::Runnable { .. } => return Step::Waiting,
-        TaskKind::Sequential { tasks } => sequential::drive(plan, state, tasks, Some(run), now),
-        TaskKind::Parallel { tasks, concurrency } => {
-            parallel::drive(plan, state, tasks, Some(run), *concurrency, now)
+        TaskKind::Sequential { tasks } => {
+            sequential::drive(plan, state, tasks, errors, Some(run), now)
         }
-        TaskKind::Dag { nodes } => dag::drive(plan, state, nodes, Some(run), now),
-        TaskKind::If { then_, else_, .. } => branch::drive_if(plan, state, run, then_, else_, now),
+        TaskKind::Parallel { tasks, concurrency } => {
+            parallel::drive(plan, state, tasks, errors, Some(run), *concurrency, now)
+        }
+        TaskKind::Dag { nodes } => dag::drive(plan, state, nodes, errors, Some(run), now),
+        TaskKind::If { then_, else_, .. } => {
+            branch::drive_if(plan, state, run, then_, else_, errors, now)
+        }
         TaskKind::Switch { cases, default, .. } => {
-            branch::drive_switch(plan, state, run, cases, default, now)
+            branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
     };

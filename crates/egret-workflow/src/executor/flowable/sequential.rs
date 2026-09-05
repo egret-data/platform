@@ -1,68 +1,135 @@
 //! `Sequential`, and the implicit root task list.
 //!
 //! Kestra's `Sequential` and a flow's top-level `tasks:` are the same rule:
-//! run the children one at a time, in declaration order, and stop at the first
-//! one that does not succeed. The root list is that rule with no `PlanTask` of
-//! its own, which is why [`drive`] takes the child list and the parent run
-//! rather than a task index.
+//! run the children one at a time, in declaration order — and, when one of them
+//! fails for good, run the `errors:` list instead. The root list is that rule
+//! with no `PlanTask` of its own, which is why [`drive`] takes the child list
+//! and the parent run rather than a task index.
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::{descend, open, run_of, Step};
+use super::{aggregate, current_list, descend, open, run_of, Current, Step};
 
-/// Drive one sequential task list.
+/// Drive one sequential task list and its `errors:`.
 ///
-/// `children` is the list, `parent` the run that owns it (`None` for the root
-/// list). Returns the first thing that needs doing, or the list's terminal
-/// state.
+/// `children` is the `tasks:` list, `errors` its `errors:`, and `parent` the
+/// run that owns both (`None` for the root list). Returns the first thing that
+/// needs doing, or the list's terminal state.
 ///
 /// Returning at the **first** thing is what makes this sequential, and it is
 /// the one line of difference from
 /// [`parallel`](super::parallel::drive_concurrent), which collects from every
 /// branch before it returns.
+///
+/// # `parent.is_none()` is the flow's own list, and it answers one question
+/// differently
+///
+/// [`Current::RetryPending`] — a child that failed and will be retried — leaves
+/// a **flowable** running and gives the **execution** its state anyway. That is
+/// not a convenience: `FlowableUtils.resolveState`'s empty arm returns a state
+/// only `if (execution.hasFailedNoRetry(...))`, while
+/// `ExecutorService.handleEnd`'s guard is `execution.isTerminated(currentTasks)`,
+/// which is `0 == 0` for the same empty list. The two entries that pin the
+/// difference are `valids/retry-failed` (root: the execution reads
+/// `… FAILED RETRYING RUNNING FAILED …`, one `FAILED` per attempt) and
+/// `valids/retry-flowable` (nested: the execution reads `… RETRYING RUNNING
+/// RETRYING …` with no `FAILED` until the end, because the `Sequential` holding
+/// the retried child never terminated).
+///
+/// `parent` is the flag rather than a separate boolean because it already
+/// carries exactly that fact — a flowable's list always has `Some(run)` and the
+/// flow's own list is the only caller that passes `None`.
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
     children: &[TaskIx],
+    errors: &[TaskIx],
     parent: Option<RunIx>,
     now: Tick,
 ) -> Step {
-    for &task in children {
+    let is_flow = parent.is_none();
+    let list = match current_list(plan, state, children, errors, parent, now) {
+        Current::Tasks(list) | Current::Errors(list) => list,
+        Current::RetryPending if is_flow => return Step::Done(aggregate(state, children, parent)),
+        Current::RetryPending => return Step::Waiting,
+        Current::Ended => return Step::Done(aggregate(state, children, parent)),
+    };
+    match walk(plan, state, list, parent, now) {
+        Some(step) => step,
+        None => Step::Done(aggregate(state, children, parent)),
+    }
+}
+
+/// Kestra's `FlowableUtils.innerResolveSequentialNexts` over one already-chosen
+/// list: create the first child that has no run, drive the one that is going,
+/// and otherwise move to the next.
+///
+/// `None` means the list is exhausted — every child has a run and every run is
+/// terminal — which is the caller's cue to take the list's own state.
+///
+/// # It does NOT stop at a child that failed, and that is the artifact
+///
+/// Task 3's version returned `Step::Done(child_state)` at the first child that
+/// did not succeed, and reproduced everything up to Task 6 because the only way
+/// a list could hold a failed child was a failure that ended it. Java stops for
+/// a different reason: `innerResolveSequentialNexts` walks to
+/// `currentTasks.get(lastIndex + 1)` whatever the last one's state was, and what
+/// ends the sequence is [`current_list`] switching the list out from under it.
+/// The two readings agree on `FAILED` and disagree on every other non-success
+/// terminal — a `KILLED` child leaves a Kestra sequence *running*, and
+/// `RETRIED` (Task 7's new state) does too. Taking Java's reading is what keeps
+/// the `errors:` list from stopping at its own first failure, which is a shape
+/// the corpus does reach.
+fn walk(
+    plan: &Plan,
+    state: &ExecutionState,
+    list: &[TaskIx],
+    parent: Option<RunIx>,
+    now: Tick,
+) -> Option<Step> {
+    for &task in list {
         let Some(ix) = run_of(state, parent, task) else {
-            // The previous child terminated successfully (or this is the
-            // first), so the next one is created — and only now. Creating the
-            // whole list up front would make every pair `overlapping` where
-            // Kestra records `before`.
-            return Step::Commands(vec![Command::CreateRun {
+            // The previous child terminated (or this is the first), so the next
+            // one is created — and only now. Creating the whole list up front
+            // would make every pair `overlapping` where Kestra records
+            // `before`.
+            return Some(Step::Commands(vec![Command::CreateRun {
                 task,
                 parent,
                 value: None,
-            }]);
+            }]));
         };
 
         match state.runs[ix].history.last() {
-            Some(RunState::Created) => return open(plan, state, ix, task, now),
+            Some(RunState::Created) => return Some(open(plan, state, ix, task, now)),
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.
-            Some(RunState::Running) => return descend(plan, state, ix, task, now),
-            Some(s) if s.is_terminal() => {
-                if *s != RunState::Success {
-                    // The sequence stops at the first child that does not
-                    // succeed, and the list takes that child's state. The
-                    // remaining children are never created, which is why a
-                    // flow whose second task fails has fewer runs than it has
-                    // tasks.
-                    return Step::Done(*s);
-                }
-            }
+            Some(RunState::Running) => return Some(descend(plan, state, ix, task, now)),
+            Some(s) if s.is_terminal() => {}
             // `Submitted` (handed to a worker, not picked up) and `Retrying`
-            // (Task 7) are both "in flight, not the executor's turn".
-            _ => return Step::Waiting,
+            // (waiting for its own delay) are both "in flight, not the
+            // executor's turn". So is a run with no history at all, which
+            // cannot happen and is not worth a branch of its own.
+            _ => return Some(Step::Waiting),
         }
     }
 
-    Step::Done(RunState::Success)
+    None
+}
+
+/// [`walk`], for [`parallel`](super::parallel), whose `errors:` list is driven
+/// sequentially even though its `tasks:` list is not — Kestra says so in as
+/// many words: "errors & finally must be run as sequential tasks"
+/// (`FlowableUtils.resolveParallelNexts`).
+pub(crate) fn walk_errors(
+    plan: &Plan,
+    state: &ExecutionState,
+    list: &[TaskIx],
+    parent: Option<RunIx>,
+    now: Tick,
+) -> Option<Step> {
+    walk(plan, state, list, parent, now)
 }

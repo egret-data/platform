@@ -47,10 +47,20 @@ pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
     nodes: &[DagNode],
+    errors: &[TaskIx],
     parent: Option<RunIx>,
     now: Tick,
 ) -> Step {
     let children: Vec<TaskIx> = nodes.iter().map(|n| n.task).collect();
+    // `Dag.java:106` carries `errors` like every other flowable, and
+    // `Dag.resolveNexts` passes it to `resolveDagNexts`. No corpus `Dag` writes
+    // one -- `every_corpus_errors_list_is_on_a_flowable_egret_plans` derives
+    // that -- so this arm is here for the shape rather than for a measurement,
+    // and it defers to `parallel::drive`, which is what `resolveDagNexts` does
+    // too.
+    if !errors.is_empty() {
+        return super::parallel::drive(plan, state, &children, errors, parent, None, now);
+    }
     drive_concurrent(
         plan,
         state,

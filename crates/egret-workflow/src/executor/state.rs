@@ -111,15 +111,24 @@ pub struct Attempt {
 /// [`Command::SetExecutionState`], the states an execution passes through too**.
 /// One type for both, so the vocabulary it has to cover is the union of both.
 ///
-/// **That union is 13 states**, measured over `golden.json` by
-/// `oracle-exec/normalise.py`; this enum holds **7** of them. Task 3 added
-/// `Submitted` to the six the plan drafted, and that one addition is what makes
-/// the sequential slice reachable at all: measured over the 266 `runs` entries,
-/// **35** use only the drafted six and **229** use only these seven. The six
-/// still missing, with the number of `runs` entries whose trace uses each:
-/// `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `SKIPPED` 4, `RETRIED` 4,
-/// `CANCELLED` 3. `oracle-exec/README.md` prints the full table and names which
-/// later task owns each.
+/// **That union is 13 states**, measured over `golden.json`; this enum holds
+/// **8** of them. Every number in this paragraph is derived on every run by
+/// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`,
+/// which is what stops it becoming a count written beside a derivation — it was
+/// one from Task 3 until Task 7 had to move it.
+///
+/// Measured over the 266 `runs` entries, by how many are wholly inside the
+/// vocabulary: **35** for the six the plan drafted, **229** once Task 3 added
+/// `Submitted`, **233** once Task 7 added `Retried`. `Submitted` is the
+/// addition that made the sequential slice reachable at all; `Retried` buys
+/// exactly the four `retry-new-execution-*` entries, none of which can bank,
+/// because the replacement execution a `CREATE_NEW_EXECUTION` retry starts is
+/// not representable here at all.
+///
+/// The five still missing, with the number of `runs` entries whose trace uses
+/// each: `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `SKIPPED` 4, `CANCELLED` 3.
+/// `oracle-exec/README.md` prints the full table and names which later task owns
+/// each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
@@ -137,6 +146,16 @@ pub enum RunState {
     Success,
     Failed,
     Retrying,
+    /// The terminal a `CREATE_NEW_EXECUTION` retry leaves behind.
+    ///
+    /// Added by Task 7, which is what took this enum from 7 of the golden's 13
+    /// states to 8. It is a **terminal** state — `State.java`'s own
+    /// `isTerminated()` lists `RETRIED` beside `FAILED` and `SUCCESS`, and the
+    /// harvester already reads that list verbatim — and that is the whole of
+    /// what makes the four `retry-new-execution-*` entries stop rather than
+    /// spin: Kestra replays the flow as a *different* execution, which nothing
+    /// in [`Command`] can ask for.
+    Retried,
     Killed,
 }
 
@@ -150,6 +169,7 @@ impl RunState {
             RunState::Success => "SUCCESS",
             RunState::Failed => "FAILED",
             RunState::Retrying => "RETRYING",
+            RunState::Retried => "RETRIED",
             RunState::Killed => "KILLED",
         }
     }
@@ -162,7 +182,7 @@ impl RunState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunState::Success | RunState::Failed | RunState::Killed
+            RunState::Success | RunState::Failed | RunState::Retried | RunState::Killed
         )
     }
 }
@@ -179,6 +199,28 @@ impl RunState {
 /// instant rather than this function taking a `now`: with the instant on the
 /// command there is exactly one value it can be — the one `advance()` saw —
 /// and no caller can record a different one.
+///
+/// # The one rule in here, added by Task 7, and where it is knowingly wrong
+///
+/// **A terminated [`Attempt`] takes no further state.** Before `retry:` a run
+/// had at most one attempt and never outlived it, so every `SetRunState` was
+/// also an attempt state. A retried run's history reads `… RUNNING FAILED
+/// RETRYING CREATED SUBMITTED RUNNING FAILED …` while each of its attempts
+/// reads exactly `CREATED RUNNING FAILED` — measured on
+/// `valids/retry-failed-task-attempts`, whose four attempts are identical and
+/// carry neither the `RETRYING` nor the second `CREATED` that sit between them
+/// in the run's own history. Without this rule the `RETRYING` and the re-`CREATED`
+/// would land on the attempt that has already finished.
+///
+/// It is a rule and not a mechanism, so it can be wrong, and there is a
+/// measured shape it *is* wrong for: a **`Subflow`**. `valids/retry-subflow`'s
+/// second attempt reads `CREATED RUNNING FAILED RETRYING CREATED RUNNING
+/// FAILED` — Kestra accumulates the sub-execution's retries inside the parent's
+/// attempt — and `valids/subflow-parent-retry` is the same shape. Both are
+/// baselined, `Subflow` is planned opaque and is W6's, and no reachable entry
+/// has an attempt that continues past its own terminal. That is why the rule
+/// is stated here with its counter-example rather than left as an invariant
+/// somebody later discovers is not one.
 pub fn apply(state: &mut ExecutionState, cmd: &Command) {
     match cmd {
         Command::CreateRun {
@@ -205,11 +247,17 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         Command::ScheduleRetry { run, not_before } => {
             state.runs[*run].not_before = Some(*not_before);
         }
+        // The run's own history always takes the state. The attempt takes it
+        // only while the attempt is still open, and that is a **rule** rather
+        // than bookkeeping -- see the block comment below.
         Command::SetRunState { run, state: s } => {
             let r = &mut state.runs[*run];
             r.history.push(*s);
-            if let Some(a) = r.attempts.last_mut() {
-                a.history.push(*s);
+            match r.attempts.last_mut() {
+                Some(a) if !a.history.last().is_some_and(|last| last.is_terminal()) => {
+                    a.history.push(*s)
+                }
+                _ => {}
             }
         }
         Command::SetExecutionState { state: s } => state.history.push(*s),

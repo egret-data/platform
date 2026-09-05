@@ -1134,6 +1134,7 @@ fn probe_plan(ids: &[&str]) -> Plan {
             .collect(),
         roots: (0..ids.len()).collect(),
         errors: Vec::new(),
+        retry: None,
     }
 }
 
@@ -1426,7 +1427,9 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
         removed,
         BTreeMap::from([
             ("valids/dag".to_string(), 1),
+            ("valids/disable-error".to_string(), 3),
             ("valids/disable-simple".to_string(), 2),
+            ("valids/exit-killed".to_string(), 2),
             ("valids/if".to_string(), 9),
             ("valids/if-with-only-disabled-tasks".to_string(), 1),
             ("valids/parallel-disabled-tasks".to_string(), 7),
@@ -1436,11 +1439,21 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
         "this is the number the ratchet prints; assert it so a widening of the \
          restriction's reach moves a test and not a log line"
     );
-    assert_eq!(removed.values().sum::<usize>(), 25);
+    assert_eq!(
+        removed.values().sum::<usize>(),
+        30,
+        "25 at Tasks 4-6. The 5 Task 7 adds are two ENTRIES that only now \
+         produce runs the golden has no pair for: `valids/disable-error` (3) and \
+         `valids/exit-killed` (2), both of which reach their `errors:` list for \
+         the first time. Both are baselined and stay so -- `disable-error`'s for \
+         `disabled:`, which belongs to no package in the programme spec"
+    );
     assert_eq!(
         runs_differ,
         [
+            "valids/disable-error",
             "valids/disable-simple",
+            "valids/exit-killed",
             "valids/if-with-only-disabled-tasks",
             "valids/parallel-disabled-tasks",
             "valids/sequential-with-disabled"
@@ -1464,11 +1477,11 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
          so there is no new run whose creation could land out of order"
     );
     assert_eq!(
-        total_pairs, 555,
-        "the population the `after` claim is measured over. 557 at Task 5; the \
-         two lost are `valids/loop-empty`'s and `valids/loop-null`'s, which both \
-         banked -- `loop-null`'s `Loop` FAILS at `CREATED`, so its second root \
-         task is never created and the flow has one run and no pair at all"
+        total_pairs, 656,
+        "the population the `after` claim is measured over. 555 at Task 6, 557 at \
+         Task 5. Task 7 adds 101, and every one of them is a pair an `errors:` \
+         run makes: an error task is a run that did not exist before, and a run \
+         that exists is in a pair with every other run of its execution"
     );
 
     // The cost, demonstrated on a BANKED entry rather than conceded in prose:
@@ -2497,13 +2510,18 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
     );
     assert_eq!(
         (fed, spawner, flowable, unplanned, fed_without_submitted),
-        (565, 55, 108, 112, 79),
+        (575, 55, 108, 102, 79),
         "these five numbers are written into oracle-exec/README.md under `What the \
          oracle feeds in`. They move as Tasks 4-8 teach `build_plan` more flowables, \
          and when they do the README has to move with them -- which is the point of \
          asserting them here rather than quoting them there. Task 6 moved every one \
          of them, and `unplanned` most: 343 -> 112, because planning the `Loop` is \
-         what gives every task inside a loop BODY a `PlanTask` at all."
+         what gives every task inside a loop BODY a `PlanTask` at all. Task 7 moves \
+         exactly 10, `unplanned` 112 -> 102 and `fed` 565 -> 575, and they are the \
+         runs of tasks written inside an `errors:` list -- which had no `PlanTask` \
+         at all until Task 7 widened W1's model. The over-feed does NOT move with \
+         them: an `errors:` task is a `Runnable` that carries `SUBMITTED`, so it \
+         belongs in `fed` on both readings."
     );
 
     // The end state, independent of how complete `build_plan` happens to be:
@@ -2943,10 +2961,14 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
     );
     assert_eq!(
         only_spawned.len(),
-        33,
+        38,
         "the number of entries whose ONLY remaining mismatch is the uncompared \
          `spawned` field. Written into oracle-exec/baseline.txt's header and \
-         README.md; asserted here so it cannot drift from either."
+         README.md; asserted here so it cannot drift from either. 33 at Task 6; \
+         the 5 Task 7 adds are the four `retry-new-execution-*` entries, whose \
+         run and execution histories now reproduce exactly and whose replacement \
+         execution egret cannot create, plus `valids/retry-flowable-parallel`, \
+         which is the same hole with a `Loop` in front of it."
     );
 
     // The remainder, by name rather than by subtraction, each with the reason
@@ -2959,9 +2981,6 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
     assert_eq!(
         rest,
         [
-            // The `Loop` whose FIRST iteration failed: Kestra stopped, and
-            // `errors:` at flow level ran two more tasks. Task 7's.
-            "valids/all-flowable",
             // A `disabled: true` task, which no W3a task claims.
             "valids/disable-flowable",
             // `values: "{{ outputs.write.uri }}"` -- the caller's context has no
@@ -2970,17 +2989,15 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
             // `the_caller_can_render_every_expression_except_the_ones_named`.
             "valids/loop-outputs-auto",
             "valids/loop-values-from-uri",
-            // `RETRY_FAILED_TASK`/`CREATE_NEW_EXECUTION`: these four carry a
-            // REPLACEMENT execution rather than a loop iteration
-            // (`parent_run: null`), and they are Task 7's whole subject.
-            "valids/retry-new-execution-flow-attempts",
-            "valids/retry-new-execution-flow-duration",
-            "valids/retry-new-execution-task-attempts",
-            "valids/retry-new-execution-task-duration",
         ]
         .iter()
         .collect::<Vec<_>>(),
-        "33 + 8 = 41: the entries that differ on more than `spawned`, by name"
+        "38 + 3 = 41: the entries that differ on more than `spawned`, by name. \
+         Task 7 removed five from this list -- the four `retry-new-execution-*` \
+         entries, which now reproduce every run, history and attempt Kestra \
+         recorded and differ ONLY on the replacement execution nothing can \
+         create, and `valids/retry-flowable-parallel`. `valids/all-flowable` \
+         left it too: its flow-level `errors:` runs now."
     );
 }
 
@@ -3298,6 +3315,13 @@ fn the_default_concurrency_limit_is_one_and_the_corpus_can_tell() {
 fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     let mut over_fed: BTreeMap<String, usize> = BTreeMap::new();
     let (mut fed, mut flowable, mut unplanned) = (0usize, 0usize, 0usize);
+    // Task 7 widened `build_plan` again, so today's plan is no longer Task 5's
+    // in one further respect: a task written inside an `errors:` list has a
+    // `PlanTask` now and had none then. That movement is DERIVED here rather
+    // than absorbed into the constants below, because the constants are what
+    // makes the 40 a measurement -- swapping them for whatever today prints
+    // would leave this test agreeing with itself.
+    let mut in_an_errors_list = 0usize;
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -3318,6 +3342,18 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                     Some(i) if !plan.is_loop_body(i) => Some(&plan.tasks[i].kind),
                     _ => None,
                 };
+                // A TASK-level `errors:` only. The flow's own `errors:` was
+                // already in the plan at Task 3 -- `Plan::errors` is populated
+                // from `flow.errors` -- so its runs were never `unplanned` and
+                // are not what moved.
+                if plan
+                    .tasks
+                    .iter()
+                    .position(|p| p.id == run.task)
+                    .is_some_and(|i| plan.tasks.iter().any(|t| t.errors.contains(&i)))
+                {
+                    in_an_errors_list += 1;
+                }
                 let submitted = run.state.iter().any(|s| s == "SUBMITTED");
                 match kind {
                     None => unplanned += 1,
@@ -3343,10 +3379,24 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     }
 
     assert_eq!(
-        (fed, flowable, unplanned, over_fed.values().sum::<usize>()),
+        in_an_errors_list, 10,
+        "the runs Task 7 alone added to the plan: every one is a task written in \
+         a TASK-level `errors:` list, which W1's model dropped until Task 7 \
+         widened it. The flow's own `errors:` is not among them -- `Plan::errors` \
+         has been populated since Task 3"
+    );
+    assert_eq!(
+        (
+            fed - in_an_errors_list,
+            flowable,
+            unplanned + in_an_errors_list,
+            over_fed.values().sum::<usize>()
+        ),
         (424, 73, 343, 114),
-        "the reconstruction must reproduce Task 5's four committed figures; if it \
-         does not, nothing below is a measurement of anything"
+        "the reconstruction must reproduce Task 5's four committed figures -- up \
+         to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
+         into `fed`, which is derived above rather than folded into these \
+         numbers. If it does not, nothing below is a measurement of anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -3433,5 +3483,109 @@ fn the_loop_completion_tier_is_load_bearing_for_exactly_these_entries() {
         "all 35 are baselined today, which is the whole point: STUCK is NOT a \
          baselined state, so the alternative to feeding is a red suite rather \
          than a wider baseline"
+    );
+}
+
+/// **The state vocabulary `RunState` holds, and the one it does not, derived.**
+///
+/// `RunState`'s own doc carries these numbers, and they sat in prose beside a
+/// derivation from Task 3 until Task 7 added `RETRIED` and had to move them.
+/// A count written next to a derivation is this package's most-repeated defect,
+/// so the derivation is here and the doc quotes it.
+///
+/// The population is the golden's `runs` entries: every state that appears in
+/// an execution history, a run history or an attempt history of one.
+#[test]
+fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
+    let held: BTreeSet<&str> = [
+        "CREATED",
+        "SUBMITTED",
+        "RUNNING",
+        "SUCCESS",
+        "FAILED",
+        "RETRYING",
+        "RETRIED",
+        "KILLED",
+    ]
+    .into_iter()
+    .collect();
+    // Task 3 drafted six; `SUBMITTED` was its own addition and `RETRIED` is
+    // Task 7's. Both are kept here so the "how much did that one state buy"
+    // question stays answerable.
+    let drafted: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| *s != "SUBMITTED" && *s != "RETRIED")
+        .collect();
+    let through_task_6: BTreeSet<&str> = held.iter().copied().filter(|s| *s != "RETRIED").collect();
+
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut fits_drafted, mut fits_task_6, mut fits_now, mut entries) = (0, 0, 0, 0usize);
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        entries += 1;
+        let mut used: BTreeSet<String> = entry.execution.iter().cloned().collect();
+        let mut stack: Vec<&Trace> = Vec::new();
+        let trace = Trace::from(entry);
+        stack.push(&trace);
+        while let Some(t) = stack.pop() {
+            used.extend(t.execution.iter().cloned());
+            for run in &t.runs {
+                used.extend(run.state.iter().cloned());
+                used.extend(run.attempts.iter().flatten().cloned());
+            }
+            stack.extend(t.spawned.iter());
+        }
+        all.extend(used.iter().cloned());
+        for state in used.iter().filter(|s| !held.contains(s.as_str())) {
+            *missing.entry(state.clone()).or_default() += 1;
+        }
+        if used.iter().all(|s| drafted.contains(s.as_str())) {
+            fits_drafted += 1;
+        }
+        if used.iter().all(|s| through_task_6.contains(s.as_str())) {
+            fits_task_6 += 1;
+        }
+        if used.iter().all(|s| held.contains(s.as_str())) {
+            fits_now += 1;
+        }
+    }
+
+    println!(
+        "state vocabulary: the golden uses {} states over {entries} `runs` entries; \
+         RunState holds {}. Entries wholly inside the vocabulary: {fits_drafted} \
+         (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_now} \
+         (Task 7, 8). Still missing, by entries using each: {missing:?}",
+        all.len(),
+        held.len()
+    );
+    assert_eq!(
+        (all.len(), entries),
+        (13, 266),
+        "the golden's own vocabulary and population; `oracle-exec/README.md`'s \
+         state table is derived from these"
+    );
+    assert_eq!(
+        (fits_drafted, fits_task_6, fits_now),
+        (35, 229, 233),
+        "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
+         big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
+         `RETRIED` population -- and the four entries are exactly the \
+         `retry-new-execution-*` flows, which cannot bank anyway because the \
+         replacement execution is not representable"
+    );
+    assert_eq!(
+        missing,
+        BTreeMap::from([
+            ("CANCELLED".to_string(), 3),
+            ("PAUSED".to_string(), 18),
+            ("RESTARTED".to_string(), 12),
+            ("SKIPPED".to_string(), 4),
+            ("WARNING".to_string(), 10),
+        ]),
+        "the five states still outside `RunState`, with the number of `runs` \
+         entries whose trace uses each. `oracle-exec/README.md` names the owner \
+         of each; `RETRIED` left this table at Task 7"
     );
 }

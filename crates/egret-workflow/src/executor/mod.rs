@@ -39,11 +39,13 @@
 mod command;
 mod flowable;
 mod plan;
+mod retry;
 mod state;
 
 pub use command::Command;
 pub use plan::{
-    build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryPolicy, TaskIx, TaskKind,
+    build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay, RetryPolicy, TaskIx,
+    TaskKind,
 };
 pub use state::{apply, Attempt, ExecutionState, RunIx, RunState, TaskRun, Tick};
 
@@ -81,11 +83,37 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         return Vec::new();
     }
 
-    let work = match sequential::drive(plan, state, &plan.roots, None, now) {
+    // The execution-delay loop, which in the artifact is a different loop from
+    // the one below (`DefaultExecutor.java:561`) whose output is re-submitted
+    // for processing rather than folded into the cycle that scheduled it. So it
+    // is emitted alone, and the next round does the rest.
+    let reopened = retry::reopen_due(plan, state, now);
+    if !reopened.is_empty() {
+        return reopened;
+    }
+
+    // `ExecutorService.handleEnd` returns at once while the execution is
+    // RETRYING, and so does the retry pass (`!executor.getExecution()
+    // .getState().isRetrying()`). Without the first of those, a root list whose
+    // only child is being retried would emit its `FAILED` again on every round
+    // until the delay fires -- the execution's history would read
+    // `FAILED RETRYING FAILED FAILED …` instead of `FAILED RETRYING RUNNING`.
+    let retrying = state.history.last() == Some(&RunState::Retrying);
+
+    let mut work = match sequential::drive(plan, state, &plan.roots, &plan.errors, None, now) {
         Step::Commands(cmds) => cmds,
         Step::Waiting => Vec::new(),
+        Step::Done(_) if retrying => Vec::new(),
         Step::Done(state) => vec![Command::SetExecutionState { state }],
     };
+
+    // `handleFlowableTasks`'s retry pass, which runs after `handleEnd` and is
+    // therefore behind whatever state the execution just took. That order is
+    // visible: `valids/retry-failed-task-attempts`'s execution reads
+    // `… FAILED RETRYING …`, never `… RETRYING FAILED …`.
+    if !retrying {
+        work.extend(retry::scan(plan, state, now));
+    }
 
     let not_running_yet = state.history.last() == Some(&RunState::Created);
     let has_a_run = !state.runs.is_empty();
@@ -105,6 +133,8 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
 
     /// The tick every test that does not care about time uses.
@@ -2637,6 +2667,814 @@ mod tests {
                 .map(|&c| plan.tasks[c].id.as_str())
                 .collect::<Vec<_>>(),
             ["1-seq", "2_end"]
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // Task 7: retry, and errors:
+    // ----------------------------------------------------------------------
+
+    /// [`run_to_fixpoint`] with the oracle's clock tier: when nothing else can
+    /// happen, `now` jumps to the earliest `not_before` still ahead of it.
+    ///
+    /// Time moves only when nothing else can, and only to a deadline something
+    /// is already waiting for — the same rule `tests/executor.rs` tier 4 uses,
+    /// written here too because a `retry:` is the first thing in this crate for
+    /// which a lib test needs one at all. `outcome` is per attempt: a
+    /// `Vec<RunState>` indexed by attempt number, with the last value repeated,
+    /// so a run that succeeds on its fourth try is expressible.
+    fn run_to_fixpoint_over_time(plan: &Plan, outcomes: &[RunState]) -> (ExecutionState, Tick) {
+        let mut state = ExecutionState::new(plan);
+        let mut now = Tick(0);
+        for _ in 0..1000 {
+            let cmds = advance(plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            if let Some(ix) = in_flight {
+                let attempt = state.runs[ix].attempts.len().saturating_sub(1);
+                let outcome = *outcomes
+                    .get(attempt)
+                    .or(outcomes.last())
+                    .expect("an outcome");
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                );
+                continue;
+            }
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(t) => now = t,
+                None => return (state, now),
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// The plan's own Task 7 test.
+    ///
+    /// Measured on `valids/retry-failed-task-attempts` (`maxAttempts: 4`,
+    /// `interval: PT1S`): the execution's own history reads
+    /// `CREATED RUNNING FAILED RETRYING RUNNING FAILED RETRYING RUNNING FAILED
+    /// RETRYING RUNNING FAILED`, the run's reads the same four attempts
+    /// separated by `RETRYING CREATED SUBMITTED`, and each of the four attempts
+    /// reads exactly `CREATED RUNNING FAILED`.
+    ///
+    /// # The double entry, decided on purpose
+    ///
+    /// The spec recorded that Kestra's record ALSO showed the retried task as
+    /// **two `taskRunList` entries**, and asked Task 7 to determine whether that
+    /// is a semantic fact or a serialisation artefact before implementing.
+    /// **It is neither: it does not reproduce.** Measured two ways —
+    ///
+    /// - over `oracle-exec/traces.json`, all 2050 captured execution records
+    ///   (268 flows × 5 rounds, plus every sub-execution) holding 4215
+    ///   taskruns: **zero** have two entries with the same taskrun id, and zero
+    ///   have two with the same `(taskId, value, parentTaskRunId)`.
+    ///   `no_captured_execution_has_a_duplicate_taskrun` re-derives that on
+    ///   every run;
+    /// - from the artifact, the path is closed by construction:
+    ///   `ExecutorService.java:611` marks the run `RETRYING` in place, and
+    ///   `ExecutionService.retryTask` (`ExecutionService.java:135`) installs the
+    ///   new attempt through `Execution.withTaskRun`, whose body is
+    ///   `Collections.replaceAll(newTaskRunList, findTaskRunByTaskRunId(id),
+    ///   taskRun)` followed by `throw new IllegalStateException` when the
+    ///   replace finds nothing. It replaces or it throws; it has no append.
+    ///
+    /// So egret reproduces one entry with several attempts, which is what the
+    /// spec asked for as the *semantics* — and this comment records that the
+    /// measured record agrees rather than that the shapes were traded off.
+    #[test]
+    fn a_retried_task_has_two_attempts_and_the_execution_passes_through_retrying() {
+        let plan = plan_of("valids/retry-failed-task-attempts");
+        let (state, now) = run_to_fixpoint_over_time(&plan, &[RunState::Failed]);
+
+        assert_eq!(run_ids(&plan, &state), ["fail"]);
+        assert_eq!(
+            state.runs[0].attempts.len(),
+            4,
+            "`maxAttempts: 4` is four attempts in total, not four RETRIES: \
+             Kestra's guard is `attemptNumber() >= maxAttempts`"
+        );
+        for (i, attempt) in state.runs[0].attempts.iter().enumerate() {
+            assert_eq!(
+                wire(&attempt.history),
+                ["CREATED", "RUNNING", "FAILED"],
+                "attempt {i} must not carry the RETRYING that follows it"
+            );
+        }
+        assert_eq!(
+            wire(&state.runs[0].history),
+            [
+                "CREATED",
+                "SUBMITTED",
+                "RUNNING",
+                "FAILED",
+                "RETRYING", //
+                "CREATED",
+                "SUBMITTED",
+                "RUNNING",
+                "FAILED",
+                "RETRYING", //
+                "CREATED",
+                "SUBMITTED",
+                "RUNNING",
+                "FAILED",
+                "RETRYING", //
+                "CREATED",
+                "SUBMITTED",
+                "RUNNING",
+                "FAILED",
+            ]
+        );
+        assert_eq!(
+            wire(&state.history),
+            [
+                "CREATED", "RUNNING", //
+                "FAILED", "RETRYING", "RUNNING", //
+                "FAILED", "RETRYING", "RUNNING", //
+                "FAILED", "RETRYING", "RUNNING", //
+                "FAILED",
+            ],
+            "the execution takes FAILED on every round a retry is pending, because \
+             `handleEnd`'s `isTerminated(currentTasks)` is 0 == 0 for the empty \
+             list `findTaskDependingFlowState` returns while a retry is pending"
+        );
+        assert_eq!(
+            now,
+            Tick(3_000),
+            "three retries at `interval: PT1S`, and the clock moved only to the \
+             deadlines the retries asked for"
+        );
+    }
+
+    /// The retried run appears ONCE, and Kestra's own record does too.
+    ///
+    /// Derived from every captured execution rather than from the eight
+    /// `retry-*` flows, because the claim under test is about the record shape
+    /// and not about retry: if any flow in the corpus could produce a duplicate
+    /// `taskRunList` entry, this is what would find it.
+    #[test]
+    fn no_captured_execution_has_a_duplicate_taskrun() {
+        let raw = std::fs::read_to_string(format!(
+            "{}/oracle-exec/traces.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("traces.json");
+        let traces: serde_json::Value = serde_json::from_str(&raw).expect("traces.json is JSON");
+        let flows = traces["flows"].as_object().expect("flows is an object");
+
+        let (mut docs, mut runs, mut dup_id, mut dup_key) = (0usize, 0usize, 0usize, 0usize);
+        for rounds in flows.values() {
+            for round in rounds.as_array().into_iter().flatten() {
+                let mut every: Vec<&serde_json::Value> = Vec::new();
+                if round["root"].is_object() {
+                    every.push(&round["root"]);
+                }
+                every.extend(round["descendants"].as_array().into_iter().flatten());
+                for doc in every {
+                    docs += 1;
+                    let list = doc["runs"].as_array().expect("runs is an array");
+                    runs += list.len();
+                    let ids: BTreeSet<&str> =
+                        list.iter().filter_map(|r| r["id"].as_str()).collect();
+                    if ids.len() != list.len() {
+                        dup_id += 1;
+                    }
+                    let keys: BTreeSet<String> = list
+                        .iter()
+                        .map(|r| format!("{}|{}|{}", r["taskId"], r["value"], r["parentTaskRunId"]))
+                        .collect();
+                    if keys.len() != list.len() {
+                        dup_key += 1;
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            (docs, runs),
+            (2050, 4215),
+            "the captured population: 2050 execution records holding 4215 \
+             taskruns. 4215 is the same number `oracle-exec/README.md` quotes \
+             for the happens-before endpoint measurement, by a different route"
+        );
+        assert_eq!(
+            (dup_id, dup_key),
+            (0, 0),
+            "a retried task appears ONCE in Kestra's `taskRunList` on this \
+             artifact, with several attempts. The spec recorded a double entry \
+             and asked Task 7 to explain it; the answer is that it does not \
+             reproduce -- and `Execution.withTaskRun` replaces or throws, so \
+             there is no append path that could produce one"
+        );
+    }
+
+    /// `maxAttempts` and `maxDuration` are two independent bounds, and either
+    /// one alone stops the retry.
+    ///
+    /// `valids/retry-failed-flow-duration` is the corpus flow with **no**
+    /// `maxAttempts` at all — `maxDuration: PT7S`, `interval: PT2S` — which is
+    /// why [`RetryPolicy::max_attempts`] is an `Option` and not a `u32` with a
+    /// zero default. Kestra's bound is `nextDate.isAfter(first attempt start +
+    /// maxDuration)`, strictly after, measured from the FIRST attempt.
+    #[test]
+    fn a_retry_is_bounded_by_max_attempts_and_separately_by_max_duration() {
+        let by_attempts = plan_of("valids/retry-failed-task-attempts");
+        let (state, _) = run_to_fixpoint_over_time(&by_attempts, &[RunState::Failed]);
+        assert_eq!(state.runs[0].attempts.len(), 4);
+        assert_eq!(
+            by_attempts.tasks[0]
+                .retry
+                .as_ref()
+                .map(|r| (r.max_attempts, r.max_duration)),
+            Some((Some(4), None))
+        );
+
+        let by_duration = plan_of("valids/retry-failed-flow-duration");
+        assert_eq!(
+            by_duration
+                .retry
+                .as_ref()
+                .map(|r| (r.max_attempts, r.max_duration)),
+            Some((None, Some(std::time::Duration::from_secs(7)))),
+            "a flow-level retry with no `maxAttempts` is bounded only by \
+             `maxDuration`; a `0` default would stop it before its first retry"
+        );
+        let (state, now) = run_to_fixpoint_over_time(&by_duration, &[RunState::Failed]);
+        // 0, 2000, 4000, 6000 -- and the fifth would be 8000, which IS after
+        // 0 + 7000, so the policy is exhausted. Kestra recorded THREE attempts
+        // for this flow rather than four, and the difference is the hole
+        // `oracle-exec/README.md` names: every attempt here costs zero elapsed
+        // time, so more of them fit inside the same window. That is why this
+        // entry stays baselined and is asserted here rather than banked.
+        assert_eq!((state.runs[0].attempts.len(), now), (4, Tick(6_000)));
+    }
+
+    /// A flowable is never retried; its child is, on the flowable's policy.
+    ///
+    /// `ExecutorService.java:572` gates the whole retry pass on `task instanceof
+    /// RunnableTask<?> || task instanceof Subflow`, and
+    /// `searchForParentTaskWithRetry` is what gives the child a policy it does
+    /// not own. `valids/retry-flowable` writes `retry:` on a `Sequential` and
+    /// Kestra's golden has the `Sequential` with **one** attempt and its child
+    /// with three.
+    #[test]
+    fn a_flowable_is_never_retried_and_its_child_inherits_the_policy() {
+        let plan = plan_of("valids/retry-flowable");
+        assert!(
+            plan.tasks[0].retry.is_some() && plan.tasks[1].retry.is_none(),
+            "the policy is written on the Sequential, not on the child"
+        );
+        let (state, _) = run_to_fixpoint_over_time(&plan, &[RunState::Failed]);
+        assert_eq!(run_ids(&plan, &state), ["flowable", "child"]);
+        assert_eq!(
+            (state.runs[0].attempts.len(), state.runs[1].attempts.len()),
+            (1, 3)
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED"]
+        );
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "RETRYING", "RUNNING", "RETRYING", "RUNNING", "FAILED"],
+            "no FAILED before the last one: the root list's only task is the \
+             Sequential, which never terminated while its child was being \
+             retried, so `handleEnd` never fired"
+        );
+    }
+
+    /// `errors:` runs on the failure path, and the list's own state is the
+    /// `tasks:` list's — not the `errors:` list's.
+    ///
+    /// Both halves are measured on `valids/errors`, whose two error tasks both
+    /// SUCCEED and whose execution ends **FAILED**. Java passes `tasks` to
+    /// `guessFinalState` even when `currentTasks` is `errors`
+    /// (`FlowableUtils.resolveState`, `ExecutorService.onEnd`), and an
+    /// aggregate over the driven list would get every `errors:` entry in the
+    /// corpus exactly backwards.
+    #[test]
+    fn an_error_list_runs_on_failure_and_the_state_stays_the_task_lists_own() {
+        let plan = plan_of("valids/errors");
+        let mut state = ExecutionState::new(&plan);
+        // The first root task fails; every error task then succeeds.
+        for _ in 0..200 {
+            let cmds = advance(&plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            let Some(ix) = in_flight else { break };
+            let outcome = if plan.tasks[state.runs[ix].task].id == "failed" {
+                RunState::Failed
+            } else {
+                RunState::Success
+            };
+            apply(
+                &mut state,
+                &Command::SetRunState {
+                    run: ix,
+                    state: outcome,
+                },
+            );
+        }
+        assert_eq!(
+            run_ids(&plan, &state),
+            [
+                "failed",
+                "t2",
+                "t3",
+                "t3-t1",
+                "t3-t1-t1",
+                "t3-t1-t1-t1",
+                "t3-t1-t1-t1-last"
+            ],
+            "the error tasks are created at the ROOT level (`parent: null`), in \
+             declaration order, only after the failure"
+        );
+        assert!(state.runs[1..]
+            .iter()
+            .all(|r| r.history.last() == Some(&RunState::Success)));
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "the execution's state is `guessFinalState(flow.getTasks())` -- over \
+             `tasks:`, never over the `errors:` that actually ran"
+        );
+    }
+
+    /// A task-level `errors:` runs **under the flowable that owns it**, and the
+    /// flow's own `errors:` runs at the root.
+    ///
+    /// The two corpus flows are the same flow written twice —
+    /// `valids/sequential-with-local-errors` and
+    /// `valids/sequential-with-global-errors` differ only in where the two
+    /// `error-t*` tasks are declared — and Kestra's records differ in exactly
+    /// one field: the error runs' `parent`.
+    #[test]
+    fn an_errors_list_belongs_to_whoever_declared_it() {
+        let local = plan_of("valids/sequential-with-local-errors");
+        let global = plan_of("valids/sequential-with-global-errors");
+        assert!(global.errors.len() == 2 && global.tasks.iter().all(|t| t.errors.is_empty()));
+        assert!(local.errors.is_empty() && local.tasks.iter().any(|t| t.errors.len() == 2));
+
+        for (plan, want_parent) in [(&local, Some(2usize)), (&global, None)] {
+            let mut state = ExecutionState::new(plan);
+            for _ in 0..200 {
+                let cmds = advance(plan, &state, T0);
+                if !cmds.is_empty() {
+                    for cmd in &cmds {
+                        apply(&mut state, cmd);
+                    }
+                    continue;
+                }
+                let in_flight = (0..state.runs.len()).find(|&ix| {
+                    matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::Runnable { .. }
+                    ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                });
+                let Some(ix) = in_flight else { break };
+                let outcome = if plan.tasks[state.runs[ix].task].id == "t2-t1" {
+                    RunState::Failed
+                } else {
+                    RunState::Success
+                };
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                );
+            }
+            assert_eq!(
+                run_ids(plan, &state),
+                [
+                    "parent-seq",
+                    "t1",
+                    "t2_seq",
+                    "t2-t1",
+                    "error-t1",
+                    "error-t2"
+                ]
+            );
+            let parents: Vec<Option<usize>> = state.runs[4..].iter().map(|r| r.parent).collect();
+            assert_eq!(
+                parents,
+                vec![want_parent, want_parent],
+                "a local `errors:` hangs off the `Sequential` that declared it \
+                 (run 2, `t2_seq`); a flow-level one hangs off nothing"
+            );
+        }
+    }
+
+    /// A terminated [`Attempt`] takes no further state, and the run's own
+    /// history takes every state.
+    ///
+    /// The rule lives in [`apply`], where it has no plan to consult, so this
+    /// drives it directly rather than through `advance`.
+    #[test]
+    fn a_terminated_attempt_takes_no_further_state() {
+        let plan = plan_of("valids/retry-failed-task-attempts");
+        let mut state = ExecutionState::new(&plan);
+        for cmd in [
+            Command::CreateRun {
+                task: 0,
+                parent: None,
+                value: None,
+            },
+            Command::StartRun {
+                run: 0,
+                at: Tick(5),
+            },
+            Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+            Command::SetRunState {
+                run: 0,
+                state: RunState::Retrying,
+            },
+            Command::SetRunState {
+                run: 0,
+                state: RunState::Created,
+            },
+        ] {
+            apply(&mut state, &cmd);
+        }
+        assert_eq!(
+            wire(&state.runs[0].attempts[0].history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "the attempt ended at FAILED and takes neither the RETRYING nor the \
+             re-CREATED that follow it"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED", "RETRYING", "CREATED"]
+        );
+    }
+
+    /// `CREATE_NEW_EXECUTION` ends the execution `RETRIED`, and marks every
+    /// ancestor run with it.
+    ///
+    /// `markWithTaskRunAs(execution, taskRunId, RETRIED, true)` — the `true` is
+    /// `markParents`, which recurses up `getParentTaskRunId()` and then sets the
+    /// execution too, where `RETRY_FAILED_TASK` passes `false` and leaves every
+    /// ancestor alone. `RETRIED` is terminal, so this is where egret stops:
+    /// Kestra replays the whole flow as a **different execution**, which no
+    /// [`Command`] can ask for and which [`ExecutionState`] has no field for.
+    /// The four `retry-new-execution-*` entries are baselined for that and for
+    /// nothing else — they reproduce every run, history and attempt Kestra
+    /// recorded, and differ only on `spawned`.
+    #[test]
+    fn create_new_execution_ends_the_execution_retried() {
+        let plan = plan_of("valids/retry-new-execution-task-attempts");
+        assert_eq!(
+            plan.tasks[0].retry.as_ref().map(|r| r.behavior),
+            Some(RetryBehavior::CreateNewExecution)
+        );
+        let (state, now) = run_to_fixpoint_over_time(&plan, &[RunState::Failed]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "FAILED", "RETRIED"]
+        );
+        assert_eq!(
+            wire(&state.runs[0].attempts[0].history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "one attempt: the next one belongs to an execution egret never creates"
+        );
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "FAILED", "RETRIED"]
+        );
+        assert_eq!(
+            now,
+            Tick(0),
+            "no `ScheduleRetry`: the delay belongs to the replay, not to this run"
+        );
+    }
+
+    /// The two behaviours read different clocks, and both are already modelled.
+    ///
+    /// `TaskRun.java:337` measures a `RETRY_FAILED_TASK` `maxDuration` from
+    /// `attempts.getFirst().getState().minDate()`; `TaskRun.java:316` measures a
+    /// `CREATE_NEW_EXECUTION` one from
+    /// `execution.getMetadata().getOriginalCreatedDate()`, which is [`Tick`]'s
+    /// own origin. This drives a run whose first attempt starts **late**, so the
+    /// two origins are 5 seconds apart and the same policy answers differently.
+    #[test]
+    fn the_two_retry_behaviours_measure_max_duration_from_different_instants() {
+        let plan = plan_of("valids/retry-failed-task-attempts");
+        let mut state = ExecutionState::new(&plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: 0,
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 0,
+                at: Tick(5_000),
+            },
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+        assert_eq!(state.runs[0].started_at(), Some(Tick(5_000)));
+
+        let policy = |behavior| RetryPolicy {
+            max_attempts: None,
+            delay: RetryDelay::Constant {
+                interval: std::time::Duration::from_secs(1),
+            },
+            max_duration: Some(std::time::Duration::from_secs(3)),
+            behavior,
+            warning_on_retry: false,
+        };
+        let at = Tick(5_000);
+        assert_eq!(
+            retry::next_retry_at(&policy(RetryBehavior::RetryFailedTask), &state, 0, at),
+            Some(Tick(6_000)),
+            "5000 + 1000 <= 5000 (the first attempt) + 3000"
+        );
+        assert_eq!(
+            retry::next_retry_at(&policy(RetryBehavior::CreateNewExecution), &state, 0, at),
+            None,
+            "5000 + 1000 IS after 0 (the execution's creation) + 3000"
+        );
+    }
+
+    /// `exponential` doubles by default and stops at `maxInterval`;
+    /// `random` takes a delay inside Kestra's own bounds.
+    ///
+    /// `Exponential.nextRetryDate` is `interval * factor^(attemptCount - 1)`
+    /// with `factor` defaulting to `2d` and the result capped at `maxInterval`
+    /// by a `>=`. `Random.nextRetryDate` is
+    /// `random.nextLong(minInterval, maxInterval)`, which `advance` cannot be
+    /// and does not pretend to be — see [`RetryDelay::Random`] for what taking
+    /// the lower bound can and cannot change.
+    #[test]
+    fn the_exponential_delay_doubles_and_the_random_one_stays_inside_its_bounds() {
+        let expo = plan_of("valids/retry-expo");
+        let Some(RetryDelay::Exponential {
+            interval,
+            max_interval,
+            delay_factor,
+        }) = expo.tasks[0].retry.as_ref().map(|r| r.delay.clone())
+        else {
+            panic!("valids/retry-expo declares `type: exponential`");
+        };
+        assert_eq!(
+            (interval, max_interval, delay_factor),
+            (
+                // `PT0.25s`, with a LOWER-CASE `s`. `Duration.parse` is
+                // case-insensitive and so is `retry::parse_duration`; a
+                // case-sensitive one drops this whole policy silently.
+                std::time::Duration::from_millis(250),
+                std::time::Duration::from_secs(5),
+                None
+            )
+        );
+        let (state, now) = run_to_fixpoint_over_time(&expo, &[RunState::Failed]);
+        assert_eq!(
+            (state.runs[0].attempts.len(), now),
+            (3, Tick(750)),
+            "250 then 500: `interval * 2^(attemptCount - 1)`, and `maxAttempts: 3` \
+             stops it before the cap is reached"
+        );
+
+        let random = plan_of("valids/retry-random");
+        let Some(RetryDelay::Random {
+            min_interval,
+            max_interval,
+        }) = random.tasks[0].retry.as_ref().map(|r| r.delay.clone())
+        else {
+            panic!("valids/retry-random declares `type: random`");
+        };
+        assert_eq!(
+            (min_interval, max_interval),
+            (
+                std::time::Duration::from_millis(200),
+                std::time::Duration::from_millis(500)
+            )
+        );
+        let (state, now) = run_to_fixpoint_over_time(&random, &[RunState::Failed]);
+        assert_eq!(state.runs[0].attempts.len(), 3);
+        for (i, attempt) in state.runs[0].attempts.iter().enumerate().skip(1) {
+            let waited = attempt.started_at.0 - state.runs[0].attempts[i - 1].started_at.0;
+            assert!(
+                (200..500).contains(&waited),
+                "attempt {i} waited {waited}ms, outside Kestra's own \
+                 [minInterval, maxInterval) -- a real RNG has to land here too"
+            );
+        }
+        assert_eq!(now, Tick(400), "the lower bound, twice");
+    }
+
+    /// Java's `Duration.parse` grammar, over the shapes a `retry:` can be
+    /// written in — and over the shapes it refuses.
+    ///
+    /// The case-insensitive rows are the load-bearing ones: `valids/retry-expo`
+    /// writes `PT0.25s`, and a parser that reads only `S` drops that policy
+    /// with no error at all, because a policy that cannot be read is a task
+    /// that does not retry.
+    #[test]
+    fn the_retry_duration_grammar_is_javas_and_is_case_insensitive() {
+        use std::time::Duration as D;
+        let accepts: &[(&str, D)] = &[
+            ("PT1S", D::from_secs(1)),
+            ("PT0.25s", D::from_millis(250)),
+            ("pt0.250S", D::from_millis(250)),
+            ("PT7.5S", D::from_millis(7_500)),
+            ("PT15M", D::from_secs(900)),
+            ("PT1H", D::from_secs(3_600)),
+            ("PT1H30M", D::from_secs(5_400)),
+            ("P1D", D::from_secs(86_400)),
+            ("P1DT2H", D::from_secs(93_600)),
+            ("PT0S", D::ZERO),
+        ];
+        for (text, want) in accepts {
+            assert_eq!(
+                retry::parse_duration(text),
+                Some(*want),
+                "{text} must parse as Java's Duration.parse reads it"
+            );
+        }
+        // Refused, each for its own reason: no designator, an empty time part,
+        // a unit outside the grammar, trailing junk, a negative span, and an
+        // expression a `Property` could hold but a literal parser cannot read.
+        for text in [
+            "1S",
+            "PT",
+            "P1W",
+            "PT1S2",
+            "-PT1S",
+            "{{ inputs.wait }}",
+            "",
+            "P",
+            "PTS",
+        ] {
+            assert_eq!(
+                retry::parse_duration(text),
+                None,
+                "{text:?} is not a duration this builder may guess at"
+            );
+        }
+    }
+
+    /// Every `retry:` in the corpus is written in literals, so the one thing a
+    /// pure builder cannot read is the one thing nobody writes.
+    ///
+    /// [`PlanTask::retry`] is dropped whole when any of its durations is not a
+    /// literal, which is the safe direction — a policy this builder cannot
+    /// evaluate must not become a policy it guesses at. This measures that the
+    /// direction is never taken: every flow in the 345-flow corpus that
+    /// declares a `retry:` anywhere produces a `RetryPolicy` for it.
+    #[test]
+    fn every_corpus_retry_is_written_in_literals() {
+        let (mut declared, mut planned, mut flows) = (0usize, 0usize, 0usize);
+        let mut dropped: Vec<String> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            let Ok(plan) = build_plan(&source) else {
+                continue;
+            };
+            let mut here = 0usize;
+            if flow.retry.is_some() {
+                here += 1;
+                if plan.retry.is_some() {
+                    planned += 1;
+                } else {
+                    dropped.push(format!("{id} (flow-level)"));
+                }
+            }
+            // The plan is flat and the model is a tree, so this counts the
+            // TASKS the plan holds -- which is every task `build_plan`
+            // descended into. A `retry:` inside an unimplemented flowable is
+            // invisible to both sides and is counted by neither.
+            let mut stack: Vec<&crate::models::Task> = flow.tasks.iter().collect();
+            stack.extend(flow.errors.iter());
+            while let Some(task) = stack.pop() {
+                if task.retry.is_some() {
+                    here += 1;
+                    match plan.tasks.iter().find(|p| p.id == task.id) {
+                        Some(p) if p.retry.is_some() => planned += 1,
+                        Some(_) => dropped.push(format!("{id}/{}", task.id)),
+                        // Not planned at all: inside a flowable `build_plan`
+                        // keeps opaque, so there is no `PlanTask` to carry it.
+                        None => here -= 1,
+                    }
+                }
+                stack.extend(task.children());
+            }
+            declared += here;
+            if here > 0 {
+                flows += 1;
+            }
+        }
+        assert_eq!(
+            dropped,
+            Vec::<String>::new(),
+            "a `retry:` whose durations are not literals is dropped whole; none is"
+        );
+        assert_eq!(
+            (flows, declared, planned),
+            (26, 27, 27),
+            "26 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 27 policies between them, and every one of them is \
+             readable as literals. If this moves, the corpus moved"
+        );
+    }
+
+    /// Every `errors:` the corpus writes sits on a task `build_plan` plans, or
+    /// on the flow itself.
+    ///
+    /// The list is derived rather than asserted by name, because the point is
+    /// the population and not the members: `dag.rs` carries an `errors:` arm
+    /// that no corpus flow reaches, and this is what says so.
+    #[test]
+    fn every_corpus_errors_list_is_on_a_flowable_egret_plans() {
+        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+        let mut flow_level = 0usize;
+        for (_, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            if !flow.errors.is_empty() {
+                flow_level += 1;
+            }
+            let mut stack: Vec<&crate::models::Task> = flow.tasks.iter().collect();
+            stack.extend(flow.errors.iter());
+            while let Some(task) = stack.pop() {
+                let errors = match &task.kind {
+                    crate::models::TaskKind::Sequential(s) => s.errors.len(),
+                    crate::models::TaskKind::Parallel(p) => p.errors.len(),
+                    crate::models::TaskKind::If(i) => i.errors.len(),
+                    crate::models::TaskKind::Switch(s) => s.errors.len(),
+                    crate::models::TaskKind::Dag(d) => d.errors.len(),
+                    _ => 0,
+                };
+                if errors > 0 {
+                    *by_type.entry(task.r#type.clone()).or_default() += 1;
+                }
+                stack.extend(task.children());
+            }
+        }
+        assert_eq!(
+            (flow_level, by_type.clone()),
+            (
+                17,
+                BTreeMap::from([
+                    ("io.kestra.plugin.core.flow.Dag".to_string(), 1),
+                    ("io.kestra.plugin.core.flow.Parallel".to_string(), 1),
+                    ("io.kestra.plugin.core.flow.Sequential".to_string(), 7),
+                ])
+            ),
+            "17 flows write a flow-level `errors:`, and 9 tasks write one -- on \
+             three of the five flowables W1 now models it on. `If` and `Switch` \
+             carry the field because Java does (`If.java:111`, \
+             `Switch.java:112`) and no corpus flow writes one there. The single \
+             `Dag` and the single `Parallel` are `valids/finally-dag` and \
+             `valids/finally-parallel`, which both ALSO write a `finally:` no \
+             W3a task implements, so neither can bank on the `errors:` arm alone"
         );
     }
 }

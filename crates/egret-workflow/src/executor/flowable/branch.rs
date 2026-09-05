@@ -133,13 +133,14 @@ pub(crate) fn drive_if(
     run: RunIx,
     then_: &[TaskIx],
     else_: &[TaskIx],
+    errors: &[TaskIx],
     now: Tick,
 ) -> Step {
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
         return Step::Waiting;
     };
     let chosen = if is_truthy(rendered) { then_ } else { else_ };
-    sequential::drive(plan, state, chosen, Some(run), now)
+    sequential::drive(plan, state, chosen, errors, Some(run), now)
 }
 
 /// Drive one `Switch`.
@@ -190,6 +191,7 @@ pub(crate) fn drive_switch(
     run: RunIx,
     cases: &[(String, Vec<TaskIx>)],
     default: &[TaskIx],
+    errors: &[TaskIx],
     now: Tick,
 ) -> Step {
     let Some(rendered) = state.runs[run].rendered.as_deref() else {
@@ -197,8 +199,8 @@ pub(crate) fn drive_switch(
     };
     match cases.iter().find(|(key, _)| key == rendered) {
         Some((_, chosen)) if chosen.is_empty() => Step::Waiting,
-        Some((_, chosen)) => sequential::drive(plan, state, chosen, Some(run), now),
+        Some((_, chosen)) => sequential::drive(plan, state, chosen, errors, Some(run), now),
         None if default.is_empty() => Step::Done(RunState::Failed),
-        None => sequential::drive(plan, state, default, Some(run), now),
+        None => sequential::drive(plan, state, default, errors, Some(run), now),
     }
 }

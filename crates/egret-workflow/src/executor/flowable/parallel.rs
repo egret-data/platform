@@ -11,17 +11,60 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::{descend, is_terminal, latest, open, run_of, Step};
+use super::{
+    aggregate, current_list, descend, is_terminal, latest, open, run_of, sequential, Current, Step,
+};
 
-/// Drive one `Parallel` task list: every child is startable, always.
+/// Drive one `Parallel` task list: every child is startable, always — until one
+/// fails for good, after which its `errors:` list is driven **sequentially**.
+///
+/// "Sequentially" is Kestra's own word, not an inference:
+/// `FlowableUtils.resolveParallelNexts` compares the chosen list against the
+/// task list and, when they differ, hands the whole thing to
+/// `resolveSequentialNexts` under the comment "errors & finally must be run as
+/// sequential tasks". Its `resolveState` is `resolveSequentialState`, the very
+/// same function `Sequential` uses, so the *state* half was already shared.
+///
+/// The still-in-flight siblings are failed first, by the same
+/// [`fail_the_rest`] the no-`errors:` path uses. That composition is not
+/// exercised by any corpus flow — no `Parallel` in the corpus has both an
+/// `errors:` and a sibling still running when one branch fails — so it is
+/// stated here rather than claimed to be measured.
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
     children: &[TaskIx],
+    errors: &[TaskIx],
     parent: Option<RunIx>,
     concurrency: Option<u32>,
     now: Tick,
 ) -> Step {
+    match current_list(plan, state, children, errors, parent, now) {
+        // A branch that will be retried holds the whole `Parallel` open, for the
+        // reason `sequential::drive` records: `resolveState`'s empty arm
+        // returns a state only when `hasFailedNoRetry`.
+        Current::RetryPending => return Step::Waiting,
+        Current::Errors(list) => {
+            let cmds = fail_the_rest(
+                state,
+                &children
+                    .iter()
+                    .map(|&task| run_of(state, parent, task))
+                    .collect::<Vec<_>>(),
+            );
+            if !cmds.is_empty() {
+                return Step::Commands(cmds);
+            }
+            return match sequential::walk_errors(plan, state, list, parent, now) {
+                Some(step) => step,
+                None => Step::Done(aggregate(state, children, parent)),
+            };
+        }
+        // `Ended` falls through on purpose: rules 1 and 4 below are Task 4's
+        // measured account of exactly that case, and re-deriving it here would
+        // be a second copy of `fail_the_rest`'s three measurements.
+        Current::Tasks(_) | Current::Ended => {}
+    }
     drive_concurrent(plan, state, children, parent, concurrency, now, |_, _| true)
 }
 
@@ -171,7 +214,7 @@ pub(crate) fn drive_concurrent(
     let created: Vec<RunIx> = runs.iter().flatten().copied().collect();
     let every_run_terminal = created.iter().all(|&ix| is_terminal(state, ix));
     if every_run_terminal && (created.len() == children.len() || ended_badly) {
-        return Step::Done(aggregate(state, &created));
+        return Step::Done(aggregate_created(state, &created));
     }
     Step::Waiting
 }
@@ -233,7 +276,7 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
 /// still cannot represent — they belong to flow concurrency, `AllowFailure` and
 /// `Pause`, none of which is Task 4's — so what is left of the order here is
 /// `KILLED`, then `FAILED`, then the `SUCCESS` it starts from.
-fn aggregate(state: &ExecutionState, runs: &[RunIx]) -> RunState {
+fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
     let mut out = RunState::Success;
     for &ix in runs {
         match latest(state, ix) {
