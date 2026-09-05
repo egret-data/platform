@@ -16,12 +16,21 @@
 # stated rather than estimated; Tasks 3-8 each bank their flowable's slice and
 # drive it to zero.
 #
+# Task 3 (`sequential`) banked 101, leaving 193. Task 4 (`parallel`, `dag`)
+# banked 4, leaving 189: `valids/parallel`, `valids/parallel-nested`, and the
+# two `invalids` `Dag` refusals egret used to OVER-ACCEPT --
+# `dag-cyclicdependency` and `dag-notexist-task`, which are the two checks
+# Kestra's own `DagTaskValidator` makes.
+#
+# `valids/dag` is NOT banked and Task 4 could not bank it. Its runs, histories
+# and attempts are reproduced exactly; one ordered pair is not, and cannot be by
+# anything without a clock. See `oracle-exec/runnable.txt`, `The one ordered
+# pair Task 4 could not reach`.
+#
 # A panic, and a state machine that will not settle inside the step bound, are
 # NOT covered by this file. A line here means "egret does not reproduce this
 # trace yet"; it never means "egret may crash here".
-invalids/dag-cyclicdependency
 invalids/dag-invalid-subtask
-invalids/dag-notexist-task
 invalids/duplicate
 invalids/duplicate-inputs
 invalids/duplicate-key
@@ -124,10 +133,8 @@ valids/loop-values-from-uri
 valids/loop-with-subflow
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
-valids/parallel
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
-valids/parallel-nested
 valids/pause-behavior
 valids/pause-delay
 valids/pause-duration-from-input

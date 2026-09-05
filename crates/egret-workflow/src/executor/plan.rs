@@ -61,9 +61,9 @@ pub struct PlanTask {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskKind {
     /// Anything the executor does not see into: it hands the task to a worker
-    /// and waits for a terminal state. Task 3 puts **every** task type here
-    /// except `io.kestra.plugin.core.flow.Sequential`, including the flowables
-    /// Tasks 4-8 own — see [`build_plan`] for why that is the safe default and
+    /// and waits for a terminal state. Tasks 3 and 4 put **every** task type
+    /// here except the three flowables they implement, including the flowables
+    /// Tasks 5-8 own — see [`build_plan`] for why that is the safe default and
     /// not an approximation.
     Runnable {
         type_id: String,
@@ -71,6 +71,50 @@ pub enum TaskKind {
     Sequential {
         tasks: Vec<TaskIx>,
     },
+    /// `io.kestra.plugin.core.flow.Parallel`.
+    ///
+    /// `concurrency` is Kestra's `concurrent`, **`None` meaning unlimited** —
+    /// which is what Kestra's own `0` means ("If the value is `0`, no limit
+    /// exist and all tasks will start at the same time",
+    /// `core/src/main/java/io/kestra/plugin/core/flow/Parallel.java`), so `0`
+    /// is normalised to `None` here rather than kept as a second spelling of
+    /// the same thing.
+    ///
+    /// It is `Option<u32>` and not `Property<i32>` because [`build_plan`] is
+    /// pure: Kestra renders `concurrent` through a `RunContext`, and a builder
+    /// that cannot render can only read a literal. Every `concurrent:` in the
+    /// 345-flow corpus **is** a literal — measured, and re-measured on every
+    /// run by `every_corpus_concurrent_is_a_literal_integer` — so nothing this
+    /// oracle compares depends on the fallback.
+    Parallel {
+        tasks: Vec<TaskIx>,
+        concurrency: Option<u32>,
+    },
+    /// `io.kestra.plugin.core.flow.Dag` — [`Parallel`](TaskKind::Parallel) plus
+    /// a dependency predicate.
+    ///
+    /// There is no `concurrency` here even though Kestra's `Dag` carries the
+    /// same `concurrent` field, and that is a **gap, not a decision**: no
+    /// corpus flow sets it on a `Dag` (measured by the same test), so a cap
+    /// implemented here would be a rule nothing could ever exercise. Task 8 or
+    /// whoever first needs it should add it with a test that fails without it.
+    Dag {
+        nodes: Vec<DagNode>,
+    },
+}
+
+/// One node of a [`TaskKind::Dag`]: a task and the sibling nodes it waits for.
+///
+/// `depends_on` holds **[`TaskIx`]es, resolved at plan-build time**. Kestra
+/// carries the author's id strings and re-resolves them on every
+/// `resolveNexts` call (`Dag.java`'s `controlTask()`), which is where its
+/// "Not existing task id in dependency" error comes from at run time as well
+/// as at publish time. Resolving once, in [`build_plan`], makes that error
+/// unrepresentable later: an unresolvable id cannot become a `DagNode`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DagNode {
+    pub task: TaskIx,
+    pub depends_on: Vec<TaskIx>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,17 +172,25 @@ impl std::error::Error for PlanError {}
 pub(super) const MEASURED_MAX_CORPUS_DEPTH: usize = 6;
 pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 
-/// Kestra's own class for the one flowable Task 3 implements.
+/// Kestra's own classes for the three flowables Tasks 3 and 4 implement.
 const SEQUENTIAL_TYPE: &str = "io.kestra.plugin.core.flow.Sequential";
+const PARALLEL_TYPE: &str = "io.kestra.plugin.core.flow.Parallel";
+const DAG_TYPE: &str = "io.kestra.plugin.core.flow.Dag";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
-/// # What Task 3 refuses, and what it deliberately does not
+/// # What this refuses, and what it deliberately does not
 ///
-/// It refuses exactly two things: source W1's parser cannot read, and nesting
-/// deeper than [`MAX_TASK_DEPTH`]. It refuses **nothing else** — in particular
-/// it does not refuse a flow because it uses a flowable Task 3 has not
-/// implemented, and that restraint is load-bearing rather than lazy.
+/// It refuses four things: source W1's parser cannot read; nesting deeper than
+/// [`MAX_TASK_DEPTH`]; and a `Dag` whose `dependsOn` names a task that is not
+/// one of its own nodes, or whose nodes form a cycle. The last two are Task 4's
+/// and are exactly the two checks Kestra's own `DagTaskValidator` makes — they
+/// are refusals about *this flow*, not about what egret has implemented, which
+/// is what separates them from the restraint below.
+///
+/// It refuses **nothing else** — in particular it does not refuse a flow
+/// because it uses a flowable no task has implemented yet, and that restraint
+/// is load-bearing rather than lazy.
 ///
 /// The oracle's `refused` verdict compares one thing: that `build_plan` returns
 /// `Err`. A builder that refused every unimplemented flowable would return
@@ -216,10 +268,166 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
     // `models::TaskKind::Sequential` is reached by that type string and by no
     // other, but matching on the parsed variant alone would also catch a
     // future model change that maps a second type onto it.
-    if let (ModelKind::Sequential(seq), SEQUENTIAL_TYPE) = (&task.kind, task.r#type.as_str()) {
-        let children = flatten_list(out, &seq.tasks, depth + 1)?;
-        out[ix].kind = TaskKind::Sequential { tasks: children };
+    match (&task.kind, task.r#type.as_str()) {
+        (ModelKind::Sequential(seq), SEQUENTIAL_TYPE) => {
+            let children = flatten_list(out, &seq.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::Sequential { tasks: children };
+        }
+        (ModelKind::Parallel(par), PARALLEL_TYPE) => {
+            let children = flatten_list(out, &par.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::Parallel {
+                tasks: children,
+                concurrency: literal_concurrency(par.concurrent.as_ref()),
+            };
+        }
+        (ModelKind::Dag(dag), DAG_TYPE) => {
+            // `task` is `Option<Task>` in W1's model because `@NotNull` is bean
+            // validation and not parsing. A node with no task has no id to be
+            // depended on and nothing to run, so it cannot be planned — and
+            // stripping the `Option` here is what lets everything below work in
+            // terms of a task rather than a maybe-task.
+            let mut nodes = Vec::with_capacity(dag.tasks.len());
+            for node in &dag.tasks {
+                let child = node.task.as_ref().ok_or_else(|| PlanError {
+                    message: format!("dag '{}' has a node with no task", task.id),
+                })?;
+                nodes.push((child, node.depends_on.as_slice()));
+            }
+            out[ix].kind = TaskKind::Dag {
+                nodes: flatten_dag(out, &task.id, &nodes, depth + 1)?,
+            };
+        }
+        _ => {}
     }
 
     Ok(ix)
+}
+
+/// Kestra's `concurrent`, as far as a builder with no `RunContext` can read it.
+///
+/// `None` out is **unlimited**, and there are three ways to reach it, only one
+/// of which is a limitation:
+///
+/// - the field is absent, so W1's model supplies Kestra's own default of `0`;
+/// - it is written `0`, which is Kestra's spelling of "no limit";
+/// - it is an expression, or an explicit `null`, or a value no `u32` can hold.
+///
+/// Only the third is a gap, and it is measured to be unreachable from this
+/// corpus: `every_corpus_concurrent_is_a_literal_integer` re-derives, from all
+/// 345 flows on every run, that every `concurrent:` written anywhere in it is a
+/// literal. Kestra's own cap is guarded by `concurrent > 0`, so "cannot read
+/// it" and "not capped" land in the same place there too.
+fn literal_concurrency(source: Option<&crate::models::Property<i32>>) -> Option<u32> {
+    match source?.source().trim().parse::<u32>() {
+        Ok(0) | Err(_) => None,
+        Ok(n) => Some(n),
+    }
+}
+
+/// Flatten a `Dag`'s nodes, refusing the two things Kestra's own
+/// `DagTaskValidator` refuses, in its order: a `dependsOn` naming a task that
+/// is not a sibling node, then a cycle.
+///
+/// **Both refusals belong here rather than in `advance()`**, which is the
+/// plan's instruction and also the artifact's shape: Kestra runs the same two
+/// checks at publish time (`DagTaskValidator.isValid`) and again at run time
+/// (`Dag.controlTask()`), and the publish-time one is why
+/// `invalids/dag-cyclicdependency` and `invalids/dag-notexist-task` are
+/// `refused` in the golden at all. Resolving `dependsOn` to indices here makes
+/// the run-time copy unrepresentable.
+fn flatten_dag(
+    out: &mut Vec<PlanTask>,
+    dag_id: &str,
+    nodes: &[(&Task, &[String])],
+    depth: usize,
+) -> Result<Vec<DagNode>, PlanError> {
+    let ids: Vec<&str> = nodes.iter().map(|(t, _)| t.id.as_str()).collect();
+
+    // Kestra: "Not existing task id in dependency: ..." --
+    // `DagTaskValidator.isValid`, via `Dag.dagCheckNotExistTask`.
+    let unknown: Vec<&str> = nodes
+        .iter()
+        .flat_map(|(_, deps)| deps.iter())
+        .map(String::as_str)
+        .filter(|d| !ids.contains(d))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(PlanError {
+            message: format!(
+                "dag '{dag_id}' depends on task id(s) that are not nodes of it: {}",
+                unknown.join(", ")
+            ),
+        });
+    }
+
+    // Kestra: "Cyclic dependency detected: ..." -- `Dag.dagCheckCyclicDependencies`.
+    let cyclic: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| reaches_itself(id, nodes))
+        .collect();
+    if !cyclic.is_empty() {
+        return Err(PlanError {
+            message: format!(
+                "dag '{dag_id}' has a cyclic dependency through task id(s): {}",
+                cyclic.join(", ")
+            ),
+        });
+    }
+
+    // Flattened in declaration order, so `out` stays pre-order and a node's own
+    // subtree sits between it and the next node.
+    let mut plan_ix = Vec::with_capacity(nodes.len());
+    for (task, _) in nodes {
+        plan_ix.push(flatten_one(out, task, depth)?);
+    }
+
+    Ok(nodes
+        .iter()
+        .zip(&plan_ix)
+        .map(|((_, deps), &ix)| DagNode {
+            task: ix,
+            depends_on: deps
+                .iter()
+                .map(|d| {
+                    let pos = ids.iter().position(|id| id == d).expect(
+                        "flatten_dag resolves dependsOn only after the \
+                             not-a-node check above has passed",
+                    );
+                    plan_ix[pos]
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+/// Whether `start` is reachable from itself by following `dependsOn`.
+///
+/// Kestra's `Dag.hasCycle`, iteratively — and iteratively **on purpose**: the
+/// programme requires a derived bound on every recursive descent over author
+/// input, and a worklist whose `visited` set admits each node id at most once
+/// terminates after at most `nodes.len()` pops for any input at all, cyclic
+/// ones included. That is a bound by construction rather than a constant to
+/// justify, which is the better of the two where it is available.
+fn reaches_itself(start: &str, nodes: &[(&Task, &[String])]) -> bool {
+    let deps_of = |id: &str| -> &[String] {
+        nodes
+            .iter()
+            .find(|(t, _)| t.id == id)
+            .map_or(&[][..], |(_, deps)| deps)
+    };
+    let mut visited: Vec<&str> = Vec::new();
+    let mut stack: Vec<&str> = vec![start];
+    while let Some(current) = stack.pop() {
+        for dep in deps_of(current) {
+            if dep == start {
+                return true;
+            }
+            if !visited.contains(&dep.as_str()) {
+                visited.push(dep.as_str());
+                stack.push(dep.as_str());
+            }
+        }
+    }
+    false
 }

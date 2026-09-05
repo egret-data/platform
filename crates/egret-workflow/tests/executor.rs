@@ -236,6 +236,44 @@ impl From<&GoldenEntry> for Trace {
 }
 
 impl Trace {
+    /// Keep only the ordered pairs the golden **has an opinion about**, and
+    /// report how many were dropped.
+    ///
+    /// `normalise.py` keeps a pair only where all five Kestra rounds agreed and
+    /// publishes the drops: 13 pairs across the whole harvest flipped between
+    /// rounds and are absent from `golden.json` for that reason. egret's side
+    /// has no such notion — a pure state machine serialises in rounds, so it
+    /// produces a relation for every pair — and comparing a vector of 21
+    /// against a vector of 20 makes an entry mismatch on a pair the oracle
+    /// explicitly declines to assert.
+    ///
+    /// **This is not the relation being weakened.** The predicate is untouched
+    /// and so are its endpoints — creation on the left, termination on the
+    /// right, strict on both sides, which
+    /// [`an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended`]
+    /// still pins against [`simulate_with`]'s raw output. Every pair the golden
+    /// *does* carry is still compared, and a pair the golden carries that egret
+    /// does not produce still mismatches, because this only ever removes.
+    ///
+    /// It was found by Task 4 and it is worth 1 banked entry on its own:
+    /// `valids/parallel-nested`'s runs, parents, histories and attempts are
+    /// identical to Kestra's, and every one of the 52 pairs the golden keeps is
+    /// reproduced exactly; the only difference was the 3 pairs it dropped.
+    /// `the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared`
+    /// derives the whole population this can touch, so it cannot quietly grow
+    /// into a way of not comparing something.
+    fn restrict_order_to(&mut self, golden: &Trace) -> usize {
+        let keep: BTreeSet<(usize, usize)> =
+            golden.order.iter().map(|(i, j, _)| (*i, *j)).collect();
+        let before = self.order.len();
+        self.order.retain(|(i, j, _)| keep.contains(&(*i, *j)));
+        let mut dropped = before - self.order.len();
+        for (mine, theirs) in self.spawned.iter_mut().zip(&golden.spawned) {
+            dropped += mine.restrict_order_to(theirs);
+        }
+        dropped
+    }
+
     /// A compact, diffable rendering for the failure report. One line per run,
     /// because a `{:#?}` of a thirteen-run trace is a page nobody reads.
     fn display(&self) -> String {
@@ -832,6 +870,94 @@ fn an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_en
         vec![(0, 1, "before".to_string())],
         "`b` was created after `a` terminated, which is exactly what Kestra's \
          `before` records"
+    );
+}
+
+/// **Restricting the order to the golden's own pairs cannot hide a
+/// disagreement on a pair the golden kept.**
+///
+/// [`Trace::restrict_order_to`] is a change to what the ratchet compares, made
+/// by Task 4 because two of its three flows were unbankable for a reason that
+/// was not about the executor. A change to what an oracle compares is exactly
+/// the kind that has to carry its own guard: the two machines below produce
+/// the same runs and different relations, the golden keeps that pair, and the
+/// restriction has to leave the disagreement visible.
+///
+/// The second half is the control that stops this passing vacuously: with the
+/// same pair *absent* from the golden, the restriction removes it and the two
+/// become equal — which is the behaviour `valids/parallel-nested` needed and
+/// therefore the behaviour that has to be shown, not assumed.
+#[test]
+fn restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair() {
+    let plan = probe_plan(&["a", "b"]);
+    let golden_feed = probe_golden(&["a", "b"]);
+    let eager = simulate_with(&plan, &golden_feed, eager_machine).expect("settles");
+    let lazy = simulate_with(&plan, &golden_feed, lazy_machine).expect("settles");
+    assert_eq!(eager.runs, lazy.runs, "same runs, by construction");
+    assert_ne!(
+        eager.order, lazy.order,
+        "different relation, by construction"
+    );
+
+    // The golden KEEPS (0, 1): the disagreement survives the restriction.
+    let mut kept = lazy.clone();
+    let dropped = kept.restrict_order_to(&eager);
+    assert_eq!(
+        dropped, 0,
+        "nothing to drop when the golden carries the pair"
+    );
+    assert_ne!(
+        kept, eager,
+        "restrict_order_to must not turn a disagreement on a KEPT pair into a match"
+    );
+
+    // The control: the golden DROPPED (0, 1), so there is nothing to compare.
+    let mut unstable_golden = eager.clone();
+    unstable_golden.order.clear();
+    let mut restricted = lazy.clone();
+    let dropped = restricted.restrict_order_to(&unstable_golden);
+    assert_eq!(dropped, 1, "the one pair the golden has no opinion about");
+    assert_eq!(
+        restricted, unstable_golden,
+        "with the pair dropped as unstable the two traces agree on everything the \
+         oracle actually asserts -- this is the case valids/parallel-nested is"
+    );
+}
+
+/// **The pairs the golden dropped as unstable are the whole of what the
+/// restriction can touch, and they are 12 across 3 entries.**
+///
+/// Derived from `golden.json` on every run, never listed: this is the entire
+/// population [`Trace::restrict_order_to`] is able to remove, so if a
+/// re-harvest drops more pairs — or if someone widens the restriction into a
+/// way of not comparing something — the number moves here first.
+#[test]
+fn the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared() {
+    fn walk(node: &Trace, id: &str, out: &mut BTreeMap<String, usize>) {
+        let n = node.runs.len();
+        let full = n * n.saturating_sub(1) / 2;
+        if full > node.order.len() {
+            *out.entry(id.to_string()).or_default() += full - node.order.len();
+        }
+        for sub in &node.spawned {
+            walk(sub, id, out);
+        }
+    }
+    let mut dropped: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        walk(&Trace::from(entry), &entry.id, &mut dropped);
+    }
+    println!("golden entries with dropped ordered pairs: {dropped:?}");
+    assert_eq!(
+        dropped,
+        BTreeMap::from([
+            ("valids/dag".to_string(), 1),
+            ("valids/if".to_string(), 9),
+            ("valids/parallel-nested".to_string(), 3),
+        ]),
+        "the whole population of pairs the golden declines to assert. \
+         `oracle-exec/README.md` reports 13 dropped pairs from the harvest; the 12 \
+         here are those minus the one whose entry did not reach golden.json"
     );
 }
 
@@ -1502,6 +1628,7 @@ fn executor_matches_golden() {
     let mut mismatched: BTreeSet<String> = BTreeSet::new();
     let mut panicked: Vec<String> = Vec::new();
     let mut detail: BTreeMap<String, String> = BTreeMap::new();
+    let mut uncompared_pairs = 0usize;
 
     for entry in &golden {
         match (entry.verdict, evaluate(entry)) {
@@ -1527,8 +1654,9 @@ fn executor_matches_golden() {
                     format!("  {}: egret REFUSED a flow Kestra ran: {msg}", entry.id),
                 );
             }
-            (Verdict::Runs, Outcome::Trace(actual)) => {
+            (Verdict::Runs, Outcome::Trace(mut actual)) => {
                 let expected = Trace::from(entry);
+                uncompared_pairs += actual.restrict_order_to(&expected);
                 if actual != expected {
                     mismatched.insert(entry.id.clone());
                     detail.insert(
@@ -1553,7 +1681,11 @@ fn executor_matches_golden() {
     let (stale, regressions, banked) = classify(&golden_ids, &baseline, &mismatched, &panicked);
 
     println!(
-        "oracle-exec ratchet: {} golden entries, {} mismatching, {} baselined, {} broken",
+        "oracle-exec ratchet: {} golden entries, {} mismatching, {} baselined, {} broken, \
+         {uncompared_pairs} ordered pair(s) removed from egret's side for having no \
+         counterpart in the golden (see Trace::restrict_order_to; the golden-side \
+         population is derived by \
+         the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared)",
         golden.len(),
         mismatched.len(),
         baseline.len(),
@@ -1589,8 +1721,9 @@ fn executor_matches_golden() {
 ///
 /// - **fed** — the run's task is a `Runnable` in the plan, so its terminal is
 ///   supplied and cannot be compared.
-/// - **flowable** — the run's task is a `TaskKind::Sequential`, whose state is
-///   the executor's own decision and is compared.
+/// - **flowable** — the run's task is one this executor drives itself
+///   (`Sequential`, `Parallel`, `Dag`), whose state is its own decision and is
+///   compared.
 /// - **unplanned** — the run's task has no `PlanTask` at all, because it lives
 ///   inside a flowable Task 3 plans opaque and therefore does not descend into.
 ///   Tasks 4-8 move these into one of the two buckets above.
@@ -1646,7 +1779,11 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
                     .map(|p| &p.kind)
                 {
                     None => unplanned += 1,
-                    Some(TaskKind::Sequential { .. }) => flowable += 1,
+                    Some(
+                        TaskKind::Sequential { .. }
+                        | TaskKind::Parallel { .. }
+                        | TaskKind::Dag { .. },
+                    ) => flowable += 1,
                     Some(TaskKind::Runnable { type_id }) => {
                         fed += 1;
                         if !run.state.iter().any(|s| s == "SUBMITTED") {
@@ -1676,7 +1813,7 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
     );
     assert_eq!(
         (fed, flowable, unplanned, fed_without_submitted),
-        (390, 23, 427, 135),
+        (428, 48, 364, 134),
         "these four numbers are written into oracle-exec/README.md under `What the \
          oracle feeds in`. They move as Tasks 4-8 teach `build_plan` more flowables, \
          and when they do the README has to move with them -- which is the point of \
@@ -1738,15 +1875,22 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
             bucket("io.kestra.plugin.core.flow."),
             bucket("io.kestra.plugin.core.execution.")
         ),
-        (15, (11, 114), (3, 19)),
-        "15 task types are over-submitted. 11 of them are flowables Tasks 4-6 \
-         own (114 runs). THREE are `io.kestra.plugin.core.execution.*` (19 runs) \
-         -- Kestra's `ExecutionUpdatableTask` family (`Labels`, `SetVariables`, \
-         `UnsetVariables`, `Exit`; `core/src/main/java/io/kestra/plugin/core/\
-         execution/Labels.java:79`), which is neither a `RunnableTask` nor a \
-         flowable and which NO W3a task claims -- nor does any task claim \
-         `core.flow.Subflow`, 18 more of these runs. See oracle-exec/README.md, \
-         `States and constructs no W3a task claims`."
+        (13, (9, 113), (3, 19)),
+        "13 task types are over-submitted, down from Task 3's 15: `core.flow.\
+         Parallel` and `core.flow.Dag` left the set in the commit that gave them \
+         a TaskKind, which is the whole point of asserting it. NINE are still \
+         flowables (113 runs) -- and the count went UP for two of them rather \
+         than down, because planning a Parallel or a Dag is what makes the \
+         opaque flowables INSIDE one reachable at all: `If` 12 -> 19 and \
+         `Subflow` 18 -> 22. THREE are `io.kestra.plugin.core.execution.*` (19 \
+         runs) -- Kestra's `ExecutionUpdatableTask` family (`Labels`, \
+         `SetVariables`, `UnsetVariables`, `Exit`; `core/src/main/java/io/kestra/\
+         plugin/core/execution/Labels.java:79`), which is neither a \
+         `RunnableTask` nor a flowable and which NO W3a task claims -- nor does \
+         any task claim `core.flow.Subflow`, `core.flow.Pause`, \
+         `core.flow.AllowFailure` or `core.flow.WorkingDirectory`, 40 more of \
+         these runs between them. See oracle-exec/README.md, `States and \
+         constructs no W3a task claims`."
     );
 
     // The remainder is the measured EXCEPTION to the discriminator this test

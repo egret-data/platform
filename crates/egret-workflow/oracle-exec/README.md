@@ -11,6 +11,15 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+Task 4 (`parallel`, `dag`) changed four more, and they are the ones a reader
+should not take from this file's older sentences: the feed table below moved to
+`428 fed / 48 flowable / 364 unplanned`, the ratchet now compares the ordered
+pairs the **golden** carries rather than every pair egret can produce, the
+"kept `before` may be unreachable without a clock" hole under *What this oracle
+does not prove* stopped being hypothetical and is now one named pair, and the
+design doc's sentence "one bad sibling failed all three" is measurably too wide.
+See *What Task 4 had to change, and what it banked*.
+
 Task 3 is the first task to write executor code, and it changed four things this
 file states: the circularity figure under *What the oracle feeds in* is now
 measured rather than quoted (and the quoted one was impossible), `RunState`
@@ -912,10 +921,13 @@ is in exactly one bucket:
 
 | bucket | count | what it is |
 |---|---|---|
-| **fed** | 390 | the run's task is a `Runnable` in the plan, so its terminal is supplied and is not compared |
-| **flowable** | 23 | the run's task is a `TaskKind::Sequential`, whose state is the executor's own decision and is compared |
-| **unplanned** | 427 | the run's task has no `PlanTask` at all — it lives inside a flowable Task 3 plans opaque and so does not descend into |
+| **fed** | 428 | the run's task is a `Runnable` in the plan, so its terminal is supplied and is not compared |
+| **flowable** | 48 | the run's task is one the executor drives itself (`Sequential`, `Parallel`, `Dag`), so its state is its own decision and is compared |
+| **unplanned** | 364 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
 | **TOTAL** | **840** | |
+
+Task 3's figures were `390 / 23 / 427`; Task 4 moved 63 runs out of *unplanned*,
+38 of them into *fed* and 25 into *flowable*.
 
 Those three move as Tasks 4-8 teach `build_plan` more flowables, which is why
 they are asserted in the test rather than only printed here: a task that changes
@@ -932,16 +944,24 @@ because `runIf` `SKIPPED` them or they failed before submission. The set is
 asserted at exactly those 2, so if the exception grows this paragraph has to
 weaken with it.
 
-**Task 3's own over-feed is 135 of the 390, and it is not a single accident.**
+**The over-feed is 134 of the 428, and it is not a single accident.**
 The by-type breakdown is derived from the plan's own `type_id` and printed on
-every run — **15 task types**, of which 11 are flowables Tasks 4-6 own (114
-runs — but see the section below: `Subflow`'s 18 of those are claimed by nobody
-either), 3 are `io.kestra.plugin.core.execution.*` (19 runs) that **no W3a task
-claims**, and 1 is the `Log` exception above. See *States and constructs no W3a
-task claims*.
+every run — **13 task types** after Task 4 (15 before it; `core.flow.Parallel`
+and `core.flow.Dag` left the set in the commit that gave them a `TaskKind`),
+of which 9 are still flowables (113 runs), 3 are
+`io.kestra.plugin.core.execution.*` (19 runs) that **no W3a task claims**, and 1
+is the `Log` exception above. See *States and constructs no W3a task claims*.
 
-**Nothing banked rests on any of this** — zero of the 134 banked runs sit in the
-135-run over-fed bucket. See *What Task 3 had to change, and what it banked* for
+**Two of those nine went UP rather than down, and that is not a regression.**
+`If` moved 12 → 19 and `Subflow` 18 → 22, because planning a `Parallel` or a
+`Dag` is what makes the opaque flowables *inside* one reachable at all: a run
+that was `unplanned` (its parent was opaque, so it had no `PlanTask`) becomes a
+fed `Runnable` the moment its parent is planned. Implementing a flowable
+therefore enlarges the over-feed for the flowables nested in it, until those
+land too.
+
+**Nothing banked rests on any of this** — zero of the banked runs sit in the
+over-fed bucket. See *What Task 3 had to change, and what it banked* for
 the intersection that establishes it.
 
 What makes that acceptable is not the argument, it is that `golden.json` is
@@ -1444,6 +1464,155 @@ reading identically to a real result. The same family caught this task once
 already: `cp` is aliased to `cp -i` in this shell, so a snapshot refresh silently
 refused to overwrite and a stale file was restored over a fix.
 
+## What Task 4 had to change, and what it banked
+
+Task 4 implements `parallel` and `dag`. It banks **4** of the 193 entries Task 3
+left, taking `baseline.txt` to **189**: `valids/parallel`,
+`valids/parallel-nested`, and the two `invalids` `Dag` refusals egret used to
+**over-accept** — `invalids/dag-cyclicdependency` and
+`invalids/dag-notexist-task`.
+
+The control was run first, in the working tree at `e82c8814` with `git status`
+clean: `oracle-exec ratchet: 294 golden entries, 193 mismatching, 193 baselined,
+0 broken`. Every line banked was one of those 193.
+
+### The ratchet now compares the pairs the GOLDEN carries, not every pair egret can produce
+
+This is a change to what the oracle compares, and it is the one thing in Task 4
+a reader should check hardest.
+
+`normalise.py` keeps an ordered pair only where all five Kestra rounds agreed,
+and publishes the drops — 13 pairs flipped between rounds and are simply absent
+from `golden.json`. egret has no such notion: a clock-free state machine
+serialises in rounds and produces a relation for **every** pair. So the ratchet
+was comparing a vector of 21 against a vector of 20 and calling it a mismatch on
+a pair the oracle explicitly declines to assert.
+
+Measured cost of not fixing it: `valids/parallel-nested` mismatched with
+**identical runs, parents, histories and attempts**, and with all 52 kept
+ordered pairs reproduced exactly. The only difference was 3 pairs the golden had
+dropped. `valids/dag` and `valids/if` are in the same position for 1 and 9
+pairs.
+
+`Trace::restrict_order_to` removes, from egret's side only, the pairs the golden
+has no relation for. **The predicate and its endpoints are untouched** — creation
+on the left, termination on the right, strict on both sides, still pinned by
+`an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended`
+against `simulate_with`'s raw output — and a pair the golden *does* carry that
+egret does not produce still mismatches, because the projection only ever
+removes. Two committed tests bound it:
+`restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` (two machines
+that differ on a kept pair still mismatch; and the control, the same pair
+dropped, does not) and
+`the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared`, which
+derives the entire population it can touch — **12 pairs across exactly 3
+entries**, `valids/dag` 1, `valids/if` 9, `valids/parallel-nested` 3.
+
+### `valids/dag` is NOT banked, and it is the hole this file predicted
+
+Everything about it reproduces except **one ordered pair**, `(task3, task4)`.
+The golden says `before`; egret says `overlapping`.
+
+Kestra's `resolveDagNexts` filters on "all dependencies are terminated", and
+`task4` depends only on `task2`. So Kestra's own code creates `task4` the moment
+`task2` terminates, whether or not `task3` has. The five harvest rounds
+nonetheless all recorded `task3` ending before `task4` was created — both are
+`Log` tasks that finish in milliseconds, and Kestra's executor saw both
+terminations in one evaluation. egret's environment completes exactly one
+in-flight run per round, so it cannot: it sees `task2` finish, creates `task4`,
+and only then sees `task3` finish.
+
+This is *What this oracle does not prove*'s fifth bullet arriving: "Where
+Kestra's scheduler happened to serialise two branches the same way five times
+running, the golden records `before` and egret will say `overlapping` — a
+mismatch that is about the instrument, not about the flowable. Tasks 4 and 6 are
+the ones that will find out, and the honest answer if it happens is to record
+the pairs, not to weaken the relation." It happened, it is one pair, and it is
+recorded — here, and in `runnable.txt`. The alternative that would bank the
+entry is a `Dag` that waits for every in-flight sibling before creating the next
+batch, and that is a worse implementation, not a fix: it would make one slow
+branch block an independent short branch's successor, which is observable and
+wrong.
+
+### "One bad sibling failed all three" is too wide, and the golden says so
+
+`docs/en/specs/2026-09-04-workflow-w3a-executor-design.md` §4 records, from the
+spike, that a validation error in one parallel branch (`c_fast`) left `a_slow`
+and `b_mid` `FAILED` as well. The shape reproduces in the corpus:
+`valids/parallel-fail-with-flowable`'s branch holding a `Sleep: PT1S` ends
+`FAILED`, and `Sleep` succeeds in every other flow here, `PT30S` included
+(`valids/sequential-sleep`).
+
+But the sentence as written is false, and the same golden refutes it.
+`valids/finally-parallel`, driven with `{"failed": true}`, is a `Parallel` whose
+four branches end `SUCCESS, SUCCESS, SUCCESS, FAILED` — the `Parallel` itself is
+`FAILED` and three siblings survived. `valids/finally-dag` is the same shape
+(`t1` and `t2` `SUCCESS` beside a `FAILED` `t3`).
+
+What separates them is *when*. A sibling that had already terminated keeps the
+state it terminated with; a sibling still in flight does not survive. That is
+the rule `parallel.rs::fail_the_rest` implements, and both halves are asserted
+by `one_invalid_sibling_fails_every_sibling` — the spike's half, and the bound
+`finally-parallel` puts on it.
+
+**Neither half is reachable by this oracle**, and that is worth saying plainly:
+the runs it touches are `Runnable`s whose terminal state is *fed* from the
+golden. The unit test is the only thing holding it.
+
+### A guard that was written and then deleted
+
+`resolveParallelNexts` returns nothing at all while any existing child run is
+still `CREATED` — Kestra's "first created, leave". It was ported, and then the
+mutation that bypasses it (`if !any_created || true`) left the whole crate at
+**447 passed / 0 failed** with the ratchet unmoved. It is unreachable in a
+round-driven executor: a `CREATED` run exists for exactly one round, and nothing
+can terminate during that round because the environment only moves when
+`advance` has emitted nothing. Kestra needs it because its executor is
+message-driven; this one does not. Deleted rather than shipped with a comment.
+
+### Task 4's mutations
+
+Each was applied, **built and asserted to compile with 0 errors**, then run
+against the whole crate (`cargo test -p egret-workflow --no-fail-fast`) — never
+a name-filtered subset. Restore is `shutil.copyfile`, which stamps a fresh
+mtime; `tar xf`, `cp -p` and `rsync -a` all preserve mtimes and would leave
+cargo rebuilding nothing.
+
+| # | file | edit | what died, and the message |
+|---|---|---|---|
+| M13 | `parallel.rs` | `.take(room)` → `.take(room.min(1))` | 3 unit tests. ``a Parallel creates every child in ONE round, in declaration order, and starts none of them while it does — left: [CreateRun { task: 1, .. }] right: [… six CreateRuns …]`` |
+| M14 | `parallel.rs` | `if !any_created` → `if !any_created \|\| true` | **nothing.** 447 passed, 0 failed, ratchet unmoved — see *A guard that was written and then deleted* |
+| M15 | `parallel.rs` | `fail_the_rest(...)` → an empty command list | `one_invalid_sibling_fails_every_sibling`: ``a_slow and b_mid were still in flight when c_fast failed, so both end FAILED — left: [] right: [SetRunState { run: 1, state: Failed }, SetRunState { run: 2, state: Failed }]`` |
+| M16 | `parallel.rs` | `fail_the_rest` fails every sibling, terminated ones included | 2 unit tests. ``a_slow had already SUCCEEDED and keeps it; only b_mid, which was still in flight, is failed — left: [Failed, Failed, Failed, Failed] right: [Failed, Success, Failed, Failed]`` |
+| M17 | `dag.rs` | the `dependsOn` predicate → `true` | 2 unit tests. ``Kestra's taskRunList for valids/dag, verbatim — left: ["dag","task1","task2","task3","task4","task5","task6"] right: ["dag","task1","task2","task3","task4","task6","task5"]`` and ``task1 failed, so none of the five nodes downstream of it exists — left: [… all seven …] right: ["dag", "task1"]`` |
+| M18 | `plan.rs` | `if !cyclic.is_empty()` → `if false && …` | `a_cyclic_dag_is_refused_by_name` **and the ratchet**: ``a cyclic dag must be refused; got a plan of 6 task(s) rooted at 'dag'``; ``PANIC … invalids/dag-cyclicdependency: STUCK after 2 step(s) … run 0 (dag) is Some(Running)`` |
+| M19 | `plan.rs` | `if !unknown.is_empty()` → `if false && …` | 2 unit tests **and the ratchet**: ``flatten_dag resolves dependsOn only after the not-a-node check above has passed``; ``PANIC … invalids/dag-notexist-task`` |
+| M20 | `parallel.rs` | the concurrency cap → `usize::MAX` | `a_parallel_concurrency_cap_bounds_the_batch`: ``\`concurrent: 2\` creates two of the three children in the first batch — left: 3 right: 2`` |
+| M21 | `tests/executor.rs` | `restrict_order_to` clears every pair | `restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` **and the ratchet**: ``nothing to drop when the golden carries the pair — left: 1 right: 0``; ``REGRESSION: 20 entr(y/ies) mismatch that were NOT in baseline.txt`` |
+| M22 | `parallel.rs` | rule 3 breaks after the first branch that wants something | `one_invalid_sibling_fails_every_sibling`: ``all three branches must be in flight before one of them fails: [Some(Running), Some(Running), Some(Created), Some(Created)]`` |
+| M23 | `parallel.rs` | `aggregate` always answers `Success` | 3 unit tests. ``and the Dag reports the failure instead of waiting for runs that will never be created — left: ["CREATED","RUNNING","SUCCESS"] right: ["CREATED","RUNNING","FAILED"]`` |
+| M24 | `parallel.rs` | rule 4 drops `\|\| ended_badly` | `a_dag_creates_nothing_downstream_of_a_failed_dependency` **and the ratchet**: ``left: ["CREATED","RUNNING"] right: ["CREATED","RUNNING","FAILED"]``; ``PANIC … invalids/dag-invalid-subtask: STUCK after 5 step(s)`` |
+| M25 | `plan.rs` | `concurrent: 0` read as a cap of 0 rather than unlimited | **8** tests including the ratchet. ``an absent \`concurrent:\` is Kestra's default 0, which is unlimited — left: Parallel { tasks: [1, 2, 3], concurrency: Some(0) } right: … concurrency: None``; ``PANIC … valids/finally-parallel: STUCK after 2 step(s)`` |
+
+### A finding Task 4 did not need but Task 8 does
+
+`build_plan` calls `spec::parse` and **not** `spec::validate`, and W1's
+`validate` already carries rules for everything Task 4 added to the builder —
+`dag_cycle`, `dag_dependency_not_found`, `dag_node_task_required`. So egret's
+HTTP publish path was already refusing `invalids/dag-cyclicdependency`; only the
+executor's builder over-accepted it.
+
+Measured over the 20 `refused` entries still baselined: **8 of them would be
+refused today if `build_plan` ran `validate`** — `invalids/duplicate` and
+`invalids/duplicate-parallel` (`duplicate_task_id`), `invalids/duplicate-inputs`
+(`duplicate_input_id`), `invalids/empty` and `valids/invalid-draft-flow`
+(`empty_tasks`), `invalids/if-without-condition` (`if_condition_required`),
+`invalids/recursive-flow` (`self_subflow`), `invalids/workingdirectory-no-tasks`
+(`working_directory_tasks_required`) — and the other 12 would not. That is
+Task 8's decision, not this task's: it changes what the executor refuses for
+every flow, and Task 3's M8 is the recorded argument for not widening refusal
+casually.
+
 ## States and constructs no W3a task claims
 
 The plan carries this table too (`docs/en/plans/2026-09-04-workflow-w3a-executor.md`,
@@ -1457,7 +1626,7 @@ owner is how a suppression list starts.
 | flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
 | `disabled:` | `SKIPPED`, 4 entries | a task-level flag | **unclaimed — W3a's final review must assign it or defer it with a reason** |
 | `ExecutionUpdatableTask` | 19 over-submitted runs across 16 baselined entries | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
-| `Subflow` | 22 baselined `runs` entries, 18 over-submitted runs | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
+| `Subflow` | 22 baselined `runs` entries, 22 over-submitted runs after Task 4 (18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 
 The fourth row is Task 3's, and it is wider than the name that surfaced it.
 `io.kestra.plugin.core.execution.Labels` is `extends Task implements
@@ -1519,16 +1688,30 @@ wrote. Beyond that, the specific holes, each with its count:
 - **13 ordered pairs were dropped**, all of them because the relation flipped
   between rounds; none because a run had no start or no end. The kept 1104 —
   743 `before`, 361 `overlapping` — are the whole of what this oracle asserts
-  about serialisation.
-- **A kept `before` is not always reachable by a clockless implementation.** The
-  relation egret produces comes from `advance()` round numbers, so two branches
-  a `parallel` starts together and finishes together are `overlapping` no matter
-  how long each took. Where Kestra's scheduler happened to serialise two
-  branches the same way five times running, the golden records `before` and
-  egret will say `overlapping` — a mismatch that is about the instrument, not
-  about the flowable. None is known to exist today because nothing is
-  implemented yet; Tasks 4 and 6 are the ones that will find out, and the honest
-  answer if it happens is to record the pairs, not to weaken the relation.
+  about serialisation. **Since Task 4 the ratchet compares only those**: egret
+  produces a relation for every pair, the golden does not, and comparing an
+  assertion against an absence was costing `valids/parallel-nested` a bank on 3
+  pairs the golden itself declines to state. `Trace::restrict_order_to`, and the
+  12-pair population it can touch, are derived and guarded — see *What Task 4
+  had to change, and what it banked*.
+- **A kept `before` is not always reachable by a clockless implementation, and
+  Task 4 found the first one.** The relation egret produces comes from
+  `advance()` round numbers, so two branches a `parallel` starts together and
+  finishes together are `overlapping` no matter how long each took. Where
+  Kestra's scheduler happened to serialise two branches the same way five times
+  running, the golden records `before` and egret says `overlapping` — a mismatch
+  about the instrument, not about the flowable.
+
+  **It is one pair, and it is `valids/dag`'s `(task3, task4)`.** `task4` depends
+  only on `task2`, so Kestra's own filter ("all dependencies are terminated")
+  creates it as soon as `task2` ends; all five rounds nonetheless saw `task3`
+  end first, because both are `Log` tasks and one executor evaluation saw both
+  terminations. egret's environment completes one in-flight run per round and
+  cannot. That single pair is the whole reason `valids/dag` is still baselined —
+  its runs, parents, histories, attempts and other 19 pairs all reproduce. The
+  answer taken was the one this bullet prescribed: record the pair, do not
+  weaken the relation, and do not make the `Dag` wait for quiescence to buy the
+  bank. Task 6 is the remaining candidate to find another.
 - **Nothing keyed on elapsed time is reachable, and there were TWO independent
   causes. Task 3 closed the second; the first stands.**
   1. *The environment, which stands.* `now` moves only to a `not_before`

@@ -753,3 +753,53 @@ recovered inputs with no checkable assertion
     with an EXPECTED row          38
     with no checkable assertion   2
 
+
+
+The one ordered pair Task 4 could not reach (W3a Task 4, `parallel` + `dag`)
+========================================================================
+
+`valids/dag` is the corpus's only `Dag` flow with a real dependency chain, and
+Task 4's mutation for the dependency predicate -- making `dependsOn` vacuously
+satisfied -- DOES go red on it, naming ids:
+
+  a_dag_creates_a_node_only_when_every_dependency_has_succeeded
+    left:  ["dag","task1","task2","task3","task4","task5","task6"]
+    right: ["dag","task1","task2","task3","task4","task6","task5"]
+
+So the gap the plan's Step 4 asked about -- "the corpus has no dag flow with a
+real dependency" -- does not exist.  A different gap does, and this is it.
+
+`valids/dag` is STILL BASELINED, and no state machine without a clock can bank
+it.  Everything reproduces -- 7 runs in Kestra's own `taskRunList` order, every
+history, every attempt, 19 of its 20 kept ordered pairs -- except:
+
+  pair (3, 4) = (task3, task4)     golden: before      egret: overlapping
+
+`task4` dependsOn `task2` ONLY.  Kestra's `resolveDagNexts` filters on "all
+dependencies are terminated", so Kestra's own code creates `task4` the moment
+`task2` terminates, whether or not `task3` has.  All five harvest rounds
+nonetheless recorded `task3` ending BEFORE `task4` was created: both are `Log`
+tasks that finish in milliseconds and one executor evaluation saw both
+terminations.  egret's environment completes exactly one in-flight run per
+round, so it sees `task2` finish, creates `task4`, and only then sees `task3`
+finish.
+
+This is the hole README.md's `What this oracle does not prove` predicted in
+those words ("Tasks 4 and 6 are the ones that will find out, and the honest
+answer if it happens is to record the pairs, not to weaken the relation").  It
+is recorded, not papered over.  The change that WOULD bank the entry -- a `Dag`
+that waits for every in-flight sibling before creating the next batch -- is a
+worse implementation, not a fix: it makes one slow branch block an independent
+short branch's successor, which is observable and wrong.
+
+`valids/dag` is therefore the one baselined line in this file that is waiting on
+the INSTRUMENT rather than on the executor.  Whoever gives the oracle an
+environment that can finish two runs in one round -- Tasks 5 and 7 already owe
+it a clock that advances for a reason other than a `not_before` -- should
+re-check this entry first.
+
+Separately: 12 ordered pairs across 3 entries (`valids/dag` 1, `valids/if` 9,
+`valids/parallel-nested` 3) were dropped by `normalise.py` as unstable and are
+no longer compared at all.  That is not a hole in the executor; it is the
+harvest's own measurement, and since Task 4 the ratchet honours it rather than
+demanding egret reproduce a relation the golden declines to state.

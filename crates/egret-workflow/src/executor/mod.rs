@@ -13,14 +13,15 @@
 //! # What is implemented
 //!
 //! W3a Task 3: [`Plan`], [`ExecutionState`], [`Command`], [`build_plan`], and
-//! the one flowable `sequential` — which is also the flow's top-level `tasks:`,
-//! since Kestra runs that list by the same rule. Every other task type is
-//! planned as an opaque [`TaskKind::Runnable`]; see [`build_plan`] for why that
-//! is the safe default rather than an approximation.
+//! the flowable `sequential` — which is also the flow's top-level `tasks:`,
+//! since Kestra runs that list by the same rule. W3a Task 4: `parallel` and
+//! `dag`, and the two refusals a `Dag` can earn at plan-build time. Every other
+//! task type is planned as an opaque [`TaskKind::Runnable`]; see [`build_plan`]
+//! for why that is the safe default rather than an approximation.
 //!
-//! Tasks 4-8 add `parallel`, `dag`, `if`/`switch`, `loop` and the attempt
-//! lifecycle. They add variants to [`TaskKind`] and [`Command`]; they do not
-//! change the signatures here.
+//! Tasks 5-8 add `if`/`switch`, `loop` and the attempt lifecycle. They add
+//! variants to [`TaskKind`] and [`Command`]; they do not change the signatures
+//! here.
 
 mod command;
 mod flowable;
@@ -29,11 +30,11 @@ mod state;
 
 pub use command::Command;
 pub use plan::{
-    build_plan, Plan, PlanError, PlanTask, RetryBehavior, RetryPolicy, TaskIx, TaskKind,
+    build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryPolicy, TaskIx, TaskKind,
 };
 pub use state::{apply, Attempt, ExecutionState, RunIx, RunState, TaskRun, Tick};
 
-use flowable::sequential::{self, Step};
+use flowable::{sequential, Step};
 
 /// Decide what this execution does next.
 ///
@@ -172,6 +173,62 @@ mod tests {
         panic!("did not settle in 1000 rounds");
     }
 
+    /// [`run_to_fixpoint`], but the environment completes the **latest**-created
+    /// in-flight run first instead of the earliest.
+    ///
+    /// This is the 4s/2s/1s experiment, in a state machine: completion order is
+    /// the exact reverse of creation order. `taskRunList` is creation order —
+    /// measured on a flow whose three parallel branches slept 4s, 2s and 1s,
+    /// five rounds, one distinct order, `a_slow, b_mid, c_fast` — so the run
+    /// list this produces must be unchanged by the reversal.
+    fn run_to_fixpoint_finishing_backwards(plan: &Plan, outcome: RunState) -> ExecutionState {
+        let mut state = ExecutionState::new(plan);
+        for _ in 0..1000 {
+            let cmds = advance(plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).rev().find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                ),
+                None => return state,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// Apply one round of `advance` and hand back what it asked for.
+    fn round(plan: &Plan, state: &mut ExecutionState) -> Vec<Command> {
+        let cmds = advance(plan, state, T0);
+        for cmd in &cmds {
+            apply(state, cmd);
+        }
+        cmds
+    }
+
+    /// The ids of the runs, in creation order.
+    fn run_ids(plan: &Plan, state: &ExecutionState) -> Vec<String> {
+        state
+            .runs
+            .iter()
+            .map(|r| plan.tasks[r.task].id.clone())
+            .collect()
+    }
+
     fn wire(states: &[RunState]) -> Vec<&'static str> {
         states.iter().map(|s| s.wire()).collect()
     }
@@ -267,46 +324,51 @@ mod tests {
     /// still has the right runs in the right order and matches nothing.
     #[test]
     fn only_a_runnable_passes_through_submitted() {
-        let plan = plan_of("valids/sequential");
-        let state = run_to_fixpoint(&plan, RunState::Success);
-
+        // One flow per flowable this executor drives, so the discriminator is
+        // pinned on all three and not only on the one Task 3 shipped.
         let mut flowables = 0;
         let mut runnables = 0;
-        for run in &state.runs {
-            match plan.tasks[run.task].kind {
-                TaskKind::Sequential { .. } => {
-                    flowables += 1;
-                    assert_eq!(
-                        wire(&run.history),
-                        ["CREATED", "RUNNING", "SUCCESS"],
-                        "flowable {} must not pass through SUBMITTED",
-                        plan.tasks[run.task].id
-                    );
+        for corpus_id in ["valids/sequential", "valids/parallel", "valids/dag"] {
+            let plan = plan_of(corpus_id);
+            let state = run_to_fixpoint(&plan, RunState::Success);
+            for run in &state.runs {
+                match plan.tasks[run.task].kind {
+                    TaskKind::Sequential { .. }
+                    | TaskKind::Parallel { .. }
+                    | TaskKind::Dag { .. } => {
+                        flowables += 1;
+                        assert_eq!(
+                            wire(&run.history),
+                            ["CREATED", "RUNNING", "SUCCESS"],
+                            "{corpus_id}: flowable {} must not pass through SUBMITTED",
+                            plan.tasks[run.task].id
+                        );
+                    }
+                    TaskKind::Runnable { .. } => {
+                        runnables += 1;
+                        assert_eq!(
+                            wire(&run.history),
+                            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+                            "{corpus_id}: runnable {} must pass through SUBMITTED",
+                            plan.tasks[run.task].id
+                        );
+                    }
                 }
-                TaskKind::Runnable { .. } => {
-                    runnables += 1;
-                    assert_eq!(
-                        wire(&run.history),
-                        ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
-                        "runnable {} must pass through SUBMITTED",
-                        plan.tasks[run.task].id
-                    );
-                }
+                assert_eq!(
+                    run.attempts.len(),
+                    1,
+                    "one attempt each, flowable or not -- Kestra records one for both"
+                );
+                assert_eq!(
+                    wire(&run.attempts[0].history),
+                    ["CREATED", "RUNNING", "SUCCESS"],
+                    "an attempt never carries SUBMITTED, whatever the run does"
+                );
             }
-            assert_eq!(
-                run.attempts.len(),
-                1,
-                "one attempt each, flowable or not -- Kestra records one for both"
-            );
-            assert_eq!(
-                wire(&run.attempts[0].history),
-                ["CREATED", "RUNNING", "SUCCESS"],
-                "an attempt never carries SUBMITTED, whatever the run does"
-            );
         }
         assert!(
-            flowables >= 3 && runnables >= 6,
-            "valids/sequential must exercise both sides; saw {flowables} flowable(s) \
+            flowables >= 5 && runnables >= 19,
+            "the three flows must exercise both sides; saw {flowables} flowable(s) \
              and {runnables} runnable(s)"
         );
     }
@@ -367,6 +429,509 @@ mod tests {
         let state = run_to_fixpoint(&plan, RunState::Success);
         assert_eq!(advance(&plan, &state, T0), vec![]);
         assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "SUCCESS"]);
+    }
+
+    // ----------------------------------------------------------------------
+    // parallel
+    // ----------------------------------------------------------------------
+
+    /// **Every child is created before any of them is started.**
+    ///
+    /// The plan's own Task 4 test, and it is the shape Kestra's
+    /// `resolveParallelNexts` has: it returns *every* not-yet-created child in
+    /// one call, and it returns nothing at all while any child run is still
+    /// `CREATED` ("first created, leave").
+    ///
+    /// Why it matters is measured, not stylistic. Kestra's `taskRunList` is
+    /// **creation** order — proven on a flow whose three parallel branches
+    /// sleep 4s, 2s and 1s, where completion order is the exact reverse and
+    /// five rounds still gave one order, `a_slow, b_mid, c_fast`. A `drive`
+    /// that created children lazily, as earlier ones finished, would order that
+    /// list by completion and invert it.
+    ///
+    /// So this asserts both halves: the batch itself, and — through an
+    /// environment that finishes the **last**-created run first, which is the
+    /// 4s/2s/1s experiment in a clock-free machine — that the resulting list is
+    /// unmoved by completion order.
+    #[test]
+    fn parallel_creates_every_child_before_starting_any() {
+        let plan = plan_of("valids/parallel");
+        let TaskKind::Parallel { tasks, .. } = &plan.tasks[0].kind else {
+            panic!("valids/parallel's first task is a Parallel");
+        };
+        let children = tasks.clone();
+        assert_eq!(children.len(), 6, "valids/parallel has six branches");
+
+        let mut state = ExecutionState::new(&plan);
+        // Round 1 creates the Parallel itself; round 2 starts it.
+        round(&plan, &mut state);
+        round(&plan, &mut state);
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Running),
+            "the Parallel has to be RUNNING before it can create anything"
+        );
+
+        // Round 3 is the whole batch, and nothing but the batch.
+        let batch = round(&plan, &mut state);
+        assert_eq!(
+            batch,
+            children
+                .iter()
+                .map(|&task| Command::CreateRun {
+                    task,
+                    parent: Some(0),
+                    value: None
+                })
+                .collect::<Vec<_>>(),
+            "a Parallel creates every child in ONE round, in declaration order, and \
+             starts none of them while it does -- a lazy `drive` asks for one \
+             CreateRun here and orders taskRunList by completion instead"
+        );
+
+        // And the list is what it is whatever order the branches finish in.
+        let forwards = run_to_fixpoint(&plan, RunState::Success);
+        let backwards = run_to_fixpoint_finishing_backwards(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &forwards),
+            ["parent", "t1", "t2", "t3", "t4", "t5", "t6", "last"],
+            "creation order, as written"
+        );
+        assert_eq!(
+            run_ids(&plan, &backwards),
+            run_ids(&plan, &forwards),
+            "the 4s/2s/1s experiment: completion order reversed, taskRunList unmoved"
+        );
+    }
+
+    /// **A `Parallel` drives every branch in the same round, not the first one
+    /// to want something.**
+    ///
+    /// Measured on `valids/parallel-disabled-tasks`, whose `taskRunList` is
+    /// `parallel, sequence1, sequence2, task1, task3, task2, task4`: the two
+    /// `Sequential` branches have their first children created adjacently, then
+    /// their second children adjacently. A driver that returned the first
+    /// branch's work and stopped — which is exactly what `sequential::drive`
+    /// does, on purpose — would run `sequence1` to completion before creating
+    /// anything under `sequence2`, giving `task1, task2, task3, task4`.
+    ///
+    /// The flow itself is still baselined (it uses `disabled:`, which no W3a
+    /// task claims), so this asserts the property on the same *shape* built
+    /// without that key.
+    #[test]
+    fn a_parallel_drives_every_branch_in_the_same_round() {
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: parallel\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: sequence1\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task1\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n          - id: task2\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n      - id: sequence2\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task3\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n          - id: task4\n            type: io.kestra.plugin.core.debug.Return\n            format: x\n",
+        )
+        .expect("plans");
+        let state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            [
+                "parallel",
+                "sequence1",
+                "sequence2",
+                "task1",
+                "task3",
+                "task2",
+                "task4"
+            ],
+            "both branches advance in the same round -- this is the taskRunList \
+             `valids/parallel-disabled-tasks` produced, minus its disabled task"
+        );
+    }
+
+    /// **One branch that ends badly fails every sibling still in flight — and
+    /// only those.**
+    ///
+    /// The design doc's sentence is "one bad sibling failed all three", from a
+    /// spike whose three parallel branches slept 4s, 2s and 1s and whose
+    /// fastest had a validation error: the other two ended `FAILED`. The golden
+    /// reproduces the shape — in `valids/parallel-fail-with-flowable` the
+    /// branch holding a `Sleep: PT1S` ends `FAILED`, a `Sleep` that succeeds
+    /// everywhere else in the corpus including at `PT30S`.
+    ///
+    /// **The sentence is too wide, and the same golden is what says so.** In
+    /// `valids/finally-parallel`, driven with `failed: true`, the `Parallel`
+    /// ends `FAILED` while three of its four branches end `SUCCESS`. The
+    /// difference is *when*: those three had already terminated. So the rule is
+    /// about the runs still going, and both halves are asserted here — the
+    /// spike's, and the bound `finally-parallel` puts on it.
+    #[test]
+    fn one_invalid_sibling_fails_every_sibling() {
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a_slow\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: b_mid\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: c_fast\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("plans");
+
+        // Create the Parallel, start it, create the batch, start the batch.
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..4 {
+            round(&plan, &mut state);
+        }
+        let ids = run_ids(&plan, &state);
+        assert_eq!(ids, ["par", "a_slow", "b_mid", "c_fast"]);
+        assert!(
+            (1..=3).all(|ix| state.runs[ix].history.last() == Some(&RunState::Running)),
+            "all three branches must be in flight before one of them fails: {:?}",
+            state
+                .runs
+                .iter()
+                .map(|r| r.history.last())
+                .collect::<Vec<_>>()
+        );
+
+        // c_fast alone fails.
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 3,
+                state: RunState::Failed,
+            },
+        );
+        let cmds = round(&plan, &mut state);
+        assert_eq!(
+            cmds,
+            vec![
+                Command::SetRunState {
+                    run: 1,
+                    state: RunState::Failed
+                },
+                Command::SetRunState {
+                    run: 2,
+                    state: RunState::Failed
+                },
+            ],
+            "a_slow and b_mid were still in flight when c_fast failed, so both end \
+             FAILED -- the spike measured exactly this"
+        );
+        round(&plan, &mut state);
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Failed),
+            "and the Parallel takes the failure"
+        );
+
+        // The bound: a sibling that had ALREADY terminated keeps what it ended
+        // with. `valids/finally-parallel` ends FAILED with three SUCCESSes.
+        let mut state = ExecutionState::new(&plan);
+        for _ in 0..4 {
+            round(&plan, &mut state);
+        }
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 1,
+                state: RunState::Success,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 3,
+                state: RunState::Failed,
+            },
+        );
+        while !advance(&plan, &state, T0).is_empty() {
+            round(&plan, &mut state);
+        }
+        assert_eq!(
+            state
+                .runs
+                .iter()
+                .map(|r| r.history.last().copied().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                RunState::Failed,
+                RunState::Success,
+                RunState::Failed,
+                RunState::Failed
+            ],
+            "a_slow had already SUCCEEDED and keeps it; only b_mid, which was still \
+             in flight, is failed"
+        );
+    }
+
+    /// **A `Parallel`'s own state is `KILLED` over `FAILED` over `SUCCESS`.**
+    ///
+    /// Kestra's `Execution.guessFinalState` priority, narrowed to what
+    /// [`RunState`] can hold.
+    #[test]
+    fn a_parallel_takes_the_worst_of_its_children() {
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("plans");
+        for (outcome, expected) in [
+            (RunState::Success, RunState::Success),
+            (RunState::Failed, RunState::Failed),
+            (RunState::Killed, RunState::Killed),
+        ] {
+            let state = run_to_fixpoint(&plan, outcome);
+            assert_eq!(
+                state.runs[0].history.last(),
+                Some(&expected),
+                "children {outcome:?} must give the Parallel {expected:?}"
+            );
+        }
+    }
+
+    /// **`concurrent:` caps how many children a `Parallel` creates at once.**
+    ///
+    /// Kestra's cap is on the *stream* of next task runs
+    /// (`limit(concurrency - runningCount)` in `resolveParallelNexts`), so it
+    /// bounds creation and not merely submission; the second batch arrives when
+    /// the first has drained. Nothing in the 345-flow corpus exercises this
+    /// (`valids/if` and `valids/full` are the only two flows with a
+    /// `concurrent:` at all, and both are baselined for other flowables), so
+    /// this test is the only thing holding it.
+    #[test]
+    fn a_parallel_concurrency_cap_bounds_the_batch() {
+        let flow = |concurrent: &str| {
+            format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n{concurrent}    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: c\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+            )
+        };
+
+        let capped = build_plan(&flow("    concurrent: 2\n")).expect("plans");
+        assert_eq!(
+            capped.tasks[0].kind,
+            TaskKind::Parallel {
+                tasks: vec![1, 2, 3],
+                concurrency: Some(2)
+            }
+        );
+        let mut state = ExecutionState::new(&capped);
+        round(&capped, &mut state);
+        round(&capped, &mut state);
+        assert_eq!(
+            round(&capped, &mut state).len(),
+            2,
+            "`concurrent: 2` creates two of the three children in the first batch"
+        );
+
+        // The control, same YAML one line shorter: Kestra's default is 0, and 0
+        // is Kestra's own spelling of "no limit".
+        let uncapped = build_plan(&flow("")).expect("plans");
+        assert_eq!(
+            uncapped.tasks[0].kind,
+            TaskKind::Parallel {
+                tasks: vec![1, 2, 3],
+                concurrency: None
+            },
+            "an absent `concurrent:` is Kestra's default 0, which is unlimited"
+        );
+        let mut state = ExecutionState::new(&uncapped);
+        round(&uncapped, &mut state);
+        round(&uncapped, &mut state);
+        assert_eq!(
+            round(&uncapped, &mut state).len(),
+            3,
+            "the control: uncapped, the batch is the whole list"
+        );
+
+        // Both flows still finish, capped or not.
+        for plan in [&capped, &uncapped] {
+            let state = run_to_fixpoint(plan, RunState::Success);
+            assert_eq!(run_ids(plan, &state), ["par", "a", "b", "c"]);
+        }
+    }
+
+    /// **Every `concurrent:` in the corpus is a literal integer**, which is what
+    /// makes [`TaskKind::Parallel`]'s "an expression reads as unlimited"
+    /// fallback unreachable from anything this oracle compares.
+    ///
+    /// Derived from the corpus on every run rather than remembered: a flow
+    /// added later with `concurrent: "{{ inputs.n }}"` would make the fallback
+    /// live, and the fallback is a silent one.
+    #[test]
+    fn every_corpus_concurrent_is_a_literal_integer() {
+        let mut seen = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            for line in source.lines() {
+                if let Some(value) = line.trim().strip_prefix("concurrent:") {
+                    let value = value.trim();
+                    assert!(
+                        value.parse::<u32>().is_ok(),
+                        "{id} writes `concurrent: {value}`, which build_plan cannot \
+                         read without a RenderContext -- it will silently plan as \
+                         UNLIMITED. See TaskKind::Parallel."
+                    );
+                    seen.push(format!("{id}={value}"));
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            ["valids/full=3", "valids/if=4"],
+            "the corpus's whole population of `concurrent:` values"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // dag
+    // ----------------------------------------------------------------------
+
+    /// **A node is created only once every task it `dependsOn` has SUCCEEDED,
+    /// and the whole eligible batch is created at once.**
+    ///
+    /// The assertion is `valids/dag`'s own `taskRunList`, verbatim from
+    /// `golden.json`: `dag, task1, task2, task3, task4, task6, task5`. That
+    /// order is not declaration order — `task5` is declared before `task6` and
+    /// created after it — so it can only come from the dependency graph, which
+    /// is what makes it the test for the predicate.
+    ///
+    /// This is the plan's Step-4 mutation target: making `dependsOn` vacuously
+    /// satisfied turns the `Dag` into a `Parallel` and creates all six at once.
+    #[test]
+    fn a_dag_creates_a_node_only_when_every_dependency_has_succeeded() {
+        let plan = plan_of("valids/dag");
+        let TaskKind::Dag { nodes } = &plan.tasks[0].kind else {
+            panic!("valids/dag's first task is a Dag");
+        };
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|n| (
+                    plan.tasks[n.task].id.as_str(),
+                    n.depends_on
+                        .iter()
+                        .map(|&d| plan.tasks[d].id.as_str())
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("task1", vec![]),
+                ("task2", vec!["task1"]),
+                ("task3", vec!["task1"]),
+                ("task4", vec!["task2"]),
+                ("task5", vec!["task4", "task3"]),
+                ("task6", vec!["task2", "task3"]),
+            ],
+            "`dependsOn` is resolved to plan indices at build time"
+        );
+
+        let state = run_to_fixpoint(&plan, RunState::Success);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["dag", "task1", "task2", "task3", "task4", "task6", "task5"],
+            "Kestra's taskRunList for valids/dag, verbatim -- task5 is DECLARED \
+             before task6 and created after it, which only the dependency \
+             predicate can produce"
+        );
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+    }
+
+    /// **Nothing downstream of a failed dependency is ever created, and the
+    /// `Dag` ends FAILED rather than stuck.**
+    ///
+    /// This is also what makes the predicate's spelling unobservable. Kestra's
+    /// `resolveDagNexts` filters on "all dependencies are **terminated**";
+    /// [`dag::drive`](crate::executor::flowable::dag::drive) says *succeeded*.
+    /// Read alone the two differ on a failed dependency — and no input reaches
+    /// the predicate in that state, because the branch has already closed. If a
+    /// later task gives a branch a way to survive a failed child (`errors:` is
+    /// Task 7's and does exactly that), this is the test that notices.
+    #[test]
+    fn a_dag_creates_nothing_downstream_of_a_failed_dependency() {
+        let plan = plan_of("valids/dag");
+        let state = run_to_fixpoint(&plan, RunState::Failed);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["dag", "task1"],
+            "task1 failed, so none of the five nodes downstream of it exists"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "and the Dag reports the failure instead of waiting for runs that will \
+             never be created"
+        );
+    }
+
+    /// **A cyclic `Dag` is refused at plan-build time, by name.**
+    ///
+    /// `invalids/dag-cyclicdependency` is a golden `refused` entry that egret
+    /// **over-accepted** before this — over-acceptance being the one divergence
+    /// class the programme forbids shipping. Kestra refuses it in
+    /// `DagTaskValidator`, at publish time, which is why it has no execution to
+    /// compare in the first place.
+    ///
+    /// The control is the same file with the one edge that closes the cycle
+    /// removed: it plans. Without that, this test would pass against a builder
+    /// that refused every `Dag`.
+    #[test]
+    fn a_cyclic_dag_is_refused_by_name() {
+        let source = corpus_source("invalids/dag-cyclicdependency");
+        // Not `expect_err`: that prints the whole `Plan` and buries the finding.
+        // A guard that fires with an unreadable message has been seen fire and
+        // not seen work -- Task 3 paid for that once already, on M6.
+        let err = match build_plan(&source) {
+            Err(e) => e,
+            Ok(plan) => panic!(
+                "a cyclic dag must be refused; got a plan of {} task(s) rooted at '{}'",
+                plan.tasks.len(),
+                plan.tasks[0].id
+            ),
+        };
+        assert!(
+            err.message.contains("cyclic dependency") && err.message.contains("task1"),
+            "the refusal has to name what is cyclic; got {err}"
+        );
+
+        // task1 dependsOn task2 and task2 dependsOn task1. Cut the first edge.
+        let acyclic = source.replacen("        dependsOn:\n          - task2\n", "", 1);
+        assert!(
+            build_plan(&acyclic).is_ok(),
+            "the control: with the back-edge gone the same flow plans -- otherwise \
+             this test would pass against a builder that refused every Dag"
+        );
+    }
+
+    /// **A `dependsOn` naming a task that is not one of the `Dag`'s own nodes is
+    /// refused, by name.**
+    ///
+    /// Kestra's other `DagTaskValidator` check, and `invalids/dag-notexist-task`
+    /// is the golden entry for it — also over-accepted before this. Kestra's
+    /// message is "Not existing task id in dependency: taskX".
+    ///
+    /// The control is the same file with `taskX` corrected to a real node.
+    #[test]
+    fn a_dag_dependency_on_a_task_that_is_not_a_node_is_refused_by_name() {
+        let source = corpus_source("invalids/dag-notexist-task");
+        let err = match build_plan(&source) {
+            Err(e) => e,
+            Ok(plan) => panic!(
+                "a dependency on a non-node must be refused; got a plan of {} task(s) \
+                 rooted at '{}'",
+                plan.tasks.len(),
+                plan.tasks[0].id
+            ),
+        };
+        assert!(
+            err.message.contains("not nodes of it") && err.message.contains("taskX"),
+            "the refusal has to name the id that does not exist; got {err}"
+        );
+        assert!(
+            build_plan(&source.replace("- taskX", "- task1")).is_ok(),
+            "the control: point the same dependency at a real node and it plans"
+        );
+    }
+
+    /// **A `Dag` node with no `task:` is refused.**
+    ///
+    /// W1's model types it `Option<Task>` because `@NotNull` is bean validation
+    /// and not parsing, so the parser hands this builder a node with nothing to
+    /// run and no id for a sibling to depend on. There is no such flow in the
+    /// corpus, so this refusal banks nothing; it exists because the alternative
+    /// is an `unwrap`.
+    #[test]
+    fn a_dag_node_with_no_task_is_refused() {
+        let err = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: d\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task: null\n",
+        )
+        .expect_err("a node with no task cannot be planned");
+        assert!(err.message.contains("node with no task"), "got {err}");
     }
 
     // ----------------------------------------------------------------------
@@ -683,8 +1248,8 @@ mod tests {
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "io.kestra.plugin.core.flow.WorkingDirectory",
-            "io.kestra.plugin.core.flow.Parallel",
             "io.kestra.plugin.core.flow.Loop",
+            "io.kestra.plugin.core.flow.WaitFor",
         ] {
             let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
             assert_eq!(
@@ -709,6 +1274,34 @@ mod tests {
             "the control: a Sequential DOES flatten its children"
         );
         assert_eq!(plan.tasks[0].kind, TaskKind::Sequential { tasks: vec![1] });
+
+        // Task 4's two controls. `Parallel` moved out of the opaque list above
+        // in the same commit that gave it a `TaskKind`, which is the whole
+        // point of this test being a list rather than a rule.
+        let plan = build_plan(&branch("io.kestra.plugin.core.flow.Parallel"))
+            .expect("the control must plan");
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Parallel {
+                tasks: vec![1],
+                concurrency: None
+            },
+            "a Parallel flattens its children too, as of Task 4"
+        );
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+        )
+        .expect("the control must plan");
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Dag {
+                nodes: vec![DagNode {
+                    task: 1,
+                    depends_on: vec![]
+                }]
+            },
+            "and so does a Dag"
+        );
     }
 
     /// **An OVER-REFUSAL already on `main`, pinned to its one token.**
