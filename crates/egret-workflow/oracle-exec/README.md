@@ -2749,7 +2749,7 @@ caught it.
 | M85 | `sequential.rs` | the `Current::RetryPending if is_flow` arm | *(deleted — both collapse to `Waiting`)* | **8** (incl. ratchet, 2 broken) |
 | M88 | `mod.rs` | the `if !reopened.is_empty() { return reopened; }` block | `let reopened: Vec<Command> = Vec::new();` | 7 (incl. ratchet, **16 broken**) |
 | M89 | `parallel.rs` | `.filter(\|&ix\| !is_terminal(state, ix))` in `fail_the_rest` | *(deleted)* | 5 (incl. ratchet, 5 broken) |
-| M90 | `plan.rs` | `out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;` | `let _ = &seq.errors;` | 5 (incl. ratchet, 3 regressions) |
+| M90 | `plan.rs` | `out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;` | `let _ = &seq.errors;` | **6** (incl. ratchet, 3 regressions) — re-run at round 2, see below |
 | M91 | `plan.rs` | `retry: super::retry::policy_of(task.retry.as_ref()),` | `retry: None,` | **10** (incl. ratchet, 8 regressions) |
 | M92 | `plan.rs` | `retry: super::retry::policy_of(flow.retry.as_ref()),` | `retry: None,` | 4 (incl. ratchet, 1 regression) |
 | M93 | `plan.rs` | the `own_errors` half of `children_of` | `let mut out: Vec<TaskIx> = Vec::new();` | **0 — and provably so; see below** |
@@ -2800,6 +2800,17 @@ so the two walks name the same set and the mutation is *equivalent* on this
 corpus. A mutation that cannot change the answer cannot be killed; what the test
 adds is the proof that it cannot, and the assertion that fails the day a corpus
 makes it non-zero.
+
+**M90 was re-run at round 2, and it is the row that shows the widened guard can
+now fail.** Round 2 rewrote
+`every_corpus_errors_list_is_on_a_flowable_egret_plans` to read the raw YAML and
+then ask the plan, which gave it a dependency on `build_plan` it did not have
+before. Exactly one row can move as a result — M90 is the only mutation that
+touches how `errors:` reaches the plan (M91 and M92 are retry-only, M93 is
+`children_of`, and nothing else is in `plan.rs`) — and it does, from 5 victims
+to 6, the sixth being that guard. Round 2's other change,
+`no_captured_execution_has_a_duplicate_taskrun`'s non-vacuity assertion, reads
+`traces.json` and no crate code under mutation, so it moves nothing.
 
 **M97's row is the one exception to "one replay of the final tree", and the
 reason is that round 2's formulation was not a mutation at all.** It read
