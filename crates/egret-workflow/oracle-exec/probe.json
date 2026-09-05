@@ -6,6 +6,7 @@
   "valids/allow-failure": {
     "alt_from": "core/src/test/java/io/kestra/plugin/core/flow/AllowFailureTest.java:29 success() (@ExecuteFlow, no inputs)",
     "alt_inputs": {},
+    "basis": "refused",
     "differs": true,
     "probed": true,
     "why": "the alternative input is REFUSED (422: Missing required input:crash), so a swap is visible"
@@ -15,6 +16,19 @@
     "alt_inputs": {
       "condition": "success"
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "hello",
+        "fail"
+      ],
+      "task_states": {
+        "fail": "SKIPPED",
+        "hello": "SUCCESS"
+      },
+      "taskruns": 2
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED"
@@ -44,6 +58,21 @@
     "alt_inputs": {
       "param": "success"
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "before",
+        "fail",
+        "after"
+      ],
+      "task_states": {
+        "after": "SUCCESS",
+        "before": "SUCCESS",
+        "fail": "SUCCESS"
+      },
+      "taskruns": 3
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; taskruns 3 != 2; task fail SUCCESS != FAILED"
@@ -57,6 +86,25 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "seq",
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS",
+        "seq": "SUCCESS"
+      },
+      "taskruns": 5
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != WARNING; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
@@ -66,6 +114,29 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "dag",
+        "t1",
+        "t2",
+        "t3",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "dag": "SUCCESS",
+        "ok": "SUCCESS",
+        "t1": "SUCCESS",
+        "t2": "SUCCESS",
+        "t3": "SUCCESS"
+      },
+      "taskruns": 7
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; taskruns 7 != 9; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
@@ -75,6 +146,23 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS"
+      },
+      "taskruns": 4
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; task ko None != FAILED"
@@ -84,6 +172,23 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS"
+      },
+      "taskruns": 4
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; taskruns 4 != 6; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
@@ -93,6 +198,17 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "each"
+      ],
+      "task_states": {
+        "each": "SUCCESS"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED"
@@ -102,6 +218,17 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "each"
+      ],
+      "task_states": {
+        "each": "SUCCESS"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED"
@@ -111,6 +238,31 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "seq",
+        "p1",
+        "p2",
+        "p3",
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS",
+        "p1": "SUCCESS",
+        "p2": "SUCCESS",
+        "p3": "SUCCESS",
+        "seq": "SUCCESS"
+      },
+      "taskruns": 8
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; taskruns 8 != 10; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
@@ -120,6 +272,25 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "seq",
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS",
+        "seq": "SUCCESS"
+      },
+      "taskruns": 5
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; task ko None != FAILED"
@@ -129,6 +300,25 @@
     "alt_inputs": {
       "failed": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "seq",
+        "if",
+        "ok",
+        "a1",
+        "a2"
+      ],
+      "task_states": {
+        "a1": "SUCCESS",
+        "a2": "SUCCESS",
+        "if": "SUCCESS",
+        "ok": "SUCCESS",
+        "seq": "SUCCESS"
+      },
+      "taskruns": 5
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS"
@@ -142,6 +332,19 @@
     "alt_inputs": {
       "param": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "if",
+        "when-false"
+      ],
+      "task_states": {
+        "if": "SUCCESS",
+        "when-false": "SUCCESS"
+      },
+      "taskruns": 2
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "task when-true None != SUCCESS"
@@ -155,6 +358,17 @@
     "alt_inputs": {
       "param": false
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "if"
+      ],
+      "task_states": {
+        "if": "SUCCESS"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "taskruns 1 != 2; task when-true None != SUCCESS"
@@ -184,9 +398,20 @@
         "behavior": "CANCEL"
       }
     ],
+    "alt_observed": {
+      "state": "FAILED",
+      "task_ids": [
+        "pause"
+      ],
+      "task_states": {
+        "pause": "FAILED"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": false,
     "probed": true,
-    "why": "all 3 documented alternative(s) satisfy this row's assertions too: {\"behavior\": \"RESUME\"}, {\"behavior\": \"WARN\"}, {\"behavior\": \"CANCEL\"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The behavior property, rendered from an input, has no observable effect on this artifact, though PauseTest.java:374-380 asserts RESUME -> SUCCESS with 2 task runs.  So this row's `agrees` is a coincidence, not evidence that the input landed, and Task 2 must not build a golden for this flow from the checkout's semantics."
+    "why": "all 3 documented alternative(s) satisfy this row's assertions too: {\"behavior\": \"RESUME\"}, {\"behavior\": \"WARN\"}, {\"behavior\": \"CANCEL\"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that `behavior` is unimplemented on this artifact: published with LITERAL values on a fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- the checkout's semantics reproduced exactly.  What fails is narrower: this corpus flow writes `behavior: \"{{ inputs.behavior }}\"`, and rendering a Pebble expression into a `Property<Behavior>` fails at resume time and takes the task down with it, for EVERY value including the one that would have failed anyway.  The execution document does record `inputs: {\"behavior\": \"FAIL\"}`, so the input landed -- the task dies rendering it.  So this row's `agrees` is a coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at all.  Task 2 builds this flow's golden from what the pinned image did, and whoever implements `pause` must not read this as a missing feature."
   },
   "valids/pause-duration-from-input": {
     "probed": false,
@@ -205,6 +430,17 @@
     "alt_inputs": {
       "string": "LABEL"
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "return"
+      ],
+      "task_states": {
+        "return": "SUCCESS"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != CANCELLED"
@@ -218,6 +454,21 @@
     "alt_inputs": {
       "string": "SECOND"
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "parent-seq",
+        "t2",
+        "t2_sub"
+      ],
+      "task_states": {
+        "parent-seq": "SUCCESS",
+        "t2": "SUCCESS",
+        "t2_sub": "SUCCESS"
+      },
+      "taskruns": 3
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "task[1] t2 != t1"
@@ -231,6 +482,17 @@
     "alt_inputs": {
       "string": "OK"
     },
+    "alt_observed": {
+      "state": "SUCCESS",
+      "task_ids": [
+        "launch"
+      ],
+      "task_states": {
+        "launch": "SUCCESS"
+      },
+      "taskruns": 1
+    },
+    "basis": "observed",
     "differs": true,
     "probed": true,
     "why": "state SUCCESS != FAILED"

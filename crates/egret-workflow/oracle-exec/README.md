@@ -24,12 +24,13 @@ checkout at run time — the flows are copied in.
 
 ```bash
 cd crates/egret-workflow/oracle-exec
-python3 harvest.py                    # down -v, up, publish, execute, probe, write both outputs
+python3 harvest.py 2>&1 | tee harvest-run.txt   # down -v, up, publish, execute, probe, write both outputs
 python3 harvest.py --traces 5         # down -v, up, publish, execute every `runs` flow 5x -> traces.json
 python3 harvest.py --verify-traces    # re-read every captured execution; requires the SAME Kestra still up
 python3 normalise.py                  # traces.json + corpus.json -> golden.json + stability.json
 python3 harvest.py --rewrite-runnable # regenerate runnable.txt offline from the committed files
 python3 harvest.py --self-test        # mutate the committed data, prove every guard fires
+python3 harvest.py --refresh-test-source-classes   # re-resolve test-source-classes.json
 python3 normalise.py --self-test      # the same, for the normaliser's guards
 python3 harvest.py --down             # docker compose down -v
 ```
@@ -43,6 +44,29 @@ normalisation costs a re-run of one second and not of an hour.
 A full harvest takes roughly 35 minutes, most of it the seven flows that pause
 and are waited out to their timeout, plus the discrimination probe's second
 execution of every flow that has an alternative input.
+
+**The run log is committed as `harvest-run.txt`, and the extension matters.**
+It was previously written to `harvest.log` and was never actually committed:
+a global `*.log` ignore swallowed it silently, so two rounds of review believed
+a file was there that `git ls-files` says never was. `harvest-run.txt` is the
+stdout of the harvest that produced the committed `corpus.json`, `probe.json`
+and `runnable.txt`.
+
+**Every flow is published before any flow is executed.** Publishing and
+executing flow-by-flow makes the result depend on the alphabet: **ten** corpus
+flows name another corpus flow that sorts later, so their `Subflow` target did
+not exist yet when they ran. It cost **four** wrong terminal states, not one —
+`valids/loop-with-subflow`, `valids/subflow-child`,
+`valids/subflow-parent-retry` and
+`valids/flow-concurrency-parallel-subflow-kill-child` were all recorded `FAILED`
+where they in fact `SUCCESS`, and `loop-with-subflow` recorded one of its two
+loop iterations because the failure stopped the loop.
+
+That was found by measurement, not review: Task 2's capture publishes everything
+first, so the two harvests disagreed on exactly those four flows.
+`traces_agreement_problems()` now makes that disagreement a hard failure rather
+than something a reader might notice, and with publish-first all **268** `runs`
+flows agree with Task 2's five-round capture on terminal state.
 
 **The clean start is structural, not documented.** The default invocation runs
 `docker compose down -v` before `up -d`, and then `assert_clean()` refuses to
@@ -140,8 +164,10 @@ was dropped for being inconvenient: `unclassified` exists as a bucket precisely
 so that a flow which fits nowhere shows up as a number rather than as an
 omission, and it is empty because every one of the 345 was classified.
 
-Following `parentId` recovered **133 sub-executions** that
-`/executions/search` does not list.
+Following `parentId` recovered **142 sub-executions** that
+`/executions/search` does not list — the same number Task 2's independent
+five-round capture reports, and `check_outputs()` fails if the two ever disagree
+on any flow's terminal state.
 
 Every table in `runnable.txt` is derived from the data and carries a `TOTAL`
 row, and the writer refuses to emit a table whose rows do not account for every
@@ -193,7 +219,7 @@ polled to its timeout and filed `not-standalone`.
 |---|---|---|---|
 | `invalid-flow` | 27 | **yes** | an `invalids` flow, refused. |
 | `refused-by-both` | 1 | **yes** | a `valids` flow the *checkout* refuses too, with the checkout line that proves it. |
-| `task-type-not-in-image` | 22 | no | the body's **only** violation is `Invalid type: X`, and `X` is shaped like a Kestra test-source class. The flow is fine; the image has no such plugin. |
+| `task-type-not-in-image` | 22 | no | the body's only violation is `Invalid type: X`, and `X` is in the checkout-resolved test-source set. **This does not say the flow is valid** — see the short-circuit below. |
 | `checkout-drift` | 1 | no | curated: the checkout has a feature the pinned artifact does not. |
 | `unclassified-rejection` | 0 | no | **unknown** — not shown to be a refusal and not shown to be drift. Read the raw message. |
 
@@ -206,18 +232,49 @@ Two properties this table has to have, and once did not:
   construction. Both lenient classes are now curated tables carrying a checkout
   line each, and everything unrecognised goes to `unclassified-rejection` — an
   open question, not a dismissal.
-- **`Invalid type:` must be the *only* violation.** A 422 body carries every
-  constraint violation, newline-separated — `invalids/invalid-parallel` returns
-  eight. Matching the phrase anywhere in the message would let a `valids` flow
-  with an unknown type *plus* a real structural violation file as the lenient
-  class, and the structural violation would vanish; a task `description`
-  containing the literal text would match too. The classifier now requires a
-  single violation matching `^Invalid type: (\S+)$`, and requires the class to
-  look like test source (a `.test.` package segment, or nesting in a `*Test`
-  outer class). All 22 current members were resolved by hand to files under
-  `src/test/java` in the checkout; `io.kestra.core.runners.test.trigger.Alias`
-  is an `aliases =` declaration on
+- **Membership of a resolved set, not a naming heuristic.** An earlier revision
+  accepted any FQCN matching `(^|\.)test\.|Test\$`. Measured: publishing a flow
+  whose task type is `com.acme.totally.made.up.test.NeverExisted` returns exactly
+  the same `Invalid type:` body, so an invented class filed into the bucket Task
+  8 ignores. `test-source-classes.json` now holds the **44** plugin types
+  (Task/Trigger subclasses and their `aliases`) declared under the checkout's
+  `src/test/java`, each with the file that declares it;
+  `harvest.py --refresh-test-source-classes` regenerates it and prints the diff.
+  The set is committed so a harvest still needs no checkout.
+  `io.kestra.core.runners.test.trigger.Alias` is in it only because it is an
+  `aliases =` declaration on
   `core/src/test/java/io/kestra/core/runners/test/TriggerWithAlias.java`.
+
+#### rc13 short-circuits on an unknown type, so this class claims less than its name
+
+This is the correction that matters most in this section, because the previous
+revision of this file stated the opposite as measured fact ("The flow is fine;
+the image cannot run it") and the classifier carried a condition that could not
+fail.
+
+Measured directly against the running artifact — each co-violation is a hard 422
+on its own, and each disappears entirely behind an unknown type:
+
+| flow | body |
+|---|---|
+| unknown type alone | `Invalid type: io.kestra.core.tasks.test.Encrypted` |
+| unknown type + `namespace: BADNS_UPPER` | `Invalid type: …Encrypted` |
+| `namespace: BADNS_UPPER` alone | `namespace: must match "^[a-z0-9][a-z0-9._-]*"` |
+| unknown type + empty `Parallel.tasks` | `Invalid type: …Encrypted` |
+| unknown type + blank task id | `Invalid type: …Encrypted` |
+| two unknown types | `Invalid type: …Encrypted` (only the first) |
+
+`POST /flows/validate` behaves identically, so there is no second opinion to
+ask. Consequences:
+
+- Requiring `Invalid type:` to be the **only** violation proves nothing about
+  co-violations: the body can never contain a second line when the first is
+  `Invalid type:`. The condition is kept as a shape check on the message and is
+  no longer described as more than that.
+- `task-type-not-in-image` therefore means **"the first violation is a missing
+  test-source class"**. It is not evidence that egret must refuse the flow, and
+  it is equally not evidence that the flow is otherwise valid. Anything that
+  needs the latter has to establish it some other way.
 
 The two curated entries, both worth knowing before writing "Kestra does" about
 anything:
@@ -237,6 +294,32 @@ anything:
   with constraint violations (empty `tasks` violates @NotEmpty)" and asserts
   422. This entry was in the lenient bucket for one revision, which is the
   concrete reason that bucket now needs evidence.
+
+### Drift at the execution seam, not at publish
+
+`CHECKOUT_DRIFT` only ever holds flows rc13 **refuses**, so a flow that
+publishes, runs, and behaves differently from the checkout's own passing test
+had nowhere to be recorded. `EXECUTION_DRIFT` is that bucket, and it currently
+holds one entry.
+
+`valids/pause-behavior` writes `behavior: "{{inputs.behavior}}"` and, harvested,
+gives the identical execution for every documented input value — `FAILED`, one
+task run. That looked like "Pause's `behavior` has no effect on rc13". It is
+not. Publishing four copies of the same flow with a **literal** behavior and
+running each measures the opposite:
+
+| literal `behavior` | state | task runs | `PauseTest.java:374-380` expects |
+|---|---|---|---|
+| `RESUME` | SUCCESS | 2 | SUCCESS, 2 |
+| `WARN` | WARNING | 2 | WARNING, 2 |
+| `FAIL` | FAILED | 1 | FAILED, 1 |
+| `CANCEL` | CANCELLED | 1 | CANCELLED, 1 |
+
+Every literal value behaves exactly as the checkout's test asserts. What fails
+is **rendering a Pebble expression into `Property<Behavior>`**, silently, at the
+moment the pause ends. So the drift is in dynamic-property resolution, not in
+`Pause` semantics — Task 7 must not read this flow as evidence about pause
+behaviour, and Task 2 must not build its golden from the checkout's semantics.
 
 ### One `invalids` flow that this Kestra ACCEPTS
 
@@ -486,6 +569,43 @@ parameterisation would silently not happen. A non-zero psql exit is fatal — a
 swallowed error would degrade sub-execution recovery to the log-scrape arm
 alone, silently, and the harvest would still write a plausible `corpus.json`.
 
+### Terminal is not the same as finished
+
+Discovering the descendants, waiting for the pending ones, and stopping when
+none are pending is the obvious loop, and it is wrong: it stops the instant the
+first discovery returns nothing, so a row that lands a beat later is simply
+absent — silently, with a plausible count written. That is measured, not feared.
+It cost **nine** sub-executions: two each for the four `retry-new-execution-*`
+flows (Task 7's entire subject, which recorded **zero**), and one of
+`valids/loop-with-subflow`'s two loop iterations.
+
+`RETRIED` is Kestra saying a replacement execution is coming. Over 40
+observations (four flows × five rounds × two children) every `RETRIED` execution
+had exactly one child and every other terminal state had none, and the
+replacement's `startDate` ran **1.07 s to 5.92 s** after the `RETRIED`
+execution's `endDate`. So the rule is exact rather than a sleep:
+
+> settle when nothing is pending **and** no `RETRIED` execution is childless.
+
+`settle()` is the single implementation, used by both the Task 1 harvest and
+Task 2's capture. Two harvests with two rules is how `corpus.json` came to say
+133 sub-executions while the verified capture said 142.
+
+A **third** arm is a quiescence condition, and it is labelled as one because no
+exact signal exists for it. A serial `Loop` creates iteration k+1 after k
+finishes, and nothing the API returns says how many iterations there will be:
+the parent's taskrun carries no count, and `loopRun` carries only `index`.
+Measured, the race is real but narrow — `valids/loop-with-subflow` recorded 1 of
+its 2 iterations once, under the load of a 345-flow harvest, while 20 quiet
+repeats had the second iteration visible **0.26 s to 0.62 s before** everything
+looked terminal. So `settle()` also requires the `(id, state)` snapshot to be
+observed unchanged across two consecutive polls. That bounds the race at one
+poll interval; it does not end it, and nothing here claims otherwise.
+
+**Siblings are ordered by `loopRun.index`, never by creation instant.** A
+concurrent loop creates its sub-executions in an order that flipped between
+rounds on nine corpus flows — a fact about the scheduler, not about the flow.
+
 ## Reproducing the summary without a Kestra
 
 `runnable.txt` is a pure function of `corpus.json` and `probe.json`, both
@@ -502,12 +622,61 @@ exited 0, since it never reads `corpus/`. `load_committed()` now fails unless
 - every row that ran and has an `EXPECTED` entry has a `probe.json` record
   (dropping five silently degraded those rows to `unprobed`), and
 - every stored `rejected_class` still matches what the current classifier
-  produces (otherwise `corpus.json` is stale in a way no count would reveal).
+  produces (otherwise `corpus.json` is stale in a way no count would reveal),
+  and
+- `validate_tables()` and `check_outputs()` both pass — the path that actually
+  writes the published file used to run neither.
 
 Guards `raise` and never `assert`: `python3 -O` strips assert statements, so a
 guard written as an assert is a guard that disappears under a flag anyone may
-pass. `--self-test` mutates the committed data eleven ways and requires every
-guard to fire; it needs no Kestra and takes about a second.
+pass.
+
+### What a guard has to be able to do
+
+Removing the `assert` keyword is not the same as making a check able to fail,
+and this file said the finding was closed when only the keyword had gone. The
+replacement condition — `if sum(by_class.values()) != len(rej)` — was still
+vacuous: `by_class` is a `Counter` built by iterating `rej` exactly once, so
+both sides are the same number by construction. It is gone. Two properties every
+guard here now has:
+
+- **It compares against something derived independently.** The class table is
+  re-derived by running `rejected_class()` again over each record's own
+  directory and message, which a corrupted stored class contradicts. `differs`
+  in `probe.json` is recomputed from the alternative's recorded observation
+  (`alt_observed`) and the `EXPECTED` row, because it used to be a raw copied
+  boolean: flipping every one of them true → false took **`proven
+  discriminating 17` → `0`** at exit 0, and that sentence is the most
+  load-bearing one in the package.
+- **Where a second, independent measurement exists, it is checked.**
+  `traces_agreement_problems()` compares every `runs` record's terminal state
+  against Task 2's five-round capture in `traces.json` and fails on any
+  disagreement. It is what turned "the two harvests differ by nine
+  sub-executions" into "these four flows have the wrong terminal state, and here
+  is why".
+- **A corruption contradicts a field it did not think to change.**
+  `record_invariant_problems()` holds the invariants that make that true, all of
+  which hold on every record today: `runs ⇒ publish_status == 200`,
+  `runs ⇒ an `observed` whose state is terminal and whose `taskruns` equals its
+  `task_ids` length`, `non-runs ⇒ no `observed``, `rejected ⇒ 4xx evidence`,
+  `non-rejected ⇒ no stale `rejected_class``, and `sub_executions` must equal
+  the number of distinct `sub_execution_ids` recorded beside it.
+
+Five corruptions of `corpus.json` used to move a published number at exit 0:
+flipping a `not-standalone` to `runs`, flipping a `rejected` to `runs` with its
+class dropped (which also slipped past the class re-derivation, since that only
+inspects records still *saying* rejected), flipping every probe `differs`,
+tripling `sub_executions`, and corrupting an `observed` state. Each now fails.
+
+`--self-test` mutates the committed data **21** ways and requires every guard to
+fire **and to name its own reason** — an earlier version accepted any
+`SystemExit`, so a case labelled for guard X passed when guard Y fired, proven
+by deleting the vocabulary guard and watching case 1 still print `FIRES`. Every
+case runs through `check_outputs()`, which writes nothing: the previous version
+drove its first cases through `write_runnable`, so the run that reports a
+missing guard left `runnable.txt` corrupted — `TOTAL 344`, one flow absent —
+and then exited 1, ready for the next `git add -A`. It needs no Kestra and takes
+about a second.
 
 ## The normalised trace
 
@@ -622,12 +791,14 @@ root       CREATED RUNNING FAILED RETRIED
     └ …    CREATED RUNNING FAILED
 ```
 
-### 142, not the 133 `corpus.json` records
+### 142, and how `corpus.json` came to agree
 
-The Task 1 harvest counted **133** sub-executions; this one counts
-**142** in every one of the five rounds. The nine extra are not a
-different Kestra — they are nine that the first capture, and Task 1's, both
-missed:
+The Task 1 harvest counted **133** sub-executions; this capture counted
+**142** in every one of the five rounds. `corpus.json` now says 142 too: Task
+1's harvest was re-run through the shared `settle()` and, like this capture,
+now publishes every flow before executing any. The two numbers are one
+measurement rather than two, and `check_outputs()` fails if they ever drift
+apart. The nine that the first capture and Task 1's original both missed:
 
 - **8** are the `retry-new-execution-*` flows' replacement executions, two each.
   All four of those flows had **zero** sub-executions recorded, and they are

@@ -23,6 +23,114 @@ import time
 import urllib.error
 import urllib.request
 
+def bail(msg):
+    """Guards raise; they never `assert`.
+
+    `python3 -O` strips assert statements, so a guard written as an assert is a
+    guard that silently disappears under a flag anyone may pass.
+    """
+    raise SystemExit("harvest.py guard failed: " + msg)
+
+
+def load_task2():
+    """golden.json + stability.json, Task 2's committed outputs.
+
+    `runnable.txt` is the file this package calls its honest denominator, so the
+    happens-before numbers belong in it and not only in a script's stdout.  Both
+    files are committed, so `--rewrite-runnable` still needs no Kestra.
+    """
+    out = {}
+    for name in ("golden.json", "stability.json"):
+        path = os.path.join(HERE, name)
+        if not os.path.exists(path):
+            bail(f"{name} is missing; run `python3 normalise.py` first "
+                 "(it needs traces.json, which `--traces` writes)")
+        with open(path, encoding="utf-8") as f:
+            out[name] = json.load(f)
+    return out["golden.json"], out["stability.json"]
+
+
+def pairs_in(node):
+    """How many ordered pairs one normalised trace HAS, counting sub-executions.
+
+    Derived from golden.json.  The point is that it is a SECOND derivation:
+    stability.json says how many pairs it kept and dropped, golden.json says how
+    many runs there are, and n*(n-1)/2 must reconcile the two.  A stability file
+    that has drifted from the golden -- a re-normalisation that wrote one and not
+    the other -- fails here instead of printing a table that adds up with itself.
+    """
+    n = len(node.get("runs") or [])
+    return n * (n - 1) // 2 + sum(pairs_in(sub) for sub in node.get("spawned") or [])
+
+
+def order_in(node):
+    """How many order pairs one normalised trace CARRIES, sub-executions included.
+
+    The counterpart to `pairs_in`: that one says how many pairs a trace has,
+    this one how many survived the filter.  Both must reconcile with
+    stability.json, from opposite directions.
+    """
+    return len(node.get("order") or []) + sum(
+        order_in(sub) for sub in node.get("spawned") or [])
+
+
+def order_table(golden, stab):
+    """The happens-before relation: kept, and what had to be dropped.
+
+    Kestra's own tests read `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()`
+    FOUR times, in ParallelTest.errors() and DagTest.errors() -- counted at
+    checkout 96893b589, not the 39 the plan claims.  That is a claim about
+    SERIALISATION, and a normaliser that drops all clocks cannot see a flowable
+    that stops serialising -- so the relation is derived before the clocks go,
+    and kept only where all five rounds agreed.
+    """
+    lines = ["happens-before pairs, over the five harvest rounds"]
+    by_id = {e["id"]: e for e in golden if e.get("verdict") == "runs"}
+    missing = sorted(set(by_id) - set(stab["flows"]))
+    if missing:
+        bail(f"{len(missing)} golden entr(y/ies) have no stability record, e.g. "
+             f"{missing[:5]}; the two files describe different harvests")
+
+    kept = unstable = unmeasurable = 0
+    for cid, entry in sorted(by_id.items()):
+        rec = stab["flows"][cid]
+        have = (rec["pairs_kept"] + rec["pairs_dropped_unstable"]
+                + rec["pairs_dropped_unmeasurable"])
+        want = pairs_in(entry)
+        if have != want:
+            bail(f"{cid}: stability.json accounts for {have} pair(s) but golden.json's "
+                 f"run counts give {want}; one of the two files is stale")
+        written = order_in(entry)
+        if written != rec["pairs_kept"]:
+            bail(f"{cid}: golden.json carries {written} order pair(s) across the whole "
+                 f"trace but stability.json kept {rec['pairs_kept']}; the stability "
+                 "filter and the golden writer disagree")
+        kept += rec["pairs_kept"]
+        unstable += rec["pairs_dropped_unstable"]
+        unmeasurable += rec["pairs_dropped_unmeasurable"]
+
+    lines.append(f"  {'kept (identical in all 5 rounds)':<44} {kept}")
+    lines.append(f"  {'dropped, relation flipped between rounds':<44} {unstable}")
+    lines.append(f"  {'dropped, a run had no start or no end':<44} {unmeasurable}")
+    lines.append(f"  {'TOTAL':<44} {kept + unstable + unmeasurable}")
+    lines.append("")
+    lines.append("  A relation observed once is a coincidence, and genuinely parallel")
+    lines.append("  branches flip.  Only the pairs that came out the same in all five")
+    lines.append("  rounds are in golden.json; the rest are dropped and counted here.")
+    lines.append("")
+    lines.append(f"traces that did NOT reproduce across all 5 rounds: "
+                 f"{len(stab['unstable_traces'])}")
+    for cid in stab["unstable_traces"]:
+        rec = stab["flows"][cid]
+        lines.append(f"  {cid}  (rounds differing from round 1: "
+                     f"{rec['rounds_differing_from_round_1']})")
+    lines.append("  These get NO golden entry and are never compared.  A trace the oracle")
+    lines.append("  itself does not reproduce five times running cannot judge egret: an")
+    lines.append("  implementation matching round 1 would be right by luck.")
+    lines.append("")
+    return lines
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = "w3oracle"
 BASE = "http://localhost:8080/api/v1"
@@ -637,30 +745,135 @@ def read_corpus():
     return entries
 
 
-# A 422 body carries EVERY constraint violation, newline-separated -- measured:
-# invalids/invalid-parallel returns 8 of them.  So matching `Invalid type:`
-# anywhere in the message is not evidence that a missing type is the ONLY thing
-# wrong: a valids/ flow with an unknown type PLUS a real structural violation
-# would file into a bucket Task 8 ignores, and the structural violation would
-# vanish.  A task `description` containing the literal text would match too.
+# rc13 SHORT-CIRCUITS on an unknown task type.  Measured directly against the
+# running artifact: an unknown type plus a bad namespace, plus an empty
+# `Parallel.tasks`, plus a blank task id, and two unknown types together, ALL
+# return exactly one violation -- the first `Invalid type:` -- while each
+# co-violation alone is a hard 422 on its own.  `POST /flows/validate` behaves
+# identically.
+#
+# Two consequences, both load-bearing:
+#
+#   1. Counting violation lines proves NOTHING about co-violations.  An earlier
+#      revision required `len(violations) == 1` and this file called that the
+#      disambiguation; it never was, because the body can never contain a second
+#      line when the first is `Invalid type:`.  The check is kept as a shape
+#      check on the message and is no longer described as more.
+#   2. `task-type-not-in-image` therefore means "the FIRST violation is a
+#      missing test-source class".  It does NOT mean the flow is otherwise
+#      valid -- rc13 cannot tell us that, and nothing here may claim it.
 INVALID_TYPE_LINE = re.compile(r"^Invalid type: (\S+)$")
-
-# Positive evidence that the missing type is a Kestra TEST-SOURCE class rather
-# than a real plugin the image should have had.  Two shapes, both measured over
-# the 22 flows that land here:
-#   io.kestra.core.tasks.test.Encrypted        -- a `.test.` package segment
-#   ...WorkingDirectoryTest$LocalFiles         -- nested in a *Test outer class
-# Every one of the 22 was resolved to a file under src/test/java in the checkout
-# at 96893b589a; `io.kestra.core.runners.test.trigger.Alias` is an `aliases =`
-# declaration on core/src/test/java/io/kestra/core/runners/test/TriggerWithAlias.java.
-TEST_SOURCE_FQCN = re.compile(r"(^|\.)test\.|Test\$")
 
 PUBLISH_PREFIX = re.compile(r"^publish -> \d+: |^publish -> 200; POST execution -> \d+: ")
 
+TEST_SOURCE_FILE = os.path.join(HERE, "test-source-classes.json")
+KESTRA_CHECKOUT = os.path.abspath(os.path.join(HERE, "..", "..", "..", "..", "kestra"))
+
+
+def load_test_source_classes():
+    """FQCN -> the checkout file that declares it.
+
+    This replaces a NAMING HEURISTIC.  A regex over the package name accepted
+    `com.acme.totally.made.up.test.NeverExisted` -- measured, it publishes with
+    exactly the same `Invalid type:` body -- so any invented FQCN could file into
+    a bucket Task 8 ignores.  Membership of a set resolved from the checkout is
+    evidence; looking like a test class is not.
+
+    The set is COMMITTED (`test-source-classes.json`) so a harvest needs no
+    checkout, and `--refresh-test-source-classes` regenerates it and reports the
+    diff.
+    """
+    with open(TEST_SOURCE_FILE, encoding="utf-8") as f:
+        doc = json.load(f)
+    classes = doc.get("classes") or {}
+    if not classes:
+        bail(f"{TEST_SOURCE_FILE} carries no classes; run "
+             "`harvest.py --refresh-test-source-classes` against the checkout")
+    return classes, doc.get("_checkout")
+
+
+def scan_test_source_classes(checkout):
+    """Resolve every plugin type declared under the checkout's src/test/java.
+
+    A plugin type is a class that extends a Kestra Task/Trigger base or
+    implements one of its interfaces, plus any `aliases = "..."` it declares --
+    `io.kestra.core.runners.test.trigger.Alias` exists only as an alias on
+    core/src/test/java/io/kestra/core/runners/test/TriggerWithAlias.java.
+    """
+    bases = re.compile(
+        r"\b(?:extends\s+(?:Task|AbstractTrigger|Sequential|Parallel|Dag|Subflow|"
+        r"WorkingDirectory|AbstractExecutionCondition|\w*Task\b)|"
+        r"implements\s+[\w<>, ]*\b(?:RunnableTask|FlowableTask|ExecutableTask|"
+        r"PollingTriggerInterface|TriggerInterface|RealtimeTriggerInterface)\b)")
+    alias_re = re.compile(r'aliases\s*=\s*\{?\s*"([^"]+)"')
+    found = {}
+    for root, _dirs, files in os.walk(checkout):
+        rp = root.replace(os.sep, "/")
+        if "node_modules" in rp or "/build/" in rp or "/.git" in rp:
+            continue
+        if "/src/test/java/" not in rp:
+            continue
+        for f in files:
+            if not f.endswith(".java"):
+                continue
+            path = os.path.join(root, f)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                src = fh.read()
+            m = re.search(r"^package\s+([\w.]+);", src, re.M)
+            if not m:
+                continue
+            pkg, outer = m.group(1), f[:-5]
+            rel = os.path.relpath(path, checkout)
+            for cm in re.finditer(r"class\s+(\w+)([^{]*)\{", src):
+                name, tail = cm.group(1), cm.group(2)
+                if not bases.search(tail):
+                    continue
+                found[f"{pkg}.{outer}" if name == outer
+                      else f"{pkg}.{outer}${name}"] = rel
+            for a in alias_re.findall(src):
+                found[a] = rel
+    return found
+
+
+def refresh_test_source_classes():
+    if not os.path.isdir(KESTRA_CHECKOUT):
+        bail(f"no Kestra checkout at {KESTRA_CHECKOUT}")
+    found = scan_test_source_classes(KESTRA_CHECKOUT)
+    sha = subprocess.run(["git", "-C", KESTRA_CHECKOUT, "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=True).stdout.strip()
+    old, old_sha = ({}, None)
+    if os.path.exists(TEST_SOURCE_FILE):
+        with open(TEST_SOURCE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        old, old_sha = d.get("classes") or {}, d.get("_checkout")
+    added = sorted(set(found) - set(old))
+    removed = sorted(set(old) - set(found))
+    doc = {
+        "_checkout": sha,
+        "_generated_by": "harvest.py --refresh-test-source-classes",
+        "_what": "Kestra plugin types (Task/Trigger subclasses and their `aliases`) "
+                 "declared in the checkout's src/test/java. A flow whose only publish "
+                 "violation names one of these is refused because the shipped image has "
+                 "no such plugin, not because the flow is malformed.",
+        "classes": dict(sorted(found.items())),
+    }
+    with open(TEST_SOURCE_FILE, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1)
+        f.write("\n")
+    print(f"[test-source] {len(found)} plugin types from {sha}"
+          f" (was {len(old)} from {old_sha})")
+    for a in added:
+        print(f"  + {a}")
+    for r in removed:
+        print(f"  - {r}")
+
 
 def violations(why):
-    """The individual constraint violations inside one 422 body."""
+    """The individual constraint violations in one 422 body."""
     return [ln.strip() for ln in PUBLISH_PREFIX.sub("", why).splitlines() if ln.strip()]
+
+
+TEST_SOURCE_CLASSES, TEST_SOURCE_CHECKOUT = load_test_source_classes()
 
 
 CHECKOUT_DRIFT = {
@@ -673,6 +886,24 @@ CHECKOUT_DRIFT = {
 
 # A flow that lives under valids/ but that the CHECKOUT refuses too.  This IS
 # evidence for Task 8 -- egret must refuse it -- despite the directory it sits in.
+# Drift the harness sees at the EXECUTION seam rather than at publish.
+# CHECKOUT_DRIFT only ever holds flows rc13 REFUSES, so a flow that publishes,
+# runs, and behaves differently from the checkout's own passing test had nowhere
+# to be recorded -- it was a comment on one probe row and nothing a later task
+# could enumerate.
+EXECUTION_DRIFT = {
+    "valids/pause-behavior":
+        "MEASURED on rc13: LITERAL behavior values work perfectly -- RESUME -> SUCCESS "
+        "with 2 task runs, WARN -> WARNING with 2, FAIL -> FAILED with 1, "
+        "CANCEL -> CANCELLED with 1, exactly what PauseTest.java:374-380 asserts.  "
+        "What fails is rendering a PEBBLE EXPRESSION into `Property<Behavior>`: this "
+        "flow writes `behavior: \"{{inputs.behavior}}\"`, and every input value then "
+        "produces the same FAILED/1 execution, silently, at resume time.  So the "
+        "difference is not in Pause's semantics; it is in resolving a dynamic property "
+        "at the moment the pause ends.  Task 2 must not build this flow's golden from "
+        "the checkout's semantics, and Task 7 must not read it as Pause behaviour.",
+}
+
 REFUSED_BY_BOTH = {
     "valids/invalid-draft-flow":
         "`draft: true` in the YAML body is not what makes a flow a draft: "
@@ -703,12 +934,14 @@ def rejected_class(entry, why):
       invalid-flow            the flow is in invalids/      (evidence: the directory)
       checkout-drift          curated CHECKOUT_DRIFT        (evidence: a checkout line)
       refused-by-both         curated REFUSED_BY_BOTH       (evidence: a checkout line)
-      task-type-not-in-image  the body's ONLY violation is `Invalid type: X` and X
-                              is shaped like a Kestra test-source class
+      task-type-not-in-image  the body's only violation is `Invalid type: X` and X is
+                              in the checkout-resolved test-source set
       unclassified-rejection  everything else -- an OPEN QUESTION, not drift and not
                               a refusal.  Nothing lands here by default reasoning.
 
     Task 8 may take TASK8_EVIDENCE as evidence that egret must refuse a flow.
+    `task-type-not-in-image` is not on that list, and it is ALSO not evidence
+    that the flow is valid: see the short-circuit note above.
     """
     if entry["kind"] == "invalids":
         return "invalid-flow"
@@ -719,7 +952,7 @@ def rejected_class(entry, why):
     vs = violations(why)
     if len(vs) == 1:
         m = INVALID_TYPE_LINE.match(vs[0])
-        if m and TEST_SOURCE_FQCN.search(m.group(1)):
+        if m and m.group(1) in TEST_SOURCE_CLASSES:
             return "task-type-not-in-image"
     return "unclassified-rejection"
 
@@ -735,8 +968,9 @@ NON_EVIDENCE_REASON = {
     "checkout-drift":
         "the flow is VALID; the pinned image is older than the checkout",
     "task-type-not-in-image":
-        "the flow is VALID; its task type is a Kestra test-source class the image "
-        "does not ship",
+        "the FIRST violation is a Kestra test-source class the image does not ship. "
+        "rc13 short-circuits on an unknown type, so this says NOTHING about whether "
+        "the flow is otherwise valid -- do not read it as `the flow is fine`",
     "unclassified-rejection":
         "UNKNOWN -- not shown to be a refusal and not shown to be drift; read the "
         "raw message before using it for anything",
@@ -811,6 +1045,83 @@ def descendants(root_id, pg):
 
     found.discard(root_id)
     return found
+
+
+def settle(root, pg, timeout):
+    """Wait until the whole execution TREE is finished, not merely terminal.
+
+    Returns (docs_by_id, error).  This is the single settle rule; Task 1's
+    harvest and Task 2's capture both go through it, because two harvests with
+    two rules is how `corpus.json` came to say 133 sub-executions while the
+    verified capture said 142.
+
+    **Terminal is not the same as finished.**  The obvious loop -- discover
+    descendants, wait for the pending ones, stop when none are pending -- stops
+    immediately when the first discovery returns nothing, so a row that lands a
+    beat later is simply absent, silently, with a plausible count written.  That
+    cost every `retry-new-execution-*` flow BOTH of its executions (four flows x
+    two each = 8) and `valids/loop-with-subflow` one of its two iterations: nine.
+
+    `RETRIED` is Kestra saying a replacement execution is coming.  Over 40
+    observations (four flows x five rounds x two children) every `RETRIED`
+    execution had exactly one child and every other terminal state had none, and
+    the replacement's `startDate` ran 1.07 s to 5.92 s after the `RETRIED`
+    execution's `endDate`.  So that arm is exact rather than a sleep: settle only
+    when nothing is pending AND no `RETRIED` execution is childless.
+
+    The THIRD arm is a quiescence condition and is labelled as one, because no
+    exact signal exists for it.  A serial `Loop` creates iteration k+1 after k
+    finishes, and nothing the API returns says how many iterations there will be:
+    the parent's taskrun carries no count and `loopRun` carries only `index`.
+    Measured, the race is real but narrow -- `valids/loop-with-subflow` recorded
+    1 of its 2 iterations once, under the load of a 345-flow harvest, while 20
+    quiet repeats had the second iteration visible 0.26 s to 0.62 s BEFORE
+    everything looked terminal.  So settle also requires the (id, state) snapshot
+    to be observed unchanged across two consecutive polls, which bounds the race
+    at one poll interval instead of ending it.  It is not exact and is not
+    described as exact.
+    """
+    deadline = time.time() + timeout
+    last_snapshot = None
+    while True:
+        docs, pending = {}, set()
+        for eid in {root} | descendants(root, pg):
+            s, b = http("GET", f"{BASE}/{TENANT}/executions/{eid}")
+            if s != 200:
+                pending.add(eid)
+                continue
+            d = json.loads(b)
+            if d.get("state", {}).get("current") in TERMINAL:
+                docs[eid] = d
+            else:
+                pending.add(eid)
+        parents = {d.get("parentId") for d in docs.values()}
+        childless = {eid for eid, d in docs.items()
+                     if d.get("state", {}).get("current") == "RETRIED" and eid not in parents}
+        snapshot = frozenset((eid, d.get("state", {}).get("current"))
+                             for eid, d in docs.items())
+        if not pending and not childless and snapshot == last_snapshot:
+            return docs, None
+        last_snapshot = snapshot
+        if time.time() >= deadline:
+            return docs, (
+                f"{len(pending)} sub-execution(s) never reached a terminal state"
+                if pending else
+                f"{len(childless)} RETRIED execution(s) never got the replacement "
+                "execution that state promises")
+        time.sleep(POLL)
+
+
+def sub_order(doc):
+    """Sort key for sibling sub-executions: `loopRun.index`, never creation instant.
+
+    A concurrent loop creates its sub-executions in an order that flipped between
+    rounds on nine corpus flows -- a fact about the scheduler, not about the flow.
+    Anything with no `loopRun` sorts after, by id, so the order is total.
+    """
+    loop = doc.get("loopRun") or {}
+    idx = loop.get("index")
+    return (0, idx, doc.get("id")) if isinstance(idx, int) else (1, 0, doc.get("id"))
 
 
 def await_terminal(eid, timeout):
@@ -905,29 +1216,15 @@ def run_flow(entry, pg):
                 )
         return "not-standalone", reason, root, [], None
 
-    subs = descendants(root, pg)
-    sub_states = []
-    sub_deadline = time.time() + SUB_TIMEOUT
-    pending = set(subs)
-    while pending and time.time() < sub_deadline:
-        for sid in list(pending):
-            s, b = http("GET", f"{BASE}/{TENANT}/executions/{sid}")
-            if s != 200:
-                pending.discard(sid)
-                continue
-            st = json.loads(b).get("state", {}).get("current")
-            if st in TERMINAL:
-                sub_states.append({"id": sid, "state": st})
-                pending.discard(sid)
-        if pending:
-            time.sleep(POLL)
-            subs |= descendants(root, pg)
-            pending |= (subs - {x["id"] for x in sub_states})
+    docs, err = settle(root, pg, SUB_TIMEOUT)
+    if err:
+        # No `observed` on a non-`runs` record: an observation is the harness
+        # saying "this finished", and record_invariant_problems enforces that a
+        # flipped disposition contradicts it.
+        return "not-standalone", err, root, [], None
 
-    if pending:
-        return ("not-standalone",
-                f"{len(pending)} sub-execution(s) never reached a terminal state",
-                root, sub_states, observe(doc))
+    sub_states = [{"id": d.get("id"), "state": d.get("state", {}).get("current")}
+                  for d in sorted((docs[k] for k in docs if k != root), key=sub_order)]
 
     return "runs", doc["state"]["current"], root, sub_states, observe(doc)
 
@@ -992,7 +1289,8 @@ def validate_tables(entries):
                         ("REFUSED_BY_BOTH", REFUSED_BY_BOTH),
                         # NON_DISCRIMINATING_NOTES was missing from this list, so a
                         # typo'd key there was a note that could never print.
-                        ("NON_DISCRIMINATING_NOTES", NON_DISCRIMINATING_NOTES)):
+                        ("NON_DISCRIMINATING_NOTES", NON_DISCRIMINATING_NOTES),
+                        ("EXECUTION_DRIFT", EXECUTION_DRIFT)):
         for k in table:
             if k not in ids:
                 problems.append(f"{name}[{k!r}] names no corpus flow")
@@ -1103,13 +1401,14 @@ def probe_discrimination(entries, out, pg):
         # when the corpus in fact contains {"param": false}, which flips the branch.
         e = by_id[cid]
         tried = []
+        last_obs = None
         verdict = None
         for alt in usable:
             body, ctype = multipart(alt["inputs"])
             status, resp = http("POST", f"{BASE}/{TENANT}/executions/"
                                         f"{e['namespace']}/{e['flow_id']}", body, ctype)
             if status != 200:
-                verdict = {"probed": True, "differs": True,
+                verdict = {"probed": True, "differs": True, "basis": "refused",
                            "alt_inputs": alt["inputs"], "alt_from": alt["from"],
                            "why": f"the alternative input is REFUSED ({status}: "
                                   f"{detail(resp)[:120]}), so a swap is visible"}
@@ -1117,20 +1416,27 @@ def probe_discrimination(entries, out, pg):
             eid = json.loads(resp)["id"]
             doc, err = await_terminal(eid, EXEC_TIMEOUT)
             if doc is None:
-                verdict = {"probed": True, "differs": True,
+                verdict = {"probed": True, "differs": True, "basis": "no-terminal",
                            "alt_inputs": alt["inputs"], "alt_from": alt["from"],
                            "why": f"the alternative input does not terminate ({err}), "
                                   "so a swap is visible"}
                 break
-            bad = check_row(row, observe(doc))
+            alt_obs = observe(doc)
+            bad = check_row(row, alt_obs)
             tried.append(json.dumps(alt["inputs"]))
+            last_obs = alt_obs
             if bad:
-                verdict = {"probed": True, "differs": True,
+                # `alt_observed` is recorded so `differs` is RE-DERIVABLE.  It used
+                # to be a raw boolean, and flipping every one of them true -> false
+                # took "proven discriminating 17" to 0 at exit 0.
+                verdict = {"probed": True, "differs": True, "basis": "observed",
+                           "alt_observed": alt_obs,
                            "alt_inputs": alt["inputs"], "alt_from": alt["from"],
                            "why": "; ".join(bad)}
                 break
         if verdict is None:
-            verdict = {"probed": True, "differs": False,
+            verdict = {"probed": True, "differs": False, "basis": "observed",
+                       "alt_observed": last_obs,
                        "alt_inputs": [a["inputs"] for a in usable],
                        "alt_from": "; ".join(a["from"] for a in usable),
                        "why": f"all {len(tried)} documented alternative(s) satisfy this row's "
@@ -1159,7 +1465,13 @@ def load_committed():
     with open(os.path.join(HERE, "probe.json"), encoding="utf-8") as f:
         probe = json.load(f)
 
-    corpus_ids = {e["id"] for e in read_corpus()}
+    entries = read_corpus()
+    # The guards `--self-test` exercises must also run on the path that actually
+    # WRITES the published file.  They did not: `--rewrite-runnable` called
+    # neither validate_tables nor expected_row_problems.
+    validate_tables(entries)
+
+    corpus_ids = {e["id"] for e in entries}
     json_ids = {r["id"] for r in out}
     if corpus_ids != json_ids:
         missing = sorted(corpus_ids - json_ids)[:5]
@@ -1168,160 +1480,178 @@ def load_committed():
              f"{len(corpus_ids)}; missing from corpus.json e.g. {missing}, "
              f"not in corpus/ e.g. {extra}.  Re-harvest; do not rewrite.")
 
-    # rejected_class is a pure function of (directory, message) and the curated
-    # tables, so it can be RE-DERIVED here.  If the classifier has changed since
-    # the harvest, corpus.json is stale in a way no count would reveal -- the
-    # totals would still add up while the classes underneath them had moved.
-    by_entry = {e["id"]: e for e in read_corpus()}
-    drifted = [r["id"] for r in out if r.get("disposition") == "rejected"
-               and rejected_class(by_entry[r["id"]], r["reason"]) != r.get("rejected_class")]
-    if drifted:
-        bail(f"{len(drifted)} rejected record(s) no longer classify the way corpus.json "
-             f"stored them, e.g. {drifted[:5]}; the classifier changed after the harvest. "
-             "Re-harvest; do not rewrite.")
-
-    want_probe = sorted(cid for cid, r in ((r["id"], r) for r in out)
-                        if cid in EXPECTED and r.get("disposition") == "runs")
-    absent = [cid for cid in want_probe if cid not in probe]
-    if absent:
-        bail(f"{len(absent)} row(s) that ran and have an EXPECTED entry have no "
-             f"probe.json record, e.g. {absent[:5]}; they would silently print as "
-             "`unprobed`.  Re-harvest; do not rewrite.")
+    check_outputs(out, probe)
     return out, probe
 
 
 def self_test():
-    """Prove each guard FIRES, by mutating the committed data.
+    """Prove each guard FIRES, and fires for the RIGHT REASON, by mutating the
+    committed data.
 
-    A guard nobody has seen fail is a guard nobody has seen.  One of these was
-    `assert sum(by_class.values()) == len(rej)` -- a tautology, since both sides
-    came from iterating the same list once -- and it survived four mutations
-    before anyone noticed.  Each case below is a mutation that MUST raise.
+    Two defects this rewrite fixes, both of which made the previous version look
+    stronger than it was:
+
+    * It drove its first cases through `write_runnable`, which validates AND
+      writes `runnable.txt`.  With a guard neutered so the mutation did not fire,
+      the run that reports a missing guard left the committed artifact corrupted
+      -- `TOTAL 344`, one flow absent -- and then exited 1.  Every case now goes
+      through `check_outputs`, which writes nothing.
+    * `must_bail` accepted ANY SystemExit, so a case labelled for guard X passed
+      when guard Y fired.  Deleting the vocabulary guard left case 1 still
+      printing FIRES.  Each case now asserts on the message.
     """
     import copy
     out, probe = load_committed()
-    golden, stab = load_task2()
-    task2 = (golden, stab)
+    results = []
 
-    def must_bail(name, fn):
+    def case(name, expect, fn):
         try:
             fn()
         except SystemExit as e:
-            print(f"  FIRES   {name}\n            {str(e)[:150]}")
-            return True
+            msg = str(e)
+            if expect in msg:
+                hit = next((ln.strip() for ln in msg.splitlines() if expect in ln), msg)
+                print(f"  FIRES   {name}")
+                print(f"            {hit[:150]}")
+                results.append(True)
+            else:
+                print(f"  WRONG   {name}")
+                print(f"            expected {expect!r} in the message, got: "
+                      f"{msg.splitlines()[0][:150]}")
+                results.append(False)
+            return
         print(f"  SILENT  {name}  <-- the guard did not fire")
-        return False
+        results.append(False)
 
-    print("[self-test] every guard below must fire on its mutation")
-    ok = True
+    def mutated(fn):
+        m = copy.deepcopy(out)
+        fn(m)
+        return m
 
-    # 1. a record with a disposition outside the vocabulary
-    m = copy.deepcopy(out)
-    m[0]["disposition"] = "probably-fine"
-    ok &= must_bail("unknown disposition is not silently dropped",
-                    lambda: write_runnable(m, probe, task2))
+    print("[self-test] every guard must fire, and name its own reason")
 
-    # 2. rejected_class blanked / dropped / unknown
+    # --- the disposition vocabulary and the record invariants -----------------
+    case("disposition outside the vocabulary",
+         "is not in KNOWN_DISPOSITIONS",
+         lambda: check_outputs(mutated(lambda m: m[0].update(disposition="probably-fine")),
+                               probe))
+
+    def flip_to_runs(m, frm):
+        r = next(x for x in m if x["disposition"] == frm)
+        r["disposition"] = "runs"
+        r.pop("rejected_class", None)
+        return r
+    case("not-standalone flipped to runs (moves the headline)",
+         "disposition runs but no `observed`",
+         lambda: check_outputs(mutated(lambda m: flip_to_runs(m, "not-standalone")), probe))
+    case("rejected flipped to runs with its class dropped",
+         "disposition runs but publish_status",
+         lambda: check_outputs(mutated(lambda m: flip_to_runs(m, "rejected")), probe))
+    case("sub_executions tripled",
+         "sub_executions",
+         lambda: check_outputs(mutated(lambda m: [
+             r.update(sub_executions=r["sub_executions"] * 3)
+             for r in m if r.get("sub_executions")][0] and None), probe))
+    case("an observed state corrupted",
+         "observed.state",
+         lambda: check_outputs(mutated(lambda m: next(
+             r for r in m if r.get("observed"))["observed"].update(state="NOPE")), probe))
+    case("a non-rejected record carrying a stale rejected_class",
+         "stale rejected_class",
+         lambda: check_outputs(mutated(lambda m: next(
+             r for r in m if r["disposition"] == "runs").update(
+                 rejected_class="invalid-flow")), probe))
+
+    # --- the rejected-class vocabulary and its re-derivation ------------------
     for label, mutate in (
         ("rejected_class = None", lambda r: r.update(rejected_class=None)),
         ("rejected_class deleted", lambda r: r.pop("rejected_class", None)),
         ("rejected_class = ''", lambda r: r.update(rejected_class="")),
         ("rejected_class unknown", lambda r: r.update(rejected_class="looks-fine")),
     ):
-        m = copy.deepcopy(out)
-        mutate(next(r for r in m if r["disposition"] == "rejected"))
-        ok &= must_bail(label, lambda m=m: write_runnable(m, probe, task2))
+        case(label, "is not a known class",
+             lambda mutate=mutate: check_outputs(mutated(lambda m: mutate(
+                 next(r for r in m if r["disposition"] == "rejected"))), probe))
+    case("a stored class the classifier disagrees with",
+         "the classifier derives",
+         lambda: check_outputs(mutated(lambda m: next(
+             r for r in m if r.get("rejected_class") == "task-type-not-in-image").update(
+                 rejected_class="checkout-drift")), probe))
 
-    # 3. corpus.json short of corpus/
-    m = [r for r in copy.deepcopy(out) if not r["id"].endswith("-duration")]
-    ok &= must_bail("corpus.json missing flows that exist in corpus/",
-                    lambda: _rewrite_with(m, probe))
+    # --- the probe verdicts ---------------------------------------------------
+    def flip_differs(pr, basis):
+        return {k: dict(v, differs=False)
+                if v.get("differs") and v.get("basis") == basis else v
+                for k, v in pr.items()}
+    case("every observed probe `differs` flipped true -> false",
+         "re-deriving it from alt_observed",
+         lambda: check_outputs(out, flip_differs(probe, "observed")))
+    case("a refused-basis probe `differs` flipped true -> false",
+         "must be discriminating",
+         lambda: check_outputs(out, flip_differs(probe, "refused")))
+    case("probe.json missing a row that ran",
+         "has no record for",
+         lambda: check_outputs(out, {k: v for k, v in list(probe.items())[5:]}))
+    case("probe.json with a key naming no probed flow",
+         "which is not a flow that ran",
+         lambda: check_outputs(out, dict(probe, **{"valids/parallel": {"probed": False}})))
 
-    # 4. probe.json short of the rows that ran
-    ok &= must_bail("probe.json missing a row that ran",
-                    lambda: _rewrite_with(out, {k: v for k, v in list(probe.items())[5:]}))
+    case("a terminal state that disagrees with Task 2's capture",
+         "rounds of traces.json say",
+         lambda: check_outputs(mutated(lambda m: next(
+             r for r in m if r["id"] == "valids/loop-with-subflow")["observed"].update(
+                 state="FAILED")), probe))
 
-    # 4b. corpus.json storing a class the current classifier would not produce
-    m = copy.deepcopy(out)
-    next(r for r in m if r.get("rejected_class") == "task-type-not-in-image")[
-        "rejected_class"] = "checkout-drift"
-    ok &= must_bail("corpus.json class the current classifier disagrees with",
-                    lambda: _reclassify_check(m))
+    # --- corpus.json against corpus/ -----------------------------------------
+    case("corpus.json short of corpus/",
+         "corpus.json covers",
+         lambda: _corpus_cover_check([r for r in out
+                                      if not r["id"].endswith("-duration")]))
 
-    # 5. an EXPECTED row with a typo'd assertion key
+    # --- the EXPECTED row shapes ---------------------------------------------
     saved = dict(EXPECTED)
     try:
         cid = "valids/exit"
         EXPECTED[cid] = dict(saved[cid], taskrun=999)
-        ok &= must_bail("EXPECTED row with a typo'd key",
-                        lambda: _raise_if(expected_row_problems()))
+        case("EXPECTED row with a typo'd key", "has unknown key(s)",
+             lambda: _raise_if(expected_row_problems()))
         EXPECTED[cid] = dict(saved[cid], state="SUKCESS")
-        ok &= must_bail("EXPECTED row with a state that is not a State.Type",
-                        lambda: _raise_if(expected_row_problems()))
+        case("EXPECTED row whose state is not a State.Type", "is not a State.Type",
+             lambda: _raise_if(expected_row_problems()))
     finally:
         EXPECTED.clear()
         EXPECTED.update(saved)
 
-    # 5b. Task 2's two artifacts describing different harvests
-    mg = copy.deepcopy(golden)
-    ms = copy.deepcopy(stab)
-    ms["flows"].pop(next(e["id"] for e in mg if e.get("verdict") == "runs"))
-    ok &= must_bail("a golden entry with no stability record",
-                    lambda: write_runnable(out, probe, (mg, ms)))
-
-    mg = copy.deepcopy(golden)
-    e = next(e for e in mg if e.get("verdict") == "runs" and e["runs"])
-    e["runs"].append(dict(e["runs"][0]))
-    ok &= must_bail("golden.json run counts that stability.json cannot account for",
-                    lambda: write_runnable(out, probe, (mg, stab)))
-
-    mg = copy.deepcopy(golden)
-    e = next(e for e in mg if e.get("verdict") == "runs" and e["order"])
-    e["order"] = e["order"][:-1]
-    ok &= must_bail("golden.json order pairs that the stability filter did not keep",
-                    lambda: write_runnable(out, probe, (mg, stab)))
-
-    # 6. a curated-note key that names no flow
+    # --- the curated tables ---------------------------------------------------
     NON_DISCRIMINATING_NOTES["valids/does-not-exist"] = "x"
     try:
-        ok &= must_bail("NON_DISCRIMINATING_NOTES key naming no flow",
-                        lambda: validate_tables(read_corpus()))
+        case("NON_DISCRIMINATING_NOTES key naming no flow", "names no corpus flow",
+             lambda: validate_tables(read_corpus()))
     finally:
         NON_DISCRIMINATING_NOTES.pop("valids/does-not-exist", None)
+    EXECUTION_DRIFT["valids/does-not-exist"] = "x"
+    try:
+        case("EXECUTION_DRIFT key naming no flow", "names no corpus flow",
+             lambda: validate_tables(read_corpus()))
+    finally:
+        EXECUTION_DRIFT.pop("valids/does-not-exist", None)
 
-    if not ok:
-        raise SystemExit("[self-test] at least one guard did not fire")
-    print("[self-test] all guards fired")
-
-
-def _reclassify_check(out):
-    """load_committed()'s re-derivation check, on in-memory data (for --self-test)."""
-    by_entry = {e["id"]: e for e in read_corpus()}
-    drifted = [r["id"] for r in out if r.get("disposition") == "rejected"
-               and rejected_class(by_entry[r["id"]], r["reason"]) != r.get("rejected_class")]
-    if drifted:
-        bail(f"{len(drifted)} rejected record(s) no longer classify the way corpus.json "
-             f"stored them, e.g. {drifted[:5]}")
+    print(f"[self-test] {sum(results)}/{len(results)} guards fired for the right reason")
+    if not all(results):
+        raise SystemExit("[self-test] at least one guard did not fire correctly")
 
 
-def _raise_if(problems):
-    if problems:
-        bail("; ".join(problems))
-
-
-def _rewrite_with(out, probe):
-    """load_committed()'s checks, applied to in-memory data (for --self-test)."""
+def _corpus_cover_check(out):
     corpus_ids = {e["id"] for e in read_corpus()}
     json_ids = {r["id"] for r in out}
     if corpus_ids != json_ids:
         bail(f"corpus.json covers {len(json_ids)} flows but corpus/ holds "
              f"{len(corpus_ids)}")
-    want = [r["id"] for r in out
-            if r["id"] in EXPECTED and r.get("disposition") == "runs"]
-    absent = [cid for cid in want if cid not in probe]
-    if absent:
-        bail(f"{len(absent)} row(s) that ran have no probe.json record, "
-             f"e.g. {absent[:5]}")
+
+
+def _raise_if(problems):
+    if problems:
+        bail("; ".join(problems))
 
 
 # --------------------------------------------------------------------------
@@ -1461,36 +1791,15 @@ def execute_once(entry, inputs, pg):
     if doc is None:
         return None, [], f"execution {root} {err}"
 
-    docs, pending, why = {}, set(), None
-    deadline = time.time() + SUB_TIMEOUT
-    while True:
-        docs = {}
-        pending = set()
-        for eid in {root} | descendants(root, pg):
-            s, b = http("GET", f"{BASE}/{TENANT}/executions/{eid}")
-            if s != 200:
-                pending.add(eid)
-                continue
-            d = json.loads(b)
-            if d.get("state", {}).get("current") in TERMINAL:
-                docs[eid] = d
-            else:
-                pending.add(eid)
-        parents = {d.get("parentId") for d in docs.values()}
-        childless = {eid for eid, d in docs.items()
-                     if d.get("state", {}).get("current") == "RETRIED" and eid not in parents}
-        if not pending and not childless:
-            break
-        if time.time() >= deadline:
-            why = (f"{len(pending)} execution(s) never reached a terminal state"
-                   if pending else
-                   f"{len(childless)} RETRIED execution(s) never got the replacement "
-                   "execution that state promises")
-            return None, [], why
-        time.sleep(POLL)
+    # One settle rule for the whole package -- see settle().  Task 1's harvest
+    # and this capture used to have separate loops, which is how corpus.json came
+    # to say 133 sub-executions while this capture said 142.
+    docs, why = settle(root, pg, SUB_TIMEOUT)
+    if why:
+        return None, [], why
 
-    subs = sorted(set(docs) - {root})
-    return reduce_execution(docs[root]), [reduce_execution(docs[k]) for k in subs], None
+    subs = sorted((docs[k] for k in docs if k != root), key=sub_order)
+    return reduce_execution(docs[root]), [reduce_execution(d) for d in subs], None
 
 
 def capture_traces(rounds):
@@ -1628,6 +1937,8 @@ def main():
     ap.add_argument("--verify-traces", action="store_true",
                     help="re-read every execution traces.json captured and require it to be "
                          "identical; needs the same Kestra still running")
+    ap.add_argument("--refresh-test-source-classes", action="store_true",
+                    help="re-resolve test-source-classes.json from the sibling Kestra checkout")
     ap.add_argument("--self-test", action="store_true",
                     help="mutate the committed data and prove every guard fires; no Kestra needed")
     args = ap.parse_args()
@@ -1636,6 +1947,10 @@ def main():
         out, probe = load_committed()
         write_runnable(out, probe)
         print("rewrote runnable.txt from corpus.json + probe.json")
+        return
+
+    if args.refresh_test_source_classes:
+        refresh_test_source_classes()
         return
 
     if args.self_test:
@@ -1678,6 +1993,25 @@ def main():
           f"({sum(1 for e in entries if e['kind'] == 'valids')} valids, "
           f"{sum(1 for e in entries if e['kind'] == 'invalids')} invalids)")
 
+    # PUBLISH EVERY FLOW FIRST, then execute.  Publishing and executing
+    # flow-by-flow in sorted order makes the result depend on the alphabet: ten
+    # corpus flows name another corpus flow that sorts LATER, so their Subflow
+    # target did not exist yet when they ran.  Measured on
+    # `valids/loop-with-subflow`, which calls `io.kestra.tests/minimal`: harvested
+    # that way it FAILED with one loop iteration, and harvested after everything
+    # was published it SUCCEEDS with two.  Task 2's capture published first and
+    # got the second answer, which is the whole of the 141-vs-142 gap.
+    publish = {}
+    for i, e in enumerate(entries, 1):
+        status, body = http(
+            "POST", f"{BASE}/{TENANT}/flows",
+            e["source"].encode("utf-8"), "application/x-yaml",
+        )
+        publish[e["id"]] = (status, detail(body))
+    ok = sum(1 for st, _ in publish.values() if st == 200)
+    print(f"[publish] {ok}/{len(entries)} flows published; "
+          f"{len(entries) - ok} refused")
+
     out = []
     for i, e in enumerate(entries, 1):
         rec = {
@@ -1688,19 +2022,16 @@ def main():
             "declares_inputs": e["declares_inputs"],
         }
 
-        status, body = http(
-            "POST", f"{BASE}/{TENANT}/flows",
-            e["source"].encode("utf-8"), "application/x-yaml",
-        )
+        status, body = publish[e["id"]]
         rec["publish_status"] = status
 
         if 400 <= status < 500:
             rec["disposition"] = "rejected"
-            rec["reason"] = f"publish -> {status}: {detail(body)}"
-            rec["rejected_class"] = rejected_class(e, detail(body))
+            rec["reason"] = f"publish -> {status}: {body}"
+            rec["rejected_class"] = rejected_class(e, body)
         elif status != 200:
             rec["disposition"] = "unclassified"
-            rec["reason"] = f"publish -> {status}: {detail(body)}"
+            rec["reason"] = f"publish -> {status}: {body}"
         elif e["id"] in NOT_STANDALONE_INPUTS:
             rec["disposition"] = "not-standalone"
             rec["reason"] = NOT_STANDALONE_INPUTS[e["id"]]
@@ -1736,6 +2067,8 @@ def main():
             if root:
                 rec["execution_id"] = root
             rec["sub_executions"] = len(subs)
+            if subs:
+                rec["sub_execution_ids"] = [x["id"] for x in subs]
 
         out.append(rec)
         print(f"[{i:3}/{len(entries)}] {rec['id']:<62} {rec['disposition']:<15} {str(rec.get('reason'))[:90]}")
@@ -1760,112 +2093,189 @@ def main():
     print("\n[done] corpus.json + runnable.txt written")
 
 
-def bail(msg):
-    """Guards raise; they never `assert`.
+def record_invariant_problems(out):
+    """Invariants every record must satisfy, checked against the RECORD's own
+    other fields rather than against the summary built from it.
 
-    `python3 -O` strips assert statements, so a guard written as an assert is a
-    guard that silently disappears under a flag anyone may pass.
+    Five corruptions of `corpus.json` used to move a published number at exit 0:
+    flipping a `not-standalone` to `runs` (the headline moves), flipping a
+    `rejected` to `runs` and dropping its class (two numbers move, and it slips
+    past the class re-derivation because that only inspects records still SAYING
+    rejected), tripling `sub_executions`, and corrupting an `observed` state.
+    Each of these now contradicts a field the corruption did not think to change.
     """
-    raise SystemExit("harvest.py guard failed: " + msg)
+    bad = []
+    for r in out:
+        cid = r.get("id", "<no id>")
+        disp = r.get("disposition")
+        pub = r.get("publish_status")
+        obs = r.get("observed")
+        if disp not in KNOWN_DISPOSITIONS:
+            bad.append(f"{cid}: disposition {disp!r} is not in KNOWN_DISPOSITIONS")
+            continue
+        if not r.get("reason"):
+            bad.append(f"{cid}: no reason")
+        # A flow that RAN was published, reached a terminal state, and left an
+        # observation.  A flipped disposition contradicts all three at once.
+        if disp == "runs":
+            if pub != 200:
+                bad.append(f"{cid}: disposition runs but publish_status {pub!r}")
+            if not obs:
+                bad.append(f"{cid}: disposition runs but no `observed`")
+            elif obs.get("state") not in TERMINAL:
+                bad.append(f"{cid}: runs but observed.state {obs.get('state')!r} "
+                           "is not terminal")
+            elif r.get("reason") != obs.get("state"):
+                bad.append(f"{cid}: reason {r.get('reason')!r} != observed.state "
+                           f"{obs.get('state')!r}")
+            elif obs.get("taskruns") != len(obs.get("task_ids") or []):
+                bad.append(f"{cid}: observed.taskruns {obs.get('taskruns')} != "
+                           f"len(task_ids) {len(obs.get('task_ids') or [])}")
+        else:
+            if obs is not None:
+                bad.append(f"{cid}: disposition {disp} but carries `observed`")
+        if disp == "rejected":
+            seam = "POST execution -> 4" in str(r.get("reason"))
+            if not ((isinstance(pub, int) and 400 <= pub < 500) or seam):
+                bad.append(f"{cid}: disposition rejected but publish_status {pub!r} "
+                           "and no 4xx execution-seam evidence in the reason")
+            if r.get("rejected_class") not in KNOWN_REJECTED_CLASSES:
+                bad.append(f"{cid}: rejected but rejected_class "
+                           f"{r.get('rejected_class')!r} is not a known class")
+        elif "rejected_class" in r:
+            bad.append(f"{cid}: disposition {disp} but carries a stale "
+                       f"rejected_class {r['rejected_class']!r}")
+        if disp == "not-standalone" and pub != 200:
+            bad.append(f"{cid}: not-standalone but publish_status {pub!r}; it never "
+                       "published, so it cannot be a standalone-execution finding")
+        n = r.get("sub_executions")
+        if n is not None:
+            ids = r.get("sub_execution_ids")
+            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                bad.append(f"{cid}: sub_executions {n!r} is not a count")
+            elif n and disp != "runs":
+                bad.append(f"{cid}: {n} sub_executions on a {disp} record")
+            elif n and ids is None:
+                # The count must be checkable against something.  Tripling a bare
+                # integer moved a published number at exit 0; the ids are what
+                # make that contradict itself.
+                bad.append(f"{cid}: {n} sub_executions but no sub_execution_ids to "
+                           "check the count against")
+            elif ids is not None and (n != len(ids) or len(set(ids)) != len(ids)):
+                bad.append(f"{cid}: sub_executions {n} != {len(ids)} distinct "
+                           "sub_execution_ids")
+    return bad
 
 
-def load_task2():
-    """golden.json + stability.json, Task 2's committed outputs.
+def probe_problems(out, probe):
+    """`differs` decides the single most load-bearing sentence in this package --
+    "proven discriminating N" -- and it used to be a raw copied boolean.
 
-    `runnable.txt` is the file this package calls its honest denominator, so the
-    happens-before numbers belong in it and not only in a script's stdout.  Both
-    files are committed, so `--rewrite-runnable` still needs no Kestra.
+    Flipping every `differs` true -> false took `proven discriminating 17` to 0
+    at exit 0.  So each probed row records the BASIS of its verdict and, where the
+    basis is an observation, the observation itself; `differs` is then recomputed
+    here from that observation and the EXPECTED row.
     """
-    out = {}
-    for name in ("golden.json", "stability.json"):
-        path = os.path.join(HERE, name)
-        if not os.path.exists(path):
-            bail(f"{name} is missing; run `python3 normalise.py` first "
-                 "(it needs traces.json, which `--traces` writes)")
-        with open(path, encoding="utf-8") as f:
-            out[name] = json.load(f)
-    return out["golden.json"], out["stability.json"]
+    bad = []
+    by_id = {r["id"]: r for r in out}
+    ran = {cid for cid, r in by_id.items()
+           if cid in EXPECTED and r.get("disposition") == "runs"}
+    for cid in sorted(ran - set(probe)):
+        bad.append(f"probe.json has no record for {cid}, which ran and has an "
+                   "EXPECTED row; it would print as `unprobed`")
+    for cid in sorted(set(probe) - ran):
+        bad.append(f"probe.json has a record for {cid}, which is not a flow that "
+                   "ran with an EXPECTED row")
+    for cid in sorted(set(probe) & ran):
+        pr = probe[cid]
+        if not pr.get("probed"):
+            if pr.get("differs"):
+                bad.append(f"probe[{cid}] is unprobed but claims differs")
+            continue
+        basis = pr.get("basis")
+        if basis == "observed":
+            obs = pr.get("alt_observed")
+            if not obs:
+                bad.append(f"probe[{cid}] basis=observed but carries no alt_observed")
+                continue
+            recomputed = bool(check_row(EXPECTED[cid], obs))
+            if recomputed != bool(pr.get("differs")):
+                bad.append(f"probe[{cid}].differs is {pr.get('differs')} but "
+                           f"re-deriving it from alt_observed gives {recomputed}")
+        elif basis in ("refused", "no-terminal"):
+            if not pr.get("differs"):
+                bad.append(f"probe[{cid}] basis={basis} must be discriminating")
+        else:
+            bad.append(f"probe[{cid}] has no recognised basis ({basis!r})")
+    return bad
 
 
-def pairs_in(node):
-    """How many ordered pairs one normalised trace HAS, counting sub-executions.
+def traces_agreement_problems(out):
+    """corpus.json's terminal states, checked against Task 2's INDEPENDENT capture.
 
-    Derived from golden.json.  The point is that it is a SECOND derivation:
-    stability.json says how many pairs it kept and dropped, golden.json says how
-    many runs there are, and n*(n-1)/2 must reconcile the two.  A stability file
-    that has drifted from the golden -- a re-normalisation that wrote one and not
-    the other -- fails here instead of printing a table that adds up with itself.
+    Two harvests of the same artifact are two measurements, and where they
+    disagree at least one is wrong.  They did, on four flows -- and the cause was
+    not flakiness: the Task 1 harvest published and executed flow-by-flow in
+    sorted order, so ten corpus flows whose `Subflow` target sorts LATER ran
+    before that target existed.  `valids/loop-with-subflow`,
+    `valids/subflow-child`, `valids/subflow-parent-retry` and
+    `valids/flow-concurrency-parallel-subflow-kill-child` were all recorded
+    FAILED where five rounds of Task 2's capture say SUCCESS.
+
+    traces.json is optional here: it belongs to Task 2 and a Task 1-only
+    checkout may not have it yet.  When it is present the check is not optional.
     """
-    n = len(node.get("runs") or [])
-    return n * (n - 1) // 2 + sum(pairs_in(sub) for sub in node.get("spawned") or [])
+    path = os.path.join(HERE, "traces.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        flows = json.load(f).get("flows") or {}
+    by_id = {r["id"]: r for r in out}
+    bad = []
+    for fid, rounds in flows.items():
+        rec = by_id.get(fid)
+        if not rec or rec.get("disposition") != "runs" or not rec.get("observed"):
+            continue
+        states = {r["root"]["state"]["current"] for r in rounds if r.get("root")}
+        if len(states) != 1:
+            continue
+        want = states.pop()
+        if rec["observed"]["state"] != want:
+            bad.append(f"{fid}: corpus.json says {rec['observed']['state']} but all "
+                       f"{len(rounds)} rounds of traces.json say {want}")
+    return bad
 
 
-def order_in(node):
-    """How many order pairs one normalised trace CARRIES, sub-executions included.
+def check_outputs(out, probe):
+    """Every guard over the harvested data, in one place that WRITES NOTHING.
 
-    The counterpart to `pairs_in`: that one says how many pairs a trace has,
-    this one how many survived the filter.  Both must reconcile with
-    stability.json, from opposite directions.
+    `--self-test` used to drive its first cases through `write_runnable`, which
+    both validates and writes the committed artifact: with a guard neutered so
+    the mutation did not fire, the run that reports a missing guard left
+    `runnable.txt` corrupted -- `TOTAL 344`, one flow absent -- and then exited 1,
+    ready for the next `git add -A`.
     """
-    return len(node.get("order") or []) + sum(
-        order_in(sub) for sub in node.get("spawned") or [])
+    problems = record_invariant_problems(out)
+    problems += probe_problems(out, probe)
+    problems += traces_agreement_problems(out)
 
-
-def order_table(golden, stab):
-    """The happens-before relation: kept, and what had to be dropped.
-
-    Kestra's own tests read `assertThat(a2.startDate.isAfter(a1.endDate)).isTrue()`
-    FOUR times, in ParallelTest.errors() and DagTest.errors() -- counted at
-    checkout 96893b589, not the 39 the plan claims.  That is a claim about
-    SERIALISATION, and a normaliser that drops all clocks cannot see a flowable
-    that stops serialising -- so the relation is derived before the clocks go,
-    and kept only where all five rounds agreed.
-    """
-    lines = ["happens-before pairs, over the five harvest rounds"]
-    by_id = {e["id"]: e for e in golden if e.get("verdict") == "runs"}
-    missing = sorted(set(by_id) - set(stab["flows"]))
-    if missing:
-        bail(f"{len(missing)} golden entr(y/ies) have no stability record, e.g. "
-             f"{missing[:5]}; the two files describe different harvests")
-
-    kept = unstable = unmeasurable = 0
-    for cid, entry in sorted(by_id.items()):
-        rec = stab["flows"][cid]
-        have = (rec["pairs_kept"] + rec["pairs_dropped_unstable"]
-                + rec["pairs_dropped_unmeasurable"])
-        want = pairs_in(entry)
-        if have != want:
-            bail(f"{cid}: stability.json accounts for {have} pair(s) but golden.json's "
-                 f"run counts give {want}; one of the two files is stale")
-        written = order_in(entry)
-        if written != rec["pairs_kept"]:
-            bail(f"{cid}: golden.json carries {written} order pair(s) across the whole "
-                 f"trace but stability.json kept {rec['pairs_kept']}; the stability "
-                 "filter and the golden writer disagree")
-        kept += rec["pairs_kept"]
-        unstable += rec["pairs_dropped_unstable"]
-        unmeasurable += rec["pairs_dropped_unmeasurable"]
-
-    lines.append(f"  {'kept (identical in all 5 rounds)':<44} {kept}")
-    lines.append(f"  {'dropped, relation flipped between rounds':<44} {unstable}")
-    lines.append(f"  {'dropped, a run had no start or no end':<44} {unmeasurable}")
-    lines.append(f"  {'TOTAL':<44} {kept + unstable + unmeasurable}")
-    lines.append("")
-    lines.append("  A relation observed once is a coincidence, and genuinely parallel")
-    lines.append("  branches flip.  Only the pairs that came out the same in all five")
-    lines.append("  rounds are in golden.json; the rest are dropped and counted here.")
-    lines.append("")
-    lines.append(f"traces that did NOT reproduce across all 5 rounds: "
-                 f"{len(stab['unstable_traces'])}")
-    for cid in stab["unstable_traces"]:
-        rec = stab["flows"][cid]
-        lines.append(f"  {cid}  (rounds differing from round 1: "
-                     f"{rec['rounds_differing_from_round_1']})")
-    lines.append("  These get NO golden entry and are never compared.  A trace the oracle")
-    lines.append("  itself does not reproduce five times running cannot judge egret: an")
-    lines.append("  implementation matching round 1 would be right by luck.")
-    lines.append("")
-    return lines
+    # The class table, re-derived rather than recounted.  `sum(Counter(rej)) ==
+    # len(rej)` was the previous check and could not fail: both sides came from
+    # iterating the same list once.  This recomputes each class from the record's
+    # own directory and message, which a corrupted `rejected_class` contradicts.
+    for r in out:
+        if r.get("disposition") != "rejected":
+            continue
+        kind = r["id"].split("/", 1)[0]
+        want = rejected_class({"kind": kind, "id": r["id"]}, r.get("reason", ""))
+        if want != r.get("rejected_class"):
+            problems.append(
+                f"{r['id']}: stored rejected_class {r.get('rejected_class')!r} but the "
+                f"classifier derives {want!r} from its directory and message")
+    if problems:
+        bail(f"{len(problems)} problem(s) in the harvested data:\n  "
+             + "\n  ".join(problems[:20])
+             + (f"\n  ... and {len(problems) - 20} more" if len(problems) > 20 else ""))
 
 
 def disposition_table(records, label, total_label="TOTAL"):
@@ -1891,6 +2301,7 @@ def disposition_table(records, label, total_label="TOTAL"):
 
 
 def write_runnable(out, probe, task2=None):
+    check_outputs(out, probe)
     buckets = {}
     for r in out:
         buckets.setdefault(r["disposition"], []).append(r)
@@ -1921,17 +2332,10 @@ def write_runnable(out, probe, task2=None):
     # class was dropped, blanked or renamed fails here instead of quietly reading
     # as one of the classes Task 8 ignores.
     lines.append("rejected, by class")
-    strays = sorted({r["id"] for r in rej
-                     if r.get("rejected_class") not in KNOWN_REJECTED_CLASSES})
-    if strays:
-        bail(f"{len(strays)} rejected record(s) carry no known rejected_class, e.g. "
-             f"{strays[:3]}; expected one of {list(KNOWN_REJECTED_CLASSES)}")
     by_class = Counter(r["rejected_class"] for r in rej)
     for cls, n in sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0])):
         mark = "  <- Task 8 evidence" if cls in TASK8_EVIDENCE else ""
         lines.append(f"  {cls:<44} {n}{mark}")
-    if sum(by_class.values()) != len(rej):
-        bail(f"class table {sum(by_class.values())} != rejected {len(rej)}")
     lines.append(f"  {'TOTAL':<44} {sum(by_class.values())}")
     lines.append("")
     # Generated from TASK8_EVIDENCE, not written beside it.  The hand-written
@@ -2102,6 +2506,7 @@ def write_runnable(out, probe, task2=None):
 
     with open(os.path.join(HERE, "runnable.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+        f.write("\n")
 
 
 if __name__ == "__main__":

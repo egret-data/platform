@@ -34,7 +34,7 @@ rejected, by class
     refused-by-both                            1
   The remaining classes are NOT refusals:
     checkout-drift                             1  -- the flow is VALID; the pinned image is older than the checkout
-    task-type-not-in-image                     22  -- the flow is VALID; its task type is a Kestra test-source class the image does not ship
+    task-type-not-in-image                     22  -- the FIRST violation is a Kestra test-source class the image does not ship. rc13 short-circuits on an unknown type, so this says NOTHING about whether the flow is otherwise valid -- do not read it as `the flow is fine`
     unclassified-rejection                     0  -- UNKNOWN -- not shown to be a refusal and not shown to be drift; read the raw message before using it for anything
 
 invalids this Kestra ACCEPTS: 1
@@ -43,7 +43,7 @@ invalids this Kestra ACCEPTS: 1
   invalids/ when the EXECUTION is expected to fail as well as when the flow
   is rejected; the pinned runtime distinguishes them and this is the split.
 
-sub-executions harvested by following parentId: 133
+sub-executions harvested by following parentId: 142
 
 happens-before pairs, over the five harvest rounds
   kept (identical in all 5 rounds)             1104
@@ -103,34 +103,34 @@ invalids/inputs-key-with-subtraction-symbol-validation  [invalid-flow]
     publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of inputs.key-name — keys with dashes require bracket notation, offending tasks: [hello]
 
 invalids/inputs-validation  [invalid-flow]
-    publish -> 422: inputs[multiselect3]: `itemType` cannot be MULTISELECT
-inputs[array1]: `itemType` cannot be ARRAY
-inputs[multiselect1]: `itemType` cannot be ARRAY
-inputs[array2]: `itemType` cannot be SECRET
-inputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI
+    publish -> 422: inputs[multiselect1]: `itemType` cannot be ARRAY
 inputs[array3]: `itemType` cannot be MULTISELECT
 inputs[array4]: `itemType` cannot be SELECT
+inputs[array2]: `itemType` cannot be SECRET
 inputs[multiselect2]: `itemType` cannot be SECRET
 inputs[multiselect4]: `itemType` cannot be SELECT
+inputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI
+inputs[array1]: `itemType` cannot be ARRAY
+inputs[multiselect3]: `itemType` cannot be MULTISELECT
 
 invalids/inputs-with-multiple-constraint-violations  [invalid-flow]
-    publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`
-Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`
+    publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`
+Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`
 invalids/invalid  [invalid-flow]
-    publish -> 422: id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
-tasks[null].id: must not be blank
-namespace: must match "^[a-z0-9][a-z0-9._-]*"
+    publish -> 422: tasks[null].id: must not be blank
 tasks[null].id: must not be null
+namespace: must match "^[a-z0-9][a-z0-9._-]*"
+id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
 
 invalids/invalid-parallel  [invalid-flow]
-    publish -> 422: tasks[para3].tasks: The 'tasks' property cannot be empty
-id: size must be between 1 and 100
+    publish -> 422: id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
 namespace: must match "^[a-z0-9][a-z0-9._-]*"
-id: must not be blank
-id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
 namespace: size must be between 1 and 150
 tasks[para2].tasks: The 'tasks' property cannot be empty
+id: must not be blank
 tasks[para4].tasks: The 'tasks' property cannot be empty
+tasks[para3].tasks: The 'tasks' property cannot be empty
+id: size must be between 1 and 100
 
 invalids/invalid-property  [invalid-flow]
     publish -> 422: Unrecognized field "invalid" (class io.kestra.plugin.core.debug.Return), not marked as ignorable (17 known properties: "logLevel", "timeout", "assets", "retry", "policyRefs", "allowWarning", "format", "version", "type", "id", "description", "workerSelector", "allowFailure", "runIf", "logToFile", "disabled", "taskCache")
@@ -152,16 +152,16 @@ invalids/switch-invalid  [invalid-flow]
     publish -> 422: tasks[impossible]: No task defined, neither cases or default have any tasks
 
 invalids/system-labels  [invalid-flow]
-    publish -> 422: tasks[null].id: must not be blank
+    publish -> 422: tasks[null].id: must not be null
 : Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id
-tasks[null].id: must not be null
+tasks[null].id: must not be blank
 
 invalids/workingdirectory-invalid  [invalid-flow]
     publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a WorkingDirectory task
 
 invalids/workingdirectory-no-tasks  [invalid-flow]
-    publish -> 422: tasks[impossible].tasks: The 'tasks' property cannot be empty
-tasks[impossible]: The 'tasks' property cannot be empty
+    publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty
+tasks[impossible].tasks: The 'tasks' property cannot be empty
 
 valids/additional-plugin  [task-type-not-in-image]
     publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPluginTestTask
@@ -219,7 +219,7 @@ not-standalone -- 26
 valids/flow-trigger-invalid-inputs-flow-listen
     Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.
 valids/follow-dependencies-partial-parent
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 3SMD3d3xE0jTFZGnn38Nx0)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 5vWOA6Ff0qNPf6GoWj0bOr)
 valids/input-log-secret
     POST execution -> 422:  errors:
 ```
@@ -234,19 +234,19 @@ valids/inputs-small-files
 valids/kv
     No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.
 valids/loop-pause
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2dwShrnMADR4nyTRVfC1GB)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6gvEBPfu9l7spVhsPz7D7y)
 valids/pause-test
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1ZW5lGvK2ScBLgZUIvtSAf)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1XUTfC0pV9NwqyeB1wZiwZ)
 valids/pause_no_tasks
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7GFH6PEaV1GhYMCA54He7e)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1s2nVeFvheZaJuNvXujzHP)
 valids/pause_on_resume
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution oCoOH05fB3UfywkcB6O1L)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2RFryUrMLqmeSvAL31e6IK)
 valids/pause_on_resume_optional
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 7IpclqIhSItQg9cUGao1X)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6umw5dtyCP1saTZwevocaD)
 valids/restart_with_inputs
     ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.
 valids/resume-validate
-    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1BgqjSUVOdYnmTB2nGP9a5)
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6CgYrG256yv5X1j1UA3M33)
 valids/scheduled-inputs-defaults
     Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
 valids/secret-input-validation
@@ -316,7 +316,7 @@ valids/flow-concurrency-cancel                                 SUCCESS
 valids/flow-concurrency-cancel-pause                           SUCCESS
 valids/flow-concurrency-fail                                   SUCCESS
 valids/flow-concurrency-parallel-subflow-kill                  SUCCESS
-valids/flow-concurrency-parallel-subflow-kill-child            FAILED
+valids/flow-concurrency-parallel-subflow-kill-child            SUCCESS
 valids/flow-concurrency-parallel-subflow-kill-grandchild       SUCCESS
 valids/flow-concurrency-queue                                  SUCCESS
 valids/flow-concurrency-queue-after-execution                  SUCCESS
@@ -403,7 +403,7 @@ valids/loop-serial-multiple-tasks                              SUCCESS  (+2 sub)
 valids/loop-switch                                             SUCCESS  (+4 sub)
 valids/loop-until-restart                                      FAILED
 valids/loop-values-from-uri                                    SUCCESS  (+3 sub)
-valids/loop-with-subflow                                       FAILED  (+1 sub)
+valids/loop-with-subflow                                       SUCCESS  (+2 sub)
 valids/loopuntil-failed-flowable                               FAILED
 valids/minimal                                                 SUCCESS
 valids/minimal-bis                                             SUCCESS
@@ -452,10 +452,10 @@ valids/retry-flowable                                          FAILED
 valids/retry-flowable-child                                    FAILED
 valids/retry-flowable-nested-child                             FAILED
 valids/retry-flowable-parallel                                 FAILED  (+2 sub)
-valids/retry-new-execution-flow-attempts                       RETRIED
-valids/retry-new-execution-flow-duration                       RETRIED
-valids/retry-new-execution-task-attempts                       RETRIED
-valids/retry-new-execution-task-duration                       RETRIED
+valids/retry-new-execution-flow-attempts                       RETRIED  (+2 sub)
+valids/retry-new-execution-flow-duration                       RETRIED  (+2 sub)
+valids/retry-new-execution-task-attempts                       RETRIED  (+2 sub)
+valids/retry-new-execution-task-duration                       RETRIED  (+2 sub)
 valids/retry-random                                            FAILED
 valids/retry-subflow                                           FAILED
 valids/retry-success                                           WARNING
@@ -481,7 +481,7 @@ valids/sleep-long                                              SUCCESS
 valids/sleep-long-after-execution-flowable                     SUCCESS
 valids/sleep-short                                             SUCCESS
 valids/sleep-task-flow                                         SUCCESS
-valids/subflow-child                                           FAILED
+valids/subflow-child                                           SUCCESS
 valids/subflow-child-with-output                               SUCCESS
 valids/subflow-function-child                                  SUCCESS
 valids/subflow-function-failing                                FAILED
@@ -492,7 +492,7 @@ valids/subflow-nullable-input-parent                           SUCCESS
 valids/subflow-parent                                          SUCCESS
 valids/subflow-parent-no-wait                                  SUCCESS
 valids/subflow-parent-of-failed                                FAILED
-valids/subflow-parent-retry                                    FAILED
+valids/subflow-parent-retry                                    SUCCESS
 valids/subflow-secret-output-child                             FAILED
 valids/subflow-secret-output-parent                            FAILED
 valids/switch                                                  SUCCESS
@@ -702,7 +702,7 @@ argued.
   unprobed      valids/parallel-fail-with-flowable
                 no alternative input is documented for this flow
   CANNOT        valids/pause-behavior
-                all 3 documented alternative(s) satisfy this row's assertions too: {"behavior": "RESUME"}, {"behavior": "WARN"}, {"behavior": "CANCEL"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The behavior property, rendered from an input, has no observable effect on this artifact, though PauseTest.java:374-380 asserts RESUME -> SUCCESS with 2 task runs.  So this row's `agrees` is a coincidence, not evidence that the input landed, and Task 2 must not build a golden for this flow from the checkout's semantics.
+                all 3 documented alternative(s) satisfy this row's assertions too: {"behavior": "RESUME"}, {"behavior": "WARN"}, {"behavior": "CANCEL"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that `behavior` is unimplemented on this artifact: published with LITERAL values on a fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- the checkout's semantics reproduced exactly.  What fails is narrower: this corpus flow writes `behavior: "{{ inputs.behavior }}"`, and rendering a Pebble expression into a `Property<Behavior>` fails at resume time and takes the task down with it, for EVERY value including the one that would have failed anyway.  The execution document does record `inputs: {"behavior": "FAIL"}`, so the input landed -- the task dies rendering it.  So this row's `agrees` is a coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at all.  Task 2 builds this flow's golden from what the pinned image did, and whoever implements `pause` must not read this as a missing feature.
   unprobed      valids/pause-duration-from-input
                 no alternative input is documented for this flow
   unprobed      valids/primitive-labels-flow
@@ -740,3 +740,4 @@ recovered inputs with no checkable assertion
   recovered input values          40
     with an EXPECTED row          38
     with no checkable assertion   2
+
