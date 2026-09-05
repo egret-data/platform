@@ -608,13 +608,17 @@ The 28 `invalids` test the one divergence class the programme forbids shipping. 
 
 - [ ] **Step 1: Classify the rejections by CAUSE, not by directory**
 
-Task 1 measured 45 rejections, and **only 27 of them are Kestra refusing a
-flow**. The other 18 are the pinned image lacking a test-only plugin class, or
-the sibling checkout being ahead of `rc13` — the artifact/checkout drift the
-Global Constraints warn about, showing up as data. Read `rejected_class` from
-`corpus.json`; **never infer "invalid" from the `invalids/` directory name**.
-Making egret refuse those 18 would be a defect manufactured out of a naming
-convention.
+**These numbers were wrong when this step was written and are corrected here.**
+Task 1 measured **51** rejections, and **28 of them are Kestra refusing a flow**
+— 27 `invalid-flow` plus one `refused-by-both`, `valids/invalid-draft-flow`.
+The other **23** are the pinned image lacking a test-only plugin class (22) or
+the sibling checkout being ahead of `rc13` (1) — the artifact/checkout drift the
+Global Constraints warn about, showing up as data. This step said 45 and 18;
+`oracle-exec/README.md`'s own `rejected is four different things wearing one
+status code` table has said 51 and 23 since Task 1, and Task 8 re-derived both
+from `corpus.json` rather than copying either. Read `rejected_class`;
+**never infer "invalid" from the `invalids/` directory name**. Making egret
+refuse those 23 would be a defect manufactured out of a naming convention.
 
 Task 1 also found that `invalids/loop-switch-failed` is **not an invalid flow at
 all** — Kestra's own `RunContextTest` executes it and asserts `FAILED`. It is 27

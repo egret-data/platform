@@ -1153,7 +1153,7 @@ fn walk_task(
             // `io.kestra.plugin.core.flow.Sleep` and
             // `io.kestra.plugin.core.flow.PurgeFlows` --- the two classes in
             // that Java package that ARE `RunnableTask`s (measured at the
-            // checkout: they are the only two of the sixteen files there
+            // checkout: they are the only two classes in that package
             // that implement it) --- and both are legitimate children of a
             // `WorkingDirectory`. Over-refusal is the mirror of the class
             // this rule exists to close, so the residual is stated instead:

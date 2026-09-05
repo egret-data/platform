@@ -11,6 +11,21 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+Task 8 (**refusal**) changed four, and a reader should take these over
+everything below. **`build_plan` now runs `spec::validate`**, so egret has one
+answer to "is this flow acceptable" instead of two — the largest single cause of
+the over-acceptance was a missing *call*, not a missing rule. The `refused`
+count in *Refusal: 22 over-accepted…* is superseded: **23 of the 28 are refused
+and 5 are named, with an owner each**, and the five are asserted to be
+over-accepted so that one becoming a refusal fails a test rather than passing
+quietly. The rejection classification is re-derived here at **51 rejections, 28
+of them evidence** — the plan's own Task 8 step says 45 and 18 and is stale.
+And running `validate` brings **two pre-existing over-refusals** with it, on
+flows this Kestra published with 200 and which have **no golden entry at all**,
+so the ratchet cannot see either; they are a committed test instead. See *What
+Task 8 had to change, and what it banked*, and *The coverage statement*, which
+now closes this file.
+
 Task 7 (`retry`, `errors:`) changed six, and a reader should take these over
 everything below and over Task 6's note: `PlanTask::retry` and `PlanTask::errors`
 are **no longer dead fields** — Task 3's stated reason for the first was wrong
@@ -1550,6 +1565,12 @@ banked runs sit in the 135-run over-fed bucket.
 
 ### Refusal: 22 over-accepted, and 6 banked on the weakest evidence there is
 
+> **Superseded by Task 8, and kept because it is the record of the debt.** The
+> 22 became 19 (Task 4 banked two `Dag` refusals, Task 5 one `If`) and then
+> **5**. The 6 became **23**. The "two are right by accident" paragraph below is
+> still true and has gained a measurement: Task 8 rehearsed W1's fix on all
+> three flows and it costs no over-acceptance. See *What Task 8 had to change*.
+
 **Over-acceptance first, because it is the class the programme forbids
 shipping.** Of the golden's 28 `refused` entries, `build_plan` **over-accepts
 22** — it plans a flow this Kestra refused. That is unchanged from BASE, honestly
@@ -1588,6 +1609,16 @@ fix; when it lands the committed test flips, and whoever fixes it must revisit
 `baseline.txt` and Task 8's per-group message assertions in the same commit.
 `valids/switch-impossible` stays baselined meanwhile as `egret REFUSED a flow
 Kestra ran`, which is where a measured over-refusal belongs.
+
+**Task 8 measured what the fix costs, and it is nothing.** Since `build_plan`
+runs `validate`, deleting the offending token from a flow is a complete
+rehearsal of W1's fix on that flow. `valids/switch-impossible` then **plans**;
+`invalids/switch-invalid` is refused by `switch_no_branches` and
+`invalids/invalid-parallel` by `parallel_tasks_required` — each the reason
+Kestra itself gives. So the two accidental refusals survive the fix on their
+merits. The rehearsal is in
+`a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`, which used to
+assert `is_ok()` for those two and now asserts the code.
 
 ## The ratchet, and the four arms
 
@@ -1910,6 +1941,18 @@ refused today if `build_plan` ran `validate`** — `invalids/duplicate` and
 Task 8's decision, not this task's: it changes what the executor refuses for
 every flow, and Task 3's M8 is the recorded argument for not widening refusal
 casually.
+
+**Task 8 re-measured it and took it, and the number moved for a reason rather
+than by drift: it is 7 of 19, not 8 of 20.** `invalids/if-without-condition` was
+the eighth and Task 5 banked it in the builder, so the population shrank by one
+at both ends. The other 12 that `validate` would not refuse are the ones Task 8
+had to write new rules for — or name with an owner, which is what happened to
+five of them. What made the decision safe rather than a judgement call is a
+measurement this section did not have: over the golden's **266 `runs` entries**,
+`validate` reports **zero** errors, so the gate refuses nothing this Kestra
+accepted. M8's danger was a rule that refused for a reason unrelated to the
+flow; this one refuses exactly what Kestra's own validator refuses, and the
+ratchet's regression arm is what says so.
 
 ## What Task 5 had to change, and what it banked
 
@@ -2870,6 +2913,17 @@ owner is how a suppression list starts.
 | a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
 | the replay a `CREATE_NEW_EXECUTION` retry starts | 4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned` | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6/W3b, with `Subflow` and the `Loop` iteration** — it is a third kind of sub-execution and `ExecutionState` has no field for any of them |
+| `afterExecution:` | **10** baselined entries | `Flow.afterExecution` | **unclaimed — new at Task 8.** W1's `Flow::after_execution` parses and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors` and nothing else, so those tasks are in no plan. It is `finally:`'s sibling and unclaimed for the same reason |
+| `sla:` | **5** baselined entries | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8** (programme spec). W1 ports it as a data shape and says so; nothing evaluates one, and the row is here because a reader of the residual baseline had no way to learn that from this file |
+
+**Two rows are Task 8's, and checking the REMAINDER rather than trusting the
+table is what found them** — the same method Task 3 used for `Subflow` and Task
+6 for `LoopUntil`. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+derives the whole table from the baselined flows' own YAML and then asserts, by
+name, the **13** entries that declare none of these constructs. `afterExecution:`
+and `sla:` were both in that remainder, and neither appeared anywhere in this
+file or in the plan. The test is what stops the next one arriving silently: a
+new baselined entry belonging to no owner fails it.
 
 `Loop` left this table in Task 6's commit and one row was added in the same one.
 **That row is not runs that arrived at Task 6, and Task 6's first draft of this
@@ -2937,6 +2991,310 @@ back to it.
 does not merely fail to bank: it makes 21 entries match *by accident*, on flows
 whose flowables egret does not implement at all. `SUBMITTED` is what stops that.
 
+## What Task 8 had to change, and what it banked
+
+Task 8 owns **refusal** — egret answering where Kestra refuses, which is the one
+divergence class the programme forbids shipping. It banks **14** of the 163
+entries Task 7 left, taking `baseline.txt` to **149**.
+
+| | golden entries | mismatching | baselined | broken | ordered pairs removed |
+|---|---|---|---|---|---|
+| **control** — clean tree at BASE `936d54b0`, `git status --porcelain` empty | 294 | **163** | 163 | 0 | 30 |
+| **after** | 294 | **149** | 149 | 0 | 30 |
+
+**14 banked, 0 regressions, 0 broken.** Every one was in `baseline.txt` at the
+control run, which for a ratchet is what "shown failing before the code that
+earns it" means.
+
+| banked | what earns it |
+|---|---|
+| `invalids/duplicate` | `duplicate_task_id` — a rule `validate` already had |
+| `invalids/duplicate-parallel` | the same, nested six levels deep |
+| `invalids/duplicate-inputs` | `duplicate_input_id` — also already there |
+| `invalids/empty` | `empty_tasks` — also already there |
+| `valids/invalid-draft-flow` | the same rule, on the one `refused-by-both` entry |
+| `invalids/recursive-flow` | `self_subflow` — also already there |
+| `invalids/workingdirectory-no-tasks` | `working_directory_tasks_required` — also already there |
+| `invalids/duplicate-key` | **new**: the same key twice in one YAML mapping |
+| `invalids/workingdirectory-invalid` | **new**: a `Pause` as a child of a `WorkingDirectory` |
+| `invalids/scheduled-missing-inputs-defaults` | **new**: a `Schedule` and an input with no default |
+| `invalids/scheduled-missing-inputs-defaults-2` | the same, with no defaulted input to distract |
+| `invalids/inputs-validation` | **new**: `itemType` on an `ARRAY`/`MULTISELECT` |
+| `invalids/inputs-key-with-subtraction-symbol-validation` | **new**: `{{inputs.server-fqn}}` |
+| `invalids/outputs-key-with-subtraction-symbol-validation` | the same, on `outputs.` |
+
+**Seven of the fourteen needed no new rule at all** — `validate` had been
+refusing them at `POST /flows` since W1 and `build_plan` never asked.
+
+### The rejections, classified by CAUSE
+
+`corpus.json` records 51 rejections. **28 of them are evidence that egret must
+refuse a flow**, and they are the golden's 28 `refused` entries:
+
+| class | count | Task 8 evidence? |
+|---|---|---|
+| `invalid-flow` | 27 | **yes** |
+| `refused-by-both` | 1 | **yes** — `valids/invalid-draft-flow` |
+| `task-type-not-in-image` | 22 | no — the pinned image lacks a test-only plugin class |
+| `checkout-drift` | 1 | no — the checkout has a feature the artifact does not |
+| `unclassified-rejection` | 0 | — |
+
+The plan's own Task 8 step says "45 rejections … the other 18". **That is stale
+and this file's `rejected is four different things wearing one status code`
+table is right**: the counts are 51 and 23, re-derived here from `corpus.json`
+rather than copied. The `invalids/` directory is 28 flows and only **27** of
+them are refusals — `invalids/loop-switch-failed` publishes, runs, and reaches
+`FAILED`; Kestra's own `RunContextTest.failedTasksVariable` executes it. It
+carries `accepted_though_invalid` and is a `runs` entry.
+
+### The seam: `build_plan` called `parse` and not `validate`
+
+**The largest single cause of the over-acceptance was not a missing rule. It was
+a missing call.** W1's `spec::validate` already carried `duplicate_task_id`,
+`duplicate_input_id`, `empty_tasks`, `self_subflow` and
+`working_directory_tasks_required`; `build_plan` never ran it, so egret had two
+different answers to "is this flow acceptable" — `POST /flows` refused seven
+flows that `advance()` would happily plan.
+
+Task 4 measured this at **8 of the then-20** remaining refusals and named them
+id for id. **Re-measured at Task 7's HEAD it is 7 of 19**, and the difference is
+not drift: `invalids/if-without-condition` was the eighth, and Task 5 banked it
+in the builder.
+
+Running `validate` there costs nothing on the accepting side, measured rather
+than argued: over the golden's **266 `runs` entries** — every flow this pinned
+Kestra published *and ran* — `validate` reports **zero** errors.
+
+### The gate order is measured, and the message assertion is what measured it
+
+The first version ran `validate` **before** the builder's own structural checks.
+The ratchet was happy — same 14 banks, no regressions — and
+`egret_refuses_every_flow_kestra_refuses` failed on three entries at once:
+
+```text
+invalids/if-without-condition: refused for a DIFFERENT reason than the group it is in.
+invalids/dag-cyclicdependency: refused for a DIFFERENT reason than the group it is in.
+invalids/dag-notexist-task:    refused for a DIFFERENT reason than the group it is in.
+```
+
+`validate` carries `if_condition_required`, `dag_cycle` and
+`dag_dependency_not_found` too, so running it first made Task 4's and Task 5's
+own arms unreachable from `build_plan` — three refusals silently becoming three
+other refusals, with every one of them still `Err`. **A test that asserted only
+"it errored" would have passed.** That is the whole argument for the per-cause
+message, and it paid for itself on the first run. The order is now parser →
+builder → `validate`.
+
+### The 23 refusals, by cause
+
+`egret_refuses_every_flow_kestra_refuses` carries them as a table; each group is
+an implementation unit, and the assertion is on a fragment of egret's own
+message so a refusal that becomes a different refusal is visible.
+
+| cause | entries | where the rule lives | new at Task 8 |
+|---|---|---|---|
+| the YAML is not a flow | 4 | `spec::parse` | |
+| the same key twice in one mapping | 1 | `spec::parse` | **yes** |
+| an explicit `null` where W1 has a bare `Vec<Task>` — right by accident | 2 | `spec::parse` | |
+| a flowable with nothing to decide on | 1 | `plan.rs` | |
+| a `Dag` whose `dependsOn` graph cannot be ordered | 1 | `plan.rs` | |
+| a `Dag` node depending on a non-node | 1 | `plan.rs` | |
+| an id declared twice | 2 | `validate` (`duplicate_task_id`) | call only |
+| an input id declared twice | 1 | `validate` (`duplicate_input_id`) | call only |
+| a flow with no tasks | 2 | `validate` (`empty_tasks`) | call only |
+| a flow that calls itself | 1 | `validate` (`self_subflow`) | call only |
+| a `WorkingDirectory` with no children | 1 | `validate` | call only |
+| a `WorkingDirectory` child that is not runnable | 1 | `validate` | **yes** |
+| a `Schedule` that cannot supply a required input | 2 | `validate` | **yes** |
+| an `itemType` an ARRAY/MULTISELECT cannot hold | 1 | `validate` | **yes** |
+| a dotted reference to a dashed input id | 1 | `validate` | **yes** |
+| the same, on an `outputs.` reference | 1 | `validate` | **yes** |
+| **total** | **23** | | |
+
+### The 5 that are still over-accepted, and why each is
+
+`STILL_OVER_ACCEPTED` asserts they are **accepted**, not merely absent from the
+table above — so the day one starts being refused the test fails and forces the
+record to be corrected, which is the `banked` arm's discipline in the other
+direction.
+
+**Three of them are one cause: egret has no plugin schema.**
+
+- `invalids/invalid-task` — `Invalid type: io.kestra.plugin.core.debug.MissingTwo`.
+  egret's `spec::registry` is not Kestra's classpath. `unknown_task_type` is a
+  **warning**, and promoting it to an error would refuse every plugin egret has
+  not registered. That is a product decision, not a Task 8 rule.
+- `invalids/invalid-property` — `Unrecognized field "invalid"`. W1 models a
+  task's plugin properties as an opaque `Leaf { spec }` on purpose.
+- `invalids/dag-invalid-subtask` — `tasks[task1].tasks[task1].task.message: must
+  not be null`, a `@NotNull` on `Log.message`. Bean validation of a plugin's own
+  property; same gap.
+
+The other two are each their own:
+
+- `invalids/inputs-bad-validator-syntax` — `validator: \`, refused as
+  `invalid pattern [\]`. Kestra compiles it with `java.util.regex.Pattern`.
+  Compiling it with the `regex` crate instead would refuse valid Java patterns
+  (lookaround, backreferences), which trades an over-acceptance for an
+  **over-refusal**. It needs a Java-Pattern-compatible syntax check. Owner: W1.
+- `invalids/inputs-with-multiple-constraint-violations` — publish returned
+  **200**. Kestra refuses it when the execution's input *values* are read.
+  `build_plan(&str)` takes no input values, so **no change to it can reach that
+  seam**. Owner: W3b/W1 input coercion.
+
+### The price of running `validate`: two over-refusals the ratchet cannot see
+
+Measured over all **345** corpus flows, `validate` reports errors on **18**.
+Sixteen are `refused` golden entries. The other two are flows this Kestra
+published with **200**:
+
+| flow | codes | why it is an over-refusal |
+|---|---|---|
+| `valids/task-flow-dynamic` | `subflow_namespace_invalid`, `subflow_flow_id_invalid` | it writes `namespace: "{{inputs.namespace}}"`; the grammar is checked against the **unrendered** source, so every dynamic subflow reference is refused |
+| `valids/trigger-flow-listener-namespace-condition` | `dependency_flow_id_required`, `dependency_namespace_required` | measured at the checkout `96893b589`, `Flow.java:364-380`'s `Dependency` puts **no `@NotNull`** on `namespace`, `flowId`, `states` or `labels`; a namespace-only dependency is a documented Kestra pattern |
+
+**How they were found is worth as much as the finding.** The ratchet was green
+through the change that introduced them: neither flow has a golden entry, so
+neither is comparable. What surfaced them is a *count over the whole corpus* —
+`every_corpus_retry_is_written_in_literals` runs over every corpus flow
+`build_plan` can plan, and its total dropped by one. Chasing which flow had left
+the population meant sweeping `validate` over all 345, and the sweep found three
+things rather than one: the expected departure
+(`invalids/duplicate-parallel`, now correctly refused) and these two.
+
+**Both are W1's rules and both predate this task** — `POST /flows` has returned
+400 for these two flows since W1 shipped. `build_plan` running `validate` does
+not create the defect; it stops the executor from disagreeing with the publish
+path about it. Both flows are `not-standalone`, so **neither has a golden entry
+and the ratchet cannot see either one** — which is exactly why
+`validate_brings_two_over_refusals_with_it_and_neither_is_in_the_golden` is a
+committed test rather than a sentence here.
+
+**Neither is a rule to loosen casually, and that is the finding.** Both exist
+because `publish::subflow_ref_name` encodes the pair as `"{namespace}/{flowId}"`
+and a `/` in either half decodes back into a different pair. Skipping the check
+when the value holds `{{` would not fix the flow; it would move the collision to
+render time, where nothing looks for it. The fix is to the **encoding**, and it
+is W1's.
+
+### W1's null-list fix costs no over-acceptance, and that is now measured
+
+`build_plan` refuses `valids/switch-impossible`, a flow this Kestra published and
+**ran**, because W1's bare `Vec<Task>` rejects an explicit `null` Jackson
+accepts. That over-refusal is unchanged and still not this task's to fix.
+
+What *is* new: since `build_plan` now runs `validate`, deleting the offending
+token from a flow is a complete rehearsal of W1's fix on that flow, and
+`a_null_task_list_is_an_over_refusal_that_reaches_the_http_api` performs it:
+
+| flow | with the `null` | with the `null` deleted |
+|---|---|---|
+| `valids/switch-impossible` | refused (over-refusal) | **plans** |
+| `invalids/switch-invalid` | refused for the `null` | refused for `switch_no_branches` |
+| `invalids/invalid-parallel` | refused for the `null` | refused for `invalid_namespace` / `parallel_tasks_required` |
+
+So the two refusals that are right *by accident* survive the fix on their merits,
+and the fix costs no over-acceptance. Before Task 8 those last two rehearsals
+both came out `Ok`, which is why that test used to assert `is_ok()` for them.
+
+### A wrong reason found beside a dropped field
+
+W1's `models::trigger::Schedule` dropped `inputs` and recorded the reason as
+"the deprecated `inputs` map". Measured at the pinned checkout `96893b589`,
+`Schedule.java:223` is a plain `private Map<String, Object> inputs;` with **no
+`@Deprecated` anywhere in the file**, and `FlowValidator.java:284-312` reads it
+to decide whether a scheduled flow can start. Had the rule been written against
+the dropped field, it would have refused every scheduled flow that supplies its
+own inputs — an over-refusal manufactured out of an incorrect note. The field is
+restored with the correct reason; only its **key set** is read here, and
+coercing the values against each input's declared type is W6's, at the moment
+the schedule fires.
+
+### Two upstream defects copied deliberately
+
+The Global Constraints say upstream defects are copied, and the dashed-reference
+rule is where that bites twice:
+
+- Kestra builds the inputs pattern as `"\\{\\{\\s*inputs." + id + "\\s*\\}\\}"`
+  with the `.` **not escaped**, so `inputs_server-fqn` matches too. Copied.
+- Both patterns require the reference to be the **whole** expression, so
+  `{{ inputs.server-fqn | upper }}` slips through upstream. Copied, and
+  `bracket_notation_and_an_undashed_id_are_both_silent` asserts it, because
+  inventing the wider rule would refuse a flow this Kestra accepts.
+
+One difference runs the other way and is checked rather than argued: Kestra
+reflects over `object.getClass().getDeclaredFields()` — the concrete class's own
+fields, so an inherited one is never scanned — where this scans the task's whole
+serialised form, a superset. A superset can only refuse **more**, so it is
+measured: over the 294 golden entries the two rules fire on exactly the two
+flows Kestra refuses for them, and the ratchet's regression arm covers the other
+266.
+
+### One fail-open rule, on purpose
+
+`is_runnable_child` answers Kestra's `task instanceof RunnableTask<?>` from a
+model with no classpath: a typed `TaskKind` variant is not runnable, and a
+`Leaf` whose canonical type has a `KESTRA_FLOW_CONTROL` row is not either (which
+is the arm `invalids/workingdirectory-invalid` needs — its offending child is a
+`Pause`, unported and therefore a `Leaf`).
+
+`KESTRA_FLOW_CONTROL`'s **other** use is fail-CLOSED: the `not_yet_enforced`
+warning fires for anything spelled like `io.kestra.plugin.core.flow.*`. This one
+is not, and the asymmetry is the point. A spurious warning costs a reader one
+line; a spurious **refusal** rejects a flow. The same spelling test would refuse
+`io.kestra.plugin.core.flow.Sleep` and `…PurgeFlows` — measured at the checkout,
+the only two classes in that package that implement `RunnableTask`
+— and both are legitimate children of a `WorkingDirectory`. The residual is
+stated instead: a control-flow class Kestra adds tomorrow, inside a
+`WorkingDirectory`, is accepted here until it gains a row.
+
+### Task 8's mutations
+
+Twelve. Every row is a literal `-` → `+`, applied to a file anchored to
+`git show HEAD:<path>` (the driver refuses to snapshot a file that already
+differs from HEAD), **built first** — `cargo build -p egret-workflow --tests`,
+0 errors asserted — and only then run against the **whole crate**,
+`cargo test -p egret-workflow --no-fail-fast`, never a name-filtered subset.
+Restore is `shutil.copyfile`, verified against the anchor after every mutation
+and for all three files at the end. Victim counts are from **one replay of the
+final tree** at `e0a22aa7`.
+
+**The first replay was discarded and re-run whole**, because its driver was
+invoked through `| tail -80` and the first seven rows scrolled out of reach —
+the same family of mistake this file already records for a `head -20`, made
+again with the other end of the pipe. A table that cannot be read is not a
+record either.
+
+| # | file | edit (`-` → `+`) | victims |
+|---|---|---|---|
+| M99 | `plan.rs` | `- if let Some(first) = report.errors.first() {` → `+ … .first().filter(\|_\| false) {` | **6** (ratchet, **13 regressions**) — the whole `validate` gate. 13 rather than 14 because `invalids/duplicate-key` is refused at *parse* |
+| M100 | `parse.rs` | `- serde_norway::from_str::<DuplicateKeyProbe>(source).map_err(located)?;` → `+ let _ = DuplicateKeyProbe;` | 4 (ratchet, 1 regression — the fourteenth) |
+| M101 | `validate.rs` | `- if !is_runnable_child(child) {` → `+ if false && !is_runnable_child(child) {` | 4 (ratchet, 1 regression) |
+| M102 | `validate.rs` | `is_runnable_child`'s whole `Leaf` arm → `true` | 3 (ratchet, 1 regression). Kills only the **unported-flowable** test, which is the arm `invalids/workingdirectory-invalid` needs |
+| M103 | `validate.rs` | the schedule rule's guard → `if true \|\| …` | 3 (ratchet, 2 regressions) |
+| M104 | `validate.rs` | `- .filter(\|id\| !supplied.is_some_and(…))` → `+ … \|\| true)` | **9** (ratchet, 1 regression) — ignoring the schedule's own `inputs:` over-refuses a flow this Kestra ran |
+| M105 | `validate.rs` | the `itemType` guard → `if false && matches!(…)` | 3 (ratchet, 1 regression) |
+| M106 | `validate.rs` | `- if !matches!(input.r#type, Array \| Multiselect) { continue; }` → `+ if false { continue; }` | **1** — and that one victim is the point: the gate is what stops this crate's flat `Input` inventing a refusal Java could never make, and nothing else in the crate reaches it |
+| M107 | `validate.rs` | the dashed-reference guard → `if true \|\| …` | 4 (ratchet, 2 regressions) |
+| M108 | `validate.rs` | `- .filter(\|i\| i.id.contains('-'))` deleted | **19** (ratchet, **6 regressions**, 1 bogus bank) — a pattern for *every* input refuses half the `If`/`Switch` corpus |
+| M109 | `validate.rs` | the two dashed codes swapped in the loop's table | 2 — `egret_refuses_every_flow_kestra_refuses` dies on the CODE, which is what a per-cause message buys over `is_err` |
+| M110 | `plan.rs` | the `validate` block moved **before** the two `flatten_list` calls | **7** (0 regressions) — the six builder refusal tests plus the gate test. See below |
+
+**M110 is the row that justifies the gate order, and it is a warning about
+running `validate` first.** Its seven victims are
+`a_dag_dependency_on_a_task_that_is_not_a_node_is_refused_by_name`,
+`a_cyclic_dag_is_refused_by_name`, `a_dag_node_with_no_task_is_refused`,
+`a_loop_with_no_values_is_refused_by_name`,
+`a_switch_with_no_value_is_refused_by_name`,
+`an_if_with_no_condition_is_refused_by_name` and
+`egret_refuses_every_flow_kestra_refuses` — **and zero ratchet regressions**.
+So `validate`-first banks the same 14, refuses the same flows, and silently
+unhooks six of Task 4's and Task 5's own guards. The ratchet cannot see it; six
+unit tests and one message assertion can.
+
+**No mutation killed nothing**, which is worth stating because six of Task 7's
+did and that is what its replay was for.
+
 ## What this oracle does not prove
 
 The corpus is Kestra's own test suite, which is a sample of an infinite space.
@@ -2947,9 +3305,23 @@ wrote. Beyond that, the specific holes, each with its count:
   corpus entry and no golden entry. Kestra itself cannot run them without what
   the Java test brings — a resume, a trigger, an uploadable file, a mocked
   worker, or an input value that is computed rather than literal.
+
+  **Task 8 found two defects in there, and the hole is what hid them.** Running
+  `validate` behind `build_plan` refuses `valids/task-flow-dynamic` and
+  `valids/trigger-flow-listener-namespace-condition`, both of which this Kestra
+  published with 200. Because neither has a golden entry, **the ratchet reported
+  nothing** — it was green through the change that introduced them. What led to
+  them was a corpus-wide sweep of `validate` over all 345 flows, and the reason
+  that sweep was run at all is unrelated: `every_corpus_retry_is_written_in_literals`
+  counts over every corpus flow `build_plan` can plan, its total moved by one,
+  and finding out which flow had left the population meant looking at all of
+  them. "Never compared at all" is not a theoretical limit, and the instrument
+  that caught it was a *count over the whole corpus*, not the golden.
 - **23 rejections are not evidence of anything about the flow**, and are
   excluded for that reason. Nothing in this package tests what egret does with
-  them.
+  them — Task 8 included, which is the point: making egret refuse them would be
+  a defect manufactured out of a naming convention, and `corpus.json`'s
+  `rejected_class` rather than the `invalids/` directory is what keeps them out.
 - **2 flows did not reproduce across five rounds** and are excluded:
   `retry-failed-task-duration` (three attempts in some rounds, four in others —
   a *duration*-bounded retry counts whatever fits) and `waitfor-max-duration`.
@@ -3316,3 +3688,118 @@ Kestra accepts carries `accepted_though_invalid`.
 `probe.json` maps a corpus id to the discrimination probe's verdict for it:
 whether it was probed, whether the alternative moved the observation, which
 alternative was used, and where that alternative came from.
+
+## The coverage statement
+
+This is the last section on purpose. Everything above is what this oracle
+proves; this is the boundary of it, with the counts published rather than
+described.
+
+### The denominators
+
+| | count |
+|---|---|
+| flows in Kestra's `valids/` + `invalids/` at checkout `96893b589` | **345** |
+| … `runs` — published and reached a terminal state standalone | 268 |
+| … `rejected` — Kestra refused it | 51 |
+| … `not-standalone` — Kestra itself could not run it here | 26 |
+| golden entries, i.e. flows this oracle compares at all | **294** |
+| … `runs` verdict (268 minus the 2 that did not reproduce) | 266 |
+| … `refused` verdict (the 28 rejections that are evidence) | 28 |
+| baselined — egret does not reproduce it yet | **149** |
+| matching | **145** |
+
+`345 = 268 + 51 + 26`. `294 = (268 − 2) + 28`. `149 + 145 = 294`. The three
+identities are asserted by `every_corpus_flow_is_compared_or_excluded_by_name`
+and the ratchet, not checked by hand here.
+
+Of the 28 `refused` entries, egret refuses **23** across 16 causes and
+over-accepts **5**, each named with an owner in
+`egret_refuses_every_flow_kestra_refuses`'s `STILL_OVER_ACCEPTED`.
+
+### What this oracle does not prove
+
+**The corpus is Kestra's own test suite, which is a sample of an infinite
+space.** 345 flows is what a project chose to write tests for. Nothing here
+says anything about the flow a user writes tomorrow, and the ratchet is a
+regression guard, not a bound on behaviour: it fails when a *comparable* entry
+moves, and a flow nobody wrote is comparable to nothing.
+
+**51 flows are never compared at all**, and the two reasons are different:
+
+- **26 `not-standalone`.** They have a corpus entry and no golden entry. Kestra
+  itself cannot run them without what the Java test brings — a resume, a
+  trigger, an uploadable file, a mocked worker, or an input value that is
+  computed rather than literal. Whatever egret does with them is unmeasured,
+  and **two of them are the over-refusals Task 8 found**: precisely because
+  they have no golden entry, the ratchet could not have told anyone.
+- **23 rejections that are not evidence about the flow** — 22
+  `task-type-not-in-image` and 1 `checkout-drift`. The pinned image or the
+  sibling checkout differing from each other, not Kestra judging a flow.
+  Demanding a refusal for those would manufacture defects out of a packaging
+  accident, and the class is *equally* not evidence that the flow is valid: rc13
+  short-circuits on an unknown type, so the body can never carry a second
+  violation.
+
+**2 flows did not reproduce across five harvests** and are excluded by name:
+`valids/retry-failed-task-duration` and `valids/waitfor-max-duration`. Both are
+bounded by wall-clock duration, so this is the flow being nondeterministic, not
+the harness.
+
+**13 ordered pairs were dropped** and the kept 1104 are the whole of what this
+oracle asserts about serialisation. **No sub-execution's trace is compared at
+all** — 41 golden entries carry one, 38 of them differ on nothing else, and
+`Command::SpawnExecution` is emitted into a void until W3b/W6. **Nothing keyed
+on elapsed time is reachable**, because `now` moves only to a deadline something
+is already waiting for.
+
+Each of those has its own section above with the derivation; they are listed
+here so the boundary can be read in one place.
+
+### The residual baseline, by owner
+
+149 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+derives this from the baselined flows' own YAML on every run; **the rows overlap
+and this is not a partition**, but the remainder is exhaustive and named.
+
+| baselined entries declaring it | construct | owner |
+|---|---|---|
+| 37 | `Loop` — a sub-execution egret asks for and cannot run | W3b/W6 |
+| 22 | `Subflow` | **unclaimed** |
+| 16 | `finally:` | **unclaimed** |
+| 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
+| 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **unclaimed** |
+| 12 | `Pause` → `PAUSED` | W8 |
+| 10 | `afterExecution:` | **unclaimed — named at Task 8** |
+| 9 | `LoopUntil` / `WaitFor` | W8 |
+| 7 | flow `concurrency:` → `CANCELLED` | W8 |
+| 6 | `disabled: true` → `SKIPPED` | **unclaimed — W3a's final review must assign it or defer it with a reason** |
+| 5 | `sla:` | W8 — named at Task 8 |
+| 4 | `CREATE_NEW_EXECUTION`'s replay | W6/W3b |
+| 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
+| **13** | **none of the above** | listed individually, below |
+
+The thirteen that declare none of them, with what holds each:
+
+| entry | what holds it |
+|---|---|
+| `invalids/dag-invalid-subtask` | over-accepted: a `@NotNull` on a plugin property |
+| `invalids/inputs-bad-validator-syntax` | over-accepted: a `java.util.regex` dialect |
+| `invalids/inputs-with-multiple-constraint-violations` | over-accepted: refused at a different seam |
+| `invalids/invalid-property` | over-accepted: an unrecognised plugin property |
+| `invalids/invalid-task` | over-accepted: a type not on Kestra's classpath |
+| `valids/dag` | one `order` pair a clockless machine cannot reach |
+| `valids/if` | three `order` pairs, same cause |
+| `valids/switch-impossible` | an **over-refusal**: W1's bare `Vec<Task>` and an explicit `null` |
+| `valids/retry-failed-flow-duration` | `maxDuration` in an environment with no elapsed time |
+| `valids/retry-success` | `WARNING`, which `RunState` cannot hold |
+| `valids/flow-with-outputs-failed` | flow-level `outputs:`, which nothing in W3a evaluates |
+| `valids/full` | flow-level `outputs:` and `variables:`, same |
+| `valids/subflow-secret-output-child` | a `SECRET` output; the harness has no encryption key |
+
+**Six of the 149 are honest over-acceptances or an over-refusal, and they are
+the whole of egret's measured disagreement about whether a flow is acceptable
+at all.** Everything else in the baseline is a flow egret plans and does not yet
+reproduce, which is a different and smaller claim than "egret is wrong about it".
+
+A limit stated plainly is worth more than a number rounded up.

@@ -3878,3 +3878,197 @@ fn egret_refuses_every_flow_kestra_refuses() {
         failures.join("\n")
     );
 }
+
+/// The residual baseline, attributed to a construct — derived, not written
+/// down beside a derivation.
+///
+/// This is the coverage statement's numerator table. 149 entries is a number;
+/// "22 of them use a `Subflow`, which no W3a task touches" is an account. The
+/// attribution is textual and deliberately so: it asks what each baselined
+/// flow's own YAML *declares*, not what egret's model made of it, because a
+/// construct egret cannot parse would score zero by construction — that is the
+/// seventh guard-that-could-not-fail this package shipped, and it was hiding a
+/// `Loop`'s `errors:`.
+///
+/// **The rows overlap and this is not a partition.** A flow may declare a
+/// `Subflow` inside a `finally:` and is counted by both. What IS asserted to
+/// be exhaustive is the remainder: the entries declaring none of these
+/// constructs are listed by name, so a new baselined entry that belongs to no
+/// owner cannot arrive silently.
+///
+/// Two of the rows are constructs the *States and constructs no W3a task
+/// claims* table did not carry, and checking the remainder rather than
+/// trusting the table is what found them — the same way Task 3 found `Subflow`
+/// and Task 6 found `LoopUntil`:
+///
+/// - **`afterExecution:` (10 entries).** W1's `Flow::after_execution` parses
+///   and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors`
+///   and nothing else, so those tasks are in no plan. It is `finally:`'s
+///   sibling and is unclaimed for the same reason.
+/// - **`sla:` (5 entries).** W1 ports it as a data shape and says so; nothing
+///   evaluates one. The programme spec gives it to W8.
+#[test]
+fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
+    // (label, the strings a flow's own YAML writes for it)
+    const CONSTRUCTS: &[(&str, usize, &[&str])] = &[
+        (
+            "Loop — a sub-execution egret asks for and cannot run",
+            37,
+            &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
+        ),
+        (
+            "Subflow",
+            22,
+            &["io.kestra.plugin.core.flow.Subflow", "core.subflow"],
+        ),
+        ("finally:", 16, &["finally:"]),
+        (
+            "ExecutionUpdatableTask",
+            16,
+            &[
+                "io.kestra.plugin.core.execution.Labels",
+                "io.kestra.plugin.core.execution.SetVariables",
+                "io.kestra.plugin.core.execution.UnsetVariables",
+                "io.kestra.plugin.core.execution.Exit",
+            ],
+        ),
+        (
+            "AllowFailure / allowFailure:",
+            12,
+            &[
+                "io.kestra.plugin.core.flow.AllowFailure",
+                "core.allowfailure",
+                "allowFailure: true",
+            ],
+        ),
+        (
+            "Pause",
+            12,
+            &["io.kestra.plugin.core.flow.Pause", "core.pause"],
+        ),
+        ("afterExecution:", 10, &["afterExecution:"]),
+        (
+            "LoopUntil / WaitFor",
+            9,
+            &[
+                "io.kestra.plugin.core.flow.LoopUntil",
+                "io.kestra.plugin.core.flow.WaitFor",
+                "core.loopuntil",
+                "core.waitfor",
+            ],
+        ),
+        ("flow concurrency:", 7, &["\nconcurrency:"]),
+        ("disabled: true", 6, &["disabled: true"]),
+        ("sla:", 5, &["\nsla:"]),
+        ("CREATE_NEW_EXECUTION retry", 4, &["CREATE_NEW_EXECUTION"]),
+        (
+            "WorkingDirectory",
+            4,
+            &[
+                "io.kestra.plugin.core.flow.WorkingDirectory",
+                "core.workingdirectory",
+            ],
+        ),
+    ];
+
+    // Every baselined entry that declares none of them, with what holds it.
+    // Eleven of the thirteen are already accounted for elsewhere in this file.
+    // Sorted, because the derivation walks `baseline()` -- a `BTreeSet`.
+    const UNATTRIBUTED: &[(&str, &str)] = &[
+        (
+            "invalids/dag-invalid-subtask",
+            "over-accepted: a @NotNull on a plugin property",
+        ),
+        (
+            "invalids/inputs-bad-validator-syntax",
+            "over-accepted: a java.util.regex dialect",
+        ),
+        (
+            "invalids/inputs-with-multiple-constraint-violations",
+            "over-accepted: refused at a different seam",
+        ),
+        (
+            "invalids/invalid-property",
+            "over-accepted: an unrecognised plugin property",
+        ),
+        (
+            "invalids/invalid-task",
+            "over-accepted: a type not on Kestra's classpath",
+        ),
+        (
+            "valids/dag",
+            "one `order` pair a clockless machine cannot reach",
+        ),
+        (
+            "valids/flow-with-outputs-failed",
+            "flow-level `outputs:`, which nothing in W3a evaluates",
+        ),
+        (
+            "valids/full",
+            "flow-level `outputs:` and `variables:`, same",
+        ),
+        ("valids/if", "three `order` pairs, same cause"),
+        (
+            "valids/retry-failed-flow-duration",
+            "maxDuration in an environment with no elapsed time",
+        ),
+        (
+            "valids/retry-success",
+            "WARNING, which RunState cannot hold",
+        ),
+        (
+            "valids/subflow-secret-output-child",
+            "a SECRET output; the harness has no encryption key",
+        ),
+        (
+            "valids/switch-impossible",
+            "an OVER-REFUSAL: W1's bare Vec<Task> and an explicit null",
+        ),
+    ];
+
+    let baseline = baseline();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut unattributed: Vec<String> = Vec::new();
+
+    for id in &baseline {
+        let source = corpus_source(id);
+        let mut any = false;
+        for (label, _, needles) in CONSTRUCTS {
+            if needles.iter().any(|n| source.contains(n)) {
+                *counts.entry(label).or_default() += 1;
+                any = true;
+            }
+        }
+        if !any {
+            unattributed.push(id.clone());
+        }
+    }
+
+    let mut report = String::new();
+    for (label, expected, _) in CONSTRUCTS {
+        let got = counts.get(label).copied().unwrap_or(0);
+        writeln!(report, "  {got:4}  {label}").unwrap();
+        assert_eq!(
+            got, *expected,
+            "{label}: the residual baseline moved. Re-derive this row and the \
+             coverage statement in oracle-exec/README.md in the same commit"
+        );
+    }
+    let named: Vec<String> = UNATTRIBUTED
+        .iter()
+        .map(|(id, _)| (*id).to_string())
+        .collect();
+    assert_eq!(
+        unattributed, named,
+        "a baselined entry that declares none of the constructs above belongs to \
+         nobody until someone names it. Add it to UNATTRIBUTED with what holds it, \
+         or bank it"
+    );
+
+    println!(
+        "residual baseline: {} entries, attributed by construct (rows OVERLAP; \
+         {} declare none and are named individually)\n{report}",
+        baseline.len(),
+        unattributed.len()
+    );
+}
