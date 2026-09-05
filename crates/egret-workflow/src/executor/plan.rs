@@ -40,11 +40,18 @@ impl Plan {
     /// amount` derives both counts — so taking the narrow one silently would be
     /// a choice nothing could see.
     ///
-    /// Linear in `tasks.len()` per call and used by the oracle rather than by
-    /// [`advance`](super::advance), which never descends into a `Loop`'s list
-    /// and so cannot create one of these runs by construction. That is exactly
-    /// why the guard is worth having: "cannot happen by construction" is a
-    /// claim about today's `descend`, and
+    /// **O(n²) in `tasks.len()` per call**, not linear: it rebuilds the frontier
+    /// from every `Loop` on each call and its `seen` set is a `Vec` searched
+    /// linearly. That is stated rather than rounded off because a wrong
+    /// complexity in a doc comment is how one gets copied into a hot path. It is
+    /// harmless where it is used — 82 loop-body tasks across the whole corpus,
+    /// and no caller is on `advance()`'s path — and a `BTreeSet` would fix it
+    /// the day one is.
+    ///
+    /// Used by the oracle rather than by [`advance`](super::advance), which
+    /// never descends into a `Loop`'s list and so cannot create one of these
+    /// runs by construction. That is exactly why the guard is worth having:
+    /// "cannot happen by construction" is a claim about today's `descend`, and
     /// `no_run_is_ever_created_for_a_task_inside_a_loop` is what would notice
     /// it stopping being true.
     pub fn is_loop_body(&self, task: TaskIx) -> bool {

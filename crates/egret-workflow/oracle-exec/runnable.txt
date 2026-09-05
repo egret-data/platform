@@ -986,7 +986,7 @@ that differ on more than `spawned`:
 
   valids/all-flowable                  first iteration failed; flow-level errors: ran (Task 7)
   valids/disable-flowable              a `disabled: true` task (unclaimed)
-  valids/loop-outputs-auto             values: "{{ outputs.write.uri }}" -- the harness has no outputs
+  valids/loop-outputs-auto             blocked TWICE OVER -- see below
   valids/loop-values-from-uri          the same
   valids/retry-new-execution-*  (x4)   replacement executions, parent_run null (Task 7)
 
@@ -1000,17 +1000,37 @@ batch: `advance()` is pure and `ExecutionState` records no sub-execution, so it
 emits `min(concurrencyLimit, size)` once and cannot schedule more.  W3b owns the
 rest.
 
-Two entries are blocked on the render context rather than on `advance()`, and
-they are new at Task 6:
+Two entries are blocked TWICE OVER, and round 0 of this task named only the
+first half:
 
   valids/loop-outputs-auto      values: "{{ outputs.write.uri }}"
   valids/loop-values-from-uri   values: "{{ outputs.write.uri }}"
 
-`render_context` carries `inputs` and `vars` and nothing else, so both fail
-where Kestra ran them.  They are asserted BY NAME, separately from the two
-Kestra could not render either, and the test reads `golden.json` to require that
-Kestra's own runs for them ended SUCCESS -- which is what makes them the
-harness's fault.  Task 5's list of 2 is now 2 + 2.
+  1. THE HARNESS.  `render_context` carries `inputs` and `vars` and nothing
+     else, so the render fails where Kestra's `RunContext` resolved it.  Task
+     5's list of 2 is now 2 + 2.
+
+  2. `advance()` ITSELF, which is the finding.  That expression renders to an
+     ION FILE URI -- Kestra's THIRD documented `values:` shape
+     (`Loop.java:210-214`).  It never reaches `resolveValues`:
+     `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
+     `values`, asks `URIFetcher.supports`, and hands a URI to
+     `Loop.initFromUri` (`Loop.java:404`), which READS THE FILE.
+     `iteration_values` implements only the `resolveValues` arms, so a rendered
+     `kestra:///….ion` is not JSON and takes the error arm.  With a perfect
+     `outputs` context both entries would STILL fail, inside the executor.
+
+  This is a NAMED GAP in `advance()`, not a harness limitation, and it is
+  recorded as one in `loop_::iteration_values`, in README.md's hole list, and in
+  the test -- which now asserts `iteration_values(kestra:///….ion)` is `Err` so
+  the second cause is committed rather than described.
+
+  Closing it needs a decision nobody has taken.  `advance()` performs no I/O, so
+  the CALLER would have to resolve `values` all the way to a JSON array --
+  fetching the ION file and coalescing its lines -- and put that in
+  `TaskRun::rendered`, which is already what `rendered` means for an `If`.
+  Neither entry could bank on it alone: this oracle has neither the `outputs`
+  context nor the storage the file lives in.
 
 No `item` is supplied, and that is a ruling rather than an omission.  Planning
 the `Loop` made 12 more `If`/`Switch` expressions planned (a review had
@@ -1022,9 +1042,28 @@ sub-execution with `item` from `loopRun`; inventing one here would put a made-up
 value behind a branch decision and change nothing this oracle can see.
 
 A `Loop`'s own terminal state is FED, not compared, and README.md's feed section
-carries the correction and its cost: `transmitFailed` and the loop's aggregation
-rule are judged by nothing in W3a.  `valids/loop-failed-no-transmit` -- three
-FAILED iterations and a SUCCESS loop -- is reproduced by feeding.
+carries the correction and its cost.  Three things round 0 of this task got
+wrong about that trade, all of them in the pessimistic direction:
+
+  - NOTHING moved from compared to fed.  A `Loop` was already an opaque
+    `Runnable` at Tasks 3-5, so `golden_outcome` already supplied its terminal
+    -- and `advance()` also emitted a `SUBMITTED` Kestra never emits for a
+    flowable.  Task 6 relabelled 40 already-fed terminals and REMOVED 40 wrong
+    emissions with them.  Derived by
+    `planning_the_loop_removed_forty_spurious_submitted_emissions`, which
+    validates itself by reproducing all four of Task 5's committed figures.
+  - The alternative was STUCK on 35 entries, not 37.  39 comparable entries hold
+    a `Loop`; two never start one for want of values, and two more because their
+    `values:` cannot be resolved at all.  Pinned by
+    `the_loop_completion_tier_is_load_bearing_for_exactly_these_entries`.
+  - "Judged by nothing in W3a" was too strong.  The aggregation rule is
+    invisible to the RATCHET and not to this oracle: `Step::Done(Success)` for a
+    `Loop` (M66) and a tier-3 override feeding `Success` (M67) each die to
+    `the_spawned_field_…_and_a_bank` and to the order test.  That test's 33 is a
+    GUARD, not only a report, and a later task re-deriving it should know so.
+
+`valids/loop-failed-no-transmit` -- three FAILED iterations and a SUCCESS loop
+-- is still reproduced by feeding rather than by deciding.
 
 The instrument-bound list did NOT grow.  README.md named Task 6 twice as the
 candidate to find a third entry blocked on an ordered pair a round-based machine

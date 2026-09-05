@@ -36,6 +36,14 @@
 //! What that costs is exact and is in `oracle-exec/README.md`: the loop's own
 //! terminal state is supplied by the caller rather than decided here, and every
 //! iteration after the first batch is neither spawned nor compared.
+//!
+//! # One shape of `values:` is a named gap, not a limitation of the harness
+//!
+//! Kestra documents three, and [`iteration_values`] implements two. An **ION
+//! file URI** is resolved by a different code path entirely, before
+//! `resolveValues` is reached, and egret has no path for it — see
+//! [`iteration_values`] for the two corpus entries that costs and for what
+//! closing it would require.
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -154,6 +162,36 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 ///   whose three sub-executions carry `"value 1"`, `"value 2"`, `"value 3"`.
 /// - **Anything else** — an error. Kestra's own message is "Unknown value type:
 ///   NUMBER" for a scalar, and unparseable text throws before that.
+///
+/// # A NAMED GAP: Kestra has a THIRD `values:` shape and this does not
+///
+/// **An ION file URI is not implemented, and it is a hole in `advance()` rather
+/// than in the harness.** `Loop.java:210-214` documents three shapes, and the
+/// third is "an ION file URI, each line will be deserialized as an ION object
+/// then coalesced to a string". It is not reached through `resolveValues` at
+/// all: `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
+/// `values` first, asks `URIFetcher.supports` whether the result is a URI, and
+/// if it is, `Loop.initFromUri` (`Loop.java:404`) reads the file and counts its
+/// lines **before** this function's arm would ever run.
+///
+/// So a rendered `kestra:///….ion` arrives here as a plain string, is not JSON,
+/// and takes the error arm. Two comparable entries are that shape —
+/// **`valids/loop-outputs-auto` and `valids/loop-values-from-uri`**, both
+/// writing `values: "{{ outputs.write.uri }}"` — and they would fail here even
+/// with a perfect render context. Task 6's first account attributed them wholly
+/// to the oracle's narrow `outputs`-less context, and that was half the reason;
+/// `the_caller_can_render_every_expression_except_the_ones_named` now asserts
+/// both causes.
+///
+/// **What closing it would take**, so that whoever does it is not designing from
+/// scratch: `advance()` performs no I/O, so it cannot fetch the file. The caller
+/// would have to resolve `values` all the way to a JSON array — fetching the ION
+/// file and coalescing its lines — and put *that* in
+/// [`TaskRun::rendered`](crate::executor::TaskRun::rendered), which is already
+/// what `rendered` means for an `If`: the caller's answer, not the author's
+/// source. That is a decision about the W3b contract and it has not been taken.
+/// Neither of the two entries could bank on it alone, because this oracle has
+/// neither the `outputs` context nor the storage the file lives in.
 ///
 /// # `distinct()` is on the array arm and NOT on the object arm
 ///

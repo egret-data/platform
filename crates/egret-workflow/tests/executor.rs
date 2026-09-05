@@ -61,16 +61,32 @@
 //! executes it until W3b/W6. So there is no decision `advance()` could take
 //! here to be judged — feeding it is the same class as feeding a worker's
 //! result, and the alternative is not "compare it" but STUCK, which the
-//! baseline does not cover and which would turn 37 honestly-baselined entries
-//! into broken ones.
+//! baseline does not cover and which would turn **35** honestly-baselined
+//! entries into broken ones
+//! ([`the_loop_completion_tier_is_load_bearing_for_exactly_these_entries`]
+//! derives the 35 and requires every one of them to be baselined; round 0 of
+//! this task said 37, in prose, pinned by nothing).
 //!
-//! What that costs, stated rather than implied: `transmitFailed` and the rule
-//! by which a `Loop` aggregates its iterations are **not judged by anything**
-//! in W3a. `valids/loop-failed-no-transmit` — a loop whose three iterations all
-//! FAILED and which Kestra ended `SUCCESS` — is reproduced by feeding, not by
-//! deciding. `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
-//! counts these 55 runs in a bucket of their own so that they can never be read
-//! as compared.
+//! **This trade costs less than round 0 said, twice over.** No terminal moved
+//! from compared to fed: a `Loop` was already an opaque `Runnable` at Tasks
+//! 3-5, so its terminal was already supplied — and it also carried a
+//! `SUBMITTED` Kestra never emits for a flowable, so the relabelling **removed
+//! 40 wrong emissions**
+//! ([`planning_the_loop_removed_forty_spurious_submitted_emissions`], which
+//! validates itself by reproducing all four of Task 5's committed figures). And
+//! the aggregation rule is **not** "judged by nothing": it is invisible to the
+//! RATCHET, and two independent wrong-aggregation constructions each die to
+//! [`the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`]
+//! and to
+//! [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`].
+//! That first test's `33` is therefore a **guard**, not only a report — it falls
+//! when a loop's terminal stops matching Kestra's.
+//! `valids/loop-failed-no-transmit` — a loop whose three iterations all FAILED
+//! and which Kestra ended `SUCCESS` — is still reproduced by feeding rather
+//! than by deciding, and
+//! [`the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`] counts
+//! these 55 runs in a bucket of their own so they can never be read as
+//! compared.
 //!
 //! **Supplied, but NOT from the golden (Task 5, widened by Task 6):** the
 //! rendered value of an `If`'s condition, a `Switch`'s value or a `Loop`'s
@@ -2367,6 +2383,12 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
     // worker-shaped feed and the spawner-shaped one cannot be confused, and
     // apart from `flowable` so that nothing reads a Loop's state as compared.
     let mut spawner = 0usize;
+    // Of the fed and spawner runs, how many live inside a SUB-EXECUTION? egret
+    // simulates none of those, so their terminals are neither supplied nor
+    // compared -- they are a classification of Kestra's runs by egret's plan and
+    // nothing more. Counting them apart is what keeps the bucket's own
+    // definition true of every run it holds.
+    let (mut fed_in_a_sub, mut spawner_in_a_sub) = (0usize, 0usize);
     let (mut fed_without_submitted, mut parents, mut submitted) = (0usize, 0usize, 0usize);
     // Which task TYPES egret currently hands to a worker that Kestra's executor
     // ran itself. Derived from the plan's own `type_id`, never a hand list --
@@ -2390,8 +2412,8 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
         // top-level lists alone -- which is worth stating, because counting
         // only the top level gives 570 and reads just as much like a
         // measurement.
-        let mut stack: Vec<&Trace> = vec![&trace];
-        while let Some(t) = stack.pop() {
+        let mut stack: Vec<(&Trace, bool)> = vec![(&trace, true)];
+        while let Some((t, top_level)) = stack.pop() {
             let has_children: BTreeSet<usize> = t.runs.iter().filter_map(|r| r.parent).collect();
             for (ix, run) in t.runs.iter().enumerate() {
                 if has_children.contains(&ix) {
@@ -2417,9 +2439,17 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
                         | TaskKind::If { .. }
                         | TaskKind::Switch { .. },
                     ) => flowable += 1,
-                    Some(TaskKind::Loop { .. }) => spawner += 1,
+                    Some(TaskKind::Loop { .. }) => {
+                        spawner += 1;
+                        if !top_level {
+                            spawner_in_a_sub += 1;
+                        }
+                    }
                     Some(TaskKind::Runnable { type_id }) => {
                         fed += 1;
+                        if !top_level {
+                            fed_in_a_sub += 1;
+                        }
                         if !run.state.iter().any(|s| s == "SUBMITTED") {
                             fed_without_submitted += 1;
                             *over_fed.entry(type_id.clone()).or_default() += 1;
@@ -2427,7 +2457,7 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
                     }
                 }
             }
-            stack.extend(t.spawned.iter());
+            stack.extend(t.spawned.iter().map(|sub| (sub, false)));
         }
     }
 
@@ -2445,6 +2475,25 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
         total, 840,
         "the golden holds 840 run terminals; if that has moved, every count in \
          oracle-exec/README.md is stale"
+    );
+    // The bucket names are true of the TOP-LEVEL runs and of no other, and that
+    // is stated as a number rather than left to a reader. `fed` says "its
+    // terminal is supplied"; for a run inside a sub-execution nothing is
+    // supplied, because egret never creates the run at all.
+    println!(
+        "of the fed, {fed_in_a_sub} live inside a sub-execution egret never \
+         simulates; of the spawner, {spawner_in_a_sub}"
+    );
+    assert_eq!(
+        (fed_in_a_sub, spawner_in_a_sub),
+        (189, 15),
+        "189 of the fed runs and 15 of the spawner runs are inside a \
+         sub-execution. Nothing is fed to them and nothing is compared about \
+         them -- egret produces no sub-execution -- so `oracle-exec/README.md`'s \
+         bucket descriptions hold for the other {} and {}, and this pair is what \
+         says so",
+        fed - fed_in_a_sub,
+        spawner - spawner_in_a_sub
     );
     assert_eq!(
         (fed, spawner, flowable, unplanned, fed_without_submitted),
@@ -2702,13 +2751,22 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
     .iter()
     .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
     .collect();
-    // And these two are the HARNESS: `values: "{{ outputs.write.uri }}"` needs a
-    // task output, which `render_context` does not carry and Kestra's
-    // `RunContext` does. Kestra ran both loops; egret fails them, and both
-    // entries are baselined for it. This is the cost of the narrow context
-    // stated as a list rather than as a reassurance -- Task 5 had none of these
-    // and Task 6 has two.
-    let the_harnesss_own: Vec<(String, String)> = [
+    // And these two are blocked TWICE OVER, which the first version of this test
+    // got wrong by naming only the first cause.
+    //
+    //   1. the harness: `values: "{{ outputs.write.uri }}"` needs a task output,
+    //      which `render_context` does not carry and Kestra's `RunContext` does;
+    //   2. `advance()` itself: that expression renders to an **ION file URI**,
+    //      which is Kestra's THIRD documented `values:` shape (`Loop.java:210-214`)
+    //      and is handled by `FlowableUtils.resolveLoopValuesUri` /
+    //      `Loop.initFromUri` BEFORE `resolveValues` is reached.
+    //      `iteration_values` implements only `resolveValues`'s String arm, so
+    //      with a perfect `outputs` context both entries would still fail --
+    //      inside the executor, not inside the harness.
+    //
+    // The second cause is asserted below rather than described, because an
+    // attribution committed in a test is the kind that gets believed.
+    let blocked_twice_over: Vec<(String, String)> = [
         ("valids/loop-outputs-auto", "loop"),
         ("valids/loop-values-from-uri", "loop"),
     ]
@@ -2717,7 +2775,7 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
     .collect();
 
     let mut expected: Vec<(String, String)> = kestras_own.to_vec();
-    expected.extend(the_harnesss_own.iter().cloned());
+    expected.extend(blocked_twice_over.iter().cloned());
     expected.sort();
     let mut got = failed.clone();
     got.sort();
@@ -2747,7 +2805,18 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
              succeeded there, it belongs in the harness list instead"
         );
     }
-    for (id, task) in &the_harnesss_own {
+    // Cause 2, on its own: a rendered ION file URI is not JSON, so
+    // `iteration_values` refuses it whatever the render context holds. This is
+    // the shape `loop_::iteration_values` records as a NAMED GAP.
+    let uri = "kestra:///io/kestra/tests/loop-values-from-uri/executions/               4uJl0m/tasks/write/6mNq1p/123456.ion";
+    assert!(
+        egret_workflow::executor::iteration_values(uri).is_err(),
+        "an ION file URI is Kestra's third `values:` shape and egret implements \
+         only the second; if this ever succeeds, the gap is closed and these two \
+         entries are blocked by the render context alone"
+    );
+
+    for (id, task) in &blocked_twice_over {
         let entry = golden()
             .into_iter()
             .find(|e| &e.id == id)
@@ -2760,8 +2829,9 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
         assert_eq!(
             run.state.last().map(String::as_str),
             Some("SUCCESS"),
-            "{id}'s `{task}` is here BECAUSE Kestra ran it and this harness \
-             cannot -- if Kestra failed it too, it belongs in the other list"
+            "{id}'s `{task}` is here BECAUSE Kestra ran it and egret cannot -- \
+             for TWO independent reasons, one of them inside `advance()`. If \
+             Kestra failed it too, it belongs in the other list"
         );
     }
 }
@@ -3203,5 +3273,165 @@ fn the_default_concurrency_limit_is_one_and_the_corpus_can_tell() {
         defaulted, 24,
         "the population: top-level `Loop`s in the comparable corpus that write no \
          `concurrencyLimit` and resolve at least one value"
+    );
+}
+
+/// **Planning the `Loop` did not move a single terminal from compared to fed.
+/// It relabelled 40 that were ALREADY fed, and removed 40 wrong `SUBMITTED`
+/// emissions with them.**
+///
+/// This is the correction to Task 6's own first account, which described the
+/// `spawner` bucket as a concession. It is not one. At Tasks 3-5 a `Loop` was
+/// planned as an opaque [`TaskKind::Runnable`], so `golden_outcome` already
+/// supplied its terminal — and `advance()` also emitted `SUBMITTED` on it,
+/// which Kestra never does for a flowable. So the trade Task 6 actually made is
+/// a relabelling that *removes* an error, and the honest way to say that is to
+/// derive what the old builder did rather than to remember it.
+///
+/// The reconstruction is Task 5's classification rebuilt from today's plan:
+/// a task inside a loop body was `unplanned` (its parent was opaque), and a
+/// `Loop` was a `Runnable`. **It is validated by reproducing all four of Task
+/// 5's committed figures** — `424 fed / 73 flowable / 343 unplanned`, 114
+/// over-submitted — which is what makes the 40 a measurement rather than an
+/// inference.
+#[test]
+fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
+    let mut over_fed: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut fed, mut flowable, mut unplanned) = (0usize, 0usize, 0usize);
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let Ok(plan) = build_plan(&corpus_source(&entry.id)) else {
+            let mut stack: Vec<&Trace> = vec![&trace];
+            while let Some(t) = stack.pop() {
+                unplanned += t.runs.len();
+                stack.extend(t.spawned.iter());
+            }
+            continue;
+        };
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for run in t.runs.iter() {
+                // Task 5's builder had no `Loop` arm, so a task inside a loop
+                // body had no `PlanTask` and a `Loop` itself was opaque.
+                let kind = match plan.tasks.iter().position(|p| p.id == run.task) {
+                    Some(i) if !plan.is_loop_body(i) => Some(&plan.tasks[i].kind),
+                    _ => None,
+                };
+                let submitted = run.state.iter().any(|s| s == "SUBMITTED");
+                match kind {
+                    None => unplanned += 1,
+                    Some(TaskKind::Loop { .. }) => {
+                        fed += 1;
+                        if !submitted {
+                            *over_fed
+                                .entry("io.kestra.plugin.core.flow.Loop".to_string())
+                                .or_default() += 1;
+                        }
+                    }
+                    Some(TaskKind::Runnable { type_id }) => {
+                        fed += 1;
+                        if !submitted {
+                            *over_fed.entry(type_id.clone()).or_default() += 1;
+                        }
+                    }
+                    Some(_) => flowable += 1,
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+    }
+
+    assert_eq!(
+        (fed, flowable, unplanned, over_fed.values().sum::<usize>()),
+        (424, 73, 343, 114),
+        "the reconstruction must reproduce Task 5's four committed figures; if it \
+         does not, nothing below is a measurement of anything"
+    );
+    assert_eq!(
+        over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
+        Some(40),
+        "`core.flow.Loop` contributed 40 over-submitted runs before it was \
+         planned. Those 40 were already FED -- their terminals came from \
+         `golden_outcome` then and come from it now -- and they carried a \
+         `SUBMITTED` Kestra never emits for a flowable. Task 6 moved them to the \
+         `spawner` bucket and dropped the emission"
+    );
+    // The net movement of the flow bucket is NOT 40, and the difference is the
+    // finding this package keeps re-finding: implementing a flowable enlarges
+    // the over-feed for whatever nests inside it. 40 left; 5 arrived.
+    let flow_then: usize = over_fed
+        .iter()
+        .filter(|(t, _)| t.starts_with("io.kestra.plugin.core.flow."))
+        .map(|(_, n)| *n)
+        .sum();
+    assert_eq!(
+        (flow_then, over_fed.len()),
+        (89, 12),
+        "Task 5's flow bucket, reconstructed: 7 types and 89 runs"
+    );
+}
+
+/// **The `Loop` completion tier is load-bearing for exactly 35 entries, and
+/// without it every one of them is STUCK rather than baselined.**
+///
+/// Task 6's headline decision — feeding a `Loop`'s terminal in tier 3 — rests
+/// on one number, and it sat in prose beside a derivation until this test. The
+/// population is derived: the comparable entries whose simulation puts a `Loop`
+/// run into `RUNNING`, which is precisely the set that would wait for ever if
+/// [`in_flight`] stopped picking a `Loop`.
+///
+/// **35, not the 37 the first report said.** 39 comparable entries hold a
+/// `Loop`; two never start one because they have no values to iterate
+/// (`valids/loop-empty`, `valids/loop-null`) and two more never start one
+/// because their `values:` cannot be resolved at all
+/// (`valids/loop-outputs-auto`, `valids/loop-values-from-uri` — see
+/// [`the_caller_can_render_every_expression_except_the_ones_named`]).
+/// 39 − 2 − 2 = 35.
+///
+/// Why that settles the decision rather than softening it: a `STUCK` execution
+/// is reported through the ratchet's **panic** arm, which
+/// `oracle-exec/baseline.txt` does not and cannot cover. So the alternative to
+/// feeding was not "compare these 35" — it was a red suite on 35 entries that
+/// are honestly baselined today.
+#[test]
+fn the_loop_completion_tier_is_load_bearing_for_exactly_these_entries() {
+    let baseline = baseline();
+    let mut starts: Vec<String> = Vec::new();
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let source = corpus_source(&entry.id);
+        let Ok(plan) = build_plan(&source) else {
+            continue;
+        };
+        let cx = render_context(&entry.id, &source);
+        let render = |expr: &str| render_str(expr, &cx).map_err(|e| e.to_string());
+        let Ok(actual) = simulate(&plan, &Trace::from(entry), &render) else {
+            continue;
+        };
+        let started = actual.runs.iter().any(|r| {
+            plan.tasks
+                .iter()
+                .any(|p| p.id == r.task && matches!(p.kind, TaskKind::Loop { .. }))
+                && r.state.iter().any(|s| s == "RUNNING")
+        });
+        if started {
+            starts.push(entry.id.clone());
+        }
+    }
+
+    println!("loop-completion tier carries {} entries", starts.len());
+    assert_eq!(
+        starts.len(),
+        35,
+        "the entries that reach tier 3 with a `Loop` in flight. Every one of them \
+         goes STUCK if the tier stops completing a `Loop` -- M63 is that mutation \
+         and it measured the same 35 broken"
+    );
+    assert!(
+        starts.iter().all(|id| baseline.contains(id)),
+        "all 35 are baselined today, which is the whole point: STUCK is NOT a \
+         baselined state, so the alternative to feeding is a red suite rather \
+         than a wider baseline"
     );
 }
