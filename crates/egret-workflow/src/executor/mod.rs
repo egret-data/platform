@@ -518,6 +518,15 @@ mod tests {
     /// The flow itself is still baselined (it uses `disabled:`, which no W3a
     /// task claims), so this asserts the property on the same *shape* built
     /// without that key.
+    ///
+    /// **The mutation that kills this is M26**, which makes rule 3 stop at the
+    /// first child that has not terminated — i.e. serialises the branches. It is
+    /// **not** M22 (rule 3 breaking after the first child that wants something),
+    /// which this test survives: M22 still visits the branches in order on every
+    /// round, so branch two catches up as soon as branch one is waiting and the
+    /// run list is unchanged. An earlier version of this doc and of the task
+    /// report both named M22, and both were wrong — a mutation that a test
+    /// survives is not that test's guard.
     #[test]
     fn a_parallel_drives_every_branch_in_the_same_round() {
         let plan = build_plan(

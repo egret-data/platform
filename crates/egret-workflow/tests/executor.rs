@@ -255,13 +255,29 @@ impl Trace {
     /// *does* carry is still compared, and a pair the golden carries that egret
     /// does not produce still mismatches, because this only ever removes.
     ///
-    /// It was found by Task 4 and it is worth 1 banked entry on its own:
-    /// `valids/parallel-nested`'s runs, parents, histories and attempts are
-    /// identical to Kestra's, and every one of the 52 pairs the golden keeps is
-    /// reproduced exactly; the only difference was the 3 pairs it dropped.
-    /// `the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared`
-    /// derives the whole population this can touch, so it cannot quietly grow
-    /// into a way of not comparing something.
+    /// **Why removing is equivalent to accepting, and not to weakening.** egret's
+    /// relation domain is measured at `{before, overlapping}` — 501 pairs, zero
+    /// `after`. A pair is dropped from the golden precisely because Kestra
+    /// flipped on it between rounds, which over a two-valued domain means Kestra
+    /// was observed producing *both* values. So "remove the pair" is exactly
+    /// "accept either relation Kestra was seen to produce", and "egret must not
+    /// produce one" is not a coherent alternative, because egret emits a
+    /// relation for every pair by construction.
+    ///
+    /// **The honest cost, measured on a banked entry.** On
+    /// `valids/parallel-nested` egret may report *anything* on those 3 pairs and
+    /// the entry still matches — corrupting its relation on exactly them leaves
+    /// the comparison equal. That is what "the oracle has no opinion here"
+    /// means, stated as a cost rather than implied.
+    ///
+    /// It is worth 1 banked entry on its own: `valids/parallel-nested`'s runs,
+    /// parents, histories and attempts are identical to Kestra's, and every one
+    /// of the 52 pairs the golden keeps is reproduced exactly; the only
+    /// difference was the 3 it dropped.
+    /// [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`]
+    /// asserts what this actually removes, and
+    /// [`the_golden_has_no_relation_for_exactly_these_pairs`] the golden-side
+    /// population, so neither can quietly grow.
     fn restrict_order_to(&mut self, golden: &Trace) -> usize {
         let keep: BTreeSet<(usize, usize)> =
             golden.order.iter().map(|(i, j, _)| (*i, *j)).collect();
@@ -924,15 +940,21 @@ fn restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair() {
     );
 }
 
-/// **The pairs the golden dropped as unstable are the whole of what the
-/// restriction can touch, and they are 12 across 3 entries.**
+/// **The pairs the golden has no relation for: 13, across 3 entries.**
 ///
-/// Derived from `golden.json` on every run, never listed: this is the entire
-/// population [`Trace::restrict_order_to`] is able to remove, so if a
-/// re-harvest drops more pairs — or if someone widens the restriction into a
-/// way of not comparing something — the number moves here first.
+/// Derived from `golden.json` on every run, never listed. It is the same 13
+/// `normalise.py` reports as dropped-for-flipping across the whole harvest, in
+/// the same three entries — `oracle-exec/stability.json` names them, and all
+/// three flows reached `golden.json`, so there is nothing to reconcile.
+///
+/// **This is the golden-side figure and it is NOT the bound on what
+/// [`Trace::restrict_order_to`] removes** — an earlier version of this doc
+/// claimed it was, and that claim was false in two ways at once: the number was
+/// written down as 12 beside a map that sums to 13, and the test never called
+/// the projection at all. What the projection actually removes is measured by
+/// [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`].
 #[test]
-fn the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared() {
+fn the_golden_has_no_relation_for_exactly_these_pairs() {
     fn walk(node: &Trace, id: &str, out: &mut BTreeMap<String, usize>) {
         let n = node.runs.len();
         let full = n * n.saturating_sub(1) / 2;
@@ -955,9 +977,145 @@ fn the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared() {
             ("valids/if".to_string(), 9),
             ("valids/parallel-nested".to_string(), 3),
         ]),
-        "the whole population of pairs the golden declines to assert. \
-         `oracle-exec/README.md` reports 13 dropped pairs from the harvest; the 12 \
-         here are those minus the one whose entry did not reach golden.json"
+        "the whole population of pairs the golden declines to assert -- 13, which \
+         is exactly the 13 `stability.json` records as dropped-for-flipping, in \
+         the same three flows"
+    );
+    assert_eq!(dropped.values().sum::<usize>(), 13, "and they sum to 13");
+}
+
+/// **What the restriction actually removes, driven through the real
+/// `advance()`: 22 pairs across 6 entries — and egret never says `after`.**
+///
+/// The bound the test above was wrongly claimed to be. It calls
+/// [`Trace::restrict_order_to`] on every comparable entry, exactly as
+/// [`executor_matches_golden`] does, and asserts the per-entry map. The number
+/// the ratchet prints is this one, so a widening of the restriction's reach
+/// moves an assertion rather than a log line.
+///
+/// **22 and not 13, and the gap is not a hole.** Three entries are the golden's
+/// own dropped pairs, on traces whose runs line up. The other three —
+/// `disable-simple`, `parallel-disabled-tasks`, `sequential-with-disabled`, all
+/// `disabled:` flows no W3a task claims — produce a *different run set* from
+/// Kestra's, so their pair indices do not denote the same pairs at all and the
+/// projection removes whatever does not collide. Such an entry can never bank:
+/// its `runs` differ, which is compared first and verbatim. The test asserts
+/// that separation rather than asserting it away, so an entry that starts
+/// having pairs removed while its runs DO match shows up as a changed map.
+///
+/// **And the `after` assertion is what makes the restriction equivalent to the
+/// stronger rule.** egret's relation domain is measured, not assumed: over all
+/// comparable entries it produces 501 ordered pairs and **zero** `after`. With a
+/// two-valued domain, a pair Kestra dropped is a pair Kestra was seen producing
+/// *both* values for, so "remove the pair" and "accept either relation Kestra
+/// was observed to produce" are the same rule. That equivalence is why the
+/// restriction is not a weakening — and it holds only while `after` stays
+/// impossible, which is a property of creation indices being monotonic in
+/// `taskRunList` order. Task 6's spawned executions are the thing that could
+/// break it, so it is asserted here rather than argued in a comment.
+#[test]
+fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
+    let mut removed: BTreeMap<String, usize> = BTreeMap::new();
+    let mut runs_differ: Vec<String> = Vec::new();
+    let mut total_pairs = 0usize;
+    let mut afters: Vec<String> = Vec::new();
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let expected = Trace::from(entry);
+        let Outcome::Trace(mut actual) = evaluate(entry) else {
+            continue;
+        };
+        total_pairs += actual.order.len();
+        if actual.order.iter().any(|(_, _, rel)| rel == "after") {
+            afters.push(entry.id.clone());
+        }
+        let same_runs = actual
+            .runs
+            .iter()
+            .map(|r| &r.task)
+            .eq(expected.runs.iter().map(|r| &r.task));
+        let dropped = actual.restrict_order_to(&expected);
+        if dropped > 0 {
+            removed.insert(entry.id.clone(), dropped);
+            if !same_runs {
+                runs_differ.push(entry.id.clone());
+            }
+        }
+    }
+
+    println!("restriction removed {removed:?}; egret produced {total_pairs} ordered pair(s)");
+    assert_eq!(
+        removed,
+        BTreeMap::from([
+            ("valids/dag".to_string(), 1),
+            ("valids/disable-simple".to_string(), 2),
+            ("valids/if".to_string(), 7),
+            ("valids/parallel-disabled-tasks".to_string(), 7),
+            ("valids/parallel-nested".to_string(), 3),
+            ("valids/sequential-with-disabled".to_string(), 2),
+        ]),
+        "this is the number the ratchet prints; assert it so a widening of the \
+         restriction's reach moves a test and not a log line"
+    );
+    assert_eq!(removed.values().sum::<usize>(), 22);
+    assert_eq!(
+        runs_differ,
+        [
+            "valids/disable-simple",
+            "valids/if",
+            "valids/parallel-disabled-tasks",
+            "valids/sequential-with-disabled"
+        ],
+        "every entry beyond the golden's own 3 dropped-pair flows has a run set \
+         that DIFFERS from Kestra's, so its pair indices denote different pairs \
+         and it can never bank -- `runs` is compared first and verbatim. If an \
+         entry whose runs MATCH starts losing pairs, this list is what says so"
+    );
+
+    assert_eq!(
+        afters,
+        Vec::<String>::new(),
+        "egret's relation domain must stay {{before, overlapping}}: a pair Kestra \
+         dropped is one it was seen producing BOTH values for, so dropping it \
+         equals accepting either -- and that equivalence needs `after` to be \
+         unreachable. It is unreachable because a run's left endpoint is its \
+         creation step and creation is monotonic in run order; Task 6's spawned \
+         executions are what could break that"
+    );
+    assert_eq!(
+        total_pairs, 501,
+        "the population the `after` claim is measured over"
+    );
+
+    // The cost, demonstrated on a BANKED entry rather than conceded in prose:
+    // on the 3 pairs the golden dropped, `valids/parallel-nested` may report
+    // anything at all and still match.
+    let entry = golden()
+        .into_iter()
+        .find(|e| e.id == "valids/parallel-nested")
+        .expect("a banked entry with dropped pairs");
+    let expected = Trace::from(&entry);
+    let Outcome::Trace(mut corrupted) = evaluate(&entry) else {
+        panic!("valids/parallel-nested produces a trace")
+    };
+    let keep: BTreeSet<(usize, usize)> = expected.order.iter().map(|(i, j, _)| (*i, *j)).collect();
+    let mut corrupted_any = false;
+    for (i, j, rel) in &mut corrupted.order {
+        if !keep.contains(&(*i, *j)) {
+            *rel = "after".to_string();
+            corrupted_any = true;
+        }
+    }
+    assert!(
+        corrupted_any,
+        "there are 3 such pairs; if none, this proves nothing"
+    );
+    corrupted.restrict_order_to(&expected);
+    assert_eq!(
+        corrupted, expected,
+        "THE COST: on a pair the golden dropped, egret may report anything -- here \
+         the impossible `after` -- and a banked entry still matches. That is what \
+         `the oracle has no opinion here` buys and what it costs"
     );
 }
 

@@ -798,8 +798,13 @@ environment that can finish two runs in one round -- Tasks 5 and 7 already owe
 it a clock that advances for a reason other than a `not_before` -- should
 re-check this entry first.
 
-Separately: 12 ordered pairs across 3 entries (`valids/dag` 1, `valids/if` 9,
+Separately: 13 ordered pairs across 3 entries (`valids/dag` 1, `valids/if` 9,
 `valids/parallel-nested` 3) were dropped by `normalise.py` as unstable and are
-no longer compared at all.  That is not a hole in the executor; it is the
-harvest's own measurement, and since Task 4 the ratchet honours it rather than
-demanding egret reproduce a relation the golden declines to state.
+no longer compared at all.  Those are the SAME 13 the header table above counts
+as dropped-for-flipping -- `stability.json` names them and all three flows
+reached `golden.json`, so there is nothing to reconcile.  That is not a hole in
+the executor; it is the harvest's own measurement, and since Task 4 the ratchet
+honours it rather than demanding egret reproduce a relation the golden declines
+to state.  Driven through the real `advance()` the projection removes 22 pairs
+across 6 entries; the extra 9 are on `disabled:` flows whose egret run set
+differs from Kestra's, which can never bank in any case.

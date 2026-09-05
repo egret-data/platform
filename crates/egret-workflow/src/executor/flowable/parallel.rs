@@ -48,19 +48,29 @@ pub(crate) fn drive(
 /// inverted. A `drive` that created children lazily as earlier ones finished
 /// would order them by completion instead.
 ///
-/// **Kestra's other half of that call is deliberately not here, and the reason
-/// is a measurement.** `resolveParallelNexts` also returns nothing at all while
-/// any existing child run is still `CREATED` ("first created, leave"); Kestra
-/// needs it because its executor is message-driven and re-resolves a branch on
-/// every taskrun transition. This one is round-driven, and in a round discipline
-/// the guard is unreachable: a `CREATED` run exists for exactly one round —
-/// rule 3 starts it in the next — and nothing can terminate during that round,
-/// because the environment only moves when `advance` has emitted nothing. It
-/// was written, and then a mutation that bypassed it (`if !any_created || true`)
-/// left the whole crate at 447 passed / 0 failed with the ratchet unmoved. A
-/// guard nobody has seen fail is a guard nobody has seen, so it was deleted
-/// rather than shipped with a comment. If a later task makes a branch
-/// re-resolvable mid-round, it comes back — with the test that made it fire.
+/// **Kestra's other half of that call is deliberately not here, and what makes
+/// it unreachable is the CALLER, not this function.**
+/// `resolveParallelNexts` also returns nothing at all while any existing child
+/// run is still `CREATED` ("first created, leave"). It was ported, and then a
+/// mutation that bypassed it (`if !any_created || true`) left the whole crate at
+/// 447 passed / 0 failed with the ratchet unmoved — so it was deleted rather
+/// than shipped with a comment nobody could check.
+///
+/// **Deleting it is right for today's only caller and is not a property of this
+/// function.** `advance` is a pure function of the state it is handed, and any
+/// caller may hand it any state. Instrumenting this exact decision point over
+/// all 294 golden entries measures the condition — a batch about to be created
+/// while an existing child run of the same branch is still `CREATED` —
+/// occurring **0 times** under the oracle's environment, which never applies a
+/// worker result while `advance` still has work to do. Under a driver that
+/// delivers **one worker result between `advance` calls**, the same
+/// instrumentation fires on `valids/dag` (1 batch) and `valids/if` (3). Nothing
+/// about a branch has to change for that; only the delivery discipline does.
+///
+/// So the trigger to watch for is **W4's worker**, which is message-driven by
+/// construction — not a later flowable. Whoever gives `advance` a caller that
+/// can interleave a completion with a decision has to bring this guard back,
+/// and bring the test that makes it fire with it.
 ///
 /// **3. Start every created child, and descend into every running flowable, in
 /// the same round.** Also load-bearing, and separately measured: in

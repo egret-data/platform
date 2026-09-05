@@ -1500,13 +1500,52 @@ on the left, termination on the right, strict on both sides, still pinned by
 `an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended`
 against `simulate_with`'s raw output — and a pair the golden *does* carry that
 egret does not produce still mismatches, because the projection only ever
-removes. Two committed tests bound it:
-`restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` (two machines
-that differ on a kept pair still mismatch; and the control, the same pair
-dropped, does not) and
-`the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared`, which
-derives the entire population it can touch — **12 pairs across exactly 3
-entries**, `valids/dag` 1, `valids/if` 9, `valids/parallel-nested` 3.
+removes.
+
+**Removing is equivalent to ACCEPTING, and that is what makes it not a
+weakening.** egret's relation domain is measured, not assumed: over all
+comparable entries it produces **501 ordered pairs and zero `after`**. A pair is
+dropped from the golden precisely because Kestra flipped on it between rounds,
+which over a two-valued domain means Kestra was *observed producing both
+values*. So "drop the pair" is today exactly "accept either relation Kestra was
+seen to produce". And "egret must not produce one" is not a coherent
+alternative, because egret emits a relation for every pair by construction. The
+equivalence holds only while `after` stays unreachable — it is unreachable
+because a run's left endpoint is its creation step and creation is monotonic in
+run order — so it is asserted rather than argued, and Task 6's spawned
+executions are the thing that could break it.
+
+**The cost, stated and demonstrated rather than implied.** On the dropped pairs
+egret may report *anything*. That is shown on `valids/parallel-nested`, a
+**banked** entry: rewriting its relation on exactly those 3 pairs to the
+impossible `after` leaves the comparison equal.
+
+Three committed tests bound it:
+
+- `restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` — two
+  machines that differ on a kept pair still mismatch; the control, the same pair
+  dropped, does not.
+- `the_golden_has_no_relation_for_exactly_these_pairs` — the golden-side
+  population, derived: **13 pairs across 3 entries**, `valids/dag` 1,
+  `valids/if` 9, `valids/parallel-nested` 3. That is the *same* 13
+  `stability.json` records as dropped-for-flipping, in the same three flows;
+  all three reached `golden.json`, so there is nothing to reconcile.
+- `what_the_order_restriction_removes_is_derived_and_egret_never_says_after` —
+  what the projection actually removes when the real `advance()` runs, which is
+  **22 across 6 entries** and is the number the ratchet prints. The 9 beyond the
+  golden's own 13 are on `valids/disable-simple` (2),
+  `valids/parallel-disabled-tasks` (7) and `valids/sequential-with-disabled` (2)
+  — all `disabled:` flows whose egret run set *differs* from Kestra's, so their
+  pair indices do not denote the same pairs and such an entry can never bank
+  anyway (`runs` is compared first and verbatim). The test asserts that
+  separation, so an entry losing pairs while its runs DO match shows up as a
+  changed map.
+
+**An earlier version of this section said 12 and offered a reconciliation for
+the missing one.** Both were wrong: the map sums to 13, and the test that
+claimed to bound the projection never called it. The map was derived and the
+total beside it was written down — this package's recurring defect, recorded
+here as the fourth instance.
 
 ### `valids/dag` is NOT banked, and it is the hole this file predicted
 
@@ -1559,16 +1598,33 @@ by `one_invalid_sibling_fails_every_sibling` — the spike's half, and the bound
 the runs it touches are `Runnable`s whose terminal state is *fed* from the
 golden. The unit test is the only thing holding it.
 
-### A guard that was written and then deleted
+### A guard that was written and then deleted — and the reason is about the CALLER
 
 `resolveParallelNexts` returns nothing at all while any existing child run is
 still `CREATED` — Kestra's "first created, leave". It was ported, and then the
 mutation that bypasses it (`if !any_created || true`) left the whole crate at
-**447 passed / 0 failed** with the ratchet unmoved. It is unreachable in a
-round-driven executor: a `CREATED` run exists for exactly one round, and nothing
-can terminate during that round because the environment only moves when
-`advance` has emitted nothing. Kestra needs it because its executor is
-message-driven; this one does not. Deleted rather than shipped with a comment.
+**447 passed / 0 failed** with the ratchet unmoved. A guard nobody has seen fail
+is a guard nobody has seen, so it was deleted.
+
+**Deleting it is right for today's only caller. It is not a property of
+`advance`.** The first version of this section said the condition was
+unreachable "in a round-driven executor", which reads as a fact about the state
+machine, and `advance` is a pure function of the state it is handed — any caller
+may hand it any state. Instrumenting the exact decision point (a batch about to
+be created while an existing child run of the same branch is still `CREATED`)
+over all 294 golden entries measures:
+
+| driver | occurrences |
+|---|---|
+| the oracle's environment — never applies a worker result while `advance` has work | **0** |
+| one worker result applied **between** `advance` calls | `valids/dag` 1 batch, `valids/if` 3 |
+
+Nothing about a branch has to change for the second row; only the *delivery
+discipline* does. So the trigger to watch for is **W4's worker**, which is
+message-driven by construction — not a later flowable, which is what the first
+version of this section wrongly named. Whoever gives `advance` a caller that can
+interleave a completion with a decision has to bring the guard back, and bring
+the test that makes it fire with it.
 
 ### Task 4's mutations
 
@@ -1576,23 +1632,51 @@ Each was applied, **built and asserted to compile with 0 errors**, then run
 against the whole crate (`cargo test -p egret-workflow --no-fail-fast`) — never
 a name-filtered subset. Restore is `shutil.copyfile`, which stamps a fresh
 mtime; `tar xf`, `cp -p` and `rsync -a` all preserve mtimes and would leave
-cargo rebuilding nothing.
+cargo rebuilding nothing, and `cp` is aliased to `cp -i` in this shell, which
+silently refuses to overwrite. Restoration was verified with `cmp` against the
+snapshot for all eight files.
 
-| # | file | edit | what died, and the message |
-|---|---|---|---|
-| M13 | `parallel.rs` | `.take(room)` → `.take(room.min(1))` | 3 unit tests. ``a Parallel creates every child in ONE round, in declaration order, and starts none of them while it does — left: [CreateRun { task: 1, .. }] right: [… six CreateRuns …]`` |
-| M14 | `parallel.rs` | `if !any_created` → `if !any_created \|\| true` | **nothing.** 447 passed, 0 failed, ratchet unmoved — see *A guard that was written and then deleted* |
-| M15 | `parallel.rs` | `fail_the_rest(...)` → an empty command list | `one_invalid_sibling_fails_every_sibling`: ``a_slow and b_mid were still in flight when c_fast failed, so both end FAILED — left: [] right: [SetRunState { run: 1, state: Failed }, SetRunState { run: 2, state: Failed }]`` |
-| M16 | `parallel.rs` | `fail_the_rest` fails every sibling, terminated ones included | 2 unit tests. ``a_slow had already SUCCEEDED and keeps it; only b_mid, which was still in flight, is failed — left: [Failed, Failed, Failed, Failed] right: [Failed, Success, Failed, Failed]`` |
-| M17 | `dag.rs` | the `dependsOn` predicate → `true` | 2 unit tests. ``Kestra's taskRunList for valids/dag, verbatim — left: ["dag","task1","task2","task3","task4","task5","task6"] right: ["dag","task1","task2","task3","task4","task6","task5"]`` and ``task1 failed, so none of the five nodes downstream of it exists — left: [… all seven …] right: ["dag", "task1"]`` |
-| M18 | `plan.rs` | `if !cyclic.is_empty()` → `if false && …` | `a_cyclic_dag_is_refused_by_name` **and the ratchet**: ``a cyclic dag must be refused; got a plan of 6 task(s) rooted at 'dag'``; ``PANIC … invalids/dag-cyclicdependency: STUCK after 2 step(s) … run 0 (dag) is Some(Running)`` |
-| M19 | `plan.rs` | `if !unknown.is_empty()` → `if false && …` | 2 unit tests **and the ratchet**: ``flatten_dag resolves dependsOn only after the not-a-node check above has passed``; ``PANIC … invalids/dag-notexist-task`` |
-| M20 | `parallel.rs` | the concurrency cap → `usize::MAX` | `a_parallel_concurrency_cap_bounds_the_batch`: ``\`concurrent: 2\` creates two of the three children in the first batch — left: 3 right: 2`` |
-| M21 | `tests/executor.rs` | `restrict_order_to` clears every pair | `restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair` **and the ratchet**: ``nothing to drop when the golden carries the pair — left: 1 right: 0``; ``REGRESSION: 20 entr(y/ies) mismatch that were NOT in baseline.txt`` |
-| M22 | `parallel.rs` | rule 3 breaks after the first branch that wants something | `one_invalid_sibling_fails_every_sibling`: ``all three branches must be in flight before one of them fails: [Some(Running), Some(Running), Some(Created), Some(Created)]`` |
-| M23 | `parallel.rs` | `aggregate` always answers `Success` | 3 unit tests. ``and the Dag reports the failure instead of waiting for runs that will never be created — left: ["CREATED","RUNNING","SUCCESS"] right: ["CREATED","RUNNING","FAILED"]`` |
-| M24 | `parallel.rs` | rule 4 drops `\|\| ended_badly` | `a_dag_creates_nothing_downstream_of_a_failed_dependency` **and the ratchet**: ``left: ["CREATED","RUNNING"] right: ["CREATED","RUNNING","FAILED"]``; ``PANIC … invalids/dag-invalid-subtask: STUCK after 5 step(s)`` |
-| M25 | `plan.rs` | `concurrent: 0` read as a cap of 0 rather than unlimited | **8** tests including the ratchet. ``an absent \`concurrent:\` is Kestra's default 0, which is unlimited — left: Parallel { tasks: [1, 2, 3], concurrency: Some(0) } right: … concurrency: None``; ``PANIC … valids/finally-parallel: STUCK after 2 step(s)`` |
+**The literal edit is in the table, and the victim counts are re-derived from a
+replay of the final tree.** The Task 3 section below says why, and Task 4's
+first attempt reproduced the same defect it warns about: a table carrying only
+descriptions was replayed by a review and gave a different number for M16 — the
+description "fails every sibling" admits several edits and they do not kill the
+same set. Every row is now the exact `-` → `+`.
+
+Fifteen rows are counted here as thirteen replayed plus two recorded: **M14**,
+whose anchor no longer exists because the guard it bypassed was deleted, and the
+Task-4 re-run in which every count below was measured.
+
+| # | file | `-` | `+` | what died |
+|---|---|---|---|---|
+| M13 | `parallel.rs` | `.take(room)` | `.take(room.min(1))` | 3 unit tests: `parallel_creates_every_child_before_starting_any`, `a_parallel_concurrency_cap_bounds_the_batch`, `one_invalid_sibling_fails_every_sibling`. ``a Parallel creates every child in ONE round … — left: [CreateRun { task: 1, .. }] right: [… six CreateRuns …]`` |
+| M14 | `parallel.rs` | `if !any_created {` | `if !any_created \|\| true {` | **nothing** — 447 passed, 0 failed, ratchet unmoved. See *A guard that was written and then deleted*; the anchor is gone from the final tree, so this row is a record and not replayable |
+| M15 | `parallel.rs` | `let cmds = fail_the_rest(state, &runs);` | `let cmds: Vec<Command> = Vec::new();` + a discarding call | 1: `one_invalid_sibling_fails_every_sibling`. ``a_slow and b_mid were still in flight when c_fast failed, so both end FAILED — left: [] right: [SetRunState { run: 1, state: Failed }, SetRunState { run: 2, state: Failed }]`` |
+| M16 | `parallel.rs` | `.filter(\|&ix\| !is_terminal(state, ix))` | `.filter(\|&ix\| latest(state, ix) != Some(RunState::Failed))` | 2: `one_invalid_sibling_fails_every_sibling`, `a_parallel_takes_the_worst_of_its_children`. ``a_slow had already SUCCEEDED and keeps it … — left: [Failed, Failed, Failed, Failed] right: [Failed, Success, Failed, Failed]`` |
+| M17 | `dag.rs` | `node.depends_on.iter().all(\|&dep\| { run_for(dep).is_some_and(…Success) })` | `true` | 3: `a_dag_creates_a_node_only_when_every_dependency_has_succeeded`, `a_dag_creates_nothing_downstream_of_a_failed_dependency`, `what_the_order_restriction_removes_…`. ``Kestra's taskRunList for valids/dag, verbatim — left: [… task4, task5, task6] right: [… task4, task6, task5]`` |
+| M18 | `plan.rs` | `if !cyclic.is_empty() {` | `if false && !cyclic.is_empty() {` | 2: `a_cyclic_dag_is_refused_by_name` and **the ratchet**. ``a cyclic dag must be refused; got a plan of 6 task(s) rooted at 'dag'``; ``PANIC … invalids/dag-cyclicdependency: STUCK after 2 step(s) … run 0 (dag) is Some(Running)`` |
+| M19 | `plan.rs` | `if !unknown.is_empty() {` | `if false && !unknown.is_empty() {` | 3: `a_dag_dependency_on_a_task_that_is_not_a_node_is_refused_by_name`, `build_plan_survives_every_corpus_flow`, **the ratchet**. ``flatten_dag resolves dependsOn only after the not-a-node check above has passed``; ``PANIC … invalids/dag-notexist-task`` |
+| M20 | `parallel.rs` | `Some(cap) => (cap as usize).saturating_sub(in_flight),` | `Some(cap) => usize::MAX.saturating_sub(cap as usize * 0 + in_flight),` | 1: `a_parallel_concurrency_cap_bounds_the_batch`. ``\`concurrent: 2\` creates two of the three children in the first batch — left: 3 right: 2`` |
+| M21 | `tests/executor.rs` | `self.order.retain(\|(i, j, _)\| keep.contains(&(*i, *j)));` | `self.order.clear();` | 3: `restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair`, `what_the_order_restriction_removes_…`, **the ratchet**. ``nothing to drop when the golden carries the pair — left: 1 right: 0``; ``REGRESSION: 20 entr(y/ies) mismatch that were NOT in baseline.txt`` |
+| M22 | `parallel.rs` | *(end of rule 3's loop body)* | `if !cmds.is_empty() { break; }` | 1: `one_invalid_sibling_fails_every_sibling`. ``all three branches must be in flight before one of them fails: [Some(Running), Some(Running), Some(Created), Some(Created)]``. **It does NOT kill `a_parallel_drives_every_branch_in_the_same_round`** — see M26 |
+| M23 | `parallel.rs` | `Some(Killed) => return Killed, Some(Failed) => out = Failed,` | both arms `=> out = RunState::Success` | 3: `a_parallel_takes_the_worst_of_its_children`, `one_invalid_sibling_fails_every_sibling`, `a_dag_creates_nothing_downstream_of_a_failed_dependency`. ``the Dag reports the failure instead of waiting for runs that will never be created — left: ["CREATED","RUNNING","SUCCESS"] right: ["CREATED","RUNNING","FAILED"]`` |
+| M24 | `parallel.rs` | `if every_run_terminal && (created.len() == children.len() \|\| ended_badly) {` | `if every_run_terminal && created.len() == children.len() {` | 2: `a_dag_creates_nothing_downstream_of_a_failed_dependency`, **the ratchet**. ``left: ["CREATED","RUNNING"] right: ["CREATED","RUNNING","FAILED"]``; ``PANIC … invalids/dag-invalid-subtask: STUCK after 5 step(s)`` |
+| M25 | `plan.rs` | `Ok(0) \| Err(_) => None,` | `Err(_) => None,` | **9**, including the ratchet. ``an absent \`concurrent:\` is Kestra's default 0, which is unlimited — left: Parallel { … concurrency: Some(0) } right: … concurrency: None``; ``PANIC … valids/finally-parallel: STUCK after 2 step(s)`` |
+| M26 | `parallel.rs` | *(end of rule 3's loop body)* | `if !is_terminal(state, ix) { break; }` | 4: `a_parallel_drives_every_branch_in_the_same_round`, `one_invalid_sibling_fails_every_sibling`, `what_the_order_restriction_removes_…`, **the ratchet**. This — serialising the branches — is what guards the every-branch property; M22 is not |
+
+**M22 and M26 look alike and are not.** M22 stops after the first branch that
+*wants something*; the branches are still visited in order on every round, so a
+branch catches up as soon as the one before it is waiting and the run list is
+unchanged. M26 stops at the first branch that has not *terminated*, which runs
+branch one to completion before touching branch two and changes
+`taskRunList` to `parallel, sequence1, sequence2, task1, task2, task3, task4`.
+Task 4's first report named M22 as the guard for
+`a_parallel_drives_every_branch_in_the_same_round`, and that test survives M22.
+
+M18 and M19's assertion messages were **rewritten because of what the mutation
+showed**: `expect_err` printed the whole `Plan` and buried the finding — Task 3's
+M6 lesson arrived at from the same direction. Both now print the task count and
+root id.
 
 ### A finding Task 4 did not need but Task 8 does
 
@@ -1691,9 +1775,11 @@ wrote. Beyond that, the specific holes, each with its count:
   about serialisation. **Since Task 4 the ratchet compares only those**: egret
   produces a relation for every pair, the golden does not, and comparing an
   assertion against an absence was costing `valids/parallel-nested` a bank on 3
-  pairs the golden itself declines to state. `Trace::restrict_order_to`, and the
-  12-pair population it can touch, are derived and guarded — see *What Task 4
-  had to change, and what it banked*.
+  pairs the golden itself declines to state. Because egret's relation domain is
+  measured at `{before, overlapping}` (501 pairs, zero `after`), a dropped pair
+  is one Kestra was seen producing *both* values for, so dropping it is exactly
+  accepting either. Derived and guarded by three tests — see *What Task 4 had to
+  change, and what it banked*.
 - **A kept `before` is not always reachable by a clockless implementation, and
   Task 4 found the first one.** The relation egret produces comes from
   `advance()` round numbers, so two branches a `parallel` starts together and
