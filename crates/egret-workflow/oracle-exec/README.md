@@ -11,6 +11,12 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+Task 3 is the first task to write executor code, and it changed three things
+this file states: the circularity figure under *What the oracle feeds in* is now
+measured rather than quoted (and the quoted one was impossible), `RunState`
+gained `SUBMITTED`, and the elapsed-time hole's second cause is closed. See
+*What Task 3 had to change, and what it banked*.
+
 Every number below is a number `harvest.py` prints. If this file and
 `runnable.txt` ever disagree, `runnable.txt` is right and this file is stale —
 it has been wrong that way once already.
@@ -885,14 +891,40 @@ experiment has no C or D.
 So a normalisation bug or a capture anomaly *in that one field* is invisible in
 both directions.
 
-How much of the golden that covers is **not** re-derivable here, and the figure
-is quoted rather than measured: the review's own plan builder put it at **812 of
-the golden's 840 run terminals**. This package has no plan builder yet — that is
-Task 3 — so it cannot reproduce that split. What it can count is the two ends of
-the bracket: 840 run terminals in the golden altogether, of which 120 belong to
-runs that are the parent of another run and are therefore certainly flowables,
-whose terminals are never fed. Task 3 should replace this paragraph with the
-exact number once `build_plan` can answer it.
+**How much of the golden that covers — measured, Task 3.** The figure that stood
+here was quoted rather than measured: the review's own plan builder put it at
+**812 of the golden's 840 run terminals**, and this file said Task 3 should
+replace the paragraph once `build_plan` could answer it. It can, and the answer
+is not 812. **812 was not merely wrong, it was impossible**, and against this
+file's own bracket: 120 of the 840 are the parent of another run and are
+therefore certainly flowables whose terminals are never fed, so no split can put
+the fed count above 720.
+
+`tests/executor.rs::the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
+derives it on every run, from `build_plan` and `golden.json`, over the golden's
+run terminals **including the sub-executions'** — counting only the top-level
+`runs` lists gives 570 and reads just as much like a measurement. Every terminal
+is in exactly one bucket:
+
+| bucket | count | what it is |
+|---|---|---|
+| **fed** | 390 | the run's task is a `Runnable` in the plan, so its terminal is supplied and is not compared |
+| **flowable** | 23 | the run's task is a `TaskKind::Sequential`, whose state is the executor's own decision and is compared |
+| **unplanned** | 427 | the run's task has no `PlanTask` at all — it lives inside a flowable Task 3 plans opaque and so does not descend into |
+| **TOTAL** | **840** | |
+
+Those three move as Tasks 4-8 teach `build_plan` more flowables, which is why
+they are asserted in the test rather than only printed here: a task that changes
+the split has to change this table in the same commit.
+
+**The end state does not move, and it is 580.** `SUBMITTED` is on every task
+Kestra's *worker* ran and on no flowable its *executor* ran, so a plan builder
+that knew every flowable would feed exactly the 580 run terminals whose golden
+history carries it, and compare the other 260. That figure is independent of how
+complete `build_plan` happens to be. It also puts a number on Task 3's own
+over-feed: **135** of the 390 fed today carry no `SUBMITTED`, so they are
+flowables being fed their own answer until the task that owns each of them
+lands.
 
 What makes that acceptable is not the argument, it is that `golden.json` is
 machine-derived and re-derivable: `normalise.py` at HEAD reproduces both it and
@@ -1143,18 +1175,36 @@ of both, and that union is **13**, not 12: `RESTARTED` appears 60 times in
 execution histories and **never** in a run history. Going the other way,
 `SKIPPED` and `SUBMITTED` appear only in run histories.
 
-`executor::RunState` has six members, so **7 of the 13 are unrepresentable** —
-`CANCELLED`, `PAUSED`, `RESTARTED`, `RETRIED`, `SKIPPED`, `SUBMITTED`,
-`WARNING`. That is left as the plan drafted it (Task 3 owns the type) and
-recorded here rather than worked around in the normaliser, because a normaliser
-that quietly maps an unrepresentable state onto a representable one is a
-normaliser that hides the gap it was built to expose.
+`executor::RunState` had six members when this was written, so 7 of the 13 were
+unrepresentable. **Task 3 added `SUBMITTED` and no other**, so the enum has seven
+and **6 of the 13 remain unrepresentable**: `PAUSED`, `RESTARTED`, `WARNING`,
+`SKIPPED`, `RETRIED`, `CANCELLED`. Each is recorded here rather than worked
+around in the normaliser, because a normaliser that quietly maps an
+unrepresentable state onto a representable one is a normaliser that hides the gap
+it was built to expose.
 
-**What that costs, exactly.** Of the 266 `runs` entries, **35** use only states
-the six members can already hold — so zero is reachable today, on a real trace,
-and "nothing can be banked until the enum widens" would be false. Adding
-`SUBMITTED` alone takes that from 35 to **229**, which is the single cheapest
-thing any later task can do to this oracle.
+**What the one addition bought, and what the six still cost.** Of the 266 `runs`
+entries, **35** use only the six members the plan drafted, and **229** use only
+the seven — so `SUBMITTED` alone is what moved the reachable set by 194 entries,
+and it was the single cheapest thing any task could do to this oracle. It is
+also not optional for Task 3's own slice: `SUBMITTED` is in 580 of the golden's
+840 run histories and on every task the worker ran, so a sequential flow of
+`Return` tasks cannot match without it.
+
+The other six, with the number of `runs` entries whose trace uses each and the
+task that owns it:
+
+| state | `runs` entries | owner |
+|---|---|---|
+| `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
+| `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
+| `WARNING` | 10 | Task 7 (`AllowFailure`, `warningOnRetry`) |
+| `SKIPPED` | 4 | `disabled: true`, which no W3a task claims |
+| `RETRIED` | 4 | Task 7 (`CREATE_NEW_EXECUTION`) |
+| `CANCELLED` | 3 | flow concurrency, which no W3a task claims |
+
+A later task adding one of these adds it here too; the counts are what
+`normalise.py` measured over `golden.json`.
 
 ## What Task 2 had to add to the interfaces
 
@@ -1177,15 +1227,80 @@ finding.
   why `Tick` exists. `Tick` wins; the divergence is recorded here rather than
   left for a reader to rediscover.
 
+## What Task 3 had to change, and what it banked
+
+Task 3 owns the types, so three changes to the plan's draft are its to make and
+to justify. All three are in the crate with a guard each; none was made quietly.
+
+- **`RunState::Submitted`.** See *The state vocabulary, measured*: the plan drafted
+  six members and 35 of the 266 `runs` entries could be reached with them. Seven
+  reaches 229, and a sequential flow of `Return` tasks cannot match at all
+  without it. `only_a_runnable_passes_through_submitted` is the guard; deleting
+  the emission leaves a trace with the right runs in the right order and no
+  matches.
+- **`Command::StartRun { run, at: Tick }`** and **`Attempt::started_at`.** This is
+  the answer to cause 2 of the elapsed-time hole below, and the shape is
+  measured rather than guessed: Kestra takes a `RETRY_FAILED_TASK` retry's
+  `maxDuration` from `this.attempts.getFirst().getState().minDate()`
+  (`core/src/main/java/io/kestra/core/models/executions/TaskRun.java:337`) and a
+  `CREATE_NEW_EXECUTION` one from `execution.getMetadata()
+  .getOriginalCreatedDate()` (line 316). The first is the attempt's start; the
+  second is the execution's creation, which is `Tick(0)` by the type's own
+  definition. So one field on the attempt covers both, and `TaskRun::started_at()`
+  derives the run's start from `attempts[0]` rather than storing a second copy
+  that could disagree. The instant rides on the command rather than being a `now`
+  parameter on `apply` so that there is exactly one value it can be — the one
+  `advance()` saw. `an_attempt_records_the_tick_it_was_started_at` is the guard.
+- **`build_plan` refuses only what it cannot parse.** Not a change to a type, but
+  the decision most likely to be undone by a later reader as an obvious
+  improvement, so it is recorded with its measurement: see the mutation table
+  below, row M8.
+
+**Banked: 101 of the 294**, leaving 193 in `baseline.txt`. Every one of the 101
+was shown red first, and not by argument: at `0e157363` — the commit before this
+one — the same ratchet reports *294 golden entries, 294 mismatching, 294
+baselined, 0 broken*. The composition, derived from the golden rather than
+listed:
+
+| | count |
+|---|---|
+| `runs` entries whose golden has a parented run — a real `Sequential` ran | 2 (`valids/sequential`, 11 runs and 3 nesting levels; `valids/sequential-sleep`) |
+| `runs` entries that are the root task list only | 93, of which 77 are a single run |
+| `refused` entries | 6 |
+| **TOTAL** | **101** |
+
+Across the 95 `runs` entries that banks 134 runs, 109 happens-before pairs (92
+`before`, 17 `overlapping`) and 23 executions that terminate `FAILED` rather than
+`SUCCESS` — so the stop-at-the-first-failure path is exercised by the corpus and
+not only by a unit test. **No banked entry contains a flowable other than
+`Sequential`**: the only other `io.kestra.plugin.core.flow.*` type in the 95 is
+`Sleep`, which is a `RunnableTask` in Kestra too, so nothing here matches because
+an opaque flowable happened to look like a worker task.
+
+**The 6 refused entries are banked on the weakest possible evidence, and Task 8
+must re-derive them.** They are `invalids/{inputs, inputs-bad-type, invalid,
+invalid-parallel, switch-invalid, system-labels}`, and they match only because
+the oracle asks one thing of a `refused` entry — that `build_plan` returns `Err`
+— and W1's YAML parser happens to refuse them. Two of the six are refused for a
+cause that is a **W1 model defect rather than a judgement about the flow**, and
+that is not speculation: `invalids/invalid-parallel` and `invalids/switch-invalid`
+die on `tasks: invalid type: null, expected a sequence`, and so does
+`valids/switch-impossible` — a flow this Kestra published and **ran**. Its
+`defaults: null` is Jackson leaving a field null, which `models/task.rs` handles
+correctly for `Parallel::concurrent` and every other scalar and misses on every
+bare `Vec<Task>`. That entry stays in `baseline.txt` as `egret REFUSED a flow
+Kestra ran`, which is where a measured over-refusal belongs. Task 8 asserts on
+the refusal *message* per group, which is what will separate the six.
+
 ## The ratchet, and the four arms
 
-`tests/executor.rs` is a ratchet, not a pass/fail. `advance()` is a stub at Task
-2, so **every** comparable entry mismatches and all 294 are in
-`baseline.txt`. A test that is simply red for six tasks measures nothing — a new
-mismatch would be invisible in the noise — so it fails in **both** directions:
-an id not in the baseline that mismatches is a regression, and an id in the
-baseline that now matches must have its line deleted in the commit that earned
-it.
+`tests/executor.rs` is a ratchet, not a pass/fail. `advance()` was a stub at Task
+2, so **every** comparable entry mismatched and all 294 were in `baseline.txt`;
+Task 3 banked 101 of them and 193 remain. A test that is simply red for six tasks
+measures nothing — a new mismatch would be invisible in the noise — so it fails
+in **both** directions: an id not in the baseline that mismatches is a
+regression, and an id in the baseline that now matches must have its line deleted
+in the commit that earned it.
 
 `assemble_failures` is a pure function carrying four arms, and each was **shown
 red on purpose** before this was committed. A green run sits exactly at
@@ -1214,6 +1329,33 @@ three entries that could not run at all. A ratchet that hands out a free pass
 for a crash is the failure this file exists to prevent. `classify()` now
 excludes them, and `a_baselined_id_that_panicked_is_not_reported_as_banked`
 dies if that exclusion is deleted.
+
+### Task 3's mutations
+
+Nine, each built first and asserted to compile (`cargo build -p egret-workflow
+--tests` reporting **0 errors**) before being run, because a mutation that does
+not build looks exactly like one no test caught. Each was run against the
+**whole crate** — `cargo test -p egret-workflow --no-fail-fast`, 434 lib tests
+plus six integration binaries — and not against a name-filtered subset, which
+can only confirm the expectation it was filtered by. The crate is green at 0
+failures without them.
+
+| # | mutation | what died, and the message |
+|---|---|---|
+| M1 | delete the `StartRun` emission (the plan's own Step 6) | the ratchet + 6 unit tests. `PANIC: the state machine panicked or would not settle on 285 entr(y/ies)` … `STUCK after 2 step(s) at now=Tick(0)` … `run 0 (dag) is Some(Submitted)` |
+| M2 | delete the `SUBMITTED` emission | the ratchet + 2. `runnable 1-1 must pass through SUBMITTED — left: ["CREATED", "RUNNING", "SUCCESS"] right: ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"]` |
+| M3 | create the whole child list up front instead of one at a time | the ratchet + 4. `left: [CreateRun { task: 0, … }, CreateRun { task: 10, … }] right: [CreateRun { task: 0, … }]` |
+| M4 | a non-`Success` child no longer stops the sequence (`if false && …`) | the ratchet + 2. `the first task failed, so none of the other 4 was created — left: 5 right: 1` |
+| M5 | hard-code `at: Tick(0)` on `StartRun` | `an_attempt_records_the_tick_it_was_started_at`. `left: Some(Tick(0)) right: Some(Tick(11))` |
+| M6 | remove the depth bound over author input | `nesting_past_the_bound_is_refused_by_name`. `nesting past the bound must be refused; got a plan of 49 task(s)` |
+| M7 | map `AllowFailure` and `WorkingDirectory` to `Sequential` too | `every_other_flowable_stays_opaque` + the feed measurement. `io.kestra.plugin.core.flow.AllowFailure is opaque, so `inner` must not be in the plan at all — left: 2 right: 1`, and the split moves `(390, 23, 427, 135)` → `(392, 30, 418, 133)` |
+| M8 | `build_plan` refuses every unimplemented flowable | the ratchet, in **both** directions at once: `REGRESSION: 12 entr(y/ies)` … `valids/flow-concurrency-cancel: egret REFUSED a flow Kestra ran: task id 'sleep' uses an unimplemented flowable`, **and** `PROGRESS NOT BANKED: 8 entr(y/ies)` naming `invalids/dag-cyclicdependency`, `invalids/recursive-flow` and six more. This is the whole argument for the restraint in `build_plan`'s doc, measured: the refusal is right for a reason that has nothing to do with the flow being invalid, and the ratchet cannot tell |
+| M9 | the execution never leaves `CREATED` | the ratchet + 3. `left: ["CREATED", "SUCCESS"] right: ["CREATED", "RUNNING", "SUCCESS"]` |
+
+M6 also earned a change to the test rather than to the code: `expect_err` printed
+the whole 49-task `Plan` and buried the finding, so the assertion prints the task
+count instead. A guard that fires with an unreadable message has been seen fire
+and not seen work.
 
 ## What this oracle does not prove
 
@@ -1246,22 +1388,41 @@ wrote. Beyond that, the specific holes, each with its count:
   about the flowable. None is known to exist today because nothing is
   implemented yet; Tasks 4 and 6 are the ones that will find out, and the honest
   answer if it happens is to record the pairs, not to weaken the relation.
-- **Nothing keyed on elapsed time is reachable, and there are TWO independent
-  causes.** The disclosure used to name only the first.
-  1. *The environment.* `now` moves only to a `not_before` something is already
-     waiting for, so no tier advances the clock because a task took a while.
-     Tasks 5 and 7 could fix that inside this oracle.
-  2. *The state type, which they could not.* `ExecutionState` and `TaskRun`
-     carry **no instant at all** except `not_before` — the only `Tick` fields in
-     the whole module are `TaskRun::not_before` and
-     `Command::ScheduleRetry::not_before`. There is no run-start tick and no
-     execution-start tick, so `advance()` has nothing to subtract `now` from and
-     **cannot implement `PlanTask::timeout` or `RetryPolicy::max_duration` at
-     all**, however the environment behaves. **Task 3 owns that type**, and this
-     is the only place it is written down.
+- **Nothing keyed on elapsed time is reachable, and there were TWO independent
+  causes. Task 3 closed the second; the first stands.**
+  1. *The environment, which stands.* `now` moves only to a `not_before`
+     something is already waiting for, so no tier advances the clock because a
+     task took a while. Tasks 5 and 7 could fix that inside this oracle. Until
+     one does, an implementation whose `maxDuration` is correct and one whose
+     `maxDuration` is ignored produce the same trace here.
+  2. *The state type — **closed**.* `ExecutionState` and `TaskRun` carried no
+     instant at all except `not_before`, so `advance()` had nothing to subtract
+     `now` from. Task 3 added `Attempt::started_at`, written by
+     `Command::StartRun { at }`; `TaskRun::started_at()` derives the run's start
+     from the first attempt. See *What Task 3 had to change* for the two Kestra
+     lines that fix which instant each rule is measured from.
 
-  Between them these cover `timeout:`, `RetryPolicy::max_duration`, `WaitFor`'s
-  `maxDuration`, and any `Pause` delay — not just `timeout:`.
+  What that covers has also been corrected, and the correction is measured.
+  `PlanTask::timeout` is **not** an executor concern in this artifact: Kestra
+  enforces it in the **worker**, in
+  `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`,
+  which wraps `task.run(runContext)` in `callWithTimeout`. Kestra's own validator
+  says so out loud —
+  `core/src/main/java/io/kestra/core/services/FlowService.java:574` emits "cannot
+  use the 'timeout' property as it's only relevant for runnable tasks" for any
+  non-`RunnableTask`, with `Pause` the single exception. So `timeout:` belongs to
+  W4's worker, not to `advance()`, and the elapsed-time rules this oracle cannot
+  reach are `RetryPolicy::max_duration`, `WaitFor`'s `maxDuration`, a `Pause`
+  delay and a `Pause`'s own `timeout` — not `timeout:` in general.
+- **`PlanTask::retry`, `PlanTask::timeout` and `PlanTask::errors` are dead
+  fields today**, and for three different reasons. `build_plan` leaves the first
+  two `None` because Kestra spells both as `Property<Duration>` — unrendered
+  source — and rendering one needs a `RenderContext` a pure builder must not
+  acquire; Task 7 owns where that render happens. `errors` is empty for a
+  different and worse reason: W1's `models::Sequential` and every other
+  `AbstractBranch` port in `models/task.rs` **drop** the Java class's
+  `errors`/`finally` fields, so there is nothing in the parsed flow to read them
+  from. Task 7 has to widen the model before it can implement `errors:` at all.
 - **Sub-executions are harvested but not yet produced.** `Command::SpawnExecution`
   arrives in Task 6; until then egret's side of `spawned` is always empty, so
   every one of the 41 golden entries that carries a sub-execution

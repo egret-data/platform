@@ -6,10 +6,12 @@
 //!
 //! # This is a RATCHET, not a pass/fail
 //!
-//! `advance()` is a stub at W3a Task 2, so **every** comparable entry
-//! mismatches and every one is listed in `oracle-exec/baseline.txt`. A test
-//! that is simply red for six tasks measures nothing — a NEW mismatch would be
-//! invisible in the noise — so this fails in **both** directions:
+//! `advance()` was a stub at W3a Task 2, so **every** comparable entry
+//! mismatched and all 294 were listed in `oracle-exec/baseline.txt`. Task 3
+//! implements `sequential` and the root task list and banks 101 of them; 193
+//! remain. A test that is simply red for six tasks measures nothing — a NEW
+//! mismatch would be invisible in the noise — so this fails in **both**
+//! directions:
 //!
 //! - an id that is **not** in the baseline mismatches — a regression;
 //! - an id that **is** in the baseline now matches — progress that has to be
@@ -730,7 +732,7 @@ fn probe_golden(ids: &[&str]) -> Trace {
 /// Starts the first `Created` run whose predecessors are all terminal, and
 /// finishes the execution when they all are. Differs from [`lazy_machine`] in
 /// exactly one respect: **when** the runs are created.
-fn eager_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
+fn eager_machine(plan: &Plan, st: &ExecutionState, now: Tick) -> Vec<Command> {
     if st.runs.is_empty() {
         let mut out = vec![Command::SetExecutionState {
             state: RunState::Running,
@@ -742,11 +744,11 @@ fn eager_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
         }));
         return out;
     }
-    serialise_then_finish(st)
+    serialise_then_finish(st, now)
 }
 
 /// Creates each run only once every earlier run has terminated.
-fn lazy_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
+fn lazy_machine(plan: &Plan, st: &ExecutionState, now: Tick) -> Vec<Command> {
     if st.runs.is_empty() {
         return vec![
             Command::SetExecutionState {
@@ -770,10 +772,10 @@ fn lazy_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
             value: None,
         }];
     }
-    serialise_then_finish(st)
+    serialise_then_finish(st, now)
 }
 
-fn serialise_then_finish(st: &ExecutionState) -> Vec<Command> {
+fn serialise_then_finish(st: &ExecutionState, now: Tick) -> Vec<Command> {
     for ix in 0..st.runs.len() {
         match st.runs[ix].history.last() {
             Some(RunState::Created) => {
@@ -781,7 +783,7 @@ fn serialise_then_finish(st: &ExecutionState) -> Vec<Command> {
                     .iter()
                     .all(|p| p.history.last().is_some_and(|s| s.is_terminal()));
                 return if earlier_done {
-                    vec![Command::StartRun { run: ix }]
+                    vec![Command::StartRun { run: ix, at: now }]
                 } else {
                     Vec::new()
                 };
@@ -908,7 +910,7 @@ fn time_moves_only_to_a_deadline_something_is_waiting_for() {
             // Waiting. Only tier 3 can get us out of here.
             return Vec::new();
         }
-        serialise_then_finish(st)
+        serialise_then_finish(st, now)
     })
     .expect("must settle");
 
@@ -1566,4 +1568,131 @@ fn executor_matches_golden() {
         detail: &detail,
     });
     assert!(failures.is_empty(), "{failures}");
+}
+
+// --------------------------------------------------------------------------
+// how much of the golden the feed absorbs
+// --------------------------------------------------------------------------
+
+/// **How many of the golden's run terminals `golden_outcome` feeds in — the
+/// number `oracle-exec/README.md` could only quote until Task 3 built a plan
+/// builder.**
+///
+/// The oracle is circular with respect to `golden.json` for exactly one field:
+/// the last element of the `state` sequence of a run whose [`PlanTask`] is
+/// `Runnable`, and of each of that run's attempts. This measures how far that
+/// reaches, and it is derived from `build_plan` and `golden.json` on every run
+/// rather than quoted — the figure this replaced ("812 of 840") came from a
+/// reviewer's own plan builder and could not be reproduced here at all.
+///
+/// Three buckets, and every run terminal is in exactly one:
+///
+/// - **fed** — the run's task is a `Runnable` in the plan, so its terminal is
+///   supplied and cannot be compared.
+/// - **flowable** — the run's task is a `TaskKind::Sequential`, whose state is
+///   the executor's own decision and is compared.
+/// - **unplanned** — the run's task has no `PlanTask` at all, because it lives
+///   inside a flowable Task 3 plans opaque and therefore does not descend into.
+///   Tasks 4-8 move these into one of the two buckets above.
+///
+/// The fourth number is the correction, and it is why "fed" is not the honest
+/// end state: `SUBMITTED` appears on every task Kestra's *worker* ran and never
+/// on a flowable its *executor* ran, so a fed run whose golden history has no
+/// `SUBMITTED` is one a complete plan builder would move to `flowable`.
+#[test]
+fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
+    let (mut fed, mut flowable, mut unplanned, mut refused_flows) =
+        (0usize, 0usize, 0usize, 0usize);
+    let (mut fed_without_submitted, mut parents, mut submitted) = (0usize, 0usize, 0usize);
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let Ok(plan) = build_plan(&corpus_source(&entry.id)) else {
+            refused_flows += 1;
+            let mut stack: Vec<&Trace> = vec![&trace];
+            while let Some(t) = stack.pop() {
+                unplanned += t.runs.len();
+                stack.extend(t.spawned.iter());
+            }
+            continue;
+        };
+        // Sub-execution runs count too: a LOOP sub-execution and a
+        // CREATE_NEW_EXECUTION replacement both run tasks of the SAME flow, so
+        // the same plan classifies them. The golden's 840 is this walk, not the
+        // top-level lists alone -- which is worth stating, because counting
+        // only the top level gives 570 and reads just as much like a
+        // measurement.
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            let has_children: BTreeSet<usize> = t.runs.iter().filter_map(|r| r.parent).collect();
+            for (ix, run) in t.runs.iter().enumerate() {
+                if has_children.contains(&ix) {
+                    parents += 1;
+                }
+                if run.state.iter().any(|s| s == "SUBMITTED") {
+                    submitted += 1;
+                }
+                // By task id, which is what the golden carries. A flow with
+                // duplicate task ids would take the first; none of the `runs`
+                // entries has one.
+                match plan
+                    .tasks
+                    .iter()
+                    .find(|p| p.id == run.task)
+                    .map(|p| &p.kind)
+                {
+                    None => unplanned += 1,
+                    Some(TaskKind::Sequential { .. }) => flowable += 1,
+                    Some(TaskKind::Runnable { .. }) => {
+                        fed += 1;
+                        if !run.state.iter().any(|s| s == "SUBMITTED") {
+                            fed_without_submitted += 1;
+                        }
+                    }
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+    }
+
+    let total = fed + flowable + unplanned;
+    println!(
+        "golden run terminals: {total} total = {fed} fed + {flowable} flowable + \
+         {unplanned} unplanned ({refused_flows} flow(s) build_plan refuses); of the fed, \
+         {fed_without_submitted} carry no SUBMITTED and so are flowables a complete \
+         plan builder would not feed; {parents} run(s) are the parent of another run; \
+         {submitted} carry SUBMITTED and are what a COMPLETE plan builder would feed"
+    );
+
+    assert_eq!(
+        total, 840,
+        "the golden holds 840 run terminals; if that has moved, every count in \
+         oracle-exec/README.md is stale"
+    );
+    assert_eq!(
+        (fed, flowable, unplanned, fed_without_submitted),
+        (390, 23, 427, 135),
+        "these four numbers are written into oracle-exec/README.md under `What the \
+         oracle feeds in`. They move as Tasks 4-8 teach `build_plan` more flowables, \
+         and when they do the README has to move with them -- which is the point of \
+         asserting them here rather than quoting them there."
+    );
+
+    // The end state, independent of how complete `build_plan` happens to be:
+    // `SUBMITTED` is on every task Kestra's WORKER ran and on no flowable its
+    // EXECUTOR ran, so this is what a plan builder that knew every flowable
+    // would feed. It also refutes the figure this test replaced: the review's
+    // quoted **812** exceeds not only this but the README's own upper bound of
+    // 840 - 120 = 720, so it could not have been right whatever the builder.
+    assert_eq!(
+        (submitted, total - submitted),
+        (580, 260),
+        "the golden's own worker/executor discriminator has moved"
+    );
+    assert!(
+        submitted < total - parents,
+        "a run that is the parent of another is certainly a flowable, so the fed \
+         count can never exceed {}",
+        total - parents
+    );
 }
