@@ -654,6 +654,19 @@ entry ends up permanently baselined with nobody able to say why:
 | `PAUSED` | 18 | `Pause` | W8 |
 | `SKIPPED` | 4 | `disabled:` | **unclaimed — assign before W3a closes** |
 | `CANCELLED` | 3 | flow concurrency | W8 |
+| — | 18 over-submitted, **22 baselined entries** | `Subflow` | W6 |
+| — | 19 over-submitted | `core.execution.*` (`Labels` and 3 siblings, `ExecutionUpdatableTask`) | **unclaimed** |
+
+**`Subflow` is the largest block W3a will leave behind, and no W3a task touches
+it.** The programme spec assigns it to W6, which is correct — but
+`Command::SpawnExecution` is Task 6's, for a **loop iteration**, and that is a
+different construct. Anyone reading W3a's residual baseline will otherwise
+assume Task 6 covers `Subflow`; it does not.
+
+`core.execution.*` is a family, not a name: `Labels` is one of four
+`ExecutionUpdatableTask` implementors — neither a `RunnableTask` nor a flowable.
+Six of the entries it accounts for include `valids/labels-update-task-deduplicate`,
+which is the entry the oracle README's own circularity demonstration stands on.
 
 `disabled:` belongs to no package in the programme spec. It is a task-level flag,
 not a flowable, so it is arguably W1's model or W8's semantics — but it is
