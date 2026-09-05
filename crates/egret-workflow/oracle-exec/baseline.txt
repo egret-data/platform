@@ -58,7 +58,7 @@
 #
 # `timeout:` is NOT among the lines this task deleted and never could have been:
 # in this artifact the WORKER enforces it
-# (`WorkerTaskCallable.java:58`), and Kestra's own validator refuses it on any
+# (`WorkerTaskCallable.java:61`), and Kestra's own validator refuses it on any
 # non-`RunnableTask` (`FlowService.java:574`). It belongs to W4.
 #
 # A panic, and a state machine that will not settle inside the step bound, are

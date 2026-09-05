@@ -5,7 +5,7 @@
 //! The plan gives this file "`retry`, `timeout` and `errors:`". Two of the
 //! three are here. `timeout:` is enforced by Kestra's **worker**, not by its
 //! executor: `worker/src/main/java/io/kestra/worker/processors/internals/
-//! WorkerTaskCallable.java:58` wraps `task.run(runContext)` in
+//! WorkerTaskCallable.java:61` wraps `task.run(runContext)` in
 //! `callWithTimeout`, and Kestra's own validator says so out loud —
 //! `core/src/main/java/io/kestra/core/services/FlowService.java:574` emits
 //! "cannot use the 'timeout' property as it's only relevant for runnable
@@ -202,9 +202,17 @@ pub(super) fn next_retry_at(
     // but a `Loop` is not a `Runnable` and `scan` skips it. The condition is
     // still real (with zero attempts, `count >= max_attempts` is false and a
     // `CREATE_NEW_EXECUTION` policy would schedule a retry for a run that never
-    // ran), so the answer is to make the mutation *unwritable* rather than to
-    // ship a guard nobody has seen fire: `NonZeroU32::new(0)` is `None` by
-    // construction and there is no line here to delete.
+    // ran), so the answer is to fold it into the type rather than to ship a
+    // guard nobody has seen fire: `NonZeroU32::new(0)` is `None` by
+    // construction and **there is no line here to delete**.
+    //
+    // That is the accurate claim, and a stronger one was withdrawn. A review
+    // wrote a mutation of this line anyway --
+    // `.and_then(|n| NonZeroU32::new(n.max(1)))?` -- which compiles, runs and
+    // kills nothing. So the mutation is *writable*; what the type buys is that
+    // the obvious edit (deleting a guard) no longer exists, not that no edit
+    // does. The substantive point is unchanged and is what that mutation
+    // confirms: the condition is unreachable from `scan`.
     let attempts = u32::try_from(task_run.attempts.len())
         .ok()
         .and_then(std::num::NonZeroU32::new)?

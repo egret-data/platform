@@ -25,12 +25,24 @@ task **does not reproduce** — 2050 captured execution records holding 4215
 taskruns contain not one duplicate. See *What Task 7 had to change, and what it
 banked*.
 
-**Task 7's fix round 1 answered six mutations that killed nothing**, and a
+**Task 7's fix round 1 answered six mutations that killed nothing, and round 2
+answered a seventh guard that could not fail — the first in this package that
+was hiding something.** `every_corpus_errors_list_is_on_a_flowable_egret_plans`
+matched on W1's parsed kind, so a type with no `errors` field scored zero by
+construction; reading the raw YAML instead raises the count from 9 tasks on
+three types to **18 on seven**, and surfaces a `Loop`'s own `errors:` as
+unclaimed debt (4 baselined entries). The same round corrected a `plan.rs` doc
+that its own commit contradicted (`errors` went onto **five** model types, not
+two, and `If`/`Switch`/`Dag` are not opaque), moved the
+`WorkerTaskCallable.java` citation from `:58` to `:61`, and withdrew
+"unwritable" to "there is no line left to delete".
+
+**Round 1 answered six mutations that killed nothing**, and a
 reader should take these over the round-0 sentences they replace. Two guards
 Kestra has and this executor cannot reach — `handleEnd`'s and the retry pass's
 `isRetrying` early returns — were **deleted** rather than shipped as comments;
 one was made **unrepresentable** (a `NonZeroU32` in place of an `attempts == 0`
-check, so the mutation is unwritable rather than unkilled); three were kept and
+check, so there is no line left to delete); three were kept and
 made reachable by tests written for them; and one is *provably* equivalent on
 this corpus and now carries the derivation that says so. The replay itself was
 killed mid-mutation once, by a `head -20` on its own output, and it was the
@@ -2589,7 +2601,7 @@ The plan gives Task 7 "`retry`, `timeout` and `errors:`" and its Step 3 says
 "`timeout` is a deadline compared against the `now` parameter". Measured against
 the artifact, it is not one at all:
 
-- `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`
+- `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:61`
   wraps `task.run(runContext)` in `callWithTimeout` — the **worker** enforces it;
 - `core/src/main/java/io/kestra/core/services/FlowService.java:574` emits
   "cannot use the 'timeout' property as it's only relevant for runnable tasks"
@@ -2844,6 +2856,7 @@ owner is how a suppression list starts.
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
 | `WARNING` | 10 golden `runs` entries, including `valids/retry-success` and `valids/task-allow-failure-runnable` | `AllowFailure` and `retry.warningOnRetry` | **unclaimed — and this table's state list said Task 7 owned it.** Task 7 reads `warningOnRetry` into `RetryPolicy` and does nothing with it, because `RunState` cannot hold `WARNING`; `AllowFailure` is planned opaque |
+| a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
 | the replay a `CREATE_NEW_EXECUTION` retry starts | 4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned` | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6/W3b, with `Subflow` and the `Loop` iteration** — it is a third kind of sub-execution and `ExecutionState` has no field for any of them |
 
@@ -3035,7 +3048,7 @@ wrote. Beyond that, the specific holes, each with its count:
   What that covers has also been corrected, and the correction is measured.
   `PlanTask::timeout` is **not** an executor concern in this artifact: Kestra
   enforces it in the **worker**, in
-  `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`,
+  `worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:61`,
   which wraps `task.run(runContext)` in `callWithTimeout`. Kestra's own validator
   says so out loud —
   `core/src/main/java/io/kestra/core/services/FlowService.java:574` emits "cannot
@@ -3144,7 +3157,7 @@ wrote. Beyond that, the specific holes, each with its count:
 
   `timeout:` stays dead for a *different* reason, and it is not a reason a later
   W3 task can close: the **worker** enforces it
-  (`WorkerTaskCallable.java:58` wraps `task.run(runContext)` in
+  (`WorkerTaskCallable.java:61` wraps `task.run(runContext)` in
   `callWithTimeout`), and Kestra's own validator refuses it on every
   non-`RunnableTask` (`FlowService.java:574`), with `Pause` the single
   exception. W4 owns it. The plan's Task 7 step said "`timeout` is a deadline
@@ -3163,10 +3176,26 @@ wrote. Beyond that, the specific holes, each with its count:
   corpus flows that put an `errors:` on a `Dag` or a `Parallel`, so those two
   arms of the implementation are reached by no comparable entry at all.
   `every_corpus_errors_list_is_on_a_flowable_egret_plans` derives that
-  distribution: 17 flows write a flow-level `errors:` and 9 tasks write one, of
-  which 7 are on a `Sequential`, 1 on a `Parallel` and 1 on a `Dag`; `If` and
-  `Switch` carry the field because Java does and no corpus flow writes one
-  there.
+  distribution — **from the raw YAML, because its round-0 version could not
+  fail**. It matched on W1's parsed kind, so a type whose model has no `errors`
+  field contributed zero by construction and the map could only ever hold the
+  five types that already had one. It reported "9 tasks on three types" and was
+  hiding a fourth. Measured properly over all 345 flows: 17 write a flow-level
+  `errors:` and **18 tasks** write one, on **seven** types — `Sequential` 7,
+  `AllowFailure` 4, `Loop` 4, `Dag` 1, `Parallel` 1, `Pause` 1,
+  `WorkingDirectory` 1. `If` and `Switch` carry the field because Java does and
+  no corpus flow writes one there.
+
+  Of those seven, three are planned opaque (`AllowFailure`, `Pause`,
+  `WorkingDirectory`) so an unread `errors:` costs nothing, and **`Loop` is a
+  gap**: `advance()` drives it, `models::Loop` has no `errors` field, and four
+  flows' lists are invisible. See the unclaimed table.
+
+  (The `valids/`-only reading of that distribution gives `Loop` 3 and
+  `Sequential` 6, and dropping `invalids/` is what costs the difference:
+  `invalids/loop-switch-failed` is a `runs` entry Task 1 measured is not an
+  invalid flow at all, and `invalids/duplicate` is a flow egret over-accepts.
+  `every_corpus_flow()` is the population everywhere in this crate.)
 - **Sub-executions are ASKED FOR and still not produced, and Task 6 did not
   close this.** `Command::SpawnExecution` is emitted; nothing executes one until
   W3b/W6, and `ExecutionState` holds no field for a sub-execution. So egret's

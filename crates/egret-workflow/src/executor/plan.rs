@@ -167,7 +167,7 @@ pub struct PlanTask {
     /// timeout;` — but it is not the reason, because W3a never enforces this
     /// field at all. Measured: in this artifact `timeout:` is enforced by the
     /// **worker**
-    /// (`worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:58`
+    /// (`worker/src/main/java/io/kestra/worker/processors/internals/WorkerTaskCallable.java:61`
     /// wraps `task.run` in `callWithTimeout`), not by the executor. Kestra's own
     /// validator says so out loud —
     /// `core/src/main/java/io/kestra/core/services/FlowService.java:574` warns
@@ -181,10 +181,31 @@ pub struct PlanTask {
     /// **Populated from Task 7, which had to widen W1's model first.** Task 3
     /// recorded this as a model gap rather than a decision: `models::Sequential`
     /// and `models::Parallel` dropped the Java class's `errors`/`finally`
-    /// fields, so there was nothing in the parsed flow to read. Task 7 added
-    /// `errors` to both (and only those two — the other `AbstractBranch` ports
-    /// stay opaque `Runnable`s, so a field on them would be unreadable by
-    /// construction) and left `finally` out, because no W3a task implements it
+    /// fields, so there was nothing in the parsed flow to read.
+    ///
+    /// **Task 7 added `errors` to FIVE model types**, not the two an earlier
+    /// draft of this comment named: `Sequential`, `Parallel`, `If`, `Switch`
+    /// and `Dag`. Java declares the field on all five — `AbstractBranch` for
+    /// the first two, and `If.java:111`, `Switch.java:112`, `Dag.java:106`,
+    /// which are not `AbstractBranch` at all and carry their own — and
+    /// [`build_plan`] flattens all five. The draft said "and only those two,
+    /// the other `AbstractBranch` ports stay opaque `Runnable`s"; both halves
+    /// were false in the same commit that wrote them, and a reader who trusted
+    /// it would conclude the `If`/`Switch`/`Dag` arms do not exist.
+    ///
+    /// **The types that really are left out are `Loop` and every opaque one,
+    /// and only one of those is a gap.** `AllowFailure`, `Pause` and
+    /// `WorkingDirectory` are planned [`TaskKind::Runnable`], so their children
+    /// get no run and a field on them would indeed be unreadable. **`Loop` is
+    /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
+    /// `errors` field, so three corpus flows' lists (`valids/all-flowable`,
+    /// `valids/finally-loop`, `valids/finally-loop-parallel`) are invisible
+    /// here. All three are baselined, so nothing banks on it; it is recorded as
+    /// a gap by `every_corpus_errors_list_is_on_a_flowable_egret_plans` and in
+    /// `oracle-exec/README.md`'s unclaimed table rather than left to be
+    /// rediscovered.
+    ///
+    /// `finally` is left out of all of them, because no W3a task implements it
     /// and a second dead field is not a smaller version of the same fix.
     ///
     /// Empty means Kestra's `errors: null`, and the two are not distinguishable

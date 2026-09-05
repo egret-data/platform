@@ -2857,7 +2857,13 @@ mod tests {
         let flows = traces["flows"].as_object().expect("flows is an object");
 
         let (mut docs, mut runs, mut dup_id, mut dup_key) = (0usize, 0usize, 0usize, 0usize);
-        for rounds in flows.values() {
+        // **The zero has to be non-vacuous.** "No taskrun appears twice" is
+        // trivially true of a corpus in which nothing ever retried, so the
+        // retried population is counted beside it: a run with two or more
+        // attempts is a run Kestra retried, and it is those runs the spec's
+        // observation was about.
+        let (mut retried_runs, mut retried_flows) = (0usize, BTreeSet::new());
+        for (flow_id, rounds) in flows {
             for round in rounds.as_array().into_iter().flatten() {
                 let mut every: Vec<&serde_json::Value> = Vec::new();
                 if round["root"].is_object() {
@@ -2880,6 +2886,12 @@ mod tests {
                     if keys.len() != list.len() {
                         dup_key += 1;
                     }
+                    for run in list {
+                        if run["attempts"].as_array().is_some_and(|a| a.len() >= 2) {
+                            retried_runs += 1;
+                            retried_flows.insert(flow_id.clone());
+                        }
+                    }
                 }
             }
         }
@@ -2890,6 +2902,14 @@ mod tests {
             "the captured population: 2050 execution records holding 4215 \
              taskruns. 4215 is the same number `oracle-exec/README.md` quotes \
              for the happens-before endpoint measurement, by a different route"
+        );
+        assert_eq!(
+            (retried_runs, retried_flows.len()),
+            (105, 19),
+            "the zero below is about RETRIED runs, so the population that makes \
+             it non-vacuous is asserted first: 105 runs across 19 flows carry \
+             two or more attempts. Without this, `(0, 0)` would also be the \
+             answer for a corpus in which nothing ever retried"
         );
         assert_eq!(
             (dup_id, dup_key),
@@ -3438,57 +3458,185 @@ mod tests {
         );
     }
 
-    /// Every `errors:` the corpus writes sits on a task `build_plan` plans, or
-    /// on the flow itself.
+    /// **Every `errors:` the corpus writes, by the type that owns it — and
+    /// which of them `build_plan` can actually read.**
     ///
-    /// The list is derived rather than asserted by name, because the point is
-    /// the population and not the members: `dag.rs` carries an `errors:` arm
-    /// that no corpus flow reaches, and this is what says so.
+    /// # This walks the RAW document, and the round-0 version could not fail
+    ///
+    /// Round 0 matched on W1's parsed [`crate::models::TaskKind`]
+    /// (`Sequential | Parallel | If | Switch | Dag => …errors.len(), _ => 0`),
+    /// which is a guard that cannot fail for the thing it exists to detect: a
+    /// type whose model has **no** `errors` field contributes zero by
+    /// construction, so the derived map could only ever hold the five types
+    /// that already had one. It reported "9 tasks on three of the five types"
+    /// and was hiding a fourth.
+    ///
+    /// This reads the YAML itself, so a type W1 does not model still counts,
+    /// and then asks the **plan** whether the list survived — which is the
+    /// question the title is about.
+    ///
+    /// # What it surfaces: `Loop`
+    ///
+    /// `AllowFailure`, `Pause` and `WorkingDirectory` write an `errors:` that
+    /// `build_plan` cannot read, and that is not a gap: all three are planned
+    /// [`TaskKind::Runnable`], so their whole subtree is opaque and a field on
+    /// them would be unreadable by construction.
+    ///
+    /// **`Loop` is a gap.** It is planned as a [`TaskKind::Loop`] — `advance()`
+    /// drives it and spawns for it — and `models::Loop` carries no `errors`
+    /// field, so `plan.rs`'s flattening has no `Loop` arm and **four** corpus
+    /// flows' lists are invisible to the executor. All four are baselined, so
+    /// nothing banked on it; the debt is recorded here, on
+    /// [`PlanTask::errors`], and in `oracle-exec/README.md`'s unclaimed table.
+    ///
+    /// A `Loop`'s `errors:` is also not the same construct as its body: Kestra
+    /// resolves it in the **sub-execution** (`Loop.java:272`, inside
+    /// `resolveState` for `ExecutionKind.LOOP`), which W3a runs none of. So
+    /// closing this needs the sub-execution hole closed first, and it is filed
+    /// beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a
+    /// missing `match` arm.
     #[test]
     fn every_corpus_errors_list_is_on_a_flowable_egret_plans() {
-        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
-        let mut flow_level = 0usize;
-        for (_, source) in every_corpus_flow() {
-            let Ok(flow) = crate::spec::parse(&source) else {
-                continue;
-            };
-            if !flow.errors.is_empty() {
-                flow_level += 1;
-            }
-            let mut stack: Vec<&crate::models::Task> = flow.tasks.iter().collect();
-            stack.extend(flow.errors.iter());
-            while let Some(task) = stack.pop() {
-                let errors = match &task.kind {
-                    crate::models::TaskKind::Sequential(s) => s.errors.len(),
-                    crate::models::TaskKind::Parallel(p) => p.errors.len(),
-                    crate::models::TaskKind::If(i) => i.errors.len(),
-                    crate::models::TaskKind::Switch(s) => s.errors.len(),
-                    crate::models::TaskKind::Dag(d) => d.errors.len(),
-                    _ => 0,
-                };
-                if errors > 0 {
-                    *by_type.entry(task.r#type.clone()).or_default() += 1;
+        // Every object carrying an `id`, a `type` and a non-empty `errors`,
+        // as `(owner id, owner type, error task ids)`.
+        fn walk(node: &serde_json::Value, out: &mut Vec<(String, String, Vec<String>)>) {
+            match node {
+                serde_json::Value::Object(map) => {
+                    if let (Some(id), Some(ty), Some(errors)) = (
+                        map.get("id").and_then(|v| v.as_str()),
+                        map.get("type").and_then(|v| v.as_str()),
+                        map.get("errors").and_then(|v| v.as_array()),
+                    ) {
+                        if !errors.is_empty() {
+                            out.push((
+                                id.to_string(),
+                                ty.to_string(),
+                                errors
+                                    .iter()
+                                    .filter_map(|e| e.get("id")?.as_str().map(str::to_string))
+                                    .collect(),
+                            ));
+                        }
+                    }
+                    for value in map.values() {
+                        walk(value, out);
+                    }
                 }
-                stack.extend(task.children());
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, out);
+                    }
+                }
+                _ => {}
             }
         }
+
+        let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+        // The owner is a task `advance()` DRIVES and its `errors:` did not
+        // reach the plan. That is the gap this test exists to find.
+        let mut gaps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut opaque: BTreeMap<String, usize> = BTreeMap::new();
+        let mut read: BTreeMap<String, usize> = BTreeMap::new();
+        let mut flow_level = 0usize;
+
+        for (flow_id, source) in every_corpus_flow() {
+            let Ok(doc) = serde_norway::from_str::<serde_json::Value>(&source) else {
+                continue;
+            };
+            // The flow's own `errors:`: the root object has an `id` and no
+            // `type`, so `walk` never counts it.
+            if doc
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty())
+            {
+                flow_level += 1;
+            }
+            let mut found = Vec::new();
+            walk(&doc, &mut found);
+            let plan = build_plan(&source).ok();
+            for (owner, ty, error_ids) in found {
+                *by_type.entry(ty.clone()).or_default() += 1;
+                let Some(plan) = plan.as_ref() else { continue };
+                match plan.tasks.iter().find(|t| t.id == owner) {
+                    // Not planned at all, or planned opaque: its children get
+                    // no run either way, so an unread `errors:` costs nothing.
+                    None => *opaque.entry(ty).or_default() += 1,
+                    Some(t) if matches!(t.kind, TaskKind::Runnable { .. }) => {
+                        *opaque.entry(ty).or_default() += 1
+                    }
+                    // Driven by `advance()`. Its `errors:` must have reached
+                    // the plan, or this is a gap with a name.
+                    Some(t) if t.errors.is_empty() => {
+                        gaps.entry(ty).or_default().insert(flow_id.clone());
+                    }
+                    Some(t) => {
+                        assert!(
+                            error_ids
+                                .iter()
+                                .all(|want| t.errors.iter().any(|&e| plan.tasks[e].id == *want)),
+                            "{flow_id}: {owner}'s `errors:` reached the plan \
+                             partially, which no arm can produce"
+                        );
+                        *read.entry(ty).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        println!(
+            "task-level errors: {by_type:?}; read {read:?}; opaque {opaque:?}; \
+             DRIVEN BUT UNREAD {gaps:?}"
+        );
         assert_eq!(
             (flow_level, by_type.clone()),
             (
                 17,
                 BTreeMap::from([
+                    ("io.kestra.plugin.core.flow.AllowFailure".to_string(), 4),
                     ("io.kestra.plugin.core.flow.Dag".to_string(), 1),
+                    ("io.kestra.plugin.core.flow.Loop".to_string(), 4),
                     ("io.kestra.plugin.core.flow.Parallel".to_string(), 1),
+                    ("io.kestra.plugin.core.flow.Pause".to_string(), 1),
                     ("io.kestra.plugin.core.flow.Sequential".to_string(), 7),
+                    ("io.kestra.plugin.core.flow.WorkingDirectory".to_string(), 1),
                 ])
             ),
-            "17 flows write a flow-level `errors:`, and 9 tasks write one -- on \
-             three of the five flowables W1 now models it on. `If` and `Switch` \
-             carry the field because Java does (`If.java:111`, \
-             `Switch.java:112`) and no corpus flow writes one there. The single \
-             `Dag` and the single `Parallel` are `valids/finally-dag` and \
-             `valids/finally-parallel`, which both ALSO write a `finally:` no \
-             W3a task implements, so neither can bank on the `errors:` arm alone"
+            "17 flows write a flow-level `errors:` and 18 TASKS write one, on \
+             SEVEN types -- derived from the YAML, so a type W1 does not model \
+             still appears here. Round 0 matched on W1's parsed kind and could \
+             only ever report the five types that already had the field.\n\n\
+             The denominator is all **345** corpus flows, `invalids/` included, \
+             and that is worth two tasks rather than a footnote. Counting only \
+             `valids/` gives `Loop` 3 and `Sequential` 6: the missing `Loop` is \
+             `invalids/loop-switch-failed`, which Task 1 measured is NOT an \
+             invalid flow at all -- Kestra's own `RunContextTest` runs it and \
+             `golden.json` holds it with verdict `runs` -- and the missing \
+             `Sequential` is `invalids/duplicate`, which egret over-accepts \
+             today. So the `valids/`-only reading drops one flow this oracle \
+             genuinely compares and one that exposes a known over-acceptance, \
+             which is why `every_corpus_flow()` is the population everywhere in \
+             this crate"
+        );
+        assert_eq!(
+            gaps,
+            BTreeMap::from([(
+                "io.kestra.plugin.core.flow.Loop".to_string(),
+                BTreeSet::from([
+                    "invalids/loop-switch-failed".to_string(),
+                    "valids/all-flowable".to_string(),
+                    "valids/finally-loop".to_string(),
+                    "valids/finally-loop-parallel".to_string(),
+                ])
+            )]),
+            "the ONE type `advance()` drives whose `errors:` `build_plan` cannot \
+             read. `models::Loop` has no `errors` field, so `plan.rs` has no \
+             `Loop` arm. All FOUR flows are baselined, so nothing banks on it -- \
+             and `invalids/loop-switch-failed` is one of them, a `runs` entry \
+             despite its directory. It is debt, it is named in \
+             `oracle-exec/README.md`'s unclaimed table, and this is what fails \
+             if a fifth appears or if someone closes it without deleting this \
+             line"
         );
     }
 
