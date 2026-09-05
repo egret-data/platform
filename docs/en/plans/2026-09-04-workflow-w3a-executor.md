@@ -644,6 +644,36 @@ The README must close with what this oracle does **not** prove: the corpus is Ke
 
 ---
 
+## States and constructs no W3a task claims
+
+Task 3 measured a gap this plan left open, and leaving it implicit is how an
+entry ends up permanently baselined with nobody able to say why:
+
+| state | golden runs | produced by | owner |
+|---|---|---|---|
+| `PAUSED` | 18 | `Pause` | W8 |
+| `SKIPPED` | 4 | `disabled:` | **unclaimed — assign before W3a closes** |
+| `CANCELLED` | 3 | flow concurrency | W8 |
+
+`disabled:` belongs to no package in the programme spec. It is a task-level flag,
+not a flowable, so it is arguably W1's model or W8's semantics — but it is
+currently nobody's, and its four entries would sit baselined forever with no
+owner named. The oracle README must carry this table, and W3a's final review must
+either assign `disabled:` or record the decision to defer it with a reason.
+
+Two more blockers Task 3 measured that are **not** W3a's to fix, and which the
+README must name so a later task does not rediscover them:
+
+- **An over-refusal already on main.** `build_plan` refuses
+  `valids/switch-impossible`, which Kestra *ran*: W1's bare `Vec<Task>` fields
+  reject an explicit `null` that Jackson accepts. Over-refusal is the mirror of
+  the divergence class this programme forbids, and 2 of the 6 banked refusals
+  are right only by accident of the same rule. W1's model owns it; Task 8's
+  per-group message assertions must not be built on it.
+- **Task 7 is blocked on the W1 model, not on the executor type.**
+  `models::Sequential` drops Java's `errors` and `finally`, so `PlanTask::errors`
+  cannot be populated at all until W1's model carries them.
+
 ## Final review
 
 After Task 8, dispatch the whole-branch review on the most capable model. W2's lesson: the whole-branch review found a Critical that eight task reviews could not, because it lived in the seam between two tasks. The seams here are `plan.rs` (every task adds a variant) and `baseline.txt` (every task deletes lines from a file no single task owns).
