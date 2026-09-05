@@ -41,18 +41,33 @@
 //! and for the same reason: an implementation that spins is a broken
 //! instrument, not a wrong answer.
 //!
-//! # What the oracle FEEDS IN, and why that is not circular
+//! # What the oracle FEEDS IN, what it costs, and where it IS circular
 //!
 //! `advance()` does not decide whether a `Log` task succeeds — Kestra's
 //! executor does not either; its worker does. So [`simulate`] supplies exactly
-//! one thing from the golden: **the terminal state of a run whose `PlanTask`
-//! is `Runnable`**. Everything else — which runs are created, in what order,
-//! under which parent, with what history, and what the execution's own state
-//! does — is egret's, and is what is compared.
+//! one thing from the golden, and this section says precisely what, because an
+//! earlier version of it overclaimed.
 //!
-//! Feeding a *flowable's* state would be circular, and is not done: a
+//! **Fed:** the last element of the `state` sequence of a run whose `PlanTask`
+//! is `Runnable`, and of each of that run's attempts — see [`golden_outcome`].
+//!
+//! **Not fed, and therefore compared:** which runs are created, in what order,
+//! under which parent, with what `value`; every state in a run's history
+//! *except* its last; the whole of a **flowable's** history including its last;
+//! the execution's own history; the happens-before relation; the
+//! sub-executions.
+//!
+//! Feeding a *flowable's* state would be circular in the way that matters: a
 //! `Sequential`, `Parallel`, `Dag`, `If`, `Switch` or `Loop` run's state is the
 //! executor's decision and is exactly what this oracle exists to judge.
+//!
+//! **It IS circular with respect to `golden.json` for that one field.** Proven,
+//! not argued: rewriting the golden's `valids/minimal2` terminal to `KILLED`,
+//! an outcome Kestra never produced for that flow, leaves this test **green**,
+//! because [`golden_outcome`] feeds the same lie into egret's side. A
+//! normalisation bug or a capture anomaly *in that one field* is invisible in
+//! both directions. What contains it is that `golden.json` is machine-derived
+//! and re-derivable — `oracle-exec/README.md` has the argument in full.
 //!
 //! # `corpus.json` and `golden.json` must describe the same flows
 //!
@@ -65,7 +80,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use egret_workflow::executor::{
-    advance, apply, build_plan, ExecutionState, Plan, RunState, TaskKind, Tick,
+    advance, apply, build_plan, ExecutionState, Plan, RunIx, RunState, TaskKind, Tick,
 };
 use serde::Deserialize;
 
@@ -283,41 +298,102 @@ fn corpus_source(id: &str) -> String {
     panic!("no corpus file for {id} under {ORACLE}/corpus/ with either extension");
 }
 
-/// The terminal state the golden recorded for the run at `ix`, as something
-/// `RunState` can hold.
+/// The terminal state the golden recorded for **attempt `attempt` of the run
+/// at `ix`**, as something `RunState` can hold.
+///
+/// Per-attempt, not per-run. Feeding the run's final state on every attempt
+/// makes a run whose attempts end differently unreproducible, and four such
+/// runs exist: `valids/retry-success`'s `failed` (FAILED, FAILED, FAILED,
+/// SUCCESS), `valids/retry-with-flowable-errors`'s `run_script`, and both
+/// `subflow1` and `subflow2` in `valids/subflow-parent-retry`. Those would have
+/// been four permanent baseline lines waiting for Task 7 to discover.
 ///
 /// The measured vocabulary is wider than `RunState` (see its doc): anything
 /// egret cannot represent is fed as `Failed`, which makes the entry mismatch —
 /// visibly, in the report — rather than quietly turning into a `Success` that
 /// happens to agree.
-fn golden_outcome(golden: &Trace, ix: usize) -> RunState {
-    match golden
-        .runs
-        .get(ix)
-        .and_then(|r| r.state.last())
-        .map(String::as_str)
-    {
+///
+/// `ix` is **egret's** run index used to look up **Kestra's** run. Once the two
+/// have diverged that feeds one run's outcome to another. It cannot cause a
+/// false pass — the trace already differs, which is why the indices diverged —
+/// but the failure report is then harder to read, and the reader has to get the
+/// alignment from the expected/actual run lists the report prints side by side
+/// rather than from the fed value. Aligning by task id instead would guess at
+/// which run the author meant, which is worse.
+fn golden_outcome(golden: &Trace, ix: usize, attempt: usize) -> RunState {
+    let last = golden.runs.get(ix).and_then(|r| {
+        r.attempts
+            .get(attempt)
+            .and_then(|a| a.last())
+            .or_else(|| r.state.last())
+    });
+    match last.map(String::as_str) {
         Some("SUCCESS") => RunState::Success,
         Some("KILLED") => RunState::Killed,
         _ => RunState::Failed,
     }
 }
 
+/// The first run the worker is still holding: a `Runnable` whose latest state
+/// is `Running`.
+fn in_flight(plan: &Plan, state: &ExecutionState) -> Option<RunIx> {
+    (0..state.runs.len()).find(|&ix| {
+        let r = &state.runs[ix];
+        matches!(
+            plan.tasks.get(r.task).map(|t| &t.kind),
+            Some(TaskKind::Runnable { .. })
+        ) && r.history.last() == Some(&RunState::Running)
+    })
+}
+
 /// Run `advance()` to a fixed point and build the trace it produced.
 ///
-/// See this module's doc for the one thing this feeds in from the golden and
-/// why that is not circular.
+/// See this module's doc for exactly what this feeds in from the golden, what
+/// that costs, and why it is not circular with respect to `advance()`.
+///
+/// # The environment has three tiers, in this order
+///
+/// 1. **`advance()` decides.** If it emits commands, they are applied and it is
+///    asked again. Nothing else happens while it still has work.
+/// 2. **The worker finishes ONE task.** Only when `advance()` returns nothing:
+///    the earliest-created `Runnable` still `Running` reaches the terminal state
+///    the golden recorded for its current attempt.
+/// 3. **Time passes.** Only when `advance()` has nothing to do and nothing is in
+///    flight: `now` jumps to the earliest `not_before` still ahead of it. Time
+///    never moves while anything else can happen, so a `timeout` cannot fire
+///    early and a `ScheduleRetry` cannot deadlock the simulation.
+///
+/// **Tier 2 is the reason for this shape, and it was an accident of loop order
+/// before.** The environment used to complete every `Running` task at the top of
+/// the loop, *before* every `advance()` call, so `advance()` was never once
+/// invoked with a task in flight — proven dead: a `Some(RunState::Running)`
+/// branch added to the state machine had zero effect on the ratchet. Every
+/// worker was zero-latency and no interleaving was ever simulated, which put
+/// concurrency caps, `WaitFor` and timeouts — Tasks 5, 6 and 7's subjects —
+/// out of reach of the instrument meant to judge them. Now the in-flight state
+/// is a state `advance()` is consulted in, and completions are one at a time so
+/// that "two running, one finishes" is a state that occurs.
 fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
     let mut state = ExecutionState::new(plan);
-    // The step at which each run started and terminated. Integers, not clocks:
-    // the happens-before relation is a claim about SERIALISATION, and a pure
-    // state machine serialises in `advance()` rounds. Same predicate as
-    // `normalise.py`'s, over step numbers instead of timestamps.
-    let mut started: Vec<Option<usize>> = Vec::new();
+    // The step at which each run was CREATED and at which it terminated.
+    // Integers, not clocks: the happens-before relation is a claim about
+    // SERIALISATION, and a pure state machine serialises in `advance()` rounds.
+    //
+    // The left endpoint is **creation**, not `StartRun`, because that is what
+    // Kestra's is: `state.startDate` equals `histories[0].date` in 4215 of 4215
+    // captured runs, and `histories[0].state` is `CREATED` in all 4215. Taking
+    // `StartRun` instead made egret's interval a strict sub-interval of
+    // Kestra's, so `Kestra-before` implied `egret-before` and never the
+    // converse — egret's `before` set was a superset, which is over-acceptance,
+    // the one divergence class this programme forbids shipping. On
+    // `valids/after-execution` it let an `advance()` that creates both runs in
+    // one round and only then serialises them match `[[0,1,"before"]]` exactly.
+    let mut created: Vec<Option<usize>> = Vec::new();
     let mut ended: Vec<Option<usize>> = Vec::new();
 
     let bound = step_bound();
     let mut step = 0usize;
+    let mut now = Tick(0);
     loop {
         if step > bound {
             return Err(format!(
@@ -326,44 +402,54 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
             ));
         }
 
-        // The environment: a runnable task the worker picked up finishes.
-        for ix in 0..state.runs.len() {
-            let r = &state.runs[ix];
-            let is_runnable = matches!(
-                plan.tasks.get(r.task).map(|t| &t.kind),
-                Some(TaskKind::Runnable { .. })
-            );
-            if is_runnable && r.history.last() == Some(&RunState::Running) {
-                let outcome = golden_outcome(golden, ix);
-                apply(
-                    &mut state,
-                    &egret_workflow::executor::Command::SetRunState {
-                        run: ix,
-                        state: outcome,
-                    },
-                );
-                ended[ix] = Some(step);
+        // Tier 1.
+        let cmds = advance(plan, &state, now);
+        if !cmds.is_empty() {
+            for cmd in &cmds {
+                use egret_workflow::executor::Command::*;
+                match cmd {
+                    CreateRun { .. } => {
+                        created.push(Some(step));
+                        ended.push(None);
+                    }
+                    SetRunState { run, state: s } if s.is_terminal() => ended[*run] = Some(step),
+                    _ => {}
+                }
+                apply(&mut state, cmd);
             }
+            step += 1;
+            continue;
         }
 
-        let cmds = advance(plan, &state, Tick(0));
-        if cmds.is_empty() {
-            break;
+        // Tier 2.
+        if let Some(ix) = in_flight(plan, &state) {
+            let attempt = state.runs[ix].attempts.len().saturating_sub(1);
+            apply(
+                &mut state,
+                &egret_workflow::executor::Command::SetRunState {
+                    run: ix,
+                    state: golden_outcome(golden, ix, attempt),
+                },
+            );
+            ended[ix] = Some(step);
+            step += 1;
+            continue;
         }
-        for cmd in &cmds {
-            use egret_workflow::executor::Command::*;
-            match cmd {
-                CreateRun { .. } => {
-                    started.push(None);
-                    ended.push(None);
-                }
-                StartRun { run } => started[*run] = Some(step),
-                SetRunState { run, state: s } if s.is_terminal() => ended[*run] = Some(step),
-                _ => {}
+
+        // Tier 3.
+        let next_deadline = state
+            .runs
+            .iter()
+            .filter_map(|r| r.not_before)
+            .filter(|t| *t > now)
+            .min();
+        match next_deadline {
+            Some(t) => {
+                now = t;
+                step += 1;
             }
-            apply(&mut state, cmd);
+            None => break,
         }
-        step += 1;
     }
 
     let runs: Vec<Run> = state
@@ -389,7 +475,7 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
     let mut order = Vec::new();
     for i in 0..runs.len() {
         for j in (i + 1)..runs.len() {
-            if let Some(rel) = step_relation(started[i], ended[i], started[j], ended[j]) {
+            if let Some(rel) = step_relation(created[i], ended[i], created[j], ended[j]) {
                 order.push((i, j, rel.to_string()));
             }
         }
@@ -400,15 +486,19 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
         value: None,
         execution: state.history.iter().map(|s| s.wire().to_string()).collect(),
         runs,
+        order,
         // Task 6 wires `Command::SpawnExecution` through; until then egret
         // spawns nothing and every entry with a sub-execution mismatches here.
         // `oracle-exec/README.md` records that hole with its count.
-        order,
         spawned: Vec::new(),
     })
 }
 
-/// `normalise.py`'s predicate, over step numbers.
+/// `normalise.py`'s predicate, over step numbers instead of timestamps.
+///
+/// The same predicate, and now over the same endpoints: creation on the left,
+/// termination on the right, strict on both sides. See [`simulate`] for what it
+/// cost when only the right-hand endpoints matched.
 fn step_relation(
     a_start: Option<usize>,
     a_end: Option<usize>,
@@ -472,6 +562,132 @@ struct Findings<'a> {
     banked: &'a [&'a String],
     /// Per-id expected/actual detail, for the ones that have it.
     detail: &'a BTreeMap<String, String>,
+}
+
+/// **The fed outcome is per ATTEMPT, not per run.**
+///
+/// Four runs in the golden have attempts that end differently — measured, not
+/// assumed: `valids/retry-success`'s `failed` (FAILED, FAILED, FAILED, SUCCESS,
+/// with the run itself ending WARNING), `valids/retry-with-flowable-errors`'s
+/// `run_script`, and both `subflow1` and `subflow2` in
+/// `valids/subflow-parent-retry`. Feeding the run's final state on every attempt
+/// makes all four unreproducible — four permanent baseline lines for Task 7 to
+/// discover. Changing [`golden_outcome`] back to `r.state.last()` compiles
+/// cleanly; this is what dies.
+#[test]
+fn the_fed_outcome_is_per_attempt_not_per_run() {
+    let golden = golden();
+    let entry = golden
+        .iter()
+        .find(|e| e.id == "valids/retry-success")
+        .expect("golden.json must carry valids/retry-success");
+    let trace = Trace::from(entry);
+    let ix = trace
+        .runs
+        .iter()
+        .position(|r| r.task == "failed")
+        .expect("valids/retry-success must have a run called `failed`");
+
+    assert_eq!(
+        trace.runs[ix].attempts.len(),
+        4,
+        "the measurement this test rests on has moved"
+    );
+    assert_eq!(
+        trace.runs[ix]
+            .attempts
+            .iter()
+            .map(|a| a.last().unwrap().as_str())
+            .collect::<Vec<_>>(),
+        vec!["FAILED", "FAILED", "FAILED", "SUCCESS"],
+        "the measurement this test rests on has moved"
+    );
+
+    assert_eq!(
+        golden_outcome(&trace, ix, 0),
+        RunState::Failed,
+        "attempt 0 ended FAILED and must be fed as Failed"
+    );
+    assert_eq!(
+        golden_outcome(&trace, ix, 3),
+        RunState::Success,
+        "attempt 3 ended SUCCESS and must be fed as Success -- a per-RUN outcome \
+         would feed this on attempt 0 too and no retry could ever be reproduced"
+    );
+    // The run itself ends WARNING, which `RunState` cannot hold, so the
+    // out-of-range fallback is Failed rather than a Success that agrees by luck.
+    assert_eq!(golden_outcome(&trace, ix, 9), RunState::Failed);
+}
+
+/// The ratchet's whole arithmetic: which baseline lines are stale, which
+/// mismatches are regressions, and which baselined ids have been earned.
+///
+/// A pure function for the same reason [`assemble_failures`] is — the rule
+/// below is otherwise unreachable by any test, because a green run sits exactly
+/// at baseline with all three lists empty.
+///
+/// **A panicked id is not banked.** It lands in `panicked` and never in
+/// `mismatched`, so `!mismatched.contains(id)` alone read a baselined entry
+/// that CRASHED as one that now matches. Measured, with `build_plan` panicking
+/// on 7 flows: the run reported the PANIC arm *and* `PROGRESS NOT BANKED: 7
+/// entr(y/ies) ... now MATCH. Delete these lines` — telling a maintainer to bank
+/// progress on seven entries that could not run at all. A ratchet that hands out
+/// a free pass for a crash is the failure this file exists to prevent.
+fn classify<'a>(
+    golden_ids: &BTreeSet<String>,
+    baseline: &'a BTreeSet<String>,
+    mismatched: &'a BTreeSet<String>,
+    panicked: &[String],
+) -> (Vec<&'a String>, Vec<&'a String>, Vec<&'a String>) {
+    let stale = baseline
+        .iter()
+        .filter(|id| !golden_ids.contains(*id))
+        .collect();
+    let regressions = mismatched
+        .iter()
+        .filter(|id| !baseline.contains(*id))
+        .collect();
+    let banked = baseline
+        .iter()
+        .filter(|id| {
+            golden_ids.contains(*id) && !mismatched.contains(*id) && !panicked.contains(id)
+        })
+        .collect();
+    (stale, regressions, banked)
+}
+
+/// **A baselined id that PANICKED is not "progress".**
+///
+/// The rule in [`classify`], which nothing else reaches: a green run has all
+/// three lists empty. Deleting `&& !panicked.contains(id)` compiles cleanly and
+/// leaves every other test green; this is what dies.
+#[test]
+fn a_baselined_id_that_panicked_is_not_reported_as_banked() {
+    let id = "valids/sequential".to_string();
+    let golden_ids = BTreeSet::from([id.clone(), "valids/parallel".to_string()]);
+    let baseline = BTreeSet::from([id.clone(), "valids/parallel".to_string()]);
+    let mismatched = BTreeSet::from(["valids/parallel".to_string()]);
+    let panicked = vec![id.clone()];
+
+    let (stale, regressions, banked) = classify(&golden_ids, &baseline, &mismatched, &panicked);
+    assert!(stale.is_empty(), "nothing here is stale; got {stale:?}");
+    assert!(
+        regressions.is_empty(),
+        "the mismatching id IS baselined, so it is not a regression; got {regressions:?}"
+    );
+    assert!(
+        banked.is_empty(),
+        "an id that PANICKED must never be reported as progress to bank; got {banked:?}"
+    );
+
+    // And the same id, baselined and merely matching, IS banked -- so the
+    // assertion above is about the panic and not about `banked` never firing.
+    let (_, _, banked) = classify(&golden_ids, &baseline, &mismatched, &[]);
+    assert_eq!(
+        banked,
+        vec![&"valids/sequential".to_string()],
+        "with nothing panicking, a baselined id that matches must be banked"
+    );
 }
 
 /// Turns [`Findings`] into the failure message, or an empty string.
@@ -896,18 +1112,8 @@ fn executor_matches_golden() {
         }
     }
 
-    let stale: Vec<&String> = baseline
-        .iter()
-        .filter(|id| !golden.iter().any(|e| &e.id == *id))
-        .collect();
-    let regressions: Vec<&String> = mismatched
-        .iter()
-        .filter(|id| !baseline.contains(*id))
-        .collect();
-    let banked: Vec<&String> = baseline
-        .iter()
-        .filter(|id| golden.iter().any(|e| &e.id == *id) && !mismatched.contains(*id))
-        .collect();
+    let golden_ids: BTreeSet<String> = golden.iter().map(|e| e.id.clone()).collect();
+    let (stale, regressions, banked) = classify(&golden_ids, &baseline, &mismatched, &panicked);
 
     println!(
         "oracle-exec ratchet: {} golden entries, {} mismatching, {} baselined, {} broken",

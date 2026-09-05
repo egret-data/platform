@@ -830,18 +830,88 @@ the thing it checks shares its clock.
 Current result: **2050 captured executions re-read identically, and every
 descendant set unchanged.**
 
-### What the oracle feeds in, and why that is not circular
+### What the oracle feeds in, what it costs, and where it IS circular
 
 `advance()` does not decide whether a `Log` task succeeds — Kestra's executor
 does not either; its *worker* does. So `tests/executor.rs` supplies exactly one
-thing from the golden: **the terminal state of a run whose `PlanTask` is
-`Runnable`**. Everything else — which runs are created, in what order, under
-which parent, with what history, and what the execution's own state does — is
-egret's, and is what is compared.
+thing from the golden, and this section says precisely what, because an earlier
+version of it overclaimed.
 
-Feeding a *flowable's* state would be circular, and is not done: a `Sequential`,
-`Parallel`, `Dag`, `If`, `Switch` or `Loop` run's state is the executor's
-decision and is exactly what this oracle exists to judge.
+**Fed:** the last element of the `state` sequence of a run whose `PlanTask` is
+`Runnable`, and of each of that run's attempts. Per attempt, not per run — four
+runs in the golden have attempts that end differently (`retry-success`'s
+`failed`: FAILED, FAILED, FAILED, SUCCESS) and a per-run outcome makes them
+unreproducible.
+
+**Not fed, and therefore compared:** which runs are created, in what order,
+under which parent, with what `value`; every state in a run's history *except*
+its last; the whole of a **flowable's** history including its last; the
+execution's own history; the happens-before relation; and the sub-executions.
+Feeding a flowable's state would be circular in the way that matters — a
+`Sequential`, `Parallel`, `Dag`, `If`, `Switch` or `Loop` run's state is the
+executor's decision and is exactly what this oracle exists to judge.
+
+**The oracle is non-circular with respect to `advance()` — which is what it is
+for — and circular with respect to `golden.json` for that one field.** The
+review demonstrated the containment rather than arguing it: rewriting
+`golden.json`'s `valids/minimal2` terminal to `KILLED`, an outcome Kestra never
+produced for that flow, left the ratchet **green**, because the same lie went
+into egret's side through the fed value. So a normalisation bug or a capture
+anomaly *in that one field* is invisible in both directions.
+
+How much of the golden that covers is **not** re-derivable here, and the figure
+is quoted rather than measured: the review's own plan builder put it at **812 of
+the golden's 840 run terminals**. This package has no plan builder yet — that is
+Task 3 — so it cannot reproduce that split. What it can count is the two ends of
+the bracket: 840 run terminals in the golden altogether, of which 120 belong to
+runs that are the parent of another run and are therefore certainly flowables,
+whose terminals are never fed. Task 3 should replace this paragraph with the
+exact number once `build_plan` can answer it.
+
+What makes that acceptable is not the argument, it is that `golden.json` is
+machine-derived and re-derivable: `normalise.py` at HEAD reproduces both it and
+`stability.json` byte-identically from the committed `traces.json`, and
+`--verify-traces` re-reads every captured execution against the live Kestra. The
+one field nobody can catch by comparison is the one field nobody hand-writes.
+
+### The environment has three tiers, and tier 2 was an accident
+
+The oracle is a *caller*, and a caller decides when the worker's answers arrive.
+`tests/executor.rs` does it in three tiers, strictly in this order:
+
+1. **`advance()` decides.** If it emits commands they are applied and it is
+   asked again. Nothing else happens while it still has work.
+2. **The worker finishes ONE task.** Only when `advance()` returns nothing: the
+   earliest-created `Runnable` still `Running` reaches the terminal state the
+   golden recorded **for its current attempt**.
+3. **Time passes.** Only when `advance()` has nothing to do and nothing is in
+   flight: `now` jumps to the earliest `not_before` still ahead of it.
+
+**Tier 2 is a deliberate choice now and was an accident of loop order before.**
+The first version completed every `Running` task at the top of the loop, *before*
+every `advance()` call — so `advance()` was never once invoked with a task in
+flight. That is not an inference: an `advance()` that panics the moment it sees
+a `Runnable` in `Running` **does not fire at all** under the old order and fires
+immediately under the new one. Every worker was zero-latency and no interleaving
+was ever simulated, which put concurrency caps, `WaitFor` and timeouts — Tasks
+5, 6 and 7's subjects — out of reach of the instrument built to judge them.
+
+Completing **one** task rather than all of them is part of the same choice: "two
+running, one finishes, `advance()` is asked what to do" is the state a
+concurrency limit is about, and it does not exist if the environment finishes
+everything at once. It is safe for the happens-before relation because a run's
+left endpoint is its *creation* step, so siblings created in one round stay
+`overlapping` whatever order they finish in.
+
+Tier 3 is a rule, not a sleep: time moves only when nothing else can happen, and
+only to a deadline something is already waiting for. So a `ScheduleRetry` cannot
+deadlock the simulation, and a `timeout` cannot fire early. **What it cannot do
+is fire a `timeout` at all from elapsed work** — no tier advances `now` because a
+task took a while, since a pure state machine has no way to be told that and the
+golden's durations are dropped. Any flow whose observable behaviour depends on
+elapsed time is out of this oracle's reach; the two such flows in the corpus
+(`retry-failed-task-duration`, `waitfor-max-duration`) are exactly the two whose
+traces did not reproduce across five rounds, and are excluded for that reason.
 
 ## The happens-before relation
 
@@ -902,17 +972,36 @@ prints the same table over the same flows — the ones that reached the golden �
 and `stability.json` lists every dropped pair with the five relations it was
 seen as.
 
-The kept pairs are **743 `before`, 361 `overlapping`
-and 0 `after`**. `after` is empty and that is not an accident: a
-pair is only ever emitted as `(i, j)` with `i < j` in `taskRunList` order, which
-is creation order, so a run that finished before an earlier-created one even
-started would have to be a task created late and finished first. No corpus flow
-does that, five times running.
+The kept pairs are **743 `before` and 361 `overlapping`**. There are no `after`
+pairs, and that is **unreachable by construction, not a measurement**: pairs are
+enumerated `(i, j)` with `i < j` in `taskRunList` order, and a run's left
+endpoint is its creation instant, which is monotonic in that order in 4215 of
+4215 captured runs — so `after` would need a run to end before it was created.
+It is kept in the vocabulary because it is still a live error signal on egret's
+side, where nothing guarantees that monotonicity; it is not evidence about
+Kestra.
 
 `tests/executor.rs` derives the same relation from egret with the same
 predicate over **`advance()` round numbers** instead of timestamps. That is the
 point: a pure state machine has no clock, and its rounds are exactly what
 serialisation means to it.
+
+**The same predicate has to mean the same endpoints, and once it did not.**
+Kestra's left endpoint is a run's **creation** instant — `state.startDate`
+equals `histories[0].date` in 4215 of 4215 captured runs, and that first history
+state is `CREATED` in all 4215. egret's was recorded on `StartRun`, the
+**RUNNING** transition. That makes egret's interval a strict sub-interval of
+Kestra's, so `Kestra-before` implies `egret-before` and never the converse:
+egret's `before` set was a **superset**, which is over-acceptance — the one
+divergence class this programme forbids shipping.
+
+It was not theoretical. `valids/labels-update-task-deduplicate` is two runs with
+`order: [[0, 1, "before"]]`, which means Kestra did not create `from-list` until
+`from-string` had terminated. An `advance()` that creates **both** runs in one
+round and only then serialises them was **accepted** — the ratchet reported the
+entry as matching and told the maintainer to bank it. With the left endpoint
+moved to creation, the same `advance()` produces `overlapping` and the entry
+correctly mismatches.
 
 ### Traces that did not reproduce
 
@@ -992,12 +1081,24 @@ Two of these are load-bearing:
   attempts and a history of `CREATED SUBMITTED RUNNING FAILED RETRYING` four
   times over.
 
-`executor::RunState` currently has six members and cannot represent
-`CANCELLED`, `PAUSED`, `RETRIED`, `SKIPPED`, `SUBMITTED` or `WARNING`. That is
-left as the plan drafted it — Task 3 owns the type — and recorded here rather
-than worked around in the normaliser, because a
-normaliser that quietly maps an unrepresentable state onto a representable one
-is a normaliser that hides the gap it was built to expose.
+The table above is **run** histories. `Command::SetExecutionState` carries a
+`RunState` too, so the vocabulary `RunState` actually has to cover is the union
+of both, and that union is **13**, not 12: `RESTARTED` appears 60 times in
+execution histories and **never** in a run history. Going the other way,
+`SKIPPED` and `SUBMITTED` appear only in run histories.
+
+`executor::RunState` has six members, so **7 of the 13 are unrepresentable** —
+`CANCELLED`, `PAUSED`, `RESTARTED`, `RETRIED`, `SKIPPED`, `SUBMITTED`,
+`WARNING`. That is left as the plan drafted it (Task 3 owns the type) and
+recorded here rather than worked around in the normaliser, because a normaliser
+that quietly maps an unrepresentable state onto a representable one is a
+normaliser that hides the gap it was built to expose.
+
+**What that costs, exactly.** Of the 266 `runs` entries, **35** use only states
+the six members can already hold — so zero is reachable today, on a real trace,
+and "nothing can be banked until the enum widens" would be false. Adding
+`SUBMITTED` alone takes that from 35 to **229**, which is the single cheapest
+thing any later task can do to this oracle.
 
 ## What Task 2 had to add to the interfaces
 
@@ -1041,12 +1142,22 @@ fail is an arm nobody has seen.
 | `panics` | the state machine panicked, or would not settle inside the step bound | neutering the arm (`if false && …`) kills `a_panic_fails_even_when_the_ratchet_is_satisfied` and nothing else |
 | `stale` | a baseline line names an id `golden.json` does not have | neutering kills `a_stale_baseline_line_fails_and_names_it`; and a bogus line added to the real file fails the real ratchet, naming it |
 | `regressions` | an id **not** in the baseline mismatches | neutering kills `a_regression_outside_the_baseline_fails_and_carries_its_detail`; and deleting a real baseline line fails the real ratchet, naming it with its detail |
-| `banked` | an id **in** the baseline now matches | neutering kills `progress_that_is_not_banked_fails_and_names_it`; and making `build_plan` refuse one flow fails the real ratchet, naming the line to delete |
+| `banked` | an id **in** the baseline now matches, **and did not panic** | neutering kills `progress_that_is_not_banked_fails_and_names_it`; and making `build_plan` refuse one flow fails the real ratchet, naming the line to delete. Deleting the `!panicked` exclusion kills `a_baselined_id_that_panicked_is_not_reported_as_banked` |
 
 **A panic is never covered by the baseline.** A baselined id means "egret does
 not reproduce this trace yet"; it never means "egret may crash here". Not
 settling inside the step bound is reported the same way and for the same reason:
 an implementation that spins is a broken instrument, not a wrong answer.
+
+**And a panicked id is not "progress" either**, which took a second pass to get
+right. `banked` was `baseline ∩ golden \ mismatched`, and a panicking id lands
+in `panicked`, never in `mismatched` — so with `build_plan` panicking on three
+flows the ratchet reported the `PANIC` arm **and**
+`PROGRESS NOT BANKED: 3 entr(y/ies) … now MATCH. Delete these lines…`, naming
+three entries that could not run at all. A ratchet that hands out a free pass
+for a crash is the failure this file exists to prevent. `classify()` now
+excludes them, and `a_baselined_id_that_panicked_is_not_reported_as_banked`
+dies if that exclusion is deleted.
 
 ## What this oracle does not prove
 
@@ -1079,6 +1190,9 @@ wrote. Beyond that, the specific holes, each with its count:
   about the flowable. None is known to exist today because nothing is
   implemented yet; Tasks 4 and 6 are the ones that will find out, and the honest
   answer if it happens is to record the pairs, not to weaken the relation.
+- **`advance()` is never asked to react to elapsed time.** `now` moves only to a
+  `not_before` something is waiting for, so `timeout:` cannot fire from work
+  taking too long. See *The environment has three tiers*.
 - **Sub-executions are harvested but not yet produced.** `Command::SpawnExecution`
   arrives in Task 6; until then egret's side of `spawned` is always empty, so
   every one of the 41 golden entries that carries a sub-execution

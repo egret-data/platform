@@ -51,6 +51,18 @@ happens-before pairs, over the five harvest rounds
   dropped, a run had no start or no end        0
   TOTAL                                        1117
 
+  of the kept pairs, by relation
+    before                                     743
+    overlapping                                361
+    TOTAL                                      1104
+
+  `after` is UNREACHABLE BY CONSTRUCTION on Kestra's side, not measured
+  to be absent: pairs are enumerated (i, j) with i < j in taskRunList
+  order, and a run's left endpoint is its creation instant, which is
+  monotonic in that order in 4215 of 4215 captured runs.  It stays in the
+  vocabulary because it is a live error signal on EGRET's side, where
+  nothing guarantees that monotonicity.
+
   A relation observed once is a coincidence, and genuinely parallel
   branches flip.  Only the pairs that came out the same in all five
   rounds are in golden.json; the rest are dropped and counted here.

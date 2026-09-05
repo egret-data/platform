@@ -74,6 +74,24 @@ def order_in(node):
         order_in(sub) for sub in node.get("spawned") or [])
 
 
+# The whole relation vocabulary.  A pair carrying anything else is a hard
+# failure rather than a row nobody prints -- the same rule KNOWN_DISPOSITIONS and
+# KNOWN_REJECTED_CLASSES follow.
+KNOWN_RELATIONS = ("before", "after", "overlapping")
+
+
+def count_relations(cid, node, counter):
+    """Tally golden.json's order relations, sub-executions included."""
+    for pair in node.get("order") or []:
+        rel = pair[2]
+        if rel not in KNOWN_RELATIONS:
+            bail(f"{cid}: order pair {pair[:2]} carries relation {rel!r}, which is not "
+                 f"a known relation {list(KNOWN_RELATIONS)}")
+        counter[rel] += 1
+    for sub in node.get("spawned") or []:
+        count_relations(cid, sub, counter)
+
+
 def order_table(golden, stab):
     """The happens-before relation: kept, and what had to be dropped.
 
@@ -92,7 +110,9 @@ def order_table(golden, stab):
              f"{missing[:5]}; the two files describe different harvests")
 
     kept = unstable = unmeasurable = 0
+    by_relation = Counter()
     for cid, entry in sorted(by_id.items()):
+        count_relations(cid, entry, by_relation)
         rec = stab["flows"][cid]
         have = (rec["pairs_kept"] + rec["pairs_dropped_unstable"]
                 + rec["pairs_dropped_unmeasurable"])
@@ -113,6 +133,23 @@ def order_table(golden, stab):
     lines.append(f"  {'dropped, relation flipped between rounds':<44} {unstable}")
     lines.append(f"  {'dropped, a run had no start or no end':<44} {unmeasurable}")
     lines.append(f"  {'TOTAL':<44} {kept + unstable + unmeasurable}")
+    lines.append("")
+    # Rows for every relation PRESENT, never a hand-written list, and derived
+    # from golden.json's `order` entries -- a SECOND derivation of the number
+    # stability.json reports as `pairs_kept`, which the per-flow check above
+    # reconciles against it.
+    lines.append("  of the kept pairs, by relation")
+    for rel in KNOWN_RELATIONS:
+        if rel in by_relation:
+            lines.append(f"    {rel:<42} {by_relation[rel]}")
+    lines.append(f"    {'TOTAL':<42} {sum(by_relation.values())}")
+    lines.append("")
+    lines.append("  `after` is UNREACHABLE BY CONSTRUCTION on Kestra's side, not measured")
+    lines.append("  to be absent: pairs are enumerated (i, j) with i < j in taskRunList")
+    lines.append("  order, and a run's left endpoint is its creation instant, which is")
+    lines.append("  monotonic in that order in 4215 of 4215 captured runs.  It stays in the")
+    lines.append("  vocabulary because it is a live error signal on EGRET's side, where")
+    lines.append("  nothing guarantees that monotonicity.")
     lines.append("")
     lines.append("  A relation observed once is a coincidence, and genuinely parallel")
     lines.append("  branches flip.  Only the pairs that came out the same in all five")
@@ -1621,6 +1658,37 @@ def self_test():
     finally:
         EXPECTED.clear()
         EXPECTED.update(saved)
+
+    # --- Task 2's two artifacts against each other ----------------------------
+    # Through `order_table`, which validates and writes nothing -- the same rule
+    # this rewrite applied to every case above.
+    golden, stab = load_task2()
+
+    def mutated_golden(fn):
+        g = copy.deepcopy(golden)
+        fn(g)
+        return g
+
+    case("a golden entry with no stability record",
+         "have no stability record",
+         lambda: order_table(golden, {**stab, "flows": {
+             k: v for k, v in stab["flows"].items()
+             if k != next(e["id"] for e in golden if e["verdict"] == "runs")}}))
+    case("golden run counts stability.json cannot account for",
+         "run counts give",
+         lambda: order_table(mutated_golden(lambda g: next(
+             e for e in g if e["verdict"] == "runs" and e["runs"])["runs"].append(
+                 {"task": "x", "value": None, "parent": None,
+                  "state": ["CREATED"], "attempts": []})), stab))
+    case("golden order pairs the stability filter did not keep",
+         "the stability filter and the golden writer disagree",
+         lambda: order_table(mutated_golden(lambda g: next(
+             e for e in g if e["verdict"] == "runs" and e["order"])["order"].pop()), stab))
+    case("an order relation outside the vocabulary",
+         "is not a known relation",
+         lambda: order_table(mutated_golden(lambda g: next(
+             e for e in g if e["verdict"] == "runs" and e["order"])["order"][0].__setitem__(
+                 2, "sort-of-before")), stab))
 
     # --- the curated tables ---------------------------------------------------
     NON_DISCRIMINATING_NOTES["valids/does-not-exist"] = "x"

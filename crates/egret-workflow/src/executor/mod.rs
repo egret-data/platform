@@ -121,17 +121,24 @@ pub struct Attempt {
     pub history: Vec<RunState>,
 }
 
-/// The states a run passes through.
+/// The states a run passes through — **and, through
+/// [`Command::SetExecutionState`], the states an execution passes through too**.
+/// One type for both, so the vocabulary it has to cover is the union of both.
 ///
-/// **This vocabulary is narrower than the one the oracle measured**, and
-/// deliberately left as the plan drafted it: Task 3 owns this type. The golden
-/// keeps Kestra's history sequences verbatim, and those carry `SUBMITTED` on
-/// every task the *worker* ran (never on a flowable, which the executor runs),
-/// plus `PAUSED`, `RESTARTED`, `CANCELLED`, `WARNING`, `SKIPPED` and
-/// `RETRIED`. `oracle-exec/README.md` prints the measured vocabulary with
-/// counts. Until this enum covers it, every entry whose trace uses a missing
-/// state is unreachable, which is one of the reasons the baseline starts at
-/// everything.
+/// **That union is 13 states and this enum has 6**, and it is deliberately left
+/// as the plan drafted it: Task 3 owns this type. Measured over `golden.json`,
+/// the seven it cannot represent are `SUBMITTED` (on every task the *worker*
+/// ran, never on a flowable, which the executor runs), `PAUSED`, `RETRIED`,
+/// `WARNING`, `SKIPPED`, `CANCELLED`, and `RESTARTED` — which occurs 60 times
+/// in **execution** histories and not once in a run history, and would have
+/// been missed by looking at run states alone.
+///
+/// `oracle-exec/README.md` prints the measured vocabulary with counts. Until
+/// this enum covers more of it, every entry whose trace uses a missing state is
+/// unreachable — which is one reason the baseline starts at everything. It is
+/// not the whole reason: **35 of the 266 `runs` entries use only these six**, so
+/// zero is reachable today on a real trace, and adding `SUBMITTED` alone takes
+/// that to 229.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
