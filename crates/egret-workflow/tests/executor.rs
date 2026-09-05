@@ -61,13 +61,23 @@
 //! `Sequential`, `Parallel`, `Dag`, `If`, `Switch` or `Loop` run's state is the
 //! executor's decision and is exactly what this oracle exists to judge.
 //!
-//! **It IS circular with respect to `golden.json` for that one field.** Proven,
-//! not argued: rewriting the golden's `valids/minimal2` terminal to `KILLED`,
-//! an outcome Kestra never produced for that flow, leaves this test **green**,
-//! because [`golden_outcome`] feeds the same lie into egret's side. A
-//! normalisation bug or a capture anomaly *in that one field* is invisible in
-//! both directions. What contains it is that `golden.json` is machine-derived
-//! and re-derivable — `oracle-exec/README.md` has the argument in full.
+//! **It IS circular with respect to `golden.json` for that one field**, and the
+//! demonstration has to be one that could have come out the other way.
+//! `oracle-exec/README.md` records it in full; in short, with a state machine
+//! that reproduces `valids/labels-update-task-deduplicate` exactly, rewriting
+//! that entry's run terminal **and** its attempt terminal from `SUCCESS` to
+//! `KILLED` — an outcome Kestra never produced for that flow — leaves the entry
+//! **still matching**, because [`golden_outcome`] feeds the same lie into
+//! egret's side. A normalisation bug or a capture anomaly *in that one field*
+//! is invisible in both directions. What contains it is that `golden.json` is
+//! machine-derived and re-derivable.
+//!
+//! An earlier version of this note used `valids/minimal2` and was **vacuous**:
+//! that entry cannot match under any value, because its golden run history
+//! carries `SUBMITTED`, which [`RunState`] cannot represent. The ratchet
+//! reported the same 294 mismatches before and after, so the experiment
+//! distinguished nothing. A demonstration that survives deleting the mechanism
+//! it demonstrates is not evidence.
 //!
 //! # `corpus.json` and `golden.json` must describe the same flows
 //!
@@ -80,7 +90,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use egret_workflow::executor::{
-    advance, apply, build_plan, ExecutionState, Plan, RunIx, RunState, TaskKind, Tick,
+    advance, apply, build_plan, Command, ExecutionState, Plan, PlanTask, RunIx, RunState, TaskKind,
+    Tick,
 };
 use serde::Deserialize;
 
@@ -267,20 +278,38 @@ enum Outcome {
     Broken(String),
 }
 
-/// How many `advance()` calls one execution may take before the simulation is
-/// declared broken.
+/// How many steps one execution may take before the simulation is declared
+/// broken.
 ///
-/// Derived, not picked. Every `Command` writes at most one history entry
-/// (`CreateRun` adds a run whose history is `[Created]`; `SetRunState` and
-/// `SetExecutionState` push one; `StartRun` pushes one plus one attempt entry),
-/// and a call that emits no command ends the loop — so the number of calls is
-/// bounded by the number of history entries the finished trace holds. The
+/// Derived, not picked, and **re-derived when tiers 2 and 3 arrived**: the
+/// premise this comment used to carry — "a call that emits no command ends the
+/// loop" — stopped being true the moment the environment gained anything to do
+/// after such a call, and the change that invalidated it did not touch the
+/// comment. This is the sole justification for the number that separates
+/// "broken instrument" from "wrong answer", so it gets re-derived rather than
+/// re-asserted.
+///
+/// Every iteration consumes one step and is exactly one of three:
+///
+/// - **tier 1** applies at least one command, and every `Command` writes at
+///   most one history entry (`CreateRun` adds a run whose history is
+///   `[Created]`; `SetRunState` and `SetExecutionState` push one; `StartRun`
+///   pushes one plus one attempt entry). So tier-1 steps ≤ history entries
+///   written.
+/// - **tier 2** writes exactly one history entry (plus one attempt entry). So
+///   tier-2 steps ≤ history entries written.
+/// - **tier 3** writes **none** — it is the one iteration that consumes a step
+///   for nothing. It is still bounded: each jump strictly increases `now` to a
+///   distinct `not_before`, and every `not_before` was written by a
+///   `ScheduleRetry`, which is itself a tier-1 command. So tier-3 steps ≤
+///   tier-1 commands.
+///
+/// Total steps ≤ 3 × (history entries the finished trace holds). The
 /// widest golden entry holds **765** of them across its execution, its runs,
 /// their attempts and its sub-executions — `valids/loop-nested`, whose 39
 /// sub-executions are most of that. Measured over all of `golden.json`. The
-/// factor of 4 is headroom for commands that write nothing (`ScheduleRetry`)
-/// and for an implementation that is correct but takes more rounds than
-/// Kestra's did.
+/// factor of 4 covers the 3 above with headroom for an implementation that is
+/// correct but takes more rounds than Kestra's did.
 const MEASURED_MAX_HISTORY: usize = 765;
 fn step_bound() -> usize {
     4 * MEASURED_MAX_HISTORY
@@ -336,6 +365,16 @@ fn golden_outcome(golden: &Trace, ix: usize, attempt: usize) -> RunState {
 
 /// The first run the worker is still holding: a `Runnable` whose latest state
 /// is `Running`.
+///
+/// **Earliest-created, deliberately.** `find` over `0..len` means the
+/// environment always completes the oldest in-flight run first, so exactly ONE
+/// interleaving is reachable: "the later-created one finishes first" never
+/// happens here. That costs nothing for the happens-before relation — a run's
+/// left endpoint is its creation step, so completion order cannot turn an
+/// `overlapping` pair into a `before` one — but Tasks 5 and 7 must know that
+/// worker return order is pinned to creation order, because a concurrency cap
+/// or an `errors:` path that behaves differently when the *second* task returns
+/// first is not exercised by this oracle.
 fn in_flight(plan: &Plan, state: &ExecutionState) -> Option<RunIx> {
     (0..state.runs.len()).find(|&ix| {
         let r = &state.runs[ix];
@@ -346,38 +385,55 @@ fn in_flight(plan: &Plan, state: &ExecutionState) -> Option<RunIx> {
     })
 }
 
-/// Run `advance()` to a fixed point and build the trace it produced.
+/// Run the state machine to a fixed point and build the trace it produced.
 ///
 /// See this module's doc for exactly what this feeds in from the golden, what
 /// that costs, and why it is not circular with respect to `advance()`.
 ///
 /// # The environment has three tiers, in this order
 ///
-/// 1. **`advance()` decides.** If it emits commands, they are applied and it is
-///    asked again. Nothing else happens while it still has work.
-/// 2. **The worker finishes ONE task.** Only when `advance()` returns nothing:
-///    the earliest-created `Runnable` still `Running` reaches the terminal state
-///    the golden recorded for its current attempt.
-/// 3. **Time passes.** Only when `advance()` has nothing to do and nothing is in
+/// 1. **The state machine decides.** If it emits commands, they are applied and
+///    it is asked again. Nothing else happens while it still has work.
+/// 2. **The worker finishes ONE task.** Only when tier 1 returns nothing: the
+///    earliest-created `Runnable` still `Running` (see [`in_flight`]) reaches
+///    the terminal state the golden recorded for its current attempt.
+/// 3. **Time passes.** Only when tier 1 has nothing to do and nothing is in
 ///    flight: `now` jumps to the earliest `not_before` still ahead of it. Time
 ///    never moves while anything else can happen, so a `timeout` cannot fire
 ///    early and a `ScheduleRetry` cannot deadlock the simulation.
 ///
+/// Then, and only then, the run is **settled** — or **stuck**, which is a
+/// different answer and is reported as one. See the end of the loop.
+///
 /// **Tier 2 is the reason for this shape, and it was an accident of loop order
 /// before.** The environment used to complete every `Running` task at the top of
-/// the loop, *before* every `advance()` call, so `advance()` was never once
-/// invoked with a task in flight — proven dead: a `Some(RunState::Running)`
-/// branch added to the state machine had zero effect on the ratchet. Every
-/// worker was zero-latency and no interleaving was ever simulated, which put
-/// concurrency caps, `WaitFor` and timeouts — Tasks 5, 6 and 7's subjects —
-/// out of reach of the instrument meant to judge them. Now the in-flight state
-/// is a state `advance()` is consulted in, and completions are one at a time so
-/// that "two running, one finishes" is a state that occurs.
-fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
+/// the loop, *before* every tier-1 call, so the state machine was never once
+/// invoked with a task in flight — proven, not inferred: a state machine that
+/// panics on seeing a `Runnable` in `Running` does not fire at all under the old
+/// order and fires immediately under this one. Every worker was zero-latency and
+/// no interleaving was ever simulated, which put concurrency caps, `WaitFor` and
+/// timeouts — Tasks 5, 6 and 7's subjects — out of reach of the instrument meant
+/// to judge them.
+///
+/// # Why the state machine is a parameter
+///
+/// [`simulate`] passes the real [`advance`]. The tests below pass their own, so
+/// that tiers 2 and 3, the clock rule, the stuck check and the happens-before
+/// endpoints are pinned by committed assertions instead of being merely current.
+/// They were not: replacing six sites in this function with unconditional
+/// panics — tier 1's application body, tier 2, tier 3's scan, [`in_flight`]'s
+/// closure, [`step_relation`]'s body and the `order` assembly — left the whole
+/// suite reporting `8 passed; 0 failed`, because with `advance()` a stub nothing
+/// committed ever reached the second iteration.
+fn simulate_with(
+    plan: &Plan,
+    golden: &Trace,
+    mut state_machine: impl FnMut(&Plan, &ExecutionState, Tick) -> Vec<Command>,
+) -> Result<Trace, String> {
     let mut state = ExecutionState::new(plan);
     // The step at which each run was CREATED and at which it terminated.
     // Integers, not clocks: the happens-before relation is a claim about
-    // SERIALISATION, and a pure state machine serialises in `advance()` rounds.
+    // SERIALISATION, and a pure state machine serialises in rounds.
     //
     // The left endpoint is **creation**, not `StartRun`, because that is what
     // Kestra's is: `state.startDate` equals `histories[0].date` in 4215 of 4215
@@ -385,9 +441,12 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
     // `StartRun` instead made egret's interval a strict sub-interval of
     // Kestra's, so `Kestra-before` implied `egret-before` and never the
     // converse — egret's `before` set was a superset, which is over-acceptance,
-    // the one divergence class this programme forbids shipping. On
-    // `valids/after-execution` it let an `advance()` that creates both runs in
-    // one round and only then serialises them match `[[0,1,"before"]]` exactly.
+    // the one divergence class this programme forbids shipping. Measured on
+    // `valids/labels-update-task-deduplicate` (and `valids/labels-update-task`,
+    // the same shape): a state machine that creates both runs in one round and
+    // only then serialises them matched `[[0, 1, "before"]]` exactly and was
+    // reported as progress to bank. `an_order_pair_is_before_only_if_the_second_
+    // run_was_CREATED_after_the_first_ended` is what now stops that.
     let mut created: Vec<Option<usize>> = Vec::new();
     let mut ended: Vec<Option<usize>> = Vec::new();
 
@@ -397,22 +456,23 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
     loop {
         if step > bound {
             return Err(format!(
-                "did not settle within {bound} advance() calls \
-                 (4 x the widest golden trace's {MEASURED_MAX_HISTORY} history entries)"
+                "did not settle within {bound} steps \
+                 (see MEASURED_MAX_HISTORY for the derivation)"
             ));
         }
 
         // Tier 1.
-        let cmds = advance(plan, &state, now);
+        let cmds = state_machine(plan, &state, now);
         if !cmds.is_empty() {
             for cmd in &cmds {
-                use egret_workflow::executor::Command::*;
                 match cmd {
-                    CreateRun { .. } => {
+                    Command::CreateRun { .. } => {
                         created.push(Some(step));
                         ended.push(None);
                     }
-                    SetRunState { run, state: s } if s.is_terminal() => ended[*run] = Some(step),
+                    Command::SetRunState { run, state: s } if s.is_terminal() => {
+                        ended[*run] = Some(step)
+                    }
                     _ => {}
                 }
                 apply(&mut state, cmd);
@@ -426,7 +486,7 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
             let attempt = state.runs[ix].attempts.len().saturating_sub(1);
             apply(
                 &mut state,
-                &egret_workflow::executor::Command::SetRunState {
+                &Command::SetRunState {
                     run: ix,
                     state: golden_outcome(golden, ix, attempt),
                 },
@@ -437,19 +497,67 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
         }
 
         // Tier 3.
-        let next_deadline = state
+        if let Some(t) = state
             .runs
             .iter()
             .filter_map(|r| r.not_before)
             .filter(|t| *t > now)
-            .min();
-        match next_deadline {
-            Some(t) => {
-                now = t;
-                step += 1;
-            }
-            None => break,
+            .min()
+        {
+            now = t;
+            step += 1;
+            continue;
         }
+
+        // Nothing to do, nothing in flight, no deadline ahead. That is either
+        // SETTLED or STUCK, and reporting them the same way was a defect: a
+        // flowable left `Running` forever is invisible to tier 2, which only
+        // picks `Runnable`s, so it fell straight through to here and produced a
+        // TRUNCATED trace reported as a mismatch -- a wrong answer a maintainer
+        // could baseline, when this module's own rule is that an implementation
+        // which cannot finish is a broken instrument. A `ScheduleRetry` whose
+        // `not_before` is already past was dropped by the `> now` filter the
+        // same way.
+        //
+        // "Started" is the qualifier that keeps the STUB honest: with
+        // `advance()` returning nothing, no run is ever created and the
+        // execution never leaves `[Created]`, and that empty trace is a
+        // legitimate mismatch -- it is the whole baseline. An execution that has
+        // started and not finished is the one that is stuck.
+        let started = !state.runs.is_empty() || state.history.len() > 1;
+        let unfinished: Vec<String> = state
+            .runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| !r.history.last().is_some_and(|s| s.is_terminal()))
+            .map(|(ix, r)| {
+                format!(
+                    "run {ix} ({}) is {:?}{}",
+                    plan.tasks.get(r.task).map_or("?", |t| t.id.as_str()),
+                    r.history.last(),
+                    match r.not_before {
+                        Some(t) if t <= now => format!(", with not_before {t:?} already past"),
+                        Some(t) => format!(", waiting for {t:?}"),
+                        None => String::new(),
+                    }
+                )
+            })
+            .collect();
+        let execution_unfinished = !state.history.last().is_some_and(|s| s.is_terminal());
+        if started && (!unfinished.is_empty() || execution_unfinished) {
+            return Err(format!(
+                "STUCK after {step} step(s) at now={now:?}: nothing to do, nothing in \
+                 flight, no deadline ahead, and the execution has not finished \
+                 (execution history {:?}); {}",
+                state.history.iter().map(|s| s.wire()).collect::<Vec<_>>(),
+                if unfinished.is_empty() {
+                    "every run is terminal".to_string()
+                } else {
+                    unfinished.join("; ")
+                }
+            ));
+        }
+        break;
     }
 
     let runs: Vec<Run> = state
@@ -492,6 +600,11 @@ fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
         // `oracle-exec/README.md` records that hole with its count.
         spawned: Vec::new(),
     })
+}
+
+/// [`simulate_with`], driven by the real [`advance`].
+fn simulate(plan: &Plan, golden: &Trace) -> Result<Trace, String> {
+    simulate_with(plan, golden, advance)
 }
 
 /// `normalise.py`'s predicate, over step numbers instead of timestamps.
@@ -562,6 +675,328 @@ struct Findings<'a> {
     banked: &'a [&'a String],
     /// Per-id expected/actual detail, for the ones that have it.
     detail: &'a BTreeMap<String, String>,
+}
+
+// --------------------------------------------------------------------------
+// the environment, pinned
+// --------------------------------------------------------------------------
+//
+// Everything below drives [`simulate_with`] with a hand-written state machine,
+// because with `advance()` a stub nothing else reaches the second iteration of
+// its loop. Six sites in that function were replaced with unconditional panics
+// and the suite still reported `8 passed; 0 failed`; these are what now dies.
+
+/// A plan of N independent `Runnable` roots.
+fn probe_plan(ids: &[&str]) -> Plan {
+    Plan {
+        tasks: ids
+            .iter()
+            .map(|id| PlanTask {
+                id: (*id).to_string(),
+                kind: TaskKind::Runnable {
+                    type_id: "probe".to_string(),
+                },
+                retry: None,
+                timeout: None,
+                errors: Vec::new(),
+            })
+            .collect(),
+        roots: (0..ids.len()).collect(),
+        errors: Vec::new(),
+    }
+}
+
+/// A golden whose runs all end `SUCCESS`, so [`golden_outcome`] feeds `Success`.
+fn probe_golden(ids: &[&str]) -> Trace {
+    Trace {
+        parent_run: None,
+        value: None,
+        execution: vec!["CREATED".into(), "RUNNING".into(), "SUCCESS".into()],
+        runs: ids
+            .iter()
+            .map(|id| Run {
+                task: (*id).to_string(),
+                value: None,
+                parent: None,
+                state: vec!["CREATED".into(), "RUNNING".into(), "SUCCESS".into()],
+                attempts: vec![vec!["CREATED".into(), "RUNNING".into(), "SUCCESS".into()]],
+            })
+            .collect(),
+        order: Vec::new(),
+        spawned: Vec::new(),
+    }
+}
+
+/// Starts the first `Created` run whose predecessors are all terminal, and
+/// finishes the execution when they all are. Differs from [`lazy_machine`] in
+/// exactly one respect: **when** the runs are created.
+fn eager_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
+    if st.runs.is_empty() {
+        let mut out = vec![Command::SetExecutionState {
+            state: RunState::Running,
+        }];
+        out.extend(plan.roots.iter().map(|&task| Command::CreateRun {
+            task,
+            parent: None,
+            value: None,
+        }));
+        return out;
+    }
+    serialise_then_finish(st)
+}
+
+/// Creates each run only once every earlier run has terminated.
+fn lazy_machine(plan: &Plan, st: &ExecutionState, _now: Tick) -> Vec<Command> {
+    if st.runs.is_empty() {
+        return vec![
+            Command::SetExecutionState {
+                state: RunState::Running,
+            },
+            Command::CreateRun {
+                task: plan.roots[0],
+                parent: None,
+                value: None,
+            },
+        ];
+    }
+    let all_terminal = st
+        .runs
+        .iter()
+        .all(|r| r.history.last().is_some_and(|s| s.is_terminal()));
+    if all_terminal && st.runs.len() < plan.roots.len() {
+        return vec![Command::CreateRun {
+            task: plan.roots[st.runs.len()],
+            parent: None,
+            value: None,
+        }];
+    }
+    serialise_then_finish(st)
+}
+
+fn serialise_then_finish(st: &ExecutionState) -> Vec<Command> {
+    for ix in 0..st.runs.len() {
+        match st.runs[ix].history.last() {
+            Some(RunState::Created) => {
+                let earlier_done = st.runs[..ix]
+                    .iter()
+                    .all(|p| p.history.last().is_some_and(|s| s.is_terminal()));
+                return if earlier_done {
+                    vec![Command::StartRun { run: ix }]
+                } else {
+                    Vec::new()
+                };
+            }
+            Some(s) if !s.is_terminal() => return Vec::new(),
+            _ => {}
+        }
+    }
+    if st.history.last() != Some(&RunState::Success) {
+        return vec![Command::SetExecutionState {
+            state: RunState::Success,
+        }];
+    }
+    Vec::new()
+}
+
+/// **`before` means the second run was CREATED after the first ENDED**, not
+/// merely started after it.
+///
+/// The committed guard for the endpoint that closed an over-acceptance. Two
+/// machines that differ in exactly one respect — when the runs are created —
+/// produce **identical runs** and **different order**. With the left endpoint
+/// moved back to `StartRun`, [`eager_machine`] also reports `before` and this
+/// test dies; on the real corpus that same revert let an eager machine be
+/// reported as progress to bank on `valids/labels-update-task-deduplicate`.
+#[test]
+fn an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended() {
+    let plan = probe_plan(&["a", "b"]);
+    let golden = probe_golden(&["a", "b"]);
+
+    let eager = simulate_with(&plan, &golden, eager_machine).expect("eager must settle");
+    let lazy = simulate_with(&plan, &golden, lazy_machine).expect("lazy must settle");
+
+    assert_eq!(
+        eager.runs, lazy.runs,
+        "the two machines must differ ONLY in when the runs are created; if their \
+         runs differ, this test is not about the endpoint"
+    );
+    assert_eq!(
+        eager.order,
+        vec![(0, 1, "overlapping".to_string())],
+        "both runs were created in one round, so neither can be `before` the other"
+    );
+    assert_eq!(
+        lazy.order,
+        vec![(0, 1, "before".to_string())],
+        "`b` was created after `a` terminated, which is exactly what Kestra's \
+         `before` records"
+    );
+}
+
+/// **Tier 2: the environment finishes an in-flight task, and the state machine
+/// is asked again while one is in flight.**
+///
+/// Both halves are asserted. Deleting tier 2 leaves the run `Running` for ever
+/// and the simulation reports STUCK; deleting the `saw_in_flight` half would
+/// let the old top-of-loop order pass, which is the defect this replaced.
+#[test]
+fn the_worker_finishes_one_task_and_the_machine_is_asked_while_it_is_in_flight() {
+    let plan = probe_plan(&["a"]);
+    let golden = probe_golden(&["a"]);
+    let mut saw_in_flight = false;
+
+    let trace = simulate_with(&plan, &golden, |p, st, now| {
+        if st
+            .runs
+            .iter()
+            .any(|r| r.history.last() == Some(&RunState::Running))
+        {
+            saw_in_flight = true;
+        }
+        eager_machine(p, st, now)
+    })
+    .expect("must settle");
+
+    assert!(
+        saw_in_flight,
+        "the state machine must be consulted while a task is in flight -- \
+         concurrency caps, WaitFor and timeouts are all decisions taken in \
+         exactly that state"
+    );
+    assert_eq!(
+        trace.runs[0].state,
+        vec!["CREATED", "RUNNING", "SUCCESS"],
+        "the environment must supply the golden's terminal for the in-flight run"
+    );
+    assert_eq!(trace.execution, vec!["CREATED", "RUNNING", "SUCCESS"]);
+}
+
+/// **Tier 3: time moves only to a deadline something is waiting for.**
+///
+/// The machine refuses to start its run until `now` has reached the
+/// `not_before` it scheduled. Without tier 3 the clock never leaves `Tick(0)`,
+/// the machine never acts, and the simulation reports STUCK — so a retry could
+/// never be reproduced by any implementation.
+#[test]
+fn time_moves_only_to_a_deadline_something_is_waiting_for() {
+    let plan = probe_plan(&["a"]);
+    let golden = probe_golden(&["a"]);
+    const DUE: Tick = Tick(7);
+    let mut seen: Vec<Tick> = Vec::new();
+
+    let trace = simulate_with(&plan, &golden, |p, st, now| {
+        seen.push(now);
+        if st.runs.is_empty() {
+            return vec![
+                Command::SetExecutionState {
+                    state: RunState::Running,
+                },
+                Command::CreateRun {
+                    task: p.roots[0],
+                    parent: None,
+                    value: None,
+                },
+            ];
+        }
+        if st.runs[0].not_before.is_none() {
+            return vec![Command::ScheduleRetry {
+                run: 0,
+                not_before: DUE,
+            }];
+        }
+        if now < DUE {
+            // Waiting. Only tier 3 can get us out of here.
+            return Vec::new();
+        }
+        serialise_then_finish(st)
+    })
+    .expect("must settle");
+
+    assert!(
+        seen.contains(&DUE),
+        "the clock must reach the scheduled deadline; saw {seen:?}"
+    );
+    assert!(
+        seen.iter().all(|t| *t <= DUE),
+        "the clock must never move PAST a deadline something is waiting for, \
+         because that is how a timeout fires early; saw {seen:?}"
+    );
+    assert_eq!(trace.runs[0].state, vec!["CREATED", "RUNNING", "SUCCESS"]);
+}
+
+/// **An execution that cannot finish is STUCK, not a short trace.**
+///
+/// A run left `Created` is invisible to tier 2, which only completes
+/// `Runnable`s that are `Running`; it reaches tier 3, finds no deadline, and
+/// before this check fell straight out of the loop as a truncated trace — a
+/// *wrong answer* a maintainer could baseline, when this module's rule is that
+/// an implementation which cannot finish is a broken instrument.
+///
+/// The second half is the qualifier that keeps the stub honest: a machine that
+/// does nothing at all has not started anything, and its empty trace is the
+/// legitimate mismatch the whole baseline is made of.
+#[test]
+fn an_execution_that_cannot_finish_is_reported_as_stuck_and_an_idle_stub_is_not() {
+    let plan = probe_plan(&["a"]);
+    let golden = probe_golden(&["a"]);
+
+    let err = simulate_with(&plan, &golden, |p, st, _| {
+        if st.runs.is_empty() {
+            vec![Command::CreateRun {
+                task: p.roots[0],
+                parent: None,
+                value: None,
+            }]
+        } else {
+            Vec::new()
+        }
+    })
+    .expect_err("a run left CREATED for ever must not pass as a finished trace");
+    assert!(err.contains("STUCK"), "got: {err}");
+    assert!(
+        err.contains("run 0 (a)"),
+        "the message must name the run that is stuck; got: {err}"
+    );
+
+    let idle = simulate_with(&plan, &golden, |_, _, _| Vec::new())
+        .expect("a machine that never starts anything is not stuck -- that is the stub");
+    assert!(idle.runs.is_empty());
+    assert_eq!(idle.execution, vec!["CREATED"]);
+}
+
+/// **[`step_relation`] itself**, which nothing else asserted.
+#[test]
+fn step_relation_is_strict_on_both_sides() {
+    let r =
+        |a: usize, b: usize, c: usize, d: usize| step_relation(Some(a), Some(b), Some(c), Some(d));
+    assert_eq!(
+        r(0, 1, 2, 3),
+        Some("before"),
+        "a ended before b was created"
+    );
+    assert_eq!(r(2, 3, 0, 1), Some("after"), "b ended before a was created");
+    assert_eq!(
+        r(0, 2, 1, 3),
+        Some("overlapping"),
+        "the intervals share a step"
+    );
+    assert_eq!(
+        r(0, 1, 1, 2),
+        Some("overlapping"),
+        "touching at a step is NOT `before` -- the predicate is strict, matching \
+         Kestra's `isAfter`"
+    );
+    assert_eq!(
+        r(0, 0, 0, 0),
+        Some("overlapping"),
+        "two runs created and ended in the same round overlap"
+    );
+    assert_eq!(
+        step_relation(Some(0), None, Some(1), Some(2)),
+        None,
+        "a run with no end is unmeasurable, and an unmeasurable pair is dropped"
+    );
+    assert_eq!(step_relation(None, None, None, None), None);
 }
 
 /// **The fed outcome is per ATTEMPT, not per run.**

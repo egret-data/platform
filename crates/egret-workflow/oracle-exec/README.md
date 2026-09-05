@@ -852,12 +852,38 @@ Feeding a flowable's state would be circular in the way that matters — a
 executor's decision and is exactly what this oracle exists to judge.
 
 **The oracle is non-circular with respect to `advance()` — which is what it is
-for — and circular with respect to `golden.json` for that one field.** The
-review demonstrated the containment rather than arguing it: rewriting
-`golden.json`'s `valids/minimal2` terminal to `KILLED`, an outcome Kestra never
-produced for that flow, left the ratchet **green**, because the same lie went
-into egret's side through the fed value. So a normalisation bug or a capture
-anomaly *in that one field* is invisible in both directions.
+for — and circular with respect to `golden.json` for that one field.**
+
+Demonstrating that needs an experiment that could have come out the other way,
+and the first one here could not. It rewrote `valids/minimal2`'s terminal to
+`KILLED` and observed the ratchet stay green — but `minimal2` cannot match under
+*any* value, because its golden run history carries `SUBMITTED`, which
+`RunState` cannot represent. The ratchet reported the same 294 mismatches before
+and after. **A demonstration that survives deleting the mechanism it
+demonstrates is not evidence**, and gutting `golden_outcome` to return `Failed`
+unconditionally does leave `executor_matches_golden` green — while `advance()`
+is a stub, nothing matches either way.
+
+The discriminating version, on `valids/labels-update-task-deduplicate`, whose
+golden uses only states `RunState` can hold. With a state machine that
+reproduces it exactly:
+
+| | golden | `golden_outcome` | the entry |
+|---|---|---|---|
+| **A** | as committed | as written | **matches** — `PROGRESS NOT BANKED … valids/labels-update-task-deduplicate` |
+| **B** | run terminal **and** attempt terminal rewritten `SUCCESS → KILLED` | as written | **still matches** — the lie is absorbed on both sides |
+| **C** | still `KILLED` | gutted to always `Failed` | **stops matching** |
+| **D** | as committed | gutted to always `Failed` | **stops matching** |
+
+**A → B is the circularity**: an outcome Kestra never produced for that flow was
+written into the golden and the entry went on agreeing. **C and D are how we
+know the experiment discriminates**: the mechanism under test is load-bearing
+for this entry in both directions, so B's result is a fact about the feed and
+not an artefact of an entry that could never match. The old `minimal2`
+experiment has no C or D.
+
+So a normalisation bug or a capture anomaly *in that one field* is invisible in
+both directions.
 
 How much of the golden that covers is **not** re-derivable here, and the figure
 is quoted rather than measured: the review's own plan builder put it at **812 of
@@ -905,13 +931,43 @@ left endpoint is its *creation* step, so siblings created in one round stay
 
 Tier 3 is a rule, not a sleep: time moves only when nothing else can happen, and
 only to a deadline something is already waiting for. So a `ScheduleRetry` cannot
-deadlock the simulation, and a `timeout` cannot fire early. **What it cannot do
-is fire a `timeout` at all from elapsed work** — no tier advances `now` because a
-task took a while, since a pure state machine has no way to be told that and the
-golden's durations are dropped. Any flow whose observable behaviour depends on
-elapsed time is out of this oracle's reach; the two such flows in the corpus
-(`retry-failed-task-duration`, `waitfor-max-duration`) are exactly the two whose
-traces did not reproduce across five rounds, and are excluded for that reason.
+deadlock the simulation, and a `timeout` cannot fire early. It also cannot fire
+at all from elapsed work — see *what this oracle does not prove*, which now names
+both causes of that, only one of which lives here.
+
+**Settled and stuck are different answers.** After tier 3 finds no deadline, a
+run left `Running` — a flowable, which tier 2 never picks up — used to fall
+straight out of the loop as a *truncated trace*, reported as a mismatch: a wrong
+answer a maintainer could baseline, when the rule is that an implementation
+which cannot finish is a broken instrument. A `ScheduleRetry` whose `not_before`
+was already past was dropped by the same filter. Both are now a `STUCK` error
+naming the run and its deadline, reported through the `panics` arm. The
+qualifier that keeps the stub honest is "started": a machine that creates
+nothing and never leaves `[CREATED]` has not started, and its empty trace is the
+legitimate mismatch the whole baseline is made of.
+
+**One interleaving, not interleavings.** `in_flight` takes the *earliest-created*
+run, so "the later-created one finishes first" never happens. It costs nothing
+for the happens-before relation — a run's left endpoint is its creation step —
+but Tasks 5 and 7 must know that worker return order is pinned to creation
+order.
+
+### None of this was guarded, and now it is
+
+With `advance()` a stub, nothing committed ever reached the **second** iteration
+of the simulation loop. Six sites were replaced with unconditional panics —
+tier 1's command-application body, tier 2, tier 3's scan, `in_flight`'s closure,
+`step_relation`'s body and the `order` assembly loop — and the suite still
+reported `8 passed; 0 failed`. The endpoint fix that closed an over-acceptance
+could have been reverted the next day and nothing would have said so.
+
+The fix is the one this file already used twice: make the rule reachable.
+`simulate_with()` takes the state machine as a parameter, `simulate()` passes
+the real `advance`, and five committed tests pass their own. Re-run against the
+same six mutations, every one of them now kills at least one test — and
+reverting the left endpoint to `StartRun` fails
+`an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended`
+with `left: [(0, 1, "before")] right: [(0, 1, "overlapping")]`.
 
 ## The happens-before relation
 
@@ -1190,9 +1246,22 @@ wrote. Beyond that, the specific holes, each with its count:
   about the flowable. None is known to exist today because nothing is
   implemented yet; Tasks 4 and 6 are the ones that will find out, and the honest
   answer if it happens is to record the pairs, not to weaken the relation.
-- **`advance()` is never asked to react to elapsed time.** `now` moves only to a
-  `not_before` something is waiting for, so `timeout:` cannot fire from work
-  taking too long. See *The environment has three tiers*.
+- **Nothing keyed on elapsed time is reachable, and there are TWO independent
+  causes.** The disclosure used to name only the first.
+  1. *The environment.* `now` moves only to a `not_before` something is already
+     waiting for, so no tier advances the clock because a task took a while.
+     Tasks 5 and 7 could fix that inside this oracle.
+  2. *The state type, which they could not.* `ExecutionState` and `TaskRun`
+     carry **no instant at all** except `not_before` — the only `Tick` fields in
+     the whole module are `TaskRun::not_before` and
+     `Command::ScheduleRetry::not_before`. There is no run-start tick and no
+     execution-start tick, so `advance()` has nothing to subtract `now` from and
+     **cannot implement `PlanTask::timeout` or `RetryPolicy::max_duration` at
+     all**, however the environment behaves. **Task 3 owns that type**, and this
+     is the only place it is written down.
+
+  Between them these cover `timeout:`, `RetryPolicy::max_duration`, `WaitFor`'s
+  `maxDuration`, and any `Pause` delay — not just `timeout:`.
 - **Sub-executions are harvested but not yet produced.** `Command::SpawnExecution`
   arrives in Task 6; until then egret's side of `spawned` is always empty, so
   every one of the 41 golden entries that carries a sub-execution
