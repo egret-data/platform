@@ -50,4 +50,42 @@ pub enum Command {
     SetExecutionState {
         state: RunState,
     },
+    /// Run one iteration of a [`Loop`](super::TaskKind::Loop) as a **separate
+    /// execution**.
+    ///
+    /// A `Loop` does not iterate inside its own execution: each value produces
+    /// a sub-execution carrying `parentId`, and the body's tasks never appear
+    /// in the parent's `taskRunList`. Measured over the whole golden: 41 entries
+    /// carry 142 sub-executions between them, and across the 39 comparable
+    /// entries holding a `Loop` not one of the 82 tasks inside a loop body has a
+    /// run in its parent — on egret's side or on Kestra's.
+    ///
+    /// # `task` is the LOOP, not the body
+    ///
+    /// A sub-execution runs the loop's **whole** `tasks:` list, which a single
+    /// body index cannot name: `valids/loop-serial-multiple-tasks` has two body
+    /// tasks and each of its two sub-executions ran both of them (`runs:
+    /// ["first", "second"]`, twice, in the golden). So this names the `Loop`
+    /// itself and the caller reads its list, which is also what Kestra's
+    /// `loopRun` carries — `{"taskId": "1_each", "taskRunId": …, "index": …,
+    /// "value": …}` names the loop task, never a body task.
+    ///
+    /// # Nothing executes this yet, and that is a hole with a count
+    ///
+    /// W3b/W6 own creating the sub-execution and reporting its outcome back.
+    /// Until then [`advance`](super::advance) emits the command and the oracle's
+    /// side of `spawned` stays empty, so the 41 golden entries that carry a
+    /// sub-execution mismatch on that field whatever else they get right.
+    /// `oracle-exec/README.md` records it under *What this oracle does not
+    /// prove*; `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran`
+    /// is what compares the part of it that can be compared.
+    SpawnExecution {
+        task: TaskIx,
+        /// The iteration value, already resolved to the string Kestra puts on
+        /// `loopRun.value` — see
+        /// [`iteration_values`](super::flowable::loop_::iteration_values).
+        value: String,
+        /// The run of the `Loop` this iteration belongs to.
+        parent_run: RunIx,
+    },
 }

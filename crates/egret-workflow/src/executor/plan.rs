@@ -24,6 +24,79 @@ pub struct Plan {
     pub errors: Vec<TaskIx>,
 }
 
+impl Plan {
+    /// True when `task` is inside some [`TaskKind::Loop`]'s `tasks:`.
+    ///
+    /// A loop body never gets a run in the parent execution — each value
+    /// produces a separate sub-execution instead — so a task that answers
+    /// `true` here is one no [`Command::CreateRun`](super::Command::CreateRun)
+    /// may ever name.
+    ///
+    /// **"Inside" is the whole subtree, not the direct children**, and that is
+    /// the reading the behaviour forces rather than a convenience: an `If`
+    /// nested in a `Sequential` in a loop body is just as absent from the
+    /// parent's `taskRunList` as the `Sequential` is. The two readings differ on
+    /// this corpus — `the_two_readings_of_inside_a_loop_differ_by_a_measured_
+    /// amount` derives both counts — so taking the narrow one silently would be
+    /// a choice nothing could see.
+    ///
+    /// Linear in `tasks.len()` per call and used by the oracle rather than by
+    /// [`advance`](super::advance), which never descends into a `Loop`'s list
+    /// and so cannot create one of these runs by construction. That is exactly
+    /// why the guard is worth having: "cannot happen by construction" is a
+    /// claim about today's `descend`, and
+    /// `no_run_is_ever_created_for_a_task_inside_a_loop` is what would notice
+    /// it stopping being true.
+    pub fn is_loop_body(&self, task: TaskIx) -> bool {
+        let mut frontier: Vec<TaskIx> = self
+            .tasks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TaskKind::Loop { tasks, .. } => Some(tasks.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        // `flatten_one` reserves a parent's index before its children's, so a
+        // child's index is always greater than its parent's and this walk
+        // strictly descends. It visits each task at most once for any plan.
+        let mut seen: Vec<TaskIx> = Vec::new();
+        while let Some(ix) = frontier.pop() {
+            if ix == task {
+                return true;
+            }
+            if seen.contains(&ix) {
+                continue;
+            }
+            seen.push(ix);
+            frontier.extend(self.children_of(ix));
+        }
+        false
+    }
+
+    /// Every task index this task's own lists hold, whatever kind it is.
+    ///
+    /// One place, so a new [`TaskKind`] cannot be added to the plan and left
+    /// out of the walk — which is how `is_loop_body` would quietly start
+    /// answering `false` for a body nested in whatever the new kind is.
+    fn children_of(&self, ix: TaskIx) -> Vec<TaskIx> {
+        match &self.tasks[ix].kind {
+            TaskKind::Runnable { .. } => Vec::new(),
+            TaskKind::Sequential { tasks }
+            | TaskKind::Parallel { tasks, .. }
+            | TaskKind::Loop { tasks, .. } => tasks.clone(),
+            TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
+            TaskKind::Switch { cases, default, .. } => cases
+                .iter()
+                .flat_map(|(_, t)| t.iter())
+                .chain(default)
+                .copied()
+                .collect(),
+            TaskKind::Dag { nodes } => nodes.iter().map(|n| n.task).collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlanTask {
     /// The author's task id, as written.
@@ -150,6 +223,41 @@ pub enum TaskKind {
     Dag {
         nodes: Vec<DagNode>,
     },
+    /// `io.kestra.plugin.core.flow.Loop` — Kestra's `ForEach` under its real
+    /// class name (there is no `ForEach.java` in this checkout; W1's
+    /// `models::Loop` records the same correction).
+    ///
+    /// **It does not iterate inside the execution.** Each value produces a
+    /// separate **sub-execution**, and the body's tasks never get a run in the
+    /// parent: measured over the whole golden, the 41 entries that carry a
+    /// sub-execution carry 142 of them between them, and not one loop body task
+    /// appears in its parent's `taskRunList`. That is why [`Plan::is_loop_body`]
+    /// exists and why [`advance`](super::advance) never descends into `tasks`.
+    ///
+    /// `values` is the author's expression, **unrendered**, exactly as
+    /// [`If::condition`](TaskKind::If) is: `advance()` is pure, so the caller
+    /// renders it and writes the result into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered). It is read at
+    /// `CREATED` rather than at `RUNNING` — see
+    /// [`loop_::open`](super::flowable::loop_::open) — because on this artifact
+    /// an empty `values` never reaches `RUNNING` at all.
+    ///
+    /// `concurrency_limit` is Kestra's `concurrencyLimit`, kept in Kestra's own
+    /// spelling rather than normalised the way
+    /// [`Parallel::concurrency`](TaskKind::Parallel) is: **`0` means unlimited,
+    /// `1` means full serialisation, `n` means up to `n` iterations at once**
+    /// (`Loop.java:225-229`). The **default is `1`**, not `0` — `Loop.java:233`
+    /// is `@Builder.Default private Integer concurrencyLimit = 1;`, W1's
+    /// `default_concurrency_limit()` ports it, and
+    /// `the_default_concurrency_limit_is_one_and_the_corpus_can_tell`
+    /// re-derives it from Kestra's own traces rather than from either reading.
+    /// A `0` normalised to `None` here would lose the distinction the field
+    /// exists for, since `1` and "no limit" are different numbers of spawns.
+    Loop {
+        values: String,
+        tasks: Vec<TaskIx>,
+        concurrency_limit: u32,
+    },
 }
 
 /// One node of a [`TaskKind::Dag`]: a task and the sibling nodes it waits for.
@@ -227,6 +335,7 @@ const PARALLEL_TYPE: &str = "io.kestra.plugin.core.flow.Parallel";
 const DAG_TYPE: &str = "io.kestra.plugin.core.flow.Dag";
 const IF_TYPE: &str = "io.kestra.plugin.core.flow.If";
 const SWITCH_TYPE: &str = "io.kestra.plugin.core.flow.Switch";
+const LOOP_TYPE: &str = "io.kestra.plugin.core.flow.Loop";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
@@ -375,6 +484,29 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 default,
             };
         }
+        (ModelKind::Loop(lp), LOOP_TYPE) => {
+            // `values` is `@NotNull` in Java, and a `Loop` with nothing to
+            // iterate cannot be planned -- the same shape and the same reason
+            // as an `If` with no `condition`. Unlike that one this refusal has
+            // no corpus flow behind it: every one of the 43 corpus flows that
+            // uses a `Loop` writes `values:`
+            // (`every_corpus_loop_declares_its_values_and_a_readable_limit`
+            // re-derives that on every run), so
+            // `a_loop_with_no_values_is_refused_by_name` is what holds it.
+            let values = lp
+                .values
+                .as_ref()
+                .map(|v| v.source().to_string())
+                .ok_or_else(|| PlanError {
+                    message: format!("loop '{}' has no values to iterate", task.id),
+                })?;
+            let children = flatten_list(out, &lp.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::Loop {
+                values,
+                tasks: children,
+                concurrency_limit: literal_concurrency_limit(lp.concurrency_limit),
+            };
+        }
         (ModelKind::Dag(dag), DAG_TYPE) => {
             // `task` is `Option<Task>` in W1's model because `@NotNull` is bean
             // validation and not parsing. A node with no task has no id to be
@@ -416,6 +548,32 @@ fn literal_concurrency(source: Option<&crate::models::Property<i32>>) -> Option<
     match source?.source().trim().parse::<u32>() {
         Ok(0) | Err(_) => None,
         Ok(n) => Some(n),
+    }
+}
+
+/// Kestra's `Loop.concurrencyLimit`, as far as a pure builder can read it.
+///
+/// **The default is `1`, and it is not the same field as
+/// [`Parallel::concurrent`](TaskKind::Parallel).** `Loop.java:233` is
+/// `@Builder.Default private Integer concurrencyLimit = 1;` — full
+/// serialisation — where `Parallel.java`'s `concurrent` defaults to `0`, which
+/// is unlimited. The two look alike and mean opposite things at their defaults,
+/// so the number here comes from W1's own port of the Java default
+/// (`models::task::default_concurrency_limit`) and is re-derived from Kestra's
+/// traces by `the_default_concurrency_limit_is_one_and_the_corpus_can_tell`.
+///
+/// `None` is reached only by an explicit `concurrencyLimit: null`, which W1
+/// accepts (bean validation is not parsing) and which Kestra refuses at publish
+/// (`@NotNull`). There is nothing to iterate differently for it, so it takes the
+/// class default; no corpus flow writes it. A negative value is not
+/// representable as a count and takes the default too — Kestra has no guard for
+/// one either (`Math.min(negative, size)` would reach `subList(0, negative)`),
+/// and `every_corpus_loop_declares_its_values_and_a_readable_limit` measures
+/// that no corpus flow writes one.
+fn literal_concurrency_limit(source: Option<i32>) -> u32 {
+    match source {
+        Some(n) if n >= 0 => n as u32,
+        _ => 1,
     }
 }
 

@@ -27,6 +27,20 @@
 # anything without a clock. See `oracle-exec/runnable.txt`, `The one ordered
 # pair Task 4 could not reach`.
 #
+# Task 5 (`if`, `switch`) banked 8, leaving 181.
+#
+# Task 6 (`loop`, `Command::SpawnExecution`) banked 2, leaving 179 --
+# `valids/loop-empty` and `valids/loop-null`, the only two `Loop` entries whose
+# golden carries NO sub-execution. That is the whole of what this task could
+# bank, and the reason is a hole rather than a gap in the implementation:
+# nothing executes `Command::SpawnExecution` until W3b/W6, so egret's side of
+# `spawned` stays empty and every one of the 41 golden entries that carries a
+# sub-execution mismatches on that field alone. 33 of those 41 now differ on
+# NOTHING ELSE -- derived by
+# `tests/executor.rs::the_spawned_field_is_all_that_stands_between_these_
+# entries_and_a_bank`, which fails if that number moves. See
+# `oracle-exec/README.md`, `What Task 6 had to change, and what it banked`.
+#
 # A panic, and a state machine that will not settle inside the step bound, are
 # NOT covered by this file. A line here means "egret does not reproduce this
 # trace yet"; it never means "egret may crash here".
@@ -101,7 +115,6 @@ valids/labels-update-nested-value-map
 valids/labels-update-task
 valids/labels-update-task-deduplicate
 valids/labels-update-task-empty
-valids/loop-empty
 valids/loop-expression-context
 valids/loop-failed
 valids/loop-failed-no-transmit
@@ -109,7 +122,6 @@ valids/loop-flowable
 valids/loop-map
 valids/loop-multiple
 valids/loop-nested
-valids/loop-null
 valids/loop-object
 valids/loop-object-in-list
 valids/loop-outputs

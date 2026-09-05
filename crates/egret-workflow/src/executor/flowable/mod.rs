@@ -3,8 +3,8 @@
 //! `dataapi/src/lifecycle.rs` reached 12,091 lines.
 //!
 //! Task 3 shipped `sequential`; Task 4 added `parallel` and `dag` beside it;
-//! Task 5 adds `branch` (`If` and `Switch`). Tasks 6-8 add `loop_` and the
-//! attempt lifecycle.
+//! Task 5 added `branch` (`If` and `Switch`); Task 6 adds `loop_`, which is the
+//! one that creates no runs at all. Tasks 7-8 add the attempt lifecycle.
 //!
 //! What lives *here* rather than in one of them is the part every task list
 //! shares whatever its scheduling rule: the answer type, how a run is looked
@@ -15,6 +15,7 @@
 
 pub(crate) mod branch;
 pub(crate) mod dag;
+pub(crate) mod loop_;
 pub(crate) mod parallel;
 pub(crate) mod sequential;
 
@@ -86,6 +87,33 @@ pub(crate) fn start(plan: &Plan, run: RunIx, task: TaskIx, now: Tick) -> Vec<Com
     cmds
 }
 
+/// What a **`CREATED`** child run needs, which is [`start`] for every kind but
+/// one.
+///
+/// A [`TaskKind::Loop`] is the exception, and it is the artifact's shape rather
+/// than a convenience: a `Loop` decides at `CREATED` whether it starts at all.
+/// `valids/loop-empty`'s `1_each` reads `CREATED SUCCESS` with **no `RUNNING`
+/// and no attempt**, and `valids/loop-null`'s reads `CREATED FAILED` the same
+/// way, so the values have to be resolved before the run is started rather
+/// than after — which is also why the caller renders a `Loop` while it is
+/// `CREATED` and an `If` while it is `RUNNING`.
+///
+/// It returns a [`Step`] rather than a `Vec<Command>` because a `Loop` whose
+/// `values` the caller has not rendered yet has nothing to ask for, and
+/// [`Step::Commands`] is documented never to be empty.
+pub(crate) fn open(
+    plan: &Plan,
+    state: &ExecutionState,
+    run: RunIx,
+    task: TaskIx,
+    now: Tick,
+) -> Step {
+    match plan.tasks[task].kind {
+        TaskKind::Loop { .. } => loop_::open(plan, state, run, task, now),
+        _ => Step::Commands(start(plan, run, task, now)),
+    }
+}
+
 /// Drive the flowable that a **`Running`** child run is, and turn its `Done`
 /// into the command that terminates that child.
 ///
@@ -125,6 +153,7 @@ pub(crate) fn descend(
         TaskKind::Switch { cases, default, .. } => {
             branch::drive_switch(plan, state, run, cases, default, now)
         }
+        TaskKind::Loop { .. } => return Step::Waiting,
     };
     match step {
         Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),

@@ -213,5 +213,13 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             }
         }
         Command::SetExecutionState { state: s } => state.history.push(*s),
+        // Nothing to record. A sub-execution is a different execution with its
+        // own `ExecutionState`, and this one holds no field for it -- which is
+        // exactly why `advance()` cannot schedule a loop's SECOND batch and
+        // why `Loop::concurrency_limit` reaches only the first. Writing
+        // anything here would be inventing W3b's protocol; leaving the arm out
+        // would be a non-exhaustive match rather than a decision, so it is
+        // spelled out.
+        Command::SpawnExecution { .. } => {}
     }
 }

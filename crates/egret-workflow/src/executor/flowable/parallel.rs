@@ -11,7 +11,7 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::{descend, is_terminal, latest, run_of, start, Step};
+use super::{descend, is_terminal, latest, open, run_of, Step};
 
 /// Drive one `Parallel` task list: every child is startable, always.
 pub(crate) fn drive(
@@ -147,7 +147,11 @@ pub(crate) fn drive_concurrent(
     for (&task, run) in children.iter().zip(&runs) {
         let Some(ix) = *run else { continue };
         match latest(state, ix) {
-            Some(RunState::Created) => cmds.extend(start(plan, ix, task, now)),
+            Some(RunState::Created) => {
+                if let Step::Commands(inner) = open(plan, state, ix, task, now) {
+                    cmds.extend(inner);
+                }
+            }
             Some(RunState::Running) => {
                 if let Step::Commands(inner) = descend(plan, state, ix, task, now) {
                     cmds.extend(inner);

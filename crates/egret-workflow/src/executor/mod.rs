@@ -15,13 +15,26 @@
 //! W3a Task 3: [`Plan`], [`ExecutionState`], [`Command`], [`build_plan`], and
 //! the flowable `sequential` — which is also the flow's top-level `tasks:`,
 //! since Kestra runs that list by the same rule. W3a Task 4: `parallel` and
-//! `dag`, and the two refusals a `Dag` can earn at plan-build time. Every other
-//! task type is planned as an opaque [`TaskKind::Runnable`]; see [`build_plan`]
-//! for why that is the safe default rather than an approximation.
+//! `dag`, and the two refusals a `Dag` can earn at plan-build time. W3a Task 5:
+//! `if` and `switch`, which read the caller's render. W3a Task 6: `loop` and
+//! [`Command::SpawnExecution`]. Every other task type is planned as an opaque
+//! [`TaskKind::Runnable`]; see [`build_plan`] for why that is the safe default
+//! rather than an approximation.
 //!
-//! Tasks 5-8 add `if`/`switch`, `loop` and the attempt lifecycle. They add
-//! variants to [`TaskKind`] and [`Command`]; they do not change the signatures
-//! here.
+//! Tasks 7-8 add the attempt lifecycle and refusal. They add variants to
+//! [`TaskKind`] and [`Command`]; they do not change the signatures here.
+//!
+//! # What Task 6 emits and does NOT execute
+//!
+//! A `Loop` does not iterate inside its execution: each value produces a
+//! separate **sub-execution**, and [`advance`] asks for one with
+//! [`Command::SpawnExecution`]. Nothing in W3a executes that command, and
+//! [`ExecutionState`] holds no field for a sub-execution — so `advance` emits
+//! the **first batch** (`min(concurrencyLimit, size)`, Kestra's own arithmetic)
+//! and cannot schedule a second, and a `Loop` run's terminal state is the
+//! caller's to supply. `oracle-exec/README.md` records that hole with its
+//! counts; `flowable::loop_` derives why it is a consequence of purity rather
+//! than a shortcut.
 
 mod command;
 mod flowable;
@@ -33,6 +46,15 @@ pub use plan::{
     build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryPolicy, TaskIx, TaskKind,
 };
 pub use state::{apply, Attempt, ExecutionState, RunIx, RunState, TaskRun, Tick};
+
+/// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
+///
+/// Public because two callers outside this module need the same answer and must
+/// not each write their own: `tests/executor.rs` derives what a first batch
+/// should be from it, and W3b will need it to schedule the batches after the
+/// first. See [`flowable::loop_::iteration_values`] for the rule and for the one
+/// place it is knowingly wider than Kestra.
+pub use flowable::loop_::iteration_values;
 
 use flowable::{sequential, Step};
 
@@ -334,6 +356,7 @@ mod tests {
             ("valids/dag", &[][..]),
             ("valids/if-condition", &[("if", "true")][..]),
             ("valids/switch", &[("parent-seq", "FIRST")][..]),
+            ("valids/loop-serial", &[][..]),
         ] {
             let plan = plan_of(corpus_id);
             let state = run_to_fixpoint_rendering(&plan, RunState::Success, renders);
@@ -343,7 +366,8 @@ mod tests {
                     | TaskKind::Parallel { .. }
                     | TaskKind::Dag { .. }
                     | TaskKind::If { .. }
-                    | TaskKind::Switch { .. } => {
+                    | TaskKind::Switch { .. }
+                    | TaskKind::Loop { .. } => {
                         flowables += 1;
                         assert_eq!(
                             wire(&run.history),
@@ -375,10 +399,10 @@ mod tests {
             }
         }
         assert!(
-            flowables >= 7 && runnables >= 21,
-            "the five flows must exercise both sides, and the two Task 5 added \
-             must each contribute a flowable; saw {flowables} flowable(s) and \
-             {runnables} runnable(s)"
+            flowables >= 8 && runnables >= 21,
+            "the six flows must exercise both sides, and the two Task 5 added \
+             plus the one Task 6 added must each contribute a flowable; saw \
+             {flowables} flowable(s) and {runnables} runnable(s)"
         );
     }
 
@@ -956,6 +980,33 @@ mod tests {
     // branch: if and switch
     // ----------------------------------------------------------------------
 
+    /// The unrendered expression this task holds, if it holds one.
+    ///
+    /// The same three kinds `tests/executor.rs`'s tier 2 renders, and the same
+    /// function shape, because the two callers of `advance` must not disagree
+    /// on which runs need a render.
+    fn expression_of(plan: &Plan, task: TaskIx) -> Option<String> {
+        match &plan.tasks[task].kind {
+            TaskKind::If { condition, .. } => Some(condition.clone()),
+            TaskKind::Switch { value, .. } => Some(value.clone()),
+            TaskKind::Loop { values, .. } => Some(values.clone()),
+            _ => None,
+        }
+    }
+
+    /// The run state at which this task's expression is rendered.
+    ///
+    /// **`CREATED` for a `Loop` and `RUNNING` for the other two, measured.** An
+    /// `If` is started and then asked; a `Loop` is asked and then started, or
+    /// not started at all -- `valids/loop-empty`'s `1_each` reads `CREATED
+    /// SUCCESS` with no `RUNNING` and no attempt.
+    fn renders_at(plan: &Plan, task: TaskIx) -> Option<RunState> {
+        match &plan.tasks[task].kind {
+            TaskKind::Loop { .. } => Some(RunState::Created),
+            _ => Some(RunState::Running),
+        }
+    }
+
     /// [`run_to_fixpoint`], with a caller that also **renders**.
     ///
     /// `advance` is pure and cannot render, so a real caller supplies the
@@ -1001,29 +1052,44 @@ mod tests {
             // guarding.
             let unrendered: Vec<RunIx> = (0..state.runs.len())
                 .filter(|&ix| {
-                    matches!(
-                        plan.tasks[state.runs[ix].task].kind,
-                        TaskKind::If { .. } | TaskKind::Switch { .. }
-                    ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                    expression_of(plan, state.runs[ix].task).is_some()
+                        && renders_at(plan, state.runs[ix].task)
+                            == state.runs[ix].history.last().copied()
                         && state.runs[ix].rendered.is_none()
                 })
                 .collect();
             if !unrendered.is_empty() {
                 for ix in unrendered {
                     let id = &plan.tasks[state.runs[ix].task].id;
-                    let value = renders
-                        .iter()
-                        .find(|(k, _)| k == id)
-                        .unwrap_or_else(|| panic!("no render supplied for task '{id}'"))
-                        .1;
-                    state.runs[ix].rendered = Some(value.to_string());
+                    let source =
+                        expression_of(plan, state.runs[ix].task).expect("filtered on Some above");
+                    // W2's own identity short-circuit: a source with no `{{`
+                    // renders to itself (`VariableRenderer.java:76-79`). So a
+                    // literal `values:` needs no entry here, and a test cannot
+                    // pass by retyping a list `build_plan` read from the wrong
+                    // field.
+                    let value = if source.contains("{{") {
+                        renders
+                            .iter()
+                            .find(|(k, _)| k == id)
+                            .unwrap_or_else(|| panic!("no render supplied for task '{id}'"))
+                            .1
+                            .to_string()
+                    } else {
+                        source
+                    };
+                    state.runs[ix].rendered = Some(value);
                 }
                 continue;
             }
+            // A `Loop` is in flight here for the same reason a `Runnable` is:
+            // the work it waits on -- its sub-executions -- is not simulated by
+            // this fixpoint, so its terminal comes from outside. See the
+            // oracle's tier 3 and `oracle-exec/README.md`.
             let in_flight = (0..state.runs.len()).find(|&ix| {
                 matches!(
                     plan.tasks[state.runs[ix].task].kind,
-                    TaskKind::Runnable { .. }
+                    TaskKind::Runnable { .. } | TaskKind::Loop { .. }
                 ) && state.runs[ix].history.last() == Some(&RunState::Running)
             });
             match in_flight {
@@ -1603,6 +1669,461 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
+    // the loop
+    // ----------------------------------------------------------------------
+
+    /// Drive `plan` until the run of `loop_id` exists, then hand the caller's
+    /// render of that loop's `values` in and ask `advance` once more.
+    ///
+    /// The render is the loop's **own literal `values` source**, which is what
+    /// W2's renderer returns for a source with no `{{` (Kestra's own
+    /// short-circuit, `VariableRenderer.java:76-79`). Taking it from the plan
+    /// rather than writing it out again is deliberate: a test that retyped the
+    /// list would still pass against a `build_plan` that read the wrong field.
+    fn spawn_round(plan: &Plan, loop_id: &str) -> (ExecutionState, Vec<Command>) {
+        let mut state = ExecutionState::new(plan);
+        for _ in 0..100 {
+            let ix =
+                (0..state.runs.len()).find(|&ix| plan.tasks[state.runs[ix].task].id == loop_id);
+            if let Some(ix) = ix {
+                let TaskKind::Loop { values, .. } = &plan.tasks[state.runs[ix].task].kind else {
+                    panic!("'{loop_id}' is not planned as a Loop");
+                };
+                assert!(
+                    !values.contains("{{"),
+                    "spawn_round only serves loops whose `values` is a literal; \
+                     '{loop_id}' holds {values:?}"
+                );
+                state.runs[ix].rendered = Some(values.clone());
+                return (state.clone(), advance(plan, &state, T0));
+            }
+            let cmds = round(plan, &mut state);
+            assert!(!cmds.is_empty(), "'{loop_id}' never got a run");
+        }
+        panic!("'{loop_id}' never got a run in 100 rounds");
+    }
+
+    /// **A `Loop` spawns one execution per value and creates no run for its
+    /// body**, which is the plan's own Task 6 test.
+    ///
+    /// Measured, and it is the whole shape of the flowable: a `Loop` does not
+    /// iterate inside its execution. Each value produces a separate
+    /// **sub-execution** carrying `parentId`, and the body's task never appears
+    /// in the parent's `taskRunList` — over the whole golden, 41 entries carry
+    /// 142 sub-executions between them and not one loop body task has a run in
+    /// its parent (`no_run_is_ever_created_for_a_task_inside_a_loop` derives
+    /// that over the corpus; this pins the one flow).
+    ///
+    /// `valids/loop-parallel-less` is the flow because it is the one that can
+    /// tell the two halves apart: **four** values with `concurrencyLimit: 2`,
+    /// so a machine that spawned one per value would emit 4 and one that
+    /// ignored the limit would emit 4 as well. Two is the number only the limit
+    /// produces.
+    #[test]
+    fn a_loop_spawns_one_execution_per_value_and_no_child_run() {
+        let plan = plan_of("valids/loop-parallel-less");
+        let (_, cmds) = spawn_round(&plan, "loop");
+
+        assert!(
+            cmds.iter()
+                .all(|c| !matches!(c, Command::CreateRun { task, .. } if plan.is_loop_body(*task))),
+            "a loop body never gets a run in the parent execution: {cmds:?}"
+        );
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, Command::SpawnExecution { .. }))
+                .count(),
+            2,
+            "four values, `concurrencyLimit: 2` -- Kestra's own first batch is \
+             `min(limit, size)` (Loop.java:422): {cmds:?}"
+        );
+    }
+
+    /// **An empty `Loop` SUCCEEDS without ever running, and a `values` that
+    /// cannot be resolved FAILS the same way.**
+    ///
+    /// Both measured on the artifact, and both are why a `Loop` is asked for
+    /// its values at `CREATED` rather than at `RUNNING`. `valids/loop-empty`'s
+    /// `1_each` reads `CREATED SUCCESS` with **no `RUNNING` and no attempt**,
+    /// and the flow's next task runs; `valids/loop-null`'s reads `CREATED
+    /// FAILED`, also with no attempt, and its next task is never created.
+    ///
+    /// A machine that started the loop and then noticed produces `CREATED
+    /// RUNNING SUCCESS` with one attempt, which is a different trace on both --
+    /// so the two histories, not just the terminal states, are what is asserted.
+    /// These are the only two `Loop` entries in the whole golden whose
+    /// sub-execution list is empty, and they are exactly the two Task 6 banks.
+    #[test]
+    fn an_empty_loop_succeeds_without_running_and_an_unresolvable_one_fails() {
+        let plan = plan_of("valids/loop-empty");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["1_each", "2_end"],
+            "an empty loop does not stop the sequence"
+        );
+        assert_eq!(
+            (wire(&state.runs[0].history), state.runs[0].attempts.len()),
+            (vec!["CREATED", "SUCCESS"], 0),
+            "no RUNNING and no attempt: an empty loop never starts"
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "SUCCESS"]);
+
+        let plan = plan_of("valids/loop-null");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["1_each"],
+            "the failure stops the sequence, so `2_end` is never created"
+        );
+        assert_eq!(
+            (wire(&state.runs[0].history), state.runs[0].attempts.len()),
+            (vec!["CREATED", "FAILED"], 0),
+            "a null inside the iteration values fails the loop before it starts"
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "FAILED"]);
+    }
+
+    /// **`concurrencyLimit` bounds the first batch: `0` is unlimited, `1` is
+    /// full serialisation, `n` is up to `n`.**
+    ///
+    /// Four corpus flows, chosen because between them they pin every arm of
+    /// `Loop.java:422` and the two directions a wrong reading goes: `0` read as
+    /// a cap of zero spawns nothing and hangs, and a default read as `0` spawns
+    /// everything. The values come from each flow's own `values:` via
+    /// [`spawn_round`], so a flow whose list changes cannot silently agree.
+    #[test]
+    fn the_concurrency_limit_bounds_the_first_batch_and_zero_means_unlimited() {
+        for (corpus_id, loop_id, values, expected) in [
+            // no `concurrencyLimit:` -- Kestra's default of 1, three values
+            ("valids/loop-serial", "loop", 3, 1),
+            // `concurrencyLimit: 2` over four values
+            ("valids/loop-parallel-less", "loop", 4, 2),
+            // `concurrencyLimit: 5` over three -- the cap is above the size
+            ("valids/loop-parallel-more", "loop", 3, 3),
+            // `concurrencyLimit: 0` -- unlimited, NOT a cap of zero
+            ("valids/loop-parallel-unlimited", "loop", 3, 3),
+        ] {
+            let plan = plan_of(corpus_id);
+            let ix = plan
+                .tasks
+                .iter()
+                .position(|t| t.id == loop_id)
+                .expect("the loop is planned");
+            let TaskKind::Loop { values: src, .. } = &plan.tasks[ix].kind else {
+                panic!("{corpus_id}: `{loop_id}` is not a Loop");
+            };
+            assert_eq!(
+                iteration_values(src).expect("literal values resolve").len(),
+                values,
+                "{corpus_id}: the flow's own value count"
+            );
+
+            let (_, cmds) = spawn_round(&plan, loop_id);
+            let spawned: Vec<&str> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    Command::SpawnExecution { value, .. } => Some(value.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                spawned.len(),
+                expected,
+                "{corpus_id}: {values} value(s), first batch of {expected}: {cmds:?}"
+            );
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, Command::StartRun { run, .. } if *run == 0)),
+                "{corpus_id}: the loop starts in the same round it spawns"
+            );
+            assert!(
+                !cmds
+                    .iter()
+                    .any(|c| matches!(c, Command::SetRunState { state, .. } if *state == RunState::Submitted)),
+                "{corpus_id}: a Loop is a flowable and never passes through SUBMITTED"
+            );
+        }
+    }
+
+    /// **Kestra's `resolveValues`, row by row** — including the two rules a
+    /// reader would not write.
+    ///
+    /// The shapes are the ones the corpus actually holds, plus the two
+    /// boundaries nothing in the corpus reaches. `distinct()` is on the array
+    /// arm and NOT on the map arm, which is `FlowableUtils.java:439` against
+    /// `:463-468`, and a map iterates its VALUES rather than its keys or its
+    /// pairs — measured on `valids/loop-map`, whose three sub-executions carry
+    /// `"value 1"`, `"value 2"`, `"value 3"` and not `key1`, `key2`, `key3`.
+    #[test]
+    fn kestra_deduplicates_a_list_of_values_and_not_a_map_of_them() {
+        let cases: &[(&str, Result<Vec<&str>, ()>)] = &[
+            // corpus shapes
+            (r#"["value 1", "value 2"]"#, Ok(vec!["value 1", "value 2"])),
+            (r#"[1, 2, 3]"#, Ok(vec!["1", "2", "3"])),
+            (r#"[]"#, Ok(vec![])),
+            (
+                r#"{"key1": "value 1", "key2": "value 2"}"#,
+                Ok(vec!["value 1", "value 2"]),
+            ),
+            (
+                r#"["value 1", {"key": "my-key", "value": "my-value"}]"#,
+                Ok(vec!["value 1", r#"{"key":"my-key","value":"my-value"}"#]),
+            ),
+            // a nested object keeps INSERTION order, not alphabetical --
+            // `valids/loop-object`'s golden value is
+            // `{"key":"my-complex","value":{"sub":1,"bool":true}}`, and `bool`
+            // sorts before `sub`.
+            (
+                r#"[{"key": "my-complex", "value": {"sub": 1, "bool": true}}]"#,
+                Ok(vec![
+                    r#"{"key":"my-complex","value":{"sub":1,"bool":true}}"#,
+                ]),
+            ),
+            // the two rules
+            (r#"["a", "b", "a"]"#, Ok(vec!["a", "b"])),
+            (r#"{"k1": "a", "k2": "a"}"#, Ok(vec!["a", "a"])),
+            // the refusals
+            (r#"[1, null]"#, Err(())),
+            (r#"{"k": null}"#, Err(())),
+            (r#"{"k": true}"#, Err(())),
+            (r#""just a string""#, Err(())),
+            (r#"7"#, Err(())),
+            (r#"not json at all"#, Err(())),
+        ];
+        for (source, expected) in cases {
+            let got = iteration_values(source);
+            match (expected, &got) {
+                (Ok(want), Ok(have)) => assert_eq!(
+                    have,
+                    &want.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                    "values {source}"
+                ),
+                (Err(()), Err(_)) => {}
+                _ => panic!("values {source}: expected {expected:?}, got {got:?}"),
+            }
+        }
+    }
+
+    /// **An explicit `concurrencyLimit: null` and a negative one both take
+    /// Kestra's class default of 1 — and both are OVER-ACCEPTANCES.**
+    ///
+    /// `Loop.java:220-233` is `@PositiveOrZero @NotNull @Builder.Default private
+    /// Integer concurrencyLimit = 1;`, so this Kestra refuses both spellings at
+    /// publish. Egret does not: W1 applies bean-validation-is-not-parsing to the
+    /// field (`Option<i32>`, exactly as `Parallel::concurrent` and every other
+    /// scalar), so both reach [`build_plan`], and [`build_plan`] is documented
+    /// not to widen refusal — **Task 8 owns that**, and this is one more entry
+    /// for its list.
+    ///
+    /// What it must not do is pick silently. The mutation that changes the
+    /// fallback from `1` to `0` — the difference between full serialisation and
+    /// spawning every value at once — killed **nothing at all** on the first
+    /// pass, because
+    /// `every_corpus_loop_declares_its_values_and_a_readable_limit` proves no
+    /// corpus flow writes either spelling and so nothing else in the crate can
+    /// reach the arm. That is the "guard nobody has seen fail" pattern this
+    /// package has already shipped three times; this test is what closes it.
+    #[test]
+    fn a_null_or_negative_concurrency_limit_takes_kestras_class_default() {
+        let flow = |limit: &str| {
+            format!(
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\", \"b\", \"c\"]'\n    concurrencyLimit: {limit}\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+            )
+        };
+        for (written, expected) in [("null", 1u32), ("-1", 1), ("0", 0), ("2", 2)] {
+            let plan = build_plan(&flow(written))
+                .unwrap_or_else(|e| panic!("`concurrencyLimit: {written}` must plan: {e}"));
+            let TaskKind::Loop {
+                concurrency_limit, ..
+            } = plan.tasks[0].kind
+            else {
+                panic!("`concurrencyLimit: {written}`: not planned as a Loop");
+            };
+            assert_eq!(
+                concurrency_limit, expected,
+                "`concurrencyLimit: {written}` must plan as {expected}"
+            );
+
+            // And the behaviour it decides, so the number is not merely stored:
+            // three values, so the first batch separates 1 from 0.
+            let (_, cmds) = spawn_round(&plan, "each");
+            let spawns = cmds
+                .iter()
+                .filter(|c| matches!(c, Command::SpawnExecution { .. }))
+                .count();
+            assert_eq!(
+                spawns,
+                if expected == 0 { 3 } else { expected as usize },
+                "`concurrencyLimit: {written}` over three values"
+            );
+        }
+    }
+
+    /// **A `Loop` with no `values:` cannot be planned**, the same shape and the
+    /// same reason as an `If` with no `condition` — `@NotNull` in Java, and
+    /// nothing to iterate here.
+    ///
+    /// Unlike that one, no corpus flow is this shape
+    /// ([`every_corpus_loop_declares_its_values_and_a_readable_limit`] derives
+    /// that), so this test is the whole of what holds the refusal. It prints the
+    /// task count and root id rather than the `Plan`, for Task 3's M6 reason.
+    #[test]
+    fn a_loop_with_no_values_is_refused_by_name() {
+        let source = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n";
+        match build_plan(source) {
+            Err(e) => assert_eq!(e.message, "loop 'each' has no values to iterate"),
+            Ok(plan) => panic!(
+                "a Loop with no values must be refused; got a plan of {} task(s) rooted at {:?}",
+                plan.tasks.len(),
+                plan.roots
+                    .first()
+                    .map(|&ix| plan.tasks[ix].id.as_str())
+                    .unwrap_or("<none>")
+            ),
+        }
+
+        // The control: the same flow with `values:` plans.
+        let with_values = source.replace(
+            "    type: io.kestra.plugin.core.flow.Loop\n",
+            "    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n",
+        );
+        assert!(
+            build_plan(&with_values).is_ok(),
+            "the control: only the missing `values:` may cause the refusal"
+        );
+    }
+
+    /// **Every corpus `Loop` declares `values:` and a limit this builder can
+    /// read**, derived from all 345 flows on every run.
+    ///
+    /// Three things it pins, each of which would otherwise be an assumption in
+    /// [`build_plan`]: that the `values:` refusal is unreachable from the corpus
+    /// (so the unit test above is what holds it), that no `concurrencyLimit:` is
+    /// an expression or a negative number (so `literal_concurrency_limit`'s
+    /// fallbacks are unreachable too), and how many loops there are to begin
+    /// with.
+    #[test]
+    fn every_corpus_loop_declares_its_values_and_a_readable_limit() {
+        // `(flow id, task id, values declared?, concurrencyLimit)` -- the two
+        // fields `build_plan` reads, kept as scalars because `models::Loop` is
+        // not exported from `models`.
+        fn walk(task: &crate::models::Task, out: &mut Vec<(String, bool, Option<i32>)>) {
+            if let crate::models::TaskKind::Loop(l) = &task.kind {
+                out.push((task.id.clone(), l.values.is_some(), l.concurrency_limit));
+            }
+            for child in task.children() {
+                walk(child, out);
+            }
+        }
+
+        let mut loops: Vec<(String, String, bool, Option<i32>)> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&source) else {
+                continue;
+            };
+            let mut here = Vec::new();
+            for task in flow.tasks.iter().chain(&flow.errors) {
+                walk(task, &mut here);
+            }
+            for (task_id, has_values, limit) in here {
+                loops.push((id.clone(), task_id, has_values, limit));
+            }
+        }
+
+        let missing: Vec<&str> = loops
+            .iter()
+            .filter(|(_, _, has_values, _)| !has_values)
+            .map(|(id, _, _, _)| id.as_str())
+            .collect();
+        assert_eq!(
+            missing,
+            Vec::<&str>::new(),
+            "no corpus flow omits `values:`, so `a_loop_with_no_values_is_refused_by_name` \
+             is the only thing holding that refusal"
+        );
+
+        let unreadable: Vec<&str> = loops
+            .iter()
+            .filter(|(_, _, _, limit)| !matches!(limit, Some(n) if *n >= 0))
+            .map(|(id, _, _, _)| id.as_str())
+            .collect();
+        assert_eq!(
+            unreadable,
+            Vec::<&str>::new(),
+            "every `concurrencyLimit:` in the corpus is a non-negative literal, so \
+             `literal_concurrency_limit`'s fallback to the class default is never \
+             reached by anything this oracle compares"
+        );
+
+        let non_default = loops
+            .iter()
+            .filter(|(_, _, _, limit)| *limit != Some(1))
+            .count();
+        assert_eq!(
+            (loops.len(), non_default),
+            (52, 14),
+            "52 `Loop` tasks across the 345 corpus flows, of which 14 write a \
+             `concurrencyLimit:` other than the default 1. Fifteen flows write \
+             the property at all -- `valids/if-in-parallel` writes \
+             `concurrencyLimit: 1`, which IS the default, and that is the \
+             cross-check on the number"
+        );
+    }
+
+    /// **"Inside a loop" means the whole subtree, and the two readings differ.**
+    ///
+    /// [`Plan::is_loop_body`] answers for a task anywhere under a `Loop`, not
+    /// only for its direct children, because an `If` nested in a `Sequential` in
+    /// a loop body is just as absent from the parent's `taskRunList`. Nothing
+    /// forces that from the type: a narrower reading compiles and passes every
+    /// other test in this crate, because `advance()` never consults the method
+    /// at all.
+    ///
+    /// So the difference is measured. Over all 345 corpus flows the wide
+    /// reading names **89** tasks and the narrow one **64**; the 25 between them
+    /// are the ones a narrow reading would have called reachable, and the oracle
+    /// would then have tried to render their expressions against a context with
+    /// no `item`. (Restricted to the comparable entries the oracle actually
+    /// drives, the wide count is 82 —
+    /// `tests/executor.rs::no_run_is_ever_created_for_a_task_inside_a_loop`.)
+    #[test]
+    fn the_two_readings_of_inside_a_loop_differ_by_a_measured_amount() {
+        let (mut wide, mut narrow) = (0usize, 0usize);
+        for (id, source) in every_corpus_flow() {
+            let Ok(plan) = build_plan(&source) else {
+                continue;
+            };
+            let direct: Vec<TaskIx> = plan
+                .tasks
+                .iter()
+                .filter_map(|t| match &t.kind {
+                    TaskKind::Loop { tasks, .. } => Some(tasks.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            narrow += direct.len();
+            let here = (0..plan.tasks.len())
+                .filter(|&ix| plan.is_loop_body(ix))
+                .count();
+            wide += here;
+            assert!(
+                here >= direct.len(),
+                "{id}: the wide reading must contain the narrow one"
+            );
+        }
+        assert_eq!(
+            (wide, narrow),
+            (89, 64),
+            "89 tasks are inside a loop by the shipped reading and 64 by the \
+             direct-children one. The 25 between them are why this is a test: \
+             `advance()` never calls `is_loop_body`, so nothing else in the crate \
+             can tell the two apart"
+        );
+    }
+
+    // ----------------------------------------------------------------------
     // the instant
     // ----------------------------------------------------------------------
 
@@ -1916,8 +2437,8 @@ mod tests {
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "io.kestra.plugin.core.flow.WorkingDirectory",
-            "io.kestra.plugin.core.flow.Loop",
             "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
         ] {
             let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
             assert_eq!(
@@ -1969,6 +2490,28 @@ mod tests {
                 }]
             },
             "and so does a Dag"
+        );
+
+        // Task 6's, and the one whose children are flattened and then never
+        // run: a `Loop` body gets a `PlanTask` so that W3b can execute the
+        // sub-execution, and no `CreateRun` in THIS execution ever names it.
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("the control must plan");
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Loop {
+                values: "[\"a\"]".to_string(),
+                tasks: vec![1],
+                concurrency_limit: 1
+            },
+            "a Loop flattens its body and takes Kestra's default limit of 1, as \
+             of Task 6"
+        );
+        assert!(
+            plan.is_loop_body(1) && !plan.is_loop_body(0),
+            "the body is inside the loop and the loop is not inside itself"
         );
 
         // Task 5's two. Both flatten, and both are reached by the FQCN only --

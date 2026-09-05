@@ -10,7 +10,7 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::{descend, run_of, start, Step};
+use super::{descend, open, run_of, Step};
 
 /// Drive one sequential task list.
 ///
@@ -43,7 +43,7 @@ pub(crate) fn drive(
         };
 
         match state.runs[ix].history.last() {
-            Some(RunState::Created) => return Step::Commands(start(plan, ix, task, now)),
+            Some(RunState::Created) => return open(plan, state, ix, task, now),
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.

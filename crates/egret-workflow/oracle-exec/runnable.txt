@@ -960,3 +960,76 @@ absent.  Implementing the absent spelling would break the explicit one, so it is
 recorded rather than fixed.  It is the same model gap as `defaults: null` vs
 `defaults: []`, in the sibling field; whoever closes one closes both.  No corpus
 flow is either shape.
+
+
+W3a Task 6: the loop, and the 41 entries the oracle cannot finish comparing
+---------------------------------------------------------------------------
+
+Task 6 banks 2 of the 181 Task 5 left (181 -> 179), and 2 is the whole of what
+it could bank.  `valids/loop-empty` and `valids/loop-null` are the ONLY two
+`Loop` entries in the golden whose sub-execution list is empty.  Everything else
+a `Loop` touches is blocked on a field egret does not fill.
+
+  41   golden entries carry a sub-execution
+  142  sub-executions they carry between them
+  33   of the 41 now differ on NOTHING BUT `spawned`
+  52   sub-executions whose (parent_run, value) IS compared
+  0    sub-executions whose TRACE is compared
+
+Nothing executes `Command::SpawnExecution` until W3b/W6, and `ExecutionState`
+holds no field for a sub-execution, so egret's side of `spawned` is empty and
+stays empty.  Those 41 entries LOOK compared in `golden.json` and are not.  The
+marking is
+`tests/executor.rs::the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`,
+which derives all three counts, requires all 41 to be baselined, and names the 8
+that differ on more than `spawned`:
+
+  valids/all-flowable                  first iteration failed; flow-level errors: ran (Task 7)
+  valids/disable-flowable              a `disabled: true` task (unclaimed)
+  valids/loop-outputs-auto             values: "{{ outputs.write.uri }}" -- the harness has no outputs
+  valids/loop-values-from-uri          the same
+  valids/retry-new-execution-*  (x4)   replacement executions, parent_run null (Task 7)
+
+What IS compared, corpus-wide, is the FIRST BATCH of spawn requests:
+`every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` checks over 36
+loop runs that the (parent_run, value) pairs egret asks for are the first ones
+Kestra's `loopRun.index` ordering recorded for the same run, that the command
+names the Loop and not a body task, and that the run it names as parent is a run
+of that same loop.  A prefix and not an equality because there IS no second
+batch: `advance()` is pure and `ExecutionState` records no sub-execution, so it
+emits `min(concurrencyLimit, size)` once and cannot schedule more.  W3b owns the
+rest.
+
+Two entries are blocked on the render context rather than on `advance()`, and
+they are new at Task 6:
+
+  valids/loop-outputs-auto      values: "{{ outputs.write.uri }}"
+  valids/loop-values-from-uri   values: "{{ outputs.write.uri }}"
+
+`render_context` carries `inputs` and `vars` and nothing else, so both fail
+where Kestra ran them.  They are asserted BY NAME, separately from the two
+Kestra could not render either, and the test reads `golden.json` to require that
+Kestra's own runs for them ended SUCCESS -- which is what makes them the
+harness's fault.  Task 5's list of 2 is now 2 + 2.
+
+No `item` is supplied, and that is a ruling rather than an omission.  Planning
+the `Loop` made 12 more `If`/`Switch` expressions planned (a review had
+forwarded 16), ALL of them inside loop bodies -- and a loop body's task never
+gets a run in this execution, so none of the 12 is ever rendered and none fails
+anything.  The reachable branch population is still exactly the 26 Task 5
+measured, with the same 2 failures.  Kestra renders those 12 inside the
+sub-execution with `item` from `loopRun`; inventing one here would put a made-up
+value behind a branch decision and change nothing this oracle can see.
+
+A `Loop`'s own terminal state is FED, not compared, and README.md's feed section
+carries the correction and its cost: `transmitFailed` and the loop's aggregation
+rule are judged by nothing in W3a.  `valids/loop-failed-no-transmit` -- three
+FAILED iterations and a SUCCESS loop -- is reproduced by feeding.
+
+The instrument-bound list did NOT grow.  README.md named Task 6 twice as the
+candidate to find a third entry blocked on an ordered pair a round-based machine
+cannot produce; it cannot, because a `Loop` creates no run for its body at all
+and so adds no creation that could land out of order.  The order test's removal
+map is unchanged at 25 pairs across the same 7 entries; egret's pair population
+moved 557 -> 555, both losses being the two entries this task banked.  Task 7 is
+the next candidate.
