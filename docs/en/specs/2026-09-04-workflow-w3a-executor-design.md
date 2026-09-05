@@ -230,11 +230,17 @@ obvious:
 
 - **One bad sibling failed all three.** A validation error in exactly one
   parallel branch (`c_fast`) left `a_slow` and `b_mid` `FAILED` as well.
-- **A retried task appears twice in `taskRunList`.** With
-  `maxAttempts: 2`, `boom` appears as **two** entries, each holding two
-  attempts, while the execution's own history reads `CREATED RUNNING FAILED
-  RETRYING RUNNING FAILED RETRYING RUNNING FAILED`. This is measured and **not
-  yet explained**; explaining it is a task in the plan, not a footnote here.
+- ~~**A retried task appears twice in `taskRunList`.**~~ **This was wrong, and
+  Task 7 settled it.** The spike reported `boom` as two entries under
+  `maxAttempts: 2`. Task 7 measured the whole harvest — 2 050 execution records
+  holding 4 215 task runs — and found **zero** duplicate ids and zero duplicate
+  `(taskId, value, parentTaskRunId)`. The path is also closed by construction:
+  `Execution.withTaskRun` is `Collections.replaceAll(...)` followed by a
+  `throw`, with no append. So the plan's ruling (reproduce the semantics, not
+  the repeated element) was answering a question that did not exist. The
+  execution history through `RETRYING` is real and is reproduced; the duplicate
+  entry is not. Recorded rather than deleted, because a spike observation that
+  survived into a spec for four tasks is worth leaving visible.
 
 ## 5. Fidelity rules
 

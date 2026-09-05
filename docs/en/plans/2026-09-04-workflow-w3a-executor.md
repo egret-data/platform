@@ -657,6 +657,8 @@ entry ends up permanently baselined with nobody able to say why:
 | — | 18 over-submitted, **22 baselined entries** | `Subflow` | W6 |
 | — | 19 over-submitted | `core.execution.*` (`Labels` and 3 siblings, `ExecutionUpdatableTask`) | **unclaimed** |
 | — | — | `LoopUntil` / its alias `WaitFor` | W8 (spec §2.1) — absent from this plan, so name it here |
+| `WARNING` | 10 | `allowFailure` / `allowWarning` | **unclaimed** — the README's table wrongly gave it to Task 7 |
+| — | 2 flows | `finally:` on a `Dag` or a `Parallel` | **unclaimed** — and it strands the only two corpus flows exercising those `errors:` arms |
 
 **`Subflow` is the largest block W3a will leave behind, and no W3a task touches
 it.** The programme spec assigns it to W6, which is correct — but
