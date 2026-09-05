@@ -92,18 +92,34 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         return reopened;
     }
 
+    // # Kestra's two `isRetrying` guards are NOT here, and deleting them was
+    // measured rather than assumed
+    //
     // `ExecutorService.handleEnd` returns at once while the execution is
-    // RETRYING, and so does the retry pass (`!executor.getExecution()
-    // .getState().isRetrying()`). Without the first of those, a root list whose
-    // only child is being retried would emit its `FAILED` again on every round
-    // until the delay fires -- the execution's history would read
-    // `FAILED RETRYING FAILED FAILED …` instead of `FAILED RETRYING RUNNING`.
-    let retrying = state.history.last() == Some(&RunState::Retrying);
-
+    // `RETRYING`, and its retry pass is gated on the same thing
+    // (`!executor.getExecution().getState().isRetrying()`). Both were ported,
+    // and both turned out to be **unreachable**: a mutation that deleted each
+    // (`Step::Done(_) if retrying => Vec::new()`, and the `if !retrying` around
+    // the scan) left the whole crate at 0 failures with the ratchet unmoved, so
+    // they were deleted rather than shipped as comments nobody could check —
+    // the same answer `parallel::drive_concurrent` records for Kestra's "first
+    // created, leave".
+    //
+    // **What makes them unreachable is a property of [`retry::scan`], not of
+    // this function.** `scan` writes `SetRunState { state: Retrying }` and
+    // `SetExecutionState { state: Retrying }` in the same round, so no later
+    // round can see a `Failed` run while the execution is `RETRYING`:
+    // `flowable::current_list` finds no failure, returns `Current::Tasks`, and
+    // the walk answers `Waiting` on a `Retrying` child. Both guards are about a
+    // state where those two writes have come apart.
+    //
+    // **So the trigger to watch for is a caller that applies a command batch
+    // PARTIALLY** — W3b's message-driven driver is the candidate, exactly as it
+    // is for the `Parallel` guard. Whoever gives `advance` one has to bring both
+    // guards back, and bring the test that makes them fire with them.
     let mut work = match sequential::drive(plan, state, &plan.roots, &plan.errors, None, now) {
         Step::Commands(cmds) => cmds,
         Step::Waiting => Vec::new(),
-        Step::Done(_) if retrying => Vec::new(),
         Step::Done(state) => vec![Command::SetExecutionState { state }],
     };
 
@@ -111,9 +127,7 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // therefore behind whatever state the execution just took. That order is
     // visible: `valids/retry-failed-task-attempts`'s execution reads
     // `… FAILED RETRYING …`, never `… RETRYING FAILED …`.
-    if !retrying {
-        work.extend(retry::scan(plan, state, now));
-    }
+    work.extend(retry::scan(plan, state, now));
 
     let not_running_yet = state.history.last() == Some(&RunState::Created);
     let has_a_run = !state.runs.is_empty();
@@ -3475,6 +3489,205 @@ mod tests {
              `Dag` and the single `Parallel` are `valids/finally-dag` and \
              `valids/finally-parallel`, which both ALSO write a `finally:` no \
              W3a task implements, so neither can bank on the `errors:` arm alone"
+        );
+    }
+
+    /// **Two retries falling due in the same round put ONE `RUNNING` on the
+    /// execution, not one each.**
+    ///
+    /// `advance` is a pure function of the state it is handed and any caller may
+    /// hand it any state, so this hands it one the corpus cannot reach: two
+    /// sibling `Runnable`s of a `Parallel`, both `RETRYING`, both past their
+    /// `not_before`. The state is hand-built for the same reason
+    /// `parallel::drive_concurrent`'s doc gives for the guard it deleted — the
+    /// difference between "unreachable under today's caller" and "unreachable"
+    /// is the whole distinction, and here the rule is kept because the wrong
+    /// shape is a real defect: `ExecutionService.retryTask` is
+    /// `withState(RUNNING)` on the **execution**, which has one state, and a
+    /// per-run emission would push a duplicate `RUNNING` into a history the
+    /// golden never shows one in.
+    ///
+    /// Without this test the rule was a guard nobody had seen fail: the
+    /// mutation that emits per run killed **nothing** across the whole crate.
+    #[test]
+    fn two_retries_due_in_one_round_move_the_execution_to_running_once() {
+        let plan = plan_of("valids/parallel");
+        let mut state = ExecutionState::new(&plan);
+        // Drive far enough that the `Parallel` and its children exist.
+        for _ in 0..10 {
+            let cmds = advance(&plan, &state, Tick(0));
+            if cmds.is_empty() {
+                break;
+            }
+            for cmd in &cmds {
+                apply(&mut state, cmd);
+            }
+        }
+        let children: Vec<RunIx> = (0..state.runs.len())
+            .filter(|&ix| {
+                state.runs[ix].parent.is_some()
+                    && matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::Runnable { .. }
+                    )
+            })
+            .take(2)
+            .collect();
+        assert_eq!(children.len(), 2, "valids/parallel has several children");
+        for &ix in &children {
+            for cmd in [
+                Command::SetRunState {
+                    run: ix,
+                    state: RunState::Failed,
+                },
+                Command::SetRunState {
+                    run: ix,
+                    state: RunState::Retrying,
+                },
+                Command::ScheduleRetry {
+                    run: ix,
+                    not_before: Tick(1_000),
+                },
+            ] {
+                apply(&mut state, &cmd);
+            }
+        }
+        apply(
+            &mut state,
+            &Command::SetExecutionState {
+                state: RunState::Retrying,
+            },
+        );
+
+        let cmds = advance(&plan, &state, Tick(1_000));
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(
+                    c,
+                    Command::SetExecutionState {
+                        state: RunState::Running
+                    }
+                ))
+                .count(),
+            1,
+            "the execution has ONE state, so two due retries move it to RUNNING \
+             once -- got {cmds:?}"
+        );
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(
+                    c,
+                    Command::SetRunState {
+                        state: RunState::Created,
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "both runs are re-CREATED, though: `retryTask` is per taskRun"
+        );
+    }
+
+    /// **`markParents` walks the WHOLE ancestor chain, and `false` walks none.**
+    ///
+    /// `markWithTaskRunAs(execution, id, RETRIED, true)` recurses up
+    /// `getParentTaskRunId()` (`ExecutionService.java:668-670`); the
+    /// `RETRY_FAILED_TASK` call passes `false` and leaves every ancestor alone.
+    /// No corpus flow puts a `CREATE_NEW_EXECUTION` retry on a nested task — all
+    /// four `retry-new-execution-*` flows fail a **root** task — so a mutation
+    /// that stopped the walk after one level killed nothing. This drives a
+    /// nested one.
+    #[test]
+    fn create_new_execution_marks_every_ancestor_run_retried() {
+        let source = "\
+id: probe-new-execution-nested
+namespace: io.kestra.tests
+tasks:
+  - id: outer
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: inner
+        type: io.kestra.plugin.core.flow.Sequential
+        tasks:
+          - id: boom
+            type: io.kestra.plugin.core.execution.Fail
+            retry:
+              behavior: CREATE_NEW_EXECUTION
+              type: constant
+              maxAttempts: 3
+              interval: PT1S
+";
+        let plan = build_plan(source).expect("a plan");
+        let (state, _) = run_to_fixpoint_over_time(&plan, &[RunState::Failed]);
+        assert_eq!(run_ids(&plan, &state), ["outer", "inner", "boom"]);
+        for (ix, id) in ["outer", "inner", "boom"].iter().enumerate() {
+            assert_eq!(
+                state.runs[ix].history.last(),
+                Some(&RunState::Retried),
+                "`markParents: true` marks {id} too"
+            );
+        }
+        assert_eq!(state.history.last(), Some(&RunState::Retried));
+    }
+
+    /// **What `errors:` adds to `Plan::is_loop_body`, measured — and it is
+    /// zero on this corpus.**
+    ///
+    /// `Plan::children_of` walks `errors` because Java's
+    /// `AbstractBranch.allChildTasks()` does, and a task hanging off an
+    /// `errors:` inside a loop body is just as absent from the parent's
+    /// `taskRunList` as one hanging off `tasks:`. But a mutation that dropped
+    /// the `errors` half killed nothing, and this is why: **no corpus loop body
+    /// contains a flowable with an `errors:` at all**, so the wide walk and the
+    /// walk without it name the same tasks.
+    ///
+    /// So the rule is kept and its cost is a measurement rather than an
+    /// argument. If a later corpus makes this non-zero, the assertion is what
+    /// says the walk started mattering.
+    #[test]
+    fn an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach() {
+        let (mut wide, mut without_errors, mut flows) = (0usize, 0usize, 0usize);
+        for (_, source) in every_corpus_flow() {
+            let Ok(plan) = build_plan(&source) else {
+                continue;
+            };
+            if !plan
+                .tasks
+                .iter()
+                .any(|t| matches!(t.kind, TaskKind::Loop { .. }))
+            {
+                continue;
+            }
+            flows += 1;
+            let here_wide = (0..plan.tasks.len())
+                .filter(|&ix| plan.is_loop_body(ix))
+                .count();
+            wide += here_wide;
+            // The same predicate with every `errors:` list emptied, which is
+            // exactly what dropping the `errors` half of `children_of` would
+            // reach.
+            let mut stripped = plan.clone();
+            for task in &mut stripped.tasks {
+                task.errors.clear();
+            }
+            without_errors += (0..stripped.tasks.len())
+                .filter(|&ix| stripped.is_loop_body(ix))
+                .count();
+        }
+        assert_eq!(
+            (flows, wide),
+            (43, 89),
+            "the 43 corpus flows holding a `Loop` and the 89 tasks the wide \
+             reading names inside one -- the same 89 \
+             `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount` \
+             derives"
+        );
+        assert_eq!(
+            wide - without_errors,
+            0,
+            "not one of those 89 is reached through an `errors:` list, so \
+             walking `errors` in `Plan::children_of` costs and buys nothing \
+             here. It is Kestra's own walk and it stays; this is its price"
         );
     }
 }

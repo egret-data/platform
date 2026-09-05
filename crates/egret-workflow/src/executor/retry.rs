@@ -194,10 +194,21 @@ pub(super) fn next_retry_at(
     let task_run = &state.runs[run];
     // `this.attempts == null || this.attempts.isEmpty()` -- a run that never
     // started an attempt has nothing to retry.
-    let attempts = u32::try_from(task_run.attempts.len()).ok()?;
-    if attempts == 0 {
-        return None;
-    }
+    //
+    // **A `NonZeroU32` rather than an `if attempts == 0` guard, deliberately.**
+    // The guard was written first and a mutation that neutered it killed
+    // NOTHING: `scan` only offers `Failed` runs, and every run this corpus can
+    // fail has started an attempt -- a `Loop` that fails at `CREATED` has none,
+    // but a `Loop` is not a `Runnable` and `scan` skips it. The condition is
+    // still real (with zero attempts, `count >= max_attempts` is false and a
+    // `CREATE_NEW_EXECUTION` policy would schedule a retry for a run that never
+    // ran), so the answer is to make the mutation *unwritable* rather than to
+    // ship a guard nobody has seen fire: `NonZeroU32::new(0)` is `None` by
+    // construction and there is no line here to delete.
+    let attempts = u32::try_from(task_run.attempts.len())
+        .ok()
+        .and_then(std::num::NonZeroU32::new)?
+        .get();
 
     let (count, origin) = match policy.behavior {
         // `this.attemptNumber()`, and `attempts.getFirst().getState().minDate()`.
