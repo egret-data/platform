@@ -656,12 +656,18 @@ entry ends up permanently baselined with nobody able to say why:
 | `CANCELLED` | 3 | flow concurrency | W8 |
 | — | 18 over-submitted, **22 baselined entries** | `Subflow` | W6 |
 | — | 19 over-submitted | `core.execution.*` (`Labels` and 3 siblings, `ExecutionUpdatableTask`) | **unclaimed** |
+| — | — | `LoopUntil` / its alias `WaitFor` | W8 (spec §2.1) — absent from this plan, so name it here |
 
 **`Subflow` is the largest block W3a will leave behind, and no W3a task touches
 it.** The programme spec assigns it to W6, which is correct — but
 `Command::SpawnExecution` is Task 6's, for a **loop iteration**, and that is a
 different construct. Anyone reading W3a's residual baseline will otherwise
 assume Task 6 covers `Subflow`; it does not.
+
+`LoopUntil` is owned — the spec's §2.1 moved it to W8 and gave the reason — but
+its name appears nowhere in this plan, so a reader of W3a's residual baseline has
+no way to learn that. Task 6 found it the same way Task 3 found `Subflow`: by
+checking what was left over rather than assuming the table was complete.
 
 `core.execution.*` is a family, not a name: `Labels` is one of four
 `ExecutionUpdatableTask` implementors — neither a `RunnableTask` nor a flowable.
