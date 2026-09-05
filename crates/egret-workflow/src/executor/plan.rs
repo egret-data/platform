@@ -119,6 +119,12 @@ impl std::error::Error for PlanError {}
 /// `executor/mod.rs` re-measures `MEASURED_MAX_CORPUS_DEPTH` from the 345
 /// committed corpus flows on every run and fails if it moves, so this is a
 /// bound over a measurement rather than over a memory of one.
+///
+/// **The measurement is a lower bound**: W1's model drops every control-flow
+/// type's `errors`/`finally`, which Java's `AbstractBranch.allChildTasks()`
+/// counts, so a subtree hanging off a task-level `errors:` is invisible to the
+/// walk *and* to this builder alike. The 8× is what absorbs that, and the
+/// figure may rise when Task 7 widens the model. See the test's doc.
 pub(super) const MEASURED_MAX_CORPUS_DEPTH: usize = 6;
 pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 

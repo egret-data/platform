@@ -1604,6 +1604,10 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
     let (mut fed, mut flowable, mut unplanned, mut refused_flows) =
         (0usize, 0usize, 0usize, 0usize);
     let (mut fed_without_submitted, mut parents, mut submitted) = (0usize, 0usize, 0usize);
+    // Which task TYPES egret currently hands to a worker that Kestra's executor
+    // ran itself. Derived from the plan's own `type_id`, never a hand list --
+    // the family is wider than any one name, and a list would go stale.
+    let mut over_fed: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -1643,10 +1647,11 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
                 {
                     None => unplanned += 1,
                     Some(TaskKind::Sequential { .. }) => flowable += 1,
-                    Some(TaskKind::Runnable { .. }) => {
+                    Some(TaskKind::Runnable { type_id }) => {
                         fed += 1;
                         if !run.state.iter().any(|s| s == "SUBMITTED") {
                             fed_without_submitted += 1;
+                            *over_fed.entry(type_id.clone()).or_default() += 1;
                         }
                     }
                 }
@@ -1689,10 +1694,81 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
         (580, 260),
         "the golden's own worker/executor discriminator has moved"
     );
+    // Pinned, not printed. The README's "812 was impossible" rests entirely on
+    // the 840 - 120 = 720 ceiling, and a ceiling no test holds is a ceiling that
+    // can move without anyone noticing -- inside a test whose whole purpose is
+    // that a figure cannot move without the README moving.
+    assert_eq!(
+        parents, 120,
+        "120 golden runs are the parent of another run and are therefore \
+         certainly flowables whose terminals are never fed. That is the entire \
+         basis for the 720 ceiling in oracle-exec/README.md, and for the finding \
+         that the quoted 812 was impossible rather than merely wrong."
+    );
     assert!(
         submitted < total - parents,
         "a run that is the parent of another is certainly a flowable, so the fed \
          count can never exceed {}",
         total - parents
+    );
+
+    // The types egret over-submits, derived. `SUBMITTED` is Kestra handing a
+    // task to a WORKER; a golden run without it was run by the EXECUTOR itself.
+    // So every type below is one `advance()` currently treats as a worker task
+    // and Kestra does not -- flowables Tasks 4-6 will claim, and one family that
+    // no W3a task claims at all.
+    println!("over-submitted by type: {over_fed:?}");
+    assert_eq!(
+        over_fed.values().sum::<usize>(),
+        fed_without_submitted,
+        "the by-type breakdown must account for every over-submitted run"
+    );
+
+    let bucket = |prefix: &str| -> (usize, usize) {
+        let m: Vec<usize> = over_fed
+            .iter()
+            .filter(|(t, _)| t.starts_with(prefix))
+            .map(|(_, n)| *n)
+            .collect();
+        (m.len(), m.iter().sum())
+    };
+    assert_eq!(
+        (
+            over_fed.len(),
+            bucket("io.kestra.plugin.core.flow."),
+            bucket("io.kestra.plugin.core.execution.")
+        ),
+        (15, (11, 114), (3, 19)),
+        "15 task types are over-submitted. 11 of them are flowables Tasks 4-6 \
+         own (114 runs). THREE are `io.kestra.plugin.core.execution.*` (19 runs) \
+         -- Kestra's `ExecutionUpdatableTask` family (`Labels`, `SetVariables`, \
+         `UnsetVariables`, `Exit`; `core/src/main/java/io/kestra/plugin/core/\
+         execution/Labels.java:79`), which is neither a `RunnableTask` nor a \
+         flowable and which NO W3a task claims -- nor does any task claim \
+         `core.flow.Subflow`, 18 more of these runs. See oracle-exec/README.md, \
+         `States and constructs no W3a task claims`."
+    );
+
+    // The remainder is the measured EXCEPTION to the discriminator this test
+    // rests on, and it is not zero. `SUBMITTED` is not on every run of a task
+    // the worker ran: a `Log` -- an unambiguous `RunnableTask` -- that Kestra
+    // never handed to a worker because `runIf` SKIPPED it, or that failed before
+    // submission, has no `SUBMITTED` either. So 580 is the number of runs Kestra
+    // DID submit, and it is a LOWER bound on what a complete plan builder would
+    // feed, not the exact figure.
+    let other: BTreeMap<&str, usize> = over_fed
+        .iter()
+        .filter(|(t, _)| {
+            !t.starts_with("io.kestra.plugin.core.flow.")
+                && !t.starts_with("io.kestra.plugin.core.execution.")
+        })
+        .map(|(t, n)| (t.as_str(), *n))
+        .collect();
+    assert_eq!(
+        other,
+        BTreeMap::from([("io.kestra.plugin.core.log.Log", 2)]),
+        "a run of a genuine RunnableTask with no SUBMITTED is the exception that \
+         bounds the 580; if this set grows, oracle-exec/README.md's phrasing of \
+         the discriminator has to weaken with it"
     );
 }

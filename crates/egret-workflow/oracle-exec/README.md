@@ -11,11 +11,15 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
-Task 3 is the first task to write executor code, and it changed three things
-this file states: the circularity figure under *What the oracle feeds in* is now
+Task 3 is the first task to write executor code, and it changed four things this
+file states: the circularity figure under *What the oracle feeds in* is now
 measured rather than quoted (and the quoted one was impossible), `RunState`
-gained `SUBMITTED`, and the elapsed-time hole's second cause is closed. See
-*What Task 3 had to change, and what it banked*.
+gained `SUBMITTED`, the elapsed-time hole's second cause is closed, and
+`timeout:` turns out not to be `advance()`'s to implement at all. It also added
+*States and constructs no W3a task claims*, which names five things — `Pause`,
+flow concurrency, `disabled:`, `ExecutionUpdatableTask` and **`Subflow`** — that
+strand baselined entries with no owner. See *What Task 3 had to change, and what
+it banked*.
 
 Every number below is a number `harvest.py` prints. If this file and
 `runnable.txt` ever disagree, `runnable.txt` is right and this file is stale —
@@ -917,14 +921,28 @@ Those three move as Tasks 4-8 teach `build_plan` more flowables, which is why
 they are asserted in the test rather than only printed here: a task that changes
 the split has to change this table in the same commit.
 
-**The end state does not move, and it is 580.** `SUBMITTED` is on every task
-Kestra's *worker* ran and on no flowable its *executor* ran, so a plan builder
-that knew every flowable would feed exactly the 580 run terminals whose golden
-history carries it, and compare the other 260. That figure is independent of how
-complete `build_plan` happens to be. It also puts a number on Task 3's own
-over-feed: **135** of the 390 fed today carry no `SUBMITTED`, so they are
-flowables being fed their own answer until the task that owns each of them
-lands.
+**The end state is 580, and it is a lower bound rather than the exact figure.**
+`SUBMITTED` is Kestra handing a task to a *worker*, so a plan builder that knew
+every flowable would feed at least the 580 run terminals whose golden history
+carries it and compare at most the other 260 — independent of how complete
+`build_plan` happens to be. It is a bound and not an equality because the
+converse fails, measured: **2 runs of `io.kestra.plugin.core.log.Log`, an
+unambiguous `RunnableTask`, carry no `SUBMITTED`** — Kestra never submitted them,
+because `runIf` `SKIPPED` them or they failed before submission. The set is
+asserted at exactly those 2, so if the exception grows this paragraph has to
+weaken with it.
+
+**Task 3's own over-feed is 135 of the 390, and it is not a single accident.**
+The by-type breakdown is derived from the plan's own `type_id` and printed on
+every run — **15 task types**, of which 11 are flowables Tasks 4-6 own (114
+runs — but see the section below: `Subflow`'s 18 of those are claimed by nobody
+either), 3 are `io.kestra.plugin.core.execution.*` (19 runs) that **no W3a task
+claims**, and 1 is the `Log` exception above. See *States and constructs no W3a
+task claims*.
+
+**Nothing banked rests on any of this** — zero of the 134 banked runs sit in the
+135-run over-fed bucket. See *What Task 3 had to change, and what it banked* for
+the intersection that establishes it.
 
 What makes that acceptable is not the argument, it is that `golden.json` is
 machine-derived and re-derivable: `normalise.py` at HEAD reproduces both it and
@@ -1250,7 +1268,25 @@ to justify. All three are in the crate with a guard each; none was made quietly.
   derives the run's start from `attempts[0]` rather than storing a second copy
   that could disagree. The instant rides on the command rather than being a `now`
   parameter on `apply` so that there is exactly one value it can be — the one
-  `advance()` saw. `an_attempt_records_the_tick_it_was_started_at` is the guard.
+  `advance()` saw. `an_attempt_records_the_tick_it_was_started_at` is the guard
+  for the field.
+
+  **The two accessors were interchangeable, and now are not.**
+  `TaskRun::started_at()` reads `attempts.first()` and
+  `attempt_started_at()` reads `attempts.last()`, and the whole justification for
+  having both is that Kestra measures two different rules from the two different
+  instants. Under the committed suite as first shipped, **swapping `.first()` for
+  `.last()` in *either* one built with 0 errors and left the crate at 434 passed
+  / 0 failed with the ratchet unmoved at 193** — because Task 3 never produces a
+  run with more than one attempt, so
+  `an_attempt_records_the_tick_it_was_started_at` pins the field and cannot tell
+  the accessors apart. Two accessors argued from two Kestra lines and
+  distinguishable by nothing is the third instance of the
+  guard-that-cannot-fail pattern in this package, and the first two shipped.
+  `the_run_start_and_the_attempt_start_are_different_instants` now opens a
+  **second attempt through `apply` and a real `Command::StartRun`** — the command
+  Task 7's retry will emit — so it pins the writer too, and only the decision to
+  emit it is the test's. Both swaps now die (M10, M11).
 - **`build_plan` refuses only what it cannot parse.** Not a change to a type, but
   the decision most likely to be undone by a later reader as an obvious
   improvement, so it is recorded with its measurement: see the mutation table
@@ -1277,20 +1313,53 @@ not only by a unit test. **No banked entry contains a flowable other than
 `Sleep`, which is a `RunnableTask` in Kestra too, so nothing here matches because
 an opaque flowable happened to look like a worker task.
 
-**The 6 refused entries are banked on the weakest possible evidence, and Task 8
-must re-derive them.** They are `invalids/{inputs, inputs-bad-type, invalid,
+**Nothing banked rests on the one field this oracle feeds.** A review
+intersected each mutation's victims with the 101: all 95 banked `runs` entries
+die to three *independent* decision mutations (M1, M2, M9), and the only 4 banked
+runs whose golden carries no `SUBMITTED` are exactly the 4 `Sequential` runs
+(`1-seq`, `1-3_seq`, `1-3-2_seq`, `seq`) — re-derived here, not relayed. So zero
+banked runs sit in the 135-run over-fed bucket.
+
+### Refusal: 22 over-accepted, and 6 banked on the weakest evidence there is
+
+**Over-acceptance first, because it is the class the programme forbids
+shipping.** Of the golden's 28 `refused` entries, `build_plan` **over-accepts
+22** — it plans a flow this Kestra refused. That is unchanged from BASE, honestly
+baselined, and Task 8's whole subject; Task 3 refuses only what W1's parser
+cannot read and deliberately does not narrow the gap (M8 below is what happens
+when it tries). The count is here so that "101 banked" is never read as progress
+against the divergence class that matters.
+
+**The other 6 are banked on the weakest possible evidence, and Task 8 must
+re-derive them.** They are `invalids/{inputs, inputs-bad-type, invalid,
 invalid-parallel, switch-invalid, system-labels}`, and they match only because
 the oracle asks one thing of a `refused` entry — that `build_plan` returns `Err`
-— and W1's YAML parser happens to refuse them. Two of the six are refused for a
-cause that is a **W1 model defect rather than a judgement about the flow**, and
-that is not speculation: `invalids/invalid-parallel` and `invalids/switch-invalid`
-die on `tasks: invalid type: null, expected a sequence`, and so does
-`valids/switch-impossible` — a flow this Kestra published and **ran**. Its
-`defaults: null` is Jackson leaving a field null, which `models/task.rs` handles
-correctly for `Parallel::concurrent` and every other scalar and misses on every
-bare `Vec<Task>`. That entry stays in `baseline.txt` as `egret REFUSED a flow
-Kestra ran`, which is where a measured over-refusal belongs. Task 8 asserts on
-the refusal *message* per group, which is what will separate the six.
+— and W1's YAML parser happens to refuse them.
+
+**Two of the six are right by accident, and the same rule is an OVER-REFUSAL that
+reaches the HTTP API.** `models::Switch::defaults` and every other bare
+`Vec<Task>` in `models/task.rs` reject an explicit `null` that Jackson accepts —
+the bean-validation-is-not-parsing principle that file applies correctly to
+`Parallel::concurrent` and every other scalar. Pinned to the token by
+`executor/mod.rs::a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`:
+
+- `valids/switch-impossible` — a flow this Kestra published and **ran** — is
+  refused, and **parses the moment `defaults: null` is deleted**.
+- `invalids/switch-invalid` parses without that same line too, so its refusal
+  says nothing about its empty `cases:`.
+- In `invalids/invalid-parallel`, only `para4`'s `tasks: null` refuses: `para2`
+  (no `tasks` key) and `para3` (`tasks: []`) both parse. The rule is exactly
+  "explicit null", not "missing or empty".
+
+**Blast radius: an API defect, not an oracle note.** `spec::parse` is called from
+`routes.rs:302` (`draft_dto`), `routes.rs:335` (`parse_draft`, used by
+`create_flow` and `update_flow`) and `routes.rs:640` (`validate_flow`). So `POST
+/flows`, `PUT /flows/{id}` and `POST /flows/{id}/validate` return **400
+InvalidInput** today for a flow this Kestra accepts and runs. W1's model owns the
+fix; when it lands the committed test flips, and whoever fixes it must revisit
+`baseline.txt` and Task 8's per-group message assertions in the same commit.
+`valids/switch-impossible` stays baselined meanwhile as `egret REFUSED a flow
+Kestra ran`, which is where a measured over-refusal belongs.
 
 ## The ratchet, and the four arms
 
@@ -1332,30 +1401,102 @@ dies if that exclusion is deleted.
 
 ### Task 3's mutations
 
-Nine, each built first and asserted to compile (`cargo build -p egret-workflow
+Twelve, each built first and asserted to compile (`cargo build -p egret-workflow
 --tests` reporting **0 errors**) before being run, because a mutation that does
 not build looks exactly like one no test caught. Each was run against the
-**whole crate** — `cargo test -p egret-workflow --no-fail-fast`, 434 lib tests
+**whole crate** — `cargo test -p egret-workflow --no-fail-fast`, 436 lib tests
 plus six integration binaries — and not against a name-filtered subset, which
 can only confirm the expectation it was filtered by. The crate is green at 0
 failures without them.
 
-| # | mutation | what died, and the message |
-|---|---|---|
-| M1 | delete the `StartRun` emission (the plan's own Step 6) | the ratchet + 6 unit tests. `PANIC: the state machine panicked or would not settle on 285 entr(y/ies)` … `STUCK after 2 step(s) at now=Tick(0)` … `run 0 (dag) is Some(Submitted)` |
-| M2 | delete the `SUBMITTED` emission | the ratchet + 2. `runnable 1-1 must pass through SUBMITTED — left: ["CREATED", "RUNNING", "SUCCESS"] right: ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"]` |
-| M3 | create the whole child list up front instead of one at a time | the ratchet + 4. `left: [CreateRun { task: 0, … }, CreateRun { task: 10, … }] right: [CreateRun { task: 0, … }]` |
-| M4 | a non-`Success` child no longer stops the sequence (`if false && …`) | the ratchet + 2. `the first task failed, so none of the other 4 was created — left: 5 right: 1` |
-| M5 | hard-code `at: Tick(0)` on `StartRun` | `an_attempt_records_the_tick_it_was_started_at`. `left: Some(Tick(0)) right: Some(Tick(11))` |
-| M6 | remove the depth bound over author input | `nesting_past_the_bound_is_refused_by_name`. `nesting past the bound must be refused; got a plan of 49 task(s)` |
-| M7 | map `AllowFailure` and `WorkingDirectory` to `Sequential` too | `every_other_flowable_stays_opaque` + the feed measurement. `io.kestra.plugin.core.flow.AllowFailure is opaque, so `inner` must not be in the plan at all — left: 2 right: 1`, and the split moves `(390, 23, 427, 135)` → `(392, 30, 418, 133)` |
-| M8 | `build_plan` refuses every unimplemented flowable | the ratchet, in **both** directions at once: `REGRESSION: 12 entr(y/ies)` … `valids/flow-concurrency-cancel: egret REFUSED a flow Kestra ran: task id 'sleep' uses an unimplemented flowable`, **and** `PROGRESS NOT BANKED: 8 entr(y/ies)` naming `invalids/dag-cyclicdependency`, `invalids/recursive-flow` and six more. This is the whole argument for the restraint in `build_plan`'s doc, measured: the refusal is right for a reason that has nothing to do with the flow being invalid, and the ratchet cannot tell |
-| M9 | the execution never leaves `CREATED` | the ratchet + 3. `left: ["CREATED", "SUCCESS"] right: ["CREATED", "RUNNING", "SUCCESS"]` |
+**The exact edit is recorded, not a description of it.** A review re-ran these
+from the descriptions and got different numbers twice — M3 killing 5 unit tests
+where the table said 4, and an M8 formulation giving 0 regressions / 6 bogus
+banks where this one gives 12 / 8 — both resolved only by matching the exact
+text. A mutation table that cannot be replayed is a claim, not a record.
+
+| # | file | edit (`-` → `+`) | what died, and the message |
+|---|---|---|---|
+| M1 | `sequential.rs` | `- cmds.push(Command::StartRun { run, at: now });` → `+ let _ = (run, now);` | ratchet + **6** unit tests. `PANIC: the state machine panicked or would not settle on 285 entr(y/ies)` … `STUCK after 2 step(s) at now=Tick(0): nothing to do, nothing in flight, no deadline ahead … run 0 (dag) is Some(Submitted)` |
+| M2 | `sequential.rs` | delete the whole `if matches!(… Runnable …) { cmds.push(SetRunState { state: Submitted }) }` block, replaced by `let _ = (plan, task);` | ratchet + **2**. `runnable 1-1 must pass through SUBMITTED — left: ["CREATED","RUNNING","SUCCESS"] right: ["CREATED","SUBMITTED","RUNNING","SUCCESS"]`. Also **21 baselined entries start matching** — see *States and constructs no W3a task claims* |
+| M3 | `sequential.rs` | the single `CreateRun` for the first un-created child → `children.iter().filter(no run yet).map(CreateRun).collect()` | ratchet + **5**. `left: [CreateRun { task: 0, .. }, CreateRun { task: 10, .. }] right: [CreateRun { task: 0, .. }]` |
+| M4 | `sequential.rs` | `- if *s != RunState::Success {` → `+ if false && *s != RunState::Success {` | ratchet + **2**. `the first task failed, so none of the other 4 was created — left: 5 right: 1` |
+| M5 | `sequential.rs` | `- at: now` → `+ at: Tick(0)` on the `StartRun` push | `an_attempt_records_the_tick_it_was_started_at`. `left: Some(Tick(0)) right: Some(Tick(11))` |
+| M6 | `plan.rs` | `- if depth > MAX_TASK_DEPTH {` → `+ if false && depth > MAX_TASK_DEPTH {` | `nesting_past_the_bound_is_refused_by_name`. `nesting past the bound must be refused; got a plan of 49 task(s)` |
+| M7 | `plan.rs` | the `if let (ModelKind::Sequential(seq), SEQUENTIAL_TYPE)` arm → a `match` also taking `ModelKind::AllowFailure(a)` and `ModelKind::WorkingDirectory(w)` | `every_other_flowable_stays_opaque` **and** the feed test. ``AllowFailure is opaque, so `inner` must not be in the plan at all — left: 2 right: 1``; the split moves `(390,23,427,135)` → `(392,30,418,133)` |
+| M8 | `plan.rs` | insert, before `let ix = out.len();`: `if task.r#type.starts_with("io.kestra.plugin.core.flow.") && task.r#type != SEQUENTIAL_TYPE { return Err(…"uses an unimplemented flowable") }` | ratchet **in both directions at once**, plus `every_other_flowable_stays_opaque` and the feed test. `REGRESSION: 12 entr(y/ies)` … `valids/flow-concurrency-cancel: egret REFUSED a flow Kestra ran: task id 'sleep' uses an unimplemented flowable`, **and** `PROGRESS NOT BANKED: 8 entr(y/ies)` naming `invalids/dag-cyclicdependency`, `invalids/recursive-flow` and six more. This is the whole argument for the restraint in `build_plan`'s doc, measured: the refusal is right for a reason that has nothing to do with the flow being invalid, and the ratchet cannot tell |
+| M9 | `mod.rs` | `- if not_running_yet && (has_a_run \|\| terminating) {` → `+ if false && …` | ratchet + **3**. `left: ["CREATED","SUCCESS"] right: ["CREATED","RUNNING","SUCCESS"]` |
+| M10 | `state.rs` | `TaskRun::started_at`: `- self.attempts.first()` → `+ self.attempts.last()` | `the_run_start_and_the_attempt_start_are_different_instants`. `started_at() is the FIRST attempt's instant — left: Some(Tick(4200)) right: Some(Tick(11))` |
+| M11 | `state.rs` | `TaskRun::attempt_started_at`: `- self.attempts.last()` → `+ self.attempts.first()` | the same test. `attempt_started_at() is the LAST attempt's instant — left: Some(Tick(11)) right: Some(Tick(4200))` |
+| M12 | `tests/executor.rs` | `- if has_children.contains(&ix) {` → `+ if has_children.contains(&ix) && run.parent.is_none() {` | the feed test. `120 golden runs are the parent of another run … That is the entire basis for the 720 ceiling — left: 86 right: 120` |
 
 M6 also earned a change to the test rather than to the code: `expect_err` printed
 the whole 49-task `Plan` and buried the finding, so the assertion prints the task
 count instead. A guard that fires with an unreadable message has been seen fire
 and not seen work.
+
+**The restore path matters as much as the edit.** The driver restores with
+`shutil.copyfile`, which copies content only and stamps the destination mtime at
+write time, so cargo always rebuilds — verified, not assumed. A restore that
+*preserves* mtimes (`tar xf`, `cp -p`, `rsync -a`) makes cargo rebuild nothing,
+and a "pristine" control run then reproduces the mutation's failures exactly,
+reading identically to a real result. The same family caught this task once
+already: `cp` is aliased to `cp -i` in this shell, so a snapshot refresh silently
+refused to overwrite and a stale file was restored over a fix.
+
+## States and constructs no W3a task claims
+
+The plan carries this table too (`docs/en/plans/2026-09-04-workflow-w3a-executor.md`,
+*States and constructs no W3a task claims*); it is here because the entries it
+strands are entries of `baseline.txt`, and a permanently baselined line with no
+owner is how a suppression list starts.
+
+| construct | what it strands | produced by | owner |
+|---|---|---|---|
+| `Pause` | `PAUSED`, 18 golden `runs` entries | `io.kestra.plugin.core.flow.Pause` | W8 |
+| flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
+| `disabled:` | `SKIPPED`, 4 entries | a task-level flag | **unclaimed — W3a's final review must assign it or defer it with a reason** |
+| `ExecutionUpdatableTask` | 19 over-submitted runs across 16 baselined entries | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
+| `Subflow` | 22 baselined `runs` entries, 18 over-submitted runs | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
+
+The fourth row is Task 3's, and it is wider than the name that surfaced it.
+`io.kestra.plugin.core.execution.Labels` is `extends Task implements
+ExecutionUpdatableTask` (`core/src/main/java/io/kestra/plugin/core/execution/Labels.java:79`)
+— **neither a `RunnableTask` nor a flowable**. Kestra's *executor* calls
+`update(execution, runContext)` on it and never submits it to a worker, so its
+runs carry no `SUBMITTED`. The interface has four implementors in this checkout:
+`Labels`, `SetVariables`, `UnsetVariables` and `Exit`.
+
+`advance()` plans all four as opaque `Runnable`s and therefore emits `SUBMITTED`
+on them, and the cost is exact rather than estimated. Under M2 — the mutation
+that deletes the `SUBMITTED` emission — **21** baselined entries start matching,
+which is the set whose *only* remaining mismatch is that emission. Six of the 21
+are `Labels` flows (`labels-update-nested-value-list`,
+`labels-update-nested-value-map`, `labels-update-task`,
+`labels-update-task-deduplicate`, `npe-labels-update-task`,
+`primitive-labels-flow`); of the other 15, twelve are `Subflow`, two are `If`
+and one is `Switch`.
+
+**And `Subflow` is the fifth unclaimed construct, which checking rather than
+assuming is what found.** `If` and `Switch` are Task 5's and `Loop` is Task 6's,
+but **the word `Subflow` does not appear anywhere in
+`docs/en/plans/2026-09-04-workflow-w3a-executor.md`** — no task creates a
+`TaskKind` for it, and `Command::SpawnExecution` arrives in Task 6 for a *loop
+iteration*, which is a different construct (a `Loop` body never gets a run in the
+parent execution; a `Subflow` task does). It is a `core.flow.*` class, so it
+looks owned to anyone reading the flowable list, and it is the largest single
+block left: **22 baselined `runs` entries** use it, 18 of the over-submitted runs
+are its, and 12 of M2's 21.
+
+**So those six can be banked by no W3a task as scheduled** — and one of them is
+`valids/labels-update-task-deduplicate`, the entry this file's own circularity
+demonstration is built on. The demonstration stands (it was run against a state
+machine that reproduces the entry), but nothing in W3a will ever force a reader
+back to it.
+
+**M2 also shows the emission is a net protection, not a net cost.** Deleting it
+does not merely fail to bank: it makes 21 entries match *by accident*, on flows
+whose flowables egret does not implement at all. `SUBMITTED` is what stops that.
 
 ## What this oracle does not prove
 

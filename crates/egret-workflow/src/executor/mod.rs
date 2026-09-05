@@ -424,6 +424,84 @@ mod tests {
         assert!(fresh.runs.is_empty());
     }
 
+    /// **The two accessors are different accessors**, and this is the only test
+    /// that can tell them apart.
+    ///
+    /// [`TaskRun::started_at`] is the **first** attempt's instant, because that
+    /// is what Kestra measures a `RETRY_FAILED_TASK` retry's `maxDuration` from
+    /// (`this.attempts.getFirst().getState().minDate()`,
+    /// `core/src/main/java/io/kestra/core/models/executions/TaskRun.java:337`).
+    /// [`TaskRun::attempt_started_at`] is the **last**, because that is what a
+    /// `timeout` on a `Pause` or a `WaitFor` runs against.
+    ///
+    /// Without this test they are interchangeable: swapping `.first()` for
+    /// `.last()` in *either* one compiles and leaves the whole crate green with
+    /// the ratchet unmoved, because **Task 3 never produces a run with more than
+    /// one attempt** —
+    /// `an_attempt_records_the_tick_it_was_started_at` pins the field but has
+    /// only one attempt per run to read it from. Two accessors justified by two
+    /// different Kestra lines and distinguishable by nothing is the
+    /// guard-that-cannot-fail this package has now paid for three times.
+    ///
+    /// The second attempt is opened by [`apply`] from a real
+    /// [`Command::StartRun`], not by a struct literal, so this pins the writer
+    /// too. Only the *decision* to emit that second command is the test's, and
+    /// that decision is exactly what Task 7 adds.
+    #[test]
+    fn the_run_start_and_the_attempt_start_are_different_instants() {
+        let plan = plan_of("valids/minimal");
+        let mut state = ExecutionState::new(&plan);
+
+        // Attempt 1, at tick 11: created, submitted, started, failed.
+        for _ in 0..2 {
+            for cmd in &advance(&plan, &state, Tick(11)) {
+                apply(&mut state, cmd);
+            }
+        }
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+        assert_eq!(state.runs[0].attempts.len(), 1);
+
+        // Attempt 2, at tick 4200 -- the command Task 7's retry will emit.
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 0,
+                at: Tick(4200),
+            },
+        );
+
+        let run = &state.runs[0];
+        assert_eq!(
+            run.attempts.len(),
+            2,
+            "this test is worthless with one attempt; that is the whole point of it"
+        );
+        assert_eq!(
+            run.started_at(),
+            Some(Tick(11)),
+            "started_at() is the FIRST attempt's instant -- Kestra measures a \
+             RETRY_FAILED_TASK maxDuration from attempts.getFirst()"
+        );
+        assert_eq!(
+            run.attempt_started_at(),
+            Some(Tick(4200)),
+            "attempt_started_at() is the LAST attempt's instant -- a Pause or \
+             WaitFor timeout runs against the attempt in flight"
+        );
+        assert_ne!(
+            run.started_at(),
+            run.attempt_started_at(),
+            "if these two ever agree in this test, it has stopped distinguishing \
+             the accessors and swapping .first() for .last() passes again"
+        );
+    }
+
     // ----------------------------------------------------------------------
     // build_plan
     // ----------------------------------------------------------------------
@@ -481,8 +559,20 @@ mod tests {
     /// re-measures the second factor from the committed corpus on every run, so
     /// the constant is a bound over a measurement rather than over a memory of
     /// one. It walks `models::Task::children()`, which sees every flowable —
-    /// not only the one Task 3 descends — so the bound already covers Tasks
-    /// 4-8.
+    /// not only the one Task 3 descends.
+    ///
+    /// **It is a LOWER bound, not the depth, and the reason is this task's own
+    /// finding.** Java's `AbstractBranch.allChildTasks()` concatenates `tasks`,
+    /// `errors` and `finally`; `models::Task::children()` returns only the
+    /// first, because W1's model **drops** every control-flow type's
+    /// `errors`/`finally` fields (`models/task.rs`, `Sequential`'s comment).
+    /// A subtree hanging off a task-level `errors:` is therefore invisible to
+    /// this walk and to `build_plan` alike. Flow-level `errors:`, `finally:` and
+    /// `afterExecution:` **are** in the model and are walked here. So the true
+    /// corpus depth is at least what this measures, the 8× headroom is what
+    /// absorbs the difference, and **the number may move when Task 7 widens the
+    /// model** — at which point this test says so rather than the bound
+    /// silently becoming tighter than it reads.
     #[test]
     fn the_depth_bound_is_derived_from_the_deepest_corpus_flow() {
         fn depth(task: &crate::models::Task) -> usize {
@@ -499,6 +589,8 @@ mod tests {
                 .tasks
                 .iter()
                 .chain(flow.errors.iter())
+                .chain(flow.finally_.iter())
+                .chain(flow.after_execution.iter())
                 .map(depth)
                 .max()
                 .unwrap_or(0);
@@ -617,6 +709,65 @@ mod tests {
             "the control: a Sequential DOES flatten its children"
         );
         assert_eq!(plan.tasks[0].kind, TaskKind::Sequential { tasks: vec![1] });
+    }
+
+    /// **An OVER-REFUSAL already on `main`, pinned to its one token.**
+    ///
+    /// `build_plan` refuses `valids/switch-impossible` — a flow this Kestra
+    /// published and **ran** — and the cause is not in the executor. W1's
+    /// `models::Switch::defaults` is a bare `Vec<Task>`, so an explicit
+    /// `defaults: null` is a parse error; Jackson leaves the field null and
+    /// Kestra runs the flow. `models/task.rs` applies the
+    /// bean-validation-is-not-parsing principle correctly to
+    /// `Parallel::concurrent` and every other scalar, and misses it on every
+    /// bare `Vec<Task>`.
+    ///
+    /// This is not an oracle curiosity: `spec::parse` is what `routes.rs:335`
+    /// (`create_flow`, `update_flow`) and `routes.rs:640` (`validate_flow`)
+    /// call, so egret's HTTP API returns 400 for a flow this Kestra accepts.
+    ///
+    /// **Committed as a test because it is a defect with a deadline.** Two of
+    /// the six `refused` entries Task 3 banked (`invalids/switch-invalid`,
+    /// `invalids/invalid-parallel`) are refused by this same rule and are
+    /// therefore right *by accident* — when W1 fixes the model this test
+    /// flips, and whoever fixes it has to revisit `oracle-exec/baseline.txt`
+    /// and Task 8's per-group message assertions in the same commit.
+    #[test]
+    fn a_null_task_list_is_an_over_refusal_that_reaches_the_http_api() {
+        // The refusal, and the single token that causes it.
+        let with_null = corpus_source("valids/switch-impossible");
+        assert!(
+            build_plan(&with_null).is_err(),
+            "if this now plans, W1's model has been fixed -- delete this test, \
+             re-run the ratchet, and revisit the two accidental refusals it names"
+        );
+        let without = with_null.replace("defaults: null", "");
+        assert!(
+            build_plan(&without).is_ok(),
+            "`defaults: null` must be the WHOLE cause; if removing it still fails, \
+             this test is pinning the wrong token"
+        );
+
+        // `invalids/switch-invalid` is refused by the same token, so its
+        // refusal says nothing about its empty `cases`.
+        let si = corpus_source("invalids/switch-invalid");
+        assert!(build_plan(&si).is_err());
+        assert!(
+            build_plan(&si.replace("defaults: null", "")).is_ok(),
+            "invalids/switch-invalid is refused for `defaults: null` and not for \
+             anything Kestra judged about it"
+        );
+
+        // And in `invalids/invalid-parallel`, only `para4` refuses: an absent
+        // `tasks` key and an empty list both parse. So the rule is exactly
+        // "explicit null", not "missing or empty".
+        let ip = corpus_source("invalids/invalid-parallel");
+        assert!(build_plan(&ip).is_err());
+        assert!(
+            build_plan(&ip.replace("tasks: null", "")).is_ok(),
+            "para2 (no `tasks` key) and para3 (`tasks: []`) must both parse -- if \
+             they do not, the cause is wider than an explicit null"
+        );
     }
 
     /// **A flow W1's parser cannot read is refused, located.**
