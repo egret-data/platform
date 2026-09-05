@@ -483,32 +483,75 @@ const LOOP_TYPE: &str = "io.kestra.plugin.core.flow.Loop";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
-/// # What this refuses, and what it deliberately does not
+/// # Refusal has one surface, and it is shared with the HTTP publish path
 ///
-/// It refuses six things: source W1's parser cannot read; nesting deeper than
+/// Three gates, in order: W1's parser, this builder's own structural checks,
+/// then W1's [`validate`](crate::spec::validate).
+///
+/// **The order is measured, not tidy.** `validate` already carries a rule for
+/// three of the things this builder refuses --- `dag_cycle`,
+/// `dag_dependency_not_found`, `if_condition_required` --- so running it first
+/// makes those three arms unreachable from here, and
+/// `egret_refuses_every_flow_kestra_refuses` said so out loud the moment the
+/// order was wrong: `invalids/{if-without-condition, dag-cyclicdependency,
+/// dag-notexist-task}` were all still refused, and all three refused for a
+/// DIFFERENT reason than the group they are in. Three refusals silently
+/// becoming three other refusals is exactly what that test's per-cause message
+/// exists to catch, and it caught it on its first run. Running the builder
+/// first keeps each of those arms the reason the caller is given, and keeps
+/// Task 4's and Task 5's mutations on them killable.
+///
+/// **Running `validate` here is Task 8's central change, and it is about a
+/// seam rather than about a rule.** Until Task 8 this function called
+/// `spec::parse` and not `spec::validate`, so egret had *two* answers to "is
+/// this flow acceptable": `POST /flows` refused a flow that `advance()` would
+/// happily plan. Seven of the flows this Kestra refuses were over-accepted here
+/// while W1's `validate` had already been refusing them at publish since W1 —
+/// `duplicate_task_id` (2), `duplicate_input_id`, `empty_tasks` (2),
+/// `self_subflow`, `working_directory_tasks_required`. The gap was not a
+/// missing rule; it was a missing call.
+///
+/// Measured before the change and re-measured after: over the golden's **266**
+/// `runs` entries — every flow this pinned Kestra published *and ran* —
+/// `validate` reports **zero** errors. So this gate refuses nothing Kestra
+/// accepted, which is the property that separates it from Task 3's M8 (a
+/// refusal that was right for a reason having nothing to do with the flow being
+/// invalid). `egret_refuses_every_flow_kestra_refuses` asserts on the message
+/// per cause so a refusal that becomes a *different* refusal is visible, and
+/// the ratchet fails in both directions so an over-refusal is a regression.
+///
+/// Only `report.errors` refuses. A warning — `not_yet_enforced`,
+/// `unknown_task_type` — must not, and that asymmetry is the whole reason
+/// `unknown_task_type` cannot close `invalids/invalid-task`: egret's
+/// `spec::registry` is not Kestra's classpath, so promoting it would refuse
+/// every plugin egret has not registered. See
+/// `egret_refuses_every_flow_kestra_refuses`'s `STILL_OVER_ACCEPTED`, which
+/// carries that reason and four more, each with an owner.
+///
+/// # What this builder still refuses on its own
+///
+/// Five things `validate` does not cover, all of them "this task cannot be
+/// *planned*" rather than "this flow is invalid": nesting deeper than
 /// [`MAX_TASK_DEPTH`]; a `Dag` whose `dependsOn` names a task that is not one
 /// of its own nodes, or whose nodes form a cycle; an `If` with no `condition`;
-/// and a `Switch` with no `value`. The `Dag` pair is Task 4's and is exactly
-/// the two checks Kestra's own `DagTaskValidator` makes; the `If`/`Switch` pair
-/// is Task 5's and is the same shape as the `Dag` node with no task — a field
-/// that is `Option` here only because `@NotNull` is bean validation rather than
-/// parsing, and whose absence leaves the task with nothing to branch on. All
-/// five are refusals about *this flow*, not about what egret has implemented,
-/// which is what separates them from the restraint below.
+/// a `Switch` with no `value`; a `Loop` with no `values`; and a `Dag` node with
+/// no task. The `Dag` pair is Task 4's and is exactly the two checks Kestra's
+/// own `DagTaskValidator` makes.
 ///
-/// It refuses **nothing else** — in particular it does not refuse a flow
-/// because it uses a flowable no task has implemented yet, and that restraint
-/// is load-bearing rather than lazy.
+/// # What it deliberately does NOT refuse
+///
+/// It does not refuse a flow because it uses a flowable no task has implemented
+/// yet, and that restraint is load-bearing rather than lazy.
 ///
 /// The oracle's `refused` verdict compares one thing: that `build_plan` returns
 /// `Err`. A builder that refused every unimplemented flowable would return
 /// `Err` for most of the `invalids` corpus too — and the ratchet would report
-/// those entries as *matching*, inviting a maintainer to bank 28 refusals that
+/// those entries as *matching*, inviting a maintainer to bank refusals that
 /// egret gets right for a reason that has nothing to do with the flow being
-/// invalid. Task 8 owns refusal. Until then an unimplemented flowable is
-/// planned as an opaque [`TaskKind::Runnable`], which produces a visibly wrong
-/// trace — the parent is there and its children are not — and so stays honestly
-/// baselined.
+/// invalid. Task 3's M8 measured exactly that: 12 regressions and 8 bogus
+/// banks from one such rule. An unimplemented flowable is planned as an opaque
+/// [`TaskKind::Runnable`], which produces a visibly wrong trace — the parent is
+/// there and its children are not — and so stays honestly baselined.
 ///
 /// That opacity is applied to `AllowFailure` and `WorkingDirectory` too, even
 /// though both `extend Sequential` in Java and would "work" if mapped to
@@ -529,6 +572,26 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let mut tasks = Vec::new();
     let roots = flatten_list(&mut tasks, &flow.tasks, 1)?;
     let errors = flatten_list(&mut tasks, &flow.errors, 1)?;
+
+    // W1's `validate`, as the third gate. `errors` only: a warning is a
+    // warning, and refusing on one would turn `unknown_task_type` into a ban on
+    // every plugin egret has not registered.
+    let report = crate::spec::validate(&flow);
+    if let Some(first) = report.errors.first() {
+        return Err(PlanError {
+            message: match report.errors.len() {
+                1 => format!("{}: {} [{}]", first.code, first.message, first.path),
+                n => format!(
+                    "{}: {} [{}] (and {} further validation error(s))",
+                    first.code,
+                    first.message,
+                    first.path,
+                    n - 1
+                ),
+            },
+        });
+    }
+
     Ok(Plan {
         tasks,
         roots,

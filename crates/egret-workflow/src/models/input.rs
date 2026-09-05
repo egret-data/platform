@@ -66,6 +66,22 @@ pub struct Input {
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<DependsOn>,
+    /// `ArrayInput.itemType` / `MultiselectInput.itemType` -- the element type
+    /// of an `ARRAY` or `MULTISELECT` input.
+    ///
+    /// It lives on `Input` rather than on a per-type struct because this
+    /// crate models `Input` as one flat shape keyed by `type`, not as Kestra's
+    /// `@JsonSubTypes` hierarchy. That flattening is why the check that reads
+    /// it (`spec::validate`'s `input_item_type_invalid`) has to gate on the
+    /// input's own `type` being `ARRAY` or `MULTISELECT`: in Java the
+    /// validator is attached to those two classes and can never see any other.
+    ///
+    /// `None` covers both "absent" and "this input type has no item type".
+    /// Kestra gives `MultiselectInput` a `@Builder.Default` of `STRING` and
+    /// `ArrayInput` none at all; neither default can fail the check, so the
+    /// distinction changes nothing this crate reads and is not modelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<InputType>,
 }
 
 const fn default_true() -> bool {

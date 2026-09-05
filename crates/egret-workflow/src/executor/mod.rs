@@ -1949,16 +1949,22 @@ mod tests {
         }
     }
 
-    /// **An explicit `concurrencyLimit: null` and a negative one both take
-    /// Kestra's class default of 1 — and both are OVER-ACCEPTANCES.**
+    /// **An explicit `concurrencyLimit: null` is now REFUSED; a negative one
+    /// still takes Kestra's class default of 1, and is still an
+    /// OVER-ACCEPTANCE.**
     ///
     /// `Loop.java:220-233` is `@PositiveOrZero @NotNull @Builder.Default private
     /// Integer concurrencyLimit = 1;`, so this Kestra refuses both spellings at
-    /// publish. Egret does not: W1 applies bean-validation-is-not-parsing to the
-    /// field (`Option<i32>`, exactly as `Parallel::concurrent` and every other
-    /// scalar), so both reach [`build_plan`], and [`build_plan`] is documented
-    /// not to widen refusal — **Task 8 owns that**, and this is one more entry
-    /// for its list.
+    /// publish. This test used to record both as over-accepted with "Task 8 owns
+    /// that" beside them. **Task 8 closed half of it**: `build_plan` now runs
+    /// W1's `validate`, which carries `loop_concurrency_limit_required` for the
+    /// `@NotNull`, so the `null` row is a refusal with a message.
+    ///
+    /// `@PositiveOrZero` has no rule in `validate`, so `-1` is still planned as
+    /// 1 — and that row is now the ONLY thing in the crate that reaches the
+    /// `_ => 1` fallback in `literal_concurrency_limit`, since the `null` path
+    /// no longer gets past the gate. It is load-bearing for the mutation below,
+    /// not decoration.
     ///
     /// What it must not do is pick silently. The mutation that changes the
     /// fallback from `1` to `0` — the difference between full serialisation and
@@ -1975,7 +1981,19 @@ mod tests {
                 "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\", \"b\", \"c\"]'\n    concurrencyLimit: {limit}\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
             )
         };
-        for (written, expected) in [("null", 1u32), ("-1", 1), ("0", 0), ("2", 2)] {
+        // The `@NotNull` half, closed by Task 8. Asserted on the CODE, not on
+        // "it errored": every other spelling below must still plan, so a
+        // refusal that widened to catch them all would pass a bare `is_err`.
+        let refused = build_plan(&flow("null"))
+            .expect_err("`concurrencyLimit: null` is @NotNull in Kestra and must be refused");
+        assert!(
+            refused
+                .message
+                .starts_with("loop_concurrency_limit_required:"),
+            "refused for the wrong reason: {refused}"
+        );
+
+        for (written, expected) in [("-1", 1u32), ("0", 0), ("2", 2)] {
             let plan = build_plan(&flow(written))
                 .unwrap_or_else(|e| panic!("`concurrencyLimit: {written}` must plan: {e}"));
             let TaskKind::Loop {
@@ -2472,9 +2490,19 @@ mod tests {
     /// builder that flattened nothing at all.
     #[test]
     fn every_other_flowable_stays_opaque() {
+        // `condition:` is written for every row, not only for the two that
+        // need it. `LoopUntil`/`WaitFor` declare it `@NotNull`
+        // (`LoopUntil.java`), so since Task 8 put W1's `validate` behind
+        // `build_plan` a probe flow without one is REFUSED -- correctly, and
+        // for a reason that has nothing to do with opacity. A probe that
+        // cannot be planned cannot say whether its children were flattened,
+        // and the four rows are kept byte-identical so that no row is a
+        // different experiment from the others. `AllowFailure` and
+        // `WorkingDirectory` ignore the extra key (it lands in their opaque
+        // remainder), which the `Sequential` control below confirms.
         let branch = |ty: &str| {
             format!(
-                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
+                "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: {ty}\n    condition: \"{{{{ true }}}}\"\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n"
             )
         };
 
@@ -2609,6 +2637,17 @@ mod tests {
     /// therefore right *by accident* — when W1 fixes the model this test
     /// flips, and whoever fixes it has to revisit `oracle-exec/baseline.txt`
     /// and Task 8's per-group message assertions in the same commit.
+    ///
+    /// **Task 8 measured what that fix would cost, and the answer is
+    /// nothing.** Since `build_plan` now runs `validate`, deleting the
+    /// offending token from each of the three flows is a complete rehearsal
+    /// of W1's fix on that flow, and this test performs it: `switch-impossible`
+    /// plans, `switch-invalid` is refused by `switch_no_branches` and
+    /// `invalid-parallel` by `parallel_tasks_required` — each the cause Kestra
+    /// itself names. So the two accidental refusals survive the fix on their
+    /// merits, and the fix costs no over-acceptance. Before Task 8 those two
+    /// rehearsals both came out `Ok`, which is why this test used to assert
+    /// `is_ok()` for them and now asserts the code.
     #[test]
     fn a_null_task_list_is_an_over_refusal_that_reaches_the_http_api() {
         // The refusal, and the single token that causes it.
@@ -2626,25 +2665,114 @@ mod tests {
         );
 
         // `invalids/switch-invalid` is refused by the same token, so its
-        // refusal says nothing about its empty `cases`.
+        // refusal today says nothing about its empty `cases`. With the token
+        // gone it is refused by `switch_no_branches` -- "No task defined,
+        // neither cases or default have any tasks" is Kestra's own wording for
+        // the same flow -- so the accident is covered by a real rule
+        // underneath it.
         let si = corpus_source("invalids/switch-invalid");
-        assert!(build_plan(&si).is_err());
+        assert!(build_plan(&si)
+            .expect_err("switch-invalid")
+            .message
+            .contains("invalid type: null, expected a sequence"));
+        let si_fixed = build_plan(&si.replace("defaults: null", ""))
+            .expect_err("its empty `cases:` is a refusal in its own right");
         assert!(
-            build_plan(&si.replace("defaults: null", "")).is_ok(),
-            "invalids/switch-invalid is refused for `defaults: null` and not for \
-             anything Kestra judged about it"
+            si_fixed.message.starts_with("switch_no_branches:"),
+            "with the null gone, invalids/switch-invalid must be refused for what \
+             Kestra judged about it, not for something else: {si_fixed}"
         );
 
-        // And in `invalids/invalid-parallel`, only `para4` refuses: an absent
-        // `tasks` key and an empty list both parse. So the rule is exactly
-        // "explicit null", not "missing or empty".
+        // And in `invalids/invalid-parallel`, only `para4` refuses at PARSE:
+        // an absent `tasks` key and an empty list both parse. So the parse
+        // rule is exactly "explicit null", not "missing or empty" -- and what
+        // catches `para2`/`para3` once it parses is `parallel_tasks_required`,
+        // which is `AbstractBranch`'s `@NotEmpty` and again Kestra's own
+        // reason.
         let ip = corpus_source("invalids/invalid-parallel");
-        assert!(build_plan(&ip).is_err());
+        assert!(build_plan(&ip)
+            .expect_err("invalid-parallel")
+            .message
+            .contains("invalid type: null, expected a sequence"));
+        let ip_fixed = build_plan(&ip.replace("tasks: null", ""))
+            .expect_err("para2 and para3 are empty flowables");
         assert!(
-            build_plan(&ip.replace("tasks: null", "")).is_ok(),
-            "para2 (no `tasks` key) and para3 (`tasks: []`) must both parse -- if \
-             they do not, the cause is wider than an explicit null"
+            ip_fixed.message.starts_with("invalid_namespace:")
+                || ip_fixed.message.starts_with("parallel_tasks_required:"),
+            "with the null gone, invalids/invalid-parallel must be refused for one \
+             of the things Kestra named (its namespace, its id, or the three \
+             empty `Parallel`s): {ip_fixed}"
         );
+    }
+
+    /// **Two more over-refusals already on `main`, which `build_plan` now
+    /// inherits — the price of running `validate`, stated rather than
+    /// rounded off.**
+    ///
+    /// Task 8 put W1's `validate` behind `build_plan` to close 7
+    /// over-acceptances. Measured over all 345 corpus flows, that also brings
+    /// in **two** flows this Kestra published with **200** and `validate`
+    /// refuses. Neither has a golden entry — both are `not-standalone`, so
+    /// Kestra itself could not run them without the Java test — which means
+    /// **the ratchet cannot see either one**. That is precisely why they are a
+    /// committed test instead of a sentence in a report.
+    ///
+    /// Both rules are W1's and both predate this task: `POST /flows` has been
+    /// returning 400 for these two flows since W1 shipped. `build_plan`
+    /// running `validate` does not create the defect; it stops the executor
+    /// from disagreeing with the publish path about it.
+    ///
+    /// **Neither is a rule to loosen casually, and that is the finding.**
+    ///
+    /// - `valids/task-flow-dynamic` writes `namespace: "{{inputs.namespace}}"`
+    ///   on a `Subflow`. `subflow_namespace_invalid` checks the grammar
+    ///   against the UNRENDERED source, so every dynamic subflow reference is
+    ///   refused. The check exists because `publish::subflow_ref_name` encodes
+    ///   the pair as `"{namespace}/{flowId}"` and a `/` in either half decodes
+    ///   back into a different pair — so skipping the check when the value
+    ///   holds `{{` would not fix the flow, it would move the collision to
+    ///   render time where nothing looks for it. The fix is to the encoding,
+    ///   which is W1's.
+    /// - `valids/trigger-flow-listener-namespace-condition` writes a `Flow`
+    ///   trigger `dependsOn:` entry carrying only a `namespace:`, and another
+    ///   carrying only `states:`. Measured at the checkout `96893b589`,
+    ///   `Flow.java:364-380`'s `Dependency` declares `namespace`, `flowId`,
+    ///   `states` and `labels` as plain `@PluginProperty` fields with **no
+    ///   `@NotNull` on any of them** — a namespace-only dependency is a
+    ///   documented Kestra pattern. So `dependency_namespace_required` /
+    ///   `dependency_flow_id_required` are a `@NotNull` egret invented, for
+    ///   the same encoding reason as above.
+    ///
+    /// When either is fixed this test fails by name and says so.
+    #[test]
+    fn validate_brings_two_over_refusals_with_it_and_neither_is_in_the_golden() {
+        for (id, codes) in [
+            (
+                "valids/task-flow-dynamic",
+                ["subflow_namespace_invalid", "subflow_flow_id_invalid"],
+            ),
+            (
+                "valids/trigger-flow-listener-namespace-condition",
+                [
+                    "dependency_flow_id_required",
+                    "dependency_namespace_required",
+                ],
+            ),
+        ] {
+            let Err(err) = build_plan(&corpus_source(id)) else {
+                panic!(
+                    "{id}: this Kestra published it with 200 and egret refuses it -- \
+                     if it now plans, W1 has fixed one of {codes:?}: delete that row, \
+                     and if BOTH rows are gone delete this test"
+                );
+            };
+            assert!(
+                codes
+                    .iter()
+                    .any(|c| err.message.starts_with(&format!("{c}:"))),
+                "{id} is refused, but not by the rule this test is about ({codes:?}): {err}"
+            );
+        }
     }
 
     /// **A flow W1's parser cannot read is refused, located.**
@@ -3451,10 +3579,14 @@ mod tests {
         );
         assert_eq!(
             (flows, declared, planned),
-            (26, 27, 27),
-            "26 corpus flows declare a `retry:` on a task `build_plan` plans (or \
-             on the flow), 27 policies between them, and every one of them is \
-             readable as literals. If this moves, the corpus moved"
+            (25, 26, 26),
+            "25 corpus flows declare a `retry:` on a task `build_plan` plans (or \
+             on the flow), 26 policies between them, and every one of them is \
+             readable as literals. If this moves, the corpus moved -- OR a flow \
+             left the population by becoming refusable, which is what took this \
+             from (26, 27, 27) at Task 7: `invalids/duplicate-parallel` declares \
+             a `retry:` and is now refused for `duplicate_task_id`, which is \
+             what Kestra refuses it for"
         );
     }
 

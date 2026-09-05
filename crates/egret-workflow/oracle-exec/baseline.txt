@@ -65,24 +65,11 @@
 # NOT covered by this file. A line here means "egret does not reproduce this
 # trace yet"; it never means "egret may crash here".
 invalids/dag-invalid-subtask
-invalids/duplicate
-invalids/duplicate-inputs
-invalids/duplicate-key
-invalids/duplicate-parallel
-invalids/empty
 invalids/inputs-bad-validator-syntax
-invalids/inputs-key-with-subtraction-symbol-validation
-invalids/inputs-validation
 invalids/inputs-with-multiple-constraint-violations
 invalids/invalid-property
 invalids/invalid-task
 invalids/loop-switch-failed
-invalids/outputs-key-with-subtraction-symbol-validation
-invalids/recursive-flow
-invalids/scheduled-missing-inputs-defaults
-invalids/scheduled-missing-inputs-defaults-2
-invalids/workingdirectory-invalid
-invalids/workingdirectory-no-tasks
 valids/after-execution
 valids/after-execution-error
 valids/after-execution-finally
@@ -127,7 +114,6 @@ valids/if
 valids/if-in-flowable
 valids/if-in-parallel
 valids/if-with-only-disabled-tasks
-valids/invalid-draft-flow
 valids/labels-update-nested-value-list
 valids/labels-update-nested-value-map
 valids/labels-update-task

@@ -3589,3 +3589,292 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          of each; `RETRIED` left this table at Task 7"
     );
 }
+
+// --------------------------------------------------------------------------
+// Task 8: the refusals
+// --------------------------------------------------------------------------
+
+/// A group of `refused` golden entries that share one cause, and the fragment
+/// of egret's own message that says egret refused them for *that* cause.
+struct RefusalGroup {
+    /// What makes every flow in this group invalid — the implementation unit.
+    cause: &'static str,
+    /// A substring of `PlanError::message`. Asserting on it is what makes a
+    /// refusal that becomes a *different* refusal visible: `expect_err` alone
+    /// degrades into "something went wrong", and every one of these flows is
+    /// wrong in more than one way, so a rule that fires for the wrong reason
+    /// still returns `Err`.
+    message: &'static str,
+    ids: &'static [&'static str],
+}
+
+/// The 23 refusals, by cause. Not by directory: `invalids/loop-switch-failed`
+/// is not in the golden's `refused` set at all (Kestra's own `RunContextTest`
+/// executes it and asserts `FAILED`), and the 23 rejections classed
+/// `task-type-not-in-image` or `checkout-drift` have no golden entry — those
+/// are the pinned image or the sibling checkout differing from each other, and
+/// refusing them would be a defect manufactured out of a naming convention.
+const REFUSAL_GROUPS: &[RefusalGroup] = &[
+    RefusalGroup {
+        cause: "the YAML is not a flow — a required field is absent or has a value \
+                no variant of its type accepts",
+        message: "cannot parse flow at line",
+        ids: &[
+            // Kestra: `Invalid type: null` — the input declares no `type`.
+            "invalids/inputs",
+            // Kestra: `Invalid type: FOO`.
+            "invalids/inputs-bad-type",
+            // Kestra: `tasks[null].id: must not be blank`.
+            "invalids/invalid",
+            // Kestra: `tasks[null].id: must not be null`, and separately the
+            // system labels. egret refuses the missing id, which is the same
+            // half of the same flow.
+            "invalids/system-labels",
+        ],
+    },
+    RefusalGroup {
+        cause: "the same key twice in one mapping — YAML would silently keep the last",
+        message: "duplicate field 'message'",
+        ids: &["invalids/duplicate-key"],
+    },
+    RefusalGroup {
+        // Recorded as its own group precisely because it is NOT the cause
+        // Kestra names, and the same rule OVER-REFUSES `valids/switch-impossible`,
+        // a flow this Kestra published and ran. W1's model owns the fix. Measured
+        // with the explicit `null`s deleted, each of these two is still refused —
+        // `invalids/invalid-parallel` by `parallel_tasks_required` and
+        // `invalids/switch-invalid` by `switch_no_branches` — and
+        // `valids/switch-impossible` validates clean. So the fix costs no
+        // over-acceptance; when it lands, these two move to the group below and
+        // this one disappears.
+        cause: "an explicit `null` where W1's model has a bare `Vec<Task>` — \
+                right by accident, and an over-refusal in the other direction",
+        message: "invalid type: null, expected a sequence",
+        ids: &["invalids/invalid-parallel", "invalids/switch-invalid"],
+    },
+    RefusalGroup {
+        cause: "a flowable with nothing to decide on — it cannot be planned at all",
+        message: "has no condition to branch on",
+        ids: &["invalids/if-without-condition"],
+    },
+    RefusalGroup {
+        cause: "a `Dag` whose `dependsOn` graph cannot be ordered",
+        message: "has a cyclic dependency through task id(s)",
+        ids: &["invalids/dag-cyclicdependency"],
+    },
+    RefusalGroup {
+        cause: "a `Dag` node depending on a task that is not a node of it",
+        message: "depends on task id(s) that are not nodes of it",
+        ids: &["invalids/dag-notexist-task"],
+    },
+    RefusalGroup {
+        cause: "an id declared twice, so a reference to it names two things",
+        message: "duplicate_task_id:",
+        ids: &["invalids/duplicate", "invalids/duplicate-parallel"],
+    },
+    RefusalGroup {
+        cause: "an input id declared twice",
+        message: "duplicate_input_id:",
+        ids: &["invalids/duplicate-inputs"],
+    },
+    RefusalGroup {
+        cause: "a flow with no tasks — there is nothing to execute",
+        message: "empty_tasks:",
+        ids: &["invalids/empty", "valids/invalid-draft-flow"],
+    },
+    RefusalGroup {
+        cause: "a flow that calls itself as a subflow",
+        message: "self_subflow:",
+        ids: &["invalids/recursive-flow"],
+    },
+    RefusalGroup {
+        cause: "a `WorkingDirectory` with no children",
+        message: "working_directory_tasks_required:",
+        ids: &["invalids/workingdirectory-no-tasks"],
+    },
+    RefusalGroup {
+        cause: "a `WorkingDirectory` whose child is not a runnable task",
+        message: "working_directory_child_not_runnable:",
+        ids: &["invalids/workingdirectory-invalid"],
+    },
+    RefusalGroup {
+        cause: "a `Schedule` trigger that cannot supply an input with no default",
+        message: "schedule_missing_inputs:",
+        ids: &[
+            "invalids/scheduled-missing-inputs-defaults",
+            "invalids/scheduled-missing-inputs-defaults-2",
+        ],
+    },
+    RefusalGroup {
+        cause: "an `itemType` an ARRAY or MULTISELECT input cannot hold",
+        message: "input_item_type_invalid:",
+        ids: &["invalids/inputs-validation"],
+    },
+    RefusalGroup {
+        cause: "a dotted reference to an id containing a dash — Pebble reads the \
+                dash as subtraction",
+        message: "dashed_input_reference:",
+        ids: &["invalids/inputs-key-with-subtraction-symbol-validation"],
+    },
+    RefusalGroup {
+        cause: "the same, on an `outputs.` reference",
+        message: "dashed_output_reference:",
+        ids: &["invalids/outputs-key-with-subtraction-symbol-validation"],
+    },
+];
+
+/// The refusals egret does NOT make, each with the reason and the owner.
+///
+/// They are asserted to be **accepted**, not merely absent from the table
+/// above: an over-acceptance that quietly becomes a refusal must fail this
+/// test and force the record to be corrected, exactly as the ratchet's
+/// `banked` arm does for the other direction.
+const STILL_OVER_ACCEPTED: &[(&str, &str)] = &[
+    (
+        "invalids/invalid-task",
+        "`Invalid type: io.kestra.plugin.core.debug.MissingTwo` — Kestra refuses a type \
+         that is not on its classpath. egret's `spec::registry` is not Kestra's classpath: \
+         `unknown_task_type` is a WARNING, and promoting it to an error would refuse every \
+         plugin egret has not registered. Owner: the registry, and a product decision.",
+    ),
+    (
+        "invalids/invalid-property",
+        "`Unrecognized field \"invalid\" (class ...debug.Return)` — needs the plugin's own \
+         property schema. W1 models a task's plugin properties as an opaque `Leaf { spec }` \
+         on purpose. Owner: the same plugin-schema gap.",
+    ),
+    (
+        "invalids/dag-invalid-subtask",
+        "`tasks[task1].tasks[task1].task.message: must not be null` — a `@NotNull` on \
+         `Log.message`, i.e. bean validation of a plugin's own property. Same gap again.",
+    ),
+    (
+        "invalids/inputs-bad-validator-syntax",
+        "`inputs[badValidatorSyntax].validator: invalid pattern [\\]` — Kestra compiles it \
+         with `java.util.regex.Pattern`. Compiling it with the `regex` crate instead would \
+         refuse valid Java patterns (lookaround, backreferences), which is an OVER-refusal \
+         traded for an over-acceptance. Owner: W1, and it needs a Java-Pattern-compatible \
+         syntax check, not `Regex::new`.",
+    ),
+    (
+        "invalids/inputs-with-multiple-constraint-violations",
+        "publish returned **200**; Kestra refuses it when the execution's input VALUES are \
+         read (`value `H` doesn't match the values `[A, B, C]`). `build_plan(&str)` takes no \
+         input values, so no change to it can reach this seam. Owner: W3b/W1 input coercion.",
+    ),
+];
+
+/// egret refuses every flow this Kestra refuses, or the exception is named.
+///
+/// Over-acceptance — egret answering where Kestra refuses — is the divergence
+/// class the programme forbids shipping, so this is the test the whole
+/// `invalids` corpus exists for. It asserts three things the ratchet alone
+/// does not:
+///
+/// 1. the refusal is a **refusal**, not a panic and not a trace;
+/// 2. it is egret's own message **for that cause**, so a refusal that becomes
+///    a different refusal is visible rather than silently still passing;
+/// 3. the partition is **exhaustive** — every golden `refused` id is in
+///    exactly one of the two tables, and the totals are asserted beside the
+///    parts.
+#[test]
+fn egret_refuses_every_flow_kestra_refuses() {
+    let refused: Vec<GoldenEntry> = golden()
+        .into_iter()
+        .filter(|e| e.verdict == Verdict::Refused)
+        .collect();
+
+    // Every `refused` entry is one of the two classes that are evidence that
+    // egret must refuse. The other two classes have no golden entry at all.
+    for e in &refused {
+        let class = e.rejected_class.as_deref().unwrap_or("<none>");
+        assert!(
+            matches!(class, "invalid-flow" | "refused-by-both"),
+            "{}: a `refused` golden entry must be classed by CAUSE, not by directory; \
+             got {class}",
+            e.id
+        );
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut refused_in_groups = 0usize;
+
+    for group in REFUSAL_GROUPS {
+        for id in group.ids {
+            let source = corpus_source(id);
+            refused_in_groups += 1;
+            match build_plan(&source) {
+                Ok(plan) => failures.push(format!(
+                    "  {id}: OVER-ACCEPTED. Kestra refused it; egret planned {} task(s).\n\
+                           cause: {}",
+                    plan.tasks.len(),
+                    group.cause
+                )),
+                Err(e) if !e.message.contains(group.message) => failures.push(format!(
+                    "  {id}: refused for a DIFFERENT reason than the group it is in.\n\
+                           cause:    {}\n      expected: {:?}\n      actual:   {:?}",
+                    group.cause, group.message, e.message
+                )),
+                Err(_) => {}
+            }
+        }
+    }
+
+    for (id, reason) in STILL_OVER_ACCEPTED {
+        let source = corpus_source(id);
+        if let Err(e) = build_plan(&source) {
+            failures.push(format!(
+                "  {id}: now REFUSED ({:?}), but it is recorded as still over-accepted.\n\
+                       Delete its row from STILL_OVER_ACCEPTED, give it a group, and \
+                 delete its `baseline.txt` line.\n      recorded reason: {reason}",
+                e.message
+            ));
+        }
+    }
+
+    // The partition, asserted rather than assumed.
+    let grouped: BTreeSet<&str> = REFUSAL_GROUPS
+        .iter()
+        .flat_map(|g| g.ids.iter().copied())
+        .collect();
+    let excepted: BTreeSet<&str> = STILL_OVER_ACCEPTED.iter().map(|(id, _)| *id).collect();
+    let golden_refused: BTreeSet<&str> = refused.iter().map(|e| e.id.as_str()).collect();
+    let mut both = grouped.intersection(&excepted).peekable();
+    assert!(
+        both.peek().is_none(),
+        "an id may be in exactly one of the two tables: {:?}",
+        both.collect::<Vec<_>>()
+    );
+    let covered: BTreeSet<&str> = grouped.union(&excepted).copied().collect();
+    assert_eq!(
+        covered, golden_refused,
+        "every golden `refused` id must be in exactly one table, and nothing else may be"
+    );
+
+    // The total, beside the parts.
+    assert_eq!(
+        refused_in_groups + STILL_OVER_ACCEPTED.len(),
+        refused.len(),
+        "{} refused in {} groups + {} named exceptions must equal the {} `refused` \
+         golden entries",
+        refused_in_groups,
+        REFUSAL_GROUPS.len(),
+        STILL_OVER_ACCEPTED.len(),
+        refused.len()
+    );
+
+    println!(
+        "refusals: {} golden `refused` entries = {} refused across {} causes + {} named \
+         over-acceptances",
+        refused.len(),
+        refused_in_groups,
+        REFUSAL_GROUPS.len(),
+        STILL_OVER_ACCEPTED.len()
+    );
+
+    assert!(
+        failures.is_empty(),
+        "OVER-ACCEPTANCE is the divergence class this programme forbids shipping:\n{}",
+        failures.join("\n")
+    );
+}

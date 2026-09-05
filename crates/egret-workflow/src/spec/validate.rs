@@ -55,10 +55,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use regex::Regex;
 use serde::Serialize;
 
 use crate::models::{
-    canonical_flow_type, Flow, Input, Retry, Sla, SlaCommon, Task, TaskKind, Trigger, TriggerKind,
+    canonical_flow_type, Flow, Input, InputType, Retry, Sla, SlaCommon, Task, TaskKind, Trigger,
+    TriggerKind,
 };
 use crate::spec::registry;
 
@@ -170,6 +172,36 @@ const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
     ("pause", KestraFlowControl::Unported { package: "W8" }),
 ];
 
+/// Whether a task may be a child of a [`TaskKind::WorkingDirectory`] --
+/// Kestra's `task instanceof RunnableTask<?>`, as far as a model with no
+/// classpath can read it.
+///
+/// Two ways to answer no, and they cover different flows:
+///
+/// - a typed [`TaskKind`] variant. Every one of them is a Kestra flowable or
+///   `ExecutableTask`; none is a `RunnableTask`. This catches a `Sequential`,
+///   a `Parallel`, a `Subflow`, a nested `WorkingDirectory`, ...
+/// - a `Leaf` whose canonical type has a `KESTRA_FLOW_CONTROL` row. This is
+///   the arm `invalids/workingdirectory-invalid` needs: its offending child
+///   is a `Pause`, which is a real Kestra flowable that this crate has NOT
+///   ported, so it reaches `Leaf` and is otherwise indistinguishable from an
+///   ordinary task.
+///
+/// Anything else -- `egret.sql`, `io.kestra.plugin.core.log.Log`, a
+/// third-party plugin, `io.kestra.plugin.core.flow.Sleep` -- is runnable as
+/// far as this crate can tell, which is the fail-open direction. See the
+/// caller for why that is the right way round for a refusal.
+fn is_runnable_child(task: &Task) -> bool {
+    match &task.kind {
+        TaskKind::Leaf { .. } => canonical_flow_type(&task.r#type).is_none_or(|canonical| {
+            !KESTRA_FLOW_CONTROL
+                .iter()
+                .any(|(name, _)| *name == canonical)
+        }),
+        _ => false,
+    }
+}
+
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
 /// Accumulated while walking the flow so each feature warns exactly once,
 /// regardless of how many tasks/places declare it.
@@ -250,6 +282,8 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     for trigger in &flow.triggers {
         validate_trigger(trigger, &mut report);
     }
+    validate_schedule_inputs(flow, &mut report);
+    validate_dashed_references(flow, &mut report);
 
     emit_not_yet_enforced(&features, &mut report);
 
@@ -464,6 +498,45 @@ fn validate_flow_level_fields(flow: &Flow, report: &mut ValidationReport) {
 /// `Option`-then-validate debt for it the way `FlowOutput::type` has, so
 /// nothing else on `Input` is owed here.
 fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
+    // kestra: `ArrayInputValidator` and `MultiselectInputValidator` --
+    // character for character the same four-way test in both files, on the
+    // two input types that have an `itemType` at all. An `ARRAY of ARRAY` and
+    // an `ARRAY of MULTISELECT`/`SELECT` have no flat wire form for the
+    // execute form to collect, and an `ARRAY of SECRET` would put a secret
+    // through the same path a plain value takes.
+    //
+    // The gate is the input's OWN type. In Java the annotation is on
+    // `ArrayInput`/`MultiselectInput`, so no other input type can reach the
+    // validator; here `Input` is one flat struct, so the gate has to be
+    // written. Without it a `STRING` input that happens to carry a stray
+    // `itemType:` would be refused --- an over-refusal invented by this
+    // crate's own flattening rather than by Kestra.
+    for input in inputs {
+        if !matches!(input.r#type, InputType::Array | InputType::Multiselect) {
+            continue;
+        }
+        let Some(item) = input.item_type else {
+            continue;
+        };
+        if matches!(
+            item,
+            InputType::Array | InputType::Secret | InputType::Multiselect | InputType::Select
+        ) {
+            report.errors.push(Finding {
+                code: "input_item_type_invalid",
+                message: format!(
+                    "input '{}': `itemType` cannot be {}",
+                    input.id,
+                    serde_json::to_value(item)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_else(|| format!("{item:?}")),
+                ),
+                path: format!("inputs.{}.itemType", input.id),
+            });
+        }
+    }
+
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for input in inputs {
         *seen.entry(input.id.as_str()).or_insert(0) += 1;
@@ -477,6 +550,199 @@ fn validate_inputs(inputs: &[Input], report: &mut ValidationReport) {
             });
         }
     }
+}
+
+/// A `Schedule` trigger must be able to supply every input that has no
+/// `defaults:` -- otherwise the flow can never start on its own schedule.
+///
+/// kestra: `FlowValidator.findMissingInputsForScheduleTriggers`
+/// (`FlowValidator.java:284-312`), reproduced field for field:
+///
+/// - it runs only when the flow has **both** triggers and inputs;
+/// - "required" is not consulted at all. The filter is `getDefaults() == null`,
+///   so an `required: false` input with no default is still missing. That is
+///   Kestra's rule as written, and this ports the rule rather than the name;
+/// - a `Schedule` with no `inputs:` map is an empty map, not a skip;
+/// - the missing ids are joined with `" | "`, which is Kestra's own separator
+///   and is kept so the two messages read alike side by side;
+/// - only `Schedule` triggers. A `Webhook` or a `Flow` trigger carries its own
+///   inputs at fire time and is not checked, which is `filter(Schedule.class::isInstance)`.
+///
+/// **One narrowing, named.** Kestra reads `resolvableInputs()`, which expands
+/// a `FORM` input into its dotted-path leaves (`FlowInterface.java:71-82`);
+/// this reads `flow.inputs` flat, because W1's `Input` models no nested
+/// `inputs:` and therefore has no leaves to expand. For a flow with no `FORM`
+/// input the two are the same list -- and no corpus flow declares one. A flow
+/// that does would be judged on the `FORM` node's own id here rather than on
+/// its leaves; that is an under-refusal, and it is W1's model to close.
+fn validate_schedule_inputs(flow: &Flow, report: &mut ValidationReport) {
+    if flow.triggers.is_empty() || flow.inputs.is_empty() {
+        return;
+    }
+    let without_defaults: Vec<&str> = flow
+        .inputs
+        .iter()
+        .filter(|i| i.defaults.is_none())
+        .map(|i| i.id.as_str())
+        .collect();
+    if without_defaults.is_empty() {
+        return;
+    }
+    for trigger in &flow.triggers {
+        let TriggerKind::Schedule(schedule) = &trigger.kind else {
+            continue;
+        };
+        let supplied = schedule.inputs.as_ref();
+        let missing: Vec<&str> = without_defaults
+            .iter()
+            .copied()
+            .filter(|id| !supplied.is_some_and(|m| m.contains_key(*id)))
+            .collect();
+        if !missing.is_empty() {
+            report.errors.push(Finding {
+                code: "schedule_missing_inputs",
+                message: format!(
+                    "schedule trigger '{}' does not supply input(s) that have no defaults: {}",
+                    trigger.id,
+                    missing.join(" | ")
+                ),
+                path: format!("triggers.{}", trigger.id),
+            });
+        }
+    }
+}
+
+/// Pebble reads `-` as subtraction, so `{{ inputs.server-fqn }}` is
+/// `inputs.server` minus `fqn` and never resolves. Kestra refuses the flow
+/// rather than letting it fail at render.
+///
+/// kestra: `FlowValidator.java:121-169`, and the two patterns are its own,
+/// **including the one that is arguably a defect**: the `inputs` pattern is
+/// built as `"\\{\\{\\s*inputs." + id + "\\s*\\}\\}"` with the `.` NOT escaped,
+/// so it also matches `inputs_server-fqn`. Copying it is the Global
+/// Constraint ("upstream defects are copied"); inventing the escaped version
+/// would refuse a flow this Kestra accepts, which is the direction that must
+/// not ship. The `outputs` pattern DOES escape its dots and requires a
+/// trailing `.<something>`, so `{{ outputs.produce-output }}` alone does not
+/// match -- also copied.
+///
+/// **What is scanned differs from Kestra's, in the safe direction.** Kestra
+/// reflects over `object.getClass().getDeclaredFields()` -- the concrete
+/// task class's OWN fields, so an inherited one (`description`, `runIf`) is
+/// never scanned. This scans the task's whole serialised form, which is a
+/// superset. A superset can only refuse MORE, so it is checked against the
+/// corpus rather than argued: over the 294 golden entries these two rules
+/// fire on exactly the two flows Kestra refuses for them and on nothing else
+/// (`egret_refuses_every_flow_kestra_refuses`, plus the ratchet's regression
+/// arm over all 266 `runs` entries).
+fn validate_dashed_references(flow: &Flow, report: &mut ValidationReport) {
+    let all_tasks: Vec<&Task> = flow
+        .tasks
+        .iter()
+        .chain(&flow.errors)
+        .chain(&flow.finally_)
+        .chain(&flow.after_execution)
+        .flat_map(descendants)
+        .collect();
+
+    let input_patterns: Vec<Regex> = flow
+        .inputs
+        .iter()
+        .filter(|i| i.id.contains('-'))
+        .filter_map(|i| Regex::new(&format!(r"\{{\{{\s*inputs.{}\s*\}}\}}", i.id)).ok())
+        .collect();
+    let output_patterns: Vec<Regex> = all_tasks
+        .iter()
+        .filter(|t| t.id.contains('-'))
+        .filter_map(|t| {
+            Regex::new(&format!(
+                r"\{{\{{\s*outputs\.{}\.[^}}]+\s*\}}\}}",
+                regex::escape(&t.id)
+            ))
+            .ok()
+        })
+        .collect();
+    if input_patterns.is_empty() && output_patterns.is_empty() {
+        return;
+    }
+
+    let offending = |patterns: &[Regex], rendered: &[(String, String)]| -> Vec<String> {
+        rendered
+            .iter()
+            .filter(|(_, text)| patterns.iter().any(|p| p.is_match(text)))
+            .map(|(id, _)| id.clone())
+            .collect()
+    };
+
+    let task_text: Vec<(String, String)> = all_tasks
+        .iter()
+        .map(|t| (t.id.clone(), serialised(t)))
+        .collect();
+    let output_text: Vec<(String, String)> = flow
+        .outputs
+        .iter()
+        .map(|o| (o.id.clone(), serialised(o)))
+        .collect();
+
+    for (code, what, patterns, population, label) in [
+        (
+            "dashed_input_reference",
+            "input",
+            &input_patterns,
+            &task_text,
+            "tasks",
+        ),
+        (
+            "dashed_output_reference",
+            "output",
+            &output_patterns,
+            &task_text,
+            "tasks",
+        ),
+        (
+            "dashed_output_reference",
+            "output",
+            &output_patterns,
+            &output_text,
+            "outputs",
+        ),
+    ] {
+        let ids = offending(patterns, population);
+        if !ids.is_empty() {
+            report.errors.push(Finding {
+                code,
+                message: format!(
+                    "use {what}s[key-name] instead of {what}s.key-name -- a key with a dash \
+                     needs bracket notation, because Pebble reads the dash as subtraction; \
+                     offending {label}: [{}]",
+                    ids.join(", ")
+                ),
+                path: label.to_string(),
+            });
+        }
+    }
+}
+
+/// A task and every task under it, in Kestra's `allTasksWithChilds()` sense.
+///
+/// Iterative, not recursive: the frontier admits each node once, so it
+/// terminates after at most one pop per task for any input, which is a bound
+/// by construction rather than a constant to justify.
+fn descendants(root: &Task) -> Vec<&Task> {
+    let mut out = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(task) = frontier.pop() {
+        out.push(task);
+        frontier.extend(task.children());
+    }
+    out
+}
+
+/// A value's serialised form, for a textual scan. An unserialisable value
+/// contributes the empty string rather than panicking -- this is a validator,
+/// and a validator that panics on a flow is worse than one that misses it.
+fn serialised<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_default()
 }
 
 fn sla_common(sla: &Sla) -> &SlaCommon {
@@ -870,6 +1136,43 @@ fn walk_task(
                     path: format!("{path}.tasks"),
                 });
             }
+            // kestra: `WorkingDirectoryTaskValidator.isValid` --
+            // `value.getTasks().stream().anyMatch(task -> !(task instanceof
+            // RunnableTask<?>))` -> "Only runnable tasks are allowed as
+            // children of a WorkingDirectory task". A `WorkingDirectory`
+            // hands its whole subtree to ONE worker in one working
+            // directory; a flowable is driven by the executor, which is not
+            // in that worker, so there is no way for it to run there at all.
+            //
+            // **`is_runnable_child` is fail-OPEN, and the asymmetry is
+            // deliberate.** `KESTRA_FLOW_CONTROL`'s other use --- the
+            // `not_yet_enforced` warning below --- is fail-CLOSED, warning
+            // for anything spelled like `io.kestra.plugin.core.flow.*`,
+            // because a spurious warning costs a reader one line. This is a
+            // REFUSAL, and the same fail-closed spelling test would refuse
+            // `io.kestra.plugin.core.flow.Sleep` and
+            // `io.kestra.plugin.core.flow.PurgeFlows` --- the two classes in
+            // that Java package that ARE `RunnableTask`s (measured at the
+            // checkout: they are the only two of the sixteen files there
+            // that implement it) --- and both are legitimate children of a
+            // `WorkingDirectory`. Over-refusal is the mirror of the class
+            // this rule exists to close, so the residual is stated instead:
+            // a control-flow class Kestra adds tomorrow, inside a
+            // `WorkingDirectory`, is accepted here until it gains a row.
+            for child in &w.tasks {
+                if !is_runnable_child(child) {
+                    report.errors.push(Finding {
+                        code: "working_directory_child_not_runnable",
+                        message: format!(
+                            "task '{}': only runnable tasks are allowed as children of a \
+                             workingDirectory, and '{}' has type '{}', which is a \
+                             control-flow task",
+                            task.id, child.id, child.r#type
+                        ),
+                        path: format!("{path}.tasks.{}", child.id),
+                    });
+                }
+            }
         }
         // Fix round 2: round 1's version of this check only warned when the
         // task's canonical type had a row in `KESTRA_FLOW_CONTROL` --
@@ -1165,6 +1468,294 @@ fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationRepo
 #[cfg(test)]
 mod tests {
     use crate::spec::{parse, validate};
+
+    // ---------- W3a Task 8: refusing what Kestra refuses ----------
+    //
+    // Each of the four rules below closes an over-acceptance the W3a execution
+    // oracle measured against `kestra/kestra:v2.0.0-rc13`. Every one gets both
+    // arms: the flow Kestra refuses, AND the nearest flow Kestra accepts --
+    // because a rule that fires on both is an over-refusal, which is the mirror
+    // of the class it was written to close.
+
+    /// kestra: `WorkingDirectoryTaskValidator` -- "Only runnable tasks are
+    /// allowed as children of a WorkingDirectory task", the refusal
+    /// `invalids/workingdirectory-invalid` earns.
+    #[test]
+    fn a_flowable_inside_a_working_directory_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+             tasks:\n      - id: log\n        type: io.kestra.plugin.core.log.Log\n        \
+             message: hi\n      - id: par\n        type: core.parallel\n        tasks:\n          \
+             - id: inner\n            type: x\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        let f0 = r
+            .errors
+            .iter()
+            .find(|e| e.code == "working_directory_child_not_runnable")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(f0.message.contains("'par'"), "{}", f0.message);
+    }
+
+    /// The arm `invalids/workingdirectory-invalid` actually needs: its
+    /// offending child is a `Pause`, which this crate has NOT ported, so it
+    /// reaches `TaskKind::Leaf` and is otherwise indistinguishable from an
+    /// ordinary task. A rule written only over the typed variants misses it.
+    #[test]
+    fn an_unported_kestra_flowable_inside_a_working_directory_is_an_error_too() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+             tasks:\n      - id: pause\n        type: io.kestra.plugin.core.flow.Pause\n        \
+             pauseDuration: PT5S\n",
+        )
+        .unwrap();
+        assert!(
+            validate(&f)
+                .errors
+                .iter()
+                .any(|e| e.code == "working_directory_child_not_runnable"),
+            "a `Pause` is a Kestra flowable even though it reaches `Leaf` here"
+        );
+    }
+
+    /// The fail-open half, and it is the whole reason the rule keys on
+    /// `KESTRA_FLOW_CONTROL` rather than on the `io.kestra.plugin.core.flow.*`
+    /// spelling. `Sleep` and `PurgeFlows` are the two classes in that Java
+    /// package that ARE `RunnableTask`s, so both are legitimate children -- and
+    /// a spelling test would refuse a flow Kestra accepts.
+    #[test]
+    fn a_runnable_that_merely_lives_in_kestras_flow_package_is_allowed() {
+        for ty in [
+            "io.kestra.plugin.core.flow.Sleep",
+            "io.kestra.plugin.core.flow.PurgeFlows",
+            "io.kestra.plugin.core.log.Log",
+            "egret.sql",
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+                 tasks:\n      - id: child\n        type: {ty}\n"
+            ))
+            .unwrap();
+            assert!(
+                !validate(&f)
+                    .errors
+                    .iter()
+                    .any(|e| e.code == "working_directory_child_not_runnable"),
+                "{ty} is a runnable task and must be allowed as a child"
+            );
+        }
+    }
+
+    /// kestra: `FlowValidator.findMissingInputsForScheduleTriggers` --
+    /// `invalids/scheduled-missing-inputs-defaults{,-2}`.
+    #[test]
+    fn a_schedule_that_cannot_supply_an_input_without_a_default_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: user\n    type: STRING\n    defaults: John\n  \
+             - id: user2\n    type: STRING\ntasks:\n  - id: t\n    type: x\ntriggers:\n  \
+             - id: every_minute\n    type: io.kestra.plugin.core.trigger.Schedule\n    \
+             cron: \"*/1 * * * *\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        let f0 = r
+            .errors
+            .iter()
+            .find(|e| e.code == "schedule_missing_inputs")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(
+            f0.message.contains("user2") && !f0.message.contains("'user'"),
+            "only the input with no default is missing: {}",
+            f0.message
+        );
+    }
+
+    /// Three ways a scheduled flow is fine, each of which a rule written one
+    /// step too wide would refuse.
+    #[test]
+    fn a_schedule_is_silent_when_every_input_can_be_supplied() {
+        // 1. the schedule supplies it. This is the row that needed
+        //    `Schedule::inputs` restored to the model -- W1 had dropped the
+        //    field as "deprecated", which the checkout does not say.
+        let supplied = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\ntasks:\n  \
+             - id: t\n    type: x\ntriggers:\n  - id: s\n    \
+             type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"* * * * *\"\n    \
+             inputs:\n      user2: bob\n",
+        )
+        .unwrap();
+        // 2. every input has a default.
+        let defaulted = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\n    \
+             defaults: bob\ntasks:\n  - id: t\n    type: x\ntriggers:\n  - id: s\n    \
+             type: io.kestra.plugin.core.trigger.Schedule\n    cron: \"* * * * *\"\n",
+        )
+        .unwrap();
+        // 3. the trigger is not a Schedule. Kestra's filter is
+        //    `Schedule.class::isInstance`; a webhook carries its inputs at
+        //    fire time.
+        let webhook = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: user2\n    type: STRING\ntasks:\n  \
+             - id: t\n    type: x\ntriggers:\n  - id: w\n    \
+             type: io.kestra.plugin.core.trigger.Webhook\n    key: k\n",
+        )
+        .unwrap();
+        for (what, flow) in [
+            ("supplied by the schedule", supplied),
+            ("has a default", defaulted),
+            ("not a schedule", webhook),
+        ] {
+            let r = validate(&flow);
+            assert!(
+                !r.errors.iter().any(|e| e.code == "schedule_missing_inputs"),
+                "{what}: {r:?}"
+            );
+        }
+    }
+
+    /// kestra: `ArrayInputValidator` / `MultiselectInputValidator` --
+    /// `invalids/inputs-validation`.
+    #[test]
+    fn an_item_type_an_array_cannot_hold_is_an_error() {
+        for item in ["ARRAY", "SECRET", "MULTISELECT", "SELECT"] {
+            for outer in ["ARRAY", "MULTISELECT"] {
+                let f = parse(&format!(
+                    "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: {outer}\n    \
+                     itemType: {item}\ntasks:\n  - id: t\n    type: x\n"
+                ))
+                .unwrap();
+                let r = validate(&f);
+                let f0 = r
+                    .errors
+                    .iter()
+                    .find(|e| e.code == "input_item_type_invalid")
+                    .unwrap_or_else(|| panic!("{outer} of {item}: {r:?}"));
+                assert!(
+                    f0.message
+                        .ends_with(&format!("`itemType` cannot be {item}")),
+                    "{}",
+                    f0.message
+                );
+            }
+        }
+    }
+
+    /// Both silent arms. The second is the one this crate's flattening makes
+    /// necessary: in Java the validator is attached to `ArrayInput` and
+    /// `MultiselectInput` and can never see any other input type, so a gate on
+    /// the input's own type is what stops the rule inventing a refusal.
+    #[test]
+    fn a_legal_item_type_and_an_item_type_on_another_input_type_are_both_silent() {
+        for (outer, item) in [
+            ("ARRAY", "STRING"),
+            ("ARRAY", "INT"),
+            ("MULTISELECT", "STRING"),
+            ("STRING", "ARRAY"),
+            ("SELECT", "SECRET"),
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ninputs:\n  - id: i\n    type: {outer}\n    \
+                 itemType: {item}\ntasks:\n  - id: t\n    type: x\n"
+            ))
+            .unwrap();
+            let r = validate(&f);
+            assert!(
+                !r.errors.iter().any(|e| e.code == "input_item_type_invalid"),
+                "{outer} with itemType {item}: {r:?}"
+            );
+        }
+    }
+
+    /// kestra: `FlowValidator.java:121-137` --
+    /// `invalids/inputs-key-with-subtraction-symbol-validation`.
+    #[test]
+    fn a_dotted_reference_to_a_dashed_input_is_an_error() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ninputs:\n  - id: server-fqn\n    type: STRING\n    \
+             defaults: animal\ntasks:\n  - id: hello\n    \
+             type: io.kestra.plugin.core.log.Log\n    message: \"{{inputs.server-fqn}}\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        let f0 = r
+            .errors
+            .iter()
+            .find(|e| e.code == "dashed_input_reference")
+            .unwrap_or_else(|| panic!("{r:?}"));
+        assert!(f0.message.contains("[hello]"), "{}", f0.message);
+    }
+
+    /// kestra: `FlowValidator.java:139-169` --
+    /// `invalids/outputs-key-with-subtraction-symbol-validation`. Both
+    /// populations Kestra scans are covered: the tasks and the flow's own
+    /// `outputs:`.
+    #[test]
+    fn a_dotted_reference_to_a_dashed_task_output_is_an_error_in_both_populations() {
+        let f = parse(
+            "id: f\nnamespace: a.b\ntasks:\n  - id: produce-output\n    \
+             type: io.kestra.plugin.core.debug.Return\n    format: x\n  - id: use_output\n    \
+             type: io.kestra.plugin.core.log.Log\n    \
+             message: \"{{ outputs.produce-output.value }}\"\noutputs:\n  - id: final\n    \
+             type: STRING\n    value: \"{{ outputs.produce-output.value }}\"\n",
+        )
+        .unwrap();
+        let r = validate(&f);
+        let found: Vec<&str> = r
+            .errors
+            .iter()
+            .filter(|e| e.code == "dashed_output_reference")
+            .map(|e| e.path.as_str())
+            .collect();
+        assert_eq!(
+            found,
+            vec!["tasks", "outputs"],
+            "Kestra reports the offending TASKS and the offending OUTPUTS \
+             separately, and so does this: {r:?}"
+        );
+    }
+
+    /// The silent arms, and the second is Kestra's own defect being copied.
+    #[test]
+    fn bracket_notation_and_an_undashed_id_are_both_silent() {
+        // 1. bracket notation -- the spelling the message tells the author to
+        //    use. It must not be refused, or the error would be unfixable.
+        let bracketed = "id: f\nnamespace: a.b\ninputs:\n  - id: server-fqn\n    \
+                         type: STRING\n    defaults: a\ntasks:\n  - id: hello\n    \
+                         type: io.kestra.plugin.core.log.Log\n    \
+                         message: \"{{inputs['server-fqn']}}\"\n";
+        // 2. no dash in the id at all: no pattern is built, so nothing is
+        //    scanned.
+        let undashed = "id: f\nnamespace: a.b\ninputs:\n  - id: serverfqn\n    \
+                        type: STRING\n    defaults: a\ntasks:\n  - id: hello\n    \
+                        type: io.kestra.plugin.core.log.Log\n    \
+                        message: \"{{inputs.serverfqn}}\"\n";
+        // 3. `{{ inputs.server-fqn | upper }}` does NOT match. Kestra's
+        //    pattern requires the reference to be the WHOLE expression
+        //    (`\{\{\s*inputs.<id>\s*\}\}`), so a filtered one slips through
+        //    upstream too. Copied deliberately: inventing the wider rule would
+        //    refuse a flow this Kestra accepts, which is the direction that
+        //    must not ship.
+        let filtered = "id: f\nnamespace: a.b\ninputs:\n  - id: server-fqn\n    \
+                        type: STRING\n    defaults: a\ntasks:\n  - id: hello\n    \
+                        type: io.kestra.plugin.core.log.Log\n    \
+                        message: \"{{ inputs.server-fqn | upper }}\"\n";
+        for (what, src) in [
+            ("bracket notation", bracketed),
+            ("no dash", undashed),
+            (
+                "Kestra's own pattern does not reach a filtered reference",
+                filtered,
+            ),
+        ] {
+            let f = parse(src).unwrap();
+            let r = validate(&f);
+            assert!(
+                !r.errors.iter().any(|e| e.code.starts_with("dashed_")),
+                "{what}: {r:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_syntax_error_carries_line_and_column() {
