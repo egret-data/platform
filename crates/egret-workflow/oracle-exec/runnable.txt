@@ -805,6 +805,84 @@ as dropped-for-flipping -- `stability.json` names them and all three flows
 reached `golden.json`, so there is nothing to reconcile.  That is not a hole in
 the executor; it is the harvest's own measurement, and since Task 4 the ratchet
 honours it rather than demanding egret reproduce a relation the golden declines
-to state.  Driven through the real `advance()` the projection removes 22 pairs
-across 6 entries; the extra 9 are on `disabled:` flows whose egret run set
-differs from Kestra's, which can never bank in any case.
+to state.  Driven through the real `advance()` the projection now removes 25
+pairs across 7 entries (Task 4 measured 22 across 6); the 16 beyond the golden's
+own 9 are on `disabled:` flows whose egret run set differs from Kestra's, which
+can never bank in any case.
+
+
+The second entry waiting on the INSTRUMENT: `valids/if` (W3a Task 5)
+-------------------------------------------------------------------
+
+`valids/if` is STILL BASELINED after Task 5 implemented both flowables it uses,
+and for exactly the reason `valids/dag` is.  Everything reproduces -- all 12
+runs in Kestra's own `taskRunList` order, every parent, every history, every
+attempt, and 54 of its 57 kept ordered pairs -- except three:
+
+  pair (2, 6)  = (if-2, if-3-log)          golden: before   egret: overlapping
+  pair (6, 9)  = (if-3-log, log-parallel-4) golden: before   egret: overlapping
+  pair (7, 10) = (log-parallel-2, log-parallel-5) golden: before  egret: overlapping
+
+The flow is a `Parallel` with `concurrent: 4` over nine branches, three of them
+`If`s, so its runs are created in batches as earlier branches terminate.  Each
+of the three disagreements is a creation egret lands in the SAME round as a
+termination Kestra had already observed, which is what a machine that completes
+exactly one in-flight run per round does.  The general mechanism is the one
+README.md's `What this oracle does not prove` describes; the specific Kestra
+cycle was NOT measured, and is not claimed.  What WAS measured is that the
+entry's runs are identical to Kestra's, which is what says the disagreement is
+about the instrument rather than about the `If`.
+
+That makes TWO entries (`valids/dag`, `valids/if`) whose only remaining
+difference is an ordered pair a round-based machine cannot produce.  README.md
+predicted one and named Task 6 as the remaining candidate; Task 5 found it
+first.  The answer taken is the one that section prescribes: record the pairs,
+do not weaken the relation, and do not reshape the executor to buy the bank.
+
+
+What the caller can render, and what that costs (W3a Task 5)
+------------------------------------------------------------
+
+`advance()` is pure and cannot render, so `tests/executor.rs` gained a tier that
+does: it renders an `If`'s `condition` or a `Switch`'s `value` with egret's own
+W2 renderer, over a context of
+
+  inputs  the values `corpus.json` records `harvest.py` as having POSTED for the
+          very execution the golden was captured from, plus the flow's own
+          declared `defaults:` for every input the harvest did not post
+  vars    the flow's own `variables:` block
+
+and nothing else.  Kestra's `RunContext` reaches far more -- task outputs, the
+loop `item`, `execution`, `taskrun`, `trigger`, `labels`, the KV store -- so an
+expression over any of those cannot be resolved here, and an unresolvable
+expression FAILS the run.
+
+The cost is DERIVED rather than argued, by
+`the_caller_can_render_every_branch_expression_except_the_two_kestra_could_not`:
+over every planned `If` and `Switch` in the comparable corpus there are 26
+expressions, 24 render, and the 2 that do not are
+
+  valids/if-condition-fail   `{{ inputs.run }}`      (no such input declared)
+  valids/variables-invalid   `{{inputs.invalid}}`    (no such input declared)
+
+which are exactly the two the ARTIFACT could not render either -- the test reads
+each failing task's own run out of `golden.json` and requires it to end FAILED.
+Both entries are banked BY that path.  A third failure, on a task Kestra ran to
+SUCCESS, would be an entry egret gets wrong because of the harness rather than
+because of `advance()`, and that assertion is what would surface it.
+
+The `defaults:` half of the context is worth its own line, because leaving it
+out was a real defect and not a simplification.  Five entries post `inputs: {}`
+and declare their input with a `defaults:` -- `valids/exit`,
+`valids/exit-cancelled`, `valids/exit-killed`, `valids/exit-nested` (two `If`s)
+and `valids/parallel-fail-with-flowable` (two `If`s), SEVEN expressions between
+them.  Kestra fills those defaults before it renders anything; without that step
+all seven failed to render too and their `If`s were FAILED for a reason that had
+nothing to do with the flow.  7 + 2 = 9 of the 26 failed before the filling
+step; 2 fail after it.  `valids/parallel-fail-with-flowable` -- the flow Task 4's whole
+`fail_the_rest` rule was argued from -- banks BECAUSE the defaults are applied.
+
+One entry is still mismatching for a reason the context cannot fix, and it is
+not the renderer's fault: `valids/if-with-only-disabled-tasks` renders
+`{{ vars.numeric_variable > 0 }}` to "true" correctly, and mismatches because its
+`then` holds a `disabled: true` task, which no W3a task claims.

@@ -328,14 +328,22 @@ mod tests {
         // pinned on all three and not only on the one Task 3 shipped.
         let mut flowables = 0;
         let mut runnables = 0;
-        for corpus_id in ["valids/sequential", "valids/parallel", "valids/dag"] {
+        for (corpus_id, renders) in [
+            ("valids/sequential", &[][..]),
+            ("valids/parallel", &[][..]),
+            ("valids/dag", &[][..]),
+            ("valids/if-condition", &[("if", "true")][..]),
+            ("valids/switch", &[("parent-seq", "FIRST")][..]),
+        ] {
             let plan = plan_of(corpus_id);
-            let state = run_to_fixpoint(&plan, RunState::Success);
+            let state = run_to_fixpoint_rendering(&plan, RunState::Success, renders);
             for run in &state.runs {
                 match plan.tasks[run.task].kind {
                     TaskKind::Sequential { .. }
                     | TaskKind::Parallel { .. }
-                    | TaskKind::Dag { .. } => {
+                    | TaskKind::Dag { .. }
+                    | TaskKind::If { .. }
+                    | TaskKind::Switch { .. } => {
                         flowables += 1;
                         assert_eq!(
                             wire(&run.history),
@@ -367,9 +375,10 @@ mod tests {
             }
         }
         assert!(
-            flowables >= 5 && runnables >= 19,
-            "the three flows must exercise both sides; saw {flowables} flowable(s) \
-             and {runnables} runnable(s)"
+            flowables >= 7 && runnables >= 21,
+            "the five flows must exercise both sides, and the two Task 5 added \
+             must each contribute a flowable; saw {flowables} flowable(s) and \
+             {runnables} runnable(s)"
         );
     }
 
@@ -944,6 +953,511 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
+    // branch: if and switch
+    // ----------------------------------------------------------------------
+
+    /// [`run_to_fixpoint`], with a caller that also **renders**.
+    ///
+    /// `advance` is pure and cannot render, so a real caller supplies the
+    /// result in `TaskRun::rendered`. This is the smallest caller that does:
+    /// whenever the state machine has nothing to do, any planned `If`/`Switch`
+    /// run that is `Running` and unrendered gets the value `renders` gives for
+    /// its task id, and only then does the worker finish anything.
+    ///
+    /// Rendering before the worker moves is Kestra's order too: it renders in
+    /// the **executor** (`If.isTrue` calls `runContext.render`), not in a
+    /// worker, so no worker result can arrive between the executor deciding to
+    /// evaluate a condition and the evaluation.
+    ///
+    /// An id with no entry is a test bug rather than a "not rendered yet", so
+    /// it panics: a missing render would otherwise read exactly like the
+    /// deliberate `None` case that
+    /// [`an_if_with_no_rendered_condition_asks_for_nothing_and_is_not_an_error`]
+    /// is about.
+    fn run_to_fixpoint_rendering(
+        plan: &Plan,
+        outcome: RunState,
+        renders: &[(&str, &str)],
+    ) -> ExecutionState {
+        let mut state = ExecutionState::new(plan);
+        for _ in 0..1000 {
+            let cmds = advance(plan, &state, T0);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let unrendered = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::If { .. } | TaskKind::Switch { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+            });
+            if let Some(ix) = unrendered {
+                let id = &plan.tasks[state.runs[ix].task].id;
+                let value = renders
+                    .iter()
+                    .find(|(k, _)| k == id)
+                    .unwrap_or_else(|| panic!("no render supplied for task '{id}'"))
+                    .1;
+                state.runs[ix].rendered = Some(value.to_string());
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                ),
+                None => return state,
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// **A rendered `true` takes `then`, a rendered `false` takes `else`.**
+    ///
+    /// The plan's own Task 5 test, on Kestra's own flow: `valids/if-condition`
+    /// has `then: [when-true]` and `else: [when-false]`, and the golden for it
+    /// — captured with `param: true` — is exactly `[if, when-true]`. The
+    /// alternative input `param: false` was *measured* on the same artifact by
+    /// Task 1's discrimination probe and gave `[if, when-false]`
+    /// (`probe.json`, `IfTest.java:76 ifFalsy()`), which is the other half.
+    #[test]
+    fn an_if_takes_then_when_true_and_else_when_false() {
+        let plan = plan_of("valids/if-condition");
+        let taken = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", "true")]);
+        assert_eq!(
+            run_ids(&plan, &taken),
+            ["if", "when-true"],
+            "a truthy condition takes `then`, and `else` is never created"
+        );
+        assert_eq!(
+            wire(&taken.runs[0].history),
+            ["CREATED", "RUNNING", "SUCCESS"]
+        );
+
+        let not_taken = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", "false")]);
+        assert_eq!(
+            run_ids(&plan, &not_taken),
+            ["if", "when-false"],
+            "a falsy condition takes `else`, and `then` is never created"
+        );
+    }
+
+    /// **An `If` that has not been rendered yet asks for nothing, and that is
+    /// not an error.**
+    ///
+    /// `advance` is pure and cannot render, so `rendered: None` means "the
+    /// caller has not answered yet" and the only correct answer is to emit
+    /// nothing. The control is what makes this an assertion rather than a
+    /// tautology: the *same* state with a render supplied does emit, so the
+    /// emptiness is about the missing render and not about the `If` being
+    /// unable to do anything at all.
+    #[test]
+    fn an_if_with_no_rendered_condition_asks_for_nothing_and_is_not_an_error() {
+        let plan = plan_of("valids/if-condition");
+        let mut state = ExecutionState::new(&plan);
+        round(&plan, &mut state); // create the If
+        round(&plan, &mut state); // start it
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Running));
+        assert_eq!(state.runs[0].rendered, None);
+
+        assert_eq!(
+            advance(&plan, &state, T0),
+            vec![],
+            "an unrendered If asks for nothing -- it must not guess a branch, \
+             and it must not fail"
+        );
+
+        // The control: the same state, rendered, does ask for something.
+        let mut rendered = state.clone();
+        rendered.runs[0].rendered = Some("true".to_string());
+        assert_eq!(
+            advance(&plan, &rendered, T0),
+            vec![Command::CreateRun {
+                task: 1,
+                parent: Some(0),
+                value: None
+            }],
+            "with the render supplied the same If creates its first `then` child"
+        );
+    }
+
+    /// **Kestra's truthiness is not Rust's, and this is the measurement.**
+    ///
+    /// `TruthUtils.isTruthy` is `condition != null && !["false", "0", "-0",
+    /// ""].contains(condition.trim())`, and the rule was measured against the
+    /// running artifact rather than read off that line: 20 flows, each an `If`
+    /// with a **literal** condition (so the rendered value is exactly the
+    /// literal and the measurement isolates the predicate from the renderer),
+    /// published to `kestra/kestra:v2.0.0-rc13` and executed, recording which
+    /// branch got a taskrun. Every row below is one of those 20 executions.
+    ///
+    /// What that catches that a Rust intuition does not: `"0"` and `"-0"` are
+    /// **falsy** while `"00"`, `"0.0"`, `"FALSE"`, `"False"`, `"null"`, `"no"`,
+    /// `"[]"` and `"{}"` are all **truthy** — the list is four exact strings,
+    /// not a parse, not a case-insensitive match and not an emptiness test —
+    /// and the comparison is on the **trimmed** value, which `"  false  "`,
+    /// `" 0 "` and `"   "` are what prove.
+    #[test]
+    fn kestra_truthiness_is_four_exact_strings_compared_after_trimming() {
+        // (rendered condition, branch Kestra took) -- one live execution each.
+        let measured = [
+            ("true", "when-true"),
+            ("false", "when-false"),
+            ("0", "when-false"),
+            ("-0", "when-false"),
+            ("", "when-false"),
+            ("  true  ", "when-true"),
+            ("  false  ", "when-false"),
+            (" 0 ", "when-false"),
+            ("   ", "when-false"),
+            ("1", "when-true"),
+            ("00", "when-true"),
+            ("0.0", "when-true"),
+            ("abc", "when-true"),
+            ("FALSE", "when-true"),
+            ("False", "when-true"),
+            ("null", "when-true"),
+            ("no", "when-true"),
+            ("[]", "when-true"),
+            ("{}", "when-true"),
+            ("true\n", "when-true"),
+        ];
+        let plan = plan_of("valids/if-condition");
+        let mut falsy = 0;
+        for (rendered, branch) in measured {
+            let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", rendered)]);
+            if branch == "when-false" {
+                falsy += 1;
+            }
+            assert_eq!(
+                run_ids(&plan, &state),
+                ["if", branch],
+                "condition rendered {rendered:?} -- measured live on \
+                 kestra/kestra:v2.0.0-rc13, which took `{branch}`"
+            );
+        }
+        assert_eq!(
+            (falsy, measured.len() - falsy),
+            (7, 13),
+            "the measured population: 7 falsy renders and 13 truthy ones, \
+             {} rows in total",
+            measured.len()
+        );
+    }
+
+    /// **An `If` whose chosen branch is empty succeeds immediately, and that is
+    /// the golden's own answer.**
+    ///
+    /// `valids/if` is driven with `if1: true, if2: false, if3: true` and its
+    /// three `If` tasks have a `then` and no `else`. Kestra's `taskRunList`
+    /// carries `if-2` with the history `CREATED RUNNING SUCCESS` and **no child
+    /// at all** — `If.resolveState` short-circuits an empty child list into
+    /// `guessFinalState(null, ...)`, which is `SUCCESS`.
+    ///
+    /// It is not a property of `else` being *absent*: on the running artifact an
+    /// explicit `else: []` with a falsy condition ended `SUCCESS` with one
+    /// taskrun too, which is Java's `ListUtils.emptyOnNull`.
+    ///
+    /// **A `Switch` does the opposite**, which is why this is asserted here and
+    /// not as a rule about branching — see
+    /// [`a_switch_with_no_matching_case_and_no_defaults_fails`].
+    #[test]
+    fn an_if_whose_chosen_branch_is_empty_succeeds_with_no_children() {
+        let plan = plan_of("valids/if-without-else");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", "false")]);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["if"],
+            "the empty `else` produces no run at all"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "SUCCESS"]
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "SUCCESS"]);
+
+        // The control: the same flow, rendered truthy, does create a child.
+        let taken = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", "true")]);
+        assert_eq!(run_ids(&plan, &taken), ["if", "when-true"]);
+    }
+
+    /// **A branch is a SEQUENTIAL list: it stops at the first child that does
+    /// not succeed, and the `If` takes that child's state.**
+    ///
+    /// Kestra's `If.resolveNexts` calls `FlowableUtils.resolveSequentialNexts`,
+    /// and the shape was measured on the running artifact rather than read off
+    /// that call: an `If` with `condition: "true"` and
+    /// `then: [a(Log), b(Fail), c(Log)]` produced exactly
+    /// `if(FAILED), a(SUCCESS), b(FAILED)` — `c` was never created.
+    #[test]
+    fn an_if_branch_is_sequential_and_stops_at_the_first_failure() {
+        let source = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"true\"\n    then:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n      - id: c\n        type: io.kestra.plugin.core.debug.Return\n        format: c\n";
+        let plan = build_plan(source).expect("plans");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Failed, &[("if", "true")]);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["if", "a"],
+            "the first child failed, so `b` and `c` were never created"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED"]
+        );
+
+        let ok = run_to_fixpoint_rendering(&plan, RunState::Success, &[("if", "true")]);
+        assert_eq!(
+            run_ids(&plan, &ok),
+            ["if", "a", "b", "c"],
+            "the control: with a succeeding worker the whole branch runs, one at a time"
+        );
+    }
+
+    /// **A `Switch` picks the case whose key EQUALS the rendered value.**
+    ///
+    /// `valids/switch` has four cases and a `defaults`, and both halves are
+    /// measured on the artifact: the golden was captured with `string: FIRST`
+    /// and is `[parent-seq, t1]`, and the discrimination probe re-ran it with
+    /// `string: SECOND` and observed `[parent-seq, t2, t2_sub]`
+    /// (`probe.json`, `SwitchTest.java:57 switchSecond()`). The second case is
+    /// what makes this a test of the key equality rather than of "the first
+    /// case wins".
+    #[test]
+    fn a_switch_picks_the_case_whose_key_equals_the_rendered_value() {
+        let plan = plan_of("valids/switch");
+        let first = run_to_fixpoint_rendering(&plan, RunState::Success, &[("parent-seq", "FIRST")]);
+        assert_eq!(run_ids(&plan, &first), ["parent-seq", "t1"]);
+
+        let second =
+            run_to_fixpoint_rendering(&plan, RunState::Success, &[("parent-seq", "SECOND")]);
+        assert_eq!(
+            run_ids(&plan, &second),
+            ["parent-seq", "t2", "t2_sub"],
+            "a second key, driven sequentially -- so this is the equality and \
+             not `cases.first()`"
+        );
+
+        let default =
+            run_to_fixpoint_rendering(&plan, RunState::Success, &[("parent-seq", "DEFAULT")]);
+        assert_eq!(
+            run_ids(&plan, &default),
+            ["parent-seq", "default"],
+            "no key equals DEFAULT, so `defaults` runs"
+        );
+    }
+
+    /// **A `Switch` with no matching case and no `defaults` FAILS — where an
+    /// `If` with an empty branch succeeds.**
+    ///
+    /// Measured, on `valids/fail-on-switch` driven with `param: fail`: the
+    /// golden is one run, `switch`, `CREATED RUNNING FAILED`, and the execution
+    /// `FAILED` with it. `valids/switch-impossible` is the same shape.
+    ///
+    /// The two flowables differ because `Switch` has no override of
+    /// `resolveState`: its `childTasks` returns Java `null`, and
+    /// `FlowableUtils.resolveState` logs "No task found on flow" and answers
+    /// `FAILED` for a null list. `If.resolveState` wraps the same list in
+    /// `ListUtils.emptyOnNull` first and answers `SUCCESS`.
+    #[test]
+    fn a_switch_with_no_matching_case_and_no_defaults_fails() {
+        let plan = plan_of("valids/fail-on-switch");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[("switch", "fail")]);
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["switch"],
+            "no case matched and there is no `defaults`, so nothing was created"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "a Switch with nothing to run FAILS -- an If in the same position \
+             SUCCEEDS, see an_if_whose_chosen_branch_is_empty_succeeds_with_no_children"
+        );
+        assert_eq!(wire(&state.history), ["CREATED", "RUNNING", "FAILED"]);
+
+        // The control: a value that DOES match runs its case and succeeds.
+        let ok = run_to_fixpoint_rendering(&plan, RunState::Success, &[("switch", "case1")]);
+        assert_eq!(run_ids(&plan, &ok), ["switch", "case1"]);
+        assert_eq!(wire(&ok.history), ["CREATED", "RUNNING", "SUCCESS"]);
+    }
+
+    /// **A `Switch` whose matched case is an EMPTY list never progresses, and
+    /// that is Kestra's behaviour rather than an omission here.**
+    ///
+    /// Measured live: a flow with `cases: {MATCH: []}` and a non-empty
+    /// `defaults`, executed with `value: "MATCH"`, was still `RUNNING` after
+    /// 45 s with only the `sw` taskrun. It does **not** fall through to
+    /// `defaults` — `Switch.childTasks` is
+    /// `filter(key.equals(value)).findFirst().orElse(defaults)`, and an empty
+    /// matched list is a `findFirst()` hit — and it does not fail either,
+    /// because an empty (non-null) list reaches `resolveState`'s last branch
+    /// and returns `Optional.empty()`.
+    ///
+    /// Reproducing it means emitting nothing for ever, which in the oracle's
+    /// environment is a `STUCK` — so this can only be a unit test, and no
+    /// corpus flow reaches it.
+    #[test]
+    fn a_switch_whose_matched_case_is_empty_asks_for_nothing_for_ever() {
+        let source = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: sw\n    type: io.kestra.plugin.core.flow.Switch\n    value: MATCH\n    cases:\n      MATCH: []\n    defaults:\n      - id: fallback\n        type: io.kestra.plugin.core.debug.Return\n        format: f\n";
+        let plan = build_plan(source).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+        round(&plan, &mut state); // create
+        round(&plan, &mut state); // start
+        state.runs[0].rendered = Some("MATCH".to_string());
+        assert_eq!(
+            advance(&plan, &state, T0),
+            vec![],
+            "an empty matched case neither runs `defaults` nor fails"
+        );
+        assert_eq!(state.runs.len(), 1);
+
+        // The control: the same flow with a value that matches nothing DOES
+        // reach `defaults`, so the emptiness above is about the empty case and
+        // not about this Switch being unable to do anything.
+        let mut other = state.clone();
+        other.runs[0].rendered = Some("NOPE".to_string());
+        assert_eq!(
+            advance(&plan, &other, T0),
+            vec![Command::CreateRun {
+                task: 1,
+                parent: Some(0),
+                value: None
+            }]
+        );
+    }
+
+    /// **An `If` with no `condition` cannot be planned, and is refused by
+    /// name.**
+    ///
+    /// `condition` is `Option<String>` in W1's model because `@NotNull` is bean
+    /// validation and not parsing; an `If` with none has nothing to branch on.
+    /// This Kestra refuses it at publish — `invalids/if-without-condition`'s
+    /// recorded rejection is `422 tasks[if].condition: must not be null` — so
+    /// this is a refusal about the flow, the same class as the two `Dag` checks
+    /// Task 4 added and not the widening `build_plan`'s doc argues against.
+    #[test]
+    fn an_if_with_no_condition_is_refused_by_name() {
+        // Not `expect_err`: it prints the whole `Plan` and buries the finding,
+        // which is Task 3's M6 lesson and Task 4's M18/M19 arriving a third
+        // time. A mutation here has to say what it produced, not dump it.
+        let planned = build_plan(&corpus_source("invalids/if-without-condition"));
+        let err = match planned {
+            Err(e) => e,
+            Ok(p) => panic!(
+                "an If with no condition must be refused; got a plan of {} task(s) \
+                 rooted at '{}'",
+                p.tasks.len(),
+                p.tasks.first().map_or("?", |t| t.id.as_str())
+            ),
+        };
+        assert!(
+            err.message.contains("has no condition"),
+            "refused for the wrong reason: {err}"
+        );
+
+        // The control: the same flow with a condition plans.
+        let with = corpus_source("invalids/if-without-condition").replace(
+            "    type: io.kestra.plugin.core.flow.If",
+            "    type: io.kestra.plugin.core.flow.If\n    condition: \"true\"",
+        );
+        let plan = build_plan(&with).expect("the control must plan");
+        assert!(matches!(plan.tasks[0].kind, TaskKind::If { .. }));
+    }
+
+    /// **A `Switch` with no `value` cannot be planned, and is refused by
+    /// name.** The same rule and the same reason as
+    /// [`an_if_with_no_condition_is_refused_by_name`]; `Switch::value` is
+    /// `@NotNull` in Java too. No corpus flow is this shape, so the flow is
+    /// written here — and the control below is what stops the assertion passing
+    /// for any other reason.
+    #[test]
+    fn a_switch_with_no_value_is_refused_by_name() {
+        let without = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: sw\n    type: io.kestra.plugin.core.flow.Switch\n    cases:\n      A:\n        - id: a\n          type: io.kestra.plugin.core.debug.Return\n          format: a\n";
+        let err = match build_plan(without) {
+            Err(e) => e,
+            Ok(p) => panic!(
+                "a Switch with no value must be refused; got a plan of {} task(s) \
+                 rooted at '{}'",
+                p.tasks.len(),
+                p.tasks.first().map_or("?", |t| t.id.as_str())
+            ),
+        };
+        assert!(
+            err.message.contains("has no value"),
+            "refused for the wrong reason: {err}"
+        );
+
+        let with = without.replace(
+            "    type: io.kestra.plugin.core.flow.Switch",
+            "    type: io.kestra.plugin.core.flow.Switch\n    value: A",
+        );
+        let plan = build_plan(&with).expect("the control must plan");
+        assert!(matches!(plan.tasks[0].kind, TaskKind::Switch { .. }));
+    }
+
+    /// **The unrendered expression reaches the plan verbatim, and it is the
+    /// only thing about the condition the plan holds.**
+    ///
+    /// A `Plan` that stored a rendered `bool` would be a plan that could only
+    /// be built by something that can render, which `build_plan` is documented
+    /// not to be. Asserting the source text is what pins that.
+    #[test]
+    fn the_plan_holds_the_unrendered_expression() {
+        let plan = plan_of("valids/if-condition");
+        let TaskKind::If {
+            condition,
+            then_,
+            else_,
+        } = &plan.tasks[0].kind
+        else {
+            panic!("valids/if-condition's first task is an If");
+        };
+        assert_eq!(condition, "{{inputs.param}}");
+        assert_eq!(
+            (
+                then_
+                    .iter()
+                    .map(|&t| plan.tasks[t].id.as_str())
+                    .collect::<Vec<_>>(),
+                else_
+                    .iter()
+                    .map(|&t| plan.tasks[t].id.as_str())
+                    .collect::<Vec<_>>()
+            ),
+            (vec!["when-true"], vec!["when-false"])
+        );
+
+        let plan = plan_of("valids/switch");
+        let TaskKind::Switch {
+            value,
+            cases,
+            default,
+        } = &plan.tasks[0].kind
+        else {
+            panic!("valids/switch's first task is a Switch");
+        };
+        assert_eq!(value, "{{inputs.string}}");
+        assert_eq!(
+            cases.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            ["FIRST", "SECOND", "THIRD"]
+        );
+        assert_eq!(default.len(), 1, "valids/switch has one `defaults` task");
+    }
+
+    // ----------------------------------------------------------------------
     // the instant
     // ----------------------------------------------------------------------
 
@@ -1310,6 +1824,35 @@ mod tests {
                 }]
             },
             "and so does a Dag"
+        );
+
+        // Task 5's two. Both flatten, and both are reached by the FQCN only --
+        // the same dispatch rule the three above use.
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ inputs.p }}\"\n    then:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("the control must plan");
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::If {
+                condition: "{{ inputs.p }}".to_string(),
+                then_: vec![1],
+                else_: vec![]
+            },
+            "an If flattens both branches, as of Task 5"
+        );
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{ inputs.p }}\"\n    cases:\n      A:\n        - id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+        )
+        .expect("the control must plan");
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Switch {
+                value: "{{ inputs.p }}".to_string(),
+                cases: vec![("A".to_string(), vec![1])],
+                default: vec![]
+            },
+            "and so does a Switch"
         );
     }
 

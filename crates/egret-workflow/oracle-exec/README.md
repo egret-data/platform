@@ -11,6 +11,16 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+Task 5 (`if`, `switch`) changed four more, and a reader should take these over
+this file's older sentences: the feed table below moved again, to
+`424 fed / 73 flowable / 343 unplanned`; the oracle's environment grew a
+**fourth tier** — the caller renders, because `advance()` cannot — and with it a
+new and narrow dependency on W2's renderer; the "kept `before` may be
+unreachable without a clock" hole gained its **second** named entry,
+`valids/if`; and `If`/`Switch` left *States and constructs no W3a task claims*
+while `core.execution.Exit` arrived in it. See *What Task 5 had to change, and
+what it banked*.
+
 Task 4 (`parallel`, `dag`) changed four more, and they are the ones a reader
 should not take from this file's older sentences: the feed table below moved to
 `428 fed / 48 flowable / 364 unplanned`, the ratchet now compares the ordered
@@ -921,13 +931,20 @@ is in exactly one bucket:
 
 | bucket | count | what it is |
 |---|---|---|
-| **fed** | 428 | the run's task is a `Runnable` in the plan, so its terminal is supplied and is not compared |
-| **flowable** | 48 | the run's task is one the executor drives itself (`Sequential`, `Parallel`, `Dag`), so its state is its own decision and is compared |
-| **unplanned** | 364 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
+| **fed** | 424 | the run's task is a `Runnable` in the plan, so its terminal is supplied and is not compared |
+| **flowable** | 73 | the run's task is one the executor drives itself (`Sequential`, `Parallel`, `Dag`, `If`, `Switch`), so its state is its own decision and is compared |
+| **unplanned** | 343 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
 | **TOTAL** | **840** | |
 
 Task 3's figures were `390 / 23 / 427`; Task 4 moved 63 runs out of *unplanned*,
-38 of them into *fed* and 25 into *flowable*.
+38 of them into *fed* and 25 into *flowable*, reaching `428 / 48 / 364`. Task 5
+took them to `424 / 73 / 343` — *flowable* **+25**, *unplanned* **−21**, *fed*
+**−4**, which sums to zero as it must. `fed` moved by only 4 because two
+opposite things happened to it at once: every `If` and `Switch` run left it (a
+flowable's state is its own decision, so it is compared and not fed) while the
+`Runnable` children of those same tasks arrived in it for the first time. The
+deltas are what was measured; the split of `fed`'s two halves was not, and is
+not asserted here.
 
 Those three move as Tasks 4-8 teach `build_plan` more flowables, which is why
 they are asserted in the test rather than only printed here: a task that changes
@@ -944,25 +961,29 @@ because `runIf` `SKIPPED` them or they failed before submission. The set is
 asserted at exactly those 2, so if the exception grows this paragraph has to
 weaken with it.
 
-**The over-feed is 134 of the 428, and it is not a single accident.**
+**The over-feed is 114 of the 424, and it is not a single accident.**
 The by-type breakdown is derived from the plan's own `type_id` and printed on
-every run — **13 task types** after Task 4 (15 before it; `core.flow.Parallel`
-and `core.flow.Dag` left the set in the commit that gave them a `TaskKind`),
-of which 9 are still flowables (113 runs), 3 are
-`io.kestra.plugin.core.execution.*` (19 runs) that **no W3a task claims**, and 1
-is the `Log` exception above. See *States and constructs no W3a task claims*.
+every run — **12 task types** after Task 5 (13 after Task 4, 15 before it;
+`core.flow.Parallel` and `core.flow.Dag` left in Task 4's commit and
+`core.flow.If` and `core.flow.Switch` in Task 5's), of which **7 are still
+flowables (89 runs)**, **4 are `io.kestra.plugin.core.execution.*` (23 runs)**
+that **no W3a task claims**, and 1 is the `Log` exception above — 7 + 4 + 1 = 12
+types and 89 + 23 + 2 = 114 runs, asserted as arithmetic beside the parts rather
+than written next to them. See *States and constructs no W3a task claims*.
 
-**Two of those nine went UP rather than down, and that is not a regression.**
-`If` moved 12 → 19 and `Subflow` 18 → 22, because planning a `Parallel` or a
-`Dag` is what makes the opaque flowables *inside* one reachable at all: a run
-that was `unplanned` (its parent was opaque, so it had no `PlanTask`) becomes a
-fed `Runnable` the moment its parent is planned. Implementing a flowable
-therefore enlarges the over-feed for the flowables nested in it, until those
-land too.
+**Implementing a flowable ENLARGES the over-feed for whatever nests inside it,
+and it has now happened twice.** Task 4 measured `If` 12 → 19 and `Subflow`
+18 → 22 when `Parallel` and `Dag` landed. Task 5 is the same shape one level
+down: `core.execution.Exit` was not in the set at all before it and contributes
+4 runs now, because `Exit` lives inside an `If` and planning the `If` is what
+gives its children a `PlanTask`. A run that was `unplanned` (its parent was
+opaque) becomes a fed `Runnable` the moment its parent is planned. Tasks 6-8
+should expect their own numbers to go up before they come down.
 
-**Nothing banked rests on any of this** — zero of the banked runs sit in the
-over-fed bucket. See *What Task 3 had to change, and what it banked* for
-the intersection that establishes it.
+**Nothing banked rests on any of this** — re-derived at Task 5, and it is still
+exactly zero: of the **168** runs in the banked entries, **none** is a planned
+`Runnable` whose golden history lacks `SUBMITTED`. See *What Task 3 had to
+change, and what it banked* for the intersection Task 3 established.
 
 What makes that acceptable is not the argument, it is that `golden.json` is
 machine-derived and re-derivable: `normalise.py` at HEAD reproduces both it and
@@ -970,18 +991,23 @@ machine-derived and re-derivable: `normalise.py` at HEAD reproduces both it and
 `--verify-traces` re-reads every captured execution against the live Kestra. The
 one field nobody can catch by comparison is the one field nobody hand-writes.
 
-### The environment has three tiers, and tier 2 was an accident
+### The environment has four tiers, and the worker tier was an accident
 
 The oracle is a *caller*, and a caller decides when the worker's answers arrive.
-`tests/executor.rs` does it in three tiers, strictly in this order:
+`tests/executor.rs` does it in four tiers, strictly in this order:
 
 1. **`advance()` decides.** If it emits commands they are applied and it is
    asked again. Nothing else happens while it still has work.
-2. **The worker finishes ONE task.** Only when `advance()` returns nothing: the
-   earliest-created `Runnable` still `Running` reaches the terminal state the
+2. **The caller renders** (Task 5). Only when `advance()` returns nothing: every
+   planned `If`/`Switch` run that is `Running` and unrendered gets its
+   expression rendered into `TaskRun::rendered`. A render that FAILS fails that
+   run. See *What Task 5 had to change* for what the caller can render and what
+   the narrowness costs.
+3. **The worker finishes ONE task.** Only when tiers 1 and 2 have nothing to do:
+   the earliest-created `Runnable` still `Running` reaches the terminal state the
    golden recorded **for its current attempt**.
-3. **Time passes.** Only when `advance()` has nothing to do and nothing is in
-   flight: `now` jumps to the earliest `not_before` still ahead of it.
+4. **Time passes.** Only when nothing else can happen: `now` jumps to the
+   earliest `not_before` still ahead of it.
 
 **Tier 2 is a deliberate choice now and was an accident of loop order before.**
 The first version completed every `Running` task at the top of the loop, *before*
@@ -1697,6 +1723,224 @@ Task 8's decision, not this task's: it changes what the executor refuses for
 every flow, and Task 3's M8 is the recorded argument for not widening refusal
 casually.
 
+## What Task 5 had to change, and what it banked
+
+Task 5 implements `if` and `switch`. It banks **8** of the 189 entries Task 4
+left, taking `baseline.txt` to **181**:
+
+| banked | what earns it |
+|---|---|
+| `valids/if-condition` | `If`, the branch taken on a truthy render |
+| `valids/if-without-else` | `If`, the branch taken on a falsy render — the empty `else` |
+| `valids/switch` | `Switch`, the case whose key equals the rendered value |
+| `valids/fail-on-switch` | `Switch` with no matching case and no `defaults`: `FAILED` |
+| `valids/if-condition-fail` | the caller's render FAILS and the run fails with it |
+| `valids/variables-invalid` | the same, on a `Switch` |
+| `valids/parallel-fail-with-flowable` | Task 4's `fail_the_rest`, finally reachable — the `If`s in its two branches are planned, and the flow's declared input `defaults:` are what make their condition render |
+| `invalids/if-without-condition` | an `If` with no `condition` cannot be planned — an **over-acceptance** fixed |
+
+The control was run **before any code**, in the main tree at `a5069876` with
+`git status --porcelain` empty:
+
+```text
+oracle-exec ratchet: 294 golden entries, 189 mismatching, 189 baselined, 0 broken,
+  22 ordered pair(s) removed
+```
+
+and after:
+
+```text
+oracle-exec ratchet: 294 golden entries, 181 mismatching, 181 baselined, 0 broken,
+  25 ordered pair(s) removed
+```
+
+Every one of the 8 was among the 189, measured mismatching immediately before
+the code that earns it. The ratchet fails in both directions, so the 8 deletions
+are neither more nor fewer than what changed.
+
+### `If`'s truthiness, measured against the running artifact
+
+The plan says to measure this rather than choose it. `TruthUtils.java` was read
+first — the sibling checkout is authoritative for reading an implementation —
+and then the rule was **measured against the running artifact before the
+predicate was written**, because the checkout and the pinned image have drifted
+before and a read is not a measurement.
+
+**Twenty flows**, each an `If` whose `condition` is a **literal** — so the
+rendered value is exactly the literal, and the measurement isolates the
+predicate from the renderer — published to `kestra/kestra:v2.0.0-rc13` and
+executed, recording which branch got a taskrun:
+
+| rendered condition | branch Kestra took |
+|---|---|
+| `"true"`, `"1"`, `"00"`, `"0.0"`, `"abc"`, `"FALSE"`, `"False"`, `"null"`, `"no"`, `"[]"`, `"{}"`, `"true\n"`, `"  true  "` | `then` |
+| `"false"`, `"0"`, `"-0"`, `""`, `"  false  "`, `" 0 "`, `"   "` | `else` |
+
+So the rule is: **falsy is exactly one of the four strings `false`, `0`, `-0`,
+`""`, compared after trimming; everything else is truthy.** It matches
+`core/src/main/java/io/kestra/core/utils/TruthUtils.java` verbatim
+(`condition != null && !List.of("false","0","-0","").contains(condition.trim())`),
+which is what a reader would hope, but three GROUPS of rows are there because
+nothing but a measurement settles them:
+
+- `"00"` and `"0.0"` are **truthy**. Any predicate that parses a number gets
+  these wrong.
+- `"FALSE"`, `"False"`, `"no"`, `"null"`, `"[]"`, `"{}"` are **truthy**. It is
+  not a case-insensitive match and not a "looks empty" test.
+- `"  false  "`, `" 0 "` and `"   "` are **falsy**. The comparison is on the
+  trimmed value, and `"   "` trims to `""`.
+
+`kestra_truthiness_is_four_exact_strings_compared_after_trimming` in
+`executor/mod.rs` carries all 20 rows as assertions, driven through
+`valids/if-condition` — Kestra's own flow — so each row is the branch a real
+corpus flow takes. Three mutations die to it (M27, M28, M29), and M27 — dropping
+only the `trim` — dies to nothing else.
+
+### A `Switch` FAILS where an `If` SUCCEEDS, and both halves are in the golden
+
+The two flowables look like one rule and are not.
+
+- An `If` whose chosen branch is empty ends **`SUCCESS`** with no child run.
+  `valids/if`, driven with `if2: false`, carries `if-2` as
+  `CREATED RUNNING SUCCESS` and no child; `valids/if-without-else`'s measured
+  alternative (`param: false`, `probe.json`, `IfTest.java:127`) is one taskrun
+  and `SUCCESS`. Java: `If.resolveState` wraps `childTasks()` in
+  `ListUtils.emptyOnNull` and short-circuits an empty list into
+  `guessFinalState(null, …)`.
+- A `Switch` with no matching case and no `defaults` ends **`FAILED`**.
+  `valids/fail-on-switch` (`param: fail`) and `valids/switch-impossible`
+  (`string: impossible`) are each one run, `CREATED RUNNING FAILED`. Java:
+  `Switch` has no `resolveState` override, `resolveTasks(null)` is `null`, and
+  `FlowableUtils.resolveState` logs "No task found on flow" and answers
+  `FAILED` for a null list.
+
+**And an empty MATCHED case is a third thing: it hangs.** Measured live rather
+than inferred — a flow with `cases: {MATCH: []}` and a non-empty `defaults`, run
+with `value: "MATCH"`, was still `RUNNING` after 45 s with only its own taskrun.
+An empty matched list is still a `findFirst()` hit, so `defaults` is never
+reached, and an empty-but-non-null list reaches `resolveState`'s last branch and
+returns `Optional.empty()`. `drive_switch` reproduces it as `Step::Waiting` for
+ever; no corpus flow reaches it, so only a unit test holds it.
+
+**What egret cannot represent, measured.** W1's `models::Switch::defaults` is a
+bare `Vec<Task>`, so an absent `defaults:` and an explicit `defaults: []` arrive
+identically — and on the artifact they differ: with no matching case,
+`defaults: []` leaves the `Switch` `RUNNING` for ever (same probe) where an
+absent `defaults:` ends it `FAILED`. Nothing in the corpus writes
+`defaults: []`, and `defaults: null` is refused by W1's parser today (the
+over-refusal `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`
+pins), so the two spellings this crate can tell apart are the two that occur.
+Whoever fixes that over-refusal owns this paragraph.
+
+Two more things the same probe settled: `then: []` is **refused at publish**
+(`422 tasks[if].then: must not be empty`), so only the `else` branch can be
+empty in a published flow; and an explicit `else: []` behaves exactly as an
+absent `else`.
+
+### The environment grew a fourth tier, because `advance()` cannot render
+
+`TaskKind::If` and `TaskKind::Switch` hold the author's **unrendered**
+expression, and `advance()` reads the caller's answer from `TaskRun::rendered` —
+the field Task 3 defined for this and that nothing wrote until now. `None` means
+"not answered yet" and the only correct response is to emit nothing; reading it
+as falsy would silently take the `else` of every `If` the caller had not reached
+(M31 is that mutation, and it kills 8 tests).
+
+That made a new tier unavoidable rather than optional: with `If` planned and
+nothing supplying `rendered`, an `If` run waits for ever and the ratchet reports
+`STUCK` — which is never covered by the baseline. Deleting the tier today
+(M38) panics **19** entries.
+
+**What the caller supplies, and where it comes from.** `inputs`, from
+`corpus.json` — the values `harvest.py` posted for the very execution the golden
+was captured from — plus the flow's own declared `defaults:` for every input the
+harvest did not post; and `vars`, from the flow's `variables:`. The expression
+itself comes from the flow's own text via `build_plan`. **Nothing about which
+branch Kestra took is read**, so the branch decision stays compared rather than
+fed; what it does add is a dependency on **W2's renderer** being right, which is
+new and is stated in `tests/executor.rs`'s own feed section.
+
+**The `defaults:` half was a real defect, not a simplification.** Without it,
+**seven** planned `If` conditions across five entries (`valids/exit`,
+`valids/exit-cancelled`, `valids/exit-killed`, `valids/exit-nested` ×2,
+`valids/parallel-fail-with-flowable` ×2) failed to render on flows that post
+`inputs: {}` and declare their input with a `defaults:` — 7 + 2 = 9 of the 26
+failed; 2 fail with it. `valids/parallel-fail-with-flowable`, the flow Task 4's
+whole `fail_the_rest` rule was argued from, banks **because** the defaults are
+applied. M42 is the guard.
+
+**A failed render FAILS the run**, which is Kestra's own answer:
+`valids/if-condition-fail` renders `{{ inputs.run }}` on a flow declaring no
+such input and its golden is one run, `CREATED RUNNING FAILED`, attempt
+included. Two entries bank by that path.
+
+### Two guards that could not fail, and what happened to them
+
+- **`drive_if`'s empty-branch early return was deleted.** An
+  `if chosen.is_empty() { return Step::Done(Success) }` was written first; then
+  `sequential::drive` over an empty list turned out to fall out of its own loop
+  with exactly `Done(Success)`, so a mutation removing the early return killed
+  nothing at all. It went, and `drive_if`'s doc records why. That is the fourth
+  instance of this pattern in the package and the first three shipped.
+- **The two refusal tests stopped using `expect_err`.** It prints the whole
+  `Plan` and buries the finding — Task 3's M6 and Task 4's M18/M19 arriving a
+  third time. Both now print the task count and root id, which is why M35 and
+  M36 read `got a plan of 2 task(s) rooted at 'if'` rather than a struct dump.
+
+### `valids/if` is NOT banked, and it is this file's own hole arriving twice
+
+`valids/if` reproduces **all 12 runs** in Kestra's `taskRunList` order, every
+parent, every history, every attempt, and **54 of its 57 kept ordered pairs**.
+The three it does not are `(if-2, if-3-log)`, `(if-3-log, log-parallel-4)` and
+`(log-parallel-2, log-parallel-5)`, all `golden: before` / `egret: overlapping`
+— the same class as `valids/dag`'s `(task3, task4)` and for the same reason: a
+machine that completes one in-flight run per round lands a creation in the same
+round as a termination Kestra had already seen. That the entry's runs are
+identical to Kestra's is the measurement; the Kestra-side cycle is not. See
+*What this oracle does not prove* and `runnable.txt`.
+
+### Task 5's mutations
+
+Sixteen, each applied to a pristine snapshot, **built first**
+(`cargo build -p egret-workflow --tests`, **0 errors** asserted) and only then
+run against the **whole crate** (`cargo test -p egret-workflow --no-fail-fast`),
+never a name-filtered subset. Restore is `shutil.copyfile` (fresh mtime, so
+cargo always rebuilds), verified with `filecmp.cmp` after every mutation and
+with `cmp` against the snapshot for all five files at the end. **The victim
+counts below are from a replay of the final tree**, not from memory: Task 4
+dropped the literal-edit column and its M16 then replayed to 3 where its table
+said 2.
+
+| # | file | `-` | `+` | victims (replayed) |
+|---|---|---|---|---|
+| M27 | `branch.rs` | `rendered.trim()` in `is_truthy`'s `matches!` | `rendered` | 1 |
+| M28 | `branch.rs` | `"false" \| "0" \| "-0" \| ""` | `"false" \| ""` | 2 |
+| M29 | `branch.rs` | the whole `!matches!(…)` | `rendered.trim().parse::<bool>().unwrap_or(!rendered.trim().is_empty())` | 2 |
+| M30 | `branch.rs` | `if is_truthy(rendered) { then_ } else { else_ }` | `{ else_ } else { then_ }` | 8 (incl. ratchet) |
+| M31 | `branch.rs` | `let Some(rendered) = … else { return Step::Waiting; };` | `let rendered = ….unwrap_or("");` | 8 (incl. ratchet) |
+| M32 | `branch.rs` | `cases.iter().find(\|(key, _)\| key == rendered)` | `cases.first()` | 5 (incl. ratchet) |
+| M33 | `branch.rs` | `Some((_, chosen)) if chosen.is_empty() => Step::Waiting,` | *(arm deleted)* | 1 |
+| M34 | `branch.rs` | `None if default.is_empty() => Step::Done(RunState::Failed),` | `… RunState::Success),` | 2 (incl. ratchet) |
+| M35 | `plan.rs` | `cond.condition.clone().ok_or_else(…)?` | `cond.condition.clone().unwrap_or_default()` | 2 (incl. ratchet) |
+| M36 | `plan.rs` | `.ok_or_else(…)?` on `Switch::value` | `.unwrap_or_default()` | 1 |
+| M37 | `flowable/mod.rs` | the `TaskKind::If` arm of `descend` | `TaskKind::If { .. } => return Step::Waiting,` | 9 (incl. ratchet PANIC on 15) |
+| M38 | `tests/executor.rs` | `if !unrendered.is_empty() {` | `if false && !unrendered.is_empty() {` | 3 (incl. ratchet PANIC on 19) |
+| M39 | `tests/executor.rs` | the failed-render `Err(_) => { apply(… Failed …); ended[ix] = Some(step); }` | `Err(_) => state.runs[ix].rendered = Some(String::new()),` | 2 (incl. ratchet) |
+| M40 | `tests/executor.rs` | `flow.and_then(\|f\| serde_json::to_value(f.variables).ok()).unwrap_or(Null)` | `serde_json::Value::Null,` | 2 |
+| M41 | `tests/executor.rs` | `Some(TaskKind::Switch { value, .. }) => Some(value.clone()),` | `Some(TaskKind::Switch { .. }) => None,` | 2 (incl. ratchet PANIC on 3) |
+| M42 | `tests/executor.rs` | `for input in &f.inputs {` | `for input in f.inputs.iter().take(0) {` | 3 (incl. ratchet) |
+
+Messages worth quoting, because they are the ones a maintainer will see:
+
+- M27: ``condition rendered "  false  " -- measured live on kestra/kestra:v2.0.0-rc13, which took `when-false` -- left: ["if", "when-true"] right: ["if", "when-false"]``
+- M33: ``an empty matched case neither runs `defaults` nor fails -- left: [SetRunState { run: 0, state: Success }] right: []``
+- M34: ``a Switch with nothing to run FAILS -- an If in the same position SUCCEEDS -- left: ["CREATED", "RUNNING", "SUCCESS"] right: ["CREATED", "RUNNING", "FAILED"]``
+- M38: ``a rendered If must settle -- STUCK here means the render tier is gone: "STUCK after 2 step(s) at now=Tick(0) …"``
+- M42: ``17 of 26 branch expressions render`` — which is where the 9 above comes from.
+
+`cargo fmt` ran after the mutation set; nothing it touched changed by more than
+whitespace.
+
 ## States and constructs no W3a task claims
 
 The plan carries this table too (`docs/en/plans/2026-09-04-workflow-w3a-executor.md`,
@@ -1709,8 +1953,15 @@ owner is how a suppression list starts.
 | `Pause` | `PAUSED`, 18 golden `runs` entries | `io.kestra.plugin.core.flow.Pause` | W8 |
 | flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
 | `disabled:` | `SKIPPED`, 4 entries | a task-level flag | **unclaimed — W3a's final review must assign it or defer it with a reason** |
-| `ExecutionUpdatableTask` | 19 over-submitted runs across 16 baselined entries | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
+| `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, 22 over-submitted runs after Task 4 (18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
+
+`If` and `Switch` were on this programme's list of things Tasks 5-8 would claim;
+Task 5 claimed them. The table gained something in the same commit:
+`core.execution.Exit` was not over-submitted at all before Task 5 and
+contributes 4 of the 23 now, because `Exit` lives inside an `If` and planning
+the `If` is what gives its children a `PlanTask`. That is the fourth row growing
+rather than shrinking, for the reason *What the oracle feeds in* records.
 
 The fourth row is Task 3's, and it is wider than the name that surfaced it.
 `io.kestra.plugin.core.execution.Labels` is `extends Task implements
@@ -1729,6 +1980,12 @@ are `Labels` flows (`labels-update-nested-value-list`,
 `labels-update-task-deduplicate`, `npe-labels-update-task`,
 `primitive-labels-flow`); of the other 15, twelve are `Subflow`, two are `If`
 and one is `Switch`.
+
+**That M2 measurement is Task 3's and has not been re-derived since.** Three of
+the entries it counts are `If`/`Switch` flows, and both flowables have been
+implemented since, so **21** is a figure to re-measure rather than to quote —
+Task 5 did not re-run M2, and says so rather than adjusting the number by
+argument.
 
 **And `Subflow` is the fifth unclaimed construct, which checking rather than
 assuming is what found.** `If` and `Switch` are Task 5's and `Loop` is Task 6's,
@@ -1776,19 +2033,39 @@ wrote. Beyond that, the specific holes, each with its count:
   produces a relation for every pair, the golden does not, and comparing an
   assertion against an absence was costing `valids/parallel-nested` a bank on 3
   pairs the golden itself declines to state. Because egret's relation domain is
-  measured at `{before, overlapping}` (501 pairs, zero `after`), a dropped pair
+  measured at `{before, overlapping}` (557 pairs after Task 5, zero
+  `after`), a dropped pair
   is one Kestra was seen producing *both* values for, so dropping it is exactly
   accepting either. Derived and guarded by three tests — see *What Task 4 had to
-  change, and what it banked*.
-- **A kept `before` is not always reachable by a clockless implementation, and
-  Task 4 found the first one.** The relation egret produces comes from
+  change, and what it banked*. Driven through the real `advance()` the
+  projection removes **25 pairs across 7 entries** at Task 5 (22 across 6 at
+  Task 4).
+- **A kept `before` is not always reachable by a clockless implementation.
+  Task 4 found the first; Task 5 found three more, on a second entry.** The
+  relation egret produces comes from
   `advance()` round numbers, so two branches a `parallel` starts together and
   finishes together are `overlapping` no matter how long each took. Where
   Kestra's scheduler happened to serialise two branches the same way five times
   running, the golden records `before` and egret says `overlapping` — a mismatch
   about the instrument, not about the flowable.
 
-  **It is one pair, and it is `valids/dag`'s `(task3, task4)`.** `task4` depends
+  **It was one pair at Task 4 and is four across two entries at Task 5.** The
+  three new ones are `valids/if`'s `(if-2, if-3-log)`,
+  `(if-3-log, log-parallel-4)` and `(log-parallel-2, log-parallel-5)`.
+  `valids/if` reproduces **all 12 runs** in Kestra's own `taskRunList` order
+  with every parent, history and attempt identical, and **54 of its 57 kept
+  ordered pairs**; it is a `Parallel` with `concurrent: 4` over nine branches, so
+  its runs are created in batches as earlier branches terminate. Each of the
+  three disagreements is a creation egret lands in the *same* round as a
+  termination Kestra had already observed, which is what a machine that completes
+  exactly one in-flight run per round does; the general mechanism is this
+  bullet's, and the specific Kestra cycle was **not** measured. What was measured
+  is that the entry's runs are identical to Kestra's, which is what says the
+  disagreement is about the instrument rather than about the `If`. This section
+  predicted one such entry and named Task 6 as the remaining candidate;
+  **Task 5 found the second first.**
+
+  The original, in detail: **`valids/dag`'s `(task3, task4)`.** `task4` depends
   only on `task2`, so Kestra's own filter ("all dependencies are terminated")
   creates it as soon as `task2` ends; all five rounds nonetheless saw `task3`
   end first, because both are `Log` tasks and one executor evaluation saw both
@@ -1797,7 +2074,8 @@ wrote. Beyond that, the specific holes, each with its count:
   its runs, parents, histories, attempts and other 19 pairs all reproduce. The
   answer taken was the one this bullet prescribed: record the pair, do not
   weaken the relation, and do not make the `Dag` wait for quiescence to buy the
-  bank. Task 6 is the remaining candidate to find another.
+  bank — and the same answer was taken for `valids/if`. Task 6 is still a
+  candidate to find a third.
 - **Nothing keyed on elapsed time is reachable, and there were TWO independent
   causes. Task 3 closed the second; the first stands.**
   1. *The environment, which stands.* `now` moves only to a `not_before`
@@ -1824,6 +2102,30 @@ wrote. Beyond that, the specific holes, each with its count:
   W4's worker, not to `advance()`, and the elapsed-time rules this oracle cannot
   reach are `RetryPolicy::max_duration`, `WaitFor`'s `maxDuration`, a `Pause`
   delay and a `Pause`'s own `timeout` — not `timeout:` in general.
+- **The caller's render context is narrow, and an expression outside it FAILS
+  the run** (Task 5). `advance()` cannot render, so the oracle does; it supplies
+  `inputs` (the values `corpus.json` records `harvest.py` as having posted, plus
+  the flow's own declared `defaults:`) and `vars`, and nothing else. Kestra's
+  `RunContext` also reaches task outputs, the loop `item`, `execution`,
+  `taskrun`, `trigger`, `labels` and the KV store. Measured and asserted by
+  `the_caller_can_render_every_branch_expression_except_the_two_kestra_could_not`:
+  of the **26** planned `If` conditions and `Switch` values in the comparable
+  corpus, **24 render** and the **2** that do not are exactly the two the
+  artifact could not render either — the test reads each failing task's own run
+  out of `golden.json` and requires it to end `FAILED`. A third failure would be
+  an entry egret gets wrong because of the harness rather than because of
+  `advance()`. Tasks 6 and 7 will widen the population: a `{{ item.value }}`
+  condition inside a `Loop` is unplanned today and will not stay so.
+
+- **Two shapes of the render tier are invisible to this oracle**, measured by
+  trying both over the whole golden: rendering every unrendered run in one step
+  versus one per step leaves the ratchet at the same count either way, and so
+  does letting the worker move before the render rather than after. The ordering
+  is not entirely free — moving the worker first changes what
+  `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`
+  measures — but the batching is, so the "all at once" the code argues for from
+  Kestra's executor is an argument and not a measurement.
+
 - **`PlanTask::retry`, `PlanTask::timeout` and `PlanTask::errors` are dead
   fields today**, and for three different reasons. `build_plan` leaves the first
   two `None` because Kestra spells both as `Property<Duration>` — unrendered

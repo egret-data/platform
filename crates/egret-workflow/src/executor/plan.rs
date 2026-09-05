@@ -90,6 +90,55 @@ pub enum TaskKind {
         tasks: Vec<TaskIx>,
         concurrency: Option<u32>,
     },
+    /// `io.kestra.plugin.core.flow.If`.
+    ///
+    /// `condition` is the author's expression, **unrendered**. [`advance`] is
+    /// pure and cannot render, so the caller renders it and writes the result
+    /// into [`TaskRun::rendered`](crate::executor::TaskRun::rendered) — the
+    /// field Task 3 added for exactly this. Holding the source here rather
+    /// than a `bool` is what makes "not rendered yet" representable at all.
+    ///
+    /// `then_` and `else_` are each driven as a **sequential** list, which is
+    /// Kestra's shape (`If.resolveNexts` calls
+    /// `FlowableUtils.resolveSequentialNexts`) and is measured: an `If` whose
+    /// `then` is `[a, b(Fail), c]` produced the taskruns `if(FAILED),
+    /// a(SUCCESS), b(FAILED)` on the running artifact — `c` was never created.
+    If {
+        condition: String,
+        then_: Vec<TaskIx>,
+        else_: Vec<TaskIx>,
+    },
+    /// `io.kestra.plugin.core.flow.Switch`.
+    ///
+    /// `value` is unrendered for the same reason as
+    /// [`If::condition`](TaskKind::If); the caller supplies the render.
+    ///
+    /// `cases` is a `Vec` of pairs rather than a map because the plan holds
+    /// indices and the lookup is a single equality against the rendered value;
+    /// Kestra's own `childTasks` is `cases.entrySet().stream().filter(entry ->
+    /// entry.getKey().equals(value)).findFirst()`, an equality on the key and
+    /// nothing else. Key order is W1's `BTreeMap` order and no rule reads it:
+    /// exactly one case is ever driven.
+    ///
+    /// **`default` empty means Kestra's `defaults: null`, and that is a
+    /// measured limit rather than a modelling choice.** W1's
+    /// `models::Switch::defaults` is a bare `Vec<Task>`, so an absent
+    /// `defaults:` and an explicit `defaults: []` arrive here identically. On
+    /// the running artifact they are *not* the same: with no matching case, an
+    /// absent `defaults:` ends the `Switch` `FAILED`
+    /// (`Switch.childTasks` returns `null`, and `FlowableUtils.resolveState`
+    /// logs "No task found" and returns `FAILED` — measured on
+    /// `valids/fail-on-switch` and `valids/switch-impossible`), while
+    /// `defaults: []` leaves the `Switch` `RUNNING` for ever (measured live:
+    /// a probe flow was still `RUNNING` after 45 s with only the `sw` taskrun).
+    /// No corpus flow writes `defaults: []`, and `defaults: null` is refused by
+    /// W1's parser today, so the two spellings this crate can tell apart are
+    /// the two that occur.
+    Switch {
+        value: String,
+        cases: Vec<(String, Vec<TaskIx>)>,
+        default: Vec<TaskIx>,
+    },
     /// `io.kestra.plugin.core.flow.Dag` — [`Parallel`](TaskKind::Parallel) plus
     /// a dependency predicate.
     ///
@@ -176,17 +225,23 @@ pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 const SEQUENTIAL_TYPE: &str = "io.kestra.plugin.core.flow.Sequential";
 const PARALLEL_TYPE: &str = "io.kestra.plugin.core.flow.Parallel";
 const DAG_TYPE: &str = "io.kestra.plugin.core.flow.Dag";
+const IF_TYPE: &str = "io.kestra.plugin.core.flow.If";
+const SWITCH_TYPE: &str = "io.kestra.plugin.core.flow.Switch";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
 /// # What this refuses, and what it deliberately does not
 ///
-/// It refuses four things: source W1's parser cannot read; nesting deeper than
-/// [`MAX_TASK_DEPTH`]; and a `Dag` whose `dependsOn` names a task that is not
-/// one of its own nodes, or whose nodes form a cycle. The last two are Task 4's
-/// and are exactly the two checks Kestra's own `DagTaskValidator` makes — they
-/// are refusals about *this flow*, not about what egret has implemented, which
-/// is what separates them from the restraint below.
+/// It refuses six things: source W1's parser cannot read; nesting deeper than
+/// [`MAX_TASK_DEPTH`]; a `Dag` whose `dependsOn` names a task that is not one
+/// of its own nodes, or whose nodes form a cycle; an `If` with no `condition`;
+/// and a `Switch` with no `value`. The `Dag` pair is Task 4's and is exactly
+/// the two checks Kestra's own `DagTaskValidator` makes; the `If`/`Switch` pair
+/// is Task 5's and is the same shape as the `Dag` node with no task — a field
+/// that is `Option` here only because `@NotNull` is bean validation rather than
+/// parsing, and whose absence leaves the task with nothing to branch on. All
+/// five are refusals about *this flow*, not about what egret has implemented,
+/// which is what separates them from the restraint below.
 ///
 /// It refuses **nothing else** — in particular it does not refuse a flow
 /// because it uses a flowable no task has implemented yet, and that restraint
@@ -278,6 +333,46 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             out[ix].kind = TaskKind::Parallel {
                 tasks: children,
                 concurrency: literal_concurrency(par.concurrent.as_ref()),
+            };
+        }
+        (ModelKind::If(cond), IF_TYPE) => {
+            // `condition` is `Option<String>` in W1's model because `@NotNull`
+            // is bean validation and not parsing. An `If` with no condition has
+            // nothing to decide on -- the same shape as a `Dag` node with no
+            // task, and refused for the same reason: it cannot be planned, not
+            // because egret has not implemented something. This Kestra refuses
+            // it at publish: `tasks[if].condition: must not be null`, measured
+            // on `invalids/if-without-condition`.
+            let condition = cond.condition.clone().ok_or_else(|| PlanError {
+                message: format!("if '{}' has no condition to branch on", task.id),
+            })?;
+            let then_ = flatten_list(out, &cond.then, depth + 1)?;
+            let else_ = flatten_list(out, &cond.r#else, depth + 1)?;
+            out[ix].kind = TaskKind::If {
+                condition,
+                then_,
+                else_,
+            };
+        }
+        (ModelKind::Switch(sw), SWITCH_TYPE) => {
+            // Same rule, same reason: `value` is `@NotNull` in Java, and a
+            // `Switch` with nothing to match on cannot be planned.
+            let value = sw
+                .value
+                .as_ref()
+                .map(|v| v.source().to_string())
+                .ok_or_else(|| PlanError {
+                    message: format!("switch '{}' has no value to match on", task.id),
+                })?;
+            let mut cases = Vec::with_capacity(sw.cases.len());
+            for (key, tasks) in &sw.cases {
+                cases.push((key.clone(), flatten_list(out, tasks, depth + 1)?));
+            }
+            let default = flatten_list(out, &sw.defaults, depth + 1)?;
+            out[ix].kind = TaskKind::Switch {
+                value,
+                cases,
+                default,
             };
         }
         (ModelKind::Dag(dag), DAG_TYPE) => {

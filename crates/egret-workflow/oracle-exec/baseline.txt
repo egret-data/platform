@@ -36,7 +36,6 @@ invalids/duplicate-inputs
 invalids/duplicate-key
 invalids/duplicate-parallel
 invalids/empty
-invalids/if-without-condition
 invalids/inputs-bad-validator-syntax
 invalids/inputs-key-with-subtraction-symbol-validation
 invalids/inputs-validation
@@ -67,7 +66,6 @@ valids/exit
 valids/exit-cancelled
 valids/exit-killed
 valids/exit-nested
-valids/fail-on-switch
 valids/finally-allowfailure
 valids/finally-dag
 valids/finally-flow
@@ -94,12 +92,9 @@ valids/flow-with-outputs-failed
 valids/flowable-with-parent-fail
 valids/full
 valids/if
-valids/if-condition
-valids/if-condition-fail
 valids/if-in-flowable
 valids/if-in-parallel
 valids/if-with-only-disabled-tasks
-valids/if-without-else
 valids/invalid-draft-flow
 valids/labels-update-nested-value-list
 valids/labels-update-nested-value-map
@@ -134,7 +129,6 @@ valids/loop-with-subflow
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
 valids/parallel-disabled-tasks
-valids/parallel-fail-with-flowable
 valids/pause-behavior
 valids/pause-delay
 valids/pause-duration-from-input
@@ -191,7 +185,6 @@ valids/subflow-parent-of-failed
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-valids/switch
 valids/switch-impossible
 valids/switch-in-concurrent-loop
 valids/task-allow-failure-executable-flow
@@ -208,7 +201,6 @@ valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
 valids/trigger-flow-with-pause
 valids/unset-variables
-valids/variables-invalid
 valids/waitfor
 valids/waitfor-child-task-warning
 valids/waitfor-max-iterations

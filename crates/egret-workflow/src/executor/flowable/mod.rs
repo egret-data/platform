@@ -2,8 +2,9 @@
 //! its own corpus slice — and because a single `executor.rs` is how
 //! `dataapi/src/lifecycle.rs` reached 12,091 lines.
 //!
-//! Task 3 shipped `sequential`; Task 4 adds `parallel` and `dag` beside it.
-//! Tasks 5-8 add `branch` and `loop_`.
+//! Task 3 shipped `sequential`; Task 4 added `parallel` and `dag` beside it;
+//! Task 5 adds `branch` (`If` and `Switch`). Tasks 6-8 add `loop_` and the
+//! attempt lifecycle.
 //!
 //! What lives *here* rather than in one of them is the part every task list
 //! shares whatever its scheduling rule: the answer type, how a run is looked
@@ -12,6 +13,7 @@
 //! would otherwise be three copies, and three copies of "a `Runnable` gets
 //! `SUBMITTED` first" is three chances for one of them to stop being true.
 
+pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod parallel;
 pub(crate) mod sequential;
@@ -119,6 +121,10 @@ pub(crate) fn descend(
             parallel::drive(plan, state, tasks, Some(run), *concurrency, now)
         }
         TaskKind::Dag { nodes } => dag::drive(plan, state, nodes, Some(run), now),
+        TaskKind::If { then_, else_, .. } => branch::drive_if(plan, state, run, then_, else_, now),
+        TaskKind::Switch { cases, default, .. } => {
+            branch::drive_switch(plan, state, run, cases, default, now)
+        }
     };
     match step {
         Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),
