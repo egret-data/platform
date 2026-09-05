@@ -967,7 +967,11 @@ mod tests {
     /// Rendering before the worker moves is Kestra's order too: it renders in
     /// the **executor** (`If.isTrue` calls `runContext.render`), not in a
     /// worker, so no worker result can arrive between the executor deciding to
-    /// evaluate a condition and the evaluation.
+    /// evaluate a condition and the evaluation. It renders **all** of the
+    /// unrendered runs in one step for the same reason, and because
+    /// `tests/executor.rs`'s tier 2 does: that shape is not free — rendering
+    /// one per step changes `valids/if`'s run order and fails a committed
+    /// oracle test — so the two callers must not differ on it.
     ///
     /// An id with no entry is a test bug rather than a "not rendered yet", so
     /// it panics: a missing render would otherwise read exactly like the
@@ -988,21 +992,32 @@ mod tests {
                 }
                 continue;
             }
-            let unrendered = (0..state.runs.len()).find(|&ix| {
-                matches!(
-                    plan.tasks[state.runs[ix].task].kind,
-                    TaskKind::If { .. } | TaskKind::Switch { .. }
-                ) && state.runs[ix].history.last() == Some(&RunState::Running)
-                    && state.runs[ix].rendered.is_none()
-            });
-            if let Some(ix) = unrendered {
-                let id = &plan.tasks[state.runs[ix].task].id;
-                let value = renders
-                    .iter()
-                    .find(|(k, _)| k == id)
-                    .unwrap_or_else(|| panic!("no render supplied for task '{id}'"))
-                    .1;
-                state.runs[ix].rendered = Some(value.to_string());
+            // ALL of the unrendered runs in one step, which is what
+            // `tests/executor.rs`'s tier 2 does. The two used to disagree on
+            // exactly the shape that turned out not to be free: rendering one
+            // per step changes `valids/if`'s run ORDER, and a committed oracle
+            // test dies to it. Two callers of `advance` differing on the
+            // question one of them is the guard for is how a guard stops
+            // guarding.
+            let unrendered: Vec<RunIx> = (0..state.runs.len())
+                .filter(|&ix| {
+                    matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::If { .. } | TaskKind::Switch { .. }
+                    ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                        && state.runs[ix].rendered.is_none()
+                })
+                .collect();
+            if !unrendered.is_empty() {
+                for ix in unrendered {
+                    let id = &plan.tasks[state.runs[ix].task].id;
+                    let value = renders
+                        .iter()
+                        .find(|(k, _)| k == id)
+                        .unwrap_or_else(|| panic!("no render supplied for task '{id}'"))
+                        .1;
+                    state.runs[ix].rendered = Some(value.to_string());
+                }
                 continue;
             }
             let in_flight = (0..state.runs.len()).find(|&ix| {
@@ -1099,22 +1114,31 @@ mod tests {
     ///
     /// `TruthUtils.isTruthy` is `condition != null && !["false", "0", "-0",
     /// ""].contains(condition.trim())`, and the rule was measured against the
-    /// running artifact rather than read off that line: 20 flows, each an `If`
-    /// with a **literal** condition (so the rendered value is exactly the
+    /// running artifact rather than read off that line: flows each holding an
+    /// `If` with a **literal** condition (so the rendered value is exactly the
     /// literal and the measurement isolates the predicate from the renderer),
     /// published to `kestra/kestra:v2.0.0-rc13` and executed, recording which
-    /// branch got a taskrun. Every row below is one of those 20 executions.
+    /// branch got a taskrun. Every row below is one of those executions.
     ///
-    /// What that catches that a Rust intuition does not: `"0"` and `"-0"` are
-    /// **falsy** while `"00"`, `"0.0"`, `"FALSE"`, `"False"`, `"null"`, `"no"`,
-    /// `"[]"` and `"{}"` are all **truthy** — the list is four exact strings,
-    /// not a parse, not a case-insensitive match and not an emptiness test —
-    /// and the comparison is on the **trimmed** value, which `"  false  "`,
-    /// `" 0 "` and `"   "` are what prove.
+    /// **The first 20 rows** were the original measurement: `"0"` and `"-0"`
+    /// are **falsy** while `"00"`, `"0.0"`, `"FALSE"`, `"False"`, `"null"`,
+    /// `"no"`, `"[]"` and `"{}"` are all **truthy** — the list is four exact
+    /// strings, not a parse, not a case-insensitive match and not an emptiness
+    /// test.
+    ///
+    /// **The other 18 are the boundary those 20 could not reach**, added in fix
+    /// round 1 because every one of the original padded rows pads with an ASCII
+    /// **space**, where every candidate trim agrees. Java's `String.trim()`
+    /// strips code units `<= U+0020`; Rust's `str::trim` strips Unicode
+    /// `White_Space`. The two sets neither contain nor are contained by each
+    /// other, and **11 of these rows disagree with `str::trim()` in both
+    /// directions** — asserted below by name, so a revert to `.trim()` fails
+    /// here rather than taking a silent wrong branch on an NBSP.
     #[test]
     fn kestra_truthiness_is_four_exact_strings_compared_after_trimming() {
         // (rendered condition, branch Kestra took) -- one live execution each.
         let measured = [
+            // --- the original 20 ---
             ("true", "when-true"),
             ("false", "when-false"),
             ("0", "when-false"),
@@ -1135,6 +1159,29 @@ mod tests {
             ("[]", "when-true"),
             ("{}", "when-true"),
             ("true\n", "when-true"),
+            // --- the trim boundary, fix round 1 ---
+            // In BOTH sets, so both trims agree: these are the control.
+            ("\u{20}false\u{20}", "when-false"),
+            ("\u{9}false\u{9}", "when-false"),
+            ("\u{a}false\u{a}", "when-false"),
+            ("\u{d}false\u{d}", "when-false"),
+            ("\u{b}false\u{b}", "when-false"),
+            ("\u{c}false\u{c}", "when-false"),
+            // <= U+0020 but NOT Unicode White_Space: Java trims, Rust does not.
+            ("\u{1}false\u{1}", "when-false"),
+            ("\u{e}false\u{e}", "when-false"),
+            ("\u{1f}false\u{1f}", "when-false"),
+            ("\u{1}0\u{1}", "when-false"),
+            // Unicode White_Space but > U+0020: Rust trims, Java does not.
+            ("\u{a0}false\u{a0}", "when-true"),
+            ("\u{85}false\u{85}", "when-true"),
+            ("\u{3000}false\u{3000}", "when-true"),
+            ("\u{2007}false\u{2007}", "when-true"),
+            ("\u{2028}false\u{2028}", "when-true"),
+            ("\u{a0}0\u{a0}", "when-true"),
+            ("\u{a0}", "when-true"),
+            // Neither: the control on the other side.
+            ("\u{21}false\u{21}", "when-true"),
         ];
         let plan = plan_of("valids/if-condition");
         let mut falsy = 0;
@@ -1152,11 +1199,52 @@ mod tests {
         }
         assert_eq!(
             (falsy, measured.len() - falsy),
-            (7, 13),
-            "the measured population: 7 falsy renders and 13 truthy ones, \
+            (17, 21),
+            "the measured population: 17 falsy renders and 21 truthy ones, \
              {} rows in total",
             measured.len()
         );
+
+        // **The boundary rows are load-bearing, derived rather than trusted.**
+        // A predicate built on `str::trim()` reads identically and is wrong on
+        // exactly these, in both directions. Asserting the SET (not a count)
+        // means a row that stops discriminating changes an assertion.
+        let rust_trim_disagrees: Vec<&str> = measured
+            .iter()
+            .filter(|(rendered, branch)| {
+                let rust_says = if !matches!(rendered.trim(), "false" | "0" | "-0" | "") {
+                    "when-true"
+                } else {
+                    "when-false"
+                };
+                rust_says != *branch
+            })
+            .map(|(rendered, _)| *rendered)
+            .collect();
+        assert_eq!(
+            rust_trim_disagrees,
+            [
+                "\u{1}false\u{1}",
+                "\u{e}false\u{e}",
+                "\u{1f}false\u{1f}",
+                "\u{1}0\u{1}",
+                "\u{a0}false\u{a0}",
+                "\u{85}false\u{85}",
+                "\u{3000}false\u{3000}",
+                "\u{2007}false\u{2007}",
+                "\u{2028}false\u{2028}",
+                "\u{a0}0\u{a0}",
+                "\u{a0}",
+            ],
+            "`str::trim()` (Unicode White_Space) disagrees with Kestra's \
+             `String.trim()` (code units <= U+0020) on exactly these 11 of the \
+             {} rows, in both directions -- 4 where Java trims and Rust does \
+             not, 7 where Rust trims and Java does not. If this list empties, \
+             the boundary rows have stopped discriminating and the fix they \
+             hold is unguarded",
+            measured.len()
+        );
+        assert_eq!(rust_trim_disagrees.len(), 11, "4 + 7 = 11");
     }
 
     /// **An `If` whose chosen branch is empty succeeds immediately, and that is
@@ -1223,6 +1311,63 @@ mod tests {
             run_ids(&plan, &ok),
             ["if", "a", "b", "c"],
             "the control: with a succeeding worker the whole branch runs, one at a time"
+        );
+    }
+
+    /// **Three `If`s inside one `Parallel` produce Kestra's own `taskRunList`,
+    /// verbatim — which is what makes the render tier's batching load-bearing.**
+    ///
+    /// `valids/if` is a `Parallel` with `concurrent: 4` over nine branches,
+    /// three of them `If`s, driven with `if1: true, if2: false, if3: true`. The
+    /// assertion is the golden's own run order for it: the three `If`s and one
+    /// `Log` are created in the first batch, the two taken branches' children
+    /// next, and the remaining `Log`s as slots free up. `if-2` takes an absent
+    /// `else`, so it terminates with no child at all — the empty-branch rule,
+    /// on the corpus rather than on a synthetic flow.
+    ///
+    /// **A caller that rendered one run per round could not produce this.** It
+    /// would resolve `if-1`, create `if-1-log`, and only then look at `if-3`,
+    /// which reorders `taskRunList`. That shape was measured to fail a
+    /// committed oracle test too (`valids/if` joins its `runs_differ` list), and
+    /// this is the unit-level statement of the same rule — so the two callers of
+    /// `advance()` cannot drift apart on it.
+    ///
+    /// The entry itself is still baselined, on three ordered pairs no clockless
+    /// machine can reach; its runs, which are what this asserts, are exact.
+    #[test]
+    fn three_ifs_in_a_parallel_produce_kestras_own_run_order() {
+        let plan = plan_of("valids/if");
+        let state = run_to_fixpoint_rendering(
+            &plan,
+            RunState::Success,
+            &[("if-1", "true"), ("if-2", "false"), ("if-3", "true")],
+        );
+        assert_eq!(
+            run_ids(&plan, &state),
+            [
+                "parallel",
+                "if-1",
+                "if-2",
+                "if-3",
+                "log-parallel-1",
+                "if-1-log",
+                "if-3-log",
+                "log-parallel-2",
+                "log-parallel-3",
+                "log-parallel-4",
+                "log-parallel-5",
+                "log-parallel-6",
+            ],
+            "valids/if's taskRunList from golden.json, verbatim"
+        );
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "RUNNING", "SUCCESS"],
+            "if-2 rendered falsy and has no `else`, so it succeeds with no child"
+        );
+        assert!(
+            state.runs.iter().all(|r| r.parent != Some(2)),
+            "and nothing at all was created under it"
         );
     }
 

@@ -60,11 +60,15 @@
 //! `harvest.py` as having posted for the very execution the golden was
 //! captured from — see [`render_context`]. Nothing about which branch Kestra
 //! took is read, so the branch decision stays compared rather than fed. What it
-//! does add is a dependency on W2 being right: a renderer answering `"false"`
-//! where Kestra answered `"true"` would move an entry here and the ratchet
-//! would report it as a mismatch in `advance()`. A render that FAILS fails the
-//! run, which is what Kestra does and is what banks `valids/if-condition-fail`
-//! and `valids/variables-invalid`.
+//! does add is a dependency on W2 being right — **in one direction only, and
+//! that is measured rather than assumed.** A renderer answering `"false"` where
+//! Kestra answered `"true"` moves an entry here and the ratchet reports it. The
+//! converse does **not**: no banked entry takes an `else` branch at all, so a
+//! predicate that always answers truthy leaves `executor_matches_golden`
+//! passing. See [`the_caller_renders_and_a_failed_render_fails_the_run`], whose
+//! falsy arm is the only assertion in this binary that dies to *every* wrong
+//! predicate. A render that FAILS fails the run, which is what Kestra does and
+//! is what banks `valids/if-condition-fail` and `valids/variables-invalid`.
 //!
 //! **Not fed, and therefore compared:** which runs are created, in what order,
 //! under which parent, with what `value`; every state in a run's history
@@ -108,6 +112,7 @@ use egret_workflow::executor::{
     advance, apply, build_plan, Command, ExecutionState, Plan, PlanTask, RunIx, RunState, TaskKind,
     Tick,
 };
+use egret_workflow::models::InputType;
 use egret_workflow::{render_str, RenderContext};
 use serde::Deserialize;
 
@@ -485,16 +490,23 @@ fn in_flight(plan: &Plan, state: &ExecutionState) -> Option<RunIx> {
 ///    else can happen, so a `timeout` cannot fire early and a `ScheduleRetry`
 ///    cannot deadlock the simulation.
 ///
-/// **Tier 2 is before the worker, and all of the runs rather than one, and
-/// neither is something this oracle can check.** Kestra renders in the
-/// *executor* (`If.isTrue` calls `runContext.render`) rather than in a worker,
-/// and its executor evaluates the whole execution in one cycle, so both choices
-/// follow the artifact — but measured over the whole golden, rendering one run
-/// per step leaves the ratchet at 182 mismatching, and so does letting the
-/// worker move first. The ordering is not entirely free (moving the worker
-/// first changes what
-/// [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`]
-/// measures); the batching is. `oracle-exec/README.md` records both.
+/// **Tier 2 is before the worker, and ALL of the runs rather than one, and
+/// this oracle checks both — which a first version of this comment got wrong.**
+/// Kestra renders in the *executor* (`If.isTrue` calls `runContext.render`)
+/// rather than in a worker, and its executor evaluates the whole execution in
+/// one cycle, so both choices follow the artifact. Both variants were then
+/// built and run over the whole golden, and the measured result is:
+///
+/// | variant | the ratchet | the oracle binary |
+/// |---|---|---|
+/// | render one run per step | **unmoved**, 181 mismatching | [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`] **FAILS** |
+/// | let the worker move first | **unmoved**, 181 mismatching | the same test **FAILS** |
+///
+/// In both, `valids/if` joins that test's `runs_differ` list: its run **order**
+/// stops matching Kestra's `taskRunList`. So the shipped shape is the one that
+/// reproduces Kestra's creation order and a committed test says so. Neither
+/// choice is free, and the earlier "the batching is free" was an artefact of
+/// checking the ratchet's count and not the binary.
 ///
 /// **What the caller can render is deliberately narrow** — see
 /// [`render_context`]: `inputs` from `corpus.json` and `vars` from the flow.
@@ -836,6 +848,11 @@ fn corpus_json() -> &'static BTreeMap<String, serde_json::Value> {
 /// `inputs` comes from `corpus.json` — the values `harvest.py` posted for the
 /// very execution the golden was captured from — and `vars` from the flow's own
 /// `variables:` block.
+///
+/// **One further divergence, recorded rather than fixed**: an input whose value
+/// is present but `null` renders as `""` here, which `is_truthy` reads as
+/// falsy, where Kestra's renderer would refuse the expression and FAIL the run.
+/// No corpus flow posts a null input value, so nothing compared reaches it.
 fn render_context(corpus_id: &str, source: &str) -> RenderContext {
     let flow = egret_workflow::spec::parse(source).ok();
 
@@ -851,23 +868,39 @@ fn render_context(corpus_id: &str, source: &str) -> RenderContext {
     // post. Kestra applies them before it renders anything, so leaving them out
     // made SEVEN planned `If` conditions across FIVE entries fail to render on
     // flows whose input was never missing -- `valids/exit` posts `inputs: {}`
-    // and declares `state` with `defaults: END`. The source text is parsed as
-    // JSON first so a `BOOL` input's `defaults: true` arrives as a boolean and
-    // not as the string `"true"`: `{{ inputs.failed == false }}` is in six
-    // corpus flows and compares against a boolean.
+    // and declares `state` with `defaults: END`.
+    //
+    // The source text is parsed as JSON for the types where Kestra's coercion
+    // would produce a non-string, so a `BOOL` input's `defaults: true` arrives
+    // as a boolean and not as `"true"` -- `{{ inputs.failed == false }}` is in
+    // six corpus flows and compares against a boolean. **It is keyed on the
+    // declared `type:` and not on whether the text happens to parse**, which
+    // round 0 got wrong: a `STRING` or `SELECT` default written `true`, `123`
+    // or `null` would silently have become a bool, a number or a null. Zero
+    // corpus flows are that shape today, and Tasks 6-8 widen this population
+    // from 26 expressions to about 42.
     if let Some(f) = &flow {
         for input in &f.inputs {
             if inputs.contains_key(&input.id) {
                 continue;
             }
-            if let Some(default) = &input.defaults {
-                let raw = default.source();
-                inputs.insert(
-                    input.id.clone(),
-                    serde_json::from_str(raw)
-                        .unwrap_or_else(|_| serde_json::Value::String(raw.to_string())),
-                );
-            }
+            let Some(default) = &input.defaults else {
+                continue;
+            };
+            let raw = default.source();
+            let typed = match input.r#type {
+                InputType::Int
+                | InputType::Float
+                | InputType::Boolean
+                | InputType::Json
+                | InputType::Array
+                | InputType::Multiselect => serde_json::from_str(raw).ok(),
+                _ => None,
+            };
+            inputs.insert(
+                input.id.clone(),
+                typed.unwrap_or_else(|| serde_json::Value::String(raw.to_string())),
+            );
         }
     }
 
@@ -1378,14 +1411,21 @@ fn the_worker_finishes_one_task_and_the_machine_is_asked_while_it_is_in_flight()
 /// Kestra's golden for it is one run, `CREATED RUNNING FAILED`, with the
 /// attempt `FAILED` too. That entry is banked by this arm.
 ///
-/// **What this does NOT pin, measured.** Two shapes of the tier are invisible
-/// to the ratchet: rendering every unrendered run in one step versus one per
-/// step, and rendering before the worker moves versus after it. Each was tried
-/// over the whole golden and left the ratchet at 182 mismatching. The ordering
-/// is not entirely free — running the worker first moves
+/// **What pins the tier's SHAPE is a different test, measured.** Two variants —
+/// rendering one run per step instead of all of them, and letting the worker
+/// move before the render — leave **the ratchet unmoved at 181**, so they are
+/// invisible *here*. Neither is invisible to the oracle **binary**: both fail
 /// [`what_the_order_restriction_removes_is_derived_and_egret_never_says_after`]
-/// — but the batching is free, so the "all at once" in [`simulate_with`]'s doc
-/// is an argument from Kestra's executor and not something this oracle checks.
+/// by putting `valids/if` into its `runs_differ` list, because its run order
+/// stops matching Kestra's. Reading the ratchet's count and calling the
+/// batching "free" is the mistake a review caught here.
+///
+/// **And this test's falsy arm is load-bearing beyond its own name.** No banked
+/// entry takes an `else` branch at all — measured: `chosen = then_`
+/// unconditionally leaves `executor_matches_golden` passing — so the `"0"` arm
+/// below is the only assertion in this binary that dies to *every* wrong
+/// truthiness predicate, including `parse::<bool>().unwrap_or(true)`, which
+/// even `an_if_takes_then_when_true_and_else_when_false` survives.
 #[test]
 fn the_caller_renders_and_a_failed_render_fails_the_run() {
     let source = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: if\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ inputs.p }}\"\n    then:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n    else:\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n";
@@ -2471,4 +2511,41 @@ fn the_caller_can_render_every_branch_expression_except_the_two_kestra_could_not
              succeeded there, this harness is failing a run the artifact ran"
         );
     }
+}
+
+/// **An input's declared `type:` decides how its `defaults:` is typed, not
+/// whether the text happens to parse as JSON.**
+///
+/// [`render_context`] fills the flow's own declared defaults for inputs the
+/// harvest did not post, and it has to produce the value Kestra's coercion
+/// would: a `BOOL` default of `true` must reach the renderer as a **boolean**,
+/// because `{{ inputs.failed == false }}` appears in six corpus flows and
+/// compares against one. Round 0 got there by parsing every default as JSON,
+/// which is right for `BOOL` and silently wrong for a `STRING` or `SELECT`
+/// whose default is written `true`, `123` or `null`.
+///
+/// Zero corpus flows are that shape today — which is exactly why this test
+/// exists rather than a corpus entry: without it the type gate is a rule
+/// nothing can see fail, and Tasks 6-8 widen the population of rendered
+/// expressions from 26 to roughly 42.
+#[test]
+fn an_inputs_declared_type_decides_how_its_default_is_typed() {
+    let source = "id: x\nnamespace: io.kestra.tests\ninputs:\n  - id: s\n    type: STRING\n    defaults: true\n  - id: b\n    type: BOOL\n    defaults: true\ntasks:\n  - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n";
+    // The id is not in `corpus.json`, so `inputs` starts empty and every value
+    // below comes from the flow's own `defaults:`.
+    let cx = render_context("not/a/corpus/id", source);
+
+    assert_eq!(
+        render_str("{{ inputs.s == 'true' }}", &cx).expect("renders"),
+        "true",
+        "a STRING input's `defaults: true` is the STRING \"true\" -- parsing it \
+         as JSON would make it a boolean and this comparison false"
+    );
+    assert_eq!(
+        render_str("{{ inputs.b == true }}", &cx).expect("renders"),
+        "true",
+        "a BOOL input's `defaults: true` is the BOOLEAN true -- leaving it a \
+         string would make this comparison false, and would break the six \
+         corpus flows that write `{{ inputs.failed == false }}`"
+    );
 }

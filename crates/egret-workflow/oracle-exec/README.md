@@ -21,6 +21,17 @@ unreachable without a clock" hole gained its **second** named entry,
 while `core.execution.Exit` arrived in it. See *What Task 5 had to change, and
 what it banked*.
 
+**Task 5's fix round 1 corrected three sentences of its own**, and a reader
+should take these over anything round 0 said: `is_truthy` trimmed with Rust's
+`str::trim` where Kestra trims Java's `String.trim()` — **11 measured rows
+disagree, in both directions** — so the predicate changed and 18 rows were added
+to the committed table; the banked table claimed `valids/if-without-else` was
+earned by an `else` branch, when its golden is the `then` branch and **no banked
+entry takes an `else` at all**; and "both shapes of the render tier are
+invisible to this oracle, 182 mismatching" was wrong twice — the count was
+stale, and **both variants fail a committed oracle test** even though the
+ratchet's count does not move.
+
 Task 4 (`parallel`, `dag`) changed four more, and they are the ones a reader
 should not take from this file's older sentences: the feed table below moved to
 `428 fed / 48 flowable / 364 unplanned`, the ratchet now compares the ordered
@@ -1731,7 +1742,7 @@ left, taking `baseline.txt` to **181**:
 | banked | what earns it |
 |---|---|
 | `valids/if-condition` | `If`, the branch taken on a truthy render |
-| `valids/if-without-else` | `If`, the branch taken on a falsy render — the empty `else` |
+| `valids/if-without-else` | `If`, the branch taken on a **truthy** render — `corpus.json` posts `param: true` for it, so its golden is the `then` branch. (Fix round 1: this row said "falsy render → the empty `else`" and that is the one thing nothing banked earns; see *No banked entry takes an `else` branch*.) |
 | `valids/switch` | `Switch`, the case whose key equals the rendered value |
 | `valids/fail-on-switch` | `Switch` with no matching case and no `defaults`: `FAILED` |
 | `valids/if-condition-fail` | the caller's render FAILS and the run fails with it |
@@ -1791,10 +1802,47 @@ nothing but a measurement settles them:
   trimmed value, and `"   "` trims to `""`.
 
 `kestra_truthiness_is_four_exact_strings_compared_after_trimming` in
-`executor/mod.rs` carries all 20 rows as assertions, driven through
+`executor/mod.rs` carries all 38 rows as assertions, driven through
 `valids/if-condition` — Kestra's own flow — so each row is the branch a real
-corpus flow takes. Three mutations die to it (M27, M28, M29), and M27 — dropping
-only the `trim` — dies to nothing else.
+corpus flow takes. Five mutations die to it (M27, M28, M29, M44, M45), and two
+of them — M27, which swaps the trim back to `str::trim()`, and M45, which is
+`parse::<bool>().unwrap_or(true)` — die to **almost nothing else**: M27 to
+nothing at all, M45 to one further test.
+
+**And Kestra's own Javadoc on `If.condition` is wrong**, which is a third reason
+not to take the rule from a reading: it says "Boolean coercion allows 0, -0,
+**null** and '' to evaluate to false", and a rendered `"null"` takes `then`.
+There is no `null` in `FALSE_VALUES`.
+
+#### `condition.trim()` is not `str::trim()` — 11 measured disagreements
+
+The 20 rows above pin *that* there is a trim. **They cannot pin WHICH trim**,
+because every padded row among them pads with an ASCII space, where every
+candidate agrees — so round 0 transliterated `condition.trim()` to
+`rendered.trim()` and shipped a silent wrong branch. A review asked the
+question; 18 more flows were published and executed to answer it.
+
+Java's `String.trim()` strips leading and trailing code units **`<= U+0020`**.
+Rust's `str::trim` strips Unicode **`White_Space`**. Neither set contains the
+other, so the two differ in **both** directions:
+
+| rendered | Kestra | `str::trim()` would give |
+|---|---|---|
+| `"\u{20}false\u{20}"`, `"\u{9}…"`, `"\u{A}…"`, `"\u{D}…"`, `"\u{B}…"`, `"\u{C}…"` | `else` | `else` — **agree**, both sets hold these |
+| `"\u{1}false\u{1}"`, `"\u{E}false\u{E}"`, `"\u{1F}false\u{1F}"`, `"\u{1}0\u{1}"` | `else` | `then` — Rust does not strip C0 controls |
+| `"\u{A0}false\u{A0}"` (NBSP), `"\u{85}…"`, `"\u{3000}…"`, `"\u{2007}…"`, `"\u{2028}…"`, `"\u{A0}0\u{A0}"`, `"\u{A0}"` | `then` | `else` — Rust strips these, Java does not |
+| `"\u{21}false\u{21}"` | `then` | `then` — **agree**, in neither set |
+
+**11 of the 18 disagree** — 4 where Java trims and Rust does not, 7 the other
+way. The predicate is now
+`rendered.trim_matches(|c: char| c <= '\u{20}')`, which agrees on all 38 rows,
+and the test asserts the **set** of 11 disagreeing rows by name rather than a
+count, so a revert to `.trim()` fails there instead of taking a wrong branch on
+an NBSP. `U+000B` and `U+000C` are in both sets and agree, which is why a
+smaller probe would have missed this entirely.
+
+Nothing in the corpus reaches it, so no baselined entry moves; an NBSP in a
+rendered data value is not exotic, which is the whole reason it is fixed.
 
 ### A `Switch` FAILS where an `If` SUCCEEDS, and both halves are in the golden
 
@@ -1834,8 +1882,21 @@ Whoever fixes that over-refusal owns this paragraph.
 
 Two more things the same probe settled: `then: []` is **refused at publish**
 (`422 tasks[if].then: must not be empty`), so only the `else` branch can be
-empty in a published flow; and an explicit `else: []` behaves exactly as an
-absent `else`.
+empty in a published flow — and W1's `spec::validate` already has
+`if_then_required`, so nothing is owed there; and an explicit `else: []` behaves
+exactly as an absent `else`.
+
+**A third null-versus-empty gap, found in fix round 1 and NOT closed.** A
+`Switch` with a `value` and **no `cases` key at all** publishes, and its run
+**FAILS** (`Switch.childTasks` dereferences a null `cases`); the same flow with
+`cases: {}` runs `defaults` to `SUCCESS`. Both measured live. W1's
+`models::Switch::cases` is a bare `BTreeMap`, so absent and `{}` arrive here
+identically and egret runs `defaults` for both — right for the `{}` spelling and
+wrong for the absent one. It is **not** implemented, and deliberately: making an
+empty `cases` map answer `FAILED` would fix the absent spelling by breaking the
+explicit-`{}` one, and egret cannot tell them apart. It is the same model gap as
+`defaults: null` vs `defaults: []`, in the sibling field, and whoever closes one
+closes both. No corpus flow is either shape.
 
 ### The environment grew a fourth tier, because `advance()` cannot render
 
@@ -1901,34 +1962,44 @@ identical to Kestra's is the measurement; the Kestra-side cycle is not. See
 
 ### Task 5's mutations
 
-Sixteen, each applied to a pristine snapshot, **built first**
+**Twenty-one after fix round 1** (sixteen in round 0, plus five the round
+added: three that prove no banked entry takes an `else`, one for the
+declared-`type:` gate and one for the render tier's batching). Each applied to a
+pristine snapshot, **built first**
 (`cargo build -p egret-workflow --tests`, **0 errors** asserted) and only then
 run against the **whole crate** (`cargo test -p egret-workflow --no-fail-fast`),
 never a name-filtered subset. Restore is `shutil.copyfile` (fresh mtime, so
 cargo always rebuilds), verified with `filecmp.cmp` after every mutation and
 with `cmp` against the snapshot for all five files at the end. **The victim
-counts below are from a replay of the final tree**, not from memory: Task 4
-dropped the literal-edit column and its M16 then replayed to 3 where its table
-said 2.
+counts below are from a replay of the ROUND-1 tree**, not from memory and not
+carried over from round 0: Task 4 dropped the literal-edit column and its M16
+then replayed to 3 where its table said 2, and round 1 moved five of these rows
+on its own (M27's anchor changed with the fix; M30, M31, M37 and M42 each gained
+a victim from the two tests round 1 added). Every row was re-run.
 
 | # | file | `-` | `+` | victims (replayed) |
 |---|---|---|---|---|
-| M27 | `branch.rs` | `rendered.trim()` in `is_truthy`'s `matches!` | `rendered` | 1 |
+| M27 | `branch.rs` | `rendered.trim_matches(\|c: char\| c <= '\u{20}'),` | `rendered.trim(),` | 1 |
 | M28 | `branch.rs` | `"false" \| "0" \| "-0" \| ""` | `"false" \| ""` | 2 |
-| M29 | `branch.rs` | the whole `!matches!(…)` | `rendered.trim().parse::<bool>().unwrap_or(!rendered.trim().is_empty())` | 2 |
-| M30 | `branch.rs` | `if is_truthy(rendered) { then_ } else { else_ }` | `{ else_ } else { then_ }` | 8 (incl. ratchet) |
-| M31 | `branch.rs` | `let Some(rendered) = … else { return Step::Waiting; };` | `let rendered = ….unwrap_or("");` | 8 (incl. ratchet) |
+| M29 | `branch.rs` | the whole `!matches!(…)` | `.parse::<bool>().unwrap_or(!rendered.trim().is_empty())` | 2 |
+| M30 | `branch.rs` | `if is_truthy(rendered) { then_ } else { else_ }` | `{ else_ } else { then_ }` | 9 (incl. ratchet) |
+| M31 | `branch.rs` | `let Some(rendered) = … else { return Step::Waiting; };` | `let rendered = ….unwrap_or("");` | 9 (incl. ratchet) |
 | M32 | `branch.rs` | `cases.iter().find(\|(key, _)\| key == rendered)` | `cases.first()` | 5 (incl. ratchet) |
 | M33 | `branch.rs` | `Some((_, chosen)) if chosen.is_empty() => Step::Waiting,` | *(arm deleted)* | 1 |
 | M34 | `branch.rs` | `None if default.is_empty() => Step::Done(RunState::Failed),` | `… RunState::Success),` | 2 (incl. ratchet) |
 | M35 | `plan.rs` | `cond.condition.clone().ok_or_else(…)?` | `cond.condition.clone().unwrap_or_default()` | 2 (incl. ratchet) |
 | M36 | `plan.rs` | `.ok_or_else(…)?` on `Switch::value` | `.unwrap_or_default()` | 1 |
-| M37 | `flowable/mod.rs` | the `TaskKind::If` arm of `descend` | `TaskKind::If { .. } => return Step::Waiting,` | 9 (incl. ratchet PANIC on 15) |
+| M37 | `flowable/mod.rs` | the `TaskKind::If` arm of `descend` | `TaskKind::If { .. } => return Step::Waiting,` | 10 (incl. ratchet PANIC on 15) |
 | M38 | `tests/executor.rs` | `if !unrendered.is_empty() {` | `if false && !unrendered.is_empty() {` | 3 (incl. ratchet PANIC on 19) |
-| M39 | `tests/executor.rs` | the failed-render `Err(_) => { apply(… Failed …); ended[ix] = Some(step); }` | `Err(_) => state.runs[ix].rendered = Some(String::new()),` | 2 (incl. ratchet) |
-| M40 | `tests/executor.rs` | `flow.and_then(\|f\| serde_json::to_value(f.variables).ok()).unwrap_or(Null)` | `serde_json::Value::Null,` | 2 |
+| M39 | `tests/executor.rs` | the failed-render arm's `apply(… Failed …)` + `ended[ix] = Some(step)` | `Err(_) => state.runs[ix].rendered = Some(String::new()),` | 2 (incl. ratchet) |
+| M40 | `tests/executor.rs` | `flow.and_then(\|f\| to_value(f.variables).ok()).unwrap_or(Null)` | `serde_json::Value::Null,` | 2 |
 | M41 | `tests/executor.rs` | `Some(TaskKind::Switch { value, .. }) => Some(value.clone()),` | `Some(TaskKind::Switch { .. }) => None,` | 2 (incl. ratchet PANIC on 3) |
-| M42 | `tests/executor.rs` | `for input in &f.inputs {` | `for input in f.inputs.iter().take(0) {` | 3 (incl. ratchet) |
+| M42 | `tests/executor.rs` | `for input in &f.inputs {` | `for input in f.inputs.iter().take(0) {` | 4 (incl. ratchet) |
+| M43 | `branch.rs` | `let chosen = if is_truthy(rendered) { then_ } else { else_ };` | `let chosen = { let _ = is_truthy(rendered); then_ };` | 6 **new** |
+| M44 | `branch.rs` | the whole `!matches!(…)` | `!rendered.trim_matches(…).is_empty()` | 6 **new** |
+| M45 | `branch.rs` | the whole `!matches!(…)` | `.parse::<bool>().unwrap_or(true)` | 2 **new** |
+| M46 | `tests/executor.rs` | the `match input.r#type { … }` gate | `let typed = serde_json::from_str(raw).ok();` | 1 **new** |
+| M47 | `executor/mod.rs` | `for ix in unrendered {` | `for ix in unrendered.into_iter().take(1) {` | 1 **new** |
 
 Messages worth quoting, because they are the ones a maintainer will see:
 
@@ -1937,6 +2008,15 @@ Messages worth quoting, because they are the ones a maintainer will see:
 - M34: ``a Switch with nothing to run FAILS -- an If in the same position SUCCEEDS -- left: ["CREATED", "RUNNING", "SUCCESS"] right: ["CREATED", "RUNNING", "FAILED"]``
 - M38: ``a rendered If must settle -- STUCK here means the render tier is gone: "STUCK after 2 step(s) at now=Tick(0) …"``
 - M42: ``17 of 26 branch expressions render`` — which is where the 9 above comes from.
+- M27 (round 1): ``condition rendered "\u{1}false\u{1}" -- measured live on kestra/kestra:v2.0.0-rc13, which took `when-false```
+- M46: ``a STRING input's `defaults: true` is the STRING "true" -- parsing it as JSON would make it a boolean and this comparison false``
+- M47: ``valids/if's taskRunList from golden.json, verbatim``
+
+**Five rows do NOT include the ratchet, and that is the finding rather than a
+gap**: M43, M44 and M45 are the three mutants that prove no banked entry takes
+an `else` branch — see *No banked entry takes an `else` branch* — and M46 and
+M47 are guarded by the two tests round 1 added precisely because nothing else
+could see them fail.
 
 `cargo fmt` ran after the mutation set; nothing it touched changed by more than
 whitespace.
@@ -2102,6 +2182,25 @@ wrote. Beyond that, the specific holes, each with its count:
   W4's worker, not to `advance()`, and the elapsed-time rules this oracle cannot
   reach are `RetryPolicy::max_duration`, `WaitFor`'s `maxDuration`, a `Pause`
   delay and a `Pause`'s own `timeout` — not `timeout:` in general.
+- **No banked entry takes an `else` branch, so the ratchet cannot see a
+  predicate that is wrong in the truthy direction** (round 1, measured). Of the
+  eight entries Task 5 banks, no `else` branch and no `defaults` list is ever
+  driven: `valids/switch` matches its `FIRST` case, `valids/fail-on-switch`
+  matches nothing and has no `defaults`, two entries fail at the render before
+  any branch is chosen, one is a refusal, and every remaining `If` renders
+  truthy. Three mutants prove it rather than argue it —
+  `chosen = then_` unconditionally, `is_truthy = !trim().is_empty()`, and
+  `parse::<bool>().unwrap_or(true)` — and all three leave `executor_matches_golden`
+  **passing**. What kills them is the lib unit tests plus the **falsy arm** of
+  `the_caller_renders_and_a_failed_render_fails_the_run`, whose use of `"0"` is
+  load-bearing and is the only assertion in the oracle binary that dies to all
+  three. (The first two also fail
+  `what_the_order_restriction_removes_…`; the `parse::<bool>` one does not, and
+  even `an_if_takes_then_when_true_and_else_when_false` survives it.) So the
+  dependency on W2's renderer that Task 5 introduces is one-directional: a
+  renderer answering `"false"` where Kestra answered `"true"` is caught; the
+  converse is not.
+
 - **The caller's render context is narrow, and an expression outside it FAILS
   the run** (Task 5). `advance()` cannot render, so the oracle does; it supplies
   `inputs` (the values `corpus.json` records `harvest.py` as having posted, plus
@@ -2117,14 +2216,21 @@ wrote. Beyond that, the specific holes, each with its count:
   `advance()`. Tasks 6 and 7 will widen the population: a `{{ item.value }}`
   condition inside a `Loop` is unplanned today and will not stay so.
 
-- **Two shapes of the render tier are invisible to this oracle**, measured by
-  trying both over the whole golden: rendering every unrendered run in one step
-  versus one per step leaves the ratchet at the same count either way, and so
-  does letting the worker move before the render rather than after. The ordering
-  is not entirely free — moving the worker first changes what
-  `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`
-  measures — but the batching is, so the "all at once" the code argues for from
-  Kestra's executor is an argument and not a measurement.
+- **Two shapes of the render tier are invisible to the RATCHET and not to the
+  oracle** — a distinction this file got wrong in round 0 and a review caught.
+  Both variants were built on the final tree and run over the whole golden:
+
+  | variant | the ratchet | the oracle binary |
+  |---|---|---|
+  | render one run per step, not all | **unmoved**, 181 mismatching | `what_the_order_restriction_removes_is_derived_and_egret_never_says_after` **FAILS** |
+  | let the worker move before the render | **unmoved**, 181 mismatching | the same test **FAILS** |
+
+  In both, `valids/if` joins that test's `runs_differ` list — its run **order**
+  stops matching Kestra's `taskRunList`. So the shipped shape is the one that
+  reproduces Kestra's creation order and a committed test says so; neither the
+  ordering nor the batching is free. Round 0 said "the batching is free" and
+  quoted **182**, which was the count from *before* the `defaults:` fix banked
+  the eighth entry: the ratchet's count was read and the binary was not.
 
 - **`PlanTask::retry`, `PlanTask::timeout` and `PlanTask::errors` are dead
   fields today**, and for three different reasons. `build_plan` leaves the first

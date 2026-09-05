@@ -886,3 +886,77 @@ One entry is still mismatching for a reason the context cannot fix, and it is
 not the renderer's fault: `valids/if-with-only-disabled-tasks` renders
 `{{ vars.numeric_variable > 0 }}` to "true" correctly, and mismatches because its
 `then` holds a `disabled: true` task, which no W3a task claims.
+
+
+W3a Task 5 fix round 1: three things round 0 stated wrongly
+------------------------------------------------------------
+
+1. THE TRIM.  `is_truthy` transliterated Kestra's `condition.trim()` to Rust's
+   `rendered.trim()`, and they are not the same function.  Java strips code
+   units <= U+0020; Rust strips Unicode `White_Space`.  Neither set contains the
+   other.  18 more literal-condition flows were published and executed on rc13,
+   and 11 of them DISAGREE with `str::trim()`:
+
+     Java trims, Rust does not (Kestra `else`, egret gave `then`):
+       U+0001 + "false" + U+0001,  U+000E + "false" + U+000E,
+       U+001F + "false" + U+001F,  U+0001 + "0" + U+0001
+     Rust trims, Java does not (Kestra `then`, egret gave `else`):
+       U+00A0 (NBSP) + "false" + U+00A0,  U+0085 + "false" + U+0085,
+       U+3000 + "false" + U+3000,  U+2007 + "false" + U+2007,
+       U+2028 + "false" + U+2028,  U+00A0 + "0" + U+00A0,  U+00A0 alone
+
+   U+000B and U+000C are in BOTH sets and agree, which is why a smaller probe
+   would have missed it -- and so did the original 20 rows, because every padded
+   one of them pads with an ASCII space.  The predicate is now
+   `trim_matches(|c| c <= '\u{20}')`, the committed rows are 38, and the test
+   asserts the SET of 11 disagreeing rows by name so a revert to `.trim()` fails
+   there.  Nothing in the corpus reaches it; an NBSP in a rendered value is not
+   exotic, which is why it is fixed rather than recorded.
+
+   The same probe found Kestra's own Javadoc on `If.condition` to be wrong: it
+   says `null` is falsy, and a rendered "null" takes `then`.
+
+2. NO BANKED ENTRY TAKES AN `else` BRANCH.  Round 0's banked table said
+   `valids/if-without-else` was earned by "a falsy render -> the empty `else`".
+   `corpus.json` posts `param: true` for that flow, so its golden is the `then`
+   branch; the empty-`else`-succeeds behaviour is golden-evidenced by
+   `valids/if`, which is NOT banked.  Measured, not argued: `chosen = then_`
+   unconditionally leaves the ratchet at 181 and `executor_matches_golden`
+   PASSING, and so do `is_truthy = !trim().is_empty()` and
+   `parse::<bool>().unwrap_or(true)`.
+
+   So the ratchet cannot see a truthiness predicate that errs toward `then`.
+   What kills those three is the lib unit tests plus the FALSY arm of
+   `the_caller_renders_and_a_failed_render_fails_the_run`, whose use of "0" is
+   load-bearing and is the only assertion in the oracle binary that dies to all
+   three.  The dependency on W2's renderer that this task introduces is
+   therefore one-directional, and the module doc now says so.
+
+3. THE BATCHING IS NOT FREE, AND THE NUMBER WAS STALE.  Round 0 said both
+   shapes of the render tier were "invisible to this oracle" and quoted 182
+   mismatching.  Re-measured on the final tree: rendering one run per step, and
+   letting the worker move first, each leave the RATCHET unmoved at 181 -- and
+   each FAILS
+   `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`,
+   because `valids/if` joins its `runs_differ` list: its run ORDER stops
+   matching Kestra's `taskRunList`.  182 was the count from before the
+   `defaults:` fix banked the eighth entry.  The ratchet's count was read and
+   the binary was not.
+
+   The shipped shape is the one that reproduces Kestra's creation order, and it
+   now has a unit-level statement too
+   (`three_ifs_in_a_parallel_produce_kestras_own_run_order`, which asserts
+   `valids/if`'s 12 run ids verbatim), so the oracle's caller and the unit
+   suite's caller cannot drift apart on it.
+
+A fourth null-versus-empty gap, measured and NOT closed
+-------------------------------------------------------
+
+A `Switch` with a `value` and NO `cases` key publishes and its run FAILS; the
+same flow with `cases: {}` runs `defaults` to SUCCESS.  Both measured live.
+W1's `models::Switch::cases` is a bare `BTreeMap`, so absent and `{}` arrive
+identically and egret runs `defaults` for both -- right for `{}`, wrong for
+absent.  Implementing the absent spelling would break the explicit one, so it is
+recorded rather than fixed.  It is the same model gap as `defaults: null` vs
+`defaults: []`, in the sibling field; whoever closes one closes both.  No corpus
+flow is either shape.

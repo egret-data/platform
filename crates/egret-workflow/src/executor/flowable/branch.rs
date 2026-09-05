@@ -34,6 +34,31 @@ use super::{sequential, Step};
 /// `parse::<bool>()`, nor "non-empty", nor a case-insensitive match, and `"0"`
 /// is falsy while `"00"` is not.
 ///
+/// # `condition.trim()` is not `str::trim()`, and the difference is silent
+///
+/// The line above transliterates to `rendered.trim()` and that is **wrong in
+/// both directions**. Java's `String.trim()` strips leading and trailing code
+/// units `<= U+0020` and nothing else; Rust's [`str::trim`] strips Unicode
+/// `White_Space`, which is a different set that neither contains nor is
+/// contained by the other. Measured live on `kestra/kestra:v2.0.0-rc13`, 18
+/// flows with a literal condition, and **11 of them disagreed with
+/// `str::trim()`**:
+///
+/// | rendered | Kestra | `str::trim()` would give |
+/// |---|---|---|
+/// | `"\u{1}false\u{1}"`, `"\u{E}false\u{E}"`, `"\u{1F}false\u{1F}"`, `"\u{1}0\u{1}"` | `else` | `then` — Rust does not strip C0 controls |
+/// | `"\u{A0}false\u{A0}"` (NBSP), `"\u{85}…"`, `"\u{3000}…"`, `"\u{2007}…"`, `"\u{2028}…"`, `"\u{A0}0\u{A0}"`, `"\u{A0}"` | `then` | `else` — Rust strips these, Java does not |
+///
+/// So the predicate trims **exactly the codepoints `<= U+0020`**, which is
+/// Java's rule stated as a rule rather than as a method name. `U+000B` and
+/// `U+000C` are in both sets and agree, which is why a smaller probe would have
+/// missed this entirely — and so did the original 20-row measurement, because
+/// **every one of its padded rows padded with an ASCII space.**
+///
+/// This is exactly the silent-wrong-branch class this module's doc warns about:
+/// an NBSP in a rendered data value is not exotic. Nothing in the corpus reaches
+/// it, so no baselined entry moves; the committed rows are what hold it.
+///
 /// # Measured, not read
 ///
 /// The rule was measured against the running artifact before this line was
@@ -47,17 +72,31 @@ use super::{sequential, Step};
 /// | `"true"`, `"1"`, `"00"`, `"0.0"`, `"abc"`, `"FALSE"`, `"False"`, `"null"`, `"no"`, `"[]"`, `"{}"`, `"true\n"`, `"  true  "` | `then` |
 /// | `"false"`, `"0"`, `"-0"`, `""`, `"  false  "`, `" 0 "`, `"   "` | `else` |
 ///
-/// The three padded rows are what pin the `trim`, and `"FALSE"`/`"False"`/
-/// `"no"`/`"null"` are what pin "four exact strings" against a looser reading.
+/// The three padded rows are what pin *that* there is a trim, and
+/// `"FALSE"`/`"False"`/`"no"`/`"null"` are what pin "four exact strings"
+/// against a looser reading. **They do not pin WHICH trim** — every one of them
+/// pads with an ASCII space, where every candidate agrees. The 18 rows of the
+/// section above are what pin that, and they were measured only after a review
+/// asked the question.
 /// `kestra_truthiness_is_four_exact_strings_compared_after_trimming` in
-/// `executor/mod.rs` carries all 20 rows as assertions.
+/// `executor/mod.rs` carries all 38 rows as assertions.
+///
+/// **Kestra's own Javadoc on `If.condition` is wrong about this**, which is a
+/// third reason not to take the rule from a reading: it says "Boolean coercion
+/// allows 0, -0, null and '' to evaluate to false", and a rendered `"null"`
+/// takes `then` — measured. There is no `null` in `FALSE_VALUES`.
 ///
 /// The `!= null` half of the Java is not here: a Java `null` condition is
 /// [`build_plan`](crate::executor::build_plan)'s refusal (an `If` with no
 /// `condition`), and a *missing render* is [`Option::None`] at the call site
 /// above, not a falsy string.
 pub(crate) fn is_truthy(rendered: &str) -> bool {
-    !matches!(rendered.trim(), "false" | "0" | "-0" | "")
+    // `trim_matches(|c| c <= '\u{20}')`, NOT `trim()`: see the section above for
+    // the 11 measured rows where the two differ, in both directions.
+    !matches!(
+        rendered.trim_matches(|c: char| c <= '\u{20}'),
+        "false" | "0" | "-0" | ""
+    )
 }
 
 /// Drive one `If`.
