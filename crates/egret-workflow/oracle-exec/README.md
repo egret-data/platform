@@ -3226,12 +3226,22 @@ those two flows. Nothing in this package looked for a third, and nothing could:
 both live in the 26 `not-standalone` flows, the population the coverage
 statement says is never compared.
 
-**The gap was demonstrated before it was closed.** An invented `validate` rule
-refusing three more flows this Kestra published with 200 — `valids/kv`,
-`valids/pause_no_tasks`, `valids/trigger-flow-listener`, all `not-standalone` —
-left this crate **green at 536 passed**. Over-refusal is the mirror of the one
-divergence class the programme forbids shipping, and it could be introduced
-without a single test moving.
+**The gap was demonstrated before it was closed, and re-measured on this tree
+afterwards.** An invented `build_plan` rule refusing three more flows this
+Kestra published with 200 — `valids/kv`, `valids/pause_no_tasks`,
+`valids/trigger-flow-listener`, all `not-standalone` — leaves the crate
+**green at 579 passed** with this one test skipped. (The review reported 536 on
+its own tree; the total is the tree's, the result is the same.) Over-refusal is
+the mirror of the one divergence class the programme forbids shipping, and it
+could be introduced without a single other test moving. With the test in place:
+
+```text
+OVER-REFUSAL: 3 flow(s) this Kestra published with 200 are refused by
+`build_plan` and are not in PUBLISHED_BUT_REFUSED …
+  valids/kv: invented_rule: refused
+  valids/pause_no_tasks: invented_rule: refused
+  valids/trigger-flow-listener: invented_rule: refused
+```
 
 `every_flow_kestra_published_plans_except_three_named_over_refusals` closes it.
 The population is `corpus.json`'s own `publish_status`, **295** of the 345
