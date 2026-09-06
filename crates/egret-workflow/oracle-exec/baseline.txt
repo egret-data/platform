@@ -86,6 +86,14 @@
 # `disable-flowable` (held by the sub-execution hole alone) and
 # `parallel-disabled-tasks` (held by one ordered pair, like `dag` and `if`).
 #
+# The null-list fix (`fix(workflow): a null task list is an empty one, as it is
+# in Kestra`) banks 1, leaving 144: `valids/switch-impossible`. It was never a
+# gap in the executor -- W1's bare `Vec<Task>` refused its `defaults: null` at
+# PARSE, so `build_plan` never reached a trace to compare. It is the one
+# OVER-REFUSAL the ratchet could see, and like the four `disabled:` entries
+# above it is a line that should never have been here: an over-refusal is a
+# divergence this programme forbids, not a trace egret does not reproduce yet.
+#
 # A panic, and a state machine that will not settle inside the step bound, are
 # NOT covered by this file. A line here means "egret does not reproduce this
 # trace yet"; it never means "egret may crash here". A line here also never
@@ -211,7 +219,6 @@ valids/subflow-parent-of-failed
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-valids/switch-impossible
 valids/switch-in-concurrent-loop
 valids/task-allow-failure-executable-flow
 valids/task-allow-failure-flowable

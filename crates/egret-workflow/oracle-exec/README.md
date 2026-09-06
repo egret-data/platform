@@ -1067,8 +1067,8 @@ is in exactly one bucket:
 |---|---|---|
 | **fed** | 575 | the run's task is a `Runnable` in the plan. For the **386** at top level its terminal is supplied and is not compared; the other **189** are inside a sub-execution egret never creates, so nothing is supplied to them and nothing is compared about them either |
 | **spawner** | 55 | the run's task is a `Loop`. For the **40** at top level, planned and driven here with its terminal **fed anyway** — it is a function of sub-executions this oracle does not run; the other **15** are inside a sub-execution, as above. Task 6's, and the price of the sub-execution hole |
-| **flowable** | 108 | the run's task is one the executor drives **and decides for** itself (`Sequential`, `Parallel`, `Dag`, `If`, `Switch`), so its state is compared |
-| **unplanned** | 102 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
+| **flowable** | 109 | the run's task is one the executor drives **and decides for** itself (`Sequential`, `Parallel`, `Dag`, `If`, `Switch`), so its state is compared |
+| **unplanned** | 101 | the run's task has no `PlanTask` at all — it lives inside a flowable `build_plan` still plans opaque and so does not descend into |
 | **TOTAL** | **840** | |
 
 Task 3's figures were `390 / 23 / 427`; Task 4 moved 63 runs out of *unplanned*,
@@ -1102,6 +1102,14 @@ list — which had no `PlanTask` at all until Task 7 widened W1's model. The flo
 own `errors:` is not among them: `Plan::errors` has been populated since Task 3.
 The over-feed does **not** move with them (79, unchanged): an `errors:` task is a
 `Runnable` that carries `SUBMITTED`, so it belongs in `fed` on both readings.
+**The null-list fix moves exactly one**, `unplanned` 102 → 101 and `flowable`
+108 → 109, and it is not a flowable the executor learned. It is
+`valids/switch-impossible`'s single `impossible` run: `build_plan` **refused**
+that flow, and a flow with no plan has every run of it *unplanned* whatever its
+tasks are. An over-refusal is invisible in this table except as an entry in the
+one bucket that means "egret has nothing to say about this" — which is the
+second thing wrong with one, after the 400 it returned on the HTTP API.
+
 `planning_the_loop_removed_forty_spurious_submitted_emissions` derives that 10
 rather than folding it into its constants, so its reproduction of Task 5's four
 committed figures is still a reproduction and not an agreement with itself.
@@ -2101,10 +2109,26 @@ bare `Vec<Task>`, so an absent `defaults:` and an explicit `defaults: []` arrive
 identically — and on the artifact they differ: with no matching case,
 `defaults: []` leaves the `Switch` `RUNNING` for ever (same probe) where an
 absent `defaults:` ends it `FAILED`. Nothing in the corpus writes
-`defaults: []`, and `defaults: null` is refused by W1's parser today (the
-over-refusal `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`
-pins), so the two spellings this crate can tell apart are the two that occur.
-Whoever fixes that over-refusal owns this paragraph.
+`defaults: []`, and `defaults: null` was refused by W1's parser, so the two
+spellings this crate could tell apart were the two that occur.
+
+**The null-list fix does not widen this gap, and the corpus says which side it
+lands on.** `defaults: null` now parses to the same empty `Vec` an absent
+`defaults:` gives — and on the artifact those two spellings behave *the same*:
+a null field and an absent one are both `null` after Jackson, so both end the
+`Switch` `FAILED` when no case matches. `defaults: []` is the odd one out, and it
+is the one nothing writes: measured over the whole corpus, `defaults: null`
+occurs in exactly two flows (`valids/switch-impossible`,
+`invalids/switch-invalid`) and `defaults: []` in none.
+
+`valids/switch-impossible` is the flow that reaches the question — its input is
+`"impossible"` and its only case is `"NO"`, so no case matches and the empty
+defaults decide the outcome — and it is banked: egret reproduces Kestra's
+`FAILED` on it exactly. So the spelling the fix newly accepts is one egret now
+gets *right*, and what stays unrepresentable is `defaults: []` alone. Closing
+that needs an `Option<Vec<Task>>` and a `drive_switch` arm for the third state;
+nothing measures it, so it stays a paragraph rather than a test. Owner: W1, with
+W3b's `drive_switch`.
 
 Two more things the same probe settled: `then: []` is **refused at publish**
 (`422 tasks[if].then: must not be empty`), so only the `else` branch can be
@@ -3164,6 +3188,10 @@ The other two are each their own:
 > — *Over-refusal, swept rather than pinned* — makes the population
 > `corpus.json`'s own `publish_status == 200` and finds **three**: these two
 > plus `valids/switch-impossible`, the over-refusal already on `main`.
+>
+> **Two, since the null-list fix.** `valids/switch-impossible` is no longer
+> refused; see *The null list Kestra accepts and egret refused*, at the end of
+> this file.
 
 Measured over all **345** corpus flows, `validate` reports errors on **18**.
 Sixteen are `refused` golden entries. The other two are flows this Kestra
@@ -3199,9 +3227,14 @@ is W1's.
 
 ### W1's null-list fix costs no over-acceptance, and that is now measured
 
-`build_plan` refuses `valids/switch-impossible`, a flow this Kestra published and
+> **The fix has landed.** Task 8's prediction below was measured against the
+> rehearsal — the token deleted from each flow — and the real fix agrees with it
+> on all three rows. See *The null list Kestra accepts and egret refused*, at the
+> end of this file, for what the prediction did **not** cover.
+
+`build_plan` refused `valids/switch-impossible`, a flow this Kestra published and
 **ran**, because W1's bare `Vec<Task>` rejects an explicit `null` Jackson
-accepts. That over-refusal is unchanged and still not this task's to fix.
+accepts. That over-refusal was not Task 8's to fix.
 
 What *is* new: since `build_plan` now runs `validate`, deleting the offending
 token from a flow is a complete rehearsal of W1's fix on that flow, and
@@ -3243,16 +3276,18 @@ OVER-REFUSAL: 3 flow(s) this Kestra published with 200 are refused by
   valids/trigger-flow-listener: invented_rule: refused
 ```
 
-`every_flow_kestra_published_plans_except_three_named_over_refusals` closes it.
-The population is `corpus.json`'s own `publish_status`, **295** of the 345
-flows — deliberately wider than the golden's 266 `runs` entries, because it
-includes every `not-standalone` flow, which is exactly where the two known
-over-refusals hide. Running it over the whole population finds **exactly
-three**:
+`every_flow_kestra_published_plans_except_two_named_over_refusals` closes it
+(named `..._three_...` until the null-list fix took the table from three rows to
+two — the mutation records above quote the older name). The population is
+`corpus.json`'s own `publish_status`, **295** of the 345 flows — deliberately
+wider than the golden's 266 `runs` entries, because it includes every
+`not-standalone` flow, which is exactly where the two known over-refusals hide.
+Running it over the whole population found **exactly three**, and finds **two**
+since the null-list fix:
 
 | flow | egret's code | whose rule |
 |---|---|---|
-| `valids/switch-impossible` | `cannot parse flow` | W1's bare `Vec<Task>` and an explicit `null`. The only one of the three with a golden entry, and the only one the ratchet can see |
+| ~~`valids/switch-impossible`~~ | ~~`cannot parse flow`~~ | **fixed.** W1's bare `Vec<Task>` and an explicit `null`. The only one of the three with a golden entry, and the only one the ratchet could see — which is why it is the only one that got fixed |
 | `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding |
 | `valids/trigger-flow-listener-namespace-condition` | `dependency_namespace_required` / `dependency_flow_id_required` | W1's, same encoding |
 
@@ -3985,15 +4020,16 @@ described.
 | golden entries, i.e. flows this oracle compares at all | **294** |
 | … `runs` verdict (268 minus the 2 that did not reproduce) | 266 |
 | … `refused` verdict (the 28 rejections that are evidence) | 28 |
-| baselined — egret does not reproduce it yet | **145** |
-| matching | **149** |
+| baselined — egret does not reproduce it yet | **144** |
+| matching | **150** |
 
-`345 = 268 + 51 + 26`. `294 = (268 − 2) + 28`. `145 + 149 = 294`. The three
+`345 = 268 + 51 + 26`. `294 = (268 − 2) + 28`. `144 + 150 = 294`. The three
 identities are asserted by `every_corpus_flow_is_compared_or_excluded_by_name`
 and the ratchet, not checked by hand here. The baseline was 149 at Task 8; the
-final review's `disabled:` banked four.
+final review's `disabled:` banked four, and the null-list fix banked
+`valids/switch-impossible` — the one over-refusal the ratchet could see.
 
-Of the 28 `refused` entries, egret refuses **23** across 16 causes and
+Of the 28 `refused` entries, egret refuses **23** across 17 causes and
 over-accepts **5**, each named with an owner in
 `egret_refuses_every_flow_kestra_refuses`'s `STILL_OVER_ACCEPTED`.
 
@@ -4061,7 +4097,7 @@ here so the boundary can be read in one place.
 
 ### The residual baseline, by owner
 
-145 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+144 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run; **the rows overlap
 and this is not a partition**, but the remainder is exhaustive and named.
 
@@ -4080,7 +4116,7 @@ and this is not a partition**, but the remainder is exhaustive and named.
 | 5 | `sla:` | W8 — named at Task 8 |
 | 4 | `CREATE_NEW_EXECUTION`'s replay | W6/W3b |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **14** | **none of the above** | listed individually, below |
+| **13** | **none of the above** | listed individually, below |
 
 **`disabled: true` was a row here with 6 entries and is gone.** It is
 implemented at the final review, so it holds nothing: four of its six banked,
@@ -4090,7 +4126,10 @@ because the construct stopped being a cause is the same rule that adds one when
 a cause is found — an attribution has to be to the thing that holds the entry,
 not to a construct the flow happens to declare.
 
-The fourteen that declare none of them, with what holds each:
+The thirteen that declare none of them, with what holds each. There were
+fourteen: `valids/switch-impossible` is banked by the null-list fix, and this is
+the list where it showed — an entry no construct explains, because no construct
+was missing.
 
 | entry | what holds it |
 |---|---|
@@ -4102,16 +4141,131 @@ The fourteen that declare none of them, with what holds each:
 | `valids/dag` | one `order` pair a clockless machine cannot reach |
 | `valids/if` | three `order` pairs, same cause |
 | `valids/parallel-disabled-tasks` | one `order` pair, same cause: with `disabled:` implemented it reproduces every run, history and attempt, and `(task3, task2)` is `before` in Kestra and `overlapping` here |
-| `valids/switch-impossible` | an **over-refusal**: W1's bare `Vec<Task>` and an explicit `null` |
 | `valids/retry-failed-flow-duration` | `maxDuration` in an environment with no elapsed time |
 | `valids/retry-success` | `WARNING`, which `RunState` cannot hold |
 | `valids/flow-with-outputs-failed` | flow-level `outputs:`, which nothing in W3a evaluates |
 | `valids/full` | flow-level `outputs:` and `variables:`, same |
 | `valids/subflow-secret-output-child` | a `SECRET` output; the harness has no encryption key |
 
-**Six of the 145 are honest over-acceptances or an over-refusal, and they are
-the whole of egret's measured disagreement about whether a flow is acceptable
-at all.** Everything else in the baseline is a flow egret plans and does not yet
+**Five of the 144 are honest over-acceptances, and they are the whole of
+egret's measured disagreement about whether a flow is acceptable at all.** There
+were six; the sixth was the over-refusal, and it is fixed rather than
+attributed. Everything else in the baseline is a flow egret plans and does not yet
 reproduce, which is a different and smaller claim than "egret is wrong about it".
 
 A limit stated plainly is worth more than a number rounded up.
+
+## The null list Kestra accepts and egret refused
+
+W3a found this, measured it, and deliberately did not fix it: the fix is W1's
+model, and W3a's own tests are what pinned the refusal. This section is the fix,
+written after it landed.
+
+### The defect
+
+`models/task.rs` declared its task lists as bare `Vec<Task>` under
+`#[serde(default)]`. That covers an **absent** key and nothing else: an explicit
+`tasks: null` is `invalid type: null, expected a sequence`, a hard parse error.
+Jackson does not error on a `null` for a `List` — it leaves the field null — so
+the same YAML that Kestra reads, egret refused.
+
+It is not an oracle curiosity. `spec::parse` is called from `routes.rs:302`
+(`draft_dto`), `routes.rs:335` (`parse_draft`, used by `create_flow` and
+`update_flow`) and `routes.rs:640` (`validate_flow`), so `POST /flows`,
+`PUT /flows/{id}` and `POST /flows/{id}/validate` answered **400 InvalidInput**
+for `valids/switch-impossible` — a flow this pinned Kestra
+(`kestra/kestra:v2.0.0-rc13`) publishes with 200 and **runs**. Over-refusal is
+the mirror of the divergence class this programme forbids shipping.
+
+### Kestra's own 422 is the evidence for what the fix should do
+
+The strongest evidence is not in Kestra's source but in this corpus's
+`reason` field for `invalids/invalid-parallel`, which lists:
+
+```text
+tasks[para2].tasks: The 'tasks' property cannot be empty
+tasks[para4].tasks: The 'tasks' property cannot be empty
+tasks[para3].tasks: The 'tasks' property cannot be empty
+```
+
+`para2` has no `tasks` key, `para3` has `tasks: []`, and `para4` has
+`tasks: null`. Kestra **parsed all three** — Jackson did not error on the null —
+and then refused all three at bean validation, for being *empty*. Two stages,
+and the null belongs to the second. That is exactly the split
+`bean-validation-is-not-parsing` names, the principle `models/task.rs` already
+applied to `Parallel::concurrent`; it was simply never applied to a list.
+
+### The fix, and why it is wider than the three flows that showed it
+
+`wire::null_is_absent` — `Option::<T>::deserialize(de)?.unwrap_or_default()` —
+under `#[serde(default, deserialize_with = …)]`, on **all 17** list fields in
+`models/task.rs`: every `tasks`, `errors`, `then`, `else`, `cases`, `defaults`
+and `dependsOn` on `Sequential`, `Parallel`, `If`, `Switch`, `Dag`, `DagNode`,
+`Loop`, `LoopUntil`, `AllowFailure` and `WorkingDirectory`.
+
+The measured defect touched three of them. Fixing three and leaving fourteen
+would have made `tasks: null` parse while `errors: null` did not, on the same
+struct — a line no reader could derive and no rule explains. The
+`egret_refuses_every_flow_kestra_refuses` sweep is what makes the wider fix
+checkable rather than merely tidy: it asserts every flow Kestra refuses is still
+refused, **for its own code**, so an over-acceptance introduced by the widening
+would fail by name. None was.
+
+### What broke, and how each break was recorded
+
+**Eight** guards moved. Seven fired on the model change itself; the eighth,
+`the_residual_baseline_is_attributed_to_a_construct_or_named`, fired on the
+banking that followed it. Every one of them was a place W3a recorded the defect,
+and each now records its absence:
+
+| guard | what it said | how it is recorded now |
+|---|---|---|
+| `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api` | "if this now plans, W1's model has been fixed — delete this test" | **inverted, not deleted.** It rehearsed the fix by deleting the token from each of three flows; it now asserts the same three outcomes with the token in place, and adds the equality `null` ≡ absent. Renamed `a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own` |
+| `every_flow_kestra_published_plans_except_three_named_over_refusals` | panicked naming `valids/switch-impossible` and its cause | the row is deleted, the table is **two**, and the test is renamed `…_two_…`. Its inverted design is what forced the deletion rather than allowing a quiet edit |
+| `egret_refuses_every_flow_kestra_refuses` | the two accidental refusals were one `RefusalGroup` whose cause was "an explicit `null`" — not a cause at all | that group is gone; `invalids/switch-invalid` and `invalids/invalid-parallel` are two groups, each asserting the code Kestra's own 422 names (`switch_no_branches`, `invalid_namespace`). 16 causes → 17 |
+| `executor_matches_golden` | `PROGRESS NOT BANKED: valids/switch-impossible` | banked. `baseline.txt` 145 → **144** |
+| `the_residual_baseline_is_attributed_to_a_construct_or_named` | the entry was in `UNATTRIBUTED` as "an OVER-REFUSAL" | removed. It was in that list precisely because no missing construct explained it |
+| `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | `(575, 55, 108, 102, 79)` | `(575, 55, 109, 101, 79)`, and the README table with it |
+| `planning_the_loop_removed_forty_spurious_submitted_emissions` | `(424, 73, 343, 114)` | `(424, 74, 342, 114)` |
+| `the_caller_can_render_every_expression_except_the_ones_named` | 26 reachable branch expressions | **27**. The `Switch` value `{{inputs.string}}` was always renderable; the parse refusal is what kept it out of the population |
+
+The last three are the same single run and the same single expression, counted
+by three different derivations. An over-refusal does not only return a 400: it
+**shrinks every population an oracle measures**, silently, in the direction that
+looks like less work to do.
+
+### The ratchet
+
+**145 → 144.** One banked, zero regressions, zero broken, zero over-acceptances.
+`valids/switch-impossible` reproduces Kestra's trace exactly — one `impossible`
+run, `FAILED` — the moment it is allowed to parse. Nothing in the executor
+changed.
+
+W3a predicted the fix would cost no over-acceptance, having rehearsed it by
+deleting the token from each flow. Measured against the real fix on all 17
+fields, the prediction holds.
+
+### Mutation
+
+Reverting **one attribute** — `Switch::defaults` back to a bare
+`#[serde(default)]` — fails seven tests, the same seven the model change moved:
+
+```text
+a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own:
+  a flow this Kestra published with 200 and RAN must plan: PlanError { message:
+  "cannot parse flow at line 9 column 3: tasks: invalid type: null, expected a
+  sequence at line 9 column 3" }
+
+every_flow_kestra_published_plans_except_two_named_over_refusals:
+  OVER-REFUSAL: 1 flow(s) this Kestra published with 200 are refused by
+  `build_plan` and are not in PUBLISHED_BUT_REFUSED …
+    valids/switch-impossible: cannot parse flow at line 9 column 3 …
+
+executor_matches_golden:
+  valids/switch-impossible: egret REFUSED a flow Kestra ran …
+```
+
+The second is the one worth reading twice. The exception table shrank from three
+rows to two, and the sweep is what makes that shrinkage *mandatory*: with the row
+deleted and the rule restored, the flow is not "a known exception" — it is an
+unlisted over-refusal, reported by name with its message.

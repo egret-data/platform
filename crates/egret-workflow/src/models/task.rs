@@ -127,15 +127,32 @@ impl Task {
 // `Vec`, which `Task::children()`, the duplicate-id walk, and `has_cycle`
 // all already iterate safely -- no `Option` unwrapping needed anywhere
 // downstream, only the new emptiness check in `spec::validate`.
+//
+// **`#[serde(default)]` alone covered only the ABSENT key**, and that was a
+// defect that reached the HTTP API. An explicit `tasks: null` is
+// `invalid type: null, expected a sequence` to a bare `Vec<Task>`, while
+// Jackson does not error on one -- it leaves the field null -- so egret's
+// `POST /flows` answered 400 for a flow this Kestra publishes and RUNS.
+// Every list field in this file therefore carries
+// `deserialize_with = "wire::null_is_absent"` beside its `default`: the same
+// bean-validation-is-not-parsing principle the paragraph above applies to
+// `@NotEmpty` and `Parallel::concurrent` below applies to `@NotNull`.
+// Kestra's own 422 for `invalids/invalid-parallel` is the evidence for that
+// reading -- it reports `tasks[para4].tasks: The 'tasks' property cannot be
+// empty` for the task written `tasks: null`, beside the same message for one
+// written `tasks: []` and one with no `tasks` key at all. Parsed, then
+// refused for being empty; two stages, and the null belongs to the second.
+// See `oracle-exec/README.md`, `The null list Kestra accepts and egret
+// refused`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sequential {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
     /// `AbstractBranch.errors` -- the list driven instead of `tasks` once a
     /// child of `tasks` has failed and will not be retried
     /// (`Execution.findTaskDependingFlowState`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
 }
 
@@ -151,12 +168,12 @@ pub struct Sequential {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Parallel {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
     /// `AbstractBranch.errors`, the same field `Sequential` carries and for
     /// the same reason -- see its doc for why `finally` is not beside it and
     /// why `children()` is not widened.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
@@ -181,15 +198,19 @@ pub struct Parallel {
 pub struct If {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub then: Vec<Task>,
-    #[serde(default, rename = "else")]
+    #[serde(
+        default,
+        rename = "else",
+        deserialize_with = "crate::models::wire::null_is_absent"
+    )]
     pub r#else: Vec<Task>,
     /// `If.java:111`. `If` is not an `AbstractBranch` -- it extends `Task`
     /// directly -- but it declares its own `errors` all the same, and
     /// `If.resolveNexts` passes it to the same
     /// `FlowableUtils.resolveSequentialNexts`. See `Sequential::errors`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
 }
 
@@ -201,12 +222,12 @@ pub struct If {
 pub struct Switch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Property<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub cases: BTreeMap<String, Vec<Task>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub defaults: Vec<Task>,
     /// `Switch.java:112`, the same field `If` carries and for the same reason.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
 }
 
@@ -221,10 +242,10 @@ pub struct Switch {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dag {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<DagNode>,
     /// `Dag.java:106`, the same field the other three flowables carry.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
@@ -244,7 +265,7 @@ pub struct Dag {
 pub struct DagNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<Task>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub depends_on: Vec<String>,
 }
 
@@ -280,7 +301,7 @@ pub struct DagNode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Loop {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub values: Option<Property<serde_json::Value>>,
@@ -305,7 +326,7 @@ pub struct Loop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoopUntil {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Property<String>>,
@@ -361,7 +382,7 @@ pub struct Subflow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllowFailure {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
 }
 
@@ -374,7 +395,7 @@ pub struct AllowFailure {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkingDirectory {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
     pub tasks: Vec<Task>,
 }
 
