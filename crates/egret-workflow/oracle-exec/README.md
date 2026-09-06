@@ -3761,6 +3761,46 @@ ran straight past the field. Measured by re-running the whole arm with
 since nothing else W3c changed can fire without a `runIf:` — and **only those two
 entries move**. Both were baselined before and are baselined after.
 
+### W3c's mutations
+
+Fourteen rows, then a fifteenth pass after the fix below. Every one is a literal
+`-` → `+` applied to a file anchored to `git show HEAD:<path>` — the driver
+refuses to snapshot a file that already differs from HEAD and refuses a `-` text
+that does not occur exactly once — **built first** (`cargo build -p
+egret-workflow --tests`, 0 errors asserted) and only then run against
+`--lib --test executor --test oracle`. Restore is byte-compared against the
+anchor after every row and again for all touched files at the end.
+
+| # | file | `-` → `+` | victims |
+|---|---|---|---|
+| M1 | `flowable/mod.rs` | `RunIfVerdict::Skip => return Step::Commands(vec![Command::SkipRun{..}])` → `=> {}` | **7** — *"left: `["CREATED","SUBMITTED","RUNNING","SUCCESS"]` right: `["CREATED","SKIPPED"]`"*. The whole rule |
+| M2 | `flowable/mod.rs` | `NotRenderedYet => return Step::Waiting` → skip instead | **6**, and one is the ratchet: *"REGRESSION: 1 entr(y/ies) mismatch that were NOT in `oracle-exec/baseline.txt` … `valids/condition_with_input`"*. **This is the one thing the corpus can judge about `runIf:`** — a task Kestra *ran* being skipped |
+| M3 | `flowable/parallel.rs` | rule 1's `!matches!(s, Success \| Skipped)` → `s != Success` | **2** — *"the sibling must run to completion, not be failed by rule 1"*, and the `Dag` test with it |
+| M4 | `flowable/dag.rs` | `Some(Success) \| Some(Skipped)` → `Some(Success)` | **1** — *"left: `["d","up"]` right: `["d","up","down"]`"*: the `Dag` hangs |
+| M5 | `state.rs` | the `attempts.push` in the `SkipRun` arm deleted | **2** — *"left: 0 right: 1"* on the attempt count. The skip's attempt is Kestra's, not decoration |
+| M6 | `state.rs` | `\| RunState::Skipped` deleted from `is_terminal` | **5** — *"assertion failed: `RunState::Skipped.is_terminal()`"* |
+| M7 | `executor/plan.rs` | `run_if: task.run_if.clone()` → `None` | **11** — the plan-side seam |
+| M8 | `models/task.rs` | `optional(&mut map, "runIf")?` → `None` | **13** — the model-side seam, one wider than M7 because the field then survives only inside a leaf's `spec` |
+| M9 | `flowable/mod.rs` | `branch::is_truthy(rendered)` → `rendered != "false"` | **1** — *"rendered `\"0\"`: expected skipped=true"*. The naive predicate a reader would write, and the row that catches it |
+| M10 | `tests/executor.rs` | tier 2a's filter → `false` (the harness never renders a `runIf:`) | **2**, both via a PANIC arm: *"STUCK after 4 step(s) … run 1 (`fail`) is `Some(Created)`"* — an unanswered `runIf:` is a wait, so deleting the answer deadlocks 5 entries rather than changing 5 traces |
+| M11 | `tests/executor.rs` | `Command::SkipRun { run, .. } => ended[*run] = Some(step)` → `=> {}` | **0** at first. See below |
+| M12 | `state.rs` | `RunState::Skipped` deleted from `RunState::ALL` | **1** — the vocabulary arm, which could not fail at all before W3c |
+| M13 | `models/task.rs` | the `runIf` emission in `Serialize` deleted | **1** — *"left: None right: `Some(\"false\")`"* |
+| M14 | `flowable/mod.rs` | `rendered_run_if` → `rendered` in `run_if_verdict` (read the wrong slot) | **10** — the two-slot decision, asserted rather than argued |
+
+**M11 killed nothing, and the reason is the finding rather than an excuse.**
+`simulate_with`'s `SkipRun` arm records a skipped run's right endpoint for the
+happens-before relation, and **no golden entry ever reaches a `SkipRun`** — the
+four `task-runif*` flows all stop earlier on a condition this harness cannot
+render. So the arm is correct, load-bearing the moment anything skips, and
+unreachable from the corpus: a guard nobody could see fail, which is the pattern
+this package has paid for eight times. It was not left that way.
+`a_skipped_run_still_gets_a_happens_before_endpoint` drives `simulate_with` with
+a `skipping_machine` of its own and requires the pair, and re-running M11 against
+it kills **1**. The comment beside the arm claimed the five ordered pairs W3c
+removed as its evidence; that was wrong — those five are two entries producing
+fewer runs — and the mutation is what said so.
+
 ### A guard that could not fail, and it was this file's own numbers
 
 `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` is the test

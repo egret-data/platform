@@ -693,12 +693,20 @@ fn simulate_recording_spawns(
                         ended[*run] = Some(step)
                     }
                     // A skipped run is a TERMINATED run, and the happens-before
-                    // relation is over creation and termination. Leaving this
-                    // out cost five ordered pairs and
-                    // `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`
-                    // is what said so -- `step_relation` answers `None` when
-                    // either endpoint is missing, so a skipped run would
-                    // silently be in no pair at all.
+                    // relation is over creation and termination. `step_relation`
+                    // answers `None` when either endpoint is missing, so without
+                    // this arm a skipped run would silently be in no pair at
+                    // all.
+                    //
+                    // **Nothing in the corpus exercises it**, and the mutation
+                    // that deletes it is what established that: it kills
+                    // nothing, because no golden entry ever reaches a `SkipRun`
+                    // (see `a_skipped_run_still_gets_a_happens_before_endpoint`,
+                    // which is the reachable control written for exactly that).
+                    // A first draft of this comment credited the five ordered
+                    // pairs W3c removed to a missing endpoint here; that was
+                    // wrong -- those five are two entries producing FEWER RUNS,
+                    // and the arm was never on the path.
                     Command::SkipRun { run, .. } => ended[*run] = Some(step),
                     Command::SpawnExecution {
                         task,
@@ -1309,6 +1317,91 @@ fn serialise_then_finish(st: &ExecutionState, now: Tick) -> Vec<Command> {
         }];
     }
     Vec::new()
+}
+
+/// [`lazy_machine`], except that it SKIPS the first run instead of running it.
+///
+/// It exists for one reason: **no golden entry reaches a `Command::SkipRun`**
+/// under this harness (the render tier cannot resolve any of the four
+/// `task-runif*` flows' conditions), so the `SkipRun` arm of `simulate_with`'s
+/// bookkeeping is unreachable from the corpus and a mutation that deletes it
+/// kills nothing. This machine is what makes it reachable.
+fn skipping_machine(plan: &Plan, st: &ExecutionState, now: Tick) -> Vec<Command> {
+    if st.runs.is_empty() {
+        return vec![
+            Command::SetExecutionState {
+                state: RunState::Running,
+            },
+            Command::CreateRun {
+                task: plan.roots[0],
+                parent: None,
+                value: None,
+            },
+        ];
+    }
+    if st.runs[0].history.last() == Some(&RunState::Created) {
+        return vec![Command::SkipRun { run: 0, at: now }];
+    }
+    let all_terminal = st
+        .runs
+        .iter()
+        .all(|r| r.history.last().is_some_and(|s| s.is_terminal()));
+    if all_terminal && st.runs.len() < plan.roots.len() {
+        return vec![Command::CreateRun {
+            task: plan.roots[st.runs.len()],
+            parent: None,
+            value: None,
+        }];
+    }
+    serialise_then_finish(st, now)
+}
+
+/// **A skipped run is a TERMINATED run, and the happens-before relation has to
+/// see it end.**
+///
+/// `simulate_with` records a run's right endpoint from `SetRunState` when the
+/// state is terminal; `Command::SkipRun` is a different command, so it needs its
+/// own arm, and without it `step_relation` answers `None` and the skipped run is
+/// silently in **no pair at all**.
+///
+/// **This test exists because the mutation that deletes that arm kills nothing
+/// else.** No golden entry reaches a `SkipRun`: all four `task-runif*` flows
+/// stop earlier on a condition `render_context` cannot resolve, and the two
+/// `WorkingDirectory` ones are planned opaque —
+/// `the_caller_can_render_every_expression_except_the_ones_named` derives that
+/// list. An arm nothing can exercise is an arm nobody can check, which is the
+/// pattern this package has now paid for eight times.
+#[test]
+fn a_skipped_run_still_gets_a_happens_before_endpoint() {
+    let plan = probe_plan(&["a", "b"]);
+    let golden = probe_golden(&["a", "b"]);
+    let trace =
+        simulate_with(&plan, &golden, &no_render, skipping_machine).expect("skipping must settle");
+
+    assert_eq!(
+        trace
+            .runs
+            .iter()
+            .map(|r| r.state.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec!["CREATED".to_string(), "SKIPPED".to_string()],
+            vec![
+                "CREATED".to_string(),
+                "RUNNING".to_string(),
+                "SUCCESS".to_string()
+            ],
+        ],
+        "the machine must skip `a` and run `b`, or this is not the shape under test"
+    );
+    assert_eq!(
+        trace.order,
+        vec![(0, 1, "before".to_string())],
+        "`b` was created after `a` was SKIPPED, and a skip is a termination. \
+         Without `simulate_with`'s `SkipRun` arm this is empty -- the pair \
+         vanishes rather than disagreeing, which is the failure mode a ratchet \
+         cannot see"
+    );
 }
 
 /// **`before` means the second run was CREATED after the first ENDED**, not
