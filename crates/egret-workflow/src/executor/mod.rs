@@ -24,6 +24,11 @@
 //! Tasks 7-8 add the attempt lifecycle and refusal. They add variants to
 //! [`TaskKind`] and [`Command`]; they do not change the signatures here.
 //!
+//! **W3c adds `runIf:`**, and with it a second obligation on the caller — see
+//! [`advance`]'s *What the caller must supply*. It is called out in the module
+//! doc because a caller that does not know about it does not get an error: it
+//! gets an empty command vector for ever.
+//!
 //! # What Task 6 emits and does NOT execute
 //!
 //! A `Loop` does not iterate inside its execution: each value produces a
@@ -89,6 +94,30 @@ use flowable::{sequential, Step};
 /// sequence, and round numbers are compared only between runs. Emitting it a
 /// round earlier would make the plan's own first-round assertion
 /// (`a_sequential_runs_its_children_one_at_a_time`) untrue for no gain.
+///
+/// # What the caller must supply, and the silence if it does not
+///
+/// `advance` is pure and cannot render, so two fields on
+/// [`TaskRun`](crate::executor::TaskRun) are the caller's to fill, at two
+/// different run states:
+///
+/// | field | filled when the run is | for |
+/// |---|---|---|
+/// | [`TaskRun::rendered_run_if`](crate::executor::TaskRun::rendered_run_if) | `CREATED` | the task's `runIf:`, if [`PlanTask::run_if`] is `Some` — W3c |
+/// | [`TaskRun::rendered`](crate::executor::TaskRun::rendered) | `CREATED` for a `Loop`, `RUNNING` for an `If`/`Switch` | that flowable's own expression — Tasks 5-6 |
+///
+/// **An unanswered render is [`Waiting`](flowable::Step::Waiting), not an
+/// error, and that is the trap.** A caller that never fills `rendered_run_if`
+/// gets an empty `Vec` from every call, for ever, on any flow whose author
+/// wrote a `runIf:` — a silent stall rather than a failure. It has to be a wait:
+/// reading `None` as falsy would skip every task the caller had not reached, and
+/// reading it as truthy would run every task the author had switched off. The
+/// oracle's tier 2a is the reference caller; deleting it is mutation M10, and
+/// it turns 5 golden entries `STUCK` rather than changing 5 traces.
+///
+/// **`rendered_run_if` is re-asked per attempt.** A retried run re-enters
+/// `CREATED` and [`apply`] clears both slots there, so a caller that answers
+/// once and caches is answering only for attempt 1. See `apply`'s rule 2.
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     if state.history.last().is_some_and(|s| s.is_terminal()) {
         return Vec::new();
@@ -4815,6 +4844,63 @@ tasks:
         );
     }
 
+    /// **The instant on a skip is the `now` the decision was taken at**, and
+    /// the plumbing from [`flowable::open`] to the stored [`Attempt`] is
+    /// asserted here rather than only at [`apply`].
+    ///
+    /// `Command::SkipRun`'s doc claims the instant "can only be the `now` the
+    /// decision was taken at". **Nothing held that claim.** Replacing
+    /// `at: now` with `at: Tick(0)` in `open` left all 561 tests green — the
+    /// state test calls `apply` with a literal, so it pins the bookkeeping and
+    /// not the seam. The control for the shape already existed one line away:
+    /// the same mutation on `StartRun`'s `at: now` kills 3.
+    ///
+    /// Two ticks, because a single non-zero one would pass against a machine
+    /// that stored the first tick it ever saw.
+    #[test]
+    fn a_skipped_runs_attempt_records_the_tick_the_skip_was_decided_at() {
+        for tick in [Tick(11), Tick(4200)] {
+            let plan = seq_with_run_if("false");
+            let mut state = ExecutionState::new(&plan);
+            // `first` is created, started and finished, so that `middle` -- the
+            // one carrying the `runIf:` -- is opened at `tick` and nothing else
+            // is in flight when it is.
+            for _ in 0..3 {
+                for cmd in &advance(&plan, &state, Tick(0)) {
+                    apply(&mut state, cmd);
+                }
+            }
+            apply(
+                &mut state,
+                &Command::SetRunState {
+                    run: 0,
+                    state: RunState::Success,
+                },
+            );
+            // Create `middle`. Its literal `runIf:` renders to itself.
+            for cmd in &advance(&plan, &state, tick) {
+                apply(&mut state, cmd);
+            }
+            assert_eq!(run_ids(&plan, &state), ["first", "middle"]);
+            state.runs[1].rendered_run_if = Some("false".to_string());
+
+            let cmds = advance(&plan, &state, tick);
+            assert_eq!(
+                cmds,
+                vec![Command::SkipRun { run: 1, at: tick }],
+                "`open` must carry the `now` it was called with onto the command"
+            );
+            for cmd in &cmds {
+                apply(&mut state, cmd);
+            }
+            assert_eq!(
+                state.runs[1].attempts[0].started_at, tick,
+                "and `apply` must store it, so the instant on a skipped attempt \
+                 is the one the decision was taken at end to end"
+            );
+        }
+    }
+
     /// **No corpus flow puts a `runIf:` on a `Parallel` or `Dag` child**, so
     /// the two rules W3c had to widen for `SKIPPED` are read from Kestra's Java
     /// rather than measured on the artifact — and that is stated here rather
@@ -4993,6 +5079,148 @@ tasks:
             "a corpus flow writes `runIf: null`, so the divergence named on \
              `models::Task::run_if` is now reachable and has to be measured \
              against the artifact rather than left named"
+        );
+    }
+
+    /// **A `runIf:` is re-asked on every attempt, and a retry is what makes
+    /// that observable.**
+    ///
+    /// Kestra renders `runIf:` at the point it emits a worker task
+    /// (`ExecutionEventMessageHandler.java:269`), and a retried task is emitted
+    /// again — so attempt 2 is decided by attempt 2's render, not attempt 1's.
+    ///
+    /// [`retry::reopen_due`] returns a run to `CREATED`, which re-enters
+    /// [`flowable::open`] and therefore `run_if_verdict`. Without clearing the
+    /// slot, `TaskRun::rendered_run_if` still holds attempt 1's answer and
+    /// `advance` never asks again — a narrower instance of exactly the
+    /// over-acceptance W3c exists to close, because a `runIf:` that has become
+    /// falsy would still run.
+    ///
+    /// **`rendered_run_if` is the first render slot that can sit on a retried
+    /// run**, which is why this is W3c's and not pre-existing:
+    /// [`retry::scan`] only retries a [`TaskKind::Runnable`], and a `Runnable`
+    /// never carried the older `rendered` slot (that is an `If`/`Switch`/`Loop`
+    /// field).
+    ///
+    /// No corpus flow has both a `retry:` and a `runIf:`
+    /// (`no_corpus_flow_has_both_a_retry_and_a_run_if` derives it), so the
+    /// ratchet is blind to this and the test is what holds it.
+    #[test]
+    fn a_run_if_is_re_asked_on_every_attempt() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    \
+             runIf: \"{{ go }}\"\n    retry:\n      type: constant\n      maxAttempts: 3\n      \
+             interval: PT1S\n",
+        )
+        .expect("the probe plans");
+        let mut state = ExecutionState::new(&plan);
+
+        // Attempt 1: create, answer TRUE, run, fail.
+        round(&plan, &mut state);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED"]);
+        // The execution takes RUNNING on the round after it has a run; that is
+        // the only thing left to emit while the `runIf:` is unanswered.
+        assert_eq!(
+            round(&plan, &mut state),
+            vec![Command::SetExecutionState {
+                state: RunState::Running
+            }]
+        );
+        assert_eq!(
+            advance(&plan, &state, T0),
+            Vec::new(),
+            "unrendered: nothing to decide"
+        );
+        state.runs[0].rendered_run_if = Some("true".to_string());
+        round(&plan, &mut state);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "SUBMITTED", "RUNNING"]
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+
+        // The retry pass schedules attempt 2 and the clock moves to it.
+        round(&plan, &mut state);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Retrying));
+        let due = state.runs[0].not_before.expect("a retry was scheduled");
+        for cmd in &advance(&plan, &state, due) {
+            apply(&mut state, cmd);
+        }
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Created),
+            "reopen_due returns the run to CREATED, which re-enters `open`"
+        );
+
+        // THE POINT: attempt 1's answer must not decide attempt 2.
+        assert_eq!(
+            state.runs[0].rendered_run_if, None,
+            "a run that has re-entered CREATED has not been rendered for this \
+             attempt; leaving attempt 1's answer in the slot is `advance` \
+             deciding attempt 2 from a stale render"
+        );
+        assert_eq!(
+            advance(&plan, &state, due),
+            Vec::new(),
+            "and so there is nothing to decide until the caller answers again"
+        );
+
+        // The caller now says FALSE, and attempt 2 is skipped rather than run.
+        state.runs[0].rendered_run_if = Some("false".to_string());
+        let cmds = advance(&plan, &state, due);
+        assert_eq!(
+            cmds,
+            vec![Command::SkipRun { run: 0, at: due }],
+            "attempt 2's own answer decides attempt 2"
+        );
+
+        // The control, on the same state: a caller that answers TRUE again gets
+        // attempt 2 started, so the assertion above is about the ANSWER and not
+        // about a retried run being unstartable.
+        let mut truthy = state.clone();
+        truthy.runs[0].rendered_run_if = Some("true".to_string());
+        assert!(advance(&plan, &truthy, due)
+            .iter()
+            .any(|c| matches!(c, Command::StartRun { .. })));
+    }
+
+    /// **No corpus flow has both a `retry:` and a `runIf:`**, which is why
+    /// `a_run_if_is_re_asked_on_every_attempt` is a committed test rather than
+    /// a banked golden entry.
+    ///
+    /// The two corpus flows that write `runIf: "{{taskrun.attemptsCount == 0}}"`
+    /// — `valids/restart-with-finally` and `…-after-execution` — are exactly the
+    /// shape this would matter for, and neither declares a `retry:`, so the
+    /// expression is constant across the one attempt they take.
+    #[test]
+    fn no_corpus_flow_has_both_a_retry_and_a_run_if() {
+        let mut with_run_if = 0usize;
+        let mut both: Vec<String> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let has_run_if = source.lines().any(|l| l.trim_start().starts_with("runIf:"));
+            if has_run_if {
+                with_run_if += 1;
+            }
+            if has_run_if && source.lines().any(|l| l.trim_start().starts_with("retry:")) {
+                both.push(id);
+            }
+        }
+        assert_eq!(
+            with_run_if, 9,
+            "the control: this must find the flows that declare a `runIf:` at all"
+        );
+        assert_eq!(
+            both,
+            Vec::<String>::new(),
+            "a corpus flow now has both, so the re-ask rule is judged by a golden \
+             entry rather than by `a_run_if_is_re_asked_on_every_attempt` alone"
         );
     }
 }

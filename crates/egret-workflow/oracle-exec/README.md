@@ -3602,7 +3602,7 @@ at the end.
 | M114 | `plan.rs` | `children_of`'s `errors` half deleted | **0** — see below |
 | M114b | `plan.rs` | `MEASURED_MAX_CORPUS_DEPTH = 6` → `5` | **1**, the depth test |
 | M116 | `tests/executor.rs` | `corpus_source` appends `\n# disabled: true\n` | **1**: *"valids/task-runif: a flow declaring `disabled:` produced a SKIPPED run"* — the control half of the attribution |
-| M117 | `tests/executor.rs` | `corpus_source` rewrites `runIf:` to `runIff:` | **2**: the SKIPPED attribution *and* the residual-baseline table's new `runIf:` row |
+| M117 | `tests/executor.rs` | `corpus_source` rewrites `runIf:` to `runIff:` | **2 when it was written**; **3 replayed at W3c**. The second of the original two was "the residual-baseline table's new `runIf:` row", and **W3c deleted that row** — this figure went stale because of a later commit rather than because it was wrong. The third victim is W3c's own `the_caller_can_render_every_expression_except_the_ones_named` |
 | M115 | `tests/executor.rs` | `simulate_with`'s `spawned: Vec::new()` → `vec![Trace::default()]` | **4**, including `only_the_top_level_order_pairs_are_ever_asserted`'s control: *"egret produces no `spawned` at all, which is WHY the 227 nested pairs are unreachable"* |
 
 **M114 killed nothing, and it is recorded rather than dropped.** Deleting the
@@ -3690,6 +3690,12 @@ run and then not execute it", and it was answered from two directions:
   whether the body runs.
 
 So the surface is `runIf:` alone, and the two independent derivations agree.
+Its corpus population is asserted rather than described: **9** of the 345 flows
+declare one (`no_corpus_parallel_or_dag_child_declares_a_run_if`) and they carry
+**17** tasks between them — `grep -rEc '^[[:space:]]*runIf:'`; the 20 raw `runIf`
+hits include three comments in `task-runif-taskswithstate`. 17 is what the 11
+planned expressions below reconcile with: 17 − 1 `not-standalone` − 3
+`WorkingDirectory` children − 2 inside a `finally:` = 11.
 
 ### Where the rule lives, and the two rules it forced open
 
@@ -3750,16 +3756,30 @@ gained an arm that derives the whole `runIf:` population (11 planned, 7 that
 this context cannot render, 2 literal `"false"`, 2 truthy) so the boundary is a
 named list rather than a rate.
 
-### What DID move, and it moved down
+### What DID move, and it moved down — on FOUR entries, not two
 
 Two entries produce *fewer* runs than before, and the order-pair population goes
 **647 → 642**. `valids/task-runif` goes 3 runs/3 pairs → 2/1 and
-`valids/task-runif-executionupdating` 4/6 → 3/3, for the reason in the table
-above: each now stops at a `runIf:` its harness cannot render, where before it
-ran straight past the field. Measured by re-running the whole arm with
-`PlanTask::run_if` forced to `None` — which reproduces the pre-W3c tree exactly,
-since nothing else W3c changed can fire without a `runIf:` — and **only those two
-entries move**. Both were baselined before and are baselined after.
+`valids/task-runif-executionupdating` 4/6 → 3/3: each now stops at a `runIf:`
+this harness cannot render, where before it ran straight past the field.
+Measured by re-running the whole arm with `PlanTask::run_if` forced to `None` —
+which reproduces the pre-W3c tree exactly, since nothing else W3c changed can
+fire without a `runIf:`.
+
+**This paragraph said "only those two entries move" and was understating it by
+half, because the instrument could not see the other two.**
+`valids/restart-with-finally` and `valids/restart-with-after-execution` each hold
+a `fail_randomly` whose `runIf:` is `{{taskrun.attemptsCount == 0}}`. That run
+was `["CREATED","SUBMITTED","RUNNING","FAILED"]` with one attempt — **byte-identical
+to the golden's** — and is now `["CREATED","FAILED"]` with none. Their run count
+and pair count are unchanged, which is exactly why a measurement over pairs is
+blind to them: a trace can move without any run appearing or disappearing.
+`the_caller_can_render_every_expression_except_the_ones_named` now reads the
+golden's own terminal for each of the seven unrenderable `runIf:` expressions
+and asserts all seven, so the cost is derived per task rather than counted.
+**Six of the seven are the harness's cost; one — `willfailedtheflow` — is a
+render Kestra failed too, so reproducing its `FAILED` is right.** All four
+entries were baselined before and are baselined after.
 
 ### W3c's mutations
 

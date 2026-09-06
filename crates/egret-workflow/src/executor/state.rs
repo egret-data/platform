@@ -286,9 +286,10 @@ impl RunState {
 /// command there is exactly one value it can be — the one `advance()` saw —
 /// and no caller can record a different one.
 ///
-/// # The one rule in here, added by Task 7, and where it is knowingly wrong
+/// # The two rules in here, and where the first is knowingly wrong
 ///
-/// **A terminated [`Attempt`] takes no further state.** Before `retry:` a run
+/// ## 1. A terminated [`Attempt`] takes no further state (Task 7)
+/// Before `retry:` a run
 /// had at most one attempt and never outlived it, so every `SetRunState` was
 /// also an attempt state. A retried run's history reads `… RUNNING FAILED
 /// RETRYING CREATED SUBMITTED RUNNING FAILED …` while each of its attempts
@@ -307,6 +308,30 @@ impl RunState {
 /// has an attempt that continues past its own terminal. That is why the rule
 /// is stated here with its counter-example rather than left as an invariant
 /// somebody later discovers is not one.
+///
+/// ## 2. A run re-entering `CREATED` has no render (W3c fix round 2)
+///
+/// [`Command::CreateRun`] sets [`TaskRun::rendered`] and
+/// [`TaskRun::rendered_run_if`] to `None`, and
+/// [`reopen_due`](super::retry::reopen_due) puts a retried run back into
+/// `CREATED` with a plain [`Command::SetRunState`]. Without clearing them there,
+/// **attempt 2 is decided by attempt 1's render** — and for a `runIf:` that is a
+/// narrower instance of the over-acceptance W3c exists to close: Kestra
+/// re-renders `runIf:` at every worker-task emission
+/// (`ExecutionEventMessageHandler.java:269`), so a condition that has become
+/// falsy skips attempt 2, and a cached `"true"` runs it.
+///
+/// It is a *restoration* of the invariant `CreateRun` sets rather than a
+/// decision, which is why it is here and not in `advance`. **`rendered_run_if`
+/// is the first slot that can reach this at all**:
+/// [`scan`](super::retry::scan) only retries a `Runnable`, and a `Runnable`
+/// never had a `rendered`. `rendered` is cleared with it because the invariant
+/// is one invariant, and because a later task that retries a flowable would
+/// otherwise inherit the same defect silently.
+///
+/// `a_run_if_is_re_asked_on_every_attempt` holds it, and
+/// `no_corpus_flow_has_both_a_retry_and_a_run_if` derives why no golden entry
+/// can.
 pub fn apply(state: &mut ExecutionState, cmd: &Command) {
     match cmd {
         Command::CreateRun {
@@ -353,6 +378,14 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         Command::SetRunState { run, state: s } => {
             let r = &mut state.runs[*run];
             r.history.push(*s);
+            // Rule 2 (W3c fix round 2): a run re-entering `CREATED` has no
+            // render for the attempt it is about to take. See the block comment
+            // above -- this restores exactly the invariant `CreateRun` sets, and
+            // `retry::reopen_due` is the only writer that can reach it.
+            if *s == RunState::Created {
+                r.rendered = None;
+                r.rendered_run_if = None;
+            }
             match r.attempts.last_mut() {
                 Some(a) if !a.history.last().is_some_and(|last| last.is_terminal()) => {
                     a.history.push(*s)

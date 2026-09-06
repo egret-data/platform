@@ -3130,8 +3130,12 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
         (run_if_reachable, run_if_in_a_loop_body),
         (11, 0),
         "every planned `runIf:` in the comparable corpus, and the number is 11 \
-         where the flows write 16. Nine of the 345 flows declare a `runIf:` at \
-         all, 16 tasks between them. `valids/subflow-to-retry` is \
+         where the flows write 17. Nine of the 345 flows declare a `runIf:` at \
+         all, **17** tasks between them -- `grep -rEc '^[[:space:]]*runIf:'`, \
+         which is 3 fewer than the 20 raw `runIf` hits because \
+         `task-runif-taskswithstate` names it in three comments. **This said 16 \
+         and was wrong beside a derivation that was right**: 11 only reconciles \
+         with 17. `valids/subflow-to-retry` is \
          `not-standalone`, so it has no golden entry and contributes none. Three \
          are children of a `WorkingDirectory`, which `build_plan` plans OPAQUE, \
          so they are in no plan. Two are in `valids/task-runif-taskswithstate`\'s \
@@ -3162,6 +3166,55 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
          `the_residual_baseline_is_attributed_to_a_construct_or_named` — so none \
          of them is a bank this list is standing in the way of"
     );
+    // **What each unrenderable `runIf:` COSTS, derived.** A count of failures
+    // does not say whether the harness is losing anything: `willfailedtheflow`
+    // is a render Kestra failed too, and reproducing its FAILED is correct. So
+    // this reads the golden's own terminal for each of the seven tasks. Six
+    // name a run Kestra carried to a NON-failed terminal, and on those six
+    // egret's trace is strictly further from the golden than it was before
+    // W3c -- which is the honest cost of the fix and is understated by any
+    // measurement over run or pair counts, because two of the six change only
+    // the STATE LIST of a run that still exists.
+    let golden_states: Vec<(String, String, Vec<String>)> = run_if_failed
+        .iter()
+        .map(|(id, task)| {
+            let entry = golden()
+                .into_iter()
+                .find(|e| &e.id == id)
+                .expect("the entry is in the golden");
+            let states = Trace::from(&entry)
+                .runs
+                .iter()
+                .find(|r| &r.task == task)
+                .map(|r| r.state.clone())
+                .unwrap_or_default();
+            (id.clone(), task.clone(), states)
+        })
+        .collect();
+    assert_eq!(
+        golden_states
+            .iter()
+            .map(|(id, task, st)| format!("{id}/{task} {}", st.join(" ")))
+            .collect::<Vec<_>>(),
+        [
+            "valids/restart-with-after-execution/fail_randomly CREATED SUBMITTED RUNNING FAILED",
+            "valids/restart-with-finally/fail_randomly CREATED SUBMITTED RUNNING FAILED",
+            "valids/task-runif/executed CREATED SUBMITTED RUNNING SUCCESS",
+            "valids/task-runif/notexecuted CREATED SKIPPED",
+            "valids/task-runif/willfailedtheflow CREATED FAILED",
+            "valids/task-runif-executionupdating/setVariables CREATED RUNNING SUCCESS",
+            "valids/task-runif-executionupdating/skipUnsetVariables CREATED SKIPPED",
+        ],
+        "exactly ONE of the seven -- `willfailedtheflow` -- is a run Kestra also \
+         ended FAILED with no attempt, so egret reproducing it is right. The \
+         other six are the harness's cost. **Two of those six are the ones a \
+         run-count or pair-count measurement cannot see**: both `fail_randomly` \
+         runs were byte-identical to this golden before W3c and are now \
+         `CREATED FAILED` with no attempt, on entries whose run count and pair \
+         count did not move. `oracle-exec/README.md` said `only those two \
+         entries move`; it is FOUR, and this is the derivation that says so"
+    );
+
     run_if_falsy.sort();
     assert_eq!(
         run_if_falsy,
