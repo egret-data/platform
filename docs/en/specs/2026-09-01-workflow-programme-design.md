@@ -369,7 +369,7 @@ W7 — a screen inventory is not a UX review.
 | **W1** Model & language | `models/{flows,tasks,executions,triggers,property}`; YAML parse/validate; draft/version tables; publish + reference resolution | W0 |
 | **W2** Expressions | minijinja + 37 filters + 40 functions + `??`/`?:` rewrite + **the Pebble differential oracle** | W0 |
 | **W3a** Executor state machine | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; the Kestra execution-trace oracle. No I/O | W1, W2 |
-| **W3b** Durable executor | claim loops; reaper; tasks `core.log`, `egret.sql` | W3a |
+| **W3b** Durable executor | claim loops; reaper; `SpawnExecution`; handlers `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; the oracle re-pointed at the real driver | W3a |
 | **W4** Runner & container | `TaskCommands` contract; `egret.container`, `egret.python`; log streaming; output files; cancel/kill | W3b |
 | **W5** Kestra plugin host | the JVM image, `ShimRunContext`, `StorageInterface` bridge, `kestra.<FQCN>` dispatch, plugin jar resolution | W4 |
 | **W6** Triggers & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
