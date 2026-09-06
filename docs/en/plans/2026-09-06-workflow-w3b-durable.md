@@ -94,7 +94,7 @@ pub async fn reap(pool: &PgPool, timeout: Duration) -> Result<usize>;
 
 - [ ] **Step 1: Read each Kestra class and record the output shape** with file and line, from Task 1 Step 3's table. Do not infer `Return`'s output from its name.
 - [ ] **Step 2: Write one failing test per handler** asserting the output shape, not merely that it ran.
-- [ ] **Step 3: Implement.** `Sleep` is a `RunnableTask` (`Sleep.java:47`) — a handler, not a flowable; its duration must be **positive** (`PT0S` is refused by the artifact, measured in the W3a spike).
+- [ ] **Step 3: Implement.** `Sleep` is a `RunnableTask` (`Sleep.java:47`) — a handler, not a flowable. **On its duration, measure rather than inherit:** an earlier brief of mine said `PT0S` is refused, citing the W3a spike, and Task 1 could not confirm it from the class — `Sleep.java` carries only `@NotNull`, no positivity constraint, and `sleep(0)` does not throw. The refusal I saw came from somewhere else in the publish path. Find where, or find that it does not happen.
 - [ ] **Step 4: Mutation per handler**, including one that makes `Return` produce no output — if that kills nothing, the output is not yet compared and you must say so rather than move on.
 - [ ] **Step 5: Full gate, commit.**
 
@@ -119,6 +119,8 @@ W3a emits this command for a **loop iteration** and nothing executes it. Closing
 **Files:** Create `oracle-exec/driver.rs`; modify `tests/executor.rs`, `oracle-exec/README.md`.
 
 This is the package's deliverable. The harness's four tiers go; the driver replaces them.
+
+**Task 1 measured that this step can LOSE entries, and that is the decision this task owns.** The ceiling is **172**; today's ratchet matches **150**; and the move is **139 kept, 11 LOST, 33 gained**. Those 11 match today only because W3a's harness *feeds* a terminal for a task type W3b has no handler for — `OutputValues` ×6, `PurgeLogs` ×5, `Assert` ×1. Keeping that feed raises the bound to 183 and keeps the 11; dropping it is honest and costs them. **Either way this task reports it as a decision with its cost, never as a number that happened.** The working expectation is **167**, because five otherwise-bankable entries carry a W3a cause Task 1's derivation cannot see.
 
 - [ ] **Step 1: Record the before state** — ratchet, the fed-terminal split, the ordered-pair split, and the circular region as W3a's README derives them. Every one of these should move, and the ones that do not are as interesting as the ones that do.
 - [ ] **Step 2: Expect the deleted guard back.** W3a's Task 4 deleted Kestra's "first created, leave" guard as unreachable and named its trigger: *"a caller that applies a batch partially — W4's worker."* That caller is now yours, and it was measured to fire on `valids/dag`, `valids/if` and `valids/parallel-disabled-tasks`. If it does not fire, find out why before assuming it is gone.
