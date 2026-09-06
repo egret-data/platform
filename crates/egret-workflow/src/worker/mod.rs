@@ -49,12 +49,16 @@
 //! [`WorkerError`].
 
 mod claim;
+pub mod handlers;
 mod reaper;
+mod registry;
 
 pub use claim::{apply_outcome, claim, start_execution, tick, Claimed};
 pub use reaper::reap;
+pub use registry::Handlers;
 
 use crate::executor::RunState;
+use crate::runners::RenderContext;
 
 /// The claim's `working_timeout_s` equivalent, and the same default
 /// `automation.schedules.working_timeout_s` carries: one hour.
@@ -71,7 +75,12 @@ pub const DEFAULT_WORKING_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// able to write to the execution, because everything it writes has to land in
 /// [`apply_outcome`]'s single transaction and a handler that had its own
 /// connection could commit outside it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// **No `Eq`.** [`TaskInput::spec`] is a `serde_json::Value`, which is
+/// `PartialEq` and not `Eq` because a JSON number may be a float. Nothing
+/// compares two `TaskInput`s for equality; the derive is here so a test can
+/// `assert_eq!` on one field's worth of it.
+#[derive(Clone, Debug, PartialEq)]
 pub struct TaskInput {
     pub workspace_id: uuid::Uuid,
     pub execution_id: uuid::Uuid,
@@ -87,32 +96,152 @@ pub struct TaskInput {
     /// opens a second attempt (`executor::apply`'s rule 2), so a handler that
     /// wants to know it is a retry reads this.
     pub attempt: usize,
+    /// The task's own properties, exactly as the author wrote them —
+    /// `models::TaskKind::Leaf`'s `spec`, i.e. the task's map with `id`,
+    /// `type`, `description`, `retry`, `timeout`, `disabled` and `runIf`
+    /// already taken out by `models::Task`'s deserializer.
+    ///
+    /// **The plan cannot supply this.** `executor::TaskKind::Runnable` carries
+    /// a `type_id` and nothing else — deliberately, because a state machine
+    /// that knows what `egret.sql` is has stopped being a state machine — so
+    /// the properties come from the execution's frozen `source`, re-parsed by
+    /// [`claim::tick`](tick). That is the same rule the `Plan` itself follows
+    /// (rebuilt from `source` every tick rather than stored).
+    pub spec: serde_json::Value,
+    /// What a `{{ … }}` in one of those properties renders against.
+    ///
+    /// **Today it is empty, and that is a hole rather than a design.**
+    /// `advance()` cannot render and neither can this worker yet: W3b Task 5
+    /// owns the render surface (spec §4.4), and until it lands, a task whose
+    /// property references any variable fails to render and the run goes
+    /// `FAILED`. That is the safe direction — a refusal, not an
+    /// over-acceptance — but it is a divergence from Kestra and it is named
+    /// here rather than discovered. `claim::render_context_for` is the single
+    /// place Task 5 has to change.
+    pub render: RenderContext,
 }
 
 /// What a handler produces.
 ///
-/// One field today. W3b Task 3 widens it — `core.debug.Return` has an output
-/// (`{"value": …}`) and `core.execution.Fail` has a message — and it is a
-/// struct rather than a bare [`RunState`] so that widening is a field rather
-/// than a signature change.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Task 2 left this a single [`RunState`] and said Task 3 would widen it;
+/// this is that widening, and both new fields are measured rather than
+/// guessed — see [`handlers`] for the per-class citations.
+///
+/// **No `Eq`**, for [`TaskInput`]'s reason: `serde_json::Value` has none.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     /// The terminal state this run reached. `advance()` reads it as a
     /// [`Command::SetRunState`](crate::executor::Command::SetRunState).
     pub state: RunState,
+    /// The task's output map — what `{{ outputs.<task id> }}` reads.
+    ///
+    /// **`None` means the task produced no `Output` object at all**, which is
+    /// what three of the four handlers do: Kestra's `Log`, `Sleep` and a
+    /// falsy `Fail` all `return null` from `run` (`Log.java:109`,
+    /// `Sleep.java:62`, `Fail.java:137`), and `VoidOutput` is an empty class
+    /// (`VoidOutput.java:3`) none of them ever instantiates.
+    ///
+    /// **`None` and `Some({})` are not distinguishable to an expression, and
+    /// that was measured rather than reasoned.** On `kestra/kestra:v2.0.0-rc13`
+    /// a flow whose second task renders `{{ outputs.a }}` printed `{}` for `a`
+    /// = a `Log`, a `Sleep`, a falsy `Fail` **and** a `Return` with no
+    /// `format:` — and `{{ outputs }}` printed `{"a":{},"b":{}}`, so the key
+    /// is present and empty rather than absent. The renderer W3b Task 5 builds
+    /// must therefore map `None` to `{}`, not omit the key: an author's
+    /// `{{ outputs.a }}` has to render, while `{{ outputs.a.value }}` has to
+    /// fail (measured: *"Unable to find `value` used in the expression"*, and
+    /// the run goes `FAILED`).
+    pub outputs: Option<serde_json::Value>,
+    /// The message a failure carries.
+    ///
+    /// It exists because `core.execution.Fail` has **two** throwing paths with
+    /// **different** messages — the literal `"Fail on a condition"` when a
+    /// `condition:` is truthy (`Fail.java:135`) and the rendered
+    /// `errorMessage` when there is no condition at all (`:140`, default
+    /// `"Task failure"` at `:127`) — and **nothing in `golden.json` records a
+    /// failure message**, so the ratchet cannot tell them apart. This field is
+    /// what `handlers::fail`'s own tests assert on instead.
+    ///
+    /// `None` on every success. Nothing persists it yet; see the task report.
+    pub message: Option<String>,
 }
 
 impl Outcome {
+    /// `SUCCESS`, with no output — the three void handlers' answer.
     pub fn success() -> Self {
         Self {
             state: RunState::Success,
+            outputs: None,
+            message: None,
         }
     }
+    /// `SUCCESS`, carrying an output map.
+    pub fn succeeded_with(outputs: serde_json::Value) -> Self {
+        Self {
+            state: RunState::Success,
+            outputs: Some(outputs),
+            message: None,
+        }
+    }
+    /// `FAILED`, with no message. Kept because Task 2's tests use it.
     pub fn failed() -> Self {
         Self {
             state: RunState::Failed,
+            outputs: None,
+            message: None,
         }
     }
+    /// `FAILED`, carrying the message the task failed with.
+    pub fn failed_with(message: impl Into<String>) -> Self {
+        Self {
+            state: RunState::Failed,
+            outputs: None,
+            message: Some(message.into()),
+        }
+    }
+}
+
+/// One task type's implementation.
+///
+/// **Named `TaskHandler`, deliberately not `TaskRunner`** — the programme spec
+/// §6.4 names it and gives the reason: in Kestra `TaskRunner` means a
+/// *shell-command executor* (`TaskRunner.run(RunContext, TaskCommands,
+/// filesToDownload)`, whose javadoc says "will be called by the script
+/// plugin"), and reusing the name would recreate the exact confusion this
+/// programme had to clear up.
+///
+/// Three methods, which is §6.4's list minus one: that signature also carries
+/// `resolve(spec, PublishCx)`, the publish-time half, and W3b does not own
+/// publish. `crate::spec::registry::TASK_TYPES` is publish's half of the seam
+/// today — see [`Handlers`] for what it and this registry currently disagree
+/// about.
+#[async_trait::async_trait]
+pub trait TaskHandler: Send + Sync {
+    /// The `type:` this handler serves, spelled as a flow writes it.
+    fn type_id(&self) -> &'static str;
+
+    /// Run one task.
+    ///
+    /// The return contract is [`Registry::run`]'s: `Err` is a **worker**
+    /// failure and aborts the tick without moving the execution, while a task
+    /// that ran and failed is `Ok(Outcome { state: Failed, .. })`. A handler
+    /// that turned a task failure into `Err` would stall the execution instead
+    /// of failing it.
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome>;
+
+    /// Stop a run that is still in flight.
+    ///
+    /// **No default body on purpose.** All four of W3b's handlers have nothing
+    /// to cancel — they hold no pod, no remote query and no external handle —
+    /// but a default `Ok(())` would hand that same answer to `egret.sql` and
+    /// to W4's container handlers, where it is wrong and where nothing would
+    /// say so. Each implementation states its own reason.
+    ///
+    /// **Nothing calls this yet.** W4 owns the kill path (the programme spec's
+    /// *"the reclaim must kill the pod before retrying, or two pods will write
+    /// at once"*), and until it lands this is a shape with no caller — which
+    /// is stated here rather than left to be discovered.
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 
 /// Type-id → handler dispatch.
@@ -157,6 +286,17 @@ pub enum WorkerError {
     /// The stored `source` no longer builds a plan.
     #[error("execution {0} holds a source that no longer plans: {1}")]
     Unplannable(uuid::Uuid, String),
+
+    /// No handler is registered for a claimed run's `type_id`.
+    ///
+    /// **A refusal, and it aborts the tick for that run** rather than
+    /// completing it in some state — the same rule
+    /// [`WorkerError::NotYetExecutable`] follows. An unknown type that
+    /// "succeeded" would be the over-acceptance shape spec §7 forbids, and an
+    /// unknown type that "failed" would be worse: it would look like the
+    /// author's flow was wrong.
+    #[error("no handler is registered for task type {0:?}")]
+    NoHandler(String),
 
     /// A stored state string outside [`RunState::ALL`].
     #[error("{0} holds state {1:?}, which is not one of RunState::ALL")]

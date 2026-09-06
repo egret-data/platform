@@ -66,11 +66,36 @@ pub struct Claimed {
     /// and the claim reads it as `jsonb_array_length(attempts)` because a
     /// handler that wants to know it is a retry must not have to ask twice.
     pub attempt: i32,
+    /// The execution's frozen flow source.
+    ///
+    /// Read in the claim itself, for [`Claimed`]'s own reason: a handler needs
+    /// the task's properties, the `Plan` deliberately does not carry them
+    /// (`TaskKind::Runnable` holds a `type_id` and nothing else), and a second
+    /// read would be a second chance for the row to have changed.
+    pub source: String,
 }
 
 impl Claimed {
-    fn input(&self) -> TaskInput {
-        TaskInput {
+    /// What the handler is handed.
+    ///
+    /// `spec` is this task's own properties, found by walking the parsed flow
+    /// for [`Claimed::task_id`]. Task ids are unique across a whole flow —
+    /// `spec::validate`'s `duplicate_task_id` is a structural check over the
+    /// nested walk, not just `flow.tasks` — so the id is a key and not a
+    /// guess.
+    fn input(&self) -> Result<TaskInput> {
+        let flow = crate::spec::parse(&self.source)
+            .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
+        let spec = leaf_spec(&flow, &self.task_id).ok_or_else(|| {
+            worker_err(WorkerError::Corrupt(
+                self.id,
+                format!(
+                    "task {:?} is not a leaf of the execution's own source",
+                    self.task_id
+                ),
+            ))
+        })?;
+        Ok(TaskInput {
             workspace_id: self.workspace_id,
             execution_id: self.execution_id,
             run_id: self.id,
@@ -78,8 +103,49 @@ impl Claimed {
             type_id: self.type_id.clone(),
             value: self.value.clone(),
             attempt: self.attempt.max(0) as usize,
-        }
+            spec,
+            render: render_context_for(self),
+        })
     }
+}
+
+/// One task's own properties, by id, from anywhere in the flow.
+///
+/// `models::TaskKind::Leaf`'s `spec` is the task's map with `id`, `type`,
+/// `description`, `retry`, `timeout`, `disabled` and `runIf` already removed
+/// by `models::Task`'s deserializer, which is exactly a handler's surface. A
+/// non-leaf id answers `None`: the claim never takes one (`type_id IS NOT
+/// NULL`), so reaching that arm is a corruption rather than a case.
+fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Value> {
+    fn walk(task: &crate::models::Task, want: &str) -> Option<serde_json::Value> {
+        if task.id == want {
+            return match &task.kind {
+                crate::models::TaskKind::Leaf { spec } => Some(spec.clone()),
+                _ => None,
+            };
+        }
+        task.children().into_iter().find_map(|c| walk(c, want))
+    }
+    flow.tasks
+        .iter()
+        .chain(flow.errors.iter())
+        .find_map(|t| walk(t, task_id))
+}
+
+/// What a handler's `{{ … }}` renders against.
+///
+/// **Empty, and this function exists so that is one edit rather than a
+/// search.** `advance()` cannot render (it is pure) and neither can this
+/// worker yet: spec §4.4 gives the render surface — `inputs`, `vars`,
+/// `outputs`, `taskrun`, `tasksWithState()` — to W3b Task 5, which is also
+/// where the widening's consequences have to be attributed. Until then a task
+/// whose property references a variable fails to render and the run goes
+/// `FAILED`; that is a divergence from Kestra in the safe direction (a
+/// refusal, never an over-acceptance) and `tests/worker.rs`'s
+/// `a_task_whose_property_needs_a_render_fails_rather_than_succeeding` pins
+/// it so the day it changes, something says so.
+fn render_context_for(_claimed: &Claimed) -> crate::runners::RenderContext {
+    crate::runners::RenderContext::new()
 }
 
 /// Take up to `limit` runnable task runs, marking each leased.
@@ -110,7 +176,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                       jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
-                t.type_id, t.value, t.attempt \
+                t.type_id, t.value, t.attempt, e.source \
            FROM taken t JOIN workflow.executions e ON e.id = t.execution_id",
     )
     .bind(limit)
@@ -137,7 +203,7 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
     for c in &claimed {
-        let outcome = reg.run(&c.input()).await?;
+        let outcome = reg.run(&c.input()?).await?;
         let mut tx = pool.begin().await.map_err(db_err)?;
         apply_outcome(&mut tx, c, &outcome).await?;
         tx.commit().await.map_err(db_err)?;

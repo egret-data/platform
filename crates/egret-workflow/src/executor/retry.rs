@@ -422,7 +422,7 @@ pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<
 /// Weeks (`P2W`) and months are not accepted: `Duration.parse` does not accept
 /// months either, and nothing in the corpus writes a week. `None` for anything
 /// else, which refuses the policy.
-pub(super) fn parse_duration(source: &str) -> Option<Duration> {
+pub fn parse_duration(source: &str) -> Option<Duration> {
     let s = source.trim();
     let (negative, s) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),

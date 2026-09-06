@@ -572,3 +572,163 @@ async fn the_result_the_successor_and_the_execution_land_together(pool: sqlx::Pg
         "committing the result releases the lease"
     );
 }
+
+// --------------------------------------------------------------------------
+// W3b Task 3: the four handlers, driven through the real claim loop.
+//
+// `src/worker/handlers/*` carries the per-class unit tests -- the output shape
+// of each handler, against the citations. These four are the OTHER half: that
+// the registry is actually reachable from `tick`, that a handler's properties
+// arrive from the execution's own frozen `source`, and that the two refusals
+// this worker makes (no handler, no render) are refusals rather than states.
+// --------------------------------------------------------------------------
+
+use egret_workflow::worker::Handlers;
+
+/// Drive `tick` until it claims nothing, and say how many runs it finished.
+async fn drain(pool: &sqlx::PgPool, reg: &Handlers) -> usize {
+    let mut total = 0;
+    // Bounded: an unbounded loop over a worker that never converges is a hang,
+    // and a hang in a test file reads as an infrastructure problem.
+    for _ in 0..64 {
+        let n = egret_workflow::worker::tick(pool, 8, reg)
+            .await
+            .expect("tick");
+        if n == 0 {
+            return total;
+        }
+        total += n;
+    }
+    panic!("tick never stopped claiming; {total} runs finished");
+}
+
+/// All four handlers, in one flow, through the real registry.
+///
+/// The assertion is the **execution's** history, not "no error": a `Fail` with
+/// a falsy condition SUCCEEDS (`Fail.java:137`), so a flow that ends `SUCCESS`
+/// is only possible if every one of the four ran and produced the right
+/// terminal. A registry that answered `Outcome::success()` for everything
+/// would pass this — which is why the truthy-condition test below is its pair.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_real_registry_runs_all_four_handlers_end_to_end(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: four\nnamespace: t\ntasks:\n\
+         \x20 - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    format: hello\n\
+         \x20 - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    condition: \"false\"\n\
+         \x20 - id: s\n    type: io.kestra.plugin.core.flow.Sleep\n    duration: PT0.001S\n";
+    let ex = start_execution(&pool, ws, None, source)
+        .await
+        .expect("start execution");
+
+    let finished = drain(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(finished, 4, "one tick's work per task, four tasks");
+
+    for id in ["l", "r", "f", "s"] {
+        assert_eq!(
+            run_state(&pool, ex, id).await.as_deref(),
+            Some("SUCCESS"),
+            "{id} must have succeeded"
+        );
+    }
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// The pair to the test above, and what stops it passing against a registry
+/// that says `SUCCESS` to everything: the SAME `Fail` type, with a truthy
+/// condition, fails the execution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_truthy_fail_fails_the_execution_through_the_real_handler(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: boom\nnamespace: t\ntasks:\n\
+         \x20 - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    condition: \"true\"\n\
+         \x20 - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: never\n";
+    let ex = start_execution(&pool, ws, None, source)
+        .await
+        .expect("start execution");
+
+    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    assert_eq!(run_state(&pool, ex, "f").await.as_deref(), Some("FAILED"));
+    assert_eq!(
+        run_state(&pool, ex, "after").await,
+        None,
+        "a failed predecessor has no successor"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}
+
+/// **The hole this task leaves, pinned so it cannot close silently.**
+///
+/// `claim::render_context_for` supplies an EMPTY render context — W3b Task 5
+/// owns the render surface (spec §4.4) — so a property that references any
+/// variable cannot render and the run goes `FAILED` where Kestra's would
+/// succeed. That is a divergence in the safe direction (a refusal, never an
+/// over-acceptance), and the day Task 5 fills the context this test fails and
+/// says so.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_task_whose_property_needs_a_render_fails_rather_than_succeeding(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: needs-render\nnamespace: t\ntasks:\n\
+         \x20 - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: \"{{ inputs.who }}\"\n";
+    let ex = start_execution(&pool, ws, None, source)
+        .await
+        .expect("start execution");
+
+    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    assert_eq!(
+        run_state(&pool, ex, "l").await.as_deref(),
+        Some("FAILED"),
+        "with no render context, `{{{{ inputs.who }}}}` cannot render — W3b \
+         Task 5 is what makes this SUCCESS, and when it does, delete this test"
+    );
+
+    // The control, on the SAME handler and the same tick path: a literal
+    // message needs no context and succeeds. Without it, this test would pass
+    // against a `Log` handler that failed on everything.
+    let lit = start_execution(&pool, ws, None, &one_task("literal"))
+        .await
+        .expect("start execution");
+    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    assert_eq!(run_state(&pool, lit, "a").await.as_deref(), Some("SUCCESS"));
+}
+
+/// A type nothing serves **aborts the tick** and leaves the run where it was.
+///
+/// Neither alternative is acceptable: a silent `SUCCESS` is the
+/// over-acceptance shape spec §7 forbids, and a `FAILED` would report the
+/// author's flow as wrong when it is egret that has no handler. `OutputValues`
+/// is not a hypothetical — Task 1 measured it on 23 corpus entries, and 6 of
+/// the 11 "at risk" entries are its.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = "id: unhandled\nnamespace: t\ntasks:\n\
+         \x20 - id: o\n    type: io.kestra.plugin.core.output.OutputValues\n    values:\n      k: v\n";
+    let ex = start_execution(&pool, ws, None, source)
+        .await
+        .expect("start execution");
+
+    let err = egret_workflow::worker::tick(&pool, 8, &Handlers::with_core_tasks())
+        .await
+        .expect_err("an unhandled type must not report a finished run");
+    assert!(
+        err.to_string()
+            .contains("io.kestra.plugin.core.output.OutputValues"),
+        "the refusal names the type, got {err}"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "o").await.as_deref(),
+        Some("RUNNING"),
+        "the execution has not moved"
+    );
+}

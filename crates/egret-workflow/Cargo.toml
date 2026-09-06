@@ -178,6 +178,17 @@ rand.workspace = true
 aes-gcm.workspace = true
 base64.workspace = true
 
+# W3b Task 3: `worker::handlers::sleep` is `core.flow.Sleep`, which must
+# actually wait -- a Sleep that returned immediately would make every
+# `overlapping` ordered pair in the execution oracle unreachable -- and it must
+# wait without blocking the runtime thread, so `tokio::time::sleep`. `tracing`
+# is `worker::handlers::TracingSink`, the shipping `LogSink`: `core.log.Log`
+# has no output at all, so its log lines are the only thing it produces.
+# Both were already in this workspace's tree (tokio was this crate's own
+# dev-dependency), so neither adds a new crate to the build.
+tokio.workspace = true
+tracing.workspace = true
+
 [dev-dependencies]
 # minijinja moved to [dependencies] in W2 Task 3 (`runners::env` builds the
 # real environment). `runners::rewrite`'s tests still reach it as
@@ -191,7 +202,6 @@ base64.workspace = true
 # repo.rs's DB-gated tests (`tests/repo.rs`): one private, already-migrated
 # database per test process, per `egret-test-db`'s own doc.
 egret-test-db.workspace = true
-tokio.workspace = true
 
 # tests/routes.rs drives the router over a real `axum::Router` and a real
 # `CedarPdp`, following `crates/egret-dataapi/tests/endpoints_routes.rs`.
