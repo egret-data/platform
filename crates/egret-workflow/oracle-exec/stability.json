@@ -1,0 +1,2306 @@
+{
+ "flows": {
+  "invalids/loop-switch-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 4,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/after-execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/after-execution-error": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/after-execution-finally": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/after-execution-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/all-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/allow-failure": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 45,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/allow-failure-with-retry": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 15,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/assert": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/change-state-errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/condition_with_input": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/dag": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 1,
+   "pairs_kept": 20,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": [
+    [
+     "",
+     "5,6",
+     [
+      "before",
+      "before",
+      "overlapping",
+      "before",
+      "before"
+     ]
+    ]
+   ]
+  },
+  "valids/disable-error": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/disable-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/disable-simple": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/empty-variables": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/exit": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/exit-cancelled": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/exit-killed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/exit-nested": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/fail-on-condition": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/fail-on-switch": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/failed-first": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/failing-subflow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-allowfailure": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-dag": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 36,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-flow-error": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 15,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-flow-error-first": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-loop": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 45,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-loop-parallel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 45,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-parallel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 45,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-sequential": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-sequential-error": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/finally-sequential-error-first": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-cancel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-cancel-pause": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-parallel-subflow-kill": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-parallel-subflow-kill-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-parallel-subflow-kill-grandchild": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue-after-execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue-killed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue-killed-after-execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-queue-pause": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-sla-assert-cancel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-sla-fail-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-sla-fail-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-concurrency-subflow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-any-mode-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-any-mode-flow-b": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-any-mode-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-at-least-mode-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-at-least-mode-flow-b": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-at-least-mode-flow-c": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-at-least-mode-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-depends-on-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-depends-on-flow-b": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-depends-on-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-fire-once-true-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-fire-once-true-flow-b": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-invalid-inputs-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-mixed-conditions-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-mixed-conditions-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-multiple-conditions-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-multiple-conditions-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-multiple-depends-on-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-multiple-depends-on-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-paused-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-paused-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-stable-condition-id-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-stable-condition-id-flow-b": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-stable-condition-id-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-when-condition-flow-a": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-trigger-when-condition-flow-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-with-array-outputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-with-optional-outputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-with-outputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flow-with-outputs-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/flowable-with-parent-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/follow-dependencies-partial-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/full": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 78,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/http-listen": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/http-listen-encrypted": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 9,
+   "pairs_kept": 57,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": [
+    [
+     "",
+     "1,9",
+     [
+      "before",
+      "overlapping",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "4,7",
+     [
+      "before",
+      "overlapping",
+      "before",
+      "overlapping",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "5,8",
+     [
+      "before",
+      "overlapping",
+      "overlapping",
+      "before",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "6,8",
+     [
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "before",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "7,8",
+     [
+      "overlapping",
+      "overlapping",
+      "overlapping",
+      "before",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "7,9",
+     [
+      "before",
+      "before",
+      "before",
+      "before",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "8,9",
+     [
+      "overlapping",
+      "before",
+      "before",
+      "overlapping",
+      "overlapping"
+     ]
+    ],
+    [
+     "",
+     "8,10",
+     [
+      "before",
+      "before",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "8,11",
+     [
+      "before",
+      "before",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ]
+   ]
+  },
+  "valids/if-condition": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if-condition-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if-in-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 5,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if-in-parallel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if-with-only-disabled-tasks": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/if-without-else": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/json-input-schema-validation": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-deserialization": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-update-nested-value-list": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-update-nested-value-map": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-update-task": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-update-task-deduplicate": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/labels-update-task-empty": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/log-to-file": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/logs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-empty": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-expression-context": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 4,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-failed-no-transmit": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 5,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-map": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-multiple": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-nested": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 81,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-null": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-object": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 4,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-object-in-list": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 4,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-outputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-outputs-auto": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-outputs-failed-render": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-outputs-store": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-parallel-equal": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-parallel-less": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-parallel-more": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-parallel-unlimited": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-serial": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-serial-multiple-tasks": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 2,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-switch": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 9,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-until-restart": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-values-from-uri": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loop-with-subflow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/loopuntil-failed-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/minimal": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/minimal-bis": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/minimal2": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/npe-labels-update-task": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/output-values": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/parallel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 28,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/parallel-disabled-tasks": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/parallel-fail-with-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/parallel-nested": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 3,
+   "pairs_kept": 52,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": [
+    [
+     "",
+     "1,8",
+     [
+      "before",
+      "before",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "2,8",
+     [
+      "before",
+      "before",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ],
+    [
+     "",
+     "4,8",
+     [
+      "overlapping",
+      "before",
+      "before",
+      "overlapping",
+      "before"
+     ]
+    ]
+   ]
+  },
+  "valids/pause-behavior": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-delay": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-duration-from-input": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-errors-finally-after-execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-kill-delay": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-timeout": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause-timeout-allow-failure": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/pause_on_pause": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/primitive-labels-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/purge_logs_execution_only": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/purge_logs_full_arguments": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/purge_logs_no_arguments": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/purge_logs_trigger_only": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/purge_logs_with_batch_size": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/replay": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/replay-loop": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/replay-revision": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/replay-sequential-with-error-handler": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-loop": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-parent-loop": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-with-after-execution": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart-with-finally": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart_always_failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart_last_failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/restart_local_errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-expo": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-failed-flow-attempts": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-failed-flow-duration": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-failed-task-attempts": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-failed-task-duration": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [
+    3,
+    4
+   ],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-flowable-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-flowable-nested-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-flowable-parallel": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-new-execution-flow-attempts": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-new-execution-flow-duration": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-new-execution-task-attempts": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-new-execution-task-duration": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-random": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-subflow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-success": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-success-first-attempt": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/retry-with-flowable-errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/return": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/schedule-trigger": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/secrets": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sequential": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 55,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sequential-sleep": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sequential-with-disabled": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sequential-with-global-errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 15,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sequential-with-local-errors": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 15,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/set-variables": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/set-variables-duplicate": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sla-execution-condition": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sla-max-duration-fail": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sla-max-duration-ok": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sla-parent-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sla-subflow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sleep": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sleep-long": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sleep-long-after-execution-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sleep-short": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/sleep-task-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-child-with-output": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-function-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-function-failing": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-grand-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-inherited-labels-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-inherited-labels-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-nullable-input-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-parent-no-wait": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-parent-of-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-parent-retry": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-secret-output-child": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/subflow-secret-output-parent": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/switch": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/switch-impossible": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/switch-in-concurrent-loop": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 2,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-failure-executable-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-failure-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-failure-runnable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-warning-executable-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-warning-flowable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-allow-warning-runnable": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-flow-inherited-labels": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-runif": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-runif-executionupdating": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-runif-taskswithstate": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 6,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/task-runif-workingdirectory": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow-listener-no-inputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow-listener-with-concurrency-limit": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow-listener-with-pause": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow-with-concurrency-limit": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/trigger-flow-with-pause": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/unset-variables": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/variables": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/variables-invalid": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-child-task-warning": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-max-duration": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [
+    2,
+    4
+   ],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-max-iterations": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-multiple-tasks": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-multiple-tasks-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 3,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-nested": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 21,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/waitfor-no-success": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-draft": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-dynamic-key": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-failed": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-no-body": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-outputs": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-plaintext": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-plugin-labels": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-routing-test": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-secret-key": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-store-body": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-wait": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/webhook-with-condition": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 0,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-invalid-runif": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-taskrun": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 1,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  },
+  "valids/working-directory-taskrun-nested": {
+   "pairs_dropped_unmeasurable": 0,
+   "pairs_dropped_unstable": 0,
+   "pairs_kept": 10,
+   "rounds_differing_from_round_1": [],
+   "unmeasurable": [],
+   "unstable": []
+  }
+ },
+ "image": "kestra/kestra:v2.0.0-rc13",
+ "rounds": 5,
+ "unstable_traces": [
+  "valids/retry-failed-task-duration",
+  "valids/waitfor-max-duration"
+ ]
+}

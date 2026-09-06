@@ -1,0 +1,22 @@
+id: retry-and-fail
+namespace: io.kestra.tests
+description: >
+  Retrying step should prevent following steps from executing.
+
+tasks:
+  - id: keepFailingWithRetry
+    type: io.kestra.plugin.core.execution.Fail
+    description: Keep retrying with a simple retry defined.
+    retry:
+      type: constant
+      maxAttempts: 3
+      interval: PT1S
+
+  - id: thisTaskShouldNotBeExecuted
+    type: io.kestra.plugin.core.log.Log
+    message: "The previous task should fail"
+
+errors:
+  - id: error
+    type: io.kestra.plugin.core.log.Log
+    message: once

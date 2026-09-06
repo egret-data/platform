@@ -1,0 +1,37 @@
+id: restart_with_inputs
+namespace: io.kestra.tests
+
+inputs:
+  - id: string
+    type: STRING
+  - id: optional
+    type: STRING
+    required: false
+  - id: int
+    type: INT
+  - id: float
+    type: FLOAT
+  - id: instant
+    type: DATETIME
+  - id: file
+    type: FILE
+  - id: optionalFile
+    type: FILE
+    required: false
+
+tasks:
+  - id: string
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{inputs.string}}"
+  - id: int
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{inputs.int}}"
+  - id: float
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{inputs.float}}"
+  - id: instant
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{inputs.instant}}"
+  - id: file
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{inputs.file}}"

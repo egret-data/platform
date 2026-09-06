@@ -1,0 +1,34 @@
+id: labels-update-task
+namespace: io.kestra.tests
+labels:
+  flowLabelKey: flowLabelValue
+  overriddenFlowLabelKey: flowValueThatWillGetOverridden
+inputs:
+  - id: labelsJson
+    type: JSON
+  - id: labelsMapKey
+    type: STRING
+  - id: labelsMapValue
+    type: STRING
+  - id: labelsListKey
+    type: STRING
+  - id: labelsListValue
+    type: STRING
+tasks:
+  - id: from-render
+    type: io.kestra.plugin.core.execution.Labels
+    labels: "{{ inputs.labelsJson }}"
+  - id: from-map
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      "{{ inputs.labelsMapKey }}": "{{ inputs.labelsMapValue }}"
+  - id: from-list
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      - key: "{{ inputs.labelsListKey }}"
+        value: "{{ inputs.labelsListValue }}"
+  - id: override-labels
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      overriddenFlowLabelKey: "{{ flow.namespace ~ '.' ~ flow.id }}"
+      overriddenExecutionLabelKey: "{{ taskrun.id }}"

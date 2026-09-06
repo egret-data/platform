@@ -1,0 +1,15 @@
+id: retry-flowable-parallel
+namespace: io.kestra.tests
+
+tasks:
+  - id: flowable
+    type: io.kestra.plugin.core.flow.Loop
+    concurrencyLimit: 0
+    values: [0, 1]
+    retry:
+      type: constant
+      interval: PT1S
+      maxAttempts: 3
+    tasks:
+      - id: child
+        type: io.kestra.plugin.core.execution.Fail

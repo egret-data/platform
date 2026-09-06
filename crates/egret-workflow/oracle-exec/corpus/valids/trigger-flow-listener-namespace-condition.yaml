@@ -1,0 +1,19 @@
+id: trigger-flow-listener-namespace-condition
+namespace: io.kestra.tests.trigger
+
+inputs:
+  - id: from-parent
+    type: STRING
+
+tasks:
+  - id: only-listener
+    type: io.kestra.plugin.core.debug.Return
+    format: "simple return"
+
+triggers:
+  - id: listen-flow
+    type: io.kestra.plugin.core.trigger.Flow
+    dependsOn:
+      - namespace: io.kestra.tests.trigger
+      - states:
+          - SUCCESS

@@ -1,0 +1,22 @@
+id: trigger-flow-listener
+namespace: io.kestra.tests.trigger
+
+inputs:
+  - id: from-parent
+    type: STRING
+
+tasks:
+  - id: only-listener
+    type: io.kestra.plugin.core.debug.Return
+    format: "childs: {{inputs['from-parent']}}"
+
+triggers:
+  - id: listen-flow
+    type: io.kestra.plugin.core.trigger.Flow
+    inputs:
+      from-parent: '{{ outputs.only.value }}'
+    dependsOn:
+      - states:
+          - SUCCESS
+        namespace: io.kestra.tests.trigger
+        flowId: trigger-flow

@@ -90,11 +90,32 @@ impl Task {
     }
 }
 
-// kestra: Sequential.java -- `AbstractBranch`'s only field, `tasks`, run one
-// after another. `errors`/`finally` are AbstractBranch fields too but are
-// dropped here along with every other control-flow type's `errors`/`finally`:
-// W1 is the model, not the executor, and nothing in this task's interface
-// (`children()`) walks them.
+// kestra: Sequential.java -- `AbstractBranch`'s `tasks`, run one after
+// another, plus its `errors`.
+//
+// **`errors` arrived at W3a Task 7, and `finally` deliberately did not.**
+// W1 dropped both AbstractBranch fields ("W1 is the model, not the
+// executor"), and `crates/egret-workflow/src/executor/plan.rs` recorded that
+// as the reason `PlanTask::errors` could not be populated *at all*. Task 7
+// implements `errors:`, so the field has to exist to be read; `finally:` has
+// no owner in W3a and adding a field nothing reads would be a second dead
+// field rather than a smaller version of the same fix.
+//
+// `children()` is NOT widened with it, and that is a decision rather than an
+// oversight. Java's `AbstractBranch.allChildTasks()` *is* `tasks + errors +
+// _finally`, so `children()` is narrower than Kestra's walk -- but
+// `children()` is `spec::validate`'s walk (duplicate ids, `has_cycle`) and
+// nothing else, and widening it would change which flows egret REFUSES at
+// publish. That is W1's model to own; changing it here would move a refusal
+// for a reason that has nothing to do with `errors:` working.
+//
+// **The argument as first written leaned on "`build_plan` never calls
+// `validate`", and that has been false since `e0a22aa7`** -- Task 8 made
+// `validate` `build_plan`'s third gate, so widening this walk now moves what
+// the EXECUTOR refuses as well as what publish does. The conclusion is
+// unchanged and the reason it is unchanged is the stronger half of the
+// original: this is a rule about which flows are acceptable, and W1 owns
+// those. The clause has been removed rather than left to be read as support.
 //
 // `tasks` is `@NotEmpty` on `AbstractBranch` in Java (Task 4 fix round 3
 // owes the check), but that is bean validation, evaluated when Kestra
@@ -111,6 +132,11 @@ impl Task {
 pub struct Sequential {
     #[serde(default)]
     pub tasks: Vec<Task>,
+    /// `AbstractBranch.errors` -- the list driven instead of `tasks` once a
+    /// child of `tasks` has failed and will not be retried
+    /// (`Execution.findTaskDependingFlowState`).
+    #[serde(default)]
+    pub errors: Vec<Task>,
 }
 
 // kestra: Parallel.java -- `AbstractBranch` + `concurrent` (0 = unlimited).
@@ -127,6 +153,11 @@ pub struct Sequential {
 pub struct Parallel {
     #[serde(default)]
     pub tasks: Vec<Task>,
+    /// `AbstractBranch.errors`, the same field `Sequential` carries and for
+    /// the same reason -- see its doc for why `finally` is not beside it and
+    /// why `children()` is not widened.
+    #[serde(default)]
+    pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
 }
@@ -154,6 +185,12 @@ pub struct If {
     pub then: Vec<Task>,
     #[serde(default, rename = "else")]
     pub r#else: Vec<Task>,
+    /// `If.java:111`. `If` is not an `AbstractBranch` -- it extends `Task`
+    /// directly -- but it declares its own `errors` all the same, and
+    /// `If.resolveNexts` passes it to the same
+    /// `FlowableUtils.resolveSequentialNexts`. See `Sequential::errors`.
+    #[serde(default)]
+    pub errors: Vec<Task>,
 }
 
 // kestra: Switch.java. `value` is `@NotNull` in Java (Task 4 owes a check);
@@ -168,6 +205,9 @@ pub struct Switch {
     pub cases: BTreeMap<String, Vec<Task>>,
     #[serde(default)]
     pub defaults: Vec<Task>,
+    /// `Switch.java:112`, the same field `If` carries and for the same reason.
+    #[serde(default)]
+    pub errors: Vec<Task>,
 }
 
 // kestra: Dag.java -- `tasks` is a list of `(task, dependsOn)` pairs, not a
@@ -183,6 +223,9 @@ pub struct Switch {
 pub struct Dag {
     #[serde(default)]
     pub tasks: Vec<DagNode>,
+    /// `Dag.java:106`, the same field the other three flowables carry.
+    #[serde(default)]
+    pub errors: Vec<Task>,
     #[serde(default = "default_concurrent")]
     pub concurrent: Option<Property<i32>>,
 }

@@ -1,0 +1,9 @@
+id: empty
+namespace: io.kestra.tests
+inputs:
+  - id: "wrong one"
+    type: FOO
+tasks:
+  - id: date
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{taskrun.startDate}}"

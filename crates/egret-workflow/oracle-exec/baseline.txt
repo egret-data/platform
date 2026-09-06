@@ -1,0 +1,239 @@
+# The W3a execution oracle's ratchet baseline: the golden entries egret does not
+# reproduce yet.
+#
+# tests/executor.rs fails if an id NOT listed here mismatches (a regression), and
+# ALSO fails if an id listed here now MATCHES -- delete the line in the same
+# commit that earns it. That second direction is what makes this a ratchet
+# rather than a suppression list: a task cannot make progress without shrinking
+# this file, and cannot claim progress it did not make.
+#
+# One id per line. `#` starts a comment. golden.json order.
+#
+# Written by W3a Task 2 at 294 entries, which is EVERY comparable golden entry.
+# `advance()` and `build_plan()` are stubs, so each of the 266 `runs` entries
+# produces an execution that never leaves [CREATED] with no runs at all, and
+# each of the 28 `refused` entries is over-accepted. That is the starting debt,
+# stated rather than estimated; Tasks 3-8 each bank their flowable's slice and
+# drive it to zero.
+#
+# Task 3 (`sequential`) banked 101, leaving 193. Task 4 (`parallel`, `dag`)
+# banked 4, leaving 189: `valids/parallel`, `valids/parallel-nested`, and the
+# two `invalids` `Dag` refusals egret used to OVER-ACCEPT --
+# `dag-cyclicdependency` and `dag-notexist-task`, which are the two checks
+# Kestra's own `DagTaskValidator` makes.
+#
+# `valids/dag` is NOT banked and Task 4 could not bank it. Its runs, histories
+# and attempts are reproduced exactly; one ordered pair is not, and cannot be by
+# anything without a clock. See `oracle-exec/runnable.txt`, `The one ordered
+# pair Task 4 could not reach`.
+#
+# Task 5 (`if`, `switch`) banked 8, leaving 181.
+#
+# Task 6 (`loop`, `Command::SpawnExecution`) banked 2, leaving 179 --
+# `valids/loop-empty` and `valids/loop-null`, the only two `Loop` entries whose
+# golden carries NO sub-execution. That is the whole of what this task could
+# bank, and the reason is a hole rather than a gap in the implementation:
+# nothing executes `Command::SpawnExecution` until W3b/W6, so egret's side of
+# `spawned` stays empty and every one of the 41 golden entries that carries a
+# sub-execution mismatches on that field alone. 33 of those 41 now differ on
+# NOTHING ELSE -- derived by
+# `tests/executor.rs::the_spawned_field_is_all_that_stands_between_these_
+# entries_and_a_bank`, which fails if that number moves. See
+# `oracle-exec/README.md`, `What Task 6 had to change, and what it banked`.
+#
+# Task 7 (`retry`, `errors:`) banked 16, leaving 163. Nine are retry
+# (`retry-expo`, `retry-fail`, `retry-failed`, `retry-failed-flow-attempts`,
+# `retry-failed-task-attempts`, `retry-flowable`, `retry-flowable-child`,
+# `retry-flowable-nested-child`, `retry-random`) and seven are `errors:`
+# (`change-state-errors`, `errors`, `replay-sequential-with-error-handler`,
+# `restart_always_failed`, `restart_local_errors`, `sequential-with-global-errors`,
+# `sequential-with-local-errors`).
+#
+# The `spawned` hole is now **38 of 41**, not 33: the four
+# `retry-new-execution-*` entries reproduce every run, history and attempt
+# Kestra recorded and differ only on the REPLACEMENT execution a
+# `CREATE_NEW_EXECUTION` retry starts -- which nothing in `Command` can ask for
+# and `ExecutionState` has no field for. `valids/retry-flowable-parallel` is the
+# fifth, and it is the same hole with a `Loop` in front of it.
+#
+# `timeout:` is NOT among the lines this task deleted and never could have been:
+# in this artifact the WORKER enforces it
+# (`WorkerTaskCallable.java:61`), and Kestra's own validator refuses it on any
+# non-`RunnableTask` (`FlowService.java:574`). It belongs to W4.
+#
+# Task 8 (the `invalids`) banked 14, leaving 149. Seven needed no new rule:
+# `build_plan` called `spec::parse` and never `spec::validate`, so egret had two
+# answers to "is this flow acceptable" and publish had been refusing seven of
+# these flows since W1. The largest single cause of the over-acceptance was a
+# missing CALL, not a missing rule. The seven that did need one are
+# `duplicate-key` (the same key twice in one YAML mapping, caught at parse),
+# `workingdirectory-invalid`, the two `scheduled-missing-inputs-defaults`,
+# `inputs-validation`, and the two dashed-reference flows.
+#
+# **This paragraph did not exist until the final review**, and its absence is
+# the symptom this file was named for in the plan: every task deletes lines from
+# a file no single task owns, so the header narrative stopped at Task 7 while
+# the line count kept moving. It said "leaving 163" over a file holding 149.
+#
+# The final review (`disabled:`) banked 4, leaving 145: `disable-simple`,
+# `disable-error`, `sequential-with-disabled` and `if-with-only-disabled-tasks`.
+# A disabled task now gets no `PlanTask` at all, which is Kestra's own rule --
+# `Execution.removeDisabled` over `tasks`, `errors` and `finally` -- and until
+# then egret CREATED AND RAN a task the author had disabled, flipping the
+# execution's terminal state on four of the six flows that use the flag. Those
+# four were filed here as "does not reproduce yet"; they were over-acceptances,
+# and this file is not where an over-acceptance belongs. The other two are
+# `disable-flowable` (held by the sub-execution hole alone) and
+# `parallel-disabled-tasks` (held by one ordered pair, like `dag` and `if`).
+#
+# A panic, and a state machine that will not settle inside the step bound, are
+# NOT covered by this file. A line here means "egret does not reproduce this
+# trace yet"; it never means "egret may crash here". A line here also never
+# means "egret over-accepts this flow": an over-acceptance is a divergence this
+# programme forbids shipping, and the five that remain are named in
+# `tests/executor.rs`'s `STILL_OVER_ACCEPTED` with an owner each, not here.
+invalids/dag-invalid-subtask
+invalids/inputs-bad-validator-syntax
+invalids/inputs-with-multiple-constraint-violations
+invalids/invalid-property
+invalids/invalid-task
+invalids/loop-switch-failed
+valids/after-execution
+valids/after-execution-error
+valids/after-execution-finally
+valids/after-execution-flowable
+valids/all-flowable
+valids/allow-failure
+valids/allow-failure-with-retry
+valids/dag
+valids/disable-flowable
+valids/exit
+valids/exit-cancelled
+valids/exit-killed
+valids/exit-nested
+valids/finally-allowfailure
+valids/finally-dag
+valids/finally-flow
+valids/finally-flow-error
+valids/finally-flow-error-first
+valids/finally-loop
+valids/finally-loop-parallel
+valids/finally-parallel
+valids/finally-sequential
+valids/finally-sequential-error
+valids/finally-sequential-error-first
+valids/flow-concurrency-cancel-pause
+valids/flow-concurrency-parallel-subflow-kill
+valids/flow-concurrency-parallel-subflow-kill-child
+valids/flow-concurrency-queue-after-execution
+valids/flow-concurrency-queue-killed-after-execution
+valids/flow-concurrency-queue-pause
+valids/flow-concurrency-sla-assert-cancel
+valids/flow-concurrency-sla-fail-child
+valids/flow-concurrency-sla-fail-parent
+valids/flow-concurrency-subflow
+valids/flow-trigger-paused-flow
+valids/flow-with-outputs-failed
+valids/flowable-with-parent-fail
+valids/full
+valids/if
+valids/if-in-flowable
+valids/if-in-parallel
+valids/labels-update-nested-value-list
+valids/labels-update-nested-value-map
+valids/labels-update-task
+valids/labels-update-task-deduplicate
+valids/labels-update-task-empty
+valids/loop-expression-context
+valids/loop-failed
+valids/loop-failed-no-transmit
+valids/loop-flowable
+valids/loop-map
+valids/loop-multiple
+valids/loop-nested
+valids/loop-object
+valids/loop-object-in-list
+valids/loop-outputs
+valids/loop-outputs-auto
+valids/loop-outputs-failed-render
+valids/loop-outputs-store
+valids/loop-parallel-equal
+valids/loop-parallel-less
+valids/loop-parallel-more
+valids/loop-parallel-unlimited
+valids/loop-serial
+valids/loop-serial-multiple-tasks
+valids/loop-switch
+valids/loop-until-restart
+valids/loop-values-from-uri
+valids/loop-with-subflow
+valids/loopuntil-failed-flowable
+valids/npe-labels-update-task
+valids/parallel-disabled-tasks
+valids/pause-behavior
+valids/pause-delay
+valids/pause-duration-from-input
+valids/pause-errors-finally-after-execution
+valids/pause-kill-delay
+valids/pause-timeout
+valids/pause-timeout-allow-failure
+valids/pause_on_pause
+valids/primitive-labels-flow
+valids/replay-loop
+valids/restart-loop
+valids/restart-parent
+valids/restart-parent-loop
+valids/restart-with-after-execution
+valids/restart-with-finally
+valids/retry-failed-flow-duration
+valids/retry-flowable-parallel
+valids/retry-new-execution-flow-attempts
+valids/retry-new-execution-flow-duration
+valids/retry-new-execution-task-attempts
+valids/retry-new-execution-task-duration
+valids/retry-subflow
+valids/retry-success
+valids/retry-with-flowable-errors
+valids/set-variables
+valids/set-variables-duplicate
+valids/sla-execution-condition
+valids/sla-max-duration-fail
+valids/sla-parent-flow
+valids/sla-subflow
+valids/sleep-long
+valids/sleep-long-after-execution-flowable
+valids/subflow-child
+valids/subflow-inherited-labels-parent
+valids/subflow-nullable-input-parent
+valids/subflow-parent
+valids/subflow-parent-no-wait
+valids/subflow-parent-of-failed
+valids/subflow-parent-retry
+valids/subflow-secret-output-child
+valids/subflow-secret-output-parent
+valids/switch-impossible
+valids/switch-in-concurrent-loop
+valids/task-allow-failure-executable-flow
+valids/task-allow-failure-flowable
+valids/task-allow-failure-runnable
+valids/task-allow-warning-executable-flow
+valids/task-allow-warning-flowable
+valids/task-allow-warning-runnable
+valids/task-flow
+valids/task-flow-inherited-labels
+valids/task-runif
+valids/task-runif-executionupdating
+valids/task-runif-taskswithstate
+valids/task-runif-workingdirectory
+valids/trigger-flow-with-pause
+valids/unset-variables
+valids/waitfor
+valids/waitfor-child-task-warning
+valids/waitfor-max-iterations
+valids/waitfor-multiple-tasks
+valids/waitfor-multiple-tasks-failed
+valids/waitfor-nested
+valids/waitfor-no-success
+valids/working-directory-invalid-runif
+valids/working-directory-taskrun
+valids/working-directory-taskrun-nested

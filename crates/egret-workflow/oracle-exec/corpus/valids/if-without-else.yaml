@@ -1,0 +1,15 @@
+id: if-without-else
+namespace: io.kestra.tests
+
+inputs:
+  - id: param
+    type: STRING
+
+tasks:
+  - id: if
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{inputs.param}}"
+    then:
+      - id: when-true
+        type: io.kestra.plugin.core.log.Log
+        message: 'Condition was true'

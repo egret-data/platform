@@ -1,0 +1,13 @@
+id: duplicate
+namespace: io.kestra.tests
+
+tasks:
+  - id: date2
+    type: io.kestra.plugin.core.debug.MissingTwo
+    format: "{{taskrun.startDate}}"
+
+
+errors:
+  - id: date3
+    type: io.kestra.plugin.core.debug.MissingThree
+    format: "{{taskrun.startDate}}"

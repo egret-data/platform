@@ -21,6 +21,10 @@
 //! network. That boundary holds all the semantic difficulty and is what makes
 //! it testable without standing anything up (spec §6.5).
 
+// `pub`, not `mod`: the ratchet that judges it (`tests/executor.rs`) is an
+// integration test, exactly as `tests/oracle.rs` is, and an integration test
+// sees only the public API.
+pub mod executor;
 pub mod models;
 pub mod publish;
 pub mod refs;

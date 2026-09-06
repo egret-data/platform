@@ -1,0 +1,1074 @@
+W3a execution oracle -- how much of Kestra's own corpus runs standalone
+========================================================================
+
+Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.
+Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,
+core/src/test/resources/flows/{valids,invalids}, BOTH .yaml and .yml.
+
+total flows                345
+  runs                     268
+  rejected                 51
+  not-standalone           26
+  TOTAL                    345
+
+valids (317)
+  runs                     267
+  rejected                 24
+  not-standalone           26
+  TOTAL                    317
+
+invalids (28)
+  runs                     1
+  rejected                 27
+  TOTAL                    28
+
+rejected, by class
+  invalid-flow                                 27  <- Task 8 evidence
+  task-type-not-in-image                       22
+  checkout-drift                               1
+  refused-by-both                              1  <- Task 8 evidence
+  TOTAL                                        51
+
+  Evidence that egret must refuse a flow -- and nothing else is:
+    invalid-flow                               27
+    refused-by-both                            1
+  The remaining classes are NOT refusals:
+    checkout-drift                             1  -- the flow is VALID; the pinned image is older than the checkout
+    task-type-not-in-image                     22  -- the FIRST violation is a Kestra test-source class the image does not ship. rc13 short-circuits on an unknown type, so this says NOTHING about whether the flow is otherwise valid -- do not read it as `the flow is fine`
+    unclassified-rejection                     0  -- UNKNOWN -- not shown to be a refusal and not shown to be drift; read the raw message before using it for anything
+
+invalids this Kestra ACCEPTS: 1
+  invalids/loop-switch-failed  ->  runs (FAILED)
+  These are NOT evidence for Task 8.  Kestra's repo files a flow under
+  invalids/ when the EXECUTION is expected to fail as well as when the flow
+  is rejected; the pinned runtime distinguishes them and this is the split.
+
+sub-executions harvested by following parentId: 142
+
+happens-before pairs, over the five harvest rounds
+  kept (identical in all 5 rounds)             1104
+  dropped, relation flipped between rounds     13
+  dropped, a run had no start or no end        0
+  TOTAL                                        1117
+
+  of the kept pairs, by relation
+    before                                     743
+    overlapping                                361
+    TOTAL                                      1104
+
+  `after` is UNREACHABLE BY CONSTRUCTION on Kestra's side, not measured
+  to be absent: pairs are enumerated (i, j) with i < j in taskRunList
+  order, and a run's left endpoint is its creation instant, which is
+  monotonic in that order in 4215 of 4215 captured runs.  It stays in the
+  vocabulary because it is a live error signal on EGRET's side, where
+  nothing guarantees that monotonicity.
+
+  A relation observed once is a coincidence, and genuinely parallel
+  branches flip.  Only the pairs that came out the same in all five
+  rounds are in golden.json; the rest are dropped and counted here.
+
+traces that did NOT reproduce across all 5 rounds: 2
+  valids/retry-failed-task-duration  (rounds differing from round 1: [3, 4])
+  valids/waitfor-max-duration  (rounds differing from round 1: [2, 4])
+  These get NO golden entry and are never compared.  A trace the oracle
+  itself does not reproduce five times running cannot judge egret: an
+  implementation matching round 1 would be right by luck.
+
+
+rejected -- 51
+------------------------------------------------------------------------
+invalids/dag-cyclicdependency  [invalid-flow]
+    publish -> 422: tasks[dag]: Cyclic dependency detected: task1, task2
+
+invalids/dag-invalid-subtask  [invalid-flow]
+    publish -> 422: tasks[task1].tasks[task1].task.message: must not be null
+
+invalids/dag-notexist-task  [invalid-flow]
+    publish -> 422: tasks[dag]: Not existing task id in dependency: taskX
+
+invalids/duplicate  [invalid-flow]
+    publish -> 422: : Invalid Flow: Duplicate task id with name [date], Duplicate trigger id with name [trigger]
+
+invalids/duplicate-inputs  [invalid-flow]
+    publish -> 422: : Invalid Flow: Duplicate input with name [first_input]
+
+invalids/duplicate-key  [invalid-flow]
+    publish -> 422: Illegal genericflow source: YAML parsing error: Duplicate field 'message'
+ at [Source: (StringReader); line: 8, column: 12] (through reference chain: io.kestra.core.models.flows.GenericFlow["tasks"]->java.util.ArrayList[0]) (at line 8)
+invalids/duplicate-parallel  [invalid-flow]
+    publish -> 422: : Invalid Flow: Duplicate task id with name [t3]
+
+invalids/empty  [invalid-flow]
+    publish -> 422: tasks: must not be empty
+
+invalids/if-without-condition  [invalid-flow]
+    publish -> 422: tasks[if].condition: must not be null
+
+invalids/inputs  [invalid-flow]
+    publish -> 422: Invalid type: null
+invalids/inputs-bad-type  [invalid-flow]
+    publish -> 422: Invalid type: FOO
+invalids/inputs-bad-validator-syntax  [invalid-flow]
+    publish -> 422: inputs[badValidatorSyntax].validator: invalid pattern [\]
+
+invalids/inputs-key-with-subtraction-symbol-validation  [invalid-flow]
+    publish -> 422: : Invalid Flow: Invalid input reference: use inputs[key-name] instead of inputs.key-name — keys with dashes require bracket notation, offending tasks: [hello]
+
+invalids/inputs-validation  [invalid-flow]
+    publish -> 422: inputs[multiselect1]: `itemType` cannot be ARRAY
+inputs[array3]: `itemType` cannot be MULTISELECT
+inputs[array4]: `itemType` cannot be SELECT
+inputs[array2]: `itemType` cannot be SECRET
+inputs[multiselect2]: `itemType` cannot be SECRET
+inputs[multiselect4]: `itemType` cannot be SELECT
+inputs[file]: inputs of type 'FILE' only support `defaults` as local files using a file URI or as namespace files using a nsfile URI
+inputs[array1]: `itemType` cannot be ARRAY
+inputs[multiselect3]: `itemType` cannot be MULTISELECT
+
+invalids/inputs-with-multiple-constraint-violations  [invalid-flow]
+    publish -> 200; POST execution -> 422: Invalid value for input `multi`. Cause: value `H` doesn't match the values `[A, B, C]`
+Invalid value for input `multi`. Cause: value `F` doesn't match the values `[A, B, C]`
+invalids/invalid  [invalid-flow]
+    publish -> 422: tasks[null].id: must not be blank
+tasks[null].id: must not be null
+namespace: must match "^[a-z0-9][a-z0-9._-]*"
+id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
+
+invalids/invalid-parallel  [invalid-flow]
+    publish -> 422: id: must match "^[a-zA-Z0-9][a-zA-Z0-9._-]*"
+namespace: must match "^[a-z0-9][a-z0-9._-]*"
+namespace: size must be between 1 and 150
+tasks[para2].tasks: The 'tasks' property cannot be empty
+id: must not be blank
+tasks[para4].tasks: The 'tasks' property cannot be empty
+tasks[para3].tasks: The 'tasks' property cannot be empty
+id: size must be between 1 and 100
+
+invalids/invalid-property  [invalid-flow]
+    publish -> 422: Unrecognized field "invalid" (class io.kestra.plugin.core.debug.Return), not marked as ignorable (17 known properties: "logLevel", "timeout", "assets", "retry", "policyRefs", "allowWarning", "format", "version", "type", "id", "description", "workerSelector", "allowFailure", "runIf", "logToFile", "disabled", "taskCache")
+invalids/invalid-task  [invalid-flow]
+    publish -> 422: Invalid type: io.kestra.plugin.core.debug.MissingTwo
+invalids/outputs-key-with-subtraction-symbol-validation  [invalid-flow]
+    publish -> 422: : Invalid Flow: Invalid output reference: use outputs[key-name] instead of outputs.key-name — keys with dashes require bracket notation, offending tasks: [use_output], Invalid output reference: use outputs[key-name] instead of outputs.key-name — keys with dashes require bracket notation, offending outputs: [final]
+
+invalids/recursive-flow  [invalid-flow]
+    publish -> 422: : Invalid Flow: Recursive call to flow [io.kestra.tests.recursive-flow]
+
+invalids/scheduled-missing-inputs-defaults  [invalid-flow]
+    publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missing inputs: 'user2'
+
+invalids/scheduled-missing-inputs-defaults-2  [invalid-flow]
+    publish -> 422: : Invalid Flow: Missing inputs for Schedule Trigger 'every_minute', missing inputs: 'user2'
+
+invalids/switch-invalid  [invalid-flow]
+    publish -> 422: tasks[impossible]: No task defined, neither cases or default have any tasks
+
+invalids/system-labels  [invalid-flow]
+    publish -> 422: tasks[null].id: must not be null
+: Invalid Flow: System labels can only be set by Kestra itself, offending label: system.label=system_key, System labels can only be set by Kestra itself, offending label: system.id=id
+tasks[null].id: must not be blank
+
+invalids/workingdirectory-invalid  [invalid-flow]
+    publish -> 422: tasks[impossible]: Only runnable tasks are allowed as children of a WorkingDirectory task
+
+invalids/workingdirectory-no-tasks  [invalid-flow]
+    publish -> 422: tasks[impossible]: The 'tasks' property cannot be empty
+tasks[impossible].tasks: The 'tasks' property cannot be empty
+
+valids/additional-plugin  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.plugins.AdditionalPluginTest$AdditionalPluginTestTask
+valids/alias-task  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.runners.test.TaskWithAlias
+valids/alias-trigger  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.runners.test.trigger.Alias
+valids/cache  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.runners.TaskCacheTest$CounterTask
+valids/dynamic-task  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
+valids/encrypted-string  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+valids/exception-with-output  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.runners.test.TaskThatFail
+valids/executable-fail  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.BadExecutable
+valids/flow-trigger-fire-once-true-flow-listen  [checkout-drift]
+    publish -> 422: Unrecognized field "fireOnce" (class io.kestra.core.models.triggers.Window), not marked as ignorable (7 known properties: "offset", "lookback", "deadline", "timezone", "from", "to", "every")
+valids/flowable-fail  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.BadSequential
+valids/invalid-draft-flow  [refused-by-both]
+    publish -> 422: tasks: must not be empty
+
+valids/null-output  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.NullOutputTask
+valids/retry-dynamic-task  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.DynamicTask
+valids/webhook-plugin  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+valids/workertask-result-too-large  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.runners.test.WorkerTaskResultTooLarge
+valids/working-directory  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-cache  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-inputs  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-loop  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-namespace-files  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
+valids/working-directory-namespace-files-with-namespaces  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Read
+valids/working-directory-outputs  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles
+valids/working-directory-secret-output  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+valids/working-directory-taskrun-encrypted  [task-type-not-in-image]
+    publish -> 422: Invalid type: io.kestra.core.tasks.test.Encrypted
+
+
+not-standalone -- 26
+------------------------------------------------------------------------
+valids/flow-trigger-invalid-inputs-flow-listen
+    Created only by a Flow trigger on flow-trigger-invalid-inputs-flow-a (MultipleConditionTriggerCaseTest.java:282); its inputs deliberately reference trigger outputs that do not exist, and the test asserts the TRIGGER produces a FAILED execution with no task runs.
+valids/follow-dependencies-partial-parent
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 5vWOA6Ff0qNPf6GoWj0bOr)
+valids/input-log-secret
+    POST execution -> 422:  errors:
+```
+Unable to use a `SECRET` input/output as encryption is not configured
+```
+valids/inputs
+    FILE input `file` is a classpath resource path resolved by the JVM (InputsTest.inputs -> application-test.yml) and json2/yaml2 are Java Map objects; the values are computed, not literal.
+valids/inputs-large
+    RunContextTest.java:141 builds the `string` input from a 16 KiB generated char array and reuses InputsTest.inputs' classpath FILE path; computed, not literal.
+valids/inputs-small-files
+    ExecutionControllerRunnerTest.java:394 uploads the classpath resource application-test.yml as a multipart FILE part; the value is a JVM resource path.
+valids/kv
+    No Java test drives this flow.  Both inputs have YAML defaults, so a bare execution would silently take them and produce a golden for a path no Kestra test asserts.
+valids/loop-pause
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6gvEBPfu9l7spVhsPz7D7y)
+valids/pause-test
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1XUTfC0pV9NwqyeB1wZiwZ)
+valids/pause_no_tasks
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 1s2nVeFvheZaJuNvXujzHP)
+valids/pause_on_resume
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 2RFryUrMLqmeSvAL31e6IK)
+valids/pause_on_resume_optional
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6umw5dtyCP1saTZwevocaD)
+valids/restart_with_inputs
+    ExecutionControllerRunnerTest.java:176 supplies FILE input `file` as the classpath resource data/hello.txt; the value is a JVM resource path.
+valids/resume-validate
+    reached PAUSED and stayed there for the full 90s: the flow's io.kestra.plugin.core.flow.Pause task declares neither `pauseDuration` nor `timeout`, so nothing bounds the pause and it ends only on an explicit resume, which a standalone harvest does not issue.  Kestra's own tests drive these with runOneUntilPaused(...) followed by executionService.resume(...).  (execution 6CgYrG256yv5X1j1UA3M33)
+valids/scheduled-inputs-defaults
+    Only FlowValidationTest.java:231 references it, and only to parse().  No test executes it.
+valids/secret-input-validation
+    InputsTest.java:493 secretInputValidation() never executes the flow -- it calls flowIO.readExecutionInputs and asserts it throws.  No test drives an execution.
+valids/subflow-function-mutual-a
+    SubflowFunctionTest.java:147 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap (a -> b -> a).
+valids/subflow-function-mutual-b
+    Half of the a -> b -> a mutual-recursion pair at SubflowFunctionTest.java:147; only ever reached through subflow-function-mutual-a.
+valids/subflow-function-recursive
+    SubflowFunctionTest.java:132 drives it through the subflow() Pebble function and asserts the call THROWS on the recursion-depth cap.  Its input default calls subflow() on its own id, so there is no input map to recover.
+valids/subflow-nullable-input-child
+    Only ever created as a subflow of subflow-nullable-input-parent (SubflowRunnerTest.java:144); no test posts inputs to it directly.
+valids/subflow-to-retry
+    Only ever created as a subflow of subflow-parent-retry (SubflowRunnerTest.java:118); no test posts inputs to it directly.
+valids/task-flow-dynamic
+    FlowGraphTest.java:295 hands runOne a RAW inputs map ({namespace: f.getNamespace(), flowId: 'switch'}) instead of going through flowIO.readExecutionInputs, so it bypasses typed-input validation entirely and never supplies the flow's one DECLARED input, the required STRING `string`.  Over the API that is `422 Missing required input:string`, and there is no value for `string` anywhere in the checkout to recover.
+valids/trigger-flow-listener
+    Created only by its own io.kestra.plugin.core.trigger.Flow trigger, from an execution of trigger-flow (FlowTriggerCaseTest.java:48); its inputs render from trigger variables that do not exist on a direct execution.
+valids/trigger-flow-listener-invalid
+    Nothing in the Kestra checkout references this flow at all -- no Java test, no other flow.  There is no test case to recover.
+valids/trigger-flow-listener-namespace-condition
+    Same as trigger-flow-listener: created only by a Flow trigger (FlowTriggerCaseTest.java:62).
+valids/webhook-inputs
+    Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a JSON body (ExecutionControllerRunnerTest.java:1491); its inputs come from the webhook body, not from an execution POST.
+
+
+runs -- 268
+------------------------------------------------------------------------
+invalids/loop-switch-failed                                    FAILED  (+2 sub)
+valids/after-execution                                         SUCCESS
+valids/after-execution-error                                   FAILED
+valids/after-execution-finally                                 SUCCESS
+valids/after-execution-flowable                                SUCCESS
+valids/all-flowable                                            FAILED  (+1 sub)
+valids/allow-failure                                           FAILED
+valids/allow-failure-with-retry                                WARNING
+valids/assert                                                  FAILED
+valids/change-state-errors                                     FAILED
+valids/condition_with_input                                    FAILED
+valids/dag                                                     SUCCESS
+valids/disable-error                                           FAILED
+valids/disable-flowable                                        FAILED  (+3 sub)
+valids/disable-simple                                          SUCCESS
+valids/empty-variables                                         SUCCESS
+valids/errors                                                  FAILED
+valids/execution                                               SUCCESS
+valids/exit                                                    WARNING
+valids/exit-cancelled                                          CANCELLED
+valids/exit-killed                                             KILLED
+valids/exit-nested                                             FAILED
+valids/fail-on-condition                                       FAILED
+valids/fail-on-switch                                          FAILED
+valids/failed-first                                            FAILED
+valids/failing-subflow                                         FAILED
+valids/finally-allowfailure                                    WARNING
+valids/finally-dag                                             FAILED
+valids/finally-flow                                            FAILED
+valids/finally-flow-error                                      FAILED
+valids/finally-flow-error-first                                FAILED
+valids/finally-loop                                            FAILED  (+3 sub)
+valids/finally-loop-parallel                                   FAILED  (+3 sub)
+valids/finally-parallel                                        FAILED
+valids/finally-sequential                                      FAILED
+valids/finally-sequential-error                                FAILED
+valids/finally-sequential-error-first                          FAILED
+valids/flow-concurrency-cancel                                 SUCCESS
+valids/flow-concurrency-cancel-pause                           SUCCESS
+valids/flow-concurrency-fail                                   SUCCESS
+valids/flow-concurrency-parallel-subflow-kill                  SUCCESS
+valids/flow-concurrency-parallel-subflow-kill-child            SUCCESS
+valids/flow-concurrency-parallel-subflow-kill-grandchild       SUCCESS
+valids/flow-concurrency-queue                                  SUCCESS
+valids/flow-concurrency-queue-after-execution                  SUCCESS
+valids/flow-concurrency-queue-fail                             FAILED
+valids/flow-concurrency-queue-killed                           SUCCESS
+valids/flow-concurrency-queue-killed-after-execution           SUCCESS
+valids/flow-concurrency-queue-pause                            SUCCESS
+valids/flow-concurrency-sla-assert-cancel                      CANCELLED
+valids/flow-concurrency-sla-fail-child                         FAILED
+valids/flow-concurrency-sla-fail-parent                        FAILED
+valids/flow-concurrency-subflow                                SUCCESS
+valids/flow-trigger-any-mode-flow-a                            SUCCESS
+valids/flow-trigger-any-mode-flow-b                            SUCCESS
+valids/flow-trigger-any-mode-flow-listen                       SUCCESS
+valids/flow-trigger-at-least-mode-flow-a                       SUCCESS
+valids/flow-trigger-at-least-mode-flow-b                       SUCCESS
+valids/flow-trigger-at-least-mode-flow-c                       SUCCESS
+valids/flow-trigger-at-least-mode-flow-listen                  SUCCESS
+valids/flow-trigger-depends-on-flow-a                          SUCCESS
+valids/flow-trigger-depends-on-flow-b                          SUCCESS
+valids/flow-trigger-depends-on-flow-listen                     SUCCESS
+valids/flow-trigger-fire-once-true-flow-a                      SUCCESS
+valids/flow-trigger-fire-once-true-flow-b                      SUCCESS
+valids/flow-trigger-invalid-inputs-flow-a                      SUCCESS
+valids/flow-trigger-mixed-conditions-flow-a                    SUCCESS
+valids/flow-trigger-mixed-conditions-flow-listen               SUCCESS
+valids/flow-trigger-multiple-conditions-flow-a                 SUCCESS
+valids/flow-trigger-multiple-conditions-flow-listen            SUCCESS
+valids/flow-trigger-multiple-depends-on-flow-a                 SUCCESS
+valids/flow-trigger-multiple-depends-on-flow-listen            SUCCESS
+valids/flow-trigger-paused-flow                                SUCCESS
+valids/flow-trigger-paused-listen                              SUCCESS
+valids/flow-trigger-stable-condition-id-flow-a                 SUCCESS
+valids/flow-trigger-stable-condition-id-flow-b                 SUCCESS
+valids/flow-trigger-stable-condition-id-flow-listen            SUCCESS
+valids/flow-trigger-when-condition-flow-a                      SUCCESS
+valids/flow-trigger-when-condition-flow-listen                 SUCCESS
+valids/flow-with-array-outputs                                 SUCCESS
+valids/flow-with-optional-outputs                              SUCCESS
+valids/flow-with-outputs                                       SUCCESS
+valids/flow-with-outputs-failed                                FAILED
+valids/flowable-with-parent-fail                               FAILED  (+4 sub)
+valids/follow-dependencies-partial-child                       SUCCESS
+valids/full                                                    SUCCESS
+valids/http-listen                                             SUCCESS
+valids/http-listen-encrypted                                   SUCCESS
+valids/if                                                      SUCCESS
+valids/if-condition                                            SUCCESS
+valids/if-condition-fail                                       FAILED
+valids/if-in-flowable                                          SUCCESS  (+3 sub)
+valids/if-in-parallel                                          SUCCESS  (+3 sub)
+valids/if-with-only-disabled-tasks                             SUCCESS
+valids/if-without-else                                         SUCCESS
+valids/json-input-schema-validation                            SUCCESS
+valids/labels-deserialization                                  SUCCESS
+valids/labels-update-nested-value-list                         SUCCESS
+valids/labels-update-nested-value-map                          SUCCESS
+valids/labels-update-task                                      SUCCESS
+valids/labels-update-task-deduplicate                          SUCCESS
+valids/labels-update-task-empty                                FAILED
+valids/log-to-file                                             SUCCESS
+valids/logs                                                    SUCCESS
+valids/loop-empty                                              SUCCESS
+valids/loop-expression-context                                 SUCCESS  (+3 sub)
+valids/loop-failed                                             FAILED  (+1 sub)
+valids/loop-failed-no-transmit                                 SUCCESS  (+3 sub)
+valids/loop-flowable                                           SUCCESS  (+3 sub)
+valids/loop-map                                                SUCCESS  (+3 sub)
+valids/loop-multiple                                           SUCCESS  (+6 sub)
+valids/loop-nested                                             SUCCESS  (+39 sub)
+valids/loop-null                                               FAILED
+valids/loop-object                                             SUCCESS  (+3 sub)
+valids/loop-object-in-list                                     SUCCESS  (+3 sub)
+valids/loop-outputs                                            SUCCESS  (+3 sub)
+valids/loop-outputs-auto                                       SUCCESS  (+3 sub)
+valids/loop-outputs-failed-render                              FAILED  (+1 sub)
+valids/loop-outputs-store                                      SUCCESS  (+3 sub)
+valids/loop-parallel-equal                                     SUCCESS  (+3 sub)
+valids/loop-parallel-less                                      SUCCESS  (+4 sub)
+valids/loop-parallel-more                                      SUCCESS  (+3 sub)
+valids/loop-parallel-unlimited                                 SUCCESS  (+3 sub)
+valids/loop-serial                                             SUCCESS  (+3 sub)
+valids/loop-serial-multiple-tasks                              SUCCESS  (+2 sub)
+valids/loop-switch                                             SUCCESS  (+4 sub)
+valids/loop-until-restart                                      FAILED
+valids/loop-values-from-uri                                    SUCCESS  (+3 sub)
+valids/loop-with-subflow                                       SUCCESS  (+2 sub)
+valids/loopuntil-failed-flowable                               FAILED
+valids/minimal                                                 SUCCESS
+valids/minimal-bis                                             SUCCESS
+valids/minimal2                                                SUCCESS
+valids/npe-labels-update-task                                  SUCCESS
+valids/output-values                                           SUCCESS
+valids/parallel                                                SUCCESS
+valids/parallel-disabled-tasks                                 SUCCESS
+valids/parallel-fail-with-flowable                             FAILED
+valids/parallel-nested                                         SUCCESS
+valids/pause-behavior                                          FAILED
+valids/pause-delay                                             SUCCESS
+valids/pause-duration-from-input                               SUCCESS
+valids/pause-errors-finally-after-execution                    FAILED
+valids/pause-kill-delay                                        SUCCESS
+valids/pause-timeout                                           FAILED
+valids/pause-timeout-allow-failure                             WARNING
+valids/pause_on_pause                                          SUCCESS
+valids/primitive-labels-flow                                   SUCCESS
+valids/purge_logs_execution_only                               SUCCESS
+valids/purge_logs_full_arguments                               SUCCESS
+valids/purge_logs_no_arguments                                 SUCCESS
+valids/purge_logs_trigger_only                                 SUCCESS
+valids/purge_logs_with_batch_size                              SUCCESS
+valids/replay                                                  SUCCESS
+valids/replay-loop                                             FAILED  (+3 sub)
+valids/replay-revision                                         FAILED
+valids/replay-sequential-with-error-handler                    FAILED
+valids/restart-child                                           FAILED
+valids/restart-loop                                            FAILED  (+1 sub)
+valids/restart-parent                                          FAILED
+valids/restart-parent-loop                                     FAILED  (+1 sub)
+valids/restart-with-after-execution                            FAILED
+valids/restart-with-finally                                    FAILED
+valids/restart_always_failed                                   FAILED
+valids/restart_last_failed                                     FAILED
+valids/restart_local_errors                                    FAILED
+valids/retry-expo                                              FAILED
+valids/retry-fail                                              FAILED
+valids/retry-failed                                            FAILED
+valids/retry-failed-flow-attempts                              FAILED
+valids/retry-failed-flow-duration                              FAILED
+valids/retry-failed-task-attempts                              FAILED
+valids/retry-failed-task-duration                              FAILED
+valids/retry-flowable                                          FAILED
+valids/retry-flowable-child                                    FAILED
+valids/retry-flowable-nested-child                             FAILED
+valids/retry-flowable-parallel                                 FAILED  (+2 sub)
+valids/retry-new-execution-flow-attempts                       RETRIED  (+2 sub)
+valids/retry-new-execution-flow-duration                       RETRIED  (+2 sub)
+valids/retry-new-execution-task-attempts                       RETRIED  (+2 sub)
+valids/retry-new-execution-task-duration                       RETRIED  (+2 sub)
+valids/retry-random                                            FAILED
+valids/retry-subflow                                           FAILED
+valids/retry-success                                           WARNING
+valids/retry-success-first-attempt                             SUCCESS
+valids/retry-with-flowable-errors                              SUCCESS
+valids/return                                                  SUCCESS
+valids/schedule-trigger                                        SUCCESS
+valids/secrets                                                 FAILED
+valids/sequential                                              SUCCESS
+valids/sequential-sleep                                        SUCCESS
+valids/sequential-with-disabled                                SUCCESS
+valids/sequential-with-global-errors                           FAILED
+valids/sequential-with-local-errors                            FAILED
+valids/set-variables                                           SUCCESS
+valids/set-variables-duplicate                                 FAILED
+valids/sla-execution-condition                                 CANCELLED
+valids/sla-max-duration-fail                                   FAILED
+valids/sla-max-duration-ok                                     SUCCESS
+valids/sla-parent-flow                                         FAILED
+valids/sla-subflow                                             FAILED
+valids/sleep                                                   SUCCESS
+valids/sleep-long                                              SUCCESS
+valids/sleep-long-after-execution-flowable                     SUCCESS
+valids/sleep-short                                             SUCCESS
+valids/sleep-task-flow                                         SUCCESS
+valids/subflow-child                                           SUCCESS
+valids/subflow-child-with-output                               SUCCESS
+valids/subflow-function-child                                  SUCCESS
+valids/subflow-function-failing                                FAILED
+valids/subflow-grand-child                                     SUCCESS
+valids/subflow-inherited-labels-child                          SUCCESS
+valids/subflow-inherited-labels-parent                         SUCCESS
+valids/subflow-nullable-input-parent                           SUCCESS
+valids/subflow-parent                                          SUCCESS
+valids/subflow-parent-no-wait                                  SUCCESS
+valids/subflow-parent-of-failed                                FAILED
+valids/subflow-parent-retry                                    SUCCESS
+valids/subflow-secret-output-child                             FAILED
+valids/subflow-secret-output-parent                            FAILED
+valids/switch                                                  SUCCESS
+valids/switch-impossible                                       FAILED
+valids/switch-in-concurrent-loop                               SUCCESS  (+2 sub)
+valids/task-allow-failure-executable-flow                      WARNING
+valids/task-allow-failure-flowable                             WARNING
+valids/task-allow-failure-runnable                             WARNING
+valids/task-allow-warning-executable-flow                      SUCCESS
+valids/task-allow-warning-flowable                             SUCCESS
+valids/task-allow-warning-runnable                             SUCCESS
+valids/task-flow                                               FAILED
+valids/task-flow-inherited-labels                              SUCCESS
+valids/task-runif                                              FAILED
+valids/task-runif-executionupdating                            SUCCESS
+valids/task-runif-taskswithstate                               FAILED
+valids/task-runif-workingdirectory                             SUCCESS
+valids/trigger-flow                                            SUCCESS
+valids/trigger-flow-listener-no-inputs                         FAILED
+valids/trigger-flow-listener-with-concurrency-limit            FAILED
+valids/trigger-flow-listener-with-pause                        FAILED
+valids/trigger-flow-with-concurrency-limit                     SUCCESS
+valids/trigger-flow-with-pause                                 SUCCESS
+valids/unset-variables                                         SUCCESS
+valids/variables                                               FAILED
+valids/variables-invalid                                       FAILED
+valids/waitfor                                                 SUCCESS
+valids/waitfor-child-task-warning                              FAILED
+valids/waitfor-max-duration                                    FAILED
+valids/waitfor-max-iterations                                  FAILED
+valids/waitfor-multiple-tasks                                  SUCCESS
+valids/waitfor-multiple-tasks-failed                           FAILED
+valids/waitfor-nested                                          SUCCESS
+valids/waitfor-no-success                                      SUCCESS
+valids/webhook                                                 FAILED
+valids/webhook-draft                                           SUCCESS
+valids/webhook-dynamic-key                                     FAILED
+valids/webhook-failed                                          FAILED
+valids/webhook-no-body                                         FAILED
+valids/webhook-outputs                                         SUCCESS
+valids/webhook-plaintext                                       SUCCESS
+valids/webhook-plugin-labels                                   SUCCESS
+valids/webhook-routing-test                                    FAILED
+valids/webhook-secret-key                                      FAILED
+valids/webhook-store-body                                      FAILED
+valids/webhook-wait                                            SUCCESS
+valids/webhook-with-condition                                  FAILED
+valids/working-directory-invalid-runif                         FAILED
+valids/working-directory-taskrun                               SUCCESS  (+1 sub)
+valids/working-directory-taskrun-nested                        SUCCESS  (+1 sub)
+
+
+
+input recovery cross-check
+------------------------------------------------------------------------
+Each recovered input is checked against what the SAME Java test asserts:
+the terminal state, the taskRunList size, a task id at a position, and
+per-task states.  A wrong input does not error -- it runs the other
+branch -- so a state-only check is not enough: several of these flows end
+SUCCESS either way.
+
+  agrees   invalids/loop-switch-failed                          [state,taskruns]
+           RunContextTest.java:344-345 failedTasksVariable()
+  agrees   valids/allow-failure                                 [state,taskruns,task_states]
+           AllowFailureTest.java:50-55 failed()
+  agrees   valids/condition_with_input                          [state]
+           ExecutionControllerRunnerTest.java:747 replayExecutionWithNewInputs()
+  agrees   valids/empty-variables                               [state,taskruns]
+           EmptyVariablesTest.java:39-41 emptyVariables()
+  agrees   valids/exit                                          [state,taskruns]
+           ExitTest.java:18-20 shouldExitTheExecution()
+  agrees   valids/exit-cancelled                                [state,taskruns]
+           ExitTest.java:47-50 shouldExitWithCancelled()
+  agrees   valids/exit-killed                                   [state,taskruns]
+           ExitTest.java:26-29 shouldExitAndKillTheExecution()
+  agrees   valids/exit-nested                                   [state,taskruns,task_states]
+           ExitTest.java:35-41 shouldExitAndFailNestedIf()
+  agrees   valids/fail-on-condition                             [state,taskruns,task_states]
+           FailTest.java:48-50 failOnCondition()
+  agrees   valids/fail-on-switch                                [state,taskruns,task_states]
+           FailTest.java:35-37 failOnSwitch()
+  agrees   valids/finally-allowfailure                          [state,taskruns,task_states]
+           FinallyTest.java:145-151 allowFailureWithErrors()
+  agrees   valids/finally-dag                                   [state,taskruns,task_states]
+           DagTest.java:92-98 errors()
+  agrees   valids/finally-flow                                  [state,taskruns,task_states]
+           FinallyTest.java:354-358 flowWithErrors()
+  agrees   valids/finally-flow-error                            [state,taskruns,task_states]
+           FinallyTest.java:388-394 flowErrorBlockWithErrors()
+  agrees   valids/finally-loop                                  [state,taskruns]
+           FinallyTest.java:220-221 loopWithErrors()
+  agrees   valids/finally-loop-parallel                         [state,taskruns]
+           FinallyTest.java:271-272 loopParallelWithErrors()
+  agrees   valids/finally-parallel                              [state,taskruns,task_states]
+           ParallelTest.java:52-58 errors()
+  agrees   valids/finally-sequential                            [state,taskruns,task_states]
+           FinallyTest.java:63-67 sequentialWithErrors()
+  agrees   valids/finally-sequential-error                      [state,taskruns,task_states]
+           FinallyTest.java:109-115 sequentialErrorBlockWithErrors()
+  agrees   valids/if                                            [state,taskruns]
+           AbstractRunnerTest.java:673-674 multipleIf()
+  agrees   valids/if-condition                                  [state,taskruns,task_states]
+           IfTest.java:45-47 ifTruthy()
+  agrees   valids/if-in-flowable                                [taskruns]
+           IfTest.java:145 ifInFlowable() (no execution-state assertion; the state assertions are on the sub-executions)
+  agrees   valids/if-without-else                               [state,taskruns,task_states]
+           IfTest.java:122-124 ifWithoutElse()
+  n/a      valids/input-log-secret                              [state,taskruns]
+           not exercised: not-standalone
+  agrees   valids/json-input-schema-validation                  [state,taskruns]
+           JsonInputSchemaFlowIntegrationTest.java:50-51
+  agrees   valids/labels-update-task                            [state,taskruns]
+           RuntimeLabelsTest.java:54-55 update()
+  agrees   valids/parallel-fail-with-flowable                   [state,taskruns]
+           ParallelTest.java:69-70 parallelFailWithFlowable()
+  agrees   valids/pause-behavior                                [state,taskruns]
+           PauseTest.java:376-380 runDurationWithBehavior(FAIL)
+  agrees   valids/pause-duration-from-input                     [state,taskruns]
+           PauseTest.java:200-202 runDurationFromInput()
+  agrees   valids/primitive-labels-flow                         [state,taskruns]
+           RuntimeLabelsTest.java:115-116 primitiveTypeLabels()
+  agrees   valids/replay-loop                                   [state,taskruns]
+           ExecutionServiceTest.java:140-141 restartLoop()
+  agrees   valids/sla-execution-condition                       [state]
+           SLATestCase.java:64 executionConditionSLAShouldCancel()
+  agrees   valids/subflow-nullable-input-parent                 [state]   WEAK
+           SubflowRunnerTest.java:161 shouldPassNullableInputFromParentToSubflow()
+  agrees   valids/switch                                        [task_at]
+           SwitchTest.java:47 switchFirst() -- getTaskRunList().get(1).getTaskId()
+  agrees   valids/switch-impossible                             [state]
+           SwitchTest.java:117 switchImpossible()
+  agrees   valids/task-flow                                     [state,taskruns]
+           FlowCaseTest.java:33 waitFailed() -> run(..., FAILED, ..., 4, ...)
+  agrees   valids/task-flow-inherited-labels                    [state,taskruns]
+           FlowCaseTest.java:37 noLabels() -> run("OK", SUCCESS, ..., false, ...)
+  agrees   valids/task-runif-workingdirectory                   [state,taskruns,task_states]
+           TaskWithRunIfTest.java:33-36 runIfWorkingDirectory()
+  n/a      valids/working-directory                             [state,taskruns]
+           not exercised: rejected
+
+  agrees 37   differs 0   not exercised 2   (of 39 rows)
+
+  WEAK rows (1): state-only, non-error state, and not proven
+  discriminating.  Counted in `agrees` above, but they would agree with
+  any input that merely finishes successfully -- do not cite them.
+    valids/subflow-nullable-input-parent
+
+
+discrimination probe -- which rows CAN report a difference
+------------------------------------------------------------------------
+A check that passes with or without the thing it verifies is not a check.
+For every row whose flow has a documented ALTERNATIVE input, the flow was
+executed again with that alternative and the row re-evaluated: the row
+discriminates only if the alternative FAILS it.  This is measured, not
+argued.
+
+  unprobed      invalids/loop-switch-failed
+                no alternative input is documented for this flow
+  discriminates valids/allow-failure
+                with {}: the alternative input is REFUSED (422: Missing required input:crash), so a swap is visible
+  discriminates valids/condition_with_input
+                with {"condition": "success"}: state SUCCESS != FAILED
+  unprobed      valids/empty-variables
+                no alternative input is documented for this flow
+  unprobed      valids/exit
+                no alternative input is documented for this flow
+  unprobed      valids/exit-cancelled
+                no alternative input is documented for this flow
+  unprobed      valids/exit-killed
+                no alternative input is documented for this flow
+  unprobed      valids/exit-nested
+                no alternative input is documented for this flow
+  discriminates valids/fail-on-condition
+                with {"param": "success"}: state SUCCESS != FAILED; taskruns 3 != 2; task fail SUCCESS != FAILED
+  unprobed      valids/fail-on-switch
+                no alternative input is documented for this flow
+  discriminates valids/finally-allowfailure
+                with {"failed": false}: state SUCCESS != WARNING; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-dag
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 7 != 9; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-flow
+                with {"failed": false}: state SUCCESS != FAILED; task ko None != FAILED
+  discriminates valids/finally-flow-error
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 4 != 6; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-loop
+                with {"failed": false}: state SUCCESS != FAILED
+  discriminates valids/finally-loop-parallel
+                with {"failed": false}: state SUCCESS != FAILED
+  discriminates valids/finally-parallel
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 8 != 10; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  discriminates valids/finally-sequential
+                with {"failed": false}: state SUCCESS != FAILED; task ko None != FAILED
+  discriminates valids/finally-sequential-error
+                with {"failed": false}: state SUCCESS != FAILED; taskruns 5 != 7; task ko None != FAILED; task e1 None != SUCCESS; task e2 None != SUCCESS
+  unprobed      valids/if
+                no alternative input is documented for this flow
+  discriminates valids/if-condition
+                with {"param": false}: task when-true None != SUCCESS
+  unprobed      valids/if-in-flowable
+                no alternative input is documented for this flow
+  discriminates valids/if-without-else
+                with {"param": false}: taskruns 1 != 2; task when-true None != SUCCESS
+  unprobed      valids/json-input-schema-validation
+                no alternative input is documented for this flow
+  unprobed      valids/labels-update-task
+                no alternative input is documented for this flow
+  unprobed      valids/parallel-fail-with-flowable
+                no alternative input is documented for this flow
+  CANNOT        valids/pause-behavior
+                all 3 documented alternative(s) satisfy this row's assertions too: {"behavior": "RESUME"}, {"behavior": "WARN"}, {"behavior": "CANCEL"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that `behavior` is unimplemented on this artifact: published with LITERAL values on a fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- the checkout's semantics reproduced exactly.  What fails is narrower: this corpus flow writes `behavior: "{{ inputs.behavior }}"`, and rendering a Pebble expression into a `Property<Behavior>` fails at resume time and takes the task down with it, for EVERY value including the one that would have failed anyway.  The execution document does record `inputs: {"behavior": "FAIL"}`, so the input landed -- the task dies rendering it.  So this row's `agrees` is a coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at all.  Task 2 builds this flow's golden from what the pinned image did, and whoever implements `pause` must not read this as a missing feature.
+  unprobed      valids/pause-duration-from-input
+                no alternative input is documented for this flow
+  unprobed      valids/primitive-labels-flow
+                the 1 documented alternative(s) pass the SAME input values (they vary something else, e.g. the execution labels), so none of them can move the observation
+  unprobed      valids/replay-loop
+                no alternative input is documented for this flow
+  discriminates valids/sla-execution-condition
+                with {"string": "LABEL"}: state SUCCESS != CANCELLED
+  unprobed      valids/subflow-nullable-input-parent
+                no alternative input is documented for this flow
+  discriminates valids/switch
+                with {"string": "SECOND"}: task[1] t2 != t1
+  unprobed      valids/switch-impossible
+                no alternative input is documented for this flow
+  discriminates valids/task-flow
+                with {"string": "OK"}: state SUCCESS != FAILED
+  unprobed      valids/task-flow-inherited-labels
+                no alternative input is documented for this flow
+  unprobed      valids/task-runif-workingdirectory
+                no alternative input is documented for this flow
+
+  proven discriminating 17   proven non-discriminating 1   unprobed 19
+
+  `unprobed` means no ALTERNATIVE input is documented for that flow, so
+  there is nothing to swap in.  Such a row is not claimed to discriminate.
+
+
+recovered inputs with no checkable assertion
+------------------------------------------------------------------------
+  invalids/inputs-with-multiple-constraint-violations
+    InputsTest.java:476 asserts that reading the inputs THROWS; there is no execution to check.  The refusal itself is the `rejected` disposition.
+  valids/subflow-function-child
+    SubflowFunctionTest.java:31 asserts the RENDERED STRING the subflow() Pebble function returns ("dc-us"), never an execution document.
+
+  recovered input values          40
+    with an EXPECTED row          38
+    with no checkable assertion   2
+
+
+
+The one ordered pair Task 4 could not reach (W3a Task 4, `parallel` + `dag`)
+========================================================================
+
+`valids/dag` is the corpus's only `Dag` flow with a real dependency chain, and
+Task 4's mutation for the dependency predicate -- making `dependsOn` vacuously
+satisfied -- DOES go red on it, naming ids:
+
+  a_dag_creates_a_node_only_when_every_dependency_has_succeeded
+    left:  ["dag","task1","task2","task3","task4","task5","task6"]
+    right: ["dag","task1","task2","task3","task4","task6","task5"]
+
+So the gap the plan's Step 4 asked about -- "the corpus has no dag flow with a
+real dependency" -- does not exist.  A different gap does, and this is it.
+
+`valids/dag` is STILL BASELINED, and no state machine without a clock can bank
+it.  Everything reproduces -- 7 runs in Kestra's own `taskRunList` order, every
+history, every attempt, 19 of its 20 kept ordered pairs -- except:
+
+  pair (3, 4) = (task3, task4)     golden: before      egret: overlapping
+
+`task4` dependsOn `task2` ONLY.  Kestra's `resolveDagNexts` filters on "all
+dependencies are terminated", so Kestra's own code creates `task4` the moment
+`task2` terminates, whether or not `task3` has.  All five harvest rounds
+nonetheless recorded `task3` ending BEFORE `task4` was created: both are `Log`
+tasks that finish in milliseconds and one executor evaluation saw both
+terminations.  egret's environment completes exactly one in-flight run per
+round, so it sees `task2` finish, creates `task4`, and only then sees `task3`
+finish.
+
+This is the hole README.md's `What this oracle does not prove` predicted in
+those words ("Tasks 4 and 6 are the ones that will find out, and the honest
+answer if it happens is to record the pairs, not to weaken the relation").  It
+is recorded, not papered over.  The change that WOULD bank the entry -- a `Dag`
+that waits for every in-flight sibling before creating the next batch -- is a
+worse implementation, not a fix: it makes one slow branch block an independent
+short branch's successor, which is observable and wrong.
+
+`valids/dag` is therefore the one baselined line in this file that is waiting on
+the INSTRUMENT rather than on the executor.  Whoever gives the oracle an
+environment that can finish two runs in one round -- Tasks 5 and 7 already owe
+it a clock that advances for a reason other than a `not_before` -- should
+re-check this entry first.
+
+Separately: 13 ordered pairs across 3 entries (`valids/dag` 1, `valids/if` 9,
+`valids/parallel-nested` 3) were dropped by `normalise.py` as unstable and are
+no longer compared at all.  Those are the SAME 13 the header table above counts
+as dropped-for-flipping -- `stability.json` names them and all three flows
+reached `golden.json`, so there is nothing to reconcile.  That is not a hole in
+the executor; it is the harvest's own measurement, and since Task 4 the ratchet
+honours it rather than demanding egret reproduce a relation the golden declines
+to state.  Driven through the real `advance()` the projection now removes 25
+pairs across 7 entries (Task 4 measured 22 across 6); the 16 beyond the golden's
+own 9 are on `disabled:` flows whose egret run set differs from Kestra's, which
+can never bank in any case.
+
+
+The second entry waiting on the INSTRUMENT: `valids/if` (W3a Task 5)
+-------------------------------------------------------------------
+
+`valids/if` is STILL BASELINED after Task 5 implemented both flowables it uses,
+and for exactly the reason `valids/dag` is.  Everything reproduces -- all 12
+runs in Kestra's own `taskRunList` order, every parent, every history, every
+attempt, and 54 of its 57 kept ordered pairs -- except three:
+
+  pair (2, 6)  = (if-2, if-3-log)          golden: before   egret: overlapping
+  pair (6, 9)  = (if-3-log, log-parallel-4) golden: before   egret: overlapping
+  pair (7, 10) = (log-parallel-2, log-parallel-5) golden: before  egret: overlapping
+
+The flow is a `Parallel` with `concurrent: 4` over nine branches, three of them
+`If`s, so its runs are created in batches as earlier branches terminate.  Each
+of the three disagreements is a creation egret lands in the SAME round as a
+termination Kestra had already observed, which is what a machine that completes
+exactly one in-flight run per round does.  The general mechanism is the one
+README.md's `What this oracle does not prove` describes; the specific Kestra
+cycle was NOT measured, and is not claimed.  What WAS measured is that the
+entry's runs are identical to Kestra's, which is what says the disagreement is
+about the instrument rather than about the `If`.
+
+That makes TWO entries (`valids/dag`, `valids/if`) whose only remaining
+difference is an ordered pair a round-based machine cannot produce.  README.md
+predicted one and named Task 6 as the remaining candidate; Task 5 found it
+first.  The answer taken is the one that section prescribes: record the pairs,
+do not weaken the relation, and do not reshape the executor to buy the bank.
+
+
+What the caller can render, and what that costs (W3a Task 5)
+------------------------------------------------------------
+
+`advance()` is pure and cannot render, so `tests/executor.rs` gained a tier that
+does: it renders an `If`'s `condition` or a `Switch`'s `value` with egret's own
+W2 renderer, over a context of
+
+  inputs  the values `corpus.json` records `harvest.py` as having POSTED for the
+          very execution the golden was captured from, plus the flow's own
+          declared `defaults:` for every input the harvest did not post
+  vars    the flow's own `variables:` block
+
+and nothing else.  Kestra's `RunContext` reaches far more -- task outputs, the
+loop `item`, `execution`, `taskrun`, `trigger`, `labels`, the KV store -- so an
+expression over any of those cannot be resolved here, and an unresolvable
+expression FAILS the run.
+
+The cost is DERIVED rather than argued, by
+`the_caller_can_render_every_branch_expression_except_the_two_kestra_could_not`:
+over every planned `If` and `Switch` in the comparable corpus there are 26
+expressions, 24 render, and the 2 that do not are
+
+  valids/if-condition-fail   `{{ inputs.run }}`      (no such input declared)
+  valids/variables-invalid   `{{inputs.invalid}}`    (no such input declared)
+
+which are exactly the two the ARTIFACT could not render either -- the test reads
+each failing task's own run out of `golden.json` and requires it to end FAILED.
+Both entries are banked BY that path.  A third failure, on a task Kestra ran to
+SUCCESS, would be an entry egret gets wrong because of the harness rather than
+because of `advance()`, and that assertion is what would surface it.
+
+The `defaults:` half of the context is worth its own line, because leaving it
+out was a real defect and not a simplification.  Five entries post `inputs: {}`
+and declare their input with a `defaults:` -- `valids/exit`,
+`valids/exit-cancelled`, `valids/exit-killed`, `valids/exit-nested` (two `If`s)
+and `valids/parallel-fail-with-flowable` (two `If`s), SEVEN expressions between
+them.  Kestra fills those defaults before it renders anything; without that step
+all seven failed to render too and their `If`s were FAILED for a reason that had
+nothing to do with the flow.  7 + 2 = 9 of the 26 failed before the filling
+step; 2 fail after it.  `valids/parallel-fail-with-flowable` -- the flow Task 4's whole
+`fail_the_rest` rule was argued from -- banks BECAUSE the defaults are applied.
+
+One entry is still mismatching for a reason the context cannot fix, and it is
+not the renderer's fault: `valids/if-with-only-disabled-tasks` renders
+`{{ vars.numeric_variable > 0 }}` to "true" correctly, and mismatches because its
+`then` holds a `disabled: true` task, which no W3a task claims.
+
+
+W3a Task 5 fix round 1: three things round 0 stated wrongly
+------------------------------------------------------------
+
+1. THE TRIM.  `is_truthy` transliterated Kestra's `condition.trim()` to Rust's
+   `rendered.trim()`, and they are not the same function.  Java strips code
+   units <= U+0020; Rust strips Unicode `White_Space`.  Neither set contains the
+   other.  18 more literal-condition flows were published and executed on rc13,
+   and 11 of them DISAGREE with `str::trim()`:
+
+     Java trims, Rust does not (Kestra `else`, egret gave `then`):
+       U+0001 + "false" + U+0001,  U+000E + "false" + U+000E,
+       U+001F + "false" + U+001F,  U+0001 + "0" + U+0001
+     Rust trims, Java does not (Kestra `then`, egret gave `else`):
+       U+00A0 (NBSP) + "false" + U+00A0,  U+0085 + "false" + U+0085,
+       U+3000 + "false" + U+3000,  U+2007 + "false" + U+2007,
+       U+2028 + "false" + U+2028,  U+00A0 + "0" + U+00A0,  U+00A0 alone
+
+   U+000B and U+000C are in BOTH sets and agree, which is why a smaller probe
+   would have missed it -- and so did the original 20 rows, because every padded
+   one of them pads with an ASCII space.  The predicate is now
+   `trim_matches(|c| c <= '\u{20}')`, the committed rows are 38, and the test
+   asserts the SET of 11 disagreeing rows by name so a revert to `.trim()` fails
+   there.  Nothing in the corpus reaches it; an NBSP in a rendered value is not
+   exotic, which is why it is fixed rather than recorded.
+
+   The same probe found Kestra's own Javadoc on `If.condition` to be wrong: it
+   says `null` is falsy, and a rendered "null" takes `then`.
+
+2. NO BANKED ENTRY TAKES AN `else` BRANCH.  Round 0's banked table said
+   `valids/if-without-else` was earned by "a falsy render -> the empty `else`".
+   `corpus.json` posts `param: true` for that flow, so its golden is the `then`
+   branch; the empty-`else`-succeeds behaviour is golden-evidenced by
+   `valids/if`, which is NOT banked.  Measured, not argued: `chosen = then_`
+   unconditionally leaves the ratchet at 181 and `executor_matches_golden`
+   PASSING, and so do `is_truthy = !trim().is_empty()` and
+   `parse::<bool>().unwrap_or(true)`.
+
+   So the ratchet cannot see a truthiness predicate that errs toward `then`.
+   What kills those three is the lib unit tests plus the FALSY arm of
+   `the_caller_renders_and_a_failed_render_fails_the_run`, whose use of "0" is
+   load-bearing and is the only assertion in the oracle binary that dies to all
+   three.  The dependency on W2's renderer that this task introduces is
+   therefore one-directional, and the module doc now says so.
+
+3. THE BATCHING IS NOT FREE, AND THE NUMBER WAS STALE.  Round 0 said both
+   shapes of the render tier were "invisible to this oracle" and quoted 182
+   mismatching.  Re-measured on the final tree: rendering one run per step, and
+   letting the worker move first, each leave the RATCHET unmoved at 181 -- and
+   each FAILS
+   `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`,
+   because `valids/if` joins its `runs_differ` list: its run ORDER stops
+   matching Kestra's `taskRunList`.  182 was the count from before the
+   `defaults:` fix banked the eighth entry.  The ratchet's count was read and
+   the binary was not.
+
+   The shipped shape is the one that reproduces Kestra's creation order, and it
+   now has a unit-level statement too
+   (`three_ifs_in_a_parallel_produce_kestras_own_run_order`, which asserts
+   `valids/if`'s 12 run ids verbatim), so the oracle's caller and the unit
+   suite's caller cannot drift apart on it.
+
+A fourth null-versus-empty gap, measured and NOT closed
+-------------------------------------------------------
+
+A `Switch` with a `value` and NO `cases` key publishes and its run FAILS; the
+same flow with `cases: {}` runs `defaults` to SUCCESS.  Both measured live.
+W1's `models::Switch::cases` is a bare `BTreeMap`, so absent and `{}` arrive
+identically and egret runs `defaults` for both -- right for `{}`, wrong for
+absent.  Implementing the absent spelling would break the explicit one, so it is
+recorded rather than fixed.  It is the same model gap as `defaults: null` vs
+`defaults: []`, in the sibling field; whoever closes one closes both.  No corpus
+flow is either shape.
+
+
+W3a Task 6: the loop, and the 41 entries the oracle cannot finish comparing
+---------------------------------------------------------------------------
+
+Task 6 banks 2 of the 181 Task 5 left (181 -> 179), and 2 is the whole of what
+it could bank.  `valids/loop-empty` and `valids/loop-null` are the ONLY two
+`Loop` entries in the golden whose sub-execution list is empty.  Everything else
+a `Loop` touches is blocked on a field egret does not fill.
+
+  41   golden entries carry a sub-execution
+  142  sub-executions they carry between them
+  33   of the 41 now differ on NOTHING BUT `spawned`
+  52   sub-executions whose (parent_run, value) IS compared
+  0    sub-executions whose TRACE is compared
+
+Nothing executes `Command::SpawnExecution` until W3b/W6, and `ExecutionState`
+holds no field for a sub-execution, so egret's side of `spawned` is empty and
+stays empty.  Those 41 entries LOOK compared in `golden.json` and are not.  The
+marking is
+`tests/executor.rs::the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`,
+which derives all three counts, requires all 41 to be baselined, and names the 8
+that differ on more than `spawned`:
+
+  valids/all-flowable                  first iteration failed; flow-level errors: ran (Task 7)
+  valids/disable-flowable              a `disabled: true` task (unclaimed)
+  valids/loop-outputs-auto             blocked TWICE OVER -- see below
+  valids/loop-values-from-uri          the same
+  valids/retry-new-execution-*  (x4)   replacement executions, parent_run null (Task 7)
+
+What IS compared, corpus-wide, is the FIRST BATCH of spawn requests:
+`every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` checks over 36
+loop runs that the (parent_run, value) pairs egret asks for are the first ones
+Kestra's `loopRun.index` ordering recorded for the same run, that the command
+names the Loop and not a body task, and that the run it names as parent is a run
+of that same loop.  A prefix and not an equality because there IS no second
+batch: `advance()` is pure and `ExecutionState` records no sub-execution, so it
+emits `min(concurrencyLimit, size)` once and cannot schedule more.  W3b owns the
+rest.
+
+Two entries are blocked TWICE OVER, and round 0 of this task named only the
+first half:
+
+  valids/loop-outputs-auto      values: "{{ outputs.write.uri }}"
+  valids/loop-values-from-uri   values: "{{ outputs.write.uri }}"
+
+  1. THE HARNESS.  `render_context` carries `inputs` and `vars` and nothing
+     else, so the render fails where Kestra's `RunContext` resolved it.  Task
+     5's list of 2 is now 2 + 2.
+
+  2. `advance()` ITSELF, which is the finding.  That expression renders to an
+     ION FILE URI -- Kestra's THIRD documented `values:` shape
+     (`Loop.java:210-214`).  It never reaches `resolveValues`:
+     `FlowableUtils.resolveLoopValuesUri` (`FlowableUtils.java:519`) renders
+     `values`, asks `URIFetcher.supports`, and hands a URI to
+     `Loop.initFromUri` (`Loop.java:404`), which READS THE FILE.
+     `iteration_values` implements only the `resolveValues` arms, so a rendered
+     `kestra:///….ion` is not JSON and takes the error arm.  With a perfect
+     `outputs` context both entries would STILL fail, inside the executor.
+
+  This is a NAMED GAP in `advance()`, not a harness limitation, and it is
+  recorded as one in `loop_::iteration_values`, in README.md's hole list, and in
+  the test -- which now asserts `iteration_values(kestra:///….ion)` is `Err` so
+  the second cause is committed rather than described.
+
+  Closing it needs a decision nobody has taken.  `advance()` performs no I/O, so
+  the CALLER would have to resolve `values` all the way to a JSON array --
+  fetching the ION file and coalescing its lines -- and put that in
+  `TaskRun::rendered`, which is already what `rendered` means for an `If`.
+  Neither entry could bank on it alone: this oracle has neither the `outputs`
+  context nor the storage the file lives in.
+
+No `item` is supplied, and that is a ruling rather than an omission.  Planning
+the `Loop` made 12 more `If`/`Switch` expressions planned (a review had
+forwarded 16), ALL of them inside loop bodies -- and a loop body's task never
+gets a run in this execution, so none of the 12 is ever rendered and none fails
+anything.  The reachable branch population is still exactly the 26 Task 5
+measured, with the same 2 failures.  Kestra renders those 12 inside the
+sub-execution with `item` from `loopRun`; inventing one here would put a made-up
+value behind a branch decision and change nothing this oracle can see.
+
+A `Loop`'s own terminal state is FED, not compared, and README.md's feed section
+carries the correction and its cost.  Three things round 0 of this task got
+wrong about that trade, all of them in the pessimistic direction:
+
+  - NOTHING moved from compared to fed.  A `Loop` was already an opaque
+    `Runnable` at Tasks 3-5, so `golden_outcome` already supplied its terminal
+    -- and `advance()` also emitted a `SUBMITTED` Kestra never emits for a
+    flowable.  Task 6 relabelled 40 already-fed terminals and REMOVED 40 wrong
+    emissions with them.  Derived by
+    `planning_the_loop_removed_forty_spurious_submitted_emissions`, which
+    validates itself by reproducing all four of Task 5's committed figures.
+  - The alternative was STUCK on 35 entries, not 37.  39 comparable entries hold
+    a `Loop`; two never start one for want of values, and two more because their
+    `values:` cannot be resolved at all.  Pinned by
+    `the_loop_completion_tier_is_load_bearing_for_exactly_these_entries`.
+  - "Judged by nothing in W3a" was too strong.  The aggregation rule is
+    invisible to the RATCHET and not to this oracle: `Step::Done(Success)` for a
+    `Loop` (M66) and a tier-3 override feeding `Success` (M67) each die to
+    `the_spawned_field_…_and_a_bank` and to the order test.  That test's 33 is a
+    GUARD, not only a report, and a later task re-deriving it should know so.
+
+`valids/loop-failed-no-transmit` -- three FAILED iterations and a SUCCESS loop
+-- is still reproduced by feeding rather than by deciding.
+
+The instrument-bound list did NOT grow.  README.md named Task 6 twice as the
+candidate to find a third entry blocked on an ordered pair a round-based machine
+cannot produce; it cannot, because a `Loop` creates no run for its body at all
+and so adds no creation that could land out of order.  The order test's removal
+map is unchanged at 25 pairs across the same 7 entries; egret's pair population
+moved 557 -> 555, both losses being the two entries this task banked.  Task 7 is
+the next candidate.

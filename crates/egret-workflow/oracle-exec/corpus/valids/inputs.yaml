@@ -1,0 +1,164 @@
+id: inputs
+namespace: io.kestra.tests
+labels:
+  flow-label-1: flow-label-1
+  flow-label-2: flow-label-2
+
+inputs:
+- id: string
+  type: STRING
+- id: optional
+  type: STRING
+  required: false
+- id: int
+  type: INT
+- id: bool
+  type: BOOL
+  required: false
+- id: float
+  type: FLOAT
+- id: instant
+  type: DATETIME
+- id: date
+  type: DATE
+  required: false
+- id: time
+  type: TIME
+  required: false
+- id: duration
+  type: DURATION
+  required: false
+- id: file
+  type: FILE
+- id: optionalFile
+  type: FILE
+  required: false
+- id: instantDefaults
+  type: DATETIME
+  defaults: "2013-08-09T14:19:00Z"
+- id: json1
+  type: JSON
+  required: false
+- id: json2
+  type: JSON
+  required: false
+- id: uri
+  type: URI
+  required: false
+- id: nested.string
+  type: STRING
+  required: false
+- id: nested.more.int
+  type: INT
+  required: false
+- id: nested.bool
+  type: BOOL
+  required: false
+- id: validatedString
+  type: STRING
+  validator: A\d+
+  required: false
+- id: validatedInt
+  type: INT
+  min: 10
+  max: 20
+  required: false
+- id: validatedDate
+  type: DATE
+  after: 2023-01-01
+  before: 2023-12-31
+  required: false
+- id: validatedDateTime
+  type: DATETIME
+  after: "2023-01-01T00:00:00Z"
+  before: "2023-12-31T23:59:59Z"
+  required: false
+- id: validatedDuration
+  type: DURATION
+  min: PT10S
+  max: PT20S
+  required: false
+- id: validatedFloat
+  type: FLOAT
+  min: 0.1
+  max: 0.5
+  required: false
+- id: validatedTime
+  type: TIME
+  after: "01:00:00"
+  before: "11:59:59"
+  required: false
+- id: secret
+  type: SECRET
+- id: array
+  type: ARRAY
+  itemType: INT
+- id: yaml1
+  type: YAML
+  defaults:
+    property: something
+    list:
+    - key: key1
+      value: value1
+    - key: key2
+      value: value2
+- id: yaml2
+  type: YAML
+  defaults:
+    property: something
+    list:
+      - key: key1
+        value: value1
+      - key: key2
+        value: value2
+# required true and an empty default value will only work if we correctly serialize default values which is what this input is about to test.
+- id: empty
+  type: STRING
+  defaults: ''
+  required: true
+
+tasks:
+- id: string
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.string}}"
+- id: optional
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.optional}}"
+- id: int
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.int}}"
+- id: float
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.float}}"
+- id: instant
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.instant}}"
+- id: file
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.file}}"
+- id: secret
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.secret}}"
+- id: array
+  type: io.kestra.plugin.core.flow.Loop
+  values: "{{inputs.array}}"
+  tasks:
+    - id: log
+      type: io.kestra.plugin.core.debug.Return
+      format: "{{item.value}}"
+
+- id: json1
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.json1}}"
+- id: json2
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.json2}}"
+- id: jsonOutput
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{outputs.json1.value}}"
+- id: yamlOutput1
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.yaml1}}"
+- id: yamlOutput2
+  type: io.kestra.plugin.core.debug.Return
+  format: "{{inputs.yaml2}}"

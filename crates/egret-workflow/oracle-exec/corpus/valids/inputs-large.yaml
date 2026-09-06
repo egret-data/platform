@@ -1,0 +1,15 @@
+id: inputs-large
+namespace: io.kestra.tests
+
+inputs:
+- id: string
+  type: STRING
+
+tasks:
+  - id: 1_each
+    type: io.kestra.plugin.core.flow.Loop
+    values: '["1", "2", "3", "4", "5", "6", "7", "8", "9"]'
+    tasks:
+    - id: string
+      type: io.kestra.plugin.core.debug.Return
+      format: "{{inputs.string}}"

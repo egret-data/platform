@@ -4,7 +4,7 @@
 // kestra: core/src/main/java/io/kestra/plugin/core/trigger/Webhook.java
 // kestra: core/src/main/java/io/kestra/plugin/core/trigger/Flow.java
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -84,8 +84,19 @@ pub enum TriggerKind {
 ///
 /// Dropped: `lateMaximumDelay` (a `Duration`, no parser for that type yet --
 /// same reasoning as `Sla::MaxDuration.duration`), `recoverMissedSchedules`,
-/// the deprecated `inputs` map, and the `executionTime`/`cachedCron` runtime
-/// caches (transient in Java, not wire fields at all).
+/// and the `executionTime`/`cachedCron` runtime caches (transient in Java,
+/// not wire fields at all).
+///
+/// **`inputs` was dropped too, and the reason written down for it was wrong.**
+/// W1 recorded it as "the deprecated `inputs` map"; measured at the pinned
+/// checkout `96893b589`, `Schedule.java:223` is a plain
+/// `private Map<String, Object> inputs;` with **no** `@Deprecated` annotation
+/// anywhere in the file. W3a Task 8 restored the field because
+/// `FlowValidator.findMissingInputsForScheduleTriggers` reads it
+/// (`FlowValidator.java:284-312`) to decide whether a scheduled flow can
+/// actually start, and a dropped field would have made that rule refuse every
+/// scheduled flow that supplies its own inputs -- an over-refusal manufactured
+/// out of an incorrect note. See `spec::validate`'s `schedule_missing_inputs`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
@@ -101,6 +112,14 @@ pub struct Schedule {
     pub with_seconds: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    // `Schedule.java:223`: `private Map<String, Object> inputs;` -- the values
+    // a scheduled execution is started with. Only the KEY SET is read in this
+    // crate today (`spec::validate`'s `schedule_missing_inputs` asks which
+    // flow inputs the schedule supplies), so the values stay opaque
+    // `serde_json::Value`s rather than being coerced against the input's
+    // declared type; that coercion is W6's, at the point the schedule fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 /// `io.kestra.plugin.core.trigger.Webhook` + its

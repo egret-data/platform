@@ -1,0 +1,22 @@
+id: if-in-flowable
+namespace: io.kestra.tests
+
+inputs:
+  - id: param
+    type: STRING
+
+tasks:
+  - id: for_each
+    type: io.kestra.plugin.core.flow.Loop
+    values: ["value 1", "value 2", "value 3"]
+    tasks:
+      - id: before_if
+        type: io.kestra.plugin.core.debug.Return
+        format: "Before if: {{ item.value }}"
+      - id: if
+        type: io.kestra.plugin.core.flow.If
+        condition: "{{ item.value equals 'value 2' }}"
+        then:
+          - id: after_if
+            type: io.kestra.plugin.core.debug.Return
+            format: "After if: {{ item.value }}"
