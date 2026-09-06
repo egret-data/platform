@@ -137,6 +137,24 @@ pub struct PlanTask {
     /// The author's task id, as written.
     pub id: String,
     pub kind: TaskKind,
+    /// This task's `runIf:`, **unrendered** — W3c.
+    ///
+    /// Carried for every kind, flowable and `Runnable` alike, because Kestra
+    /// checks it in one place for all of them: `ExecutionEventMessageHandler`
+    /// tests `TruthUtils.isTruthy(render(getRunIf()))` *before* it emits
+    /// `SUBMITTED` for a runnable and before it moves a flowable to `RUNNING`
+    /// (`executor/src/main/java/io/kestra/executor/handler/ExecutionEventMessageHandler.java:269`).
+    /// Falsy means the run goes `CREATED → SKIPPED` and its children — if it
+    /// has any — never exist. That is why the check lives at
+    /// [`flowable::open`](super::flowable::open), which is every created run's
+    /// single door, rather than beside any one flowable.
+    ///
+    /// **Unrendered for the same reason [`TaskKind::If::condition`] is**:
+    /// `advance()` is pure, so the caller renders it and writes the answer into
+    /// [`TaskRun::rendered_run_if`](super::TaskRun::rendered_run_if). `None`
+    /// there means "not rendered yet", not "falsy" — reading it as falsy would
+    /// silently skip every task the caller had not got to.
+    pub run_if: Option<String>,
     /// This task's own `retry:`.
     ///
     /// **Task 3's reason for leaving this `None` was wrong, measured.** It
@@ -671,8 +689,12 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
 /// same reason Kestra gets them: there is no run because there is no task.
 ///
 /// **A `SKIPPED` state is NOT what this produces, and the oracle README used to
-/// say it was.** The golden's only `SKIPPED` runs come from `runIf:`, which
-/// nothing in W3a reads; see `oracle-exec/README.md`, *`runIf:`*.
+/// say it was.** The golden's only `SKIPPED` runs come from `runIf:`, which is
+/// **W3c's** and lives at the other end: a `runIf:` is rendered per run, so the
+/// run has to exist to be skipped, and the check is in
+/// [`flowable::open`](super::flowable) rather than here.
+/// `disabled_removes_the_run_and_run_if_skips_it` asserts the two traces side
+/// by side; see `oracle-exec/README.md`, *What W3c had to change*.
 ///
 /// # The one position this does not reach, and why that is deliberate
 ///
@@ -719,6 +741,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         kind: TaskKind::Runnable {
             type_id: task.r#type.clone(),
         },
+        run_if: task.run_if.clone(),
         retry: super::retry::policy_of(task.retry.as_ref()),
         timeout: None,
         errors: Vec::new(),

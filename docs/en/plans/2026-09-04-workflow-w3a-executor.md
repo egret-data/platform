@@ -656,7 +656,7 @@ entry ends up permanently baselined with nobody able to say why:
 | state | golden runs | produced by | owner |
 |---|---|---|---|
 | `PAUSED` | 18 | `Pause` | W8 |
-| `SKIPPED` | 4 | ~~`disabled:`~~ **`runIf:`** — the attribution here was wrong, and it was wrong in the oracle README in three more places. Walking `golden.json` finds `SKIPPED` on 6 runs across 4 entries, all `task-runif*`, and not one of those files contains `disabled:` | **unclaimed — named at the final review.** Two packages have to move: W1's `Task` has no field for `runIf`, and `RunState` has no `SKIPPED` |
+| `SKIPPED` | 4 | ~~`disabled:`~~ **`runIf:`** — the attribution here was wrong, and it was wrong in the oracle README in three more places. Walking `golden.json` finds `SKIPPED` on 6 runs across 4 entries, all `task-runif*`, and not one of those files contains `disabled:` | **W3c — closed.** It was "unclaimed by two packages at once" when this row was written; W3c moved both halves in one commit (`models::Task::run_if`, `RunState::Skipped`) and banked nothing, because every one of the 7 entries declares a second construct that still holds it and the oracle's render tier cannot reach any of the 6 skipped runs. See `oracle-exec/README.md`, *What W3c had to change, and what it did NOT bank* |
 | `CANCELLED` | 3 | flow concurrency | W8 |
 | — | 18 over-submitted, **22 baselined entries** | `Subflow` | W6 |
 | — | 19 over-submitted | `core.execution.*` (`Labels` and 3 siblings, `ExecutionUpdatableTask`) | **unclaimed** |

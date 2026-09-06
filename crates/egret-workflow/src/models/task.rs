@@ -28,6 +28,28 @@ pub struct Task {
     pub retry: Option<Retry>,
     pub timeout: Option<Property<Duration>>,
     pub disabled: bool,
+    /// `Task.java:89` — `@Builder.Default private String runIf = "true";`,
+    /// rendered per run and compared by `TruthUtils.isTruthy`.
+    ///
+    /// **A raw expression, not a `Property<bool>`.** Java's field is a bare
+    /// `String` with `dynamic = true`, and the value Kestra tests is the
+    /// *rendered string*, not a parsed boolean: `"0"` is falsy and `"00"` is
+    /// not. Holding the source here is what lets `advance()` stay pure — the
+    /// caller renders it, exactly as it renders an `If`'s `condition`.
+    ///
+    /// **`None` rather than `Some("true")` for an absent key.** Kestra's
+    /// default is the literal string `"true"`, which is truthy, so the two
+    /// spellings decide the same way; `None` is what keeps a task nobody wrote
+    /// a `runIf:` on out of the render tier's population altogether.
+    ///
+    /// An explicit `runIf: null` parses to `None` here, i.e. as an absent one.
+    /// Java's `TruthUtils.isTruthy(null)` is `false`, so on the artifact that
+    /// spelling *might* skip the task instead — but `@Builder.Default` versus
+    /// Jackson's null handling decides it and nothing measured which, so the
+    /// divergence is named rather than guessed at. No corpus flow writes it
+    /// (`no_corpus_flow_writes_a_null_run_if` re-derives that from all 345 on
+    /// every run), and `disabled: null` is already read the same way.
+    pub run_if: Option<String>,
     pub kind: TaskKind,
 }
 
@@ -502,6 +524,11 @@ impl<'de> Deserialize<'de> for Task {
         let retry: Option<Retry> = optional(&mut map, "retry")?;
         let timeout: Option<Property<Duration>> = optional(&mut map, "timeout")?;
         let disabled: bool = with_default(&mut map, "disabled", false)?;
+        // Kestra's key is `runIf`, and it is read here rather than left in
+        // `rest` so that a `Leaf`'s opaque `spec` cannot be the only place it
+        // survives -- which is where it was through W3a, and why the executor
+        // could not see it.
+        let run_if: Option<String> = optional(&mut map, "runIf")?;
 
         let rest = serde_json::Value::Object(map);
         let kind = kind_for(&r#type, rest).map_err(D::Error::custom)?;
@@ -513,6 +540,7 @@ impl<'de> Deserialize<'de> for Task {
             retry,
             timeout,
             disabled,
+            run_if,
             kind,
         })
     }
@@ -589,6 +617,16 @@ impl Serialize for Task {
             "disabled".to_string(),
             serde_json::Value::Bool(self.disabled),
         );
+        // Emitted only when the author wrote one, unlike `disabled` above:
+        // `None` here means "no `runIf:` in the source", and writing Kestra's
+        // default `"true"` back out would put a key into every serialised task
+        // that no input had.
+        if let Some(run_if) = &self.run_if {
+            map.insert(
+                "runIf".to_string(),
+                serde_json::Value::String(run_if.clone()),
+            );
+        }
 
         serde_json::Value::Object(map).serialize(serializer)
     }
@@ -1189,5 +1227,83 @@ inputs:
             "id: t\ntype: egret.sql\nsql: SELECT 1\ndisabled: 1\n"
         )
         .is_err());
+    }
+
+    // -- W3c: `runIf`, the second task-level property that stops a task
+    // running. Kestra's default is the STRING "true", not a boolean, and the
+    // value it tests is the rendered string -- so this field must survive
+    // parsing as source text and must not be coerced.
+
+    /// **`runIf:` reaches the struct and does not stay inside a leaf's opaque
+    /// `spec`.** That is the whole W3c model change, and it is the failure
+    /// `disabled:` had for eight tasks: a field that parses somewhere the
+    /// executor cannot read is a field the executor does not have.
+    #[test]
+    fn run_if_is_read_off_the_task_and_not_left_in_the_leafs_spec() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\nrunIf: \"{{ inputs.go }}\"\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert_eq!(t.run_if.as_deref(), Some("{{ inputs.go }}"));
+        let TaskKind::Leaf { spec } = &t.kind else {
+            panic!("egret.sql is a leaf");
+        };
+        assert!(
+            spec.get("runIf").is_none(),
+            "a field read off the task must be stripped from `rest`, or the \
+             round-trip below emits it twice"
+        );
+    }
+
+    #[test]
+    fn run_if_is_none_when_the_key_is_absent() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert!(t.run_if.is_none());
+    }
+
+    /// An explicit `runIf: null` parses like an absent one, the same reading
+    /// `description:` and `disabled:` already take. The divergence this may
+    /// hide from Kestra is named on the field and derived unreachable by
+    /// `no_corpus_flow_writes_a_null_run_if`.
+    #[test]
+    fn explicit_null_run_if_parses_like_an_absent_one() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\nrunIf: null\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        assert!(t.run_if.is_none());
+    }
+
+    /// **`runIf: false` (a YAML boolean) is a parse error, not a silent
+    /// skip.** Kestra's field is a `String`, so a bare `false` is a type error
+    /// there too — and the failure mode of accepting it quietly is the worst
+    /// one available: an author who wrote it believes the task is conditional,
+    /// and it would run unconditionally with `run_if: None`.
+    #[test]
+    fn a_boolean_run_if_is_a_parse_error_not_a_silent_none() {
+        assert!(serde_norway::from_str::<Task>(
+            "id: t\ntype: egret.sql\nsql: SELECT 1\nrunIf: false\n"
+        )
+        .is_err());
+        assert!(serde_norway::from_str::<Task>(
+            "id: t\ntype: egret.sql\nsql: SELECT 1\nrunIf: 0\n"
+        )
+        .is_err());
+    }
+
+    /// The round trip, which is what says `Serialize` emits `runIf` under
+    /// Kestra's own key and only when the author wrote one.
+    #[test]
+    fn run_if_round_trips_and_an_absent_one_emits_no_key() {
+        let yaml = "id: t\ntype: egret.sql\nsql: SELECT 1\nrunIf: \"false\"\n";
+        let t: Task = serde_norway::from_str(yaml).unwrap();
+        let out = serde_json::to_value(&t).unwrap();
+        assert_eq!(out.get("runIf").and_then(|v| v.as_str()), Some("false"));
+        let again: Task = serde_json::from_value(out).unwrap();
+        assert_eq!(again, t);
+
+        let bare: Task = serde_norway::from_str("id: t\ntype: egret.sql\nsql: SELECT 1\n").unwrap();
+        assert!(
+            serde_json::to_value(&bare).unwrap().get("runIf").is_none(),
+            "Kestra's default is the string \"true\"; writing it back into every \
+             serialised task would put a key into output no input had"
+        );
     }
 }

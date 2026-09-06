@@ -147,10 +147,24 @@ pub(crate) fn drive_concurrent(
     };
 
     // Rule 1.
-    let ended_badly = runs
-        .iter()
-        .flatten()
-        .any(|&ix| latest(state, ix).is_some_and(|s| s.is_terminal() && s != RunState::Success));
+    //
+    // **`SKIPPED` is excluded, and W3c is why.** Through W3a "terminal and not
+    // `SUCCESS`" and "terminated in error" were the same set, because every
+    // state this enum could hold that was terminal and not `SUCCESS` was a
+    // failure. `Skipped` is the first that is not: `State.java:293` lists it in
+    // `isTerminatedNoFail()` beside `SUCCESS`, and `Execution.guessFinalState`
+    // has no arm for it at all. Without this exclusion a falsy `runIf:` on one
+    // branch of a `Parallel` would `fail_the_rest` of its siblings -- egret
+    // failing runs Kestra succeeds, which is the divergence class this
+    // programme forbids. No corpus flow puts a `runIf:` on a `Parallel` or
+    // `Dag` child (`no_corpus_parallel_or_dag_child_declares_a_run_if` derives
+    // that on every run), so this is Kestra's Java stated as a rule rather than
+    // a live measurement, and `a_skipped_branch_does_not_fail_its_siblings` is
+    // what holds it.
+    let ended_badly = runs.iter().flatten().any(|&ix| {
+        latest(state, ix)
+            .is_some_and(|s| s.is_terminal() && !matches!(s, RunState::Success | RunState::Skipped))
+    });
     if ended_badly {
         let cmds = fail_the_rest(state, &runs);
         if !cmds.is_empty() {

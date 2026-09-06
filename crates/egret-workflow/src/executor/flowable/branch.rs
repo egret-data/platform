@@ -90,7 +90,7 @@ use super::{sequential, Step};
 /// [`build_plan`](crate::executor::build_plan)'s refusal (an `If` with no
 /// `condition`), and a *missing render* is [`Option::None`] at the call site
 /// above, not a falsy string.
-pub(crate) fn is_truthy(rendered: &str) -> bool {
+pub fn is_truthy(rendered: &str) -> bool {
     // `trim_matches(|c| c <= '\u{20}')`, NOT `trim()`: see the section above for
     // the 11 measured rows where the two differ, in both directions.
     !matches!(

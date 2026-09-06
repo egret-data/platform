@@ -43,6 +43,23 @@ use super::{latest, Step};
 /// later task gives a branch a way to survive a failed child — `errors:` is
 /// Task 7's and does exactly that — this line and that test have to be
 /// revisited together, and the test is the one that will notice.
+///
+/// # W3c: the argument broke, exactly where it said it would
+///
+/// `SKIPPED` is the state that separates the two spellings and does **not**
+/// end the branch: [`drive_concurrent`]'s rule 1 now excludes it, because
+/// `State.java:293` puts it in `isTerminatedNoFail()` beside `SUCCESS`. So a
+/// node whose `runIf:` rendered falsy reaches this predicate terminated, alive,
+/// and not `SUCCESS` — and a `Success`-only reading would leave every node that
+/// `dependsOn` it waiting for ever, on a `Dag` Kestra runs to completion.
+/// The predicate is therefore `SUCCESS` **or** `SKIPPED`, which is one step
+/// closer to Kestra's "terminated" and still not the whole of it: `FAILED` and
+/// `KILLED` remain unreachable here for the reason above.
+///
+/// No corpus `Dag` node carries a `runIf:`
+/// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives that from
+/// all 345 flows), so this is read from the Java rather than measured live, and
+/// `a_dag_node_downstream_of_a_skipped_dependency_still_runs` is the guard.
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
@@ -76,7 +93,12 @@ pub(crate) fn drive(
                 return false;
             };
             node.depends_on.iter().all(|&dep| {
-                run_for(dep).is_some_and(|ix| latest(state, ix) == Some(RunState::Success))
+                run_for(dep).is_some_and(|ix| {
+                    matches!(
+                        latest(state, ix),
+                        Some(RunState::Success) | Some(RunState::Skipped)
+                    )
+                })
             })
         },
     )

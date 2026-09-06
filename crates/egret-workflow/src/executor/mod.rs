@@ -24,6 +24,11 @@
 //! Tasks 7-8 add the attempt lifecycle and refusal. They add variants to
 //! [`TaskKind`] and [`Command`]; they do not change the signatures here.
 //!
+//! **W3c adds `runIf:`**, and with it a second obligation on the caller — see
+//! [`advance`]'s *What the caller must supply*. It is called out in the module
+//! doc because a caller that does not know about it does not get an error: it
+//! gets an empty command vector for ever.
+//!
 //! # What Task 6 emits and does NOT execute
 //!
 //! A `Loop` does not iterate inside its execution: each value produces a
@@ -58,6 +63,17 @@ pub use state::{apply, Attempt, ExecutionState, RunIx, RunState, TaskRun, Tick};
 /// place it is knowingly wider than Kestra.
 pub use flowable::loop_::iteration_values;
 
+/// Kestra's `TruthUtils.isTruthy`, over an already-rendered string.
+///
+/// Public for the same reason [`iteration_values`] is: callers outside this
+/// module need the same answer and must not each write their own. W3c's oracle
+/// arm derives which corpus `runIf:` expressions render falsy and has to ask
+/// the question the executor asks, not a transliteration of the Java that
+/// agrees with it by luck — the trim alone has 11 measured rows where the
+/// obvious transliteration is wrong. See [`flowable::branch::is_truthy`] for
+/// the measurement.
+pub use flowable::branch::is_truthy;
+
 use flowable::{sequential, Step};
 
 /// Decide what this execution does next.
@@ -78,6 +94,30 @@ use flowable::{sequential, Step};
 /// sequence, and round numbers are compared only between runs. Emitting it a
 /// round earlier would make the plan's own first-round assertion
 /// (`a_sequential_runs_its_children_one_at_a_time`) untrue for no gain.
+///
+/// # What the caller must supply, and the silence if it does not
+///
+/// `advance` is pure and cannot render, so two fields on
+/// [`TaskRun`](crate::executor::TaskRun) are the caller's to fill, at two
+/// different run states:
+///
+/// | field | filled when the run is | for |
+/// |---|---|---|
+/// | [`TaskRun::rendered_run_if`](crate::executor::TaskRun::rendered_run_if) | `CREATED` | the task's `runIf:`, if [`PlanTask::run_if`] is `Some` — W3c |
+/// | [`TaskRun::rendered`](crate::executor::TaskRun::rendered) | `CREATED` for a `Loop`, `RUNNING` for an `If`/`Switch` | that flowable's own expression — Tasks 5-6 |
+///
+/// **An unanswered render is [`Waiting`](flowable::Step::Waiting), not an
+/// error, and that is the trap.** A caller that never fills `rendered_run_if`
+/// gets an empty `Vec` from every call, for ever, on any flow whose author
+/// wrote a `runIf:` — a silent stall rather than a failure. It has to be a wait:
+/// reading `None` as falsy would skip every task the caller had not reached, and
+/// reading it as truthy would run every task the author had switched off. The
+/// oracle's tier 2a is the reference caller; deleting it is mutation M10, and
+/// it turns 5 golden entries `STUCK` rather than changing 5 traces.
+///
+/// **`rendered_run_if` is re-asked per attempt.** A retried run re-enters
+/// `CREATED` and [`apply`] clears both slots there, so a caller that answers
+/// once and caches is answering only for attempt 1. See `apply`'s rule 2.
 pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     if state.history.last().is_some_and(|s| s.is_terminal()) {
         return Vec::new();
@@ -1078,12 +1118,63 @@ mod tests {
         outcome: RunState,
         renders: &[(&str, &str)],
     ) -> ExecutionState {
+        run_to_fixpoint_rendering_run_if(plan, outcome, renders, &[])
+    }
+
+    /// [`run_to_fixpoint_rendering`], with the caller also answering `runIf:` --
+    /// W3c's second render slot, keyed by task id in its own list because one
+    /// task can need both.
+    ///
+    /// The `runIf:` pass comes FIRST and in its own step, exactly as
+    /// `tests/executor.rs`'s tier 2a does, and for the same reason: Kestra
+    /// decides `runIf:` before it resolves anything else about the task, so a
+    /// `Loop` whose `runIf:` is falsy is `SKIPPED` without its `values:` ever
+    /// being looked at. Two callers of `advance` differing on that would be two
+    /// answers to the question one of them is the guard for.
+    fn run_to_fixpoint_rendering_run_if(
+        plan: &Plan,
+        outcome: RunState,
+        renders: &[(&str, &str)],
+        run_ifs: &[(&str, &str)],
+    ) -> ExecutionState {
         let mut state = ExecutionState::new(plan);
         for _ in 0..1000 {
             let cmds = advance(plan, &state, T0);
             if !cmds.is_empty() {
                 for cmd in &cmds {
                     apply(&mut state, cmd);
+                }
+                continue;
+            }
+            // W3c's tier 2a.
+            let unrendered_run_if: Vec<RunIx> = (0..state.runs.len())
+                .filter(|&ix| {
+                    plan.tasks[state.runs[ix].task].run_if.is_some()
+                        && state.runs[ix].history.last() == Some(&RunState::Created)
+                        && state.runs[ix].rendered_run_if.is_none()
+                })
+                .collect();
+            if !unrendered_run_if.is_empty() {
+                for ix in unrendered_run_if {
+                    let id = &plan.tasks[state.runs[ix].task].id;
+                    let source = plan.tasks[state.runs[ix].task]
+                        .run_if
+                        .clone()
+                        .expect("filtered on Some above");
+                    // Same identity short-circuit as below: a `runIf:` with no
+                    // `{{` renders to itself, which is how a literal
+                    // `runIf: "false"` needs no entry here.
+                    let value = if source.contains("{{") {
+                        run_ifs
+                            .iter()
+                            .find(|(k, _)| k == id)
+                            .unwrap_or_else(|| panic!("no runIf render supplied for task '{id}'"))
+                            .1
+                            .to_string()
+                    } else {
+                        source
+                    };
+                    state.runs[ix].rendered_run_if = Some(value);
                 }
                 continue;
             }
@@ -4334,5 +4425,911 @@ tasks:
              walking `errors` in `Plan::children_of` costs and buys nothing \
              here. It is Kestra's own walk and it stays; this is its price"
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // W3c: `runIf:`
+    // ----------------------------------------------------------------------
+
+    /// A three-task flow whose middle task carries `run_if`.
+    fn seq_with_run_if(run_if: &str) -> Plan {
+        build_plan(&format!(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n\
+             \x20 - id: first\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n\
+             \x20 - id: middle\n    type: io.kestra.plugin.core.debug.Return\n    format: b\n    runIf: \"{run_if}\"\n\
+             \x20 - id: last\n    type: io.kestra.plugin.core.debug.Return\n    format: c\n"
+        ))
+        .expect("the probe plans")
+    }
+
+    /// **A falsy `runIf:` creates the run and then does not execute it**, which
+    /// is the whole of W3c and is *not* what `disabled:` does.
+    ///
+    /// Measured on `valids/task-runif`, whose golden is:
+    ///
+    /// ```text
+    /// output               CREATED SUBMITTED RUNNING SUCCESS
+    /// executed             CREATED SUBMITTED RUNNING SUCCESS
+    /// notexecuted          CREATED SKIPPED
+    /// notexecutedflowable  CREATED SKIPPED
+    /// willfailedtheflow    CREATED FAILED
+    /// ```
+    ///
+    /// So a skipped run exists, has no `SUBMITTED` and no `RUNNING`, carries one
+    /// attempt reading `CREATED SKIPPED`, and **the sequence keeps going** —
+    /// `notexecutedflowable` is created after `notexecuted` was skipped. A
+    /// disabled task, by contrast, has no run at all (`flatten_list`).
+    #[test]
+    fn a_falsy_run_if_creates_the_run_skips_it_and_the_sequence_continues() {
+        let plan = seq_with_run_if("false");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(run_ids(&plan, &state), ["first", "middle", "last"]);
+        assert_eq!(wire(&state.runs[1].history), ["CREATED", "SKIPPED"]);
+        assert_eq!(state.runs[1].attempts.len(), 1);
+        assert_eq!(
+            wire(&state.runs[1].attempts[0].history),
+            ["CREATED", "SKIPPED"]
+        );
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "a skipped sibling does not stop the sequence: Kestra creates \
+             `notexecutedflowable` after skipping `notexecuted`"
+        );
+        assert_eq!(
+            state.history.last(),
+            Some(&RunState::Success),
+            "`Execution.guessFinalState` has no arm for SKIPPED, so it leaves the \
+             aggregate alone -- `valids/task-runif-executionupdating` ends \
+             SUCCESS with two of its five runs SKIPPED"
+        );
+
+        // The control, same flow, same driver: a TRUTHY `runIf:` changes
+        // nothing at all. Without it, an implementation that skipped
+        // unconditionally would pass every assertion above.
+        let plan = seq_with_run_if("true");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"]
+        );
+    }
+
+    /// **The falsy set is Kestra's `TruthUtils.FALSE_VALUES`, and it is the
+    /// SAME predicate an `If` uses** — not a second copy of it.
+    ///
+    /// `branch::is_truthy` is measured against the running artifact over 38
+    /// rows, including the 18 that pin Java's `String.trim()` against Rust's
+    /// `str::trim` (11 of them disagree, in both directions). Writing a second
+    /// predicate here would have been a second chance to get that wrong; this
+    /// asserts that `runIf:` goes through the first one, on the rows where a
+    /// naive reading differs.
+    #[test]
+    fn a_run_ifs_truthiness_is_the_same_predicate_an_if_uses() {
+        for (rendered, skipped) in [
+            ("false", true),
+            ("0", true),
+            ("-0", true),
+            ("", true),
+            ("  false  ", true),
+            ("true", false),
+            ("00", false),
+            ("0.0", false),
+            ("FALSE", false),
+            ("null", false),
+            ("no", false),
+            // The trim rows: `\u{1}` is <= U+0020 so Java strips it and the
+            // value is falsy; `\u{A0}` is not, so Java keeps it and the value
+            // is truthy. Rust's `str::trim` answers the opposite on both.
+            ("\u{1}false\u{1}", true),
+            ("\u{A0}false\u{A0}", false),
+        ] {
+            let plan = seq_with_run_if("{{ x }}");
+            let state = run_to_fixpoint_rendering_run_if(
+                &plan,
+                RunState::Success,
+                &[],
+                &[("middle", rendered)],
+            );
+            assert_eq!(
+                state.runs[1].history.last() == Some(&RunState::Skipped),
+                skipped,
+                "rendered {rendered:?}: expected skipped={skipped}, got {:?}",
+                wire(&state.runs[1].history)
+            );
+        }
+    }
+
+    /// **An unrendered `runIf:` asks for nothing and is not an error** — the
+    /// same rule `an_if_with_no_rendered_condition_asks_for_nothing_and_is_not_an_error`
+    /// holds for a condition, and for the same reason.
+    ///
+    /// `advance()` is pure and cannot render. Treating `None` as falsy would
+    /// skip every task the caller had not reached yet, silently and on every
+    /// flow that uses the feature.
+    #[test]
+    fn an_unrendered_run_if_asks_for_nothing_and_is_not_an_error() {
+        let plan = seq_with_run_if("{{ inputs.go }}");
+        let mut state = ExecutionState::new(&plan);
+        // first: created, submitted, running -> succeed it.
+        for _ in 0..4 {
+            round(&plan, &mut state);
+        }
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Success,
+            },
+        );
+        // Now `middle` is created and its `runIf:` is unrendered.
+        round(&plan, &mut state);
+        assert_eq!(run_ids(&plan, &state), ["first", "middle"]);
+        assert_eq!(wire(&state.runs[1].history), ["CREATED"]);
+        assert_eq!(
+            advance(&plan, &state, T0),
+            Vec::new(),
+            "with the `runIf:` unrendered there is nothing to decide: not a \
+             skip, not a start, and not an error"
+        );
+
+        // And the caller answering unblocks it, so the wait above is a wait and
+        // not a deadlock.
+        state.runs[1].rendered_run_if = Some("true".to_string());
+        assert!(!advance(&plan, &state, T0).is_empty());
+    }
+
+    /// **A skipped flowable never creates its children**, which is what makes
+    /// `valids/task-runif`'s `notexecutedflowable` one run rather than a
+    /// subtree.
+    ///
+    /// The check is in [`flowable::open`], before the flowable is descended
+    /// into at all, so this holds for every kind — it is asserted on a
+    /// `Sequential` because a `Subflow` is planned opaque and could not tell
+    /// the difference.
+    #[test]
+    fn a_skipped_flowable_creates_no_children_and_leaves_its_parent_successful() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    runIf: \"false\"\n    \
+             tasks:\n      - id: inner1\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n      \
+             - id: inner2\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n",
+        )
+        .expect("the probe plans");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(run_ids(&plan, &state), ["seq"]);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED", "SKIPPED"]);
+        assert_eq!(
+            state.history.last(),
+            Some(&RunState::Success),
+            "the flow's own list aggregates a SKIPPED child as benign"
+        );
+    }
+
+    /// **A `Loop` decides `runIf:` before it resolves its `values:`**, so a
+    /// skipped `Loop` spawns nothing.
+    ///
+    /// This is why the check is at the top of [`flowable::open`] rather than
+    /// inside [`start`](flowable::start): a `Loop` never calls `start` —
+    /// `loop_::open` answers at `CREATED` — so a check in `start` would let a
+    /// skipped `Loop` spawn its whole first batch.
+    #[test]
+    fn a_skipped_loop_spawns_nothing() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: lp\n    type: io.kestra.plugin.core.flow.Loop\n    runIf: \"false\"\n    \
+             values: '[\"a\", \"b\"]'\n    tasks:\n      - id: body\n        \
+             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("the probe plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut spawns = 0usize;
+        for _ in 0..20 {
+            let cmds = advance(&plan, &state, T0);
+            if cmds.is_empty() {
+                // Tier 2a, by hand: a literal `runIf:` renders to itself.
+                let Some(ix) = (0..state.runs.len()).find(|&ix| {
+                    plan.tasks[state.runs[ix].task].run_if.is_some()
+                        && state.runs[ix].rendered_run_if.is_none()
+                }) else {
+                    break;
+                };
+                state.runs[ix].rendered_run_if = plan.tasks[state.runs[ix].task].run_if.clone();
+                continue;
+            }
+            for cmd in &cmds {
+                if matches!(cmd, Command::SpawnExecution { .. }) {
+                    spawns += 1;
+                }
+                apply(&mut state, cmd);
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["lp"]);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED", "SKIPPED"]);
+        assert_eq!(
+            spawns, 0,
+            "a skipped `Loop` asks for no sub-execution; the values are never \
+             resolved because the run never leaves CREATED alive"
+        );
+
+        // The control: the same `Loop` with a truthy `runIf:` spawns its batch,
+        // so the zero above is the skip and not the probe.
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: lp\n    type: io.kestra.plugin.core.flow.Loop\n    runIf: \"true\"\n    \
+             values: '[\"a\", \"b\"]'\n    tasks:\n      - id: body\n        \
+             type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("the probe plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut spawns = 0usize;
+        for _ in 0..20 {
+            let cmds = advance(&plan, &state, T0);
+            if cmds.is_empty() {
+                let unrendered = (0..state.runs.len()).find(|&ix| {
+                    plan.tasks[state.runs[ix].task].run_if.is_some()
+                        && state.runs[ix].rendered_run_if.is_none()
+                });
+                if let Some(ix) = unrendered {
+                    state.runs[ix].rendered_run_if = plan.tasks[state.runs[ix].task].run_if.clone();
+                    continue;
+                }
+                let unrendered = (0..state.runs.len()).find(|&ix| {
+                    matches!(plan.tasks[state.runs[ix].task].kind, TaskKind::Loop { .. })
+                        && state.runs[ix].rendered.is_none()
+                });
+                match unrendered {
+                    Some(ix) => {
+                        state.runs[ix].rendered = Some("[\"a\", \"b\"]".to_string());
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            for cmd in &cmds {
+                if matches!(cmd, Command::SpawnExecution { .. }) {
+                    spawns += 1;
+                }
+                apply(&mut state, cmd);
+            }
+        }
+        assert!(spawns > 0, "the control must spawn");
+    }
+
+    /// **A skipped branch does not fail its siblings** — the guard on
+    /// [`parallel::drive_concurrent`]'s rule 1.
+    ///
+    /// Through W3a, "terminal and not `SUCCESS`" and "terminated in error" were
+    /// the same set for every state [`RunState`] could hold. `Skipped` is the
+    /// first that is not: `State.java:293` lists it in `isTerminatedNoFail()`
+    /// beside `SUCCESS`. Without the exclusion, `fail_the_rest` would `FAIL`
+    /// every sibling still in flight the moment one branch's `runIf:` came back
+    /// falsy — egret failing runs Kestra succeeds.
+    #[test]
+    fn a_skipped_branch_does_not_fail_its_siblings() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+             - id: skipped\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"false\"\n      \
+             - id: sibling\n        type: io.kestra.plugin.core.debug.Return\n        format: b\n",
+        )
+        .expect("the probe plans");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(run_ids(&plan, &state), ["par", "skipped", "sibling"]);
+        assert_eq!(wire(&state.runs[1].history), ["CREATED", "SKIPPED"]);
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "the sibling must run to completion, not be failed by rule 1"
+        );
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+    }
+
+    /// **A `Dag` node downstream of a skipped dependency still runs.**
+    ///
+    /// `FlowableUtils.resolveDagNexts`'s filter is "all dependencies are
+    /// **terminated**", and `dag::drive` spells it `SUCCESS` because through
+    /// W3a every terminated-but-not-successful dependency had already ended the
+    /// branch. `SKIPPED` is the state where that argument stops holding, so the
+    /// predicate accepts it — otherwise a `runIf: "false"` on one node would
+    /// hang the whole `Dag` for ever, on a flow Kestra completes.
+    #[test]
+    fn a_dag_node_downstream_of_a_skipped_dependency_still_runs() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: d\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      \
+             - task:\n          id: up\n          type: io.kestra.plugin.core.debug.Return\n          format: a\n          runIf: \"false\"\n      \
+             - task:\n          id: down\n          type: io.kestra.plugin.core.debug.Return\n          format: b\n        dependsOn:\n          - up\n",
+        )
+        .expect("the probe plans");
+        let state = run_to_fixpoint_rendering(&plan, RunState::Success, &[]);
+        assert_eq!(run_ids(&plan, &state), ["d", "up", "down"]);
+        assert_eq!(wire(&state.runs[1].history), ["CREATED", "SKIPPED"]);
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "with a `SUCCESS`-only predicate this run is never created and the \
+             `Dag` never terminates -- a hang, on a flow Kestra completes"
+        );
+        assert_eq!(state.history.last(), Some(&RunState::Success));
+    }
+
+    /// **`disabled:` and `runIf:` are the same shape and different rules**, and
+    /// this is the pair of traces that says so.
+    ///
+    /// A disabled task has **no run at all** (`Execution.removeDisabled`, a list
+    /// filter). A `runIf:`-false task has a run in `SKIPPED`. The oracle
+    /// README credited the golden's `SKIPPED` population to `disabled:` in
+    /// three places and the plan said it too; both were false, and this asserts
+    /// the difference in one place rather than leaving it to prose.
+    #[test]
+    fn disabled_removes_the_run_and_run_if_skips_it() {
+        let disabled = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    disabled: true\n",
+        )
+        .expect("plans");
+        let state = run_to_fixpoint(&disabled, RunState::Success);
+        assert_eq!(
+            run_ids(&disabled, &state),
+            Vec::<String>::new(),
+            "`disabled:` is a plan-time deletion: no taskrun at all"
+        );
+
+        let run_if = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    runIf: \"false\"\n",
+        )
+        .expect("plans");
+        let state = run_to_fixpoint_rendering(&run_if, RunState::Success, &[]);
+        assert_eq!(run_ids(&run_if, &state), ["t"]);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED", "SKIPPED"]);
+    }
+
+    /// **`runIf:` reaches the plan from every task position `build_plan`
+    /// flattens**, derived rather than spot-checked.
+    ///
+    /// W3c's whole failure mode is a field that parses and is then dropped at
+    /// some boundary — which is exactly what happened to `disabled:` through
+    /// eight tasks. `flatten_one` writes `run_if` once, before the kind
+    /// dispatch, so every position goes through it; this is what says so for
+    /// each of the positions a corpus flow can put a task in.
+    #[test]
+    fn a_run_if_survives_every_position_the_builder_flattens() {
+        let probe = "id: probe\nnamespace: io.kestra.tests\n\
+             tasks:\n  \
+             - id: root\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    runIf: \"r\"\n  \
+             - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      \
+             - id: seqchild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"sc\"\n    \
+             errors:\n      - id: seqerr\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"se\"\n  \
+             - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+             - id: parchild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"pc\"\n  \
+             - id: iff\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ x }}\"\n    then:\n      \
+             - id: thenchild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"tc\"\n    \
+             else:\n      - id: elsechild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"ec\"\n  \
+             - id: sw\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{ x }}\"\n    cases:\n      \
+             A:\n        - id: casechild\n          type: io.kestra.plugin.core.debug.Return\n          format: a\n          runIf: \"cc\"\n    \
+             defaults:\n      - id: defchild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"dc\"\n  \
+             - id: dag\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      \
+             - task:\n          id: dagchild\n          type: io.kestra.plugin.core.debug.Return\n          format: a\n          runIf: \"gc\"\n  \
+             - id: lp\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n      \
+             - id: bodychild\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n        runIf: \"bc\"\n\
+             errors:\n  - id: flowerr\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    runIf: \"fe\"\n";
+        let plan = build_plan(probe).expect("the probe plans");
+        let got: BTreeMap<String, String> = plan
+            .tasks
+            .iter()
+            .filter_map(|t| t.run_if.clone().map(|r| (t.id.clone(), r)))
+            .collect();
+        assert_eq!(
+            got,
+            BTreeMap::from(
+                [
+                    ("root", "r"),
+                    ("seqchild", "sc"),
+                    ("seqerr", "se"),
+                    ("parchild", "pc"),
+                    ("thenchild", "tc"),
+                    ("elsechild", "ec"),
+                    ("casechild", "cc"),
+                    ("defchild", "dc"),
+                    ("dagchild", "gc"),
+                    ("bodychild", "bc"),
+                    ("flowerr", "fe"),
+                ]
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+            ),
+            "eleven positions, and each one is a place a dropped field would be \
+             invisible to every other test in this file"
+        );
+    }
+
+    /// **The instant on a skip is the `now` the decision was taken at**, and
+    /// the plumbing from [`flowable::open`] to the stored [`Attempt`] is
+    /// asserted here rather than only at [`apply`].
+    ///
+    /// `Command::SkipRun`'s doc claims the instant "can only be the `now` the
+    /// decision was taken at". **Nothing held that claim.** Replacing
+    /// `at: now` with `at: Tick(0)` in `open` left all 561 tests green — the
+    /// state test calls `apply` with a literal, so it pins the bookkeeping and
+    /// not the seam. The control for the shape already existed one line away:
+    /// the same mutation on `StartRun`'s `at: now` kills 3.
+    ///
+    /// Two ticks, because a single non-zero one would pass against a machine
+    /// that stored the first tick it ever saw.
+    #[test]
+    fn a_skipped_runs_attempt_records_the_tick_the_skip_was_decided_at() {
+        for tick in [Tick(11), Tick(4200)] {
+            let plan = seq_with_run_if("false");
+            let mut state = ExecutionState::new(&plan);
+            // `first` is created, started and finished, so that `middle` -- the
+            // one carrying the `runIf:` -- is opened at `tick` and nothing else
+            // is in flight when it is.
+            for _ in 0..3 {
+                for cmd in &advance(&plan, &state, Tick(0)) {
+                    apply(&mut state, cmd);
+                }
+            }
+            apply(
+                &mut state,
+                &Command::SetRunState {
+                    run: 0,
+                    state: RunState::Success,
+                },
+            );
+            // Create `middle`. Its literal `runIf:` renders to itself.
+            for cmd in &advance(&plan, &state, tick) {
+                apply(&mut state, cmd);
+            }
+            assert_eq!(run_ids(&plan, &state), ["first", "middle"]);
+            state.runs[1].rendered_run_if = Some("false".to_string());
+
+            let cmds = advance(&plan, &state, tick);
+            assert_eq!(
+                cmds,
+                vec![Command::SkipRun { run: 1, at: tick }],
+                "`open` must carry the `now` it was called with onto the command"
+            );
+            for cmd in &cmds {
+                apply(&mut state, cmd);
+            }
+            assert_eq!(
+                state.runs[1].attempts[0].started_at, tick,
+                "and `apply` must store it, so the instant on a skipped attempt \
+                 is the one the decision was taken at end to end"
+            );
+        }
+    }
+
+    /// **No corpus flow puts a `runIf:` on a `Parallel` or `Dag` child**, so
+    /// the two rules W3c had to widen for `SKIPPED` are read from Kestra's Java
+    /// rather than measured on the artifact — and that is stated here rather
+    /// than left for a reader to assume otherwise.
+    ///
+    /// If a corpus flow ever does, both `a_skipped_branch_does_not_fail_its_siblings`
+    /// and `a_dag_node_downstream_of_a_skipped_dependency_still_runs` acquire a
+    /// golden entry that can judge them, and this test is what would say so.
+    #[test]
+    fn no_corpus_parallel_or_dag_child_declares_a_run_if() {
+        // Over the raw YAML, for the reason every construct walk in this file
+        // is: reading the model would score zero for anything the model drops.
+        fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+            if let serde_json::Value::Object(map) = node {
+                let canon = map
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::models::canonical_flow_type);
+                match canon.as_deref() {
+                    Some("parallel") => {
+                        for child in map
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            if child.get("runIf").is_some() {
+                                out.push(child["id"].as_str().unwrap_or("<no id>").to_string());
+                            }
+                        }
+                    }
+                    Some("dag") => {
+                        for entry in map
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(task) = entry.get("task") else {
+                                continue;
+                            };
+                            if task.get("runIf").is_some() {
+                                out.push(task["id"].as_str().unwrap_or("<no id>").to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match node {
+                serde_json::Value::Object(map) => {
+                    for v in map.values() {
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // The positive control, in both spellings and both shapes, so an empty
+        // result below is a property of the corpus and not of this walker.
+        for (ty, body) in [
+            (
+                "io.kestra.plugin.core.flow.Parallel",
+                "    tasks:\n      - id: on\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n        runIf: \"false\"\n      - id: off\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "core.parallel",
+                "    tasks:\n      - id: on\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n        runIf: \"false\"\n      - id: off\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Dag",
+                "    tasks:\n      - task:\n          id: on\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n          runIf: \"false\"\n      - task:\n          id: off\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+            ),
+            (
+                "core.dag",
+                "    tasks:\n      - task:\n          id: on\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n          runIf: \"false\"\n      - task:\n          id: off\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+            ),
+        ] {
+            let probe: serde_json::Value = serde_norway::from_str(&format!(
+                "id: probe\nnamespace: io.kestra.tests\ntasks:\n  - id: p\n    type: {ty}\n{body}"
+            ))
+            .expect("the probe parses");
+            let mut found = Vec::new();
+            walk(&probe, &mut found);
+            assert_eq!(
+                found,
+                ["on".to_string()],
+                "{ty}: the walker must find the child with a runIf and not the other"
+            );
+        }
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut with_run_if = 0usize;
+        for (id, source) in every_corpus_flow() {
+            if source.contains("runIf") {
+                with_run_if += 1;
+            }
+            let Ok(doc) = serde_norway::from_str::<serde_json::Value>(&source) else {
+                continue;
+            };
+            let mut here = Vec::new();
+            walk(&doc, &mut here);
+            offenders.extend(here.into_iter().map(|t| format!("{id}/{t}")));
+        }
+        println!("corpus flows declaring a runIf anywhere: {with_run_if}");
+        assert_eq!(
+            with_run_if, 9,
+            "the population this is a statement about; if it moves, re-derive \
+             the `runIf:` numbers in oracle-exec/README.md in the same commit"
+        );
+        assert_eq!(
+            offenders,
+            Vec::<String>::new(),
+            "a corpus `Parallel` or `Dag` child declares a `runIf:`, so the two \
+             SKIPPED rules W3c widened are now judged by a golden entry rather \
+             than by Kestra's Java alone. Re-read `parallel::drive_concurrent` \
+             rule 1 and `dag::drive`'s predicate against it"
+        );
+    }
+
+    /// **No corpus flow writes an explicit `runIf: null`**, which is the one
+    /// spelling W1's parser and Kestra might read differently.
+    ///
+    /// `optional()` maps an explicit null to `None`, i.e. to "no `runIf:`",
+    /// which runs the task. Java's `TruthUtils.isTruthy(null)` is `false`,
+    /// which would skip it — but whether Jackson ever hands `getRunIf()` a null
+    /// past the `@Builder.Default` was not measured, and guessing either way
+    /// would be inventing a semantics. Nothing reaches the question, and this
+    /// is what says so.
+    #[test]
+    fn no_corpus_flow_writes_a_null_run_if() {
+        fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+            if let serde_json::Value::Object(map) = node {
+                if map.get("runIf").is_some_and(|v| v.is_null()) {
+                    out.push(map["id"].as_str().unwrap_or("<no id>").to_string());
+                }
+                for v in map.values() {
+                    walk(v, out);
+                }
+            } else if let serde_json::Value::Array(items) = node {
+                for v in items {
+                    walk(v, out);
+                }
+            }
+        }
+
+        // The control.
+        let probe: serde_json::Value = serde_norway::from_str(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  - id: n\n    \
+             type: io.kestra.plugin.core.debug.Return\n    format: x\n    runIf: null\n  \
+             - id: y\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n    runIf: \"false\"\n",
+        )
+        .expect("the probe parses");
+        let mut found = Vec::new();
+        walk(&probe, &mut found);
+        assert_eq!(found, ["n".to_string()]);
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let Ok(doc) = serde_norway::from_str::<serde_json::Value>(&source) else {
+                continue;
+            };
+            let mut here = Vec::new();
+            walk(&doc, &mut here);
+            offenders.extend(here.into_iter().map(|t| format!("{id}/{t}")));
+        }
+        assert_eq!(
+            offenders,
+            Vec::<String>::new(),
+            "a corpus flow writes `runIf: null`, so the divergence named on \
+             `models::Task::run_if` is now reachable and has to be measured \
+             against the artifact rather than left named"
+        );
+    }
+
+    /// **A `runIf:` is re-asked on every attempt, and a retry is what makes
+    /// that observable.**
+    ///
+    /// Kestra renders `runIf:` at the point it emits a worker task
+    /// (`ExecutionEventMessageHandler.java:269`), and a retried task is emitted
+    /// again — so attempt 2 is decided by attempt 2's render, not attempt 1's.
+    ///
+    /// [`retry::reopen_due`] returns a run to `CREATED`, which re-enters
+    /// [`flowable::open`] and therefore `run_if_verdict`. Without clearing the
+    /// slot, `TaskRun::rendered_run_if` still holds attempt 1's answer and
+    /// `advance` never asks again — a narrower instance of exactly the
+    /// over-acceptance W3c exists to close, because a `runIf:` that has become
+    /// falsy would still run.
+    ///
+    /// **`rendered_run_if` is the first render slot that can sit on a retried
+    /// run**, which is why this is W3c's and not pre-existing:
+    /// [`retry::scan`] only retries a [`TaskKind::Runnable`], and a `Runnable`
+    /// never carried the older `rendered` slot (that is an `If`/`Switch`/`Loop`
+    /// field).
+    ///
+    /// No corpus flow has both a `retry:` and a `runIf:`
+    /// (`no_corpus_flow_has_both_a_retry_and_a_run_if` derives it), so the
+    /// ratchet is blind to this and the test is what holds it.
+    #[test]
+    fn a_run_if_is_re_asked_on_every_attempt() {
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: t\n    type: io.kestra.plugin.core.debug.Return\n    format: a\n    \
+             runIf: \"{{ go }}\"\n    retry:\n      type: constant\n      maxAttempts: 3\n      \
+             interval: PT1S\n",
+        )
+        .expect("the probe plans");
+        let mut state = ExecutionState::new(&plan);
+
+        // Attempt 1: create, answer TRUE, run, fail.
+        round(&plan, &mut state);
+        assert_eq!(wire(&state.runs[0].history), ["CREATED"]);
+        // The execution takes RUNNING on the round after it has a run; that is
+        // the only thing left to emit while the `runIf:` is unanswered.
+        assert_eq!(
+            round(&plan, &mut state),
+            vec![Command::SetExecutionState {
+                state: RunState::Running
+            }]
+        );
+        assert_eq!(
+            advance(&plan, &state, T0),
+            Vec::new(),
+            "unrendered: nothing to decide"
+        );
+        state.runs[0].rendered_run_if = Some("true".to_string());
+        round(&plan, &mut state);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "SUBMITTED", "RUNNING"]
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+
+        // The retry pass schedules attempt 2 and the clock moves to it.
+        round(&plan, &mut state);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Retrying));
+        let due = state.runs[0].not_before.expect("a retry was scheduled");
+        for cmd in &advance(&plan, &state, due) {
+            apply(&mut state, cmd);
+        }
+        assert_eq!(
+            state.runs[0].history.last(),
+            Some(&RunState::Created),
+            "reopen_due returns the run to CREATED, which re-enters `open`"
+        );
+
+        // THE POINT: attempt 1's answer must not decide attempt 2.
+        assert_eq!(
+            state.runs[0].rendered_run_if, None,
+            "a run that has re-entered CREATED has not been rendered for this \
+             attempt; leaving attempt 1's answer in the slot is `advance` \
+             deciding attempt 2 from a stale render"
+        );
+        assert_eq!(
+            advance(&plan, &state, due),
+            Vec::new(),
+            "and so there is nothing to decide until the caller answers again"
+        );
+
+        // The caller now says FALSE, and attempt 2 is skipped rather than run.
+        state.runs[0].rendered_run_if = Some("false".to_string());
+        let cmds = advance(&plan, &state, due);
+        assert_eq!(
+            cmds,
+            vec![Command::SkipRun { run: 0, at: due }],
+            "attempt 2's own answer decides attempt 2"
+        );
+
+        // The control, on the same state: a caller that answers TRUE again gets
+        // attempt 2 started, so the assertion above is about the ANSWER and not
+        // about a retried run being unstartable.
+        let mut truthy = state.clone();
+        truthy.runs[0].rendered_run_if = Some("true".to_string());
+        assert!(advance(&plan, &truthy, due)
+            .iter()
+            .any(|c| matches!(c, Command::StartRun { .. })));
+    }
+
+    /// **No corpus flow has both a `retry:` and a `runIf:`**, which is why
+    /// `a_run_if_is_re_asked_on_every_attempt` is a committed test rather than
+    /// a banked golden entry.
+    ///
+    /// The two corpus flows that write `runIf: "{{taskrun.attemptsCount == 0}}"`
+    /// — `valids/restart-with-finally` and `…-after-execution` — are exactly the
+    /// shape this would matter for, and neither declares a `retry:`, so the
+    /// expression is constant across the one attempt they take.
+    #[test]
+    fn no_corpus_flow_has_both_a_retry_and_a_run_if() {
+        let mut with_run_if = 0usize;
+        let mut both: Vec<String> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let has_run_if = source.lines().any(|l| l.trim_start().starts_with("runIf:"));
+            if has_run_if {
+                with_run_if += 1;
+            }
+            if has_run_if && source.lines().any(|l| l.trim_start().starts_with("retry:")) {
+                both.push(id);
+            }
+        }
+        assert_eq!(
+            with_run_if, 9,
+            "the control: this must find the flows that declare a `runIf:` at all"
+        );
+        assert_eq!(
+            both,
+            Vec::<String>::new(),
+            "a corpus flow now has both, so the re-ask rule is judged by a golden \
+             entry rather than by `a_run_if_is_re_asked_on_every_attempt` alone"
+        );
+    }
+
+    /// **Only a `Runnable` can ever re-enter `CREATED`**, which is why
+    /// [`apply`]'s rule 2 clearing [`TaskRun::rendered`] alongside
+    /// `rendered_run_if` is unreachable today — and why that half is kept
+    /// rather than deleted.
+    ///
+    /// The mutation that removes the `rendered` half (R2-M16) kills nothing,
+    /// and this is the derivation that says why instead of leaving it as an
+    /// argument. The chain is structural, not corpus-dependent:
+    /// [`retry::scan`] gates on `matches!(kind, TaskKind::Runnable { .. })`, so
+    /// only a `Runnable` is ever put into `RETRYING` or given a `not_before`;
+    /// [`retry::reopen_due`] reopens exactly the runs that have one; and a
+    /// `Runnable` never has a `rendered`, because that slot belongs to an
+    /// `If`'s condition, a `Switch`'s value and a `Loop`'s `values`.
+    ///
+    /// So the code path is provably unreached, and the crate now carries the
+    /// test that says so — the treatment `an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach`
+    /// already established here. **Anyone who lets a flowable be retried should
+    /// expect R2-M16 to start killing something**, and should want it to.
+    #[test]
+    fn only_a_runnable_can_re_enter_created() {
+        // A `Sequential` carrying its OWN `retry:`, whose child fails. Kestra
+        // retries the CHILD (`policy_for` walks task -> ancestor -> flow), and
+        // the `Sequential` itself is never retried however its child ends.
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+             retry:\n      type: constant\n      maxAttempts: 3\n      interval: PT1S\n    \
+             tasks:\n      - id: child\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n",
+        )
+        .expect("the probe plans");
+
+        let mut state = ExecutionState::new(&plan);
+        let mut reopened: Vec<String> = Vec::new();
+        let mut now = T0;
+        for _ in 0..200 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    if let Command::SetRunState {
+                        run,
+                        state: RunState::Created,
+                    } = cmd
+                    {
+                        reopened.push(plan.tasks[state.runs[*run].task].id.clone());
+                    }
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Failed,
+                    },
+                ),
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+
+        // The positive control: something WAS reopened, so an empty
+        // non-Runnable list below is a fact about kinds and not about a flow
+        // that never retried at all.
+        assert_eq!(
+            reopened,
+            ["child", "child"],
+            "the child is a `Runnable` with a maxAttempts of 3, so it is \
+             reopened twice; if this is empty the assertion below proves nothing"
+        );
+        let non_runnable: Vec<&String> = reopened
+            .iter()
+            .filter(|id| {
+                !plan
+                    .tasks
+                    .iter()
+                    .any(|t| &&t.id == id && matches!(t.kind, TaskKind::Runnable { .. }))
+            })
+            .collect();
+        assert!(
+            non_runnable.is_empty(),
+            "a non-`Runnable` was returned to CREATED: {non_runnable:?}. \
+             `apply`'s rule 2 clearing `rendered` is reachable now, and R2-M16 \
+             should start killing something"
+        );
+        // And the `Sequential` itself never went RETRYING, which is the same
+        // fact read off `scan`'s gate rather than off the reopen commands.
+        assert!(
+            !state.runs[0].history.contains(&RunState::Retrying),
+            "`scan` gates on `TaskKind::Runnable`, so a flowable is never retried"
+        );
+        assert!(state.runs[0].not_before.is_none());
     }
 }
