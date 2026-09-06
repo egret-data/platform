@@ -20,8 +20,16 @@ services:
       retries: 10
 
   kestra:
-    image: kestra/kestra:v2.0.0-rc13
-    pull_policy: always
+    # PINNED BY DIGEST, not by tag. `v2.0.0-rc13` is a MUTABLE tag over a
+    # NIGHTLY build: the image's own labels read `version=nightly`,
+    # `revision=169ca7f25a1b3aeeaaab1206a89b2446a1335a46`, created 2026-09-01 —
+    # and the sibling checkout is 96893b589a (2026-08-17), which does not contain
+    # that revision. With `pull_policy: always` every `up` re-pulled whatever the
+    # tag pointed at, so the authority behind every golden entry could move
+    # without anyone noticing. That is why W3b Task 1 could not find
+    # `@DurationMin` in `Sleep.java` while the running image enforces it.
+    image: kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd
+    pull_policy: missing
     # Kestra, by default, has a termination grace period of 5m. We need to wait a little more to be sure no active tasks are running.
     stop_grace_period: 6m
     # Note that this setup with a root user is intended for development purpose.
