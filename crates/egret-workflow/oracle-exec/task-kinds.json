@@ -1,0 +1,198 @@
+{
+  "_": "Every task type declared by a corpus flow, resolved to the Kestra interface its class implements -- transitively, because `Loop extends AbstractBranch implements FlowableTask` and `WorkingDirectory extends Sequential`. Written by `handler_surface.py --refresh-kinds`; do not hand-edit. A type with NO entry is one the checkout does not declare, which is itself the answer for the test-source classes.",
+  "_checkout": "96893b589a02e5d5d85c722855f76c08e79085af",
+  "types": {
+    "io.kestra.core.plugins.AdditionalPluginTest$AdditionalPluginTestTask": {
+      "file": "core/src/test/java/io/kestra/core/plugins/AdditionalPluginTest.java",
+      "kind": "RunnableTask",
+      "line": 62
+    },
+    "io.kestra.core.runners.TaskCacheTest$CounterTask": {
+      "file": "core/src/test/java/io/kestra/core/runners/TaskCacheTest.java",
+      "kind": "RunnableTask",
+      "line": 83
+    },
+    "io.kestra.core.runners.test.TaskThatFail": {
+      "file": "core/src/test/java/io/kestra/core/runners/test/TaskThatFail.java",
+      "kind": "RunnableTask",
+      "line": 18
+    },
+    "io.kestra.core.runners.test.TaskWithAlias": {
+      "file": "core/src/test/java/io/kestra/core/runners/test/TaskWithAlias.java",
+      "kind": "RunnableTask",
+      "line": 25
+    },
+    "io.kestra.core.runners.test.WorkerTaskResultTooLarge": {
+      "file": "core/src/test/java/io/kestra/core/runners/test/WorkerTaskResultTooLarge.java",
+      "kind": "RunnableTask",
+      "line": 19
+    },
+    "io.kestra.core.runners.test.task.Alias": {
+      "alias_of": "io.kestra.core.runners.test.TaskWithAlias",
+      "file": "core/src/test/java/io/kestra/core/runners/test/TaskWithAlias.java",
+      "kind": "RunnableTask",
+      "line": 25
+    },
+    "io.kestra.core.tasks.test.BadExecutable": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/BadExecutable.java",
+      "kind": "ExecutableTask",
+      "line": 40
+    },
+    "io.kestra.core.tasks.test.BadSequential": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/BadSequential.java",
+      "kind": "FlowableTask",
+      "line": 54
+    },
+    "io.kestra.core.tasks.test.DynamicTask": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/DynamicTask.java",
+      "kind": "RunnableTask",
+      "line": 23
+    },
+    "io.kestra.core.tasks.test.Encrypted": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/Encrypted.java",
+      "kind": "RunnableTask",
+      "line": 30
+    },
+    "io.kestra.core.tasks.test.NullOutputTask": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/NullOutputTask.java",
+      "kind": "RunnableTask",
+      "line": 19
+    },
+    "io.kestra.core.tasks.test.Read": {
+      "file": "core/src/test/java/io/kestra/core/tasks/test/Read.java",
+      "kind": "RunnableTask",
+      "line": 21
+    },
+    "io.kestra.plugin.core.debug.Return": {
+      "file": "core/src/main/java/io/kestra/plugin/core/debug/Return.java",
+      "kind": "RunnableTask",
+      "line": 87
+    },
+    "io.kestra.plugin.core.execution.Assert": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/Assert.java",
+      "kind": "RunnableTask",
+      "line": 68
+    },
+    "io.kestra.plugin.core.execution.Exit": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/Exit.java",
+      "kind": "ExecutionUpdatableTask",
+      "line": 71
+    },
+    "io.kestra.plugin.core.execution.Fail": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/Fail.java",
+      "kind": "RunnableTask",
+      "line": 118
+    },
+    "io.kestra.plugin.core.execution.Labels": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/Labels.java",
+      "kind": "ExecutionUpdatableTask",
+      "line": 79
+    },
+    "io.kestra.plugin.core.execution.SetVariables": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/SetVariables.java",
+      "kind": "ExecutionUpdatableTask",
+      "line": 57
+    },
+    "io.kestra.plugin.core.execution.UnsetVariables": {
+      "file": "core/src/main/java/io/kestra/plugin/core/execution/UnsetVariables.java",
+      "kind": "ExecutionUpdatableTask",
+      "line": 60
+    },
+    "io.kestra.plugin.core.flow.AllowFailure": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/AllowFailure.java",
+      "kind": "FlowableTask",
+      "line": 87
+    },
+    "io.kestra.plugin.core.flow.Dag": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Dag.java",
+      "kind": "FlowableTask",
+      "line": 91
+    },
+    "io.kestra.plugin.core.flow.If": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/If.java",
+      "kind": "FlowableTask",
+      "line": 78
+    },
+    "io.kestra.plugin.core.flow.Loop": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Loop.java",
+      "kind": "FlowableTask",
+      "line": 197
+    },
+    "io.kestra.plugin.core.flow.LoopUntil": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/LoopUntil.java",
+      "kind": "FlowableTask",
+      "line": 69
+    },
+    "io.kestra.plugin.core.flow.Parallel": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Parallel.java",
+      "kind": "FlowableTask",
+      "line": 105
+    },
+    "io.kestra.plugin.core.flow.Pause": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Pause.java",
+      "kind": "FlowableTask",
+      "line": 158
+    },
+    "io.kestra.plugin.core.flow.Sequential": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Sequential.java",
+      "kind": "FlowableTask",
+      "line": 61
+    },
+    "io.kestra.plugin.core.flow.Sleep": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Sleep.java",
+      "kind": "RunnableTask",
+      "line": 47
+    },
+    "io.kestra.plugin.core.flow.Subflow": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Subflow.java",
+      "kind": "ExecutableTask",
+      "line": 81
+    },
+    "io.kestra.plugin.core.flow.Switch": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/Switch.java",
+      "kind": "FlowableTask",
+      "line": 91
+    },
+    "io.kestra.plugin.core.flow.WaitFor": {
+      "alias_of": "io.kestra.plugin.core.flow.LoopUntil",
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/LoopUntil.java",
+      "kind": "FlowableTask",
+      "line": 69
+    },
+    "io.kestra.plugin.core.flow.WorkingDirectory": {
+      "file": "core/src/main/java/io/kestra/plugin/core/flow/WorkingDirectory.java",
+      "kind": "FlowableTask",
+      "line": 207
+    },
+    "io.kestra.plugin.core.flow.WorkingDirectoryTest$LocalFiles": {
+      "file": "core/src/test/java/io/kestra/plugin/core/flow/WorkingDirectoryTest.java",
+      "kind": "RunnableTask",
+      "line": 442
+    },
+    "io.kestra.plugin.core.kv.Set": {
+      "file": "core/src/main/java/io/kestra/plugin/core/kv/Set.java",
+      "kind": "RunnableTask",
+      "line": 63
+    },
+    "io.kestra.plugin.core.log.Log": {
+      "file": "core/src/main/java/io/kestra/plugin/core/log/Log.java",
+      "kind": "RunnableTask",
+      "line": 68
+    },
+    "io.kestra.plugin.core.log.PurgeLogs": {
+      "file": "core/src/main/java/io/kestra/plugin/core/log/PurgeLogs.java",
+      "kind": "RunnableTask",
+      "line": 74
+    },
+    "io.kestra.plugin.core.output.OutputValues": {
+      "file": "core/src/main/java/io/kestra/plugin/core/output/OutputValues.java",
+      "kind": "RunnableTask",
+      "line": 61
+    },
+    "io.kestra.plugin.core.storage.Write": {
+      "file": "core/src/main/java/io/kestra/plugin/core/storage/Write.java",
+      "kind": "RunnableTask",
+      "line": 52
+    }
+  }
+}
