@@ -32,6 +32,7 @@
 //! value that is present, non-null, AND wrong-typed is still a real error.
 
 use serde::de::{DeserializeOwned, Error as SerdeError};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 /// A required field: missing key is `missing_field(key)`; a present value of
@@ -99,4 +100,36 @@ where
         Some(Value::Null) | None => Ok(default),
         Some(v) => serde_json::from_value(v).map_err(E::custom),
     }
+}
+
+/// A **derive**-based field whose explicit `null` must behave exactly like an
+/// absent key: `#[serde(default, deserialize_with = "null_is_absent")]`.
+///
+/// The same decision `optional`/`with_default` make for the hand-rolled path,
+/// applied to the derived one. `#[serde(default)]` alone covers only the
+/// *absent* key: a bare `Vec<Task>` handed an explicit `null` is
+/// `invalid type: null, expected a sequence`, and that refusal reached the HTTP
+/// API. `spec::parse` is what `routes.rs`'s `create_flow`, `update_flow` and
+/// `validate_flow` call, and it refused `valids/switch-impossible` — a flow this
+/// pinned Kestra (`kestra/kestra:v2.0.0-rc13`) publishes and RUNS — over a
+/// single `defaults: null`. Jackson does not error on a `null` for a `List`
+/// field; it leaves the field null, and Kestra's flowables read it as nothing to
+/// run. An empty collection is that same nothing, expressed in a type where
+/// `Task::children()`, the duplicate-id walk and `has_cycle` all already iterate
+/// it safely.
+///
+/// **Accepting the token is not accepting the flow.** `@NotEmpty` on
+/// `AbstractBranch.tasks` is bean validation, which Kestra evaluates when it
+/// *validates* a flow rather than when Jackson *parses* one — the principle this
+/// file's header already applies to `Parallel::concurrent`. So a `tasks: null`
+/// that now parses to an empty list still meets `spec::validate`'s emptiness
+/// rules, which is Kestra's own reason and is measured:
+/// `invalids/invalid-parallel` is still refused by `parallel_tasks_required` and
+/// `invalids/switch-invalid` by `switch_no_branches`.
+pub(super) fn null_is_absent<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }

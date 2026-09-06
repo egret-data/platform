@@ -2884,92 +2884,88 @@ mod tests {
         );
     }
 
-    /// **An OVER-REFUSAL already on `main`, pinned to its one token.**
+    /// **The over-refusal that reached the HTTP API, and the record of its
+    /// absence.**
     ///
-    /// `build_plan` refuses `valids/switch-impossible` — a flow this Kestra
-    /// published and **ran** — and the cause is not in the executor. W1's
-    /// `models::Switch::defaults` is a bare `Vec<Task>`, so an explicit
-    /// `defaults: null` is a parse error; Jackson leaves the field null and
-    /// Kestra runs the flow. `models/task.rs` applies the
-    /// bean-validation-is-not-parsing principle correctly to
-    /// `Parallel::concurrent` and every other scalar, and misses it on every
-    /// bare `Vec<Task>`.
+    /// `build_plan` used to refuse `valids/switch-impossible` — a flow this
+    /// pinned Kestra publishes and **runs** — and the cause was not in the
+    /// executor. W1's `models::Switch::defaults` was a bare `Vec<Task>`, so an
+    /// explicit `defaults: null` was a parse error; Jackson does not error on
+    /// one, it leaves the field null and Kestra runs the flow. `models/task.rs`
+    /// applied the bean-validation-is-not-parsing principle correctly to
+    /// `Parallel::concurrent` and every other scalar, and missed it on every
+    /// bare list.
     ///
-    /// This is not an oracle curiosity: `spec::parse` is what `routes.rs:335`
-    /// (`create_flow`, `update_flow`) and `routes.rs:640` (`validate_flow`)
-    /// call, so egret's HTTP API returns 400 for a flow this Kestra accepts.
+    /// It was never an oracle curiosity: `spec::parse` is what `routes.rs`'s
+    /// `create_flow`, `update_flow` and `validate_flow` call, so egret's HTTP
+    /// API returned 400 for a flow this Kestra accepts. Over-refusal is the
+    /// mirror of the divergence class this programme forbids shipping.
     ///
-    /// **Committed as a test because it is a defect with a deadline.** Two of
-    /// the six `refused` entries Task 3 banked (`invalids/switch-invalid`,
-    /// `invalids/invalid-parallel`) are refused by this same rule and are
-    /// therefore right *by accident* — when W1 fixes the model this test
-    /// flips, and whoever fixes it has to revisit `oracle-exec/baseline.txt`
-    /// and Task 8's per-group message assertions in the same commit.
+    /// `wire::null_is_absent`, on every list field in `models/task.rs`, closes
+    /// it. This test is its predecessor inverted: what that one *rehearsed* by
+    /// deleting the offending token from each of the three flows, this one
+    /// asserts with the token in place.
     ///
-    /// **Task 8 measured what that fix would cost, and the answer is
-    /// nothing.** Since `build_plan` now runs `validate`, deleting the
-    /// offending token from each of the three flows is a complete rehearsal
-    /// of W1's fix on that flow, and this test performs it: `switch-impossible`
-    /// plans, `switch-invalid` is refused by `switch_no_branches` and
-    /// `invalid-parallel` by `parallel_tasks_required` — each the cause Kestra
-    /// itself names. So the two accidental refusals survive the fix on their
-    /// merits, and the fix costs no over-acceptance. Before Task 8 those two
-    /// rehearsals both came out `Ok`, which is why this test used to assert
-    /// `is_ok()` for them and now asserts the code.
+    /// **The two accidental refusals are the reason this is a test and not a
+    /// one-line diff.** `invalids/switch-invalid` and `invalids/invalid-parallel`
+    /// were refused BY the null rule, so their refusals said nothing about what
+    /// Kestra judged them for, and a fix that accepted the token could have
+    /// accepted the flows with it. It does not, and the reason is the same
+    /// principle: `@NotEmpty` on `AbstractBranch.tasks` is bean validation,
+    /// evaluated when Kestra *validates* a flow rather than when Jackson
+    /// *parses* one, and `spec::validate` — which `build_plan` runs as its third
+    /// gate — is egret's equivalent. Both are still refused, each for the cause
+    /// Kestra itself names, and that is asserted on egret's own code rather than
+    /// on `is_err()`: every one of these flows is wrong in more than one way, so
+    /// a bare `expect_err` would pass for the wrong reason.
     #[test]
-    fn a_null_task_list_is_an_over_refusal_that_reaches_the_http_api() {
-        // The refusal, and the single token that causes it.
+    fn a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own() {
+        // The flow that was refused, with the token that refused it still in it.
         let with_null = corpus_source("valids/switch-impossible");
         assert!(
-            build_plan(&with_null).is_err(),
-            "if this now plans, W1's model has been fixed -- delete this test, \
-             re-run the ratchet, and revisit the two accidental refusals it names"
+            with_null.contains("defaults: null"),
+            "this test is about an explicit `null` in the corpus source; the flow \
+             no longer carries one, so nothing below is asserting anything"
         );
-        let without = with_null.replace("defaults: null", "");
-        assert!(
-            build_plan(&without).is_ok(),
-            "`defaults: null` must be the WHOLE cause; if removing it still fails, \
-             this test is pinning the wrong token"
+        let planned = build_plan(&with_null)
+            .expect("a flow this Kestra published with 200 and RAN must plan");
+
+        // `null` and "key absent" are now the same input, which is Jackson's
+        // behaviour and the whole content of the fix — asserted as an equality
+        // rather than as two `is_ok()`s, so a fix that merely stopped erroring
+        // while producing something else would fail here.
+        assert_eq!(
+            planned,
+            build_plan(&with_null.replace("defaults: null", "")).expect("without the null"),
+            "an explicit `null` list must parse to exactly what an absent key \
+             parses to"
         );
 
-        // `invalids/switch-invalid` is refused by the same token, so its
-        // refusal today says nothing about its empty `cases`. With the token
-        // gone it is refused by `switch_no_branches` -- "No task defined,
-        // neither cases or default have any tasks" is Kestra's own wording for
-        // the same flow -- so the accident is covered by a real rule
-        // underneath it.
-        let si = corpus_source("invalids/switch-invalid");
-        assert!(build_plan(&si)
-            .expect_err("switch-invalid")
-            .message
-            .contains("invalid type: null, expected a sequence"));
-        let si_fixed = build_plan(&si.replace("defaults: null", ""))
+        // `invalids/switch-invalid` used to be refused by the same token, so its
+        // refusal said nothing about its empty `cases`. It is refused by
+        // `switch_no_branches` now — "No task defined, neither cases or default
+        // have any tasks" is Kestra's own wording for this flow.
+        let si = build_plan(&corpus_source("invalids/switch-invalid"))
             .expect_err("its empty `cases:` is a refusal in its own right");
         assert!(
-            si_fixed.message.starts_with("switch_no_branches:"),
-            "with the null gone, invalids/switch-invalid must be refused for what \
-             Kestra judged about it, not for something else: {si_fixed}"
+            si.message.starts_with("switch_no_branches:"),
+            "with the null accepted, invalids/switch-invalid must be refused for \
+             what Kestra judged about it, not for something else: {si}"
         );
 
-        // And in `invalids/invalid-parallel`, only `para4` refuses at PARSE:
-        // an absent `tasks` key and an empty list both parse. So the parse
-        // rule is exactly "explicit null", not "missing or empty" -- and what
-        // catches `para2`/`para3` once it parses is `parallel_tasks_required`,
-        // which is `AbstractBranch`'s `@NotEmpty` and again Kestra's own
-        // reason.
-        let ip = corpus_source("invalids/invalid-parallel");
-        assert!(build_plan(&ip)
-            .expect_err("invalid-parallel")
-            .message
-            .contains("invalid type: null, expected a sequence"));
-        let ip_fixed = build_plan(&ip.replace("tasks: null", ""))
-            .expect_err("para2 and para3 are empty flowables");
+        // And `invalids/invalid-parallel`, whose `para4` carried `tasks: null`
+        // while `para2` (no `tasks` key) and `para3` (`tasks: []`) always
+        // parsed: the parse rule was exactly "explicit null", and what catches
+        // all three now is `parallel_tasks_required`, which is
+        // `AbstractBranch`'s `@NotEmpty` and again Kestra's own reason.
+        let ip = build_plan(&corpus_source("invalids/invalid-parallel"))
+            .expect_err("para2, para3 and para4 are empty flowables");
         assert!(
-            ip_fixed.message.starts_with("invalid_namespace:")
-                || ip_fixed.message.starts_with("parallel_tasks_required:"),
-            "with the null gone, invalids/invalid-parallel must be refused for one \
-             of the things Kestra named (its namespace, its id, or the three \
-             empty `Parallel`s): {ip_fixed}"
+            ip.message.starts_with("invalid_namespace:")
+                || ip.message.starts_with("parallel_tasks_required:"),
+            "with the null accepted, invalids/invalid-parallel must be refused \
+             for one of the things Kestra named (its namespace, its id, or the \
+             three empty `Parallel`s): {ip}"
         );
     }
 
@@ -2991,13 +2987,16 @@ mod tests {
         codes: &'static [&'static str],
     }
 
-    /// **The three, and the sweep below asserts there is no fourth.**
+    /// **The two, and the sweep below asserts there is no third.**
+    ///
+    /// There were three. `valids/switch-impossible` was the first row and the
+    /// only one of them with a golden entry — refused over a single
+    /// `defaults: null` by a bare `Vec<Task>` in W1's model, which is now
+    /// `wire::null_is_absent`. Its row is deleted here rather than edited, and
+    /// the sweep below is what forced the deletion: it panicked by name the
+    /// moment the flow started planning. See
+    /// `a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own`.
     const PUBLISHED_BUT_REFUSED: &[PublishedButRefused] = &[
-        PublishedButRefused {
-            id: "valids/switch-impossible",
-            cause: "W1's `models::Switch::defaults` is a bare `Vec<Task>`, so an                     explicit `defaults: null` is a parse error where Jackson                     leaves the field null and Kestra runs the flow. The only one                     of the three with a golden entry, and the only over-refusal                     the ratchet can see. Pinned to its single token by                     `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`",
-            codes: &["cannot parse flow"],
-        },
         PublishedButRefused {
             id: "valids/task-flow-dynamic",
             cause: "`namespace: \"{{inputs.namespace}}\"` on a `Subflow`.                     `subflow_namespace_invalid` checks the grammar against the                     UNRENDERED source, so every dynamic subflow reference is                     refused. The check exists because `publish::subflow_ref_name`                     encodes the pair as `\"{namespace}/{flowId}\"` and a `/` in                     either half decodes back into a different pair -- skipping it                     when the value holds `{{` would move the collision to render                     time, where nothing looks for it. The fix is to the encoding,                     and it is W1's",
@@ -3013,7 +3012,7 @@ mod tests {
         },
     ];
 
-    /// **Every flow this Kestra published with 200 must plan, except three
+    /// **Every flow this Kestra published with 200 must plan, except two
     /// named over-refusals — swept over the whole corpus, not pinned by
     /// name.**
     ///
@@ -3044,9 +3043,13 @@ mod tests {
     /// The exception table is inverted the way `STILL_OVER_ACCEPTED` is: each
     /// row is asserted to be **still refused, for its own code**. A suppression
     /// list would let a fixed row rot; this one fails when a row is fixed and
-    /// says which.
+    /// says which — which is not a claim about how it was written but a
+    /// measurement: the table was three rows until the null-list fix landed, and
+    /// this test is what refused to let the third one be deleted quietly. It
+    /// panicked at `valids/switch-impossible` by name, with the row's own cause
+    /// in the message, before anything had been edited.
     #[test]
-    fn every_flow_kestra_published_plans_except_three_named_over_refusals() {
+    fn every_flow_kestra_published_plans_except_two_named_over_refusals() {
         let corpus: serde_json::Value =
             serde_json::from_str(include_str!("../../oracle-exec/corpus.json"))
                 .expect("corpus.json parses");

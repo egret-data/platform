@@ -175,16 +175,19 @@ pub(crate) fn drive_if(
 ///
 /// # What this cannot represent
 ///
-/// An empty `default` here means Kestra's `defaults: null`. W1's
-/// `models::Switch::defaults` is a bare `Vec<Task>`, so an absent `defaults:`
-/// and an explicit `defaults: []` arrive identically — and on the artifact they
-/// differ: with no matching case, `defaults: []` leaves the `Switch` `RUNNING`
-/// for ever (measured live, same probe as above) where an absent `defaults:`
-/// ends it `FAILED`. Nothing in the corpus writes `defaults: []`, and
-/// `defaults: null` is refused by W1's parser today (an over-refusal recorded
-/// by `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`), so the
-/// two spellings this crate can tell apart are the two that occur. Whoever
-/// fixes that over-refusal owns this sentence too.
+/// An empty `default` here means Kestra's `defaults: null` OR an absent
+/// `defaults:` — and since the null-list fix (`wire::null_is_absent`) it means
+/// both, because they now parse identically. On the artifact those two agree
+/// too: Jackson leaves the field null either way, and with no matching case the
+/// `Switch` ends `FAILED`. `valids/switch-impossible` is that flow, and it is
+/// banked — egret reproduces its `FAILED` exactly.
+///
+/// What still cannot be represented is the third spelling, `defaults: []`: on
+/// the artifact an empty-but-non-null list leaves the `Switch` `RUNNING` for
+/// ever (measured live, same probe as above), and an empty `Vec` here cannot
+/// hold that apart from the other two. **Nothing in the corpus writes
+/// `defaults: []`** (measured over all 345 flows), so nothing reaches it.
+/// Closing it needs an `Option<Vec<Task>>` in W1's model and a third arm here.
 pub(crate) fn drive_switch(
     plan: &Plan,
     state: &ExecutionState,

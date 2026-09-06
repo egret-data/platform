@@ -2585,7 +2585,7 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
     );
     assert_eq!(
         (fed, spawner, flowable, unplanned, fed_without_submitted),
-        (575, 55, 108, 102, 79),
+        (575, 55, 109, 101, 79),
         "these five numbers are written into oracle-exec/README.md under `What the \
          oracle feeds in`. They move as Tasks 4-8 teach `build_plan` more flowables, \
          and when they do the README has to move with them -- which is the point of \
@@ -2596,7 +2596,12 @@ fn the_feed_absorbs_a_measured_share_of_the_golden_run_terminals() {
          runs of tasks written inside an `errors:` list -- which had no `PlanTask` \
          at all until Task 7 widened W1's model. The over-feed does NOT move with \
          them: an `errors:` task is a `Runnable` that carries `SUBMITTED`, so it \
-         belongs in `fed` on both readings."
+         belongs in `fed` on both readings. The null-list fix then moves exactly \
+         one, `unplanned` 102 -> 101 and `flowable` 108 -> 109: it is \
+         `valids/switch-impossible`'s single `impossible` run, and it changes \
+         bucket rather than count because a flow `build_plan` REFUSES has every \
+         run of it unplanned -- the refusal, not the Switch, was what put it \
+         there."
     );
 
     // The end state, independent of how complete `build_plan` happens to be:
@@ -2802,14 +2807,19 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
             branch_in_body,
             values_in_body
         ),
-        (26, 40, 12, 6),
+        (27, 40, 12, 6),
         "the population: every planned `If` condition, `Switch` value and `Loop` \
          `values:` in the comparable corpus, split two ways -- by kind, and by \
          whether a run for it can exist in THIS execution. Task 5 measured 26 \
          branch expressions and predicted `16 more across 15 entries` once `Loop` \
          landed; **the measured figure is 12, and every one of them is inside a \
          loop body**, so the REACHABLE branch population is still exactly 26 and \
-         nothing Task 5 asserted about it moved."
+         nothing Task 5 asserted about it moved. The null-list fix makes it 27: \
+         `valids/switch-impossible`'s `{{inputs.string}}` is a `Switch` value \
+         this crate could always render and never got to, because W1's model \
+         refused the flow at parse over its `defaults: null`. An over-refusal \
+         shrinks the population an oracle can measure -- which is the second \
+         thing wrong with one."
     );
     // The arithmetic, beside the parts rather than written next to them.
     assert_eq!(
@@ -2818,7 +2828,7 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
             branch_in_body + values_in_body
         ),
         (reachable, in_a_loop_body.len()),
-        "26 + 40 reachable and 12 + 6 in a loop body, totalling 84 expressions"
+        "27 + 40 reachable and 12 + 6 in a loop body, totalling 85 expressions"
     );
     assert_eq!(
         mentions_item, 10,
@@ -3475,11 +3485,15 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             unplanned + in_an_errors_list,
             over_fed.values().sum::<usize>()
         ),
-        (424, 73, 343, 114),
+        (424, 74, 342, 114),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
-         numbers. If it does not, nothing below is a measurement of anything"
+         numbers, and up to the one the null-list fix moved out of `unplanned` \
+         and into `flowable` (`valids/switch-impossible`'s `impossible` run: the \
+         flow is planned at all now, so its `Switch` is a flowable rather than a \
+         task with no plan). If it does not, nothing below is a measurement of \
+         anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -3830,20 +3844,32 @@ const REFUSAL_GROUPS: &[RefusalGroup] = &[
         message: "duplicate field 'message'",
         ids: &["invalids/duplicate-key"],
     },
+    // These two were ONE group until the null-list fix, and the group was not a
+    // cause at all: both flows carry an explicit `null` where W1's model had a
+    // bare `Vec<Task>`, so both were refused at PARSE — right by accident, while
+    // the same rule over-refused `valids/switch-impossible`, a flow this Kestra
+    // published and ran. `wire::null_is_absent` removed that rule, and each flow
+    // is now refused for the cause Kestra's own 422 names. Their `reason` fields
+    // in `corpus.json` are what the two `message`s below were chosen against.
+    //
+    // Kestra's 422 for `invalid-parallel` is also the direct evidence for what
+    // the fix does: it lists `tasks[para4].tasks: The 'tasks' property cannot be
+    // empty` beside para2's and para3's. Kestra READ `tasks: null` — Jackson did
+    // not error on it — and then bean validation refused it for being EMPTY,
+    // which is exactly the two-stage behaviour egret now reproduces.
     RefusalGroup {
-        // Recorded as its own group precisely because it is NOT the cause
-        // Kestra names, and the same rule OVER-REFUSES `valids/switch-impossible`,
-        // a flow this Kestra published and ran. W1's model owns the fix. Measured
-        // with the explicit `null`s deleted, each of these two is still refused —
-        // `invalids/invalid-parallel` by `parallel_tasks_required` and
-        // `invalids/switch-invalid` by `switch_no_branches` — and
-        // `valids/switch-impossible` validates clean. So the fix costs no
-        // over-acceptance; when it lands, these two move to the group below and
-        // this one disappears.
-        cause: "an explicit `null` where W1's model has a bare `Vec<Task>` — \
-                right by accident, and an over-refusal in the other direction",
-        message: "invalid type: null, expected a sequence",
-        ids: &["invalids/invalid-parallel", "invalids/switch-invalid"],
+        cause: "a `Switch` with neither `cases:` nor `defaults:` — it runs nothing \
+                under any match. Kestra: `tasks[impossible]: No task defined, \
+                neither cases or default have any tasks`",
+        message: "switch_no_branches:",
+        ids: &["invalids/switch-invalid"],
+    },
+    RefusalGroup {
+        cause: "a flow whose id and namespace are both the empty string, carrying \
+                three `Parallel`s with no children. Kestra names all of it; egret \
+                reports the namespace first and counts the rest",
+        message: "invalid_namespace:",
+        ids: &["invalids/invalid-parallel"],
     },
     RefusalGroup {
         cause: "a flowable with nothing to decide on — it cannot be planned at all",
@@ -4196,6 +4222,11 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     // Every baselined entry that declares none of them, with what holds it.
     // Eleven of the thirteen are already accounted for elsewhere in this file.
     // Sorted, because the derivation walks `baseline()` -- a `BTreeSet`.
+    //
+    // There were fourteen. `valids/switch-impossible` is banked by the null-list
+    // fix: what held it was never a construct the executor lacked but an
+    // OVER-REFUSAL in W1's model, and this list is where that showed -- an entry
+    // no construct explains, because no construct was missing.
     const UNATTRIBUTED: &[(&str, &str)] = &[
         (
             "invalids/dag-invalid-subtask",
@@ -4247,10 +4278,6 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/subflow-secret-output-child",
             "a SECRET output; the harness has no encryption key",
-        ),
-        (
-            "valids/switch-impossible",
-            "an OVER-REFUSAL: W1's bare Vec<Task> and an explicit null",
         ),
     ];
 

@@ -183,6 +183,91 @@ fn limits(secs: u64) -> Limits {
     }
 }
 
+/// **What the retry policy decides, recorded — not how long this machine took.**
+///
+/// The connector emits one `debug` event per retry carrying `wait_ms`: the wait
+/// [`retry_wait`](../src/execution/connector/trino.rs) computed, emitted *before*
+/// it is slept. Recording those is the difference between asserting a property of
+/// the policy and asserting a property of the machine, and the difference is not
+/// academic. The three tests below used to time the call with
+/// `std::time::Instant` and require the elapsed under 3-4 seconds; each passed
+/// alone in about a second and failed on a loaded machine having observed 3.0 to
+/// 4.7s. Four workspace gate runs were spent re-reading them as regressions.
+///
+/// A recorded ask cannot drift with load: `retry_wait` returns the same number on
+/// an idle laptop and on a machine with two dozen test binaries on it — while
+/// still failing, loudly and with the offending number, when the cap is removed.
+#[derive(Clone, Default)]
+struct Waits {
+    asked: Arc<Mutex<Vec<Duration>>>,
+    /// Signalled as each wait is recorded, so a test can judge the ask WITHOUT
+    /// waiting out the sleep it describes. That is what lets the absurd
+    /// `Retry-After` test fail in milliseconds rather than in an hour.
+    recorded: Arc<tokio::sync::Notify>,
+}
+
+impl Waits {
+    /// Route this thread's tracing events into the recorder for as long as the
+    /// returned guard lives. `#[tokio::test]` is a current-thread runtime, so
+    /// the whole test — spawned tasks included — is polled on the thread that
+    /// installs this, and each test binds its own recorder on its own thread.
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(WaitRecorder(self.clone())),
+        )
+    }
+
+    fn asked(&self) -> Vec<Duration> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    /// Return once the policy has ASKED for its first sleep — before that sleep
+    /// happens.
+    ///
+    /// The bound is a liveness guard, not an assertion about duration: the event
+    /// is emitted one localhost round-trip in, so thirty seconds is four orders
+    /// of magnitude of headroom, and the only thing that can exhaust it is a
+    /// connector that never retried at all.
+    async fn first_ask(&self) {
+        if !self.asked.lock().unwrap().is_empty() {
+            return;
+        }
+        tokio::time::timeout(Duration::from_secs(30), self.recorded.notified())
+            .await
+            .expect("the connector never asked to sleep: the 503 was not retried at all");
+    }
+}
+
+struct WaitRecorder(Waits);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WaitRecorder {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Grab(Option<u64>);
+        impl tracing::field::Visit for Grab {
+            fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
+                if f.name() == "wait_ms" {
+                    self.0 = Some(v);
+                }
+            }
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+        }
+        let mut grab = Grab::default();
+        event.record(&mut grab);
+        if let Some(ms) = grab.0 {
+            self.0.asked.lock().unwrap().push(Duration::from_millis(ms));
+            // `notify_one` stores a permit, so a `first_ask` that arrives after
+            // the event still returns immediately.
+            self.0.recorded.notify_one();
+        }
+    }
+}
+
 /// **The pooling safety property, measured rather than argued.**
 ///
 /// Two different principals run a statement against ONE coordinator. Because the
@@ -294,21 +379,29 @@ async fn a_503_is_retried_and_the_query_survives() {
 }
 
 /// The retry is BOUNDED. A coordinator that is genuinely down must still produce
-/// an error, and must not be hammered forever — every caller here already sits
-/// under a wall-clock budget it did not choose.
+/// an error, must not be hammered forever, and must not sleep past the budget
+/// every caller here already sits under — one it did not choose.
+///
+/// **Asserted on the policy's own decisions, recorded as it makes them.** The
+/// previous version timed the whole call and required it under 4 seconds; that
+/// is a property of the machine, and on a loaded one it was observed at 4.7s.
+/// The sequence below is what `retry_wait` computes — `TRINO_RETRY_BASE_BACKOFF`
+/// doubling, four times, under `TRINO_RETRY_MAX_BACKOFF` — and it is the same
+/// sequence at any load.
 #[tokio::test]
 async fn a_permanent_503_gives_up_after_a_bounded_number_of_attempts() {
     let mut s = stub();
     s.always_503 = true;
     let (port, seen) = start(s).await;
 
+    let waits = Waits::default();
+    let _recording = waits.install();
+
     let c = build_connector(&spec_impersonating(port, "alice"));
-    let started = std::time::Instant::now();
     let err = c
         .execute("SELECT 1", &limits(30), CancellationToken::new())
         .await
         .expect_err("a permanently unavailable coordinator is still an error");
-    let elapsed = started.elapsed();
 
     assert!(
         err.to_string().contains("503"),
@@ -321,19 +414,39 @@ async fn a_permanent_503_gives_up_after_a_bounded_number_of_attempts() {
         5,
         "the retry budget is five attempts"
     );
-    // 50 + 100 + 200 + 400 = 750ms of backoff, well inside every caller budget.
+
+    let asked = waits.asked();
+    assert_eq!(
+        asked,
+        vec![
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            Duration::from_millis(200),
+            Duration::from_millis(400),
+        ],
+        "the four sleeps between five attempts are the base backoff doubling \
+         under the 1s per-sleep cap; the policy asked for {asked:?}"
+    );
+    // 750ms in total, inside `TRINO_RETRY_MAX_TOTAL_WAIT` — which is the claim
+    // "well inside every caller budget" actually rests on.
+    let total: Duration = asked.iter().sum();
     assert!(
-        elapsed < Duration::from_secs(4),
-        "the bounded retry took {elapsed:?}, which no caller budget allows"
+        total <= Duration::from_millis(4000),
+        "the retries of one request may ask for at most TRINO_RETRY_MAX_TOTAL_WAIT \
+         (4s) of sleep, which is what makes them fit inside every caller budget; \
+         this one asked for {total:?}"
     );
 }
 
 /// `Retry-After` is honoured when the coordinator sends one — and capped, so the
 /// engine cannot decide how long an egret request hangs.
 ///
-/// Asserted as a floor on elapsed time: with the header ignored, egret's own
-/// first backoff is 50ms and the request would finish an order of magnitude
-/// faster than the 1s asked for.
+/// Both halves are one assertion on the recorded ask. egret's own backoff for a
+/// first retry is 50ms, so a 1000ms sleep can only have come from the header;
+/// and 1000ms is exactly `TRINO_RETRY_MAX_BACKOFF`, so the header was honoured
+/// as far as the cap allows and no further. The previous version made the same
+/// claim as `elapsed >= 900ms && elapsed < 3s`, through a clock this test does
+/// not control.
 #[tokio::test]
 async fn a_retry_after_header_is_honoured() {
     let mut s = stub();
@@ -341,23 +454,22 @@ async fn a_retry_after_header_is_honoured() {
     s.fail_with_503.store(1, Ordering::SeqCst);
     let (port, seen) = start(s).await;
 
+    let waits = Waits::default();
+    let _recording = waits.install();
+
     let c = build_connector(&spec_impersonating(port, "alice"));
-    let started = std::time::Instant::now();
     c.execute("SELECT 1", &limits(30), CancellationToken::new())
         .await
         .expect("served after the asked-for wait");
-    let elapsed = started.elapsed();
 
     assert_eq!(seen.lock().unwrap().len(), 2);
-    assert!(
-        elapsed >= Duration::from_millis(900),
-        "Retry-After: 1 was ignored — waited only {elapsed:?}"
-    );
-    // And capped: `TRINO_RETRY_MAX_BACKOFF` is 1s, so even an absurd header
-    // cannot stretch this past a couple of seconds.
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "waited {elapsed:?}; the cap on one sleep is 1s"
+    let asked = waits.asked();
+    assert_eq!(
+        asked,
+        vec![Duration::from_secs(1)],
+        "`Retry-After: 1` must be what the connector sleeps — its own backoff for \
+         a first retry is 50ms, so anything shorter means the header was ignored; \
+         the policy asked for {asked:?}"
     );
 }
 
@@ -365,16 +477,16 @@ async fn a_retry_after_header_is_honoured() {
 ///
 /// The other `Retry-After` test asks for one second, which IS the cap — so
 /// `d.min(cap) == d` and it passes with the cap deleted. This one asks for an
-/// hour. With the cap, the request waits a second and is served; without it,
-/// `send` sleeps for an hour and the outer bound below fires.
+/// hour, and asserts on the number the policy arrived at rather than on how long
+/// the call took: `Retry-After: 3600` must become a 1000ms sleep.
 ///
-/// The outer `tokio::time::timeout` is what makes the failure an assertion
-/// rather than a hung suite: it is deliberately far above the 1s the cap allows
-/// and far below the 3600s the coordinator asked for, so it can only fire when
-/// the cap is gone.
+/// The ask is judged *before* the sleep it describes, which is why this test is
+/// not merely load-proof but fast in the failure case: with the cap removed the
+/// recorded ask is `[3600s]` and the assertion fires in milliseconds, where the
+/// old version could only fail by outliving an 8-second outer timeout.
 ///
 /// Why it matters beyond this connector: `describe`/`describe_with_params` run at
-/// publish time, and until this package they had no outer wall clock at all
+/// publish time, and until Package 3b they had no outer wall clock at all
 /// (`port_impl::describe_bounded` now provides one) — an unbounded honouring of
 /// this header held a publish-validate open for as long as the coordinator said.
 #[tokio::test]
@@ -384,31 +496,37 @@ async fn an_absurd_retry_after_is_capped_and_cannot_hang_the_request() {
     s.fail_with_503.store(1, Ordering::SeqCst);
     let (port, seen) = start(s).await;
 
+    let waits = Waits::default();
+    let _recording = waits.install();
+
     let c = build_connector(&spec_impersonating(port, "alice"));
-    let started = std::time::Instant::now();
-    let out = tokio::time::timeout(
-        Duration::from_secs(8),
-        c.execute("SELECT 1", &limits(30), CancellationToken::new()),
-    )
-    .await
-    .expect("`Retry-After: 3600` was obeyed unbounded — the cap is gone")
-    .expect("the query survives one 503");
-    let elapsed = started.elapsed();
+    let query = tokio::spawn(async move {
+        c.execute("SELECT 1", &limits(30), CancellationToken::new())
+            .await
+    });
+
+    waits.first_ask().await;
+    let asked = waits.asked();
+    assert_eq!(
+        asked,
+        vec![Duration::from_millis(1000)],
+        "`Retry-After: 3600` must be capped at TRINO_RETRY_MAX_BACKOFF (1s): an \
+         engine does not get to decide how long an egret request hangs. The \
+         policy asked for {asked:?}"
+    );
+
+    // And the capped wait is really taken and the query really served — the cap
+    // shortens the retry, it does not skip it. The bound on the join is a
+    // liveness guard, not an assertion about duration: the sleep asserted above
+    // is one second, so nothing here is being measured against a clock.
+    let out = tokio::time::timeout(Duration::from_secs(60), query)
+        .await
+        .expect("the request never returned after a capped one-second wait")
+        .expect("the query task panicked")
+        .expect("the query survives one 503");
 
     assert_eq!(out.row_count, 1);
     assert_eq!(seen.lock().unwrap().len(), 2, "503 then 200");
-    // Capped at exactly one `TRINO_RETRY_MAX_BACKOFF`, so the whole call is
-    // about a second — not the hour it was asked for.
-    assert!(
-        elapsed < Duration::from_secs(3),
-        "one sleep is capped at 1s; waited {elapsed:?}"
-    );
-    // And the header was still honoured up to that cap rather than ignored:
-    // egret's own first backoff is 50ms.
-    assert!(
-        elapsed >= Duration::from_millis(900),
-        "the header was ignored entirely — waited only {elapsed:?}"
-    );
 }
 
 /// **A statement that could change data is never re-POSTed.**
