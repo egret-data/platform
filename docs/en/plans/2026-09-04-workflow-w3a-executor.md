@@ -656,7 +656,7 @@ entry ends up permanently baselined with nobody able to say why:
 | state | golden runs | produced by | owner |
 |---|---|---|---|
 | `PAUSED` | 18 | `Pause` | W8 |
-| `SKIPPED` | 4 | `disabled:` | **unclaimed — assign before W3a closes** |
+| `SKIPPED` | 4 | ~~`disabled:`~~ **`runIf:`** — the attribution here was wrong, and it was wrong in the oracle README in three more places. Walking `golden.json` finds `SKIPPED` on 6 runs across 4 entries, all `task-runif*`, and not one of those files contains `disabled:` | **unclaimed — named at the final review.** Two packages have to move: W1's `Task` has no field for `runIf`, and `RunState` has no `SKIPPED` |
 | `CANCELLED` | 3 | flow concurrency | W8 |
 | — | 18 over-submitted, **22 baselined entries** | `Subflow` | W6 |
 | — | 19 over-submitted | `core.execution.*` (`Labels` and 3 siblings, `ExecutionUpdatableTask`) | **unclaimed** |
@@ -682,9 +682,20 @@ which is the entry the oracle README's own circularity demonstration stands on.
 
 `disabled:` belongs to no package in the programme spec. It is a task-level flag,
 not a flowable, so it is arguably W1's model or W8's semantics — but it is
-currently nobody's, and its four entries would sit baselined forever with no
-owner named. The oracle README must carry this table, and W3a's final review must
+currently nobody's, and its entries would sit baselined forever with no owner
+named. The oracle README must carry this table, and W3a's final review must
 either assign `disabled:` or record the decision to defer it with a reason.
+
+**Resolved at the final review: W3a took it, because deferring was not open.**
+It is not a missing feature sitting in the baseline; it is an
+**over-acceptance**. On all six flows that use the flag egret created and ran a
+task the author had disabled, and on four of them that flipped the execution's
+terminal state. Over-acceptance is the one divergence class the Global
+Constraints forbid shipping, so "unclaimed" was the wrong category and
+`baseline.txt` was the wrong file. `flatten_list` now drops a disabled task from
+the plan — Kestra's own rule, `Execution.removeDisabled` over `tasks`, `errors`
+and `finally` — and four of the six banked. The row above is also corrected:
+`disabled:` never produced `SKIPPED`.
 
 Two more blockers Task 3 measured that are **not** W3a's to fix, and which the
 README must name so a later task does not rediscover them:

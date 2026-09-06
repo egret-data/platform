@@ -105,10 +105,17 @@ impl Task {
 // oversight. Java's `AbstractBranch.allChildTasks()` *is* `tasks + errors +
 // _finally`, so `children()` is narrower than Kestra's walk -- but
 // `children()` is `spec::validate`'s walk (duplicate ids, `has_cycle`) and
-// nothing else, `build_plan` never calls `validate`, and widening it would
-// change which flows egret REFUSES at publish. That is Task 8's subject and
-// W1's model to own; changing it here would move a refusal for a reason
-// that has nothing to do with `errors:` working.
+// nothing else, and widening it would change which flows egret REFUSES at
+// publish. That is W1's model to own; changing it here would move a refusal
+// for a reason that has nothing to do with `errors:` working.
+//
+// **The argument as first written leaned on "`build_plan` never calls
+// `validate`", and that has been false since `e0a22aa7`** -- Task 8 made
+// `validate` `build_plan`'s third gate, so widening this walk now moves what
+// the EXECUTOR refuses as well as what publish does. The conclusion is
+// unchanged and the reason it is unchanged is the stronger half of the
+// original: this is a rule about which flows are acceptable, and W1 owns
+// those. The clause has been removed rather than left to be read as support.
 //
 // `tasks` is `@NotEmpty` on `AbstractBranch` in Java (Task 4 fix round 3
 // owes the check), but that is bean validation, evaluated when Kestra

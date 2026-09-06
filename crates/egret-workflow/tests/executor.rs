@@ -1361,8 +1361,79 @@ fn the_golden_has_no_relation_for_exactly_these_pairs() {
     assert_eq!(dropped.values().sum::<usize>(), 13, "and they sum to 13");
 }
 
+/// **Of the 1104 kept ordered pairs, only the 877 at the TOP level are ever
+/// asserted; the other 227 live inside `spawned` sub-traces that nothing
+/// reaches.**
+///
+/// `oracle-exec/README.md`'s coverage statement said "the kept 1104 are the
+/// whole of what this oracle asserts about serialisation". Both numbers in that
+/// sentence are right and the claim it makes is not: 227 of them are inside a
+/// sub-execution's own trace, egret's `spawned` is `Vec::new()` unconditionally
+/// (nothing executes [`Command::SpawnExecution`] until W3b/W6), and
+/// [`Trace::restrict_order_to`] descends through
+/// `self.spawned.iter_mut().zip(&golden.spawned)` — a `zip` with an empty left
+/// side, which never iterates. The sentence three lines below it in the same
+/// file ("No sub-execution's trace is compared at all") already said so.
+///
+/// Demonstrated before it was believed: flipping all 227 sub-execution
+/// relations in `golden.json` to their opposite left this crate green and the
+/// ratchet unmoved.
+///
+/// Both halves are asserted, and the second is the one that makes the first
+/// mean anything:
+///
+/// - the split is derived from `golden.json` on every run, so the number in the
+///   README cannot drift from it;
+/// - and every trace egret produces for a comparable entry carries an **empty**
+///   `spawned`, which is *why* the 227 are unreachable. When W3b/W6 fills it,
+///   this assertion fails and the coverage statement has to be re-derived in
+///   the same commit.
+#[test]
+fn only_the_top_level_order_pairs_are_ever_asserted() {
+    fn count(node: &Trace, depth: usize, top: &mut usize, nested: &mut usize) {
+        if depth == 0 {
+            *top += node.order.len();
+        } else {
+            *nested += node.order.len();
+        }
+        for sub in &node.spawned {
+            count(sub, depth + 1, top, nested);
+        }
+    }
+
+    let (mut top, mut nested) = (0usize, 0usize);
+    let mut egret_spawned: Vec<String> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        count(&Trace::from(entry), 0, &mut top, &mut nested);
+        if let Outcome::Trace(actual) = evaluate(entry) {
+            if !actual.spawned.is_empty() {
+                egret_spawned.push(entry.id.clone());
+            }
+        }
+    }
+
+    println!("kept ordered pairs: {top} at the top level, {nested} inside `spawned`");
+    assert_eq!(
+        (top, nested, top + nested),
+        (877, 227, 1104),
+        "the split `oracle-exec/README.md`'s coverage statement quotes. 1104 is \
+         the number of pairs the harvest KEPT; 877 is the number this oracle can \
+         assert. The difference is the sub-execution hole measured in the unit \
+         the order table is written in"
+    );
+    assert_eq!(
+        egret_spawned,
+        Vec::<String>::new(),
+        "egret produces no `spawned` at all, which is WHY the {nested} nested \
+         pairs are unreachable: `restrict_order_to` descends through a `zip` \
+         with an empty left side. If this ever fails, W3b/W6 has closed the \
+         hole -- and the coverage statement's 877 must be re-derived in the \
+         same commit"
+    );
+}
+
 /// **What the restriction actually removes, driven through the real
-/// `advance()`: 22 pairs across 6 entries — and egret never says `after`.**
+/// `advance()`: 15 pairs across 4 entries — and egret never says `after`.**
 ///
 /// The bound the test above was wrongly claimed to be. It calls
 /// [`Trace::restrict_order_to`] on every comparable entry, exactly as
@@ -1370,19 +1441,27 @@ fn the_golden_has_no_relation_for_exactly_these_pairs() {
 /// the ratchet prints is this one, so a widening of the restriction's reach
 /// moves an assertion rather than a log line.
 ///
-/// **22 and not 13, and the gap is not a hole.** Three entries are the golden's
-/// own dropped pairs, on traces whose runs line up. The other three —
-/// `disable-simple`, `parallel-disabled-tasks`, `sequential-with-disabled`, all
-/// `disabled:` flows no W3a task claims — produce a *different run set* from
-/// Kestra's, so their pair indices do not denote the same pairs at all and the
-/// projection removes whatever does not collide. Such an entry can never bank:
-/// its `runs` differ, which is compared first and verbatim. The test asserts
-/// that separation rather than asserting it away, so an entry that starts
-/// having pairs removed while its runs DO match shows up as a changed map.
+/// **15 and not 13, and the gap is not a hole.** Three of the four entries are
+/// the golden's own dropped pairs, on traces whose runs line up. The fourth,
+/// `valids/exit-killed`, produces a *different run set* from Kestra's — `Exit`
+/// is an `ExecutionUpdatableTask`, which no W3a task claims — so its pair
+/// indices do not denote the same pairs at all and the projection removes
+/// whatever does not collide. Such an entry can never bank: its `runs` differ,
+/// which is compared first and verbatim. The test asserts that separation
+/// rather than asserting it away, so an entry that starts having pairs removed
+/// while its runs DO match shows up as a changed map.
+///
+/// **The number has moved four times and the last move went DOWN**: 22 across 6
+/// at Task 4, 25 across 7 at Tasks 5 and 6, 30 across 9 at Task 7, and 15
+/// across 4 at the final review. Five of the nine entries were `disabled:`
+/// flows, and every pair they contributed was a pair egret invented for a run
+/// Kestra never created — so implementing `disabled:` deleted the runs and
+/// their pairs together. A projection shrinking is the oracle seeing *more*,
+/// not less.
 ///
 /// **And the `after` assertion is what makes the restriction equivalent to the
 /// stronger rule.** egret's relation domain is measured, not assumed: over all
-/// comparable entries it produces 501 ordered pairs and **zero** `after`. With a
+/// comparable entries it produces 647 ordered pairs and **zero** `after`. With a
 /// two-valued domain, a pair Kestra dropped is a pair Kestra was seen producing
 /// *both* values for, so "remove the pair" and "accept either relation Kestra
 /// was observed to produce" are the same rule. That equivalence is why the
@@ -1427,37 +1506,31 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
         removed,
         BTreeMap::from([
             ("valids/dag".to_string(), 1),
-            ("valids/disable-error".to_string(), 3),
-            ("valids/disable-simple".to_string(), 2),
             ("valids/exit-killed".to_string(), 2),
             ("valids/if".to_string(), 9),
-            ("valids/if-with-only-disabled-tasks".to_string(), 1),
-            ("valids/parallel-disabled-tasks".to_string(), 7),
             ("valids/parallel-nested".to_string(), 3),
-            ("valids/sequential-with-disabled".to_string(), 2),
         ]),
         "this is the number the ratchet prints; assert it so a widening of the \
          restriction's reach moves a test and not a log line"
     );
     assert_eq!(
         removed.values().sum::<usize>(),
-        30,
-        "25 at Tasks 4-6. The 5 Task 7 adds are two ENTRIES that only now \
-         produce runs the golden has no pair for: `valids/disable-error` (3) and \
-         `valids/exit-killed` (2), both of which reach their `errors:` list for \
-         the first time. Both are baselined and stay so -- `disable-error`'s for \
-         `disabled:`, which belongs to no package in the programme spec"
+        15,
+        "25 at Tasks 4-6, 30 at Task 7, **15 at the final review**. This number \
+         went DOWN, and the direction is the point: a dropped pair is a pair \
+         egret invented for a run Kestra never created, so implementing \
+         `disabled:` deleted the runs and the pairs with them. The five entries \
+         that left are exactly the five `disabled:` flows whose runs used to \
+         differ -- `disable-error` (3), `disable-simple` (2), \
+         `if-with-only-disabled-tasks` (1), `parallel-disabled-tasks` (7), \
+         `sequential-with-disabled` (2). What remains is the golden's own three \
+         dropped-pair flows plus `valids/exit-killed`, whose runs still differ \
+         for a reason nothing in W3a owns (`Exit` is an \
+         `ExecutionUpdatableTask`)"
     );
     assert_eq!(
         runs_differ,
-        [
-            "valids/disable-error",
-            "valids/disable-simple",
-            "valids/exit-killed",
-            "valids/if-with-only-disabled-tasks",
-            "valids/parallel-disabled-tasks",
-            "valids/sequential-with-disabled"
-        ],
+        ["valids/exit-killed"],
         "every entry beyond the golden's own 3 dropped-pair flows has a run set \
          that DIFFERS from Kestra's, so its pair indices denote different pairs \
          and it can never bank -- `runs` is compared first and verbatim. If an \
@@ -1477,11 +1550,13 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
          so there is no new run whose creation could land out of order"
     );
     assert_eq!(
-        total_pairs, 656,
+        total_pairs, 647,
         "the population the `after` claim is measured over. 555 at Task 6, 557 at \
-         Task 5. Task 7 adds 101, and every one of them is a pair an `errors:` \
-         run makes: an error task is a run that did not exist before, and a run \
-         that exists is in a pair with every other run of its execution"
+         Task 5, 656 at Task 7 -- which added 101, every one of them a pair an \
+         `errors:` run makes, because an error task is a run that did not exist \
+         before and a run that exists is in a pair with every other run of its \
+         execution. The final review's `disabled:` takes 9 back off it, for the \
+         mirror-image reason: a run that no longer exists is in no pair at all"
     );
 
     // The cost, demonstrated on a BANKED entry rather than conceded in prose:
@@ -2961,14 +3036,17 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
     );
     assert_eq!(
         only_spawned.len(),
-        38,
+        39,
         "the number of entries whose ONLY remaining mismatch is the uncompared \
          `spawned` field. Written into oracle-exec/baseline.txt's header and \
          README.md; asserted here so it cannot drift from either. 33 at Task 6; \
          the 5 Task 7 adds are the four `retry-new-execution-*` entries, whose \
          run and execution histories now reproduce exactly and whose replacement \
          execution egret cannot create, plus `valids/retry-flowable-parallel`, \
-         which is the same hole with a `Loop` in front of it."
+         which is the same hole with a `Loop` in front of it. The final review \
+         adds the 39th, `valids/disable-flowable`: implementing `disabled:` was \
+         the whole of what stood between it and this list, and what holds it now \
+         is the sub-execution hole and nothing else."
     );
 
     // The remainder, by name rather than by subtraction, each with the reason
@@ -2981,8 +3059,6 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
     assert_eq!(
         rest,
         [
-            // A `disabled: true` task, which no W3a task claims.
-            "valids/disable-flowable",
             // `values: "{{ outputs.write.uri }}"` -- the caller's context has no
             // `outputs`, so the render fails and the `Loop` fails with it where
             // Kestra ran three iterations. The harness, not `advance()`; see
@@ -2992,12 +3068,15 @@ fn the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank() {
         ]
         .iter()
         .collect::<Vec<_>>(),
-        "38 + 3 = 41: the entries that differ on more than `spawned`, by name. \
+        "39 + 2 = 41: the entries that differ on more than `spawned`, by name. \
          Task 7 removed five from this list -- the four `retry-new-execution-*` \
          entries, which now reproduce every run, history and attempt Kestra \
          recorded and differ ONLY on the replacement execution nothing can \
          create, and `valids/retry-flowable-parallel`. `valids/all-flowable` \
-         left it too: its flow-level `errors:` runs now."
+         left it too: its flow-level `errors:` runs now. The final review \
+         removed the sixth, `valids/disable-flowable`, by implementing \
+         `disabled:`; the two that remain are both the harness's render, not \
+         `advance()`."
     );
 }
 
@@ -3077,10 +3156,14 @@ fn no_run_is_ever_created_for_a_task_inside_a_loop() {
 
     assert_eq!(
         (entries_with_a_body, loop_bodies),
-        (39, 82),
-        "the population: 39 comparable entries hold a `Loop`, with 82 tasks \
+        (39, 81),
+        "the population: 39 comparable entries hold a `Loop`, with 81 tasks \
          inside a loop body between them. Both are derived; if they move, the \
-         `Loop` slice of the corpus has changed"
+         `Loop` slice of the corpus has changed. It moved once, from 82: the \
+         final review's `disabled:` deletes `valids/disable-flowable`'s \
+         `1-each-2` from the plan, so the body it is in has one task fewer. The \
+         golden half of this test is unchanged, because Kestra never created a \
+         run for it either"
     );
 }
 
@@ -3590,6 +3673,116 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     );
 }
 
+/// **`SKIPPED` comes from `runIf:`, and never from `disabled:`** — the
+/// attribution derived rather than written down.
+///
+/// `oracle-exec/README.md` said `disabled: true` produced the golden's
+/// `SKIPPED` runs in three separate places, and the plan's *States and
+/// constructs no W3a task claims* table said it too. It is false, and it was
+/// false in a way that mattered: it gave a state to a construct that does not
+/// produce it, and it left the construct that DOES produce it — `runIf:` —
+/// with no row and no owner anywhere in the package.
+///
+/// Both halves are asserted, because only the second one is a control:
+///
+/// - every run whose state history holds `SKIPPED` is named here, and its
+///   flow's YAML must declare `runIf:` and must NOT declare `disabled:`;
+/// - and no flow that DOES declare `disabled:` may produce a `SKIPPED`
+///   anywhere in its trace. Without that half the test would pass on a golden
+///   where `disabled:` skipped things too.
+///
+/// This is what `executor/plan.rs`'s `flatten_list` stands on: a disabled task
+/// gets **no run at all**, not a run in a state `RunState` cannot hold. Had the
+/// README's sentence been true, deleting the task from the plan would have been
+/// the wrong shape of fix.
+#[test]
+fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
+    let mut skipped_runs: Vec<(String, String)> = Vec::new();
+    let mut disabled_entries: Vec<String> = Vec::new();
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let mut stack: Vec<&Trace> = vec![&trace];
+        let mut saw_skipped = false;
+        while let Some(t) = stack.pop() {
+            for run in &t.runs {
+                if run.state.iter().any(|s| s == "SKIPPED")
+                    || run.attempts.iter().flatten().any(|s| s == "SKIPPED")
+                {
+                    saw_skipped = true;
+                    skipped_runs.push((entry.id.clone(), run.task.clone()));
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if corpus_source(&entry.id).contains("disabled:") {
+            disabled_entries.push(entry.id.clone());
+            assert!(
+                !saw_skipped,
+                "{}: a flow declaring `disabled:` produced a SKIPPED run. That \
+                 is the reading `oracle-exec/README.md` used to carry, and if it \
+                 ever becomes true then `flatten_list` deleting the task from \
+                 the plan is the wrong shape of fix",
+                entry.id
+            );
+        }
+    }
+
+    skipped_runs.sort();
+    assert_eq!(
+        skipped_runs,
+        [
+            ("valids/task-runif", "notexecuted"),
+            ("valids/task-runif", "notexecutedflowable"),
+            ("valids/task-runif-executionupdating", "skipSetVariables"),
+            ("valids/task-runif-executionupdating", "skipUnsetVariables"),
+            (
+                "valids/task-runif-taskswithstate",
+                "skipped_when_failures_exist"
+            ),
+            ("valids/task-runif-workingdirectory", "log_test"),
+        ]
+        .map(|(e, t)| (e.to_string(), t.to_string())),
+        "every SKIPPED run in the golden, by name: 6 runs across 4 entries. \
+         `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
+         counts the ENTRIES (4); this names the runs, so a state moving between \
+         them is visible too"
+    );
+
+    let owners: BTreeSet<String> = skipped_runs.iter().map(|(e, _)| e.clone()).collect();
+    for id in &owners {
+        let source = corpus_source(id);
+        assert!(
+            source.contains("runIf:"),
+            "{id}: produces a SKIPPED run and does not declare `runIf:` -- the \
+             attribution has moved and the README's row must move with it"
+        );
+        assert!(
+            !source.contains("disabled:"),
+            "{id}: produces a SKIPPED run AND declares `disabled:`, so this \
+             corpus can no longer tell the two constructs apart and the \
+             attribution must be re-derived by hand"
+        );
+    }
+
+    assert_eq!(
+        disabled_entries,
+        [
+            "valids/disable-error",
+            "valids/disable-flowable",
+            "valids/disable-simple",
+            "valids/if-with-only-disabled-tasks",
+            "valids/parallel-disabled-tasks",
+            "valids/sequential-with-disabled",
+        ],
+        "the control's own population, named so it cannot silently become \
+         empty: six comparable golden entries declare `disabled:`, and not one \
+         of them produces a SKIPPED anywhere. `valids/working-directory` is a \
+         seventh corpus flow with the flag and has no golden entry -- it is one \
+         of the 22 `task-type-not-in-image` rejections"
+    );
+}
+
 // --------------------------------------------------------------------------
 // Task 8: the refusals
 // --------------------------------------------------------------------------
@@ -3907,6 +4100,32 @@ fn egret_refuses_every_flow_kestra_refuses() {
 ///   sibling and is unclaimed for the same reason.
 /// - **`sla:` (5 entries).** W1 ports it as a data shape and says so; nothing
 ///   evaluates one. The programme spec gives it to W8.
+///
+/// **A third arrived at the final review, and it arrived because an
+/// attribution written in prose was wrong.** `oracle-exec/README.md` credited
+/// the golden's `SKIPPED` state to `disabled: true` in three places. Walking
+/// every run of `golden.json` finds `SKIPPED` on **6 runs across 4 entries**
+/// — `valids/task-runif`, `…-executionupdating`, `…-taskswithstate`,
+/// `…-workingdirectory` — and **not one of those four YAML files contains
+/// `disabled:` at all**. Every one is `runIf:`.
+/// `the_skipped_state_comes_from_runif_and_never_from_disabled` derives that
+/// on every run so the sentence cannot drift back.
+///
+/// - **`runIf:` (7 entries).** Unclaimed, and unclaimed by *two* packages at
+///   once: W1's `Task` does not carry the field (it is neither in the struct
+///   nor in `children()`, so it survives only inside a leaf's opaque `spec`),
+///   and `RunState` has no `SKIPPED` for the executor to put a skipped run
+///   into. Either half alone would block it. Its entries were absorbed by
+///   other rows until now — `valids/task-runif` was counted under `Subflow`,
+///   which it happens to declare, so fixing `Subflow` would not have banked
+///   it.
+///
+/// **`disabled: true` left this table at the final review**, which is the
+/// other direction the same rule runs in: it is implemented, so it holds
+/// nothing. Of its six entries four banked; `valids/disable-flowable` is now
+/// attributed to the `Loop` that really holds it, and
+/// `valids/parallel-disabled-tasks` is in the named remainder below, held by
+/// one `order` pair — the same thing that holds `valids/dag` and `valids/if`.
 #[test]
 fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     // (label, the strings a flow's own YAML writes for it)
@@ -3958,7 +4177,10 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             ],
         ),
         ("flow concurrency:", 7, &["\nconcurrency:"]),
-        ("disabled: true", 6, &["disabled: true"]),
+        // `disabled: true` was a row here through Task 8 with 6 entries. It is
+        // implemented at the final review, so it holds nothing and a row would
+        // be an attribution to a construct that is no longer the cause.
+        ("runIf:", 7, &["runIf:"]),
         ("sla:", 5, &["\nsla:"]),
         ("CREATE_NEW_EXECUTION retry", 4, &["CREATE_NEW_EXECUTION"]),
         (
@@ -4008,6 +4230,12 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             "flow-level `outputs:` and `variables:`, same",
         ),
         ("valids/if", "three `order` pairs, same cause"),
+        (
+            "valids/parallel-disabled-tasks",
+            "one `order` pair, same cause: with `disabled:` implemented, every \
+             run, history and attempt matches and `(task3, task2)` is `before` \
+             in Kestra and `overlapping` here",
+        ),
         (
             "valids/retry-failed-flow-duration",
             "maxDuration in an environment with no elapsed time",

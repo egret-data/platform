@@ -61,9 +61,37 @@
 # (`WorkerTaskCallable.java:61`), and Kestra's own validator refuses it on any
 # non-`RunnableTask` (`FlowService.java:574`). It belongs to W4.
 #
+# Task 8 (the `invalids`) banked 14, leaving 149. Seven needed no new rule:
+# `build_plan` called `spec::parse` and never `spec::validate`, so egret had two
+# answers to "is this flow acceptable" and publish had been refusing seven of
+# these flows since W1. The largest single cause of the over-acceptance was a
+# missing CALL, not a missing rule. The seven that did need one are
+# `duplicate-key` (the same key twice in one YAML mapping, caught at parse),
+# `workingdirectory-invalid`, the two `scheduled-missing-inputs-defaults`,
+# `inputs-validation`, and the two dashed-reference flows.
+#
+# **This paragraph did not exist until the final review**, and its absence is
+# the symptom this file was named for in the plan: every task deletes lines from
+# a file no single task owns, so the header narrative stopped at Task 7 while
+# the line count kept moving. It said "leaving 163" over a file holding 149.
+#
+# The final review (`disabled:`) banked 4, leaving 145: `disable-simple`,
+# `disable-error`, `sequential-with-disabled` and `if-with-only-disabled-tasks`.
+# A disabled task now gets no `PlanTask` at all, which is Kestra's own rule --
+# `Execution.removeDisabled` over `tasks`, `errors` and `finally` -- and until
+# then egret CREATED AND RAN a task the author had disabled, flipping the
+# execution's terminal state on four of the six flows that use the flag. Those
+# four were filed here as "does not reproduce yet"; they were over-acceptances,
+# and this file is not where an over-acceptance belongs. The other two are
+# `disable-flowable` (held by the sub-execution hole alone) and
+# `parallel-disabled-tasks` (held by one ordered pair, like `dag` and `if`).
+#
 # A panic, and a state machine that will not settle inside the step bound, are
 # NOT covered by this file. A line here means "egret does not reproduce this
-# trace yet"; it never means "egret may crash here".
+# trace yet"; it never means "egret may crash here". A line here also never
+# means "egret over-accepts this flow": an over-acceptance is a divergence this
+# programme forbids shipping, and the five that remain are named in
+# `tests/executor.rs`'s `STILL_OVER_ACCEPTED` with an owner each, not here.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -78,9 +106,7 @@ valids/all-flowable
 valids/allow-failure
 valids/allow-failure-with-retry
 valids/dag
-valids/disable-error
 valids/disable-flowable
-valids/disable-simple
 valids/exit
 valids/exit-cancelled
 valids/exit-killed
@@ -113,7 +139,6 @@ valids/full
 valids/if
 valids/if-in-flowable
 valids/if-in-parallel
-valids/if-with-only-disabled-tasks
 valids/labels-update-nested-value-list
 valids/labels-update-nested-value-map
 valids/labels-update-task
@@ -169,7 +194,6 @@ valids/retry-new-execution-task-duration
 valids/retry-subflow
 valids/retry-success
 valids/retry-with-flowable-errors
-valids/sequential-with-disabled
 valids/set-variables
 valids/set-variables-duplicate
 valids/sla-execution-condition

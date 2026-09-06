@@ -1459,7 +1459,7 @@ task that owns it:
 | `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
 | `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
 | `WARNING` | 10 | `AllowFailure` and `warningOnRetry` — **not Task 7's**, and this row said it was. `warningOnRetry` turns a retried task's eventual SUCCESS into WARNING, so `valids/retry-success` and `valids/task-allow-failure-runnable` need it; `AllowFailure` is planned opaque and belongs to W8. Unclaimed |
-| `SKIPPED` | 4 | `disabled: true`, which no W3a task claims |
+| `SKIPPED` | 4 | `runIf:`. **This row said `disabled: true` and was wrong**; see *`SKIPPED` is `runIf:`'s, and `runIf:` had no owner* |
 | `CANCELLED` | 3 | flow concurrency, which no W3a task claims |
 
 A later task adding one of these adds it here too; the counts are what
@@ -1744,7 +1744,8 @@ removes.
 **Removing is equivalent to ACCEPTING, and that is what makes it not a
 weakening.** egret's relation domain is measured, not assumed: over all
 comparable entries it produced **501 ordered pairs and zero `after`** at Task 4
-(555 after Task 6, **656** after Task 7; the zero has never moved). A pair is
+(555 after Task 6, 656 after Task 7, **647** after the final review; the zero
+has never moved). A pair is
 dropped from the golden precisely because Kestra flipped on it between rounds,
 which over a two-valued domain means Kestra was *observed producing both
 values*. So "drop the pair" is today exactly "accept either relation Kestra was
@@ -1755,10 +1756,13 @@ because a run's left endpoint is its creation step and creation is monotonic in
 run order — so it is asserted rather than argued. Task 6's spawned executions
 were the thing named as able to break it, and they do not: a `Loop` creates no
 run for its body at all, so it adds no creation that could land out of order.
-The population is **656** after Task 7 (555 after Task 6), and the assertion of
-zero `after` is unchanged. Task 7 adds 101 pairs and every one of them is made
-by an `errors:` run — a run that exists is in a pair with every other run of its
-execution — so the growth is a new *population*, not a new relation.
+The population is **647** after the final review (656 after Task 7, 555 after
+Task 6), and the assertion of zero `after` is unchanged. Task 7 adds 101 pairs
+and every one of them is made by an `errors:` run — a run that exists is in a
+pair with every other run of its execution — so that growth is a new
+*population*, not a new relation. The final review takes 9 back off, for the
+mirror-image reason: implementing `disabled:` deletes runs egret used to create
+and Kestra never did, and a run that no longer exists is in no pair at all.
 
 **The cost, stated and demonstrated rather than implied.** On the dropped pairs
 egret may report *anything*. That is shown on `valids/parallel-nested`, a
@@ -1777,14 +1781,16 @@ Three committed tests bound it:
   all three reached `golden.json`, so there is nothing to reconcile.
 - `what_the_order_restriction_removes_is_derived_and_egret_never_says_after` —
   what the projection actually removes when the real `advance()` runs, which is
-  **22 across 6 entries** and is the number the ratchet prints. The 9 beyond the
-  golden's own 13 are on `valids/disable-simple` (2),
-  `valids/parallel-disabled-tasks` (7) and `valids/sequential-with-disabled` (2)
-  — all `disabled:` flows whose egret run set *differs* from Kestra's, so their
-  pair indices do not denote the same pairs and such an entry can never bank
+  **15 across 4 entries** after the final review and is the number the ratchet
+  prints. It was 22 across 6 at Task 4, 25 across 7 at Tasks 5 and 6, and 30
+  across 9 at Task 7; five of those nine entries were `disabled:` flows, and
+  implementing `disabled:` deleted both the runs and the pairs they made. The 2
+  beyond the golden's own 13 are on `valids/exit-killed`, whose egret run set
+  *differs* from Kestra's (`Exit` is an `ExecutionUpdatableTask`, unclaimed), so
+  its pair indices do not denote the same pairs and such an entry can never bank
   anyway (`runs` is compared first and verbatim). The test asserts that
   separation, so an entry losing pairs while its runs DO match shows up as a
-  changed map.
+  changed map. **A shrinking projection is the oracle seeing more, not less.**
 
 **An earlier version of this section said 12 and offered a reconciliation for
 the missing one.** Both were wrong: the map sums to 13, and the test that
@@ -2276,7 +2282,7 @@ that egret cannot produce — see below for the three numbers that say how much.
 Measured, and it is the whole shape of the flowable. Each value produces a
 separate **sub-execution** carrying `parentId`; the body's tasks never appear in
 the parent's `taskRunList`. Over the comparable corpus, **39 entries hold a
-`Loop`, with 82 tasks inside a loop body between them, and not one of those
+`Loop`, with 81 tasks inside a loop body between them, and not one of those
 tasks has a run in its parent** — on either side.
 `no_run_is_ever_created_for_a_task_inside_a_loop` derives that from egret's
 traces *and* from Kestra's own golden, because if Kestra ever did put one there,
@@ -2286,7 +2292,11 @@ traces *and* from Kestra's own golden, because if Kestra ever did put one there,
 the direct children. Nothing forces that from the type — a narrow reading
 compiles and passes everything else, because `advance()` never calls the method
 at all — so the two readings are measured against each other: over all 345
-corpus flows the wide one names **89** tasks and the narrow one **64**.
+corpus flows the wide one names **88** tasks and the narrow one **63**. (82,
+89 and 64 until the final review implemented `disabled:`, which deletes
+`valids/disable-flowable`'s `1-each-2` — a direct child of a `Loop` — from the
+plan. The gap of 25 between the two readings is unchanged: the task left both at
+once.)
 
 ### Only the FIRST batch is spawned, and that is a derivation
 
@@ -2388,17 +2398,20 @@ hole is stated with numbers and marked by a test rather than by a sentence.
 |---|---|
 | golden entries carrying a sub-execution | **41** |
 | sub-executions they carry | **142** |
-| of the 41, entries that now differ on **nothing but `spawned`** | **33** |
+| of the 41, entries that differ on **nothing but `spawned`** — 33 at Task 6, 38 at Task 7, **39** at the final review | **39** |
 | sub-executions whose `(parent_run, value)` IS compared | **52** |
 | sub-executions whose **trace** is compared | **0** |
 
 `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` asserts
-the first three, requires all 41 to still be baselined, and names the 8 that
-differ on more than `spawned` with the reason for each: four are the
-`retry-new-execution-*` replacement executions (Task 7's), one is a `disabled:`
-task (unclaimed), one is a `Loop` whose first iteration failed and whose
-flow-level `errors:` then ran (Task 7's), and two are the `values: "{{
-outputs.write.uri }}"` flows the harness cannot render.
+the first three, requires all 41 to still be baselined, and names the ones that
+differ on more than `spawned` with the reason for each. There were 8 at Task 6:
+four `retry-new-execution-*` replacement executions and one
+`valids/retry-flowable-parallel`, which Task 7 closed; one `Loop` whose first
+iteration failed and whose flow-level `errors:` then ran, which Task 7 closed
+too; `valids/disable-flowable`, which the final review closed by implementing
+`disabled:`; and the two `values: "{{ outputs.write.uri }}"` flows the harness
+cannot render, which are **the only two left** and are the harness rather than
+`advance()`.
 
 `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` is the part that
 *can* be compared, and it is corpus-wide: over **36** loop runs it checks that
@@ -2483,8 +2496,9 @@ asserts three things: that the render fails, that `golden.json` says Kestra's
 own runs for them ended `SUCCESS`, and that `iteration_values` refuses a
 `kestra:///….ion` string. The third is the second cause, asserted rather than
 described, because an attribution committed in a test is the kind that gets
-believed. Both entries are baselined, and both are in the 8 that differ on more
-than `spawned`.
+believed. Both entries are baselined, and after the final review they are the
+**only two** that differ on more than `spawned` — it was 8 at Task 6 and 3 at
+Task 7.
 
 ### A third `values:` shape, named as a gap
 
@@ -2905,7 +2919,8 @@ owner is how a suppression list starts.
 |---|---|---|---|
 | `Pause` | `PAUSED`, 18 golden `runs` entries | `io.kestra.plugin.core.flow.Pause` | W8 |
 | flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
-| `disabled:` | `SKIPPED`, 4 entries | a task-level flag | **unclaimed — W3a's final review must assign it or defer it with a reason** |
+| `disabled:` | ~~`SKIPPED`, 4 entries~~ — **the state was misattributed and the construct is now implemented**; see the two rows below | a task-level flag | **W3a's final review took it.** `flatten_list` drops a disabled task from the plan, which is Kestra's own rule (`Execution.removeDisabled`, called on `tasks`, `errors` and `finally` inside `findTaskDependingFlowState`): no taskrun at all, and a flowable whose children are all disabled still succeeds. 4 of its 6 baselined entries banked |
+| `runIf:` | **6 runs across 4 entries** — the golden's whole `SKIPPED` population — and 7 baselined entries | a task-level expression, rendered per run | **unclaimed, and by two packages at once.** W1's `Task` does not carry the field, and `RunState` has no `SKIPPED` to put a skipped run into. Either half alone would block it. Named at the final review: it had no row anywhere in this file or in the plan, because the `SKIPPED` state was credited to `disabled:` |
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
@@ -3144,6 +3159,12 @@ The other two are each their own:
 
 ### The price of running `validate`: two over-refusals the ratchet cannot see
 
+> **Superseded in scope at the final review, not in content.** Task 8 pinned
+> these two *by name*, which guards these two and nothing else. The sweep below
+> — *Over-refusal, swept rather than pinned* — makes the population
+> `corpus.json`'s own `publish_status == 200` and finds **three**: these two
+> plus `valids/switch-impossible`, the over-refusal already on `main`.
+
 Measured over all **345** corpus flows, `validate` reports errors on **18**.
 Sixteen are `refused` golden entries. The other two are flows this Kestra
 published with **200**:
@@ -3162,13 +3183,12 @@ the population meant sweeping `validate` over all 345, and the sweep found three
 things rather than one: the expected departure
 (`invalids/duplicate-parallel`, now correctly refused) and these two.
 
-**Both are W1's rules and both predate this task** — `POST /flows` has returned
-400 for these two flows since W1 shipped. `build_plan` running `validate` does
-not create the defect; it stops the executor from disagreeing with the publish
-path about it. Both flows are `not-standalone`, so **neither has a golden entry
-and the ratchet cannot see either one** — which is exactly why
-`validate_brings_two_over_refusals_with_it_and_neither_is_in_the_golden` is a
-committed test rather than a sentence here.
+**Both are W1's rules and both predate this task** — publish has returned 400
+for these two flows since W1 shipped. `build_plan` running `validate` does not
+create the defect; it stops the executor from disagreeing with the publish path
+about it. Both flows are `not-standalone`, so **neither has a golden entry and
+the ratchet cannot see either one** — which is exactly why they are a committed
+test rather than a sentence here.
 
 **Neither is a rule to loosen casually, and that is the finding.** Both exist
 because `publish::subflow_ref_name` encodes the pair as `"{namespace}/{flowId}"`
@@ -3196,6 +3216,50 @@ token from a flow is a complete rehearsal of W1's fix on that flow, and
 So the two refusals that are right *by accident* survive the fix on their merits,
 and the fix costs no over-acceptance. Before Task 8 those last two rehearsals
 both came out `Ok`, which is why that test used to assert `is_ok()` for them.
+
+### Over-refusal, swept rather than pinned
+
+Task 8's concern 2 asked the final review to decide whether to pin the two
+over-refusals above as exceptions or fix the encoding. The answer is neither on
+its own: **pin them, and sweep for a third.** Pinning two flows by name guards
+those two flows. Nothing in this package looked for a third, and nothing could:
+both live in the 26 `not-standalone` flows, the population the coverage
+statement says is never compared.
+
+**The gap was demonstrated before it was closed.** An invented `validate` rule
+refusing three more flows this Kestra published with 200 — `valids/kv`,
+`valids/pause_no_tasks`, `valids/trigger-flow-listener`, all `not-standalone` —
+left this crate **green at 536 passed**. Over-refusal is the mirror of the one
+divergence class the programme forbids shipping, and it could be introduced
+without a single test moving.
+
+`every_flow_kestra_published_plans_except_three_named_over_refusals` closes it.
+The population is `corpus.json`'s own `publish_status`, **295** of the 345
+flows — deliberately wider than the golden's 266 `runs` entries, because it
+includes every `not-standalone` flow, which is exactly where the two known
+over-refusals hide. Running it over the whole population finds **exactly
+three**:
+
+| flow | egret's code | whose rule |
+|---|---|---|
+| `valids/switch-impossible` | `cannot parse flow` | W1's bare `Vec<Task>` and an explicit `null`. The only one of the three with a golden entry, and the only one the ratchet can see |
+| `valids/task-flow-dynamic` | `subflow_namespace_invalid` / `subflow_flow_id_invalid` | W1's, and the fix is to `publish::subflow_ref_name`'s encoding |
+| `valids/trigger-flow-listener-namespace-condition` | `dependency_namespace_required` / `dependency_flow_id_required` | W1's, same encoding |
+
+**It is written inverted, the way `STILL_OVER_ACCEPTED` is**, and that is the
+whole difference between an exception table and a suppression list: each row is
+asserted to be *still refused, for its own code*, so fixing one fails the test
+by name and forces this table to be corrected. A suppression list would let a
+fixed row rot in place.
+
+One flow in the population published with 200 and was refused later — the
+`invalids/inputs-with-multiple-constraint-violations` entry, refused when the
+execution's *input values* were read. It must still **plan**: `build_plan(&str)`
+never sees an input value, so refusing it here would be refusing it for a reason
+egret cannot have. That is the same seam its `STILL_OVER_ACCEPTED` row records,
+seen from the other side.
+
+The sweep costs about a third of a second over 295 flows.
 
 ### A wrong reason found beside a dropped field
 
@@ -3295,6 +3359,163 @@ unit tests and one message assertion can.
 **No mutation killed nothing**, which is worth stating because six of Task 7's
 did and that is what its replay was for.
 
+## What the final review had to change, and what it banked
+
+Eight tasks, then a whole-branch review of all 32 commits. Its findings are here
+because four of them are corrections to *this file*, and a correction that lives
+only in a review report is a correction nobody reads.
+
+**The ratchet: 149 → 145.** Four banked, zero regressions, zero broken.
+
+| banked | what earns it |
+|---|---|
+| `valids/disable-simple` | a disabled task in the middle of the flow's root list |
+| `valids/disable-error` | a disabled task in the middle of the flow's `errors:` list |
+| `valids/sequential-with-disabled` | a `Sequential` whose only child is disabled — it still runs, and still succeeds |
+| `valids/if-with-only-disabled-tasks` | the same, on the branch an `If` chose |
+
+### `disabled:` was an over-acceptance, and over-acceptance is the class that must not ship
+
+`disabled:` had been unclaimed since Task 3, and the plan required the final
+review to assign it or defer it with a reason. Deferring was not open: on all
+six flows that use the flag, egret **created and ran a task the author had
+disabled**, and on four of them that flipped the execution's terminal state —
+`valids/disable-simple` is `["CREATED","RUNNING","SUCCESS"]` in the golden and
+`FAILED` here. `baseline.txt` filed those as "does not reproduce yet", which is
+the wrong category: they were egret answering where Kestra refused to.
+
+The flag was parsed by W1 and dropped at the plan boundary. `flatten_one` never
+read `task.disabled`, and `grep '\.disabled\b'` outside `src/models/` was empty.
+
+**Kestra's rule, read from the goldens and then confirmed in the source.** A
+disabled task gets **no taskrun at all** — it is absent from `taskRunList`, not
+present in some skipped state — and its parent flowable still runs and can
+succeed with every child disabled. `Execution.removeDisabled` is called on
+`tasks`, `errors` **and** `finally` at the top of
+`Execution.findTaskDependingFlowState` (`Execution.java:585-587`), which every
+flowable's `resolveNexts`/`resolveState` goes through, and again on the flow's
+own root list in `FlowableUtils.resolveSequentialNexts`. The all-disabled case
+has its own short-circuit in `resolveSequentialState`, and a second copy of it
+in `If.java:192-198`.
+
+So it is a *list* rule, and it is implemented as one: `flatten_list` drops a
+disabled task, and every list-shaped child position in the builder goes through
+`flatten_list`.
+
+**The two of the six that did not bank, and why.**
+
+- `valids/disable-flowable` carries three sub-executions. It now differs on
+  `spawned` and on nothing else — it is the 39th entry in that population, and
+  the whole of what stood between it and a bank was this flag.
+- `valids/parallel-disabled-tasks` reproduces every run, parent, history and
+  attempt, and differs on **one ordered pair**: `(task3, task2)` is `before` in
+  the golden and `overlapping` here. That is the clockless-machine hole
+  `valids/dag` and `valids/if` are already in, and it is where this entry is
+  filed now. **The review that commissioned this fix expected five of the six to
+  bank; the measurement says four.** The fifth is this one, and the ratchet's
+  own failure output is what says so.
+
+**The one position the rule is not applied to, deliberately.** A `Dag`'s nodes
+are flattened by `flatten_dag`, and a disabled `Dag` node is left planned.
+Kestra removes it from `currentTasks` like any other child but leaves it in
+`taskDependencies` (`FlowableUtils.resolveDagNexts`), so every node that
+`dependsOn` it waits for a run that is never created and the `Dag` never
+terminates. Copying that is reproducing a hang; dropping the node *and* its
+incoming edges is inventing a semantics Kestra does not have; dropping the node
+alone makes `flatten_dag` refuse the flow for a dangling `dependsOn`, which is
+an over-refusal. No corpus flow reaches the question, and
+`no_corpus_dag_node_is_disabled` re-derives that from all 345 flows on every
+run, so the position is a named gap rather than a guess.
+
+### `SKIPPED` is `runIf:`'s, and `runIf:` had no owner
+
+This file credited the golden's `SKIPPED` state to `disabled: true` in **three**
+places, and the plan's own table said it too. It is false. Walking every run of
+`golden.json` finds `SKIPPED` on **6 runs across 4 entries** —
+`valids/task-runif`, `valids/task-runif-executionupdating`,
+`valids/task-runif-taskswithstate`, `valids/task-runif-workingdirectory` — and
+**not one of those four YAML files contains `disabled:` at all**. Every one is
+`runIf:`.
+
+Two things follow, and the second is the one worth having.
+
+1. `runIf:` had **no row and no owner anywhere** — not here, not in the plan.
+   Its 7 baselined entries were absorbed by other rows: `valids/task-runif` was
+   counted under `Subflow`, which it happens to declare, so fixing `Subflow`
+   would not have banked it. It now has its own row, and its owner is
+   *unclaimed by two packages at once*: W1's `Task` carries no field for it, and
+   `RunState` has no `SKIPPED` to hold a skipped run. Either half alone blocks
+   it.
+2. **Nothing derived the attribution.** The counts beside it were derived from
+   the baselined flows' own YAML on every run; the words naming the construct
+   were not — and an attribution nothing derives is the same shape as a count
+   written beside a derivation, which is the defect this package has now
+   produced four times.
+   `the_skipped_state_comes_from_runif_and_never_from_disabled` closes it: it
+   names the six runs, requires each of their flows to declare `runIf:` and not
+   `disabled:`, and — the half that is the control — requires that **no** flow
+   declaring `disabled:` produces a `SKIPPED` anywhere. Without that half the
+   test would pass on a golden where both constructs skipped things.
+
+Had the old sentence been true, deleting a disabled task from the plan would
+have been the wrong shape of fix, so this is not a documentation-only finding.
+
+### The W1↔W3a dispatch seam nobody owned
+
+`flatten_one` matched `(&task.kind, task.r#type.as_str())` against the FQCN
+literals, while W1's `canonical_flow_type` reaches the same `ModelKind` from
+**four** spellings — the FQCN, the `core.` short form, and either in any case.
+Measured on a two-level chain at the review's HEAD:
+
+```text
+io.kestra.plugin.core.flow.Sequential -> 2 tasks, Sequential { tasks: [1] }
+core.sequential                       -> 1 task,  Runnable { type_id: "core.sequential" }
+core.Sequential                       -> 1 task,  Runnable { .. }
+io.kestra.plugin.core.flow.sequential -> 1 task,  Runnable { .. }
+```
+
+An aliased flowable was planned opaque, taking its whole subtree with it — so a
+60-level `core.sequential` chain planned as **one** task and `MAX_TASK_DEPTH`
+never fired. The builder's own comment said "`models::TaskKind::Sequential` is
+reached by that type string and by no other", which was false from the moment W1
+gained the short form.
+
+Latent rather than live: no corpus flow writes an alias, which is why 294 golden
+entries and every unit test were green through it. The builder now dispatches
+through `canonical_flow_type` — the *same* reduction W1 dispatches through,
+rather than a second opinion about which strings name a flowable — and
+`every_spelling_of_a_flowable_reaches_the_same_plan` plans a chain past the
+bound in each of the four spellings and requires the refusal from every one. A
+guard that fires on only one spelling of the input it guards is not a bound.
+
+### The depth bound was measured against the wrong walk
+
+`MEASURED_MAX_CORPUS_DEPTH = 6` was derived through `Task::children()`, which is
+`spec::validate`'s walk and excludes every task-level `errors:` list. That was
+right when it was written and stopped being right at Task 7, which made
+`flatten_one` descend into `errors` at `depth + 1`. From Task 7 the derivation
+was measuring a walk that is not the one the constant guards.
+
+Re-measured over the builder's own output: the deepest **plan** in the corpus is
+`valids/full` at **6**, the same number, so there is no live consequence and the
+8× headroom is intact. `the_depth_bound_is_derived_from_the_deepest_corpus_flow`
+now derives both readings and requires them to agree.
+
+### Seven documentation drifts, and the shape they share
+
+Six of the seven were written in the same commit as the derivation that
+contradicts them.
+
+| where | said | is |
+|---|---|---|
+| `baseline.txt` header | the narrative stops at Task 7, "banked 16, leaving 163" | the file holds 145. Task 8 deleted 14 lines and added no paragraph — the file-no-task-owns symptom the plan's *Final review* section predicted |
+| `plan.rs` | "Five things `validate` does not cover", then lists **seven** | six of the seven ARE in `validate`; only `MAX_TASK_DEPTH` is the builder's alone. The paragraph argued against the gate order settled three paragraphs above it |
+| `plan.rs` | `POST /flows` refuses on `report.errors` | `create_flow`/`update_flow` go through `parse_draft`, which only parses. The gate is `publish::publish` (`publish.rs:118-127`) |
+| `plan.rs` | a `Loop`'s `errors:` makes "three corpus flows' lists" invisible | **four**, which the test written in the same commit already asserted |
+| `models/task.rs` | "`build_plan` never calls `validate`" | false since `e0a22aa7`; the argument built on it is void, and the conclusion survives on its other half |
+| `plan.rs` | a task-level `errors:` subtree is invisible "to the walk and to this builder alike" | stale since Task 7 — see *the depth bound* above |
+| this file | "51 flows are never compared at all", then lists 26 + 23 | **49**. The 51 only closes if the 2 unstable traces are counted, and this 51 and the denominator table's "51 rejected" are different sets coinciding in size |
+
 ## What this oracle does not prove
 
 The corpus is Kestra's own test suite, which is a sample of an infinite space.
@@ -3334,18 +3555,20 @@ wrote. Beyond that, the specific holes, each with its count:
   produces a relation for every pair, the golden does not, and comparing an
   assertion against an absence was costing `valids/parallel-nested` a bank on 3
   pairs the golden itself declines to state. Because egret's relation domain is
-  measured at `{before, overlapping}` (**656** pairs after Task 7, 555 after
-  Task 6, 557 after Task 5, zero `after`), a dropped pair
-  is one Kestra was seen producing *both* values for, so dropping it is exactly
-  accepting either. Derived and guarded by three tests — see *What Task 4 had to
-  change, and what it banked*. Driven through the real `advance()` the
-  projection removes **30 pairs across 9 entries** at Task 7 (25 across 7 at
-  Tasks 5 and 6, 22 across 6 at Task 4). Task 7's 101 new pairs are all made by
-  `errors:` runs — a run that exists is in a pair with every other run of its
-  execution — and its two new entries are `valids/disable-error` (3) and
-  `valids/exit-killed` (2), which reach an `errors:` list for the first time and
-  whose run sets differ from Kestra's for reasons that are not Task 7's
-  (`disabled:`, which belongs to no package in the programme spec, and `Exit`).
+  measured at `{before, overlapping}` (**647** pairs after the final review,
+  656 after Task 7, 555 after Task 6, 557 after Task 5, zero `after`), a dropped
+  pair is one Kestra was seen producing *both* values for, so dropping it is
+  exactly accepting either. Derived and guarded by three tests — see *What Task
+  4 had to change, and what it banked*. Driven through the real `advance()` the
+  projection removes **15 pairs across 4 entries** after the final review (30
+  across 9 at Task 7, 25 across 7 at Tasks 5 and 6, 22 across 6 at Task 4).
+  Task 7's 101 new pairs are all made by `errors:` runs — a run that exists is
+  in a pair with every other run of its execution. The final review's
+  `disabled:` takes 9 back off and removes five entries from the projection,
+  every one of them a `disabled:` flow whose extra pairs existed only because
+  egret was creating runs Kestra never created. The two that remain beyond the
+  golden's own 13 are `valids/exit-killed`'s, whose run set differs for a reason
+  that is `Exit`'s and unclaimed.
 - **A kept `before` is not always reachable by a clockless implementation.
   Task 4 found the first; Task 5 found three more, on a second entry.** The
   relation egret produces comes from
@@ -3583,23 +3806,25 @@ wrote. Beyond that, the specific holes, each with its count:
   close this.** `Command::SpawnExecution` is emitted; nothing executes one until
   W3b/W6, and `ExecutionState` holds no field for a sub-execution. So egret's
   side of `spawned` is still **always empty** and every one of the **41** golden
-  entries that carries a sub-execution mismatches on that field alone. **38 of
+  entries that carries a sub-execution mismatches on that field alone. **39 of
   the 41 now differ on nothing else** — they reproduce every run, parent,
   history, attempt and kept ordered pair Kestra recorded, and are baselined
-  purely for a field egret does not fill. It was 33 at Task 6; the five Task 7
-  adds are the four `retry-new-execution-*` entries and
-  `valids/retry-flowable-parallel`. A `CREATE_NEW_EXECUTION` retry ends its
+  purely for a field egret does not fill. It was 33 at Task 6 and 38 at Task 7;
+  the five Task 7 adds are the four `retry-new-execution-*` entries and
+  `valids/retry-flowable-parallel`, and the final review adds the 39th,
+  `valids/disable-flowable`. A `CREATE_NEW_EXECUTION` retry ends its
   execution `RETRIED` and Kestra then **replays the whole flow as a different
   execution**, which is a sub-execution of a second kind: it carries
   `parent_run: null` rather than a loop run, and nothing in `Command` can ask
-  for one. The remaining three are `valids/disable-flowable` (`disabled:`,
-  unclaimed) and `valids/loop-outputs-auto` / `valids/loop-values-from-uri`
-  (the ION-file `values:` shape).
+  for one. The remaining two — three until the final review implemented
+  `disabled:` and closed `valids/disable-flowable` — are
+  `valids/loop-outputs-auto` and `valids/loop-values-from-uri` (the ION-file
+  `values:` shape), and both are the harness rather than `advance()`.
 
   Those entries look compared and are not.
   `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` is the
   marking the plan asked for: it derives all three numbers, requires all 41 to
-  be baselined, and names the 8 that differ on more with a reason each. What
+  be baselined, and names the 2 that differ on more with a reason each. What
   **is** compared is the first batch of spawn *requests* — `(parent_run, value)`
   for **52** of the 142, over 36 loop runs, by
   `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran`. **No
@@ -3706,12 +3931,13 @@ described.
 | golden entries, i.e. flows this oracle compares at all | **294** |
 | … `runs` verdict (268 minus the 2 that did not reproduce) | 266 |
 | … `refused` verdict (the 28 rejections that are evidence) | 28 |
-| baselined — egret does not reproduce it yet | **149** |
-| matching | **145** |
+| baselined — egret does not reproduce it yet | **145** |
+| matching | **149** |
 
-`345 = 268 + 51 + 26`. `294 = (268 − 2) + 28`. `149 + 145 = 294`. The three
+`345 = 268 + 51 + 26`. `294 = (268 − 2) + 28`. `145 + 149 = 294`. The three
 identities are asserted by `every_corpus_flow_is_compared_or_excluded_by_name`
-and the ratchet, not checked by hand here.
+and the ratchet, not checked by hand here. The baseline was 149 at Task 8; the
+final review's `disabled:` banked four.
 
 Of the 28 `refused` entries, egret refuses **23** across 16 causes and
 over-accepts **5**, each named with an owner in
@@ -3725,7 +3951,16 @@ says anything about the flow a user writes tomorrow, and the ratchet is a
 regression guard, not a bound on behaviour: it fails when a *comparable* entry
 moves, and a flow nobody wrote is comparable to nothing.
 
-**51 flows are never compared at all**, and the two reasons are different:
+**49 flows are never compared at all**, and the two reasons are different:
+
+*(This said **51** and then listed 26 + 23 = 49. The 51 only closes if the 2
+unstable traces are counted in, and those are a third reason with its own
+paragraph below. Worse, the 51 here and the denominator table's "51 `rejected`"
+are **different sets that happen to coincide in size** — the table's 51 is every
+flow Kestra refused, 28 of which this oracle very much does compare; this list's
+49 is 26 `not-standalone` plus the 23 rejections that are not evidence. Nothing
+warned the reader, and the coincidence is what made the arithmetic error
+invisible.)*
 
 - **26 `not-standalone`.** They have a corpus entry and no golden entry. Kestra
   itself cannot run them without what the Java test brings — a resume, a
@@ -3746,19 +3981,33 @@ moves, and a flow nobody wrote is comparable to nothing.
 bounded by wall-clock duration, so this is the flow being nondeterministic, not
 the harness.
 
-**13 ordered pairs were dropped** and the kept 1104 are the whole of what this
-oracle asserts about serialisation. **No sub-execution's trace is compared at
-all** — 41 golden entries carry one, 38 of them differ on nothing else, and
-`Command::SpawnExecution` is emitted into a void until W3b/W6. **Nothing keyed
-on elapsed time is reachable**, because `now` moves only to a deadline something
-is already waiting for.
+**13 ordered pairs were dropped, 1104 were kept, and only 877 of those are ever
+asserted.** The other **227** live inside `spawned` sub-traces:
+`Trace::restrict_order_to` descends into them through
+`self.spawned.iter_mut().zip(&golden.spawned)`, and egret's `spawned` is
+`Vec::new()` unconditionally, so that `zip` never iterates. Demonstrated rather
+than reasoned: flipping all 227 sub-execution relations in `golden.json` to
+their opposite leaves this crate green and the ratchet unmoved. The split is
+derived on every run by `only_the_top_level_order_pairs_are_ever_asserted`,
+which also asserts the *reason* — that every trace egret produces carries an
+empty `spawned` — so when W3b/W6 fills it this number has to be re-derived in
+the same commit.
+
+*(This sentence read "the kept 1104 are the whole of what this oracle asserts
+about serialisation". Both numbers in it were right and the claim was not, and
+the sentence immediately after it already contradicted the claim.)*
+
+**No sub-execution's trace is compared at all** — 41 golden entries carry one,
+**39** of them differ on nothing else, and `Command::SpawnExecution` is emitted
+into a void until W3b/W6. **Nothing keyed on elapsed time is reachable**,
+because `now` moves only to a deadline something is already waiting for.
 
 Each of those has its own section above with the derivation; they are listed
 here so the boundary can be read in one place.
 
 ### The residual baseline, by owner
 
-149 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+145 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run; **the rows overlap
 and this is not a partition**, but the remainder is exhaustive and named.
 
@@ -3772,14 +4021,22 @@ and this is not a partition**, but the remainder is exhaustive and named.
 | 12 | `Pause` → `PAUSED` | W8 |
 | 10 | `afterExecution:` | **unclaimed — named at Task 8** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
+| 7 | `runIf:` | **unclaimed — named at the final review.** W1's `Task` has no field for it and `RunState` has no `SKIPPED`; two packages have to move. It had no row until now because the `SKIPPED` state was credited to `disabled:` |
 | 7 | flow `concurrency:` → `CANCELLED` | W8 |
-| 6 | `disabled: true` → `SKIPPED` | **unclaimed — W3a's final review must assign it or defer it with a reason** |
 | 5 | `sla:` | W8 — named at Task 8 |
 | 4 | `CREATE_NEW_EXECUTION`'s replay | W6/W3b |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **13** | **none of the above** | listed individually, below |
+| **14** | **none of the above** | listed individually, below |
 
-The thirteen that declare none of them, with what holds each:
+**`disabled: true` was a row here with 6 entries and is gone.** It is
+implemented at the final review, so it holds nothing: four of its six banked,
+`valids/disable-flowable` is attributed to the `Loop` that really holds it, and
+`valids/parallel-disabled-tasks` is in the named remainder below. Removing a row
+because the construct stopped being a cause is the same rule that adds one when
+a cause is found — an attribution has to be to the thing that holds the entry,
+not to a construct the flow happens to declare.
+
+The fourteen that declare none of them, with what holds each:
 
 | entry | what holds it |
 |---|---|
@@ -3790,6 +4047,7 @@ The thirteen that declare none of them, with what holds each:
 | `invalids/invalid-task` | over-accepted: a type not on Kestra's classpath |
 | `valids/dag` | one `order` pair a clockless machine cannot reach |
 | `valids/if` | three `order` pairs, same cause |
+| `valids/parallel-disabled-tasks` | one `order` pair, same cause: with `disabled:` implemented it reproduces every run, history and attempt, and `(task3, task2)` is `before` in Kestra and `overlapping` here |
 | `valids/switch-impossible` | an **over-refusal**: W1's bare `Vec<Task>` and an explicit `null` |
 | `valids/retry-failed-flow-duration` | `maxDuration` in an environment with no elapsed time |
 | `valids/retry-success` | `WARNING`, which `RunState` cannot hold |
@@ -3797,7 +4055,7 @@ The thirteen that declare none of them, with what holds each:
 | `valids/full` | flow-level `outputs:` and `variables:`, same |
 | `valids/subflow-secret-output-child` | a `SECRET` output; the harness has no encryption key |
 
-**Six of the 149 are honest over-acceptances or an over-refusal, and they are
+**Six of the 145 are honest over-acceptances or an over-refusal, and they are
 the whole of egret's measured disagreement about whether a flow is acceptable
 at all.** Everything else in the baseline is a flow egret plans and does not yet
 reproduce, which is a different and smaller claim than "egret is wrong about it".

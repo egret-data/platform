@@ -105,7 +105,7 @@ impl Plan {
     /// non-empty, and including it moves the number
     /// `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount`
     /// derives — which is why that test derives it rather than remembering it.
-    fn children_of(&self, ix: TaskIx) -> Vec<TaskIx> {
+    pub(super) fn children_of(&self, ix: TaskIx) -> Vec<TaskIx> {
         let own_errors = self.tasks[ix].errors.iter().copied();
         let mut out: Vec<TaskIx> = own_errors.collect();
         out.extend(self.direct_task_children(ix));
@@ -198,12 +198,16 @@ pub struct PlanTask {
     /// `WorkingDirectory` are planned [`TaskKind::Runnable`], so their children
     /// get no run and a field on them would indeed be unreadable. **`Loop` is
     /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
-    /// `errors` field, so three corpus flows' lists (`valids/all-flowable`,
-    /// `valids/finally-loop`, `valids/finally-loop-parallel`) are invisible
-    /// here. All three are baselined, so nothing banks on it; it is recorded as
-    /// a gap by `every_corpus_errors_list_is_on_a_flowable_egret_plans` and in
-    /// `oracle-exec/README.md`'s unclaimed table rather than left to be
-    /// rediscovered.
+    /// `errors` field, so **four** corpus flows' lists are invisible here:
+    /// `valids/all-flowable`, `valids/finally-loop`,
+    /// `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which
+    /// is a `runs` entry despite its directory. This sentence said *three* and
+    /// named the first three, while the test written in the same commit
+    /// asserts all four (`every_corpus_errors_list_is_on_a_flowable_egret_plans`);
+    /// the test is the derivation and the prose now agrees with it. All four
+    /// are baselined, so nothing banks on it; it is recorded as a gap by that
+    /// test and in `oracle-exec/README.md`'s unclaimed table rather than left
+    /// to be rediscovered.
     ///
     /// `finally` is left out of all of them, because no W3a task implements it
     /// and a second dead field is not a smaller version of the same fix.
@@ -465,21 +469,44 @@ impl std::error::Error for PlanError {}
 /// committed corpus flows on every run and fails if it moves, so this is a
 /// bound over a measurement rather than over a memory of one.
 ///
-/// **The measurement is a lower bound**: W1's model drops every control-flow
-/// type's `errors`/`finally`, which Java's `AbstractBranch.allChildTasks()`
-/// counts, so a subtree hanging off a task-level `errors:` is invisible to the
-/// walk *and* to this builder alike. The 8× is what absorbs that, and the
-/// figure may rise when Task 7 widens the model. See the test's doc.
+/// **It is measured two ways, and the second one is the builder's own walk.**
+/// Through Task 7 there was only the first: a walk over the parsed flow via
+/// `Task::children()`, which is `spec::validate`'s walk and excludes every
+/// task-level `errors:` list. That was written when a task-level `errors:` was
+/// invisible to this builder as well — and Task 7 made it visible, because
+/// [`flatten_one`] now descends into `errors` at `depth + 1`. From Task 7 on,
+/// the YAML-side reading was no longer measuring the recursion this bounds.
+/// Re-measured over the builder's own output at the final review, the deepest
+/// plan is **6** as well, so there is no live consequence and the 8× headroom
+/// is intact either way; the test now derives BOTH readings and requires them
+/// to agree, so a future divergence is a failure rather than a stale sentence.
+///
+/// `finally:` is outside both readings, because no W3a task implements it and
+/// `models` carries no task-level field for it to be read from. That half of
+/// the old caveat stands.
 pub(super) const MEASURED_MAX_CORPUS_DEPTH: usize = 6;
 pub(super) const MAX_TASK_DEPTH: usize = 8 * MEASURED_MAX_CORPUS_DEPTH;
 
-/// Kestra's own classes for the three flowables Tasks 3 and 4 implement.
-const SEQUENTIAL_TYPE: &str = "io.kestra.plugin.core.flow.Sequential";
-const PARALLEL_TYPE: &str = "io.kestra.plugin.core.flow.Parallel";
-const DAG_TYPE: &str = "io.kestra.plugin.core.flow.Dag";
-const IF_TYPE: &str = "io.kestra.plugin.core.flow.If";
-const SWITCH_TYPE: &str = "io.kestra.plugin.core.flow.Switch";
-const LOOP_TYPE: &str = "io.kestra.plugin.core.flow.Loop";
+/// The flowables this builder plans, in the **canonical** spelling
+/// [`canonical_flow_type`](crate::models::canonical_flow_type) reduces
+/// every accepted wire `type` to.
+///
+/// **These were the FQCN literals through Task 8, and that was a seam
+/// defect.** W1 accepts four spellings of each — `io.kestra.plugin.core.flow.X`
+/// and `core.X`, either of them in any case, because `canonical_flow_type`
+/// strips the prefix and lowercases — so an alias parsed to
+/// `ModelKind::Sequential` and then fell through this builder's `match` to an
+/// opaque `Runnable`, taking its whole subtree with it. Latent, because no
+/// corpus flow writes an alias; not harmless, because the missing subtree also
+/// takes [`MAX_TASK_DEPTH`] out of reach. Asserted by
+/// `every_spelling_of_a_flowable_reaches_the_same_plan`, which plans a chain
+/// past the bound in each of the four and requires the refusal from every one.
+const SEQUENTIAL_TYPE: &str = "sequential";
+const PARALLEL_TYPE: &str = "parallel";
+const DAG_TYPE: &str = "dag";
+const IF_TYPE: &str = "if";
+const SWITCH_TYPE: &str = "switch";
+const LOOP_TYPE: &str = "loop";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
@@ -504,8 +531,12 @@ const LOOP_TYPE: &str = "io.kestra.plugin.core.flow.Loop";
 /// **Running `validate` here is Task 8's central change, and it is about a
 /// seam rather than about a rule.** Until Task 8 this function called
 /// `spec::parse` and not `spec::validate`, so egret had *two* answers to "is
-/// this flow acceptable": `POST /flows` refused a flow that `advance()` would
-/// happily plan. Seven of the flows this Kestra refuses were over-accepted here
+/// this flow acceptable": **publish** refused a flow that `advance()` would
+/// happily plan. Publish, and not `POST /flows`: `routes::create_flow` and
+/// `update_flow` go through `parse_draft`, which only *parses* — the report
+/// `validate` produces is carried into the draft DTO and refuses nothing. The
+/// gate that turns `report.errors` into a `400` is `publish::publish`
+/// (`publish.rs:118-127`), behind `routes::publish_flow`. Seven of the flows this Kestra refuses were over-accepted here
 /// while W1's `validate` had already been refusing them at publish since W1 —
 /// `duplicate_task_id` (2), `duplicate_input_id`, `empty_tasks` (2),
 /// `self_subflow`, `working_directory_tasks_required`. The gap was not a
@@ -528,15 +559,29 @@ const LOOP_TYPE: &str = "io.kestra.plugin.core.flow.Loop";
 /// `egret_refuses_every_flow_kestra_refuses`'s `STILL_OVER_ACCEPTED`, which
 /// carries that reason and four more, each with an owner.
 ///
-/// # What this builder still refuses on its own
+/// # What this builder refuses before `validate` gets to see it
 ///
-/// Five things `validate` does not cover, all of them "this task cannot be
-/// *planned*" rather than "this flow is invalid": nesting deeper than
-/// [`MAX_TASK_DEPTH`]; a `Dag` whose `dependsOn` names a task that is not one
-/// of its own nodes, or whose nodes form a cycle; an `If` with no `condition`;
-/// a `Switch` with no `value`; a `Loop` with no `values`; and a `Dag` node with
-/// no task. The `Dag` pair is Task 4's and is exactly the two checks Kestra's
-/// own `DagTaskValidator` makes.
+/// Seven things, and **exactly one of them is a rule `validate` does not
+/// have**: nesting deeper than [`MAX_TASK_DEPTH`]. The other six — a `Dag`
+/// whose `dependsOn` names a task that is not one of its own nodes
+/// (`dag_dependency_not_found`), or whose nodes form a cycle (`dag_cycle`); a
+/// `Dag` node with no task (`dag_node_task_required`); an `If` with no
+/// `condition` (`if_condition_required`); a `Switch` with no `value`
+/// (`switch_value_required`); and a `Loop` with no `values`
+/// (`loop_values_required`) — are all in `validate` too, and this builder is
+/// simply the gate they reach first.
+///
+/// **This heading said "Five things `validate` does not cover" and then listed
+/// seven, six of which `validate` covers.** Both halves were wrong, and the
+/// second one mattered: the gate order above exists *because* `validate`
+/// carries those six, so a paragraph claiming it does not carry them argues
+/// against the order settled three paragraphs earlier in the same doc comment.
+/// What running the builder first buys is the *reason the caller is given* —
+/// "if 'x' has no condition to branch on" rather than `if_condition_required`
+/// — and Tasks 4's and 5's mutations on those arms staying killable.
+///
+/// The `Dag` pair is Task 4's and is exactly the two checks Kestra's own
+/// `DagTaskValidator` makes.
 ///
 /// # What it deliberately does NOT refuse
 ///
@@ -600,6 +645,48 @@ pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     })
 }
 
+/// Flatten a list of children, **dropping the ones the author disabled**.
+///
+/// # `disabled:` is a plan-time deletion, not a run-time skip
+///
+/// Kestra removes a disabled task from every *resolved task list* before it
+/// looks at any of them: `Execution.removeDisabled` is called on `tasks`,
+/// `errors` **and** `finally` at the top of
+/// `Execution.findTaskDependingFlowState` (`Execution.java:585-587`), which is
+/// what every flowable's `resolveNexts`/`resolveState` goes through, and again
+/// on the flow's own root list in `FlowableUtils.resolveSequentialNexts`'s
+/// two-argument form (`FlowableUtils.java:191`). A disabled task therefore gets
+/// **no taskrun at all** — it is absent from `taskRunList`, not present with a
+/// `SKIPPED` state — and a flowable whose children are *all* disabled still
+/// runs and still succeeds (`FlowableUtils.resolveSequentialState`'s
+/// `filter(!disabled).findAny().isEmpty() -> SUCCESS`, and `If.java:192-198`'s
+/// own copy of it).
+///
+/// That is a *list* rule, so it belongs here rather than in `advance()`: the
+/// six corpus flows that use the flag put it on a flow root
+/// (`valids/disable-simple`), on a flow-level `errors:` entry
+/// (`valids/disable-error`), and on a child of a `Sequential`, a `Parallel`, an
+/// `If` and a `Switch` — every one of which reaches this function. Deleting the
+/// task from the plan reproduces all of them, and it reproduces them for the
+/// same reason Kestra gets them: there is no run because there is no task.
+///
+/// **A `SKIPPED` state is NOT what this produces, and the oracle README used to
+/// say it was.** The golden's only `SKIPPED` runs come from `runIf:`, which
+/// nothing in W3a reads; see `oracle-exec/README.md`, *`runIf:`*.
+///
+/// # The one position this does not reach, and why that is deliberate
+///
+/// A `Dag`'s nodes are flattened by [`flatten_dag`], not here, and a disabled
+/// `Dag` node is left planned. Kestra removes it from `currentTasks` like any
+/// other child but leaves it in `taskDependencies`
+/// (`FlowableUtils.resolveDagNexts`), so every node that `dependsOn` it waits
+/// for a run that is never created and the `Dag` never terminates. Copying that
+/// would be reproducing a hang; dropping the node *and* its incoming edges
+/// would be inventing a semantics Kestra does not have; dropping the node alone
+/// would make `flatten_dag` refuse the flow for a dangling `dependsOn`, which
+/// is an over-refusal. No corpus flow reaches the question —
+/// `no_corpus_dag_node_is_disabled` re-derives that from all 345 flows on every
+/// run — so the position is left as a named gap rather than guessed at.
 fn flatten_list(
     out: &mut Vec<PlanTask>,
     tasks: &[Task],
@@ -607,6 +694,7 @@ fn flatten_list(
 ) -> Result<Vec<TaskIx>, PlanError> {
     tasks
         .iter()
+        .filter(|t| !t.disabled)
         .map(|t| flatten_one(out, t, depth))
         .collect::<Result<Vec<_>, _>>()
 }
@@ -636,20 +724,26 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         errors: Vec::new(),
     });
 
-    // Kestra dispatches on the wire `type`, and so does this: W1's
-    // `models::TaskKind::Sequential` is reached by that type string and by no
-    // other, but matching on the parsed variant alone would also catch a
-    // future model change that maps a second type onto it.
-    match (&task.kind, task.r#type.as_str()) {
+    // Kestra dispatches on the wire `type`, and so does this -- through the
+    // SAME reduction W1 dispatches through, `canonical_flow_type`, rather than
+    // through a literal of its own. The pair is kept rather than matching on
+    // the parsed variant alone so that a future model change mapping a second
+    // type onto an existing `ModelKind` is caught here; what it must not be is
+    // a SECOND opinion about which strings name a flowable, which is what the
+    // FQCN literals were.
+    match (
+        &task.kind,
+        crate::models::canonical_flow_type(&task.r#type).as_deref(),
+    ) {
         // `errors` is flattened AFTER `tasks` for both, so `out` stays
         // pre-order and the error subtree sits behind the task subtree it
         // handles -- which is also the order Kestra creates their runs in.
-        (ModelKind::Sequential(seq), SEQUENTIAL_TYPE) => {
+        (ModelKind::Sequential(seq), Some(SEQUENTIAL_TYPE)) => {
             let children = flatten_list(out, &seq.tasks, depth + 1)?;
             out[ix].errors = flatten_list(out, &seq.errors, depth + 1)?;
             out[ix].kind = TaskKind::Sequential { tasks: children };
         }
-        (ModelKind::Parallel(par), PARALLEL_TYPE) => {
+        (ModelKind::Parallel(par), Some(PARALLEL_TYPE)) => {
             let children = flatten_list(out, &par.tasks, depth + 1)?;
             out[ix].errors = flatten_list(out, &par.errors, depth + 1)?;
             out[ix].kind = TaskKind::Parallel {
@@ -657,7 +751,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 concurrency: literal_concurrency(par.concurrent.as_ref()),
             };
         }
-        (ModelKind::If(cond), IF_TYPE) => {
+        (ModelKind::If(cond), Some(IF_TYPE)) => {
             // `condition` is `Option<String>` in W1's model because `@NotNull`
             // is bean validation and not parsing. An `If` with no condition has
             // nothing to decide on -- the same shape as a `Dag` node with no
@@ -677,7 +771,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 else_,
             };
         }
-        (ModelKind::Switch(sw), SWITCH_TYPE) => {
+        (ModelKind::Switch(sw), Some(SWITCH_TYPE)) => {
             // Same rule, same reason: `value` is `@NotNull` in Java, and a
             // `Switch` with nothing to match on cannot be planned.
             let value = sw
@@ -699,7 +793,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 default,
             };
         }
-        (ModelKind::Loop(lp), LOOP_TYPE) => {
+        (ModelKind::Loop(lp), Some(LOOP_TYPE)) => {
             // `values` is `@NotNull` in Java, and a `Loop` with nothing to
             // iterate cannot be planned -- the same shape and the same reason
             // as an `If` with no `condition`. Unlike that one this refusal has
@@ -722,7 +816,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 concurrency_limit: literal_concurrency_limit(lp.concurrency_limit),
             };
         }
-        (ModelKind::Dag(dag), DAG_TYPE) => {
+        (ModelKind::Dag(dag), Some(DAG_TYPE)) => {
             // `task` is `Option<Task>` in W1's model because `@NotNull` is bean
             // validation and not parsing. A node with no task has no id to be
             // depended on and nothing to run, so it cannot be planned — and

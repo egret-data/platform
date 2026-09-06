@@ -2177,11 +2177,15 @@ mod tests {
         }
         assert_eq!(
             (wide, narrow),
-            (89, 64),
-            "89 tasks are inside a loop by the shipped reading and 64 by the \
+            (88, 63),
+            "88 tasks are inside a loop by the shipped reading and 63 by the \
              direct-children one. The 25 between them are why this is a test: \
              `advance()` never calls `is_loop_body`, so nothing else in the crate \
-             can tell the two apart"
+             can tell the two apart. Both were one higher until the final \
+             review implemented `disabled:`, which deletes \
+             `valids/disable-flowable`'s `1-each-2` -- a direct child of a \
+             `Loop` -- from the plan; the gap of 25 is unchanged, because the \
+             task left both readings at once"
         );
     }
 
@@ -2391,12 +2395,30 @@ mod tests {
     /// silently becoming tighter than it reads.
     #[test]
     fn the_depth_bound_is_derived_from_the_deepest_corpus_flow() {
+        /// The model-side reading: `Task::children()`, which is
+        /// `spec::validate`'s walk and excludes every task-level `errors:`.
         fn depth(task: &crate::models::Task) -> usize {
             1 + task.children().iter().map(|c| depth(c)).max().unwrap_or(0)
         }
 
+        /// The **builder's own** reading: the depth of the tree `flatten_one`
+        /// actually built, `errors:` subtrees included. `Plan::children_of` is
+        /// `errors` + the flowable's children, which is exactly the set
+        /// `flatten_one` recurses into at `depth + 1`, and the roots are at
+        /// depth 1 — so this is the largest `depth` the recursion ever held.
+        fn plan_depth(plan: &Plan, ix: TaskIx) -> usize {
+            1 + plan
+                .children_of(ix)
+                .into_iter()
+                .map(|c| plan_depth(plan, c))
+                .max()
+                .unwrap_or(0)
+        }
+
         let mut deepest = 0usize;
         let mut deepest_id = String::new();
+        let mut deepest_planned = 0usize;
+        let mut deepest_planned_id = String::new();
         for (id, source) in every_corpus_flow() {
             let Ok(flow) = crate::spec::parse(&source) else {
                 continue;
@@ -2412,28 +2434,63 @@ mod tests {
                 .unwrap_or(0);
             if d > deepest {
                 deepest = d;
-                deepest_id = id;
+                deepest_id = id.clone();
+            }
+            if let Ok(plan) = build_plan(&source) {
+                let p = plan
+                    .roots
+                    .iter()
+                    .chain(plan.errors.iter())
+                    .map(|&ix| plan_depth(&plan, ix))
+                    .max()
+                    .unwrap_or(0);
+                if p > deepest_planned {
+                    deepest_planned = p;
+                    deepest_planned_id = id;
+                }
             }
         }
 
-        println!("deepest corpus flow: {deepest_id} nests {deepest} level(s)");
+        println!(
+            "deepest corpus flow: {deepest_id} nests {deepest} level(s) by \
+             `Task::children()`; deepest PLAN: {deepest_planned_id} at \
+             {deepest_planned} level(s) by the builder's own walk"
+        );
         assert_eq!(
             deepest,
             super::plan::MEASURED_MAX_CORPUS_DEPTH,
             "plan.rs's MEASURED_MAX_CORPUS_DEPTH is stale: the deepest corpus flow is \
              now {deepest_id} at {deepest}"
         );
+        assert_eq!(
+            deepest_planned,
+            super::plan::MEASURED_MAX_CORPUS_DEPTH,
+            "the BUILDER's own walk is what MAX_TASK_DEPTH bounds, and since Task 7 \
+             it is wider than `Task::children()`: `flatten_one` descends into a \
+             task-level `errors:` and `children()` does not. Through Task 8 only \
+             the model-side reading was derived, so the constant was measured \
+             against a walk that is not the one it guards. The two agree at \
+             {deepest_planned}; if they ever stop agreeing, this is the one to \
+             believe -- the deepest PLAN is {deepest_planned_id}"
+        );
     }
 
     /// A chain of `levels` nested tasks: `levels - 1` `Sequential`s with one
     /// `Return` at the bottom, so the deepest task sits at depth `levels`.
     fn nested_yaml(levels: usize) -> String {
+        nested_yaml_spelled(levels, "io.kestra.plugin.core.flow.Sequential")
+    }
+
+    /// The same chain, with the `Sequential`s written in whichever of the four
+    /// spellings W1 accepts the caller names. See
+    /// `every_spelling_of_a_flowable_reaches_the_same_plan`.
+    fn nested_yaml_spelled(levels: usize, sequential: &str) -> String {
         assert!(levels >= 1);
         let mut y = String::from("id: deep\nnamespace: io.kestra.tests\ntasks:\n");
         for level in 0..levels - 1 {
             let pad = "  ".repeat(level * 2 + 1);
             y.push_str(&format!(
-                "{pad}- id: s{level}\n{pad}  type: io.kestra.plugin.core.flow.Sequential\n{pad}  tasks:\n"
+                "{pad}- id: s{level}\n{pad}  type: {sequential}\n{pad}  tasks:\n"
             ));
         }
         let pad = "  ".repeat((levels - 1) * 2 + 1);
@@ -2476,9 +2533,218 @@ mod tests {
         assert_eq!(plan.tasks.len(), super::plan::MAX_TASK_DEPTH);
     }
 
-    /// **Only `io.kestra.plugin.core.flow.Sequential` is planned as a
-    /// `Sequential`; every other flowable is opaque and its children are not
-    /// flattened at all.**
+    /// **No corpus `Dag` node is disabled** — the derivation behind the one
+    /// position `flatten_list`'s `disabled:` rule deliberately does not reach.
+    ///
+    /// A `Dag`'s nodes go through `flatten_dag`, not `flatten_list`, so a
+    /// disabled `Dag` node is still planned. That is a gap, and it is a gap on
+    /// purpose: Kestra removes such a node from `currentTasks` like any other
+    /// child (`findTaskDependingFlowState` -> `removeDisabled`) but leaves it in
+    /// `taskDependencies` (`FlowableUtils.resolveDagNexts`), so every node that
+    /// `dependsOn` it waits for a run that is never created and the `Dag` never
+    /// terminates. Each of the three ways out is worse than the gap: copying it
+    /// reproduces a hang, dropping the node *and* its incoming edges invents a
+    /// semantics Kestra does not have, and dropping the node alone makes
+    /// `flatten_dag` refuse the flow for a dangling `dependsOn` — an
+    /// over-refusal, the direction that must not ship.
+    ///
+    /// So the question is left open, and this is what says the corpus never
+    /// asks it. If a flow ever does, this fails and somebody has to decide
+    /// rather than inherit the guess.
+    #[test]
+    fn no_corpus_dag_node_is_disabled() {
+        // A `Dag`'s node is `{ task: {...}, dependsOn: [...] }`, so a disabled
+        // node is a `disabled: true` on the object under a `task:` key that is
+        // itself an element of a `Dag`'s `tasks:`. Walked over the raw YAML for
+        // the same reason `every_corpus_errors_list_is_on_a_flowable_egret_plans`
+        // is: a construct the model drops would score zero by construction.
+        fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+            if let serde_json::Value::Object(map) = node {
+                let is_dag = map
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::models::canonical_flow_type)
+                    .is_some_and(|c| c == "dag");
+                if is_dag {
+                    for entry in map
+                        .get("tasks")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        let disabled = entry
+                            .get("task")
+                            .and_then(|t| t.get("disabled"))
+                            .and_then(|d| d.as_bool())
+                            .unwrap_or(false);
+                        if disabled {
+                            out.push(
+                                entry["task"]["id"]
+                                    .as_str()
+                                    .unwrap_or("<no id>")
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            match node {
+                serde_json::Value::Object(map) => {
+                    for v in map.values() {
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // The positive control, first: this walker must be able to SEE a
+        // disabled `Dag` node, or the empty result below is a property of the
+        // walker rather than of the corpus. Written in the alias spelling too,
+        // since `canonical_flow_type` is what decides whether a node is a
+        // `Dag`'s.
+        for ty in ["io.kestra.plugin.core.flow.Dag", "core.dag"] {
+            let probe: serde_json::Value = serde_norway::from_str(&format!(
+                "id: probe\nnamespace: io.kestra.tests\ntasks:\n  - id: d\n    type: {ty}\n    \
+                 tasks:\n      - task:\n          id: off\n          type: io.kestra.plugin.core.debug.Return\n          \
+                 format: x\n          disabled: true\n      - task:\n          id: on\n          \
+                 type: io.kestra.plugin.core.debug.Return\n          format: x\n"
+            ))
+            .expect("the probe parses");
+            let mut found = Vec::new();
+            walk(&probe, &mut found);
+            assert_eq!(
+                found,
+                ["off".to_string()],
+                "{ty}: the walker must find a disabled Dag node and must not \
+                 report the enabled one"
+            );
+        }
+
+        let mut dags = 0usize;
+        let mut offenders: Vec<String> = Vec::new();
+        for (id, source) in every_corpus_flow() {
+            let Ok(doc) = serde_norway::from_str::<serde_json::Value>(&source) else {
+                continue;
+            };
+            if source.contains(".flow.Dag") || source.contains("core.dag") {
+                dags += 1;
+            }
+            let mut here = Vec::new();
+            walk(&doc, &mut here);
+            offenders.extend(here.into_iter().map(|node| format!("{id}/{node}")));
+        }
+
+        println!("corpus flows declaring a Dag: {dags}");
+        assert!(
+            dags > 0,
+            "the control: if no corpus flow declares a `Dag` at all, this test \
+             proves nothing about `Dag` nodes"
+        );
+        assert_eq!(
+            offenders,
+            Vec::<String>::new(),
+            "a corpus `Dag` node is disabled, so the gap `flatten_list`'s doc \
+             names is now reachable. `flatten_dag` still plans it, which is an \
+             over-acceptance; Kestra would hang on it. Somebody has to decide \
+             what egret does, and the three obvious answers are each worse than \
+             the gap -- see `flatten_list`"
+        );
+    }
+
+    /// **Every spelling W1 accepts for a flowable reaches the same plan** —
+    /// the W1/W3a dispatch seam, asserted rather than assumed.
+    ///
+    /// W1's `models::canonical_flow_type` reaches `ModelKind::Sequential` from
+    /// **four** spellings: the FQCN, the `core.` short form, and either of them
+    /// in any case, because it lowercases. `flatten_one` used to match the
+    /// parsed variant against the FQCN *literal*, and carried a comment saying
+    /// "`models::TaskKind::Sequential` is reached by that type string and by no
+    /// other". That was false the moment W1 gained the short form, and the
+    /// price is not a cosmetic one: a `core.sequential` planned as an opaque
+    /// `Runnable` has no children in the plan at all, so a chain of them is
+    /// **one** task however deep it is written and [`MAX_TASK_DEPTH`] never
+    /// fires.
+    ///
+    /// Measured at the fix's parent commit, on a two-level chain:
+    ///
+    /// ```text
+    /// io.kestra.plugin.core.flow.Sequential -> 2 tasks, Sequential { tasks: [1] }
+    /// core.sequential                       -> 1 task,  Runnable { type_id: "core.sequential" }
+    /// core.Sequential                       -> 1 task,  Runnable { .. }
+    /// io.kestra.plugin.core.flow.sequential -> 1 task,  Runnable { .. }
+    /// ```
+    ///
+    /// It was latent rather than live — no corpus flow writes an alias, which
+    /// is why every ratchet entry was green through it — and latent is the
+    /// only reason this is a test and not a bank.
+    ///
+    /// The second half is the one that matters, and it is the one a
+    /// shape-equality assertion alone would miss: the recursion bound must fire
+    /// on the alias too. A guard that only fires on one spelling of the input
+    /// it guards is not a bound.
+    #[test]
+    fn every_spelling_of_a_flowable_reaches_the_same_plan() {
+        const SPELLINGS: &[&str] = &[
+            "io.kestra.plugin.core.flow.Sequential",
+            "core.sequential",
+            "core.Sequential",
+            "io.kestra.plugin.core.flow.sequential",
+        ];
+
+        let canonical =
+            build_plan(&nested_yaml_spelled(2, SPELLINGS[0])).expect("the FQCN spelling plans");
+        assert_eq!(canonical.tasks.len(), 2, "the control: two tasks, nested");
+        assert!(
+            matches!(canonical.tasks[0].kind, TaskKind::Sequential { .. }),
+            "the control must be a Sequential, or the rows below prove nothing"
+        );
+
+        for spelling in SPELLINGS {
+            let plan = build_plan(&nested_yaml_spelled(2, spelling))
+                .unwrap_or_else(|e| panic!("{spelling} must plan: {e}"));
+            assert_eq!(
+                plan.tasks.len(),
+                canonical.tasks.len(),
+                "{spelling}: W1 parses this to the same `ModelKind` as the FQCN,                  so it must reach the same plan. A different task count means                  the builder fell through to an opaque `Runnable` and the whole                  subtree is missing"
+            );
+            assert_eq!(
+                plan.tasks[0].kind, canonical.tasks[0].kind,
+                "{spelling}: same variant, not merely the same size"
+            );
+
+            // And the bound fires on it. This is the half that is not implied
+            // by the shape assertions: an opaque `Runnable` chain is one task
+            // deep whatever it says on the page.
+            let over = super::plan::MAX_TASK_DEPTH + 1;
+            let refused = build_plan(&nested_yaml_spelled(over, spelling));
+            assert!(
+                refused.is_err(),
+                "{spelling}: nesting {over} levels deep must be refused; got a                  plan of {} task(s)",
+                refused.as_ref().map(|p| p.tasks.len()).unwrap_or(0)
+            );
+            let err = refused.unwrap_err();
+            assert!(
+                err.message.contains("nests deeper"),
+                "{spelling}: refused for the wrong reason: {err}"
+            );
+        }
+    }
+
+    /// **Only a `Sequential` is planned as a `Sequential`; every other
+    /// flowable is opaque and its children are not flattened at all.**
+    ///
+    /// "A `Sequential`" and not "`io.kestra.plugin.core.flow.Sequential`":
+    /// since the final review the builder dispatches through
+    /// `canonical_flow_type`, so all four spellings of it reach this arm. That
+    /// is `every_spelling_of_a_flowable_reaches_the_same_plan`'s subject; what
+    /// this test is about is the OTHER direction, which the change does not
+    /// touch — a type that canonicalises to something else stays opaque.
     ///
     /// `AllowFailure` and `WorkingDirectory` both `extend Sequential` in Java
     /// and both stay opaque here, deliberately: see [`build_plan`]. A builder
@@ -2586,8 +2852,10 @@ mod tests {
             "the body is inside the loop and the loop is not inside itself"
         );
 
-        // Task 5's two. Both flatten, and both are reached by the FQCN only --
-        // the same dispatch rule the three above use.
+        // Task 5's two. Both flatten, through the same `canonical_flow_type`
+        // dispatch the three above use -- which reaches each of them from four
+        // spellings, not from the FQCN alone. This comment said "the FQCN
+        // only" and was true of the builder until the final review.
         let plan = build_plan(
             "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ inputs.p }}\"\n    then:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
         )
@@ -2705,74 +2973,167 @@ mod tests {
         );
     }
 
-    /// **Two more over-refusals already on `main`, which `build_plan` now
-    /// inherits — the price of running `validate`, stated rather than
-    /// rounded off.**
+    /// A flow this pinned Kestra published with **200** and `build_plan`
+    /// refuses anyway: an OVER-REFUSAL, with the cause and the code that says
+    /// egret refuses it for *that* cause.
     ///
-    /// Task 8 put W1's `validate` behind `build_plan` to close 7
-    /// over-acceptances. Measured over all 345 corpus flows, that also brings
-    /// in **two** flows this Kestra published with **200** and `validate`
-    /// refuses. Neither has a golden entry — both are `not-standalone`, so
-    /// Kestra itself could not run them without the Java test — which means
-    /// **the ratchet cannot see either one**. That is precisely why they are a
-    /// committed test instead of a sentence in a report.
+    /// Written as an exception table rather than as a suppression list, the
+    /// same way `STILL_OVER_ACCEPTED` is: each row is asserted to be **still
+    /// refused**, so fixing one fails this test by name and forces the record
+    /// to be corrected rather than letting the row rot.
+    struct PublishedButRefused {
+        id: &'static str,
+        /// Why egret refuses it, and whose rule that is.
+        cause: &'static str,
+        /// egret's own codes. Any one of them must open the message, so a
+        /// refusal that becomes a *different* refusal is a failure and not a
+        /// silent pass.
+        codes: &'static [&'static str],
+    }
+
+    /// **The three, and the sweep below asserts there is no fourth.**
+    const PUBLISHED_BUT_REFUSED: &[PublishedButRefused] = &[
+        PublishedButRefused {
+            id: "valids/switch-impossible",
+            cause: "W1's `models::Switch::defaults` is a bare `Vec<Task>`, so an                     explicit `defaults: null` is a parse error where Jackson                     leaves the field null and Kestra runs the flow. The only one                     of the three with a golden entry, and the only over-refusal                     the ratchet can see. Pinned to its single token by                     `a_null_task_list_is_an_over_refusal_that_reaches_the_http_api`",
+            codes: &["cannot parse flow"],
+        },
+        PublishedButRefused {
+            id: "valids/task-flow-dynamic",
+            cause: "`namespace: \"{{inputs.namespace}}\"` on a `Subflow`.                     `subflow_namespace_invalid` checks the grammar against the                     UNRENDERED source, so every dynamic subflow reference is                     refused. The check exists because `publish::subflow_ref_name`                     encodes the pair as `\"{namespace}/{flowId}\"` and a `/` in                     either half decodes back into a different pair -- skipping it                     when the value holds `{{` would move the collision to render                     time, where nothing looks for it. The fix is to the encoding,                     and it is W1's",
+            codes: &["subflow_namespace_invalid", "subflow_flow_id_invalid"],
+        },
+        PublishedButRefused {
+            id: "valids/trigger-flow-listener-namespace-condition",
+            cause: "a `Flow` trigger `dependsOn:` entry carrying only a                     `namespace:`, and another carrying only `states:`. At                     checkout `96893b589`, `Flow.java:364-380`'s `Dependency`                     declares `namespace`, `flowId`, `states` and `labels` as                     plain `@PluginProperty` fields with NO `@NotNull` on any of                     them -- a namespace-only dependency is a documented Kestra                     pattern. So these two codes are a `@NotNull` egret invented,                     for the same encoding reason as the row above. W1's",
+            codes: &[
+                "dependency_flow_id_required",
+                "dependency_namespace_required",
+            ],
+        },
+    ];
+
+    /// **Every flow this Kestra published with 200 must plan, except three
+    /// named over-refusals — swept over the whole corpus, not pinned by
+    /// name.**
     ///
-    /// Both rules are W1's and both predate this task: `POST /flows` has been
-    /// returning 400 for these two flows since W1 shipped. `build_plan`
-    /// running `validate` does not create the defect; it stops the executor
-    /// from disagreeing with the publish path about it.
+    /// Over-refusal is the mirror of the divergence class the programme
+    /// forbids shipping, and until the final review nothing in this package
+    /// swept for it. The two `validate` brought in at Task 8 were pinned *by
+    /// name*, which guards those two and nothing else: they live in the 26
+    /// `not-standalone` flows, the population the coverage statement says is
+    /// never compared, so the ratchet could not have found them and cannot
+    /// find a third.
     ///
-    /// **Neither is a rule to loosen casually, and that is the finding.**
+    /// **Measured, not argued.** An invented `validate` rule refusing three
+    /// more flows Kestra published with 200 (`kv`, `pause_no_tasks`,
+    /// `trigger-flow-listener`, all `not-standalone`) left this crate green at
+    /// 536 passed. That is the gap this test closes.
     ///
-    /// - `valids/task-flow-dynamic` writes `namespace: "{{inputs.namespace}}"`
-    ///   on a `Subflow`. `subflow_namespace_invalid` checks the grammar
-    ///   against the UNRENDERED source, so every dynamic subflow reference is
-    ///   refused. The check exists because `publish::subflow_ref_name` encodes
-    ///   the pair as `"{namespace}/{flowId}"` and a `/` in either half decodes
-    ///   back into a different pair — so skipping the check when the value
-    ///   holds `{{` would not fix the flow, it would move the collision to
-    ///   render time where nothing looks for it. The fix is to the encoding,
-    ///   which is W1's.
-    /// - `valids/trigger-flow-listener-namespace-condition` writes a `Flow`
-    ///   trigger `dependsOn:` entry carrying only a `namespace:`, and another
-    ///   carrying only `states:`. Measured at the checkout `96893b589`,
-    ///   `Flow.java:364-380`'s `Dependency` declares `namespace`, `flowId`,
-    ///   `states` and `labels` as plain `@PluginProperty` fields with **no
-    ///   `@NotNull` on any of them** — a namespace-only dependency is a
-    ///   documented Kestra pattern. So `dependency_namespace_required` /
-    ///   `dependency_flow_id_required` are a `@NotNull` egret invented, for
-    ///   the same encoding reason as above.
+    /// The population is derived from `corpus.json`'s own `publish_status`,
+    /// not from the `invalids/` directory name and not from the golden:
+    /// **295** of the 345 flows. That is deliberately wider than the golden's
+    /// 266 `runs` entries — it includes every `not-standalone` flow, which is
+    /// exactly where the two known over-refusals hide, and one flow
+    /// (`invalids/inputs-with-multiple-constraint-violations`) that published
+    /// with 200 and was refused later, when the execution's *input values*
+    /// were read. That one must still plan: `build_plan(&str)` never sees an
+    /// input value, so refusing it here would be refusing it for a reason
+    /// egret cannot have.
     ///
-    /// When either is fixed this test fails by name and says so.
+    /// The exception table is inverted the way `STILL_OVER_ACCEPTED` is: each
+    /// row is asserted to be **still refused, for its own code**. A suppression
+    /// list would let a fixed row rot; this one fails when a row is fixed and
+    /// says which.
     #[test]
-    fn validate_brings_two_over_refusals_with_it_and_neither_is_in_the_golden() {
-        for (id, codes) in [
-            (
-                "valids/task-flow-dynamic",
-                ["subflow_namespace_invalid", "subflow_flow_id_invalid"],
-            ),
-            (
-                "valids/trigger-flow-listener-namespace-condition",
-                [
-                    "dependency_flow_id_required",
-                    "dependency_namespace_required",
-                ],
-            ),
-        ] {
-            let Err(err) = build_plan(&corpus_source(id)) else {
+    fn every_flow_kestra_published_plans_except_three_named_over_refusals() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../../oracle-exec/corpus.json"))
+                .expect("corpus.json parses");
+        let entries = corpus.as_array().expect("corpus.json is an array");
+
+        let published: BTreeSet<String> = entries
+            .iter()
+            .filter(|e| e["publish_status"].as_u64() == Some(200))
+            .map(|e| {
+                e["id"]
+                    .as_str()
+                    .expect("every corpus entry has an id")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            (published.len(), entries.len()),
+            (295, 345),
+            "the population, derived from corpus.json's own `publish_status`. \
+             If it moves, the corpus or the harvest has changed and this \
+             sweep's exception table must be re-measured"
+        );
+
+        let expected: BTreeSet<String> = PUBLISHED_BUT_REFUSED
+            .iter()
+            .map(|r| r.id.to_string())
+            .collect();
+
+        let mut refused: BTreeMap<String, String> = BTreeMap::new();
+        for id in &published {
+            if let Err(err) = build_plan(&corpus_source(id)) {
+                refused.insert(id.clone(), err.message);
+            }
+        }
+
+        let found: BTreeSet<String> = refused.keys().cloned().collect();
+        let extra: Vec<&String> = found.difference(&expected).collect();
+        assert!(
+            extra.is_empty(),
+            "OVER-REFUSAL: {} flow(s) this Kestra published with 200 are refused \
+             by `build_plan` and are not in PUBLISHED_BUT_REFUSED. Over-refusal \
+             is the mirror of the class this programme forbids shipping; fix the \
+             rule, or add the row with its cause and its owner:\n{}",
+            extra.len(),
+            extra
+                .iter()
+                .map(|id| format!("  {id}: {}", refused[*id]))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+
+        // The other direction: every named row must still BE refused, and for
+        // its own code. This is what stops the table becoming a list of things
+        // that used to be true.
+        for row in PUBLISHED_BUT_REFUSED {
+            assert!(
+                published.contains(row.id),
+                "{}: PUBLISHED_BUT_REFUSED names a flow this Kestra did NOT \
+                 publish with 200, so the row is about nothing",
+                row.id
+            );
+            let Some(message) = refused.get(row.id) else {
                 panic!(
-                    "{id}: this Kestra published it with 200 and egret refuses it -- \
-                     if it now plans, W1 has fixed one of {codes:?}: delete that row, \
-                     and if BOTH rows are gone delete this test"
-                );
+                    "{}: this Kestra published it with 200 and it now PLANS -- \
+                     one of {:?} has been fixed. Delete the row (and if this \
+                     leaves the table empty, say so in oracle-exec/README.md's \
+                     coverage statement, which quotes the count). Its cause was: \
+                     {}",
+                    row.id, row.codes, row.cause
+                )
             };
             assert!(
-                codes
-                    .iter()
-                    .any(|c| err.message.starts_with(&format!("{c}:"))),
-                "{id} is refused, but not by the rule this test is about ({codes:?}): {err}"
+                row.codes.iter().any(|c| message.starts_with(c)),
+                "{} is refused, but not by the rule this row is about ({:?}): \
+                 {message}",
+                row.id,
+                row.codes
             );
         }
+
+        println!(
+            "over-refusal sweep: {} flow(s) published with 200, {} refused, all \
+             {} named",
+            published.len(),
+            refused.len(),
+            PUBLISHED_BUT_REFUSED.len()
+        );
     }
 
     /// **A flow W1's parser cannot read is refused, located.**
@@ -3956,11 +4317,12 @@ tasks:
         }
         assert_eq!(
             (flows, wide),
-            (43, 89),
-            "the 43 corpus flows holding a `Loop` and the 89 tasks the wide \
-             reading names inside one -- the same 89 \
+            (43, 88),
+            "the 43 corpus flows holding a `Loop` and the 88 tasks the wide \
+             reading names inside one -- the same 88 \
              `the_two_readings_of_inside_a_loop_differ_by_a_measured_amount` \
-             derives"
+             derives. 43 flows and not 42: the flow count is over the YAML and \
+             `disabled:` does not change it"
         );
         assert_eq!(
             wide - without_errors,
