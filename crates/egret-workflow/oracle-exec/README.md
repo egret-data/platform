@@ -3501,6 +3501,50 @@ Re-measured over the builder's own output: the deepest **plan** in the corpus is
 8× headroom is intact. `the_depth_bound_is_derived_from_the_deepest_corpus_flow`
 now derives both readings and requires them to agree.
 
+### The final review's mutations
+
+Seven rows. Every one is a literal `-` → `+` applied to a file anchored to
+`git show HEAD:<path>` (the driver refuses to snapshot a file that already
+differs from HEAD), **built first** — `cargo build -p egret-workflow --tests`,
+0 errors asserted — and only then run against the **whole crate**. Restore is
+byte-compared against the anchor after every row and again for all touched files
+at the end.
+
+| # | file | `-` → `+` | victims |
+|---|---|---|---|
+| M111 | `plan.rs` | `.filter(\|t\| !t.disabled)` deleted | **6**, ratchet **4 regressions** — the four banked entries, and the ratchet prints 149 mismatching and 30 dropped pairs again |
+| M112 | `plan.rs` | `canonical_flow_type(&task.r#type)` → the same, `.filter(\|_\| task.r#type.starts_with("io.kestra.plugin.core.flow."))` | **1**, and that one is the point: `every_spelling_of_a_flowable_reaches_the_same_plan`, on `core.sequential`. Nothing else in the crate or the corpus can tell |
+| M113 | `plan.rs` | a `report.warnings.first()` refusal inserted before the `errors` one | **68**, including `every_flow_kestra_published_plans_except_three_named_over_refusals`: *"OVER-REFUSAL: 281 flow(s) this Kestra published with 200 are refused by `build_plan` and are not in PUBLISHED_BUT_REFUSED"*. This is the asymmetry `build_plan`'s own doc comment forbids, and it is now a test failure rather than a paragraph |
+| M114 | `plan.rs` | `children_of`'s `errors` half deleted | **0** — see below |
+| M114b | `plan.rs` | `MEASURED_MAX_CORPUS_DEPTH = 6` → `5` | **1**, the depth test |
+| M116 | `tests/executor.rs` | `corpus_source` appends `\n# disabled: true\n` | **1**: *"valids/task-runif: a flow declaring `disabled:` produced a SKIPPED run"* — the control half of the attribution |
+| M117 | `tests/executor.rs` | `corpus_source` rewrites `runIf:` to `runIff:` | **2**: the SKIPPED attribution *and* the residual-baseline table's new `runIf:` row |
+| M115 | `tests/executor.rs` | `simulate_with`'s `spawned: Vec::new()` → `vec![Trace::default()]` | **4**, including `only_the_top_level_order_pairs_are_ever_asserted`'s control: *"egret produces no `spawned` at all, which is WHY the 227 nested pairs are unreachable"* |
+
+**M114 killed nothing, and it is recorded rather than dropped.** Deleting the
+`errors` half of `Plan::children_of` — the half Task 7 added, and the half the
+depth bound's second reading exists for — moves no assertion in this crate. That
+is not a hole in the guards: it is the corpus. `is_loop_body` is the only
+consumer, and `an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach`
+already asserts, by name, that no corpus flow puts an `errors:` inside a `Loop`
+body; the deepest plan is `valids/full`, whose deepest path is not an `errors:`
+either. So the code path is provably unreached by the 345 flows, and the crate
+already carries the test that says so. Anyone widening `children_of`'s consumers
+should expect this row to start killing something.
+
+**The new plan-side depth assertion is killable, and M113 is what showed it.**
+M114b fires the *model-side* assertion first (they are ordered), so its message
+is the old one. Under M113 the population of plannable flows collapses and the
+new assertion fires on its own: *"the BUILDER's own walk is what
+`MAX_TASK_DEPTH` bounds … The two agree at 2 … the deepest PLAN is
+valids/flow-concurrency-parallel-subflow-kill"*.
+
+`no_corpus_dag_node_is_disabled` carries its positive control **inside the
+test** rather than in this table: it runs the walker over a synthetic `Dag` with
+one disabled node and one enabled one, in both spellings, and requires it to
+report exactly the disabled one. A control that runs on every CI run is worth
+more than a mutation run once.
+
 ### Seven documentation drifts, and the shape they share
 
 Six of the seven were written in the same commit as the derivation that
