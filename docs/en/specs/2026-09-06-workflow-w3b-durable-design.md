@@ -73,10 +73,32 @@ against a real engine, the way `egret-dataapi`'s does.
 and its own comment explains why. W3b reuses that statement rather than
 inventing one.
 
-- **worker loop** — claim `task_runs` where `state = 'pending' AND not_before <= now()`,
-  run the handler, and **in the same transaction** record the result, call
-  `advance()`, and insert the successors. No window exists in which a task is
-  finished and the execution has not moved.
+- **worker loop** — claim a runnable `task_run`, run the handler, and **in one
+  transaction** record the result, call `advance()`, and insert the successors.
+  No window exists in which a task is finished and the execution has not moved.
+
+  **The predicate above was wrong in both halves and Task 2 measured it.** This
+  section first read `state = 'pending' AND not_before <= now()`, copied from the
+  programme spec §6.3. There is no `pending` state — the claimable one is
+  `RUNNING` — and `not_before` is written only by `ScheduleRetry` and read only
+  by `retry::reopen_due`, which requires `Retrying`, so a claim term on it could
+  never fire. Nothing in the table separates a flowable from a runnable either: a
+  `Parallel` reaches `RUNNING` exactly as its children do, so `type_id IS NOT
+  NULL` (⟺ `TaskKind::Runnable`) is the claim's only discriminator.
+
+  **The claim commits separately from the result, and that is deliberate.** A
+  handler is arbitrarily long — `Sleep`, `egret.sql` — and a lease that is never
+  committed cannot expire, so a single transaction end to end would make the
+  reaper unreachable. The constraint that matters is unchanged: result,
+  `advance()` and successors are one transaction. The cost is that after a kill
+  the run becomes claimable again *after `reap`*, not immediately.
+
+  **A fourth durability property, found by Task 2 and invisible to the oracle:**
+  a run whose result committed must never be claimed again. The commit clears the
+  lease, so `claimed_at IS NULL` holds of a finished run and the lease term alone
+  would readmit it — the handler would run twice for one attempt. A re-run
+  producing the same terminal state produces an **identical trace**, so the
+  ratchet cannot see it; only the handler's call log can.
 - **reaper** — `working_timeout_s`, as automation does.
 
 ### 4.2 `advance()` does not change
