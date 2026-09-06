@@ -11,6 +11,19 @@ happens-before relation, `golden.json`, `stability.json` and the ratchet in
 `crates/egret-workflow/tests/executor.rs`. Those sections start at *The
 normalised trace*.
 
+**W3c** is a follow-on package, not a W3a task, and it closes the last
+over-acceptance W3a named but left unowned: **`runIf:`**. A task whose `runIf:`
+renders falsy is *created* by Kestra and then not executed — `CREATED SKIPPED`,
+no `SUBMITTED`, no `RUNNING` — and egret ran it. That is the same class as
+`disabled:`, which W3a's final review closed. Four sentences below are now
+stale and a reader should take these over them: **`RunState` holds 9 of the
+golden's 13 states**, not 8; `SKIPPED` is no longer in the missing list, so
+**four** remain, not five; `runIf:` is gone from *States and constructs no W3a
+task claims* and from the residual-baseline table; and the order-pair population
+is **642**, not 647. **The ratchet did not move: 144 mismatching before and
+after, 0 banked and 0 regressions**, and *What W3c had to change, and what it did
+NOT bank* is the section that says why a correct fix banks nothing here.
+
 Task 8 (**refusal**) changed four, and a reader should take these over
 everything below. **`build_plan` now runs `spec::validate`**, so egret has one
 answer to "is this flow acceptable" instead of two — the largest single cause of
@@ -1127,7 +1140,9 @@ converse fails, measured: **2 runs of `io.kestra.plugin.core.log.Log`, an
 unambiguous `RunnableTask`, carry no `SUBMITTED`** — Kestra never submitted them,
 because `runIf` `SKIPPED` them or they failed before submission. The set is
 asserted at exactly those 2, so if the exception grows this paragraph has to
-weaken with it.
+weaken with it. (W3c implements `runIf:`, so egret no longer submits those two
+either — but the *feed* split this table describes is derived from the golden
+and the plan, not from a simulation, so none of these numbers moved.)
 
 **The over-feed is 79 of the 565, and it is not a single accident.**
 The by-type breakdown is derived from the plan's own `type_id` and printed on
@@ -1435,21 +1450,38 @@ execution histories and **never** in a run history. Going the other way,
 `SKIPPED` and `SUBMITTED` appear only in run histories.
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
-unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`**, so the
-enum has eight and **5 of the 13 remain unrepresentable**: `PAUSED`, `RESTARTED`,
-`WARNING`, `SKIPPED`, `CANCELLED`. Each is recorded here rather than worked
-around in the normaliser, because a normaliser that quietly maps an
+unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`, W3c added
+`SKIPPED`**, so the enum has nine and **4 of the 13 remain unrepresentable**:
+`PAUSED`, `RESTARTED`, `WARNING`, `CANCELLED`. Each is recorded here rather than
+worked around in the normaliser, because a normaliser that quietly maps an
 unrepresentable state onto a representable one is a normaliser that hides the gap
 it was built to expose.
 
-**What each addition bought, and what the five still cost.** Of the 266 `runs`
+**The test that derives all of this could not see the enum until W3c.**
+`the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` carried its
+own literal list of the eight state names, so it measured a list in the test
+file against the golden and never once read `RunState` — adding `Skipped` left
+it green. It now derives the vocabulary from `RunState::ALL`, which is the
+single list, and `run_state_all_holds_every_variant_in_order` is what keeps that
+list and the enum in step.
+
+**What each addition bought, and what the four still cost.** Of the 266 `runs`
 entries, **35** use only the six members the plan drafted, **229** use only the
-seven and **233** use only the eight — so `SUBMITTED` alone is what moved the
-reachable set by 194 entries and `RETRIED` moves it by 4,
+seven, **233** use only the eight and **237** use only the nine — so `SUBMITTED`
+alone is what moved the reachable set by 194 entries, `RETRIED` moves it by 4 and
+`SKIPPED` by 4,
 and it was the single cheapest thing any task could do to this oracle. It is
 also not optional for Task 3's own slice: `SUBMITTED` is in 580 of the golden's
 840 run histories and on every task the worker ran, so a sequential flow of
 `Return` tasks cannot match without it.
+
+**`SKIPPED`'s 4 buy no bank either, and for a different reason.** `RETRIED`'s
+four are blocked by a replacement execution nothing produces; `SKIPPED`'s four
+are blocked by a *second* construct each: `valids/task-runif` declares a
+`Subflow`, `…-executionupdating` an `ExecutionUpdatableTask`, `…-taskswithstate`
+a `finally:`, and `…-workingdirectory` a `WorkingDirectory` planned opaque.
+Being inside the vocabulary is necessary and not sufficient, and this is the
+second measured example of that.
 
 **And `RETRIED`'s 4 buy no bank at all**, which is worth saying beside the
 number: the four entries it covers are exactly the `retry-new-execution-*`
@@ -1459,7 +1491,7 @@ four are `FAILED` where Kestra recorded `RETRIED`, which is a wrong answer rathe
 than a missing one — but it moved them from *wrong on several fields* to *right
 on everything except the field nothing produces*. See the sub-execution hole.
 
-The other five, with the number of `runs` entries whose trace uses each and the
+The other four, with the number of `runs` entries whose trace uses each and the
 task that owns it:
 
 | state | `runs` entries | owner |
@@ -1467,8 +1499,11 @@ task that owns it:
 | `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
 | `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
 | `WARNING` | 10 | `AllowFailure` and `warningOnRetry` — **not Task 7's**, and this row said it was. `warningOnRetry` turns a retried task's eventual SUCCESS into WARNING, so `valids/retry-success` and `valids/task-allow-failure-runnable` need it; `AllowFailure` is planned opaque and belongs to W8. Unclaimed |
-| `SKIPPED` | 4 | `runIf:`. **This row said `disabled: true` and was wrong**; see *`SKIPPED` is `runIf:`'s, and `runIf:` had no owner* |
 | `CANCELLED` | 3 | flow concurrency, which no W3a task claims |
+
+`SKIPPED` was a fifth row, 4 entries, credited first to `disabled: true` (wrong)
+and then to `runIf:` (right). **W3c implements `runIf:`**, so the row is gone
+from here as well; see *What W3c had to change, and what it did NOT bank*.
 
 A later task adding one of these adds it here too; the counts are what
 `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`
@@ -2944,7 +2979,7 @@ owner is how a suppression list starts.
 | `Pause` | `PAUSED`, 18 golden `runs` entries | `io.kestra.plugin.core.flow.Pause` | W8 |
 | flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
 | `disabled:` | ~~`SKIPPED`, 4 entries~~ — **the state was misattributed and the construct is now implemented**; see the two rows below | a task-level flag | **W3a's final review took it.** `flatten_list` drops a disabled task from the plan, which is Kestra's own rule (`Execution.removeDisabled`, called on `tasks`, `errors` and `finally` inside `findTaskDependingFlowState`): no taskrun at all, and a flowable whose children are all disabled still succeeds. 4 of its 6 baselined entries banked |
-| `runIf:` | **6 runs across 4 entries** — the golden's whole `SKIPPED` population — and 7 baselined entries | a task-level expression, rendered per run | **unclaimed, and by two packages at once.** W1's `Task` does not carry the field, and `RunState` has no `SKIPPED` to put a skipped run into. Either half alone would block it. Named at the final review: it had no row anywhere in this file or in the plan, because the `SKIPPED` state was credited to `disabled:` |
+| `runIf:` | ~~**6 runs across 4 entries** — the golden's whole `SKIPPED` population — and 7 baselined entries~~ — **implemented by W3c** | a task-level expression, rendered per run | **W3c took it**, and both halves moved in one commit: W1's `Task` carries `run_if` and `RunState` has `Skipped`. **None of the 7 banks and none of the 6 skipped runs is reproduced under this oracle** — not because the rule is wrong but because the harness cannot render any of the four flows' conditions; see *What W3c had to change, and what it did NOT bank* |
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
@@ -3474,6 +3509,10 @@ run, so the position is a named gap rather than a guess.
 
 ### `SKIPPED` is `runIf:`'s, and `runIf:` had no owner
 
+*(`runIf:` has an owner since W3c, which implements it. This section is the
+attribution that made that possible and it stands as written; the sentence
+"unclaimed by two packages at once" is what stopped being true.)*
+
 This file credited the golden's `SKIPPED` state to `disabled: true` in **three**
 places, and the plan's own table said it too. It is false. Walking every run of
 `golden.json` finds `SKIPPED` on **6 runs across 4 entries** —
@@ -3604,6 +3643,141 @@ contradicts them.
 | `models/task.rs` | "`build_plan` never calls `validate`" | false since `e0a22aa7`; the argument built on it is void, and the conclusion survives on its other half |
 | `plan.rs` | a task-level `errors:` subtree is invisible "to the walk and to this builder alike" | stale since Task 7 — see *the depth bound* above |
 | this file | "51 flows are never compared at all", then lists 26 + 23 | **49**. The 51 only closes if the 2 unstable traces are counted, and this 51 and the denominator table's "51 rejected" are different sets coinciding in size |
+
+
+## What W3c had to change, and what it did NOT bank
+
+W3c is a follow-on package with one subject: **`runIf:`**, the over-acceptance
+W3a's final review named and left unowned. It changes no number in the ratchet,
+and the interesting half of this section is why a correct fix cannot.
+
+| | golden entries | mismatching | baselined | broken | ordered pairs removed |
+|---|---|---|---|---|---|
+| **control** — clean tree at BASE `05083cbc`, `git status --porcelain` empty | 294 | **144** | 144 | 0 | 15 |
+| **after** | 294 | **144** | 144 | 0 | 15 |
+
+**0 banked, 0 regressions, 0 broken.**
+
+### The defect, and the surface it belongs to
+
+A task whose `runIf:` renders falsy is **created** by Kestra and then not
+executed: `CREATED SKIPPED`, no `SUBMITTED`, no `RUNNING`, and one attempt
+reading `CREATED SKIPPED`. egret ran it. That is the same class as `disabled:`
+— egret producing work Kestra did not — and it is the class this programme
+forbids shipping.
+
+**The surface was derived rather than taken from the brief, and it is one
+property.** The question is "which task-level properties make Kestra create a
+run and then not execute it", and it was answered from two directions:
+
+- **From the state.** `State.Type.SKIPPED` is written at **four** sites in the
+  whole checkout's main sources — `ExecutorService.java:1302` and `:1382`,
+  `ExecutionEventMessageHandler.java:272`, `WorkerTaskProcessor.java:141` —
+  and every one of the four is guarded by
+  `TruthUtils.isTruthy(runContext.render(task.getRunIf()))`. Nothing else in the
+  artifact can put a run into `SKIPPED`.
+- **From the field list.** `Task.java` declares **16** task-level properties
+  (`id`, `type`, `version`, `description`, `retry`, `timeout`, `disabled`,
+  `workerSelector`, `policyRefs`, `logLevel`, `allowFailure`, `logToFile`,
+  `runIf`, `allowWarning`, `taskCache`, `assets`). Exactly two stop a task
+  running: `disabled:`, which removes it from the list before a run exists
+  (W3a's final review), and `runIf:`. Two more are near neighbours and neither
+  is this shape: `taskCache` restores outputs *instead of* running the body but
+  the run still goes `SUBMITTED RUNNING SUCCESS`, and both it and `timeout:` are
+  enforced in the **worker** (`WorkerTaskProcessor.java:225`,
+  `WorkerTaskCallable.java:61`) — the same place `timeout:` already sits in the
+  unclaimed list. `allowFailure`/`allowWarning` change a terminal state, not
+  whether the body runs.
+
+So the surface is `runIf:` alone, and the two independent derivations agree.
+
+### Where the rule lives, and the two rules it forced open
+
+`flowable::open` is every created run's single door — `sequential::walk` and
+`parallel::drive_concurrent`'s rule 3 both go through it, and a `Loop` goes
+through it before `loop_::open` resolves its `values:`. The check is at the top
+of it, which is what makes a skipped `Loop` spawn nothing and a skipped
+`Sequential` create no children. `Command::SkipRun` writes the state and the
+attempt together, because Kestra's four sites do
+(`withState(SKIPPED).addAttempt(...state(new State().withState(SKIPPED)))`, and
+a `new State()` starts at `CREATED`) and a `SetRunState` cannot: `apply` appends
+to the *last* attempt and a skipped run has none.
+
+**`SKIPPED` is the first terminal state this executor holds that is not a
+failure, and two rules were written on the assumption that there was no such
+thing.**
+
+- `parallel::drive_concurrent`'s rule 1 was `terminal && != SUCCESS`, so a falsy
+  `runIf:` on one branch would have `fail_the_rest` of its siblings — egret
+  failing runs Kestra succeeds. `State.java:293` puts `SKIPPED` in
+  `isTerminatedNoFail()` beside `SUCCESS`, and `Execution.guessFinalState` has
+  no arm for it at all.
+- `dag::drive`'s predicate was `== SUCCESS`, with a doc comment arguing that
+  Kestra's own "all dependencies are **terminated**" could not be told apart
+  because every terminated-but-not-successful state had already ended the
+  branch. **That argument broke exactly where it said it would**, and its own
+  comment is what said so: with rule 1 excluding `SKIPPED`, a skipped dependency
+  is terminated, alive and not `SUCCESS`, and a `SUCCESS`-only reading would
+  hang the `Dag` for ever on a flow Kestra completes.
+
+**Neither of those two is measured on the artifact**, and that is stated rather
+than implied: `no_corpus_parallel_or_dag_child_declares_a_run_if` derives, from
+all 345 flows and with a positive control in all four spellings, that no corpus
+`Parallel` or `Dag` child carries a `runIf:`. They are read from Kestra's Java
+and held by two committed tests.
+
+### Why nothing banks, measured rather than argued
+
+All **7** baselined entries that declare a `runIf:` stay baselined, and — the
+sharper statement — **egret reproduces none of the golden's 6 `SKIPPED` runs
+under this oracle.** The cause is the render tier, and it is per-entry:
+
+| entry | why the skipped run is not reached |
+|---|---|
+| `valids/task-runif` | its second task's `runIf:` is `{{ outputs.output['values']['taskrun_data'] == 1 }}`. `render_context` carries `inputs` and `vars` and no `outputs`, so that render FAILS, the run FAILS, and the two skipped runs after it are never created. Kestra's own `willfailedtheflow` proves a failed `runIf:` render is a `FAILED` run, so the *rule* is right and the *context* is short |
+| `valids/task-runif-executionupdating` | the same, one task later: `setVariables` fails on `{{ outputs.… }}` |
+| `valids/task-runif-taskswithstate` | both its `runIf:` tasks are in `finally:`, which `build_plan` does not flatten — they are in no plan |
+| `valids/task-runif-workingdirectory` | both are children of a `WorkingDirectory`, planned opaque |
+
+**So the ratchet is not the instrument for this fix, and saying so is the
+point.** What holds the rule is a set of committed tests over hand-built plans
+— the skip, the truthiness rows including the two `trim()` rows where a naive
+transliteration disagrees, the unrendered case, a skipped flowable's children, a
+skipped `Loop`'s spawns, the `Parallel` sibling, the `Dag` dependent, and the
+`disabled:`/`runIf:` pair asserted side by side — plus the two corpus-derived
+guards above. `the_caller_can_render_every_expression_except_the_ones_named`
+gained an arm that derives the whole `runIf:` population (11 planned, 7 that
+this context cannot render, 2 literal `"false"`, 2 truthy) so the boundary is a
+named list rather than a rate.
+
+### What DID move, and it moved down
+
+Two entries produce *fewer* runs than before, and the order-pair population goes
+**647 → 642**. `valids/task-runif` goes 3 runs/3 pairs → 2/1 and
+`valids/task-runif-executionupdating` 4/6 → 3/3, for the reason in the table
+above: each now stops at a `runIf:` its harness cannot render, where before it
+ran straight past the field. Measured by re-running the whole arm with
+`PlanTask::run_if` forced to `None` — which reproduces the pre-W3c tree exactly,
+since nothing else W3c changed can fire without a `runIf:` — and **only those two
+entries move**. Both were baselined before and are baselined after.
+
+### A guard that could not fail, and it was this file's own numbers
+
+`the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` is the test
+that derives the state table above, and it carried **its own literal list** of
+the eight state names. So it compared a list in `tests/executor.rs` against the
+golden and never once read `RunState`: adding `Skipped` to the enum left it
+green, and the `SKIPPED` row in the missing table would have stayed until
+somebody noticed by eye. It now derives the vocabulary from `RunState::ALL`, and
+`run_state_all_holds_every_variant_in_order` keeps that list and the enum in
+step. This is the eighth guard-that-could-not-fail in this package and the
+second that was hiding something.
+
+`RunState::ALL` is not a proof of completeness and does not claim to be:
+`RunState::slot` is exhaustive so a new variant forces an arm, and the test
+requires the arm's number to be the variant's real position — but a variant
+given a slot past the end of `ALL` is caught by nothing here. That limit is on
+`ALL`'s own doc rather than argued away.
 
 ## What this oracle does not prove
 
@@ -4111,7 +4285,6 @@ and this is not a partition**, but the remainder is exhaustive and named.
 | 12 | `Pause` → `PAUSED` | W8 |
 | 10 | `afterExecution:` | **unclaimed — named at Task 8** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
-| 7 | `runIf:` | **unclaimed — named at the final review.** W1's `Task` has no field for it and `RunState` has no `SKIPPED`; two packages have to move. It had no row until now because the `SKIPPED` state was credited to `disabled:` |
 | 7 | flow `concurrency:` → `CANCELLED` | W8 |
 | 5 | `sla:` | W8 — named at Task 8 |
 | 4 | `CREATE_NEW_EXECUTION`'s replay | W6/W3b |

@@ -37,6 +37,29 @@ pub enum Command {
         /// the one the decision was taken at.
         at: Tick,
     },
+    /// A falsy `runIf:`: terminate this `CREATED` run as `SKIPPED`, with the
+    /// one attempt Kestra records for it — W3c.
+    ///
+    /// **It is not a [`Command::SetRunState`], and the attempt is why.** Every
+    /// one of Kestra's four skip sites writes the state *and* an attempt in the
+    /// same expression —
+    /// `taskRun.withState(SKIPPED).addAttempt(TaskRunAttempt.builder().state(new State().withState(SKIPPED)).build())`
+    /// — and a `new State()` starts at `CREATED`, which is why the golden's
+    /// skipped runs read `["CREATED","SKIPPED"]` with an attempt reading the
+    /// same two. A `SetRunState` cannot produce that: [`apply`](super::apply)
+    /// appends to the *last* attempt and a skipped run has none, so it would
+    /// leave `attempts: []` — which is a different measured shape, the one a
+    /// **failed render** of the same expression produces
+    /// (`valids/task-runif`'s `willfailedtheflow` is `["CREATED","FAILED"]`
+    /// with no attempt at all).
+    ///
+    /// It carries `at` for the same reason [`Command::StartRun`] does: the
+    /// attempt it opens stores an instant, and the only value that instant can
+    /// have without a second opinion is the `now` the decision was taken at.
+    SkipRun {
+        run: RunIx,
+        at: Tick,
+    },
     /// The plan's draft spells `not_before` as an `Instant`; it is a [`Tick`]
     /// for the reason [`Tick`] gives.
     ScheduleRetry {

@@ -62,6 +62,20 @@ pub struct TaskRun {
     /// Populated from Task 5 onward; the field exists from Task 3 so no later
     /// task changes this struct's shape.
     pub rendered: Option<String>,
+    /// The caller's render of this task's `runIf:` — W3c.
+    ///
+    /// **A second field rather than a second use of [`TaskRun::rendered`]**,
+    /// because one run can need both: `runIf:` is on `Task` and so is carried
+    /// by every kind, including an `If` that also has a `condition`. They are
+    /// also read at different states — `runIf:` at `CREATED`, before the run is
+    /// started at all, and a branch expression at `RUNNING` — so a single slot
+    /// would have to be cleared between them.
+    ///
+    /// `None` means "the caller has not answered yet" and the only correct
+    /// response to it is to emit nothing and wait. It is **not** falsy: reading
+    /// it that way would skip every run whose `runIf:` the caller had not
+    /// reached.
+    pub rendered_run_if: Option<String>,
     pub history: Vec<RunState>,
     pub attempts: Vec<Attempt>,
     pub not_before: Option<Tick>,
@@ -112,21 +126,26 @@ pub struct Attempt {
 /// One type for both, so the vocabulary it has to cover is the union of both.
 ///
 /// **That union is 13 states**, measured over `golden.json`; this enum holds
-/// **8** of them. Every number in this paragraph is derived on every run by
+/// **9** of them. Every number in this paragraph is derived on every run by
 /// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`,
 /// which is what stops it becoming a count written beside a derivation — it was
 /// one from Task 3 until Task 7 had to move it.
 ///
+/// **That test read a literal list of its own until W3c, so it could not see
+/// this enum at all**; it now derives the vocabulary from [`RunState::ALL`].
+/// Adding `Skipped` here left it green, which is precisely the failure it
+/// existed to prevent.
+///
 /// Measured over the 266 `runs` entries, by how many are wholly inside the
 /// vocabulary: **35** for the six the plan drafted, **229** once Task 3 added
-/// `Submitted`, **233** once Task 7 added `Retried`. `Submitted` is the
-/// addition that made the sequential slice reachable at all; `Retried` buys
-/// exactly the four `retry-new-execution-*` entries, none of which can bank,
-/// because the replacement execution a `CREATE_NEW_EXECUTION` retry starts is
-/// not representable here at all.
+/// `Submitted`, **233** once Task 7 added `Retried`, **237** once W3c added
+/// `Skipped`. `Submitted` is the addition that made the sequential slice
+/// reachable at all; `Retried` buys exactly the four `retry-new-execution-*`
+/// entries, none of which can bank, because the replacement execution a
+/// `CREATE_NEW_EXECUTION` retry starts is not representable here at all.
 ///
-/// The five still missing, with the number of `runs` entries whose trace uses
-/// each: `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `SKIPPED` 4, `CANCELLED` 3.
+/// The four still missing, with the number of `runs` entries whose trace uses
+/// each: `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `CANCELLED` 3.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,9 +176,71 @@ pub enum RunState {
     /// in [`Command`] can ask for.
     Retried,
     Killed,
+    /// The terminal a falsy `runIf:` leaves behind — W3c, which is what took
+    /// this enum from 8 of the golden's 13 states to **9**.
+    ///
+    /// **It is the golden's whole `SKIPPED` population and it has exactly one
+    /// producer.** `State.Type.SKIPPED` is written at four sites in the whole
+    /// Kestra checkout's main sources and every one of them is guarded by
+    /// `TruthUtils.isTruthy(runContext.render(task.getRunIf()))` —
+    /// `executor/…/ExecutorService.java:1302` and `:1382`,
+    /// `executor/…/handler/ExecutionEventMessageHandler.java:272`, and
+    /// `worker/…/processors/WorkerTaskProcessor.java:141`. Nothing else in the
+    /// artifact can put a run into it.
+    ///
+    /// **Terminal, and terminal in the benign half.** `State.java:288` lists it
+    /// beside `SUCCESS` in `isTerminated()`, and `:293` lists it again in
+    /// `isTerminatedNoFail()`; `Execution.guessFinalState` has no arm for it, so
+    /// a skipped child leaves its parent's aggregate at whatever it was.
+    /// `valids/task-runif-executionupdating` is that case measured — two of its
+    /// five runs are `SKIPPED` and the execution ends `SUCCESS`.
+    Skipped,
 }
 
 impl RunState {
+    /// Every variant, in wire order — the **one** list the oracle's vocabulary
+    /// arm reads.
+    ///
+    /// **It exists because that arm was a guard that could not fail.**
+    /// `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` carried
+    /// its own literal copy of the eight state names, so it measured a *list in
+    /// the test file* against the golden and never once looked at this enum:
+    /// adding `Skipped` here left it green, which is exactly what it exists to
+    /// notice. It now derives `held` from this slice.
+    ///
+    /// [`RunState::slot`] is exhaustive, so a variant added to this enum forces
+    /// an arm there, and `run_state_all_holds_every_variant_in_order`
+    /// round-trips the two. What that pair does **not** prove is that a variant
+    /// given a fresh `slot` was also appended here — nothing in Rust can
+    /// enumerate the variants to check it — so that is stated rather than
+    /// claimed away.
+    pub const ALL: &'static [RunState] = &[
+        RunState::Created,
+        RunState::Submitted,
+        RunState::Running,
+        RunState::Success,
+        RunState::Failed,
+        RunState::Retrying,
+        RunState::Retried,
+        RunState::Killed,
+        RunState::Skipped,
+    ];
+
+    /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
+    pub const fn slot(self) -> usize {
+        match self {
+            RunState::Created => 0,
+            RunState::Submitted => 1,
+            RunState::Running => 2,
+            RunState::Success => 3,
+            RunState::Failed => 4,
+            RunState::Retrying => 5,
+            RunState::Retried => 6,
+            RunState::Killed => 7,
+            RunState::Skipped => 8,
+        }
+    }
+
     /// Kestra's spelling, which is what the golden holds.
     pub fn wire(self) -> &'static str {
         match self {
@@ -171,6 +252,7 @@ impl RunState {
             RunState::Retrying => "RETRYING",
             RunState::Retried => "RETRIED",
             RunState::Killed => "KILLED",
+            RunState::Skipped => "SKIPPED",
         }
     }
 
@@ -182,7 +264,11 @@ impl RunState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            RunState::Success | RunState::Failed | RunState::Retried | RunState::Killed
+            RunState::Success
+                | RunState::Failed
+                | RunState::Retried
+                | RunState::Killed
+                | RunState::Skipped
         )
     }
 }
@@ -232,6 +318,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             parent: *parent,
             value: value.clone(),
             rendered: None,
+            rendered_run_if: None,
             history: vec![RunState::Created],
             attempts: Vec::new(),
             not_before: None,
@@ -241,6 +328,19 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             r.history.push(RunState::Running);
             r.attempts.push(Attempt {
                 history: vec![RunState::Created, RunState::Running],
+                started_at: *at,
+            });
+        }
+        // The `SKIPPED` state and the one attempt Kestra records with it, in
+        // one write -- see `Command::SkipRun` for why this is not a
+        // `SetRunState`. The attempt's own history is `[CREATED, SKIPPED]`
+        // because Java's `new State()` starts at `CREATED` and `.withState`
+        // appends, which is what the golden holds for all six skipped runs.
+        Command::SkipRun { run, at } => {
+            let r = &mut state.runs[*run];
+            r.history.push(RunState::Skipped);
+            r.attempts.push(Attempt {
+                history: vec![RunState::Created, RunState::Skipped],
                 started_at: *at,
             });
         }
@@ -269,5 +369,114 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // would be a non-exhaustive match rather than a decision, so it is
         // spelled out.
         Command::SpawnExecution { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`RunState::ALL`] and [`RunState::slot`] agree, in both directions this
+    /// pair can check.
+    ///
+    /// `slot` is exhaustive, so a new variant cannot be added to the enum
+    /// without an arm; this requires the arm's number to be the variant's
+    /// actual position here. The residual gap — a variant given a slot beyond
+    /// the end of `ALL` — shows up as an index panic the first time anything
+    /// walks `ALL` looking for it, and is named on `ALL`'s own doc rather than
+    /// papered over.
+    #[test]
+    fn run_state_all_holds_every_variant_in_order() {
+        for (i, state) in RunState::ALL.iter().enumerate() {
+            assert_eq!(
+                state.slot(),
+                i,
+                "{state:?} is at index {i} of RunState::ALL but claims slot {}",
+                state.slot()
+            );
+        }
+        let wires: std::collections::BTreeSet<&str> =
+            RunState::ALL.iter().map(|s| s.wire()).collect();
+        assert_eq!(
+            wires.len(),
+            RunState::ALL.len(),
+            "two variants share a wire spelling, so the golden cannot tell them apart"
+        );
+    }
+
+    /// **`SKIPPED` is terminal, and terminal in the half that does not fail.**
+    ///
+    /// `State.java:288` lists it in `isTerminated()` beside `SUCCESS` and
+    /// `:293` lists it again in `isTerminatedNoFail()`. Both halves matter here:
+    /// the first is what lets a sequence walk past a skipped child, and the
+    /// second is what keeps a skipped sibling from failing a `Parallel`.
+    #[test]
+    fn a_skipped_run_is_terminal() {
+        assert!(RunState::Skipped.is_terminal());
+        assert_eq!(RunState::Skipped.wire(), "SKIPPED");
+    }
+
+    /// **A skip writes the state AND the attempt Kestra records with it.**
+    ///
+    /// Measured on `valids/task-runif`'s `notexecuted`: the run reads
+    /// `["CREATED","SKIPPED"]` and carries **one** attempt reading the same two
+    /// states — Java's `new State()` starts at `CREATED` and `.withState(SKIPPED)`
+    /// appends. A `SetRunState { Skipped }` cannot produce that, and this test
+    /// asserts the difference rather than describing it.
+    #[test]
+    fn skipping_a_run_records_the_attempt_kestra_records() {
+        let plan = Plan::default();
+        let mut state = ExecutionState::new(&plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: 0,
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::SkipRun {
+                run: 0,
+                at: Tick(7),
+            },
+        );
+        assert_eq!(
+            state.runs[0].history,
+            vec![RunState::Created, RunState::Skipped]
+        );
+        assert_eq!(state.runs[0].attempts.len(), 1);
+        assert_eq!(
+            state.runs[0].attempts[0].history,
+            vec![RunState::Created, RunState::Skipped]
+        );
+        assert_eq!(state.runs[0].attempts[0].started_at, Tick(7));
+
+        // The control: the shape a FAILED render leaves, which is the other
+        // thing a `runIf:` can do and is a different trace -- no attempt at all.
+        // `valids/task-runif`'s `willfailedtheflow` is that one.
+        let mut other = ExecutionState::new(&plan);
+        apply(
+            &mut other,
+            &Command::CreateRun {
+                task: 0,
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut other,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+        assert!(
+            other.runs[0].attempts.is_empty(),
+            "a run terminated without being started has no attempt; if this ever \
+             grows one, `valids/task-runif`'s `willfailedtheflow` stops being \
+             reproducible"
+        );
     }
 }

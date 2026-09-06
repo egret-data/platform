@@ -219,6 +219,56 @@ pub(crate) fn start(plan: &Plan, run: RunIx, task: TaskIx, now: Tick) -> Vec<Com
 /// It returns a [`Step`] rather than a `Vec<Command>` because a `Loop` whose
 /// `values` the caller has not rendered yet has nothing to ask for, and
 /// [`Step::Commands`] is documented never to be empty.
+/// A falsy `runIf:` skips the run, and this is where W3c puts that — **before**
+/// anything else `open` does.
+///
+/// # One door, for every kind
+///
+/// Kestra asks the question in one place for runnables and flowables alike:
+/// `ExecutionEventMessageHandler.java:269` tests
+/// `TruthUtils.isTruthy(render(task.getRunIf()))` before it emits `SUBMITTED`
+/// for a runnable, before it moves a flowable to `RUNNING`, and before either
+/// gets an attempt. So the run reads `CREATED SKIPPED` and nothing else — which
+/// is exactly what the golden holds for all six skipped runs, `Subflow`
+/// (`valids/task-runif`'s `notexecutedflowable`) included.
+///
+/// [`open`] is this executor's matching single door: every created child run
+/// reaches it, from [`sequential::walk`](super::sequential) and from
+/// [`parallel::drive_concurrent`](super::parallel)'s rule 3, and a `Loop` goes
+/// through it before it resolves its values. Putting the check in `start`
+/// instead would miss the `Loop`, which never calls `start`; putting it in each
+/// flowable would be six copies of one rule.
+///
+/// # `disabled:` and `runIf:` are the same shape and NOT the same rule
+///
+/// Both are task-level properties that stop a task running, and Kestra
+/// implements them at opposite ends. `disabled:` is `Execution.removeDisabled`,
+/// a *list* filter applied before anything is resolved — no taskrun at all —
+/// and lives in [`flatten_list`](crate::executor::build_plan). `runIf:` is
+/// rendered *per run*, so the run must exist to be skipped. A `runIf:`
+/// implemented as a plan-time deletion would produce five taskruns for
+/// `valids/task-runif` where Kestra produces five and three where it produces
+/// three, and would still be wrong on every one of them.
+enum RunIfVerdict {
+    /// No `runIf:`, or one that rendered truthy.
+    Run,
+    /// Rendered falsy: `CREATED → SKIPPED`.
+    Skip,
+    /// There is a `runIf:` and the caller has not rendered it yet.
+    NotRenderedYet,
+}
+
+fn run_if_verdict(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx) -> RunIfVerdict {
+    let Some(_) = plan.tasks[task].run_if.as_deref() else {
+        return RunIfVerdict::Run;
+    };
+    match state.runs[run].rendered_run_if.as_deref() {
+        None => RunIfVerdict::NotRenderedYet,
+        Some(rendered) if branch::is_truthy(rendered) => RunIfVerdict::Run,
+        Some(_) => RunIfVerdict::Skip,
+    }
+}
+
 pub(crate) fn open(
     plan: &Plan,
     state: &ExecutionState,
@@ -226,6 +276,11 @@ pub(crate) fn open(
     task: TaskIx,
     now: Tick,
 ) -> Step {
+    match run_if_verdict(plan, state, run, task) {
+        RunIfVerdict::Skip => return Step::Commands(vec![Command::SkipRun { run, at: now }]),
+        RunIfVerdict::NotRenderedYet => return Step::Waiting,
+        RunIfVerdict::Run => {}
+    }
     match plan.tasks[task].kind {
         TaskKind::Loop { .. } => loop_::open(plan, state, run, task, now),
         _ => Step::Commands(start(plan, run, task, now)),

@@ -150,8 +150,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use egret_workflow::executor::{
-    advance, apply, build_plan, Command, ExecutionState, Plan, PlanTask, RunIx, RunState, TaskKind,
-    Tick,
+    advance, apply, build_plan, is_truthy, Command, ExecutionState, Plan, PlanTask, RunIx,
+    RunState, TaskKind, Tick,
 };
 use egret_workflow::models::InputType;
 use egret_workflow::{render_str, RenderContext};
@@ -412,12 +412,19 @@ enum Outcome {
 ///   `[Created]`; `SetRunState` and `SetExecutionState` push one; `StartRun`
 ///   pushes one plus one attempt entry). So tier-1 steps ≤ history entries
 ///   written.
-/// - **tier 2** (Task 5, the caller's render; a third kind, `Loop`, at Task 6)
-///   either writes a history entry —
+/// - **tier 2** (Task 5, the caller's render; a third kind, `Loop`, at Task 6;
+///   a second *slot*, `runIf:`, at W3c) either writes a history entry —
 ///   the failed-render arm applies a `SetRunState` — or writes none and sets
-///   `rendered` on at least one run. `rendered` is written once per run and
-///   never cleared, so the second case is bounded by `state.runs.len()`, which
-///   is bounded by the history entries the trace holds (every run has one).
+///   `rendered` or `rendered_run_if` on at least one run. Each is written once
+///   per run and never cleared, so the second case is bounded by
+///   `2 × state.runs.len()`, which is bounded by twice the history entries the
+///   trace holds (every run has one). **W3c doubled this term and did not touch
+///   the factor**, because tier 2's share of the sum was never the binding one:
+///   the factor of 4 buys `4 × 765` steps in total, and the widest golden entry
+///   holds **94** runs counting its sub-executions (`valids/loop-nested`) and
+///   **13** at the top level (`valids/full`) — both re-derived by
+///   `the_step_bound_dominates_the_widest_golden_entry` rather than written
+///   here alone.
 /// - **tier 3** writes exactly one history entry (plus one attempt entry). So
 ///   tier-3 steps ≤ history entries written.
 /// - **tier 4** writes **none** — it is the one iteration that consumes a step
@@ -533,6 +540,17 @@ fn in_flight(plan: &Plan, state: &ExecutionState) -> Option<RunIx> {
 ///    into `TaskRun::rendered`. A render that fails FAILS that run -- measured
 ///    on `valids/if-condition-fail`, whose condition names an input the flow
 ///    does not declare and whose golden is one run, `CREATED RUNNING FAILED`.
+///
+///    **W3c added a second thing to render and put it FIRST**: a `runIf:`, on
+///    any kind of task, read at `CREATED`. It is a step of its own rather than
+///    part of the same batch because Kestra decides it first and the order is
+///    observable — a `Loop` whose `runIf:` is falsy is `SKIPPED` without its
+///    `values:` ever being resolved, so a harness that rendered both at once
+///    could fail a run on an expression Kestra never evaluated. A failed
+///    `runIf:` render fails the run too, and the shape it leaves is *different*
+///    from a skip: `valids/task-runif`'s `willfailedtheflow` is
+///    `["CREATED","FAILED"]` with **no attempt**, while its `notexecuted` is
+///    `["CREATED","SKIPPED"]` with one attempt reading the same two states.
 /// 3. **The outside world finishes ONE thing.** Only when tiers 1 and 2 have
 ///    nothing to do: the earliest-created `Runnable` -- or, since Task 6,
 ///    `Loop` -- still `Running` (see [`in_flight`]) reaches the terminal state
@@ -674,6 +692,14 @@ fn simulate_recording_spawns(
                     Command::SetRunState { run, state: s } if s.is_terminal() => {
                         ended[*run] = Some(step)
                     }
+                    // A skipped run is a TERMINATED run, and the happens-before
+                    // relation is over creation and termination. Leaving this
+                    // out cost five ordered pairs and
+                    // `what_the_order_restriction_removes_is_derived_and_egret_never_says_after`
+                    // is what said so -- `step_relation` answers `None` when
+                    // either endpoint is missing, so a skipped run would
+                    // silently be in no pair at all.
+                    Command::SkipRun { run, .. } => ended[*run] = Some(step),
                     Command::SpawnExecution {
                         task,
                         value,
@@ -691,7 +717,48 @@ fn simulate_recording_spawns(
             continue;
         }
 
-        // Tier 2: the caller renders. Every planned `If`/`Switch`/`Loop` run
+        // Tier 2a (W3c): the caller renders every `runIf:` it can see -- a run
+        // that is still `CREATED` and whose task declares one. Ahead of tier 2b
+        // and in its own step, because Kestra decides `runIf:` before it
+        // resolves anything else about the task; see this function's doc.
+        let unrendered_run_if: Vec<RunIx> = (0..state.runs.len())
+            .filter(|&ix| {
+                run_if_of_task(plan, state.runs[ix].task).is_some()
+                    && state.runs[ix].history.last() == Some(&RunState::Created)
+                    && state.runs[ix].rendered_run_if.is_none()
+            })
+            .collect();
+        if !unrendered_run_if.is_empty() {
+            for ix in unrendered_run_if {
+                let source =
+                    run_if_of_task(plan, state.runs[ix].task).expect("filtered on Some above");
+                match render(&source) {
+                    Ok(value) => state.runs[ix].rendered_run_if = Some(value),
+                    // A `runIf:` that will not render fails the run, with NO
+                    // attempt -- `valids/task-runif`'s `willfailedtheflow`,
+                    // whose `{{ outputs.notexists == 2 }}` names an output that
+                    // does not exist and whose golden is `["CREATED","FAILED"]`
+                    // with `attempts: []`. That is the same rule tier 2b has for
+                    // a branch expression and a different resulting shape,
+                    // because a branch is rendered after its attempt is open and
+                    // a `runIf:` before there is one.
+                    Err(_) => {
+                        apply(
+                            &mut state,
+                            &Command::SetRunState {
+                                run: ix,
+                                state: RunState::Failed,
+                            },
+                        );
+                        ended[ix] = Some(step);
+                    }
+                }
+            }
+            step += 1;
+            continue;
+        }
+
+        // Tier 2b: the caller renders. Every planned `If`/`Switch`/`Loop` run
         // that is at its own render state and unrendered, in creation order, in
         // ONE step -- see this function's doc for why all of them rather than
         // one and why this comes before the worker, and `renders_at` for why a
@@ -898,6 +965,19 @@ fn expression_of(plan: &Plan, state: &ExecutionState, ix: RunIx) -> Option<Strin
 /// Three kinds hold one: an `If`'s `condition`, a `Switch`'s `value` and a
 /// `Loop`'s `values`. Task 6 added the third, and it is not a fourth tier —
 /// the same tier renders it, at a different run state (see [`renders_at`]).
+/// The unrendered `runIf:` a planned task holds — W3c.
+///
+/// Separate from [`expression_of_task`] and not folded into it: a `runIf:` is
+/// on `Task`, so **any** kind can carry one, it is read at a different run state
+/// (`CREATED`, always), and it lands in a different field
+/// (`TaskRun::rendered_run_if`). Folding the two would also have moved
+/// [`the_caller_can_render_every_expression_except_the_ones_named`]'s
+/// carefully derived population for a reason that has nothing to do with
+/// branching.
+fn run_if_of_task(plan: &Plan, task: usize) -> Option<String> {
+    plan.tasks.get(task).and_then(|t| t.run_if.clone())
+}
+
 fn expression_of_task(plan: &Plan, task: usize) -> Option<String> {
     match plan.tasks.get(task).map(|t| &t.kind) {
         Some(TaskKind::If { condition, .. }) => Some(condition.clone()),
@@ -1127,6 +1207,7 @@ fn probe_plan(ids: &[&str]) -> Plan {
                 kind: TaskKind::Runnable {
                     type_id: "probe".to_string(),
                 },
+                run_if: None,
                 retry: None,
                 timeout: None,
                 errors: Vec::new(),
@@ -1550,13 +1631,24 @@ fn what_the_order_restriction_removes_is_derived_and_egret_never_says_after() {
          so there is no new run whose creation could land out of order"
     );
     assert_eq!(
-        total_pairs, 647,
+        total_pairs, 642,
         "the population the `after` claim is measured over. 555 at Task 6, 557 at \
          Task 5, 656 at Task 7 -- which added 101, every one of them a pair an \
          `errors:` run makes, because an error task is a run that did not exist \
          before and a run that exists is in a pair with every other run of its \
          execution. The final review's `disabled:` takes 9 back off it, for the \
-         mirror-image reason: a run that no longer exists is in no pair at all"
+         mirror-image reason: a run that no longer exists is in no pair at all. \
+         **W3c takes 5 more off, and the entries are named rather than \
+         arithmetic**: measured by re-running this whole arm with \
+         `PlanTask::run_if` forced to `None` -- which reproduces the pre-W3c \
+         tree exactly, since nothing else W3c changed can fire without a \
+         `runIf:` -- only two entries move. `valids/task-runif` goes 3 runs/3 \
+         pairs -> 2/1 and `valids/task-runif-executionupdating` 4/6 -> 3/3, and \
+         both shrink for the SAME reason and it is the harness rather than \
+         `advance()`: their second task\'s `runIf:` is `{{ outputs.… }}`, which \
+         `render_context` cannot resolve, so the run FAILS and the sequence stops \
+         earlier than it did. `the_caller_can_render_every_expression_except_the_ones_named` \
+         names all seven such expressions"
     );
 
     // The cost, demonstrated on a BANKED entry rather than conceded in prose:
@@ -2891,6 +2983,106 @@ fn the_caller_can_render_every_expression_except_the_ones_named() {
         reachable - failed.len()
     );
 
+    // ------------------------------------------------------------------
+    // W3c: `runIf:`, the second thing tier 2 renders
+    // ------------------------------------------------------------------
+    //
+    // Derived separately rather than folded into `reachable` above, because
+    // this population answers a different question: an `If`'s condition is on
+    // three task kinds, a `runIf:` is on `Task` and so can be on any of them.
+    // Folding them would also have moved the four numbers above for a reason
+    // that has nothing to do with branching.
+    //
+    // **The failure rate here is the opposite of the one above, and that is the
+    // finding.** Kestra renders a `runIf:` in the EXECUTOR, with the full
+    // `RunContext` — `outputs`, `taskrun`, `tasksWithState()` — and the corpus
+    // flows that exercise the feature are Kestra's own regression tests for
+    // exactly those variables. `render_context` reaches `inputs` and `vars`, so
+    // most of them fail here. Every failing one is named with the entry it
+    // costs, so the boundary is a list rather than a rate.
+    let mut run_if_reachable = 0usize;
+    let mut run_if_in_a_loop_body = 0usize;
+    let mut run_if_failed: Vec<(String, String)> = Vec::new();
+    let mut run_if_falsy: Vec<(String, String)> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let source = corpus_source(&entry.id);
+        let Ok(plan) = build_plan(&source) else {
+            continue;
+        };
+        let cx = render_context(&entry.id, &source);
+        for ix in 0..plan.tasks.len() {
+            let Some(expression) = run_if_of_task(&plan, ix) else {
+                continue;
+            };
+            if plan.is_loop_body(ix) {
+                run_if_in_a_loop_body += 1;
+                continue;
+            }
+            run_if_reachable += 1;
+            let named = (entry.id.clone(), plan.tasks[ix].id.clone());
+            match render_str(&expression, &cx) {
+                Err(_) => run_if_failed.push(named),
+                Ok(v) if !is_truthy(&v) => run_if_falsy.push(named),
+                Ok(_) => {}
+            }
+        }
+    }
+    println!(
+        "runIf: {run_if_reachable} reachable + {run_if_in_a_loop_body} in a loop \
+         body; {} fail to render, {} render falsy",
+        run_if_failed.len(),
+        run_if_falsy.len()
+    );
+    assert_eq!(
+        (run_if_reachable, run_if_in_a_loop_body),
+        (11, 0),
+        "every planned `runIf:` in the comparable corpus, and the number is 11 \
+         where the flows write 16. Nine of the 345 flows declare a `runIf:` at \
+         all, 16 tasks between them. `valids/subflow-to-retry` is \
+         `not-standalone`, so it has no golden entry and contributes none. Three \
+         are children of a `WorkingDirectory`, which `build_plan` plans OPAQUE, \
+         so they are in no plan. Two are in `valids/task-runif-taskswithstate`\'s \
+         `finally:`, which `build_plan` does not flatten either. **The first \
+         draft of this assertion said 7 and was wrong by 4**; it was written \
+         from the flow list rather than from the plan, and 11 is what the \
+         builder produces"
+    );
+    run_if_failed.sort();
+    assert_eq!(
+        run_if_failed,
+        [
+            ("valids/restart-with-after-execution", "fail_randomly"),
+            ("valids/restart-with-finally", "fail_randomly"),
+            ("valids/task-runif", "executed"),
+            ("valids/task-runif", "notexecuted"),
+            ("valids/task-runif", "willfailedtheflow"),
+            ("valids/task-runif-executionupdating", "setVariables"),
+            ("valids/task-runif-executionupdating", "skipUnsetVariables"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string())),
+        "the harness's boundary, named. `{{taskrun.attemptsCount}}` and \
+         `{{outputs.…}}` are executor-side variables `render_context` does not \
+         carry; ONE of the seven is a failure Kestra had too \
+         (`valids/task-runif`'s `willfailedtheflow`, `CREATED FAILED` with no \
+         attempt in the golden) and the other six are this harness. All five \
+         entries are baselined for other reasons as well — see \
+         `the_residual_baseline_is_attributed_to_a_construct_or_named` — so none \
+         of them is a bank this list is standing in the way of"
+    );
+    run_if_falsy.sort();
+    assert_eq!(
+        run_if_falsy,
+        [
+            ("valids/task-runif", "notexecutedflowable"),
+            ("valids/task-runif-executionupdating", "skipSetVariables"),
+        ]
+        .map(|(a, b)| (a.to_string(), b.to_string())),
+        "the two literal `runIf: \"false\"` in the comparable corpus, which need \
+         no context at all: W2's renderer short-circuits a source with no `{{` to \
+         itself, so these two reach `is_truthy` exactly as Kestra's do. Both are \
+         `SKIPPED` in the golden"
+    );
+
     for (id, task) in &kestras_own {
         let entry = golden()
             .into_iter()
@@ -3594,31 +3786,31 @@ fn the_loop_completion_tier_is_load_bearing_for_exactly_these_entries() {
 /// an execution history, a run history or an attempt history of one.
 #[test]
 fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
-    let held: BTreeSet<&str> = [
-        "CREATED",
-        "SUBMITTED",
-        "RUNNING",
-        "SUCCESS",
-        "FAILED",
-        "RETRYING",
-        "RETRIED",
-        "KILLED",
-    ]
-    .into_iter()
-    .collect();
-    // Task 3 drafted six; `SUBMITTED` was its own addition and `RETRIED` is
-    // Task 7's. Both are kept here so the "how much did that one state buy"
-    // question stays answerable.
+    // **Derived from `RunState` itself, and it was NOT until W3c.** This was a
+    // literal list of eight names, so the test compared the golden against a
+    // list in this file and never once looked at the enum: adding `Skipped` to
+    // `RunState` left it passing. `RunState::ALL` is now the single source, and
+    // the four numbers below are what move when it does.
+    let held: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+    // Task 3 drafted six; `SUBMITTED` was its own addition, `RETRIED` is Task
+    // 7's and `SKIPPED` is W3c's. All are kept here so the "how much did that
+    // one state buy" question stays answerable.
     let drafted: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| *s != "SUBMITTED" && *s != "RETRIED")
+        .filter(|s| !matches!(*s, "SUBMITTED" | "RETRIED" | "SKIPPED"))
         .collect();
-    let through_task_6: BTreeSet<&str> = held.iter().copied().filter(|s| *s != "RETRIED").collect();
+    let through_task_6: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "RETRIED" | "SKIPPED"))
+        .collect();
+    let through_w3a: BTreeSet<&str> = held.iter().copied().filter(|s| *s != "SKIPPED").collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut fits_drafted, mut fits_task_6, mut fits_now, mut entries) = (0, 0, 0, 0usize);
+    let (mut fits_drafted, mut fits_task_6, mut fits_w3a, mut fits_now, mut entries) =
+        (0, 0, 0, 0, 0usize);
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         entries += 1;
@@ -3644,6 +3836,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         if used.iter().all(|s| through_task_6.contains(s.as_str())) {
             fits_task_6 += 1;
         }
+        if used.iter().all(|s| through_w3a.contains(s.as_str())) {
+            fits_w3a += 1;
+        }
         if used.iter().all(|s| held.contains(s.as_str())) {
             fits_now += 1;
         }
@@ -3652,8 +3847,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     println!(
         "state vocabulary: the golden uses {} states over {entries} `runs` entries; \
          RunState holds {}. Entries wholly inside the vocabulary: {fits_drafted} \
-         (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_now} \
-         (Task 7, 8). Still missing, by entries using each: {missing:?}",
+         (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_w3a} \
+         (Task 7, 8), {fits_now} (W3c, 9). Still missing, by entries using each: \
+         {missing:?}",
         all.len(),
         held.len()
     );
@@ -3664,13 +3860,18 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          state table is derived from these"
     );
     assert_eq!(
-        (fits_drafted, fits_task_6, fits_now),
-        (35, 229, 233),
+        (fits_drafted, fits_task_6, fits_w3a, fits_now),
+        (35, 229, 233, 237),
         "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
          big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
          `RETRIED` population -- and the four entries are exactly the \
          `retry-new-execution-*` flows, which cannot bank anyway because the \
-         replacement execution is not representable"
+         replacement execution is not representable. `SKIPPED` (W3c) buys 4, \
+         which is the whole `SKIPPED` population -- and, like `RETRIED`'s four, \
+         **none of them banks**: every one of the four is held by a construct \
+         W3a does not implement as well (`Subflow`, an `ExecutionUpdatableTask`, \
+         `finally:`, an opaque `WorkingDirectory`). Being inside the vocabulary \
+         is necessary and not sufficient"
     );
     assert_eq!(
         missing,
@@ -3678,12 +3879,11 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
             ("CANCELLED".to_string(), 3),
             ("PAUSED".to_string(), 18),
             ("RESTARTED".to_string(), 12),
-            ("SKIPPED".to_string(), 4),
             ("WARNING".to_string(), 10),
         ]),
-        "the five states still outside `RunState`, with the number of `runs` \
+        "the four states still outside `RunState`, with the number of `runs` \
          entries whose trace uses each. `oracle-exec/README.md` names the owner \
-         of each; `RETRIED` left this table at Task 7"
+         of each; `RETRIED` left this table at Task 7 and `SKIPPED` at W3c"
     );
 }
 
@@ -4203,10 +4403,20 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             ],
         ),
         ("flow concurrency:", 7, &["\nconcurrency:"]),
-        // `disabled: true` was a row here through Task 8 with 6 entries. It is
-        // implemented at the final review, so it holds nothing and a row would
-        // be an attribution to a construct that is no longer the cause.
-        ("runIf:", 7, &["runIf:"]),
+        // `disabled: true` was a row here through Task 8 with 6 entries, and
+        // `runIf:` was a row with 7 through W3a's final review. Both are
+        // implemented now, so neither holds anything and a row for either would
+        // be an attribution to a construct that is no longer the cause -- the
+        // same rule that ADDS a row when a cause is found, run backwards.
+        //
+        // **`runIf:` banked none of its 7 and the row still goes**, which is the
+        // distinction that matters here: an attribution is to the thing that
+        // holds an entry, not to a construct the flow happens to declare. Every
+        // one of the seven declares at least one construct that still has a row
+        // -- measured, and the rows above absorb all seven without moving,
+        // which is what the counts here assert. `afterExecution:`,
+        // `ExecutionUpdatableTask`, `finally:`, `Subflow` and `WorkingDirectory`
+        // are the five, and every one of them is unclaimed or opaque today.
         ("sla:", 5, &["\nsla:"]),
         ("CREATE_NEW_EXECUTION retry", 4, &["CREATE_NEW_EXECUTION"]),
         (
@@ -4325,5 +4535,65 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
          {} declare none and are named individually)\n{report}",
         baseline.len(),
         unattributed.len()
+    );
+}
+
+/// **The step bound dominates the widest golden entry, derived.**
+///
+/// `MEASURED_MAX_HISTORY` and the factor of 4 are a bound over an environment
+/// that has grown a tier and a render slot since it was written, and its own
+/// doc quotes two numbers about the widest entry. Deriving them here is what
+/// stops those being counts written beside a derivation — the defect W3a
+/// produced seven times.
+#[test]
+fn the_step_bound_dominates_the_widest_golden_entry() {
+    fn runs_of(t: &Trace) -> usize {
+        t.runs.len() + t.spawned.iter().map(runs_of).sum::<usize>()
+    }
+    fn history_of(t: &Trace) -> usize {
+        t.execution.len()
+            + t.runs
+                .iter()
+                .map(|r| r.state.len() + r.attempts.iter().map(Vec::len).sum::<usize>())
+                .sum::<usize>()
+            + t.spawned.iter().map(history_of).sum::<usize>()
+    }
+
+    let traces: Vec<Trace> = golden()
+        .iter()
+        .filter(|e| e.verdict == Verdict::Runs)
+        .map(Trace::from)
+        .collect();
+    let widest_history = traces.iter().map(history_of).max().expect("non-empty");
+    let widest_runs = traces.iter().map(runs_of).max().expect("non-empty");
+    let widest_top_level = traces
+        .iter()
+        .map(|t| t.runs.len())
+        .max()
+        .expect("non-empty");
+
+    println!(
+        "widest golden entry: {widest_history} history entries, {widest_runs} runs \
+         (with sub-executions), {widest_top_level} at the top level; step bound {}",
+        step_bound()
+    );
+    assert_eq!(
+        (widest_history, widest_runs, widest_top_level),
+        (765, 94, 13),
+        "the three numbers `step_bound`'s derivation quotes. `MEASURED_MAX_HISTORY` \
+         is the first; the other two are what W3c's doubling of the tier-2 term is \
+         measured against"
+    );
+    assert!(
+        step_bound() >= 4 * widest_history,
+        "the factor covers the four tiers"
+    );
+    // Tier 2 is the term W3c doubled: two render slots per run instead of one.
+    assert!(
+        2 * widest_runs < step_bound(),
+        "tier 2 can consume at most one step per unrendered slot, and there are \
+         two slots per run; {} < {}",
+        2 * widest_runs,
+        step_bound()
     );
 }
