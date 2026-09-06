@@ -3808,6 +3808,47 @@ anchor after every row and again for all touched files at the end.
 | M13 | `models/task.rs` | the `runIf` emission in `Serialize` deleted | **1** — *"left: None right: `Some(\"false\")`"* |
 | M14 | `flowable/mod.rs` | `rendered_run_if` → `rendered` in `run_if_verdict` (read the wrong slot) | **10** — the two-slot decision, asserted rather than argued |
 
+### W3c fix round 2's mutations, and the replay that had to be thrown away
+
+A review found three things the round-1 tree did not hold. All three are now
+guards, and all three carry a mutation.
+
+| # | file | `-` → `+` | victims |
+|---|---|---|---|
+| R2-M15 | `state.rs` | rule 2's `if *s == RunState::Created { … }` deleted | **1** — *"a run that has re-entered CREATED has not been rendered for this attempt … left `Some("true")` right `None`"*. The `runIf:` over-acceptance across a retry |
+| R2-M16 | `state.rs` | rule 2's `r.rendered = None;` deleted, keeping `r.rendered_run_if = None;` | **0**. See below |
+| R2-M17 | `flowable/mod.rs` | `SkipRun { run, at: now }` → `at: Tick(0)` | **2** — the skip's instant, end to end from `open` to the stored [`Attempt`] |
+| R2-M18 | `flowable/mod.rs` | the control: `StartRun { run, at: now }` → `at: Tick(0)` | **3** — the pattern that already existed one line away and had not been applied to the new command |
+| M117 | `tests/executor.rs` | replayed | **3**, up from the 2 recorded at the final review |
+
+**R2-M16 killed nothing, and it is provably unreachable rather than merely
+untested.** Rule 2 clears both render slots when a run re-enters `CREATED`;
+only the `runIf:` one can be reached today, and the chain is structural rather
+than corpus-dependent: `retry::scan` gates on
+`matches!(kind, TaskKind::Runnable { .. })`, so only a `Runnable` is ever given
+a `not_before`; `reopen_due` reopens exactly those; and a `Runnable` never has a
+`rendered`, which is an `If`/`Switch`/`Loop` slot. `only_a_runnable_can_re_enter_created`
+derives that with a positive control (the child *is* reopened, twice), so the
+half is kept with the reason committed rather than deleted — and whoever lets a
+flowable be retried should expect this row to start killing something.
+
+**Three things round 1 got wrong, recorded because the corrections are the
+point.** `runIf:` was decided once per run and never re-asked across a retry —
+a narrower instance of the very class W3c closes, and W3c's own, since
+`rendered_run_if` is the first render slot that can sit on a retried run.
+`SkipRun`'s `at: now` was unheld while `command.rs` claimed the instant could
+only be the `now` of the decision. And *What DID move* said two entries; it is
+four.
+
+**The replay itself was killed mid-mutation and was discarded whole.** A
+2-minute tool timeout took the driver out between "write the mutation" and
+"restore", and the next run's poison check — *"REFUSED — `state.rs` already
+differs from HEAD"* — is what caught it. The tree was restored from HEAD, every
+touched file byte-compared against `git show HEAD:<path>`, and the whole replay
+re-run from a verified-clean tree. It was not topped up. That is the second time
+this package's own poison check has caught a killed replay, and both times the
+discipline alone would not have.
+
 **M11 killed nothing, and the reason is the finding rather than an excuse.**
 `simulate_with`'s `SkipRun` arm records a skipped run's right endpoint for the
 happens-before relation, and **no golden entry ever reaches a `SkipRun`** — the

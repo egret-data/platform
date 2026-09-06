@@ -5223,4 +5223,113 @@ tasks:
              entry rather than by `a_run_if_is_re_asked_on_every_attempt` alone"
         );
     }
+
+    /// **Only a `Runnable` can ever re-enter `CREATED`**, which is why
+    /// [`apply`]'s rule 2 clearing [`TaskRun::rendered`] alongside
+    /// `rendered_run_if` is unreachable today — and why that half is kept
+    /// rather than deleted.
+    ///
+    /// The mutation that removes the `rendered` half (R2-M16) kills nothing,
+    /// and this is the derivation that says why instead of leaving it as an
+    /// argument. The chain is structural, not corpus-dependent:
+    /// [`retry::scan`] gates on `matches!(kind, TaskKind::Runnable { .. })`, so
+    /// only a `Runnable` is ever put into `RETRYING` or given a `not_before`;
+    /// [`retry::reopen_due`] reopens exactly the runs that have one; and a
+    /// `Runnable` never has a `rendered`, because that slot belongs to an
+    /// `If`'s condition, a `Switch`'s value and a `Loop`'s `values`.
+    ///
+    /// So the code path is provably unreached, and the crate now carries the
+    /// test that says so — the treatment `an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach`
+    /// already established here. **Anyone who lets a flowable be retried should
+    /// expect R2-M16 to start killing something**, and should want it to.
+    #[test]
+    fn only_a_runnable_can_re_enter_created() {
+        // A `Sequential` carrying its OWN `retry:`, whose child fails. Kestra
+        // retries the CHILD (`policy_for` walks task -> ancestor -> flow), and
+        // the `Sequential` itself is never retried however its child ends.
+        let plan = build_plan(
+            "id: probe\nnamespace: io.kestra.tests\ntasks:\n  \
+             - id: seq\n    type: io.kestra.plugin.core.flow.Sequential\n    \
+             retry:\n      type: constant\n      maxAttempts: 3\n      interval: PT1S\n    \
+             tasks:\n      - id: child\n        type: io.kestra.plugin.core.debug.Return\n        format: a\n",
+        )
+        .expect("the probe plans");
+
+        let mut state = ExecutionState::new(&plan);
+        let mut reopened: Vec<String> = Vec::new();
+        let mut now = T0;
+        for _ in 0..200 {
+            let cmds = advance(&plan, &state, now);
+            if !cmds.is_empty() {
+                for cmd in &cmds {
+                    if let Command::SetRunState {
+                        run,
+                        state: RunState::Created,
+                    } = cmd
+                    {
+                        reopened.push(plan.tasks[state.runs[*run].task].id.clone());
+                    }
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            match in_flight {
+                Some(ix) => apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Failed,
+                    },
+                ),
+                None => match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(t) => now = t,
+                    None => break,
+                },
+            }
+        }
+
+        // The positive control: something WAS reopened, so an empty
+        // non-Runnable list below is a fact about kinds and not about a flow
+        // that never retried at all.
+        assert_eq!(
+            reopened,
+            ["child", "child"],
+            "the child is a `Runnable` with a maxAttempts of 3, so it is \
+             reopened twice; if this is empty the assertion below proves nothing"
+        );
+        let non_runnable: Vec<&String> = reopened
+            .iter()
+            .filter(|id| {
+                !plan
+                    .tasks
+                    .iter()
+                    .any(|t| &&t.id == id && matches!(t.kind, TaskKind::Runnable { .. }))
+            })
+            .collect();
+        assert!(
+            non_runnable.is_empty(),
+            "a non-`Runnable` was returned to CREATED: {non_runnable:?}. \
+             `apply`'s rule 2 clearing `rendered` is reachable now, and R2-M16 \
+             should start killing something"
+        );
+        // And the `Sequential` itself never went RETRYING, which is the same
+        // fact read off `scan`'s gate rather than off the reopen commands.
+        assert!(
+            !state.runs[0].history.contains(&RunState::Retrying),
+            "`scan` gates on `TaskKind::Runnable`, so a flowable is never retried"
+        );
+        assert!(state.runs[0].not_before.is_none());
+    }
 }
