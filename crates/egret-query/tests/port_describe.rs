@@ -552,8 +552,15 @@ async fn execute_as_rejects_invalid_sql_as_invalid_input() {
 ///   never returns that variant — so this string is the wrap's fingerprint.
 ///   Trino's own `EXCEEDED_TIME_LIMIT` arrives as `Engine(..)` and a reqwest
 ///   per-request timeout as `Connect(..)`; both are excluded by it.
-/// * The elapsed bound is the "rather than hanging" half — the property that
-///   actually fails open on StarRocks.
+/// * The "rather than hanging" half — the property that actually fails open on
+///   StarRocks — is an outer `tokio::time::timeout`, not a measured elapsed
+///   time. It was `elapsed < 10s` against a 750ms budget, which is the same
+///   shape as the three assertions `connector_trino_pool.rs` had to give up:
+///   a claim about the policy, checked against this machine's clock. What
+///   `execute_as` enforced is asserted above, on the error it produced; all the
+///   bound below has to do is stop a hang from becoming a hung suite, so it is
+///   a guard with two orders of magnitude of headroom rather than a number
+///   anyone reads as tight.
 #[tokio::test]
 async fn execute_as_enforces_the_timeout_budget_rather_than_hanging() {
     let Some(f) = trino_engine_state().await else {
@@ -570,18 +577,22 @@ async fn execute_as_enforces_the_timeout_budget_rather_than_hanging() {
     // Six billion rows through the tpch generator: it cannot finish inside the
     // budget, and every individual `nextUri` poll returns promptly — which is
     // exactly the shape the per-request timeout fails to bound.
-    let started = std::time::Instant::now();
-    let err = port
-        .execute_as(
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        port.execute_as(
             f.ws,
             f.database_id,
             f.user,
             "SELECT count(*) FROM tpch.sf1000.lineitem",
             limits,
-        )
-        .await
-        .expect_err("a query past its budget must return, not run to completion");
-    let elapsed = started.elapsed();
+        ),
+    )
+    .await
+    .expect(
+        "execute_as never returned: a query 80x past its 750ms budget was still \
+         running, which is the hang this wrap exists to prevent",
+    )
+    .expect_err("a query past its budget must return, not run to completion");
 
     assert!(
         matches!(err, egret_core::Error::InvalidInput(_)),
@@ -591,10 +602,6 @@ async fn execute_as_enforces_the_timeout_budget_rather_than_hanging() {
         err.to_string().contains("query timed out"),
         "the budget must be enforced by execute_as's own wrap, not by the \
          engine's session limit or a per-request socket timeout: {err}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "execute_as must return near its budget, not hang: took {elapsed:?}"
     );
 }
 

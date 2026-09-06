@@ -59,3 +59,8 @@ mysql_async.workspace = true
 # timeout in as an argument, which would have tested a mechanism while leaving the
 # value every caller actually uses unasserted.
 tokio = { workspace = true, features = ["test-util"] }
+# A test-local `Layer` that records the `wait_ms` the Trino connector's retry
+# policy asks for. `connector_trino_pool.rs` asserts on those numbers instead of
+# on elapsed wall-clock time, which is what three of its assertions used to do —
+# and what made them fail on a loaded machine while the policy was correct.
+tracing-subscriber.workspace = true
