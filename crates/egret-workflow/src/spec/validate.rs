@@ -92,13 +92,39 @@ pub struct ValidationReport {
 /// {limit: 1}` and sees a green publish will reasonably conclude it is
 /// enforced; the warning is the only thing standing between them and that
 /// conclusion.
+///
+/// # Two rows were false, and nothing here could have said so
+///
+/// This list is a **user-visible claim about this codebase's behaviour**, and
+/// it had not been re-read since it was written. W4 Task 2's fix round found
+/// `("timeout", "W3")` still here while the same commit enforced `timeout:` in
+/// the worker — a flow with `timeout: PT1S` was told "not yet enforced;
+/// enforcement lands in W3" and then had its task failed at one second. Reading
+/// the other six rows rather than only the reported one found a **second**:
+///
+/// * **`retry` was enforced by W3a Task 7**, and by both paths.
+///   `plan::build_plan` reads `flow.retry` (`plan.rs:662`) and `task.retry`
+///   (`:745`) through `retry::policy_of`, `retry::policy_for` walks a run's
+///   parent chain and falls back to the flow's, and `retry::scan` emits
+///   `Command::ScheduleRetry`. W4 Task 1 then added the waker that makes the
+///   delay elapse. Fourteen baselined corpus entries declare one.
+/// * **`timeout` is enforced by W4 Task 2**, in `worker::timeout`, around
+///   `Registry::run` — which is where the artifact enforces it too.
+///
+/// Both rows are gone. The five that remain were re-checked the same way:
+/// `concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
+/// reader outside this validator, and `triggers` is W6's. `oracle-exec/README.md`'s
+/// unclaimed table records the same status for flow `concurrency:` and `sla:`.
+///
+/// `the_not_yet_enforced_list_is_pinned_in_both_directions` is what makes a
+/// wrong row fail from now on — the reported finding was not only that the row
+/// was stale but that **no test pinned it**, so a false claim could sit here
+/// indefinitely.
 const NOT_YET_ENFORCED: &[(&str, &str)] = &[
     ("concurrency", "W8"),
     ("sla", "W8"),
     ("checks", "W8"),
     ("quotas", "W8"),
-    ("retry", "W3"),
-    ("timeout", "W3"),
     ("triggers", "W6"),
 ];
 
@@ -203,16 +229,20 @@ fn is_runnable_child(task: &Task) -> bool {
 }
 
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
-/// Accumulated while walking the flow so each feature warns exactly once,
-/// regardless of how many tasks/places declare it.
+///
+/// **All five are flow-level, and that is new.** It used to be accumulated
+/// during the task walk as well, because `retry:` and `timeout:` are
+/// task-level and were on the list. Both are enforced now (see
+/// `NOT_YET_ENFORCED`), so nothing remains that a task can declare, and
+/// `walk_task` no longer takes this at all — clippy's `only_used_in_recursion`
+/// is what pointed that out, on a parameter the walk was still threading
+/// through and no longer reading.
 #[derive(Debug, Default)]
 struct FeaturePresence {
     concurrency: bool,
     sla: bool,
     checks: bool,
     quotas: bool,
-    retry: bool,
-    timeout: bool,
     triggers: bool,
 }
 
@@ -223,13 +253,11 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     validate_flow_id(flow, &mut report);
     validate_flow_level_fields(flow, &mut report);
 
-    let mut features = FeaturePresence {
+    let features = FeaturePresence {
         concurrency: flow.concurrency.is_some(),
         sla: !flow.sla.is_empty(),
         checks: !flow.checks.is_empty(),
         quotas: !flow.quotas.is_empty(),
-        retry: flow.retry.is_some(),
-        timeout: false,
         triggers: !flow.triggers.is_empty(),
     };
 
@@ -260,7 +288,7 @@ pub fn validate(flow: &Flow) -> ValidationReport {
     ] {
         for task in list {
             let path = format!("{list_name}.{}", task.id);
-            walk_task(flow, task, path, &mut seen_ids, &mut features, &mut report);
+            walk_task(flow, task, path, &mut seen_ids, &mut report);
         }
     }
 
@@ -754,7 +782,6 @@ fn sla_common(sla: &Sla) -> &SlaCommon {
 
 /// Walk one task node and its subtree, recording:
 /// - its id, for the structural duplicate-id check run after the whole walk;
-/// - whether it declares `timeout`/`retry` (for the not-yet-enforced layer);
 /// - Task 4's `@NotNull` debts specific to each control-flow kind
 ///   (`Parallel`/`Dag::concurrent`, `Switch::value`, `Loop::values`,
 ///   `LoopUntil::condition`, and each `Retry` subtype's interval fields);
@@ -767,7 +794,6 @@ fn walk_task(
     task: &Task,
     path: String,
     seen_ids: &mut HashMap<String, Vec<String>>,
-    features: &mut FeaturePresence,
     report: &mut ValidationReport,
 ) {
     seen_ids
@@ -775,12 +801,11 @@ fn walk_task(
         .or_default()
         .push(path.clone());
 
-    if task.timeout.is_some() {
-        features.timeout = true;
-    }
-    if task.retry.is_some() {
-        features.retry = true;
-    }
+    // `timeout:` and `retry:` used to be recorded here for the
+    // not-yet-enforced layer. Both are enforced now — see `NOT_YET_ENFORCED` —
+    // so the walk no longer collects them. `check_retry` below is a different
+    // thing and stays: it validates the SHAPE of a `retry:` block, which is
+    // required whether or not anything acts on it.
     check_retry(&task.retry, &format!("{path}.retry"), report);
 
     match &task.kind {
@@ -1257,7 +1282,7 @@ fn walk_task(
 
     for child in task.children() {
         let child_path = format!("{path}.{}", child.id);
-        walk_task(flow, child, child_path, seen_ids, features, report);
+        walk_task(flow, child, child_path, seen_ids, report);
     }
 }
 
@@ -1437,13 +1462,11 @@ fn validate_trigger(trigger: &Trigger, report: &mut ValidationReport) {
 }
 
 fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationReport) {
-    let present: [(&str, bool); 7] = [
+    let present: [(&str, bool); NOT_YET_ENFORCED.len()] = [
         ("concurrency", features.concurrency),
         ("sla", features.sla),
         ("checks", features.checks),
         ("quotas", features.quotas),
-        ("retry", features.retry),
-        ("timeout", features.timeout),
         ("triggers", features.triggers),
     ];
     for (name, is_present) in present {
@@ -1467,6 +1490,7 @@ fn emit_not_yet_enforced(features: &FeaturePresence, report: &mut ValidationRepo
 
 #[cfg(test)]
 mod tests {
+    use super::NOT_YET_ENFORCED;
     use crate::spec::{parse, validate};
 
     // ---------- W3a Task 8: refusing what Kestra refuses ----------
@@ -1828,6 +1852,74 @@ mod tests {
         assert!(
             r.errors.is_empty(),
             "a declared-but-unimplemented feature is not an error"
+        );
+    }
+
+    /// **The list is a claim about this codebase, and this is what makes a
+    /// wrong row fail.** The reported finding was not only that
+    /// `("timeout", "W3")` had gone stale — it was that **no test pinned any
+    /// row**, so a false claim could sit in a user-visible warning
+    /// indefinitely. Reading the other six then found `retry` stale as well.
+    ///
+    /// Both directions, because either half alone is satisfiable by a mistake:
+    /// a validator that never warns passes the negative half, and one that
+    /// warns about everything passes the positive half.
+    #[test]
+    fn the_not_yet_enforced_list_is_pinned_in_both_directions() {
+        // The list itself, by name and by package.
+        assert_eq!(
+            NOT_YET_ENFORCED,
+            &[
+                ("concurrency", "W8"),
+                ("sla", "W8"),
+                ("checks", "W8"),
+                ("quotas", "W8"),
+                ("triggers", "W6"),
+            ],
+            "a row added here is a claim that egret does NOT enforce that \
+             feature; a row removed is a claim that it now does. Both need the \
+             evidence this constant's doc carries"
+        );
+
+        // NEGATIVE: the two features that ARE enforced must not warn. A flow
+        // declaring both, at flow level and at task level, so neither of
+        // `validate`'s two collection points can reintroduce one alone.
+        let enforced = parse(
+            "id: f\nnamespace: a.b\nretry:\n  type: constant\n  interval: PT1S\n\
+             tasks:\n  - id: t\n    type: x\n    timeout: PT1S\n    retry:\n\
+             \x20     type: constant\n      interval: PT1S\n",
+        )
+        .unwrap();
+        let r = validate(&enforced);
+        assert!(
+            !r.warnings.iter().any(|w| w.code == "not_yet_enforced"),
+            "`retry:` is enforced by `executor::retry` (W3a Task 7, plus W4 \
+             Task 1's waker) and `timeout:` by `worker::timeout` (W4 Task 2), \
+             so neither may be reported as not yet enforced: {:?}",
+            r.warnings
+        );
+        assert!(r.errors.is_empty(), "{r:?}");
+
+        // POSITIVE CONTROL: a feature that really is unenforced still warns,
+        // through the same code path, on a flow of the same shape.
+        let unenforced = parse(
+            "id: f\nnamespace: a.b\nconcurrency:\n  limit: 1\ntasks:\n\
+             \x20 - id: t\n    type: x\n    timeout: PT1S\n",
+        )
+        .unwrap();
+        let r = validate(&unenforced);
+        let names: Vec<&str> = r
+            .warnings
+            .iter()
+            .filter(|w| w.code == "not_yet_enforced")
+            .map(|w| w.path.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["concurrency"],
+            "exactly the unenforced feature warns, and the enforced `timeout:` \
+             beside it does not: {:?}",
+            r.warnings
         );
     }
 

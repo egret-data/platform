@@ -63,6 +63,7 @@
 //! | the author wrote | the artifact does | this module does |
 //! |---|---|---|
 //! | `timeout: PT0S`, or anything under a millisecond | FAILED, `timeout: must be a positive duration` | the same, verbatim ([`NOT_POSITIVE`]) |
+//! | a NEGATIVE duration in any spelling or case — `PT-1S`, `pt-1s`, `-PT1S`, `P-1D`, … | FAILED, the same sentence | the same, verbatim; see [`is_negative`], whose first version got the case wrong |
 //! | `timeout: "{{ nope }}"` | FAILED, ``Unable to find `nope` used in the expression `{{ nope }}` at line 1`` | FAILED, `timeout: undefined value (in <string>:1)` |
 //! | `timeout: not-a-duration` | FAILED, a raw `com.fasterxml.jackson.core.JsonParseException` | FAILED, `timeout: "not-a-duration" is not an ISO-8601 duration` |
 //!
@@ -189,6 +190,61 @@ impl Budget {
     }
 }
 
+/// Whether `source` is a duration Java **would** parse and this parser refuses
+/// *because it is negative*, as opposed to text that is not a duration at all.
+///
+/// # Fix round 1: the branch this replaces was case-SENSITIVE
+///
+/// It matched the literal prefixes `PT-`, `P-` and `-P`, while
+/// [`parse_duration`] is deliberately case-**in**sensitive — `java.time.Duration.parse`
+/// accepts either case and `valids/retry-expo` writes `interval: PT0.25s`. So
+/// `pt-1s` fell through to `timeout: "pt-1s" is not an ISO-8601 duration`,
+/// contradicting this module's own "verbatim" table. Two of the three prefixes
+/// were also reachable by no test at all.
+///
+/// # What the artifact actually does, measured rather than assumed
+///
+/// Nine spellings run through
+/// `kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd`,
+/// each on a task whose body would otherwise sleep three seconds:
+///
+/// | `timeout:` | the artifact |
+/// |---|---|
+/// | `PT-1S`, `pt-1s`, `Pt-1S` | FAILED, `timeout: must be a positive duration` |
+/// | `-PT1S`, `-pt1s` | FAILED, same sentence |
+/// | `P-1D`, `p-1d` | FAILED, same sentence |
+/// | `PT1-S` | FAILED, a raw `JsonParseException` — **not** the positivity sentence |
+/// | `--PT1S`, `-` | FAILED, a raw parse error |
+/// | `+PT1S` | a real budget: `Timeout after 00:00:01.000` |
+/// | `pt1s` | a real budget: `Timeout after 00:00:01.000` |
+///
+/// So the review that reported this was right about the sentence, and the
+/// boundary is sharper than "contains a minus": a `-` is a **sign** exactly
+/// where Java's grammar puts one — at the very start, or immediately after the
+/// `P` or `T` designator. `PT1-S` has a `-` and is *not* a negative duration.
+///
+/// This function is that rule rather than a longer list of prefixes: strip the
+/// `-`s in sign positions and ask [`parse_duration`], which supplies the
+/// case-insensitivity for free because it is the same parser that accepts
+/// `PT0.25s`. Every row of the table above is a test below.
+fn is_negative(source: &str) -> bool {
+    let s = source.trim();
+    if !s.contains('-') {
+        return false;
+    }
+    let mut unsigned = String::with_capacity(s.len());
+    let mut prev: Option<char> = None;
+    for (i, c) in s.chars().enumerate() {
+        let sign_position = i == 0 || matches!(prev, Some('P' | 'p' | 'T' | 't'));
+        prev = Some(c);
+        if c == '-' && sign_position {
+            continue;
+        }
+        unsigned.push(c);
+    }
+    parse_duration(&unsigned).is_some()
+}
+
 /// Resolve one task's `timeout:` against the context its handler will render
 /// against.
 ///
@@ -215,16 +271,11 @@ pub(super) fn resolve(timeout: Option<&Property<Duration>>, cx: &RenderContext) 
         // parses it and the constraint then rejects it; the observable answer
         // is the same sentence, so both spellings report it. Identical to
         // `handlers::sleep`'s split for `duration:`.
-        return Budget::Refused(
-            if rendered.starts_with("PT-")
-                || rendered.starts_with("P-")
-                || rendered.starts_with("-P")
-            {
-                NOT_POSITIVE.to_string()
-            } else {
-                format!("timeout: {rendered:?} is not an ISO-8601 duration")
-            },
-        );
+        return Budget::Refused(if is_negative(&rendered) {
+            NOT_POSITIVE.to_string()
+        } else {
+            format!("timeout: {rendered:?} is not an ISO-8601 duration")
+        });
     };
     if d < MINIMUM {
         return Budget::Refused(NOT_POSITIVE.to_string());
@@ -343,11 +394,59 @@ mod tests {
         );
     }
 
+    /// **Every row of [`is_negative`]'s table, and every spelling reachable.**
+    ///
+    /// Fix round 1: the branch this covers used to match `PT-`, `P-` and `-P`
+    /// case-sensitively, so `pt-1s` reported a parse error where the artifact
+    /// reports the positivity sentence — and two of the three prefixes were
+    /// reachable by no test, which is the guard-nobody-has-seen-fail shape this
+    /// package has produced ten times. Each value below was run through the
+    /// pinned image; the expectation is what that image did, not what the
+    /// grammar suggests.
     #[test]
-    fn a_negative_budget_reports_the_positivity_sentence_rather_than_a_parse_error() {
+    fn a_negative_budget_reports_the_positivity_sentence_in_every_spelling_and_case() {
+        for source in [
+            "PT-1S", "pt-1s", "Pt-1S", // the sign on the seconds field
+            "-PT1S", "-pt1s", // the sign on the whole duration
+            "P-1D", "p-1d", // the sign on the days field
+        ] {
+            assert_eq!(
+                resolve(Some(&property(source)), &cx()),
+                Budget::Refused(NOT_POSITIVE.to_string()),
+                "the artifact answers `{NOT_POSITIVE}` for {source:?}"
+            );
+        }
+    }
+
+    /// The other side of the same boundary, which is what stops
+    /// [`is_negative`] from being "contains a minus". A `-` outside a sign
+    /// position is not a negative duration — the artifact gives `PT1-S`,
+    /// `--PT1S` and `-` a raw parse error, not the positivity sentence.
+    #[test]
+    fn a_minus_outside_a_sign_position_is_not_a_negative_duration() {
+        for source in ["PT1-S", "--PT1S", "-"] {
+            assert_eq!(
+                resolve(Some(&property(source)), &cx()),
+                Budget::Refused(format!("timeout: {source:?} is not an ISO-8601 duration")),
+                "the artifact answers a parse error for {source:?}, not the \
+                 positivity sentence"
+            );
+        }
+        assert!(
+            !is_negative("PT1S") && !is_negative("pt1s"),
+            "and a duration with no sign at all is not negative"
+        );
+    }
+
+    /// A leading `+` is a real budget on the artifact
+    /// (`+PT1S` → `Timeout after 00:00:01.000`), and `parse_duration` already
+    /// strips it — asserted here because nothing else in this module would
+    /// notice if that changed.
+    #[test]
+    fn an_explicitly_positive_budget_is_a_budget() {
         assert_eq!(
-            resolve(Some(&property("PT-1S")), &cx()),
-            Budget::Refused(NOT_POSITIVE.to_string())
+            resolve(Some(&property("+PT1S")), &cx()),
+            Budget::Of(Duration::from_secs(1))
         );
     }
 
