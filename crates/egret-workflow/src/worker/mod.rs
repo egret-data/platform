@@ -33,6 +33,23 @@
 //! transaction, a crash rolls the claim back too and the reaper could never
 //! reclaim anything.
 //!
+//! # The third statement: [`wake`]
+//!
+//! There is a **step 0**, and W3b did not have it. A run in `RETRYING` is not
+//! claimable — it carries a deadline and has to re-enter `CREATED` before a
+//! handler may touch it, which only `advance()` may do — so neither the claim
+//! nor [`reap`] can reach one, and `executor::retry::reopen_due` fires only
+//! inside a [`settle`](claim) whose `now` is fixed for the transaction. A retry
+//! on a run with **no concurrently-live sibling** therefore sat `RETRYING` for
+//! ever. [`wake`] is the statement that re-reads the clock: it names the
+//! executions holding a due retry and hands each to [`resume`], and [`tick`]
+//! calls it **ahead of** the claim so the run it reopens is claimed by the same
+//! tick. See [`claim`]'s module doc for the two-clocks rule the predicate rests
+//! on, and `tests/worker.rs`'s
+//! `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+//! for the property — which the differential oracle cannot see, because its
+//! driver rewinds `executions.created_at` to fake the delay.
+//!
 //! The cost of the split is stated rather than hidden: a worker killed between
 //! the claim and the commit leaves its run **leased**, and it becomes claimable
 //! again only when [`reap`] takes it back. `tests/worker.rs`'s
@@ -61,7 +78,7 @@ mod render;
 mod spawn;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
-pub use claim::{apply_outcome, claim, resume, start_execution, tick, Claimed};
+pub use claim::{apply_outcome, claim, resume, start_execution, tick, wake, Claimed};
 pub use reaper::reap;
 pub use registry::Handlers;
 

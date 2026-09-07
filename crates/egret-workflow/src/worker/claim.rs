@@ -16,28 +16,49 @@
 //!
 //! - it is wrapped in a CTE, because the caller needs `workspace_id`, which
 //!   lives on `workflow.executions` and a `RETURNING` cannot reach;
-//! - there is **no `not_before` term**, and the reason first written here was
-//!   wrong in its second half. The first half stands: spec §4.1's
-//!   `state = 'pending' AND not_before <= now()` cannot fire against this
-//!   predicate, because `TaskRun::not_before` is written only by
-//!   `Command::ScheduleRetry`, a run carrying one is `RETRYING`, and the claim
-//!   takes only `RUNNING` — so a term on it would be a guard nobody could ever
-//!   see fail.
+//! - there is **no `not_before` term on the claim**, and both halves of the
+//!   reason that used to be written here were wrong.
 //!
-//!   What does **not** follow, and what this comment used to assert, is *"the
-//!   delay is `advance()`'s to enforce and it already does"*. Nothing in this
-//!   worker makes a retry's delay elapse. `executor::retry::reopen_due` is
-//!   `not_before`'s only reader and it runs inside a [`settle`], whose `now` is
-//!   fixed for the whole call; [`reap`](super::reap) excludes `RETRYING` as the
-//!   claim does; and [`resume`] — the one entry point that would re-read the
-//!   clock — has no production caller. The only caller today is
-//!   `oracle-exec/driver.rs`'s `pass_time`, which *rewinds*
-//!   `executions.created_at` because there is no other way to make time pass.
+//!   The half that reads like a guarantee — *"the delay is `advance()`'s to
+//!   enforce and it already does"* — was withdrawn by W3b, which enumerated
+//!   why nothing in this worker made a retry's delay elapse. The half that
+//!   replaced it — *"a term on it would be a guard nobody could ever see
+//!   fail"* — is false too, and W4 Task 1 is what makes it false: the term
+//!   exists, it is in [`due_retries`], and
+//!   `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+//!   has seen it fail in both directions.
 //!
-//!   So a run in `RETRYING` with no concurrently-live sibling to bring a
-//!   `settle` along sits there for ever. **W4 fills the hole** — it owns the
-//!   loop that wakes on a deadline — and this is stated rather than left as a
-//!   sentence that reads like a guarantee.
+//!   What is true is narrower and is about **which statement** carries the
+//!   term. A `RETRYING` run is not runnable: it has to re-enter `CREATED`
+//!   first, and only `advance()` may put it there
+//!   (`executor::retry::reopen_due`). So the claim — whose whole job is to
+//!   hand a run to a handler — cannot take one, and a `not_before` term on
+//!   *this* predicate really would be unreachable, because
+//!   `TaskRun::not_before` is written only by `Command::ScheduleRetry` and a
+//!   run carrying one is `RETRYING` rather than `RUNNING`. The waker is
+//!   therefore a **second statement** rather than a widened claim:
+//!   [`due_retries`] names the executions holding a run whose deadline has
+//!   passed, [`wake`] calls [`resume`] on each, and [`tick`] runs it **ahead
+//!   of** the claim so a run this call reopens is claimed by the same call.
+//!
+//!   **The two clocks are one expression, deliberately.** [`due_retries`]'s
+//!   `now` is spelled exactly as [`load_with`] spells it —
+//!   `(EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint`, the origin
+//!   `Tick` is measured from — so an execution the waker names is one
+//!   `reopen_due` will actually move. Two different readings of the clock
+//!   would give a waker that resumes an execution `advance()` then declines to
+//!   advance: a settle that writes nothing, bumps `executions.seq`, and is
+//!   selected again on the next tick for ever. `now()` only ever grows between
+//!   the two statements, and that is the safe direction — a run the waker
+//!   found due is still due by the time `resume` reads the clock.
+//!
+//!   What this does **not** do is invent a state. The waker moves nothing
+//!   itself; it re-reads the clock and hands the execution to the same
+//!   [`settle`] every other writer uses, exactly as
+//!   `oracle-exec/driver.rs`'s `pass_time` did — except that `pass_time`
+//!   *rewinds* `executions.created_at` to fake the delay, and is why this hole
+//!   was invisible for a whole package: the only caller `resume` had was one
+//!   that had already moved the clock itself.
 
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
@@ -266,6 +287,94 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
+/// The executions holding a `RETRYING` run whose retry delay has elapsed.
+///
+/// **The `RETRYING` term is the whole predicate's point** and it is not a
+/// tidiness: `advance()` never CLEARS a `not_before` — `executor::apply`'s
+/// `ScheduleRetry` arm writes one and nothing writes `None` back — so a run
+/// that has been retried and has since succeeded still carries the deadline
+/// its retry wrote, for ever. Without the state term this statement would name
+/// every finished execution whose retry deadline is in the past, on every
+/// tick, and each would take the execution's row lock and a settle that writes
+/// nothing but a new `executions.seq`. Driven by
+/// `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`,
+/// whose last assertion is exactly that: nothing is `RETRYING` any more, the
+/// deadline is still there and still past, and the waker must name nobody.
+///
+/// **The clock is [`load_with`]'s, spelled the same way**, so an execution
+/// named here is one `retry::reopen_due` will actually reopen — see the module
+/// doc's `not_before` bullet.
+///
+/// # `ORDER BY` the shortfall, and the tiebreak for the same reason the claim has one
+///
+/// `not_before_ms` is measured from each execution's OWN `created_at`, so it
+/// is not comparable across executions; the shortfall
+/// `not_before_ms - now_ms` is, because both are the same instant minus the
+/// same `now()`. It is the quantity `oracle-exec/driver.rs`'s `pass_time`
+/// calls by that name, and ordering by it is "the retry that came due first
+/// goes first". `execution_id` breaks the remaining tie, for
+/// [`claim`]'s reason: without a total order the rows come back in whatever
+/// the scan produced, and at `LIMIT 1` that decides *which* execution is
+/// woken rather than merely in what order.
+pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT r.execution_id \
+           FROM workflow.task_runs r \
+           JOIN workflow.executions e ON e.id = r.execution_id \
+          WHERE r.state = 'RETRYING' \
+            AND r.not_before_ms IS NOT NULL \
+            AND r.not_before_ms <= \
+                (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
+          GROUP BY r.execution_id \
+          ORDER BY MIN(r.not_before_ms \
+                       - (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint), \
+                   r.execution_id \
+          LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(exec)
+    .await
+    .map_err(db_err)
+}
+
+/// Reopen every retry whose delay has elapsed, up to `limit` executions.
+///
+/// Returns the executions it resumed, **by id and in the order it took them**,
+/// rather than a count: an entry that moved for an unattributed reason is a
+/// coincidence, and a caller — a test included — that can only see a number
+/// cannot tell which execution moved. [`reap`](super::reap) returns a count
+/// because a reclaimed lease is fungible; a woken execution is not.
+///
+/// Public and callable on its own, for [`reap`](super::reap)'s reason: a real
+/// worker pool may want to wake on its own cadence, and a waker reachable only
+/// from inside [`tick`] would be one nothing could drive directly. [`tick`]
+/// calls it, which is what gives it a production caller — the thing `resume`
+/// did not have, and the whole reason this hole survived a package.
+///
+/// **Every named execution is attempted and the first error is returned after
+/// the loop**, which is [`tick`]'s own rule for the same reason: one
+/// execution's failure to settle must not leave the executions behind it
+/// asleep for a reason that concerned a different execution.
+pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
+    let due = due_retries(pool, limit).await?;
+    let mut woken = Vec::with_capacity(due.len());
+    let mut first_err: Option<Error> = None;
+    for execution in due {
+        match resume(pool, execution).await {
+            Ok(()) => woken.push(execution),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(woken),
+    }
+}
+
 /// Claim up to `n` runnable task runs, hand each to `reg`, and commit each
 /// result with `advance()`'s commands and the successors.
 ///
@@ -294,11 +403,35 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// finish must not be reported as finished. The returned count stays "runs whose
 /// result committed", so a partial batch reports what it actually did.
 ///
-/// Returns the number of runs whose result committed.
+/// # The waker runs first, and inside the same call
+///
+/// A run in `RETRYING` is not claimable — it has to re-enter `CREATED` first,
+/// and only `advance()` may put it there. [`wake`] is what re-reads the clock
+/// for it, and it is called **ahead of** the claim rather than beside it so
+/// that a run this call reopens is a run this call also claims: `resume` drives
+/// the reopened run to `RUNNING` inside its own transaction, which is exactly
+/// the claim's predicate. A waker after the claim would cost one whole tick of
+/// latency per retry for no reason.
+///
+/// It is `n` executions rather than an unbounded sweep, for the claim's
+/// reason: a tick is the unit of work a caller asked for.
+///
+/// Returns the number of runs whose result committed. **A tick that only woke
+/// something returns 0**, and that is deliberate — the count means "results
+/// committed", not "work done", and a caller that looped until zero would
+/// otherwise never stop on an execution whose retry it had just reopened. The
+/// run it reopened is claimed by this same call, so the count moves on the
+/// tick that runs it.
 pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> {
+    let mut first_err: Option<Error> = None;
+    // Ahead of the claim, and its failure does not stop the claim: an
+    // execution that cannot settle must not keep this worker from running the
+    // runs that are already claimable.
+    if let Err(e) = wake(pool, n as i64).await {
+        first_err = Some(e);
+    }
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
-    let mut first_err: Option<Error> = None;
     for c in &claimed {
         match run_one(pool, c, reg).await {
             Ok(()) => done += 1,

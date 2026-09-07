@@ -5756,18 +5756,39 @@ A **stalled** execution is deliberately not in this class: egret doing less than
 Kestra is under-acceptance, which the ratchet already reports as a mismatch and
 item 6 already counts.
 
-**11. A retry with no live sibling never resumes, and `claim.rs` used to say the
-opposite.** Its module doc justified omitting a `not_before` term with *"the
-delay is `advance()`'s to enforce and it already does"*. The first half of that
-paragraph stands — the claim takes only `RUNNING` and a run carrying a
-`not_before` is `RETRYING`, so the term could never fire — but nothing in this
-worker makes the delay elapse. `retry::reopen_due` is `not_before`'s only reader
-and it runs inside a `settle` whose `now` is fixed; `reap` excludes `RETRYING` as
-the claim does; and `resume`, the one entry point that re-reads the clock, has no
-production caller — its only caller is this oracle's `driver::pass_time`, which
-*rewinds* `executions.created_at` because there is no other way to make time
-pass. W4 owns the loop that wakes on a deadline. The sentence is corrected in
-place rather than left reading like a guarantee.
+**11. A retry with no live sibling never resumed, and `claim.rs` used to say the
+opposite — CLOSED by W4 Task 1, and this oracle could see neither the hole nor
+the fix.** As W3b left it: the module doc justified omitting a `not_before` term
+with *"the delay is `advance()`'s to enforce and it already does"*; nothing in
+this worker made the delay elapse; `retry::reopen_due` is `not_before`'s only
+reader and it runs inside a `settle` whose `now` is fixed; `reap` excludes
+`RETRYING` as the claim does; and `resume`, the one entry point that re-reads
+the clock, had no production caller — its only caller was this oracle's
+`driver::pass_time`, which *rewinds* `executions.created_at` because there is no
+other way to make time pass.
+
+W4 Task 1 added `claim::due_retries` and `claim::wake`, and `tick` calls the
+waker ahead of the claim. **The second half of W3b's own correction turned out
+to be false as well**: it said a `not_before` term *"would be a guard nobody
+could ever see fail"*, and the term exists now, in a statement of its own, with
+a test that has seen it fail in both directions
+(`tests/worker.rs::a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`).
+What is true is narrower: the term cannot live on the *claim*, because a
+`RETRYING` run is not runnable until `advance()` puts it back to `CREATED`.
+
+**The ratchet did not move: 143 mismatching before and after, 0 banked, 0
+regressions, over three runs each side.** 14 baselined entries declare a
+`retry:` with a non-zero `interval:` (10 of them `RETRY_FAILED_TASK`, the only
+behaviour that writes a `not_before` at all), and none of them moved — which is
+derived rather than assumed. `wake` was instrumented to print every execution it
+selected and run over the whole 294-entry oracle: it fired **zero** times, with
+`tests/worker.rs` as the positive control for the instrument on the same build.
+`driver::pass_time` rewinds `executions.created_at` *before* any deadline can
+elapse in wall-clock time, so `due_retries`' predicate is never satisfied inside
+this oracle. The mutation that deletes the `RETRYING` term is invisible here for
+the same reason — under it the whole `tests/executor.rs` binary stays green and
+only `tests/worker.rs` fails. **This is a hole the ratchet speaks for in neither
+direction**, and W4 Task 6 owns re-deriving the coverage statement around it.
 
 **12. `advance()` is unchanged by the whole of W3b** — and the sentence that
 used to be here overstated it, so it is restated as measured. `git diff --stat

@@ -1,4 +1,5 @@
-//! The five durability properties the differential oracle can never see.
+//! The properties the differential oracle can never see: five durability ones,
+//! and one scheduling one.
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.
 //! It has no opinion about whether two workers claimed the same run, whether a
@@ -10,6 +11,17 @@
 //! The fifth was added by the whole-branch review, which found that the first
 //! four could not see it: the reap property reaps a run whose handler never
 //! ran, and nothing called [`apply_outcome`] twice with one `Claimed`.
+//!
+//! **The sixth is not a durability property at all** — it is the `RETRYING`
+//! waker, W4 Task 1, and the oracle cannot see it for a different reason than
+//! the other five. It is not that the trace does not carry the fact; it is
+//! that `oracle-exec/driver.rs`'s `pass_time` *rewinds*
+//! `executions.created_at` to fake the delay, so no retry deadline ever
+//! elapses in wall-clock time there and the waker's predicate is never
+//! satisfied. Measured: instrumented to print every execution it selects, the
+//! waker fires **zero** times across the whole 294-entry oracle run, with this
+//! file as the positive control for the instrument. See
+//! [`a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`].
 //!
 //! # Why `#[sqlx::test]` and not `common::db()`
 //!
@@ -31,7 +43,7 @@ use std::sync::Mutex;
 
 use egret_metastore::Db;
 use egret_workflow::worker::{
-    apply_outcome, claim, reap, start_execution, Outcome, Registry, TaskInput,
+    apply_outcome, claim, reap, start_execution, wake, Outcome, Registry, TaskInput,
 };
 use uuid::Uuid;
 
@@ -1803,5 +1815,257 @@ async fn the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order(pool
          ticks one run at a time (`driver::BATCH == 1`). Without the tiebreak \
          this is the choice that made `executor_matches_golden` return a \
          different verdict on the same tree"
+    );
+}
+
+/// A one-task flow whose only task carries a `retry:` with a non-zero
+/// `interval:` — and **no sibling**, which is the condition that makes the
+/// stall reachable: with a second live task, a `settle` for that task would
+/// carry a fresh `now` past the deadline and `retry::reopen_due` would fire
+/// inside it by accident.
+fn one_task_with_retry(id: &str, interval: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    retry:\n      type: constant\n      interval: {interval}\n\
+         \x20     maxAttempts: 2\n"
+    )
+}
+
+/// Fails every run's **first** attempt and succeeds on every later one.
+///
+/// The failure is what makes `advance()` schedule the retry; the success on
+/// attempt 2 is what makes "the run moved" observable as a state rather than
+/// as the absence of an error.
+#[derive(Default)]
+struct FailsOnce {
+    seen: Mutex<Vec<(String, usize)>>,
+}
+
+impl FailsOnce {
+    fn seen(&self) -> Vec<(String, usize)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for FailsOnce {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.task_id.clone(), task.attempt));
+        match task.attempt {
+            1 => Ok(Outcome::failed_with("the first attempt always fails")),
+            _ => Ok(Outcome::success()),
+        }
+    }
+}
+
+/// How many attempts a run has recorded.
+async fn attempts_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> i32 {
+    sqlx::query_scalar(
+        "SELECT jsonb_array_length(attempts) FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read attempts")
+}
+
+/// The deadline a `Command::ScheduleRetry` wrote, in `Tick` milliseconds.
+async fn not_before_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT not_before_ms FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read not_before_ms")
+}
+
+async fn run_id_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2")
+        .bind(execution)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read run id")
+}
+
+/// Everything about a stuck run, in one string, so an assertion can say **what**
+/// is stuck rather than that a count was zero.
+async fn stuck(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> String {
+    format!(
+        "run {} (execution {execution}, task `{task_id}`) is {:?} with {} attempt(s) \
+         and not_before_ms {:?}; the execution is {:?}",
+        run_id_of(pool, execution, task_id).await,
+        run_state(pool, execution, task_id).await,
+        attempts_of(pool, execution, task_id).await,
+        not_before_of(pool, execution, task_id).await,
+        execution_history(pool, execution)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+    )
+}
+
+/// Drive `tick` until it claims nothing.
+async fn drain_with(pool: &sqlx::PgPool, reg: &dyn Registry) -> usize {
+    let mut total = 0;
+    for _ in 0..64 {
+        let n = egret_workflow::worker::tick(pool, 8, reg)
+            .await
+            .expect("tick");
+        if n == 0 {
+            return total;
+        }
+        total += n;
+    }
+    panic!("tick never stopped claiming; {total} runs finished");
+}
+
+/// **Property 6: a retry whose delay has elapsed is woken, and one whose delay
+/// has not is left alone.**
+///
+/// This is the hole W3b handed to W4, and it is a *scheduling* property rather
+/// than a durability one: a run in `RETRYING` with no concurrently-live sibling
+/// had nothing in this worker that would ever look at its deadline again. The
+/// claim takes only `RUNNING`, [`reap`] takes only `RUNNING`,
+/// `retry::reopen_due` fires only inside a `settle` whose `now` is fixed for
+/// the transaction, and `resume`'s only caller in the tree was the differential
+/// oracle's driver — which fakes the delay by rewinding
+/// `executions.created_at`.
+///
+/// **Nothing here rewinds anything.** The delay elapses in real time, which is
+/// what makes this the shipping worker's problem rather than the driver's.
+///
+/// **It asserts what is stuck, not that nothing happened**, because "no rows
+/// claimed" is also what a correct idle loop returns: a test that asserted a
+/// tick returned zero would pass with the bug present *and* with it fixed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = FailsOnce::default();
+
+    let due = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("due", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start due");
+    let waiting = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("waiting", "PT30S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start waiting");
+
+    // Both first attempts fail, so both runs take `RETRYING` and a deadline.
+    assert_eq!(
+        drain_with(&pool, &reg).await,
+        2,
+        "both first attempts must have run: {:?}",
+        reg.seen()
+    );
+    for (label, execution, interval_ms) in [("due", due, 1_000), ("waiting", waiting, 30_000)] {
+        assert_eq!(
+            run_state(&pool, execution, "a").await.as_deref(),
+            Some("RETRYING"),
+            "the {label} run must be RETRYING before anything is measured: {}",
+            stuck(&pool, execution, "a").await
+        );
+        let deadline = not_before_of(&pool, execution, "a")
+            .await
+            .expect("a retry was scheduled");
+        assert!(
+            deadline >= interval_ms,
+            "the {label} run's deadline must be at least its own interval past \
+             the execution's origin: {}",
+            stuck(&pool, execution, "a").await
+        );
+    }
+
+    // The delay passes in REAL time. `executions.created_at` is untouched.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    // The waker names the execution whose deadline has passed **by id**, and
+    // no other. A count would not say which one moved, and an entry that moved
+    // for an unattributed reason is a coincidence rather than a wake.
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![due],
+        "the waker must name the execution whose retry came due and no other. \
+         due={due} (interval PT1S, elapsed); waiting={waiting} (interval PT30S, \
+         not elapsed). It named {woken:?}"
+    );
+
+    let finished = drain_with(&pool, &reg).await;
+
+    assert_eq!(
+        run_state(&pool, due, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "the retry's delay has elapsed and nothing else is alive in this \
+         execution, so the worker itself has to reopen it. Instead: {}\n\
+         handler calls: {:?}",
+        stuck(&pool, due, "a").await,
+        reg.seen()
+    );
+    assert_eq!(
+        attempts_of(&pool, due, "a").await,
+        2,
+        "the woken run must open a SECOND attempt rather than reuse the first: {}",
+        stuck(&pool, due, "a").await
+    );
+    assert_eq!(
+        finished,
+        1,
+        "exactly one run's result committed after the wake — the due retry's \
+         second attempt: {:?}",
+        reg.seen()
+    );
+
+    // The other direction, which is what a widened predicate breaks: a retry
+    // whose interval has NOT elapsed must still be sitting there.
+    assert_eq!(
+        run_state(&pool, waiting, "a").await.as_deref(),
+        Some("RETRYING"),
+        "a retry 30 seconds away must not be started 1.3 seconds in: {}",
+        stuck(&pool, waiting, "a").await
+    );
+    assert_eq!(
+        attempts_of(&pool, waiting, "a").await,
+        1,
+        "and it must not have opened a second attempt: {}",
+        stuck(&pool, waiting, "a").await
+    );
+
+    // **The `RETRYING` term's own assertion, and the one that names it.**
+    // `advance()` never clears a `not_before` — `executor::apply`'s
+    // `ScheduleRetry` arm writes one and nothing ever writes `None` back — so
+    // `due`'s run STILL carries the deadline its retry wrote and that deadline
+    // is still in the past. The state term is the only thing between the waker
+    // and a finished execution it would relock and re-settle on every tick for
+    // ever.
+    let again = wake(&pool, 8).await.expect("wake again");
+    assert!(
+        again.is_empty(),
+        "the waker named {again:?} when nothing is RETRYING. Due side: {}. \
+         Waiting side: {}",
+        stuck(&pool, due, "a").await,
+        stuck(&pool, waiting, "a").await
     );
 }
