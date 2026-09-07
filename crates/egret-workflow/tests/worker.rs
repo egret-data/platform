@@ -1,5 +1,13 @@
 //! The properties the differential oracle can never see: five durability ones,
-//! and one scheduling one.
+//! one scheduling one, and one **ruling** — W4 Task 4's, that a handler result
+//! is applied one per transaction. The seventh is the odd one out twice over:
+//! the oracle CAN see its consequence (four entries that differ on the
+//! happens-before relation alone), and it is the only test in the crate that
+//! can tell the ruling from its alternative — measured, under a prototype that
+//! applies a whole claim batch in one transaction at `driver::BATCH = 1`, it is
+//! the sole failure and the other 707 tests pass, `tests/executor.rs`
+//! included. See
+//! [`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`].
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.
 //! It has no opinion about whether two workers claimed the same run, whether a
@@ -151,6 +159,21 @@ async fn ended_seq(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Optio
     .fetch_one(pool)
     .await
     .expect("read ended_seq")
+}
+
+/// The happens-before LEFT endpoint, read for the same reason `ended_seq` is:
+/// [`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`]
+/// compares the two across two runs, and a helper per column keeps the query
+/// that reads them from being the thing that drifts.
+async fn created_seq(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT created_seq FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read created_seq")
 }
 
 async fn lease_of(
@@ -2589,5 +2612,126 @@ async fn a_killed_handler_cannot_commit_over_the_worker_that_replaced_it(pool: s
         "and the successor the rival created is live and claimable -- RUNNING \
          with no lease IS the claim's predicate, which is what makes an \
          execution that had reached FAILED beside it the Critical it was"
+    );
+}
+
+/// Two `Sequential` branches of one `Parallel`, four leaves. The shape of
+/// `valids/parallel-disabled-tasks` without the `disabled:`, which is the
+/// entry W4 Task 4's ruling is about.
+fn parallel_of_two_sequences(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: s1\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task1\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n          - id: task2\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n      - id: s2\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task3\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n          - id: task4\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n"
+    )
+}
+
+/// **The seventh property, and it is a RULING rather than a durability one:
+/// one handler result per transaction.**
+///
+/// W3b handed W4 the question of whether the tick should stay this shape, and
+/// W4 Task 4 ruled that it does. The ruling is invisible to every other test in
+/// this file and only *half*-visible to the oracle — `oracle-exec` sees it as
+/// four entries that reproduce every run, attempt and execution state Kestra
+/// recorded and differ on the happens-before relation alone — so it is stated
+/// here as the thing a future change would have to break on purpose.
+///
+/// # What is asserted, and why it is these three runs
+///
+/// `task1` and `task3` are the first leaves of two `Sequential` branches of one
+/// `Parallel`, so both are claimable at once and ONE tick finishes both. The
+/// question the ruling answers is what `advance()` sees in between:
+///
+/// - egret applies `task1`'s result, drives `advance()` to a fixed point (which
+///   creates `task2`) and commits, then does the same for `task3`. So
+///   `ended(task1) < created(task2) < ended(task3)`.
+/// - Kestra's worker pool finished both siblings before either successor
+///   existed, so on its side `created(task2)` is AFTER `ended(task3)`.
+///
+/// The middle inequality is therefore the whole of the divergence, and it is
+/// the assertion below. Measured, on this flow, both ways: shipping gives
+/// `ended(task1)=8, created(task2)=9, ended(task3)=11`; the widened tick gives
+/// `ended(task1)=8, created(task2)=9, ended(task3)=8` — both siblings on step
+/// 8 and both successors on step 9, which is Kestra's shape exactly.
+///
+/// # This is not about the batch size, and that was measured
+///
+/// The tick claims **eight** runs here and finishes two of them, so "one run
+/// per tick" is the wrong name for it: the discipline is one result per
+/// TRANSACTION. Setting `oracle-exec/driver.rs`'s `BATCH` to 32 with this
+/// discipline unchanged left the ratchet at 143 baselined and every test in
+/// this file green — the claim orders by `created_at, execution_id, run_ix`, so
+/// a batch of n is indistinguishable from n successive claims of 1.
+///
+/// # The cost of the ruling, measured rather than argued
+///
+/// Applying a whole batch's results in one transaction before calling
+/// `advance()` banks **`valids/dag`, `valids/full` and
+/// `valids/parallel-disabled-tasks`** (143 mismatching → 140, no regression,
+/// `valids/if` still differing on `order` alone). It was refused for what it
+/// costs, not for what it banks: a batch is one transaction, so ONE
+/// `WorkerError::LeaseLost` discards every result in it. Paired measurement on
+/// this very flow shape with a registry that reaps every lease from inside the
+/// second handler — six rounds, same everything but the discipline:
+///
+/// | | one result per transaction | a batch per transaction |
+/// |---|---|---|
+/// | handler call log | `a, b, b, b, b, b, b` | `a, b, a, b, a, b, a, b, a, b, a, b` |
+/// | `a` after round 1 | `SUCCESS` | `RUNNING` — discarded |
+/// | progress in six rounds | `a` banked | none |
+///
+/// See `oracle-exec/README.md`'s *One result per transaction is a ruling* for
+/// the other three costs and for W3a's deleted guard, which stays unreachable
+/// under the widened tick — measured, not predicted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &parallel_of_two_sequences("ruling"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let reg = Recorder::default();
+    let finished = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("one tick, eight claimable slots");
+    assert_eq!(
+        finished, 2,
+        "both first leaves are claimable at once and ONE tick finishes both, so          the ruling is not about how many runs a tick takes: {:?}",
+        reg.seen()
+    );
+    assert_eq!(
+        reg.seen(),
+        vec!["task1".to_string(), "task3".to_string()],
+        "and it takes them in `run_ix` order, which is what the claim's          tiebreak is for"
+    );
+
+    let ended1 = ended_seq(&pool, ex, "task1")
+        .await
+        .expect("task1 terminated in this tick");
+    let created2 = created_seq(&pool, ex, "task2")
+        .await
+        .expect("task1's successor exists");
+    let ended3 = ended_seq(&pool, ex, "task3")
+        .await
+        .expect("task3 terminated in this tick");
+
+    assert!(
+        ended1 < created2,
+        "a successor is created strictly after the run that caused it ends          (task1 {ended1}, task2 {created2}, task3 {ended3})"
+    );
+    assert!(
+        created2 < ended3,
+        "THE RULING. `task1`'s result, `advance()` and `task1`'s successor are          one transaction, so `task2` exists before `task3`'s result is applied          at all. Kestra's worker pool finished both siblings first and its          `created(task2)` is after `ended(task3)`; that divergence is          `valids/dag`, `valids/full` and `valids/parallel-disabled-tasks`, and          W4 Task 4 measured that widening the tick banks all three and refused          it anyway -- see this test's doc for the price. If this assertion is          ever failing, the tick has been widened and the three baseline lines          have to go in the same commit          (task1 {ended1}, task2 {created2}, task3 {ended3})"
+    );
+    assert_ne!(
+        ended1, ended3,
+        "two siblings finished in one tick must not share a step: the step IS          the happens-before endpoint, and a shared one is exactly what a batched          transaction produces"
     );
 }

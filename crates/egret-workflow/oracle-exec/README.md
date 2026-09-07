@@ -4556,11 +4556,134 @@ something else**: `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`
 and — the finding — `valids/full` are the four entries whose runs, attempts and
 execution history are byte-identical to Kestra's and which differ on the
 happens-before relation ALONE. The cause is this driver's delivery discipline:
-it finishes ONE task run per tick and creates that run's successors in the same
-transaction, where Kestra's worker pool finished two siblings before either
-successor existed. W3b Task 1's Concern 3 said `valids/full`'s recorded
-attribution was wrong and its real cause unknown; this is the cause, and it is
-the same one.
+it applies ONE task run's result per transaction and creates that run's
+successors in the same one, where Kestra's worker pool finished two siblings
+before either successor existed. That discipline is now a ruling with both sides
+measured — see *One result per transaction is a ruling* immediately below. W3b
+Task 1's Concern 3 said `valids/full`'s recorded attribution was wrong and its
+real cause unknown; this is the cause, and it is the same one.
+
+> **W4 Task 4 checked whether widening the tick is what brings the guard back.
+> It is not, and that was measured rather than reasoned about.** The overlap is
+> real — three of the four entries above are the three W3a named — so the
+> hypothesis was worth testing: the trigger W3a wrote down is *"a caller that
+> applies a batch partially"*, and W4's worker is the caller it meant. Under a
+> prototype that applies a whole claim batch's results in one transaction before
+> calling `advance()`, at `BATCH = 32`,
+> `worker::CREATE_BESIDE_A_CREATED_SIBLING` is still **0** and
+> `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`
+> still passes — while the same run banks three of the four entries. The two
+> things are independent, and the reason is the one this section already gives:
+> the guard's state needs a worker result delivered *between two rounds of one
+> `advance()` cascade*, and `claim::drive` runs that cascade to a fixed point
+> inside one transaction under **either** discipline. Batching results changes
+> what `advance()` is handed at the START of a cascade, not what it sees in the
+> middle of one. The shared entries are a coincidence of which corpus flows have
+> observable sibling order, not a shared mechanism.
+
+### One result per transaction is a ruling — W4 Task 4
+
+W3b handed W4 the question in *What this ratchet does not prove*, item 5. **The
+answer is that the discipline stays**, and the ruling was written down with its
+justification before the ratchet was run under the alternative.
+
+#### "One run per tick" is the wrong name for it
+
+`worker::tick` claims `n` runs and finishes `n`. What is one-at-a-time is the
+*transaction*: `apply_outcome` takes one handler result, drives `advance()` to a
+fixed point and commits. The two halves are separable and were measured
+separately, which is the first finding — the constant everybody points at is not
+the lever.
+
+| configuration | `executor_matches_golden` |
+|---|---|
+| shipping — `driver::BATCH = 1`, one result per transaction | 143 mismatching |
+| `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
+| `BATCH = 1`, a whole batch per transaction | 143 mismatching; whole crate green but for the guard below |
+| `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
+
+`BATCH` buys nothing on its own because `worker::claim` orders by
+`created_at, execution_id, run_ix` (W3b Task 7's fix), which makes a batch of `n`
+indistinguishable from `n` successive claims of 1, and because the
+happens-before endpoints are `executions.seq`, bumped once per `settle`. The
+entries are bought by applying several results **before** `advance()` is called
+at all.
+
+`valids/if` is the one of the four that does not bank even then; it still differs
+on `order` alone, and nothing here explains why. Its `Parallel` is the corpus's
+only `concurrent: 4` (`every_corpus_concurrent_is_a_literal_integer` derives the
+whole population as `valids/full=3`, `valids/if=4`), so a cap that throttles the
+batch is the obvious suspect — **stated as a suspect, not measured.**
+
+#### The step it costs, on one flow, both ways
+
+Two `Sequential` branches of one `Parallel` — `valids/parallel-disabled-tasks`'s
+shape. One tick finishes `task1` and `task3`.
+
+| | `ended(task1)` | `created(task2)` | `ended(task3)` |
+|---|---|---|---|
+| shipping | 8 | 9 | 11 |
+| a batch per transaction | 8 | 9 | **8** |
+
+The widened row is Kestra's shape exactly: both siblings on one step, both
+successors on the next. `tests/worker.rs`'s
+`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+asserts the shipping row, and **it is the only test in the crate that can tell
+the two disciplines apart** — measured: under the widened prototype at
+`BATCH = 1`, it is the only failure in the crate and every one of the other
+**707** tests passes, `executor.rs` included (589 lib + 34 executor + 10 oracle
++ 13 publish + 10 repo + 17 routes + 8 sql_starrocks_live + 27 worker = 708,
+less this one). Before this task the ruling had no instrument at all.
+
+#### Why it was refused, and it is not the number
+
+Four costs, all measured on the prototype rather than argued:
+
+1. **A batch is one transaction, so one `WorkerError::LeaseLost` discards every
+   result in it.** Paired run, six rounds, a `Parallel` of two leaves and a
+   registry that reaps every lease from inside the second handler — everything
+   identical but the discipline:
+
+   | | one result per transaction | a batch per transaction |
+   |---|---|---|
+   | handler call log | `a, b, b, b, b, b, b` | `a, b, a, b, a, b, a, b, a, b, a, b` |
+   | `a` after round 1 | `SUCCESS` | `RUNNING` — discarded |
+   | leases reaped per round | 1 | 2 |
+   | progress in six rounds | `a` banked | **none** |
+
+   `a`'s handler is re-run every round for a reason that concerned `b`.
+2. **`working_timeout_s` stops meaning what it says.** A run's lease is held for
+   `input_for` plus its own handler today; batched, for the sum over the batch.
+   The reaper still reclaims exactly what the timeout says — durability property
+   3 survives — but the quantity it bounds changes from one handler to a whole
+   batch, and the operator setting it cannot know the batch size.
+3. **It is the coupling `tick`'s own doc refused once already** — *"One run's
+   failure does not strand the rest of the batch … the first draft did exactly
+   that with `?`"* — this time inside the transaction, where an early return
+   cannot be softened into "carry on with the next one".
+4. **The fence surface grows from one row per transaction to `n`**, and
+   `persist`'s four-mutation table proving the two fences are alternatives was
+   taken against the one-row shape. Measured: under the prototype,
+   `a_worker_whose_lease_was_reaped_cannot_commit` and
+   `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
+   **unchanged**, because both drive `apply_outcome` with a single `Claimed`.
+   Two greens that would say nothing about the shipped path.
+
+Against that, the four entries differ on the happens-before relation alone —
+every run, attempt and execution state already matches. Buying them by changing
+what a lease means is the trade W3b refused when reversing the claim's tiebreak
+also banked `valids/dag`, and the reason is the same: **choosing the shape of the
+runner by what it banks is how an oracle gets tuned to its own answer.** The
+ruling and these four costs were written down before the 140 was known; the
+number is reported as measured and did not change them.
+
+#### What would reopen it
+
+A design in which a batch's results are applied together **without sharing a
+failure** — a savepoint per run inside the group transaction, so a lost lease
+rolls back one run's writes and not the group's. That removes cost 1 and shrinks
+cost 3; costs 2 and 4 remain and would need their own mutation tables. It is a
+different piece of work from widening the tick.
 
 ### The happens-before endpoints are a logical clock now, and they had to be
 
@@ -5669,17 +5792,16 @@ by construction: a re-run that reaches the same terminal state produces an
 **identical trace**, so the only place a duplicate execution is visible is the
 handler's call log. A green ratchet is compatible with running every task twice.
 
-**5. One run per tick is a ruling, not an accident.** Four entries —
-`valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`, `valids/full` —
-reproduce every run, attempt and execution state Kestra recorded and differ on
-the **happens-before relation alone**. This driver finishes one task run per tick
-and creates that run's successors in the same transaction, where Kestra's worker
-pool finished two siblings before either successor existed. Closing it means
-applying several results before calling `advance()`, which changes the
-transaction boundary W3b Task 2 built the durability properties on. **Four
-ordered-pair entries is the wrong price for the durability guarantee**; W4
-introduces a real worker pool and owns the decision. This is also the single
-largest lever left on the ratchet.
+**5. One result per TRANSACTION is a ruling, and W4 Task 4 made it.** Four
+entries — `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`,
+`valids/full` — reproduce every run, attempt and execution state Kestra recorded
+and differ on the **happens-before relation alone**. `worker::apply_outcome`
+applies one handler result, drives `advance()` to a fixed point and commits,
+where Kestra's worker pool finished two siblings before either successor
+existed. See *One result per transaction is a ruling* below for both sides of
+the measurement, the three entries the alternative banks, and the four costs it
+was refused for. It is still the single largest lever left on the ratchet, and
+it is now a decided one rather than an open one.
 
 **6. 84 of the 294 executions end unfinished**, counted and named by
 `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type

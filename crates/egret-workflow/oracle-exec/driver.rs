@@ -90,6 +90,27 @@ pub const STEP_BOUND: usize = 4 * 765;
 /// error: `Registry::run` refusing an unknown type aborts the tick, and with a
 /// batch the runs claimed beside it would keep a lease nothing would ever
 /// release.
+///
+/// # W4 Task 4 measured what `BATCH` is worth on its own, and it is nothing
+///
+/// The paragraph above reads as though the batch size were the lever. It is
+/// not. `worker::claim` orders by `created_at, execution_id, run_ix` (W3b Task
+/// 7's fix), which makes a batch of `n` indistinguishable from `n` successive
+/// claims of 1, and the happens-before endpoints are `executions.seq`, bumped
+/// once per `settle`. Measured: **`BATCH = 32` with the shipping worker leaves
+/// `executor_matches_golden` at 143 mismatching and the whole crate green.**
+///
+/// The lever is the *worker's* discipline — one handler result per
+/// transaction. `BATCH = 32` with a prototype that applies a whole batch's
+/// results before calling `advance()` banks `valids/dag`, `valids/full` and
+/// `valids/parallel-disabled-tasks` (143 → 140, no regression). W4 Task 4
+/// ruled against it on the durability cost; `worker::tick`'s doc carries the
+/// ruling and the four costs, and
+/// `tests/worker.rs::one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+/// is the instrument. **Neither half moves the ratchet alone** — `BATCH = 1`
+/// with the widened worker is also 143 — so raising this constant without
+/// re-opening that ruling changes nothing, which is the other reason it stays
+/// at 1.
 const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`

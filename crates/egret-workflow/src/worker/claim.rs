@@ -463,6 +463,72 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// It is `n` executions rather than an unbounded sweep, for the claim's
 /// reason: a tick is the unit of work a caller asked for.
 ///
+/// # One result per TRANSACTION — W4 Task 4's ruling, and what it costs
+///
+/// The loop above hands one result at a time to [`apply_outcome`], which opens
+/// its own transaction, applies that one terminal, drives `advance()` to a
+/// fixed point and commits. W3b left the question of whether it should stay
+/// that way to W4, on the grounds that W4 introduces a real worker pool. **It
+/// stays.**
+///
+/// **"One run per tick" is the wrong name for the discipline and this loop is
+/// the proof**: the tick claims `n` and finishes `n`. The discipline is one
+/// result per transaction, and `tests/worker.rs`'s
+/// `one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+/// finishes two runs in one tick while asserting it. The two halves are
+/// independently measurable and were measured separately:
+///
+/// | configuration | `executor_matches_golden` |
+/// |---|---|
+/// | shipping (`driver::BATCH = 1`, one result per transaction) | 143 mismatching |
+/// | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
+/// | `BATCH = 1`, a whole batch per transaction | 143 mismatching; whole crate green but for this ruling's own test |
+/// | `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
+///
+/// So the batch size buys nothing on its own — the claim orders by
+/// `created_at, execution_id, run_ix`, which makes a batch of `n`
+/// indistinguishable from `n` successive claims of 1 — and the entries are
+/// bought by applying several results **before** calling `advance()`.
+///
+/// **It was refused for what it costs, not for what it banks**, which is the
+/// rule W3b applied when reversing the claim's tiebreak also banked
+/// `valids/dag`: choosing the shape of the runner by what it banks is how an
+/// oracle gets tuned to its own answer. The costs, measured on a prototype:
+///
+/// 1. **A batch is one transaction, so one [`WorkerError::LeaseLost`] discards
+///    every result in it.** Paired run over six rounds on a `Parallel` of two
+///    leaves, with a registry that reaps every lease from inside the second
+///    handler — everything identical but the discipline. One result per
+///    transaction: handler log `a, b, b, b, b, b, b`, `a` `SUCCESS` after round
+///    one. A batch per transaction: `a, b, a, b, a, b, a, b, a, b, a, b`, `a`
+///    still `RUNNING`, **no progress at all in six rounds** — `a`'s handler
+///    re-run every round for a reason that concerned `b`.
+/// 2. **`working_timeout_s` stops meaning what it says.** Today a run's lease
+///    is held for `input_for` plus its own handler. Batched, it is held for the
+///    sum over the batch, so the reaper's timeout bounds a whole batch rather
+///    than one handler and the operator who sets it cannot know the batch size.
+/// 3. **It is the coupling this doc's own *One run's failure does not strand
+///    the rest of the batch* already refused once** — this time inside the
+///    transaction, where an early return cannot be softened into "carry on".
+/// 4. **The fence surface grows from one row per transaction to `n`**, and the
+///    four-mutation table in [`persist`] that proves the two fences are
+///    alternatives was taken against the one-row shape. Measured: under the
+///    widened prototype, `a_worker_whose_lease_was_reaped_cannot_commit` and
+///    `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
+///    **unchanged**, because both drive [`apply_outcome`] with a single
+///    `Claimed` — two greens that would say nothing about the shipped path.
+///
+/// **W3a's deleted guard did NOT come back, and that was measured rather than
+/// predicted.** W3a removed `resolveParallelNexts`'s "return nothing while any
+/// child is still `CREATED`" and named the trigger that would restore it as *"a
+/// caller that applies a batch partially — W4's worker"*, on the same three
+/// entries. [`CREATE_BESIDE_A_CREATED_SIBLING`] is **0** under the widened
+/// prototype exactly as it is today: the guard's state needs a worker result
+/// delivered *between two rounds of one `advance()` cascade*, and [`drive`]
+/// runs that cascade to a fixed point inside one transaction under either
+/// ruling. The overlap of entries is a coincidence of which flows have
+/// observable sibling order, not a shared mechanism.
+///
 /// Returns the number of runs whose result committed. **A tick that only woke
 /// something returns 0**, and that is deliberate — the count means "results
 /// committed", not "work done", and a caller that looped until zero would
