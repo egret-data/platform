@@ -124,6 +124,18 @@ This is the package's deliverable. The harness's four tiers go; the driver repla
 
 - [ ] **Step 1: Record the before state** — ratchet, the fed-terminal split, the ordered-pair split, and the circular region as W3a's README derives them. Every one of these should move, and the ones that do not are as interesting as the ones that do.
 - [ ] **Step 2: Expect the deleted guard back.** W3a's Task 4 deleted Kestra's "first created, leave" guard as unreachable and named its trigger: *"a caller that applies a batch partially — W4's worker."* That caller is now yours, and it was measured to fire on `valids/dag`, `valids/if` and `valids/parallel-disabled-tasks`. If it does not fire, find out why before assuming it is gone.
+**Two corrections from Task 3 that this task must not inherit wrong.**
+
+- **"No output" is `{}`, not an absent key.** I wrote the opposite into Task 3's
+  brief and labelled it load-bearing for exactly this step. Measured on the
+  artifact: `{{ outputs.a }}` renders `{}` for a `Log`, a `Sleep`, a falsy `Fail`
+  **and** a format-less `Return`; `{{ outputs }}` over two tasks renders
+  `{"a":{},"b":{}}`; `{{ outputs.a.value }}` fails the run in all four. Map "no
+  output" to `{}` and never omit the key.
+- **Nothing persists `Outcome::outputs` yet** — there is no `task_runs.outputs`
+  column, so Task 3's guard on `Return`'s output dies only to in-process tests.
+  This task needs the column as well as the rule.
+
 - [ ] **Step 3: Attribute every moved entry.** The render surface widens because the driver has `outputs`, so entries baselined for reasons unrelated to durability will move. Each must be attributed to a cause — a handler, the spawner, or the render surface. An entry that banks for an unattributed reason is not a bank, it is a coincidence.
 - [ ] **Step 4: The circular region.** With terminals coming from handlers that ran, re-derive it. If it is now empty, prove that by corrupting a golden terminal and showing the ratchet fails — W3a's first attempt at exactly this demonstration was vacuous because the chosen entry could not match under any value.
 - [ ] **Step 5: Full gate, commit.**
