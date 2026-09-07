@@ -35,6 +35,12 @@ use egret_core::Result;
 /// egret's public task vocabulary is Kestra's FQCN, a short alias, or both is
 /// a spec-level choice and not a handler's to make. [`Handlers::register`]
 /// takes an arbitrary key so that whichever answer wins is one line here.
+///
+/// W3b Task 6 adds the one type where the two halves **do** agree:
+/// [`handlers::sql`] serves `egret.sql`, which is what `TASK_TYPES` already
+/// publishes under and what `publish` already resolves a `database` reference
+/// for. It is the only one of the five that a flow can publish through egret's
+/// own path and then find a handler for.
 #[derive(Default)]
 pub struct Handlers {
     by_type: HashMap<String, Arc<dyn TaskHandler>>,
@@ -58,6 +64,29 @@ impl Handlers {
     }
 
     /// The four W3b implements, each under the FQCN a corpus flow writes.
+    ///
+    /// # `egret.sql` is in NEITHER registry, and that is the answer to Task 5's
+    /// hand-off
+    ///
+    /// Task 5 left the question open: the ratchet's registry is
+    /// `oracle-exec/driver.rs`'s `registry()` and deliberately not this one, so
+    /// a fifth handler had to be added "to both or to neither". **Neither**, and
+    /// it is structural rather than a preference: [`handlers::sql::Sql`] is
+    /// constructed from an `Arc<dyn QueryExecPort>`, and neither constructor has
+    /// one — this function takes no arguments, and the oracle's registry must
+    /// never reach an engine at all, because `egret.sql` appears in **zero**
+    /// corpus flows and a handler the corpus cannot call has nothing to
+    /// contribute to a comparison.
+    ///
+    /// A caller that wants it wires it in one line beside these four:
+    ///
+    /// ```ignore
+    /// let mut reg = Handlers::with_core_tasks();
+    /// reg.add(std::sync::Arc::new(handlers::sql::Sql::new(port)));
+    /// ```
+    ///
+    /// `oracle-exec/README.md`'s coverage statement says the same thing, so a
+    /// green ratchet is not read as covering a handler it never ran.
     pub fn with_core_tasks() -> Self {
         let mut r = Self::new();
         r.add(Arc::new(handlers::log::Log::new()));

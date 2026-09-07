@@ -75,6 +75,18 @@ egret-workspace.workspace = true
 egret-auth.workspace = true
 egret-audit.workspace = true
 
+# W3b Task 6: `worker::handlers::sql` is `egret.sql`, and it is built on
+# `QueryExecPort` -- the LEAF contract crate, never `egret-query`. The programme
+# spec section 6.4 states the rule ("handlers depend on port traits, never on
+# concrete crates, exactly as `egret-dataapi` holds `Arc<dyn QueryExecPort>` and
+# does not know `egret-query`"), and this is that rule applied: the port carries
+# the workspace-scoping obligation, `Param`/`Limits`/`TabularResult` are its
+# vocabulary, and `ExecFailure::kind_of` is how the handler tells an engine
+# failure from egret's own without matching on a message.
+#
+# `egret-query` itself is a DEV-dependency below, for the live test only.
+egret-query-api.workspace = true
+
 # Task 7's `refs.rs`: the real `WorkflowRefPort` implementation resolves
 # `RefKind::DataApiEndpoint`/`RefKind::Notebook` through these two LEAF
 # contract crates (no sqlx/axum, mirroring `egret-automation`'s identical
@@ -209,3 +221,24 @@ egret-test-db.workspace = true
 # `http-body-util` dependency is needed (that crate's own dependency covers it).
 tower.workspace = true
 egret-events.workspace = true
+
+# W3b Task 6: `tests/sql_starrocks_live.rs` ONLY, and it is the whole instrument
+# for `egret.sql` -- that handler reaches ZERO corpus entries, so the execution
+# ratchet says nothing about it and a real engine has to. This mirrors
+# `egret-dataapi`'s `serving_starrocks_live.rs` exactly, including the reason it
+# is dev-only: the library must never depend on `egret-query`, because the whole
+# point of `QueryExecPort` is that the seam can move to another binary. A
+# dev-only edge does not link into the library and cannot be reached from
+# `src/`, and there is no cycle -- `egret-query` does not depend on this crate.
+egret-query.workspace = true
+# What `EngineState` needs to exist at all: an object store (inert here -- this
+# path never materialises a result set), the secret stores a `DatabaseRepo`
+# opens a connection's credentials through, and the engine-token minter the
+# delegation branch would resolve through (refused, so the branch being taken is
+# a failure rather than a silent mint).
+egret-storage.workspace = true
+egret-secrets.workspace = true
+egret-analytics-api.workspace = true
+# `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
+# suite parses it.
+url.workspace = true

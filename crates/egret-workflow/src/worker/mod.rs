@@ -123,6 +123,38 @@ pub struct TaskInput {
     /// ancestors' included), and this run's `taskrun`. See that module for what
     /// each name is and what is deliberately still missing.
     pub render: RenderContext,
+    /// The identity this execution acts as, and `None` when it has none.
+    ///
+    /// A workflow runs with nobody logged in, so a handler that reaches an
+    /// egret object on the execution's behalf has to name somebody. Four of the
+    /// five handlers never do — a `Log`, a `Return`, a `Fail` and a `Sleep`
+    /// touch nothing outside the execution — and [`handlers::sql`] is the first
+    /// that does.
+    ///
+    /// **The rule is `egret-automation`'s, followed rather than re-derived.** An
+    /// alert runs as its *owner*, and an owner whose credentials cannot be
+    /// resolved makes the run fail rather than fall back to the service account
+    /// (`evaluator.rs`'s `the_token_is_minted_for_the_owner_and_nobody_else`
+    /// and `an_owner_with_no_mintable_token_fails_instead_of_falling_back`).
+    /// Falling back is the escalation, and it looks exactly like a flow that
+    /// kept working.
+    ///
+    /// **Today this is `workflow.flows.created_by`**, read by [`claim`] through
+    /// the execution's `flow_id`, and that is a stand-in with two known holes,
+    /// both stated rather than discovered later:
+    ///
+    /// * it is the flow's *creator*, not a `run_as` anybody chose, and it is
+    ///   `ON DELETE SET NULL`, so deactivating the author silently turns every
+    ///   `egret.sql` in their flows into a refusal (loud, but not obviously
+    ///   about the user record);
+    /// * an execution with no `flow_id` — an ad-hoc run, or one whose flow was
+    ///   deleted — has no owner at all and therefore cannot run an `egret.sql`.
+    ///
+    /// The fix is a `run_as` on `workflow.executions`, chosen when the execution
+    /// is started; W6 (triggers) is the package that has to decide what a
+    /// scheduled run acts as, so it is left to own that column rather than
+    /// guessed at here.
+    pub principal: Option<egret_core::UserId>,
 }
 
 /// What a handler produces.

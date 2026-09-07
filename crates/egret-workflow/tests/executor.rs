@@ -508,12 +508,167 @@ fn corpus_inputs(corpus_id: &str) -> serde_json::Value {
 /// LOCKED`), so a leftover execution from an earlier process would be claimed
 /// by this one's ticks and would consume its steps. `workflow.executions` is
 /// written by nothing but the worker and these tests — checked, not assumed.
+///
+/// # The `TRUNCATE`, and the ruling about it (W3b Task 6)
+///
+/// The plan ruled that this statement "truncates `workflow.executions` in the
+/// shared `egret_test` database" and had to be scoped or given a private
+/// database. **Measured, that premise is false**: `common::db()` goes through
+/// `egret_test_db::url()`, which does not hand back `DATABASE_URL`'s database at
+/// all — it clones a migrated template into `egret_t_<pid as 32 hex>`, one per
+/// test *process*, and drops it on exit. A probe printed
+/// `DATABASE_URL=…/egret_test  current_database()=egret_t_000000000000000000000000000185c6`.
+/// So the private database the ruling asked for is already taken, and has been
+/// since before Task 5; the destructive statement never reaches `egret_test`.
+///
+/// What Task 6 changed is that this is now **structural rather than
+/// incidental**. [`is_process_clone`] is checked immediately before the
+/// `TRUNCATE`, so the statement cannot run against anything but this process's
+/// own clone even if a future edit points `common::db()` somewhere else — which
+/// is the change that would otherwise reintroduce exactly the destruction the
+/// ruling was written about.
+/// **`egret.sql` reaches zero corpus entries, derived rather than quoted.**
+///
+/// The spec (§3.1) says the programme spec's handler list — `core.log`,
+/// `egret.sql` — predates the corpus, and that `egret.sql` has no oracle
+/// coverage at all. That is the sentence a green ratchet must not be read
+/// against, so it is a **measurement** here rather than a claim in a README:
+/// Kestra has no `egret.*` task type, so no golden entry can name one, and no
+/// entry this file compares can ever exercise `worker::handlers::sql`.
+///
+/// **The `Log` count is the positive control**, and it is the whole reason this
+/// test is worth anything. A zero is only a measurement if the instrument can
+/// move: a scanner that parsed nothing — a changed file layout, a `type:`
+/// spelling this walk does not recognise — would report zero `egret.*` flows and
+/// look exactly like the truth. It cannot also report 106 flows naming a type it
+/// failed to parse.
+///
+/// The control number is **108**, not the 106 a first derivation gave: two
+/// flows write the type as a list item (`- type: io.kestra.plugin.core.log.Log`,
+/// in `invalids/invalid` and `invalids/system-labels`) and a first scanner that
+/// required `type:` to begin its line missed both. The scanner below strips a
+/// leading `- ` for that reason, and the discrepancy is recorded rather than
+/// silently corrected because it is the exact failure this control exists to
+/// catch — a scanner that under-reads looks like a true zero.
+///
+/// Totals asserted beside the parts, both populations.
+#[test]
+fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
+    fn task_types(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim().trim_start_matches("- ").trim();
+                let v = t.strip_prefix("type:")?.trim();
+                Some(v.trim_matches(|c| c == '"' || c == '\'').to_string())
+            })
+            .collect()
+    }
+
+    let corpus: Vec<CorpusEntry> = corpus();
+    let mut corpus_total = 0usize;
+    let (mut corpus_egret, mut corpus_log) = (0usize, 0usize);
+    for entry in &corpus {
+        corpus_total += 1;
+        let types = task_types(&corpus_source(&entry.id));
+        if types.iter().any(|t| t.starts_with("egret.")) {
+            corpus_egret += 1;
+        }
+        if types.iter().any(|t| t == "io.kestra.plugin.core.log.Log") {
+            corpus_log += 1;
+        }
+    }
+
+    let mut golden_total = 0usize;
+    let (mut golden_egret, mut golden_log) = (0usize, 0usize);
+    for entry in golden() {
+        golden_total += 1;
+        let types = task_types(&corpus_source(&entry.id));
+        if types.iter().any(|t| t.starts_with("egret.")) {
+            golden_egret += 1;
+        }
+        if types.iter().any(|t| t == "io.kestra.plugin.core.log.Log") {
+            golden_log += 1;
+        }
+    }
+
+    assert_eq!(
+        (corpus_total, corpus_egret, corpus_log),
+        (345, 0, 108),
+        "every corpus flow, how many name an `egret.*` task type, and the control: \
+         how many name `core.log.Log`"
+    );
+    assert_eq!(
+        (golden_total, golden_egret, golden_log),
+        (294, 0, 97),
+        "the same three over the population this file actually compares. The middle \
+         number is what `oracle-exec/README.md`'s coverage statement rests on: the \
+         ratchet being green says NOTHING about `worker::handlers::sql`, whose only \
+         instruments are `tests/sql_starrocks_live.rs` and its own unit tests"
+    );
+}
+
+/// Is `name` a database `egret-test-db` created for one test process?
+///
+/// The rule is that crate's `CLONE_PATTERN`, restated where the destructive
+/// statement is: the literal prefix `egret_t_` and **exactly** 32 hex digits.
+/// Anchored on both ends on purpose — `LIKE 'egret_t_%'` is what once dropped
+/// the shared `egret_test` in this repo, because `_` is a single-character
+/// wildcard in `LIKE` and the pattern matches the very database it was written
+/// to protect.
+fn is_process_clone(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("egret_t_") else {
+        return false;
+    };
+    rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The guard above, driven in **both** directions.
+///
+/// It exists because a guard nobody has seen fail is a guard nobody has seen:
+/// `is_process_clone` is checked against a database that is always a clone
+/// today, so on the live path it can only ever return `true`, and a mutation
+/// that made it return `true` unconditionally would change nothing anybody
+/// could observe. Here it is fed the names that must be refused, `egret_test`
+/// first — the shared database the ruling is about, and the one an earlier
+/// helper in this repo actually dropped.
+#[test]
+fn the_truncate_is_confined_to_this_process_own_clone() {
+    assert!(
+        is_process_clone("egret_t_000000000000000000000000000185c6"),
+        "the measured shape of a real clone, taken from a probe rather than \
+         from the pattern"
+    );
+    for refused in [
+        "egret_test",
+        "egret",
+        "egret_t_",
+        "egret_t_0",
+        "egret_t_000000000000000000000000000185c",
+        "egret_t_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "xegret_t_000000000000000000000000000185c6",
+    ] {
+        assert!(
+            !is_process_clone(refused),
+            "{refused:?} is not this process's clone and must not be TRUNCATEd"
+        );
+    }
+}
+
 async fn egret_side() -> &'static Side {
     static SIDE: tokio::sync::OnceCell<Side> = tokio::sync::OnceCell::const_new();
     SIDE.get_or_init(|| async {
         let db = common::db()
             .await
             .expect("the oracle now drives a REAL executor and needs DATABASE_URL");
+        let here: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&db.pool)
+            .await
+            .expect("read the current database");
+        assert!(
+            is_process_clone(&here),
+            "refusing to TRUNCATE {here:?}: this statement is only ever safe against              THIS PROCESS's own `egret_test_db` clone, which is named `egret_t_` plus              the pid as 32 hex digits and is dropped when the process exits. A shared              database would not flake under a concurrent run — it would lose rows that              run had written."
+        );
         sqlx::query("TRUNCATE workflow.executions CASCADE")
             .execute(&db.pool)
             .await

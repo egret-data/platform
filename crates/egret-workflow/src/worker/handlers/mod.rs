@@ -17,6 +17,11 @@
 //! | `core.execution.Fail` | `VoidOutput` (`Fail.java:118`); throws, **or** returns `null` and succeeds (`:137`) | `None` |
 //! | `core.flow.Sleep` | `VoidOutput` (`Sleep.java:47`); returns `null` (`:62`) | `None` |
 //!
+//! The fifth handler, [`sql`], is **not** in that table and could not be: it is
+//! `egret.sql`, egret's own type, which Kestra has no counterpart for and which
+//! reaches zero corpus entries. Its shapes are decided rather than measured, and
+//! its module doc says which and why.
+//!
 //! `VoidOutput` is an empty class (`VoidOutput.java:3`) and none of the three
 //! ever instantiates it. What an *expression* sees for such a task is not
 //! nothing, though — it is `{}` — and that measurement lives on
@@ -38,6 +43,7 @@ pub mod fail;
 pub mod log;
 pub mod ret;
 pub mod sleep;
+pub mod sql;
 
 use std::sync::Arc;
 
@@ -152,6 +158,11 @@ pub(crate) mod testing {
             attempt: 1,
             spec,
             render: crate::runners::RenderContext::new(),
+            // `None`, and that is right for the four handlers that share this
+            // helper: not one of them reaches an egret object, so an identity
+            // they cannot use must not be there to be quietly relied on.
+            // `handlers::sql` builds its own input for that reason.
+            principal: None,
         }
     }
 }

@@ -75,6 +75,15 @@ pub struct Claimed {
     /// (`TaskKind::Runnable` holds a `type_id` and nothing else), and a second
     /// read would be a second chance for the row to have changed.
     pub source: String,
+    /// The identity this execution acts as — the flow's owner, or `None`.
+    ///
+    /// Read in the same statement as everything else, for the reason above, and
+    /// through a LEFT JOIN because `executions.flow_id` is nullable
+    /// (`ON DELETE SET NULL`, so the record of what a deleted flow did survives
+    /// it) and `flows.created_by` is nullable in its turn. Both absences answer
+    /// `None`, which is what [`TaskInput::principal`] means and what
+    /// [`super::handlers::sql`] refuses on.
+    pub principal_id: Option<Uuid>,
 }
 
 impl Claimed {
@@ -107,6 +116,7 @@ impl Claimed {
             attempt: self.attempt.max(0) as usize,
             spec,
             render,
+            principal: self.principal_id.map(egret_core::UserId),
         })
     }
 }
@@ -171,8 +181,10 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                       jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
-                t.type_id, t.value, t.attempt, e.source \
-           FROM taken t JOIN workflow.executions e ON e.id = t.execution_id",
+                t.type_id, t.value, t.attempt, e.source, f.created_by AS principal_id \
+           FROM taken t \
+           JOIN workflow.executions e ON e.id = t.execution_id \
+           LEFT JOIN workflow.flows f ON f.id = e.flow_id",
     )
     .bind(limit)
     .fetch_all(exec)

@@ -4458,6 +4458,147 @@ loop sub-executions carry their parent execution's `startDate` and all 220
 multi-sibling groups share one instant, so the instant does not order siblings
 badly, it does not order them at all.
 
+## W3b Task 6 — `egret.sql`, and the coverage this ratchet does NOT give it
+
+**Read this before reading a green ratchet as coverage of the workflow SQL
+task.** It is the one handler egret ships that the oracle cannot say anything
+about, and the whole of Task 6's contribution to this file is making that
+unmissable rather than inferable.
+
+### The measurement
+
+| population | flows naming an `egret.*` task type | flows naming `core.log.Log` (the control) |
+|---|---|---|
+| the whole corpus — 345 flows | **0** | 108 |
+| the golden — 294 entries, i.e. what this oracle compares | **0** | 97 |
+
+Derived on every run by
+`no_corpus_entry_can_exercise_the_egret_sql_handler`, which walks every corpus
+source and asserts both triples whole. Kestra has no `egret.*` type, so this is
+not a gap somebody could close by harvesting more of Kestra's test suite: **no
+Kestra corpus can ever exercise `worker::handlers::sql`.**
+
+**The `Log` column is the point of the table, not decoration.** A zero is only a
+measurement if the instrument can move, and a scanner that parsed nothing would
+report zero `egret.*` flows and look exactly like the truth. It cannot also
+report 108 flows naming a type it failed to parse.
+
+That control also caught its own first version. A scanner requiring `type:` to
+begin its line gave **106**, missing `invalids/invalid` and
+`invalids/system-labels`, which write `- type: io.kestra.plugin.core.log.Log` as
+a list item. Two entries, in the direction that would have made a broken scanner
+look healthy.
+
+### What proves what, kept apart
+
+| claim | instrument |
+|---|---|
+| the state machine reproduces Kestra on 150 of 294 comparable entries | this ratchet |
+| `Log`, `Return`, `Fail`, `Sleep` produce what Kestra's classes produce | this ratchet, plus each handler's own tests |
+| two workers never claim one run; a crash applies nothing; the reaper takes back exactly the expired | `tests/worker.rs` — the ratchet cannot see any of it |
+| **`egret.sql` binds rather than interpolates, scopes to the workspace, and writes the output Postgres holds** | **`tests/sql_starrocks_live.rs` against a real StarRocks, and `worker::handlers::sql`'s own unit tests. Nothing else.** |
+
+`egret.sql` is in **neither** registry, and that is structural rather than an
+oversight — it answers the open question Task 5 handed on ("a fifth handler needs
+adding to both or to neither"). `Handlers::with_core_tasks()` takes no arguments
+and `driver::registry()` must never reach an engine, while `Sql` is constructed
+from an `Arc<dyn QueryExecPort>`. A caller wires it in one line; the oracle never
+does, because a handler no corpus flow can call has nothing to contribute to a
+comparison.
+
+### What the live suite asserts, and why each assertion could not pass against a fake
+
+`deploy/seed-starrocks-workflow.sh` writes five rows into
+`egret_workflow_live.shipments`: `('EU', 40), ('EU', 51), ('US', 6), ('US', 7)`
+and a fifth whose `region` is the literal text `EU' OR '1'='1`.
+
+- **A bound value is data, not SQL.** The statement is
+  `WHERE region = {{ inputs.r }}` and the value is that injection text. Bound, it
+  matches the one row holding it — **1** of 5. Interpolated,
+  `WHERE region = 'EU' OR '1'='1'` matches **all 5**. Both answers are non-zero,
+  so the assertion cannot pass by the statement having been broken, which is the
+  failure an "expect zero rows" version would have had.
+- **The numbers are the engine's.** `EU => 91` is a SUM of two rows; `91` appears
+  nowhere in the flow source, in the test, or in any fixture in this crate, and
+  the `Spy` port the unit tests drive could not invent it. It is deliberately not
+  the `42` `deploy/seed-starrocks-dataapi.sh` writes.
+- **`fetch: NONE` produced `{}` AND the statement still ran.** The second half is
+  what makes the first mean anything: the same `NONE` over a statement naming a
+  column that does not exist fails, and the engine's own words reach the author.
+  A handler that skipped execution for `NONE` would answer `{}` there too.
+- **The port's workspace scoping, exercised rather than trusted.** The same
+  handler and statement against a `database` registered in a *second* workspace
+  is refused, with the first workspace's success as the control — without which a
+  handler that refused everything would pass.
+- **The output is read back out of Postgres**, driven through
+  `worker::start_execution` + `worker::tick` rather than by calling the handler.
+  W3b already paid for this hole once: Task 3's guard on `Return`'s output died
+  only to in-process tests, because `task_runs.outputs` did not exist yet.
+
+The suite self-skips without `EGRET_TEST_STARROCKS_URL`, following the
+convention this repo already has (`EGRET_TEST_TRINO_URL`, `EGRET_TEST_S3_ENDPOINT`),
+because CI has no StarRocks. **A skipped run therefore proves nothing**, and that
+is the honest cost of the trade rather than a footnote.
+
+### Three things `egret.sql` does not have, stated here rather than found later
+
+1. **No cancellation.** `TaskHandler::cancel` **refuses** on this handler rather
+   than answering `Ok(())`: it holds a statement running on a remote engine, and
+   `QueryExecPort` has no cancellation method. Nothing calls `cancel` at all yet
+   (W4 owns the kill path), so adding one to the port would be adding a method
+   ahead of its caller twice over. The refusal is what makes W4 fail loudly at
+   the one place that has to change.
+2. **No `run_as`.** The statement runs as `TaskInput::principal`, which
+   `worker::claim` reads from `workflow.flows.created_by` through
+   `executions.flow_id`. That is the rule `egret-automation` already established
+   for an unattended run — as the owner, and *fail* rather than fall back to the
+   service account — but the column is the flow's *creator*, is
+   `ON DELETE SET NULL`, and is absent entirely for an execution with no
+   `flow_id`. The fix is a `run_as` on `workflow.executions`, and W6 is the
+   package that has to decide what a *scheduled* run acts as.
+3. **No identifier binding.** `ORDER BY ?` is a syntax error on both engines, and
+   this handler has no `| ident` escape hatch, because a flow declares no
+   `allowed` list for one to emit the author's own string from. A dynamic column
+   list belongs in `{% if %}` branches over literal SQL.
+
+### The `TRUNCATE` ruling: the premise was false, and the invariant is now structural
+
+The plan ruled that `egret_side()` "truncates `workflow.executions` in the shared
+`egret_test` database" and had to be scoped or given a private database.
+**Measured, that premise is false.** `common::db()` goes through
+`egret_test_db::url()`, which does not return `DATABASE_URL`'s database at all —
+it clones a migrated template into `egret_t_<pid as 32 hex digits>`, one per test
+*process*, and drops it when the process exits. A probe printed:
+
+```text
+DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+current_database()=egret_t_000000000000000000000000000185c6
+```
+
+So the per-test database the ruling asked for was already taken, and has been
+since before Task 5; the destructive statement never reaches `egret_test`, and a
+concurrent run loses nothing. **Task 5's Concern 4 named a real hazard about the
+wrong database.**
+
+What Task 6 changed is that this is now enforced rather than incidental.
+`is_process_clone` is checked immediately before the `TRUNCATE`, so the statement
+cannot run against anything but this process's own clone even if a future edit
+points `common::db()` somewhere else — which is the change that would otherwise
+reintroduce exactly the destruction the ruling was written about. The predicate
+is anchored on both ends (`egret_t_` plus **exactly** 32 hex digits) because
+`LIKE 'egret_t_%'` is what once dropped `egret_test` in this repo: `_` is a
+single-character wildcard in `LIKE`, so the obvious pattern matches the very
+database it was written to protect. `the_truncate_is_confined_to_this_process_own_clone`
+drives it in both directions, `egret_test` first, because on the live path the
+predicate can only ever answer `true`.
+
+### The ratchet did not move, and that is not evidence of anything
+
+150 of 294, unchanged from Task 5, and it could not have moved: this task added a
+handler zero corpus entries reach. It is recorded because a number that stays
+still for a good reason and a number that stays still because nothing ran look
+identical in a table.
+
 ## What this oracle does not prove
 
 The corpus is Kestra's own test suite, which is a sample of an infinite space.
@@ -4866,6 +5007,12 @@ alternative was used, and where that alternative came from.
 This is the last section on purpose. Everything above is what this oracle
 proves; this is the boundary of it, with the counts published rather than
 described.
+
+**W3b Task 6 added a boundary this section does not carry**: `egret.sql` reaches
+**0** of the 345 corpus flows and **0** of the 294 golden entries, so nothing
+below says anything about it, and its own instruments are named in *W3b Task 6 —
+`egret.sql`, and the coverage this ratchet does NOT give it* above. Task 7 owns
+folding that in when it re-derives this section rather than editing it.
 
 ### The denominators
 

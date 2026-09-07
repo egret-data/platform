@@ -100,6 +100,21 @@ test-dataapi-starrocks:
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
       cargo test -p egret-dataapi --test serving_starrocks_live -- --nocapture
 
+# `egret.sql` end to end against a real StarRocks — the ONLY instrument that handler has.
+#
+# `worker::handlers::sql` reaches ZERO entries of the Kestra execution corpus (measured;
+# `no_corpus_entry_can_exercise_the_egret_sql_handler` derives it on every run), so the
+# execution ratchet says nothing about it and a green ratchet must not be read as coverage.
+# This publishes nothing — it drives the handler, and the shipping worker, against rows
+# StarRocks computed.
+#
+# Opt-in behind `EGRET_TEST_STARROCKS_URL`, same convention and same reason as above.
+# Prereq: `just up` (StarRocks takes ~30-60s to become healthy).
+test-workflow-starrocks:
+    ./deploy/seed-starrocks-workflow.sh
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+      cargo test -p egret-workflow --test sql_starrocks_live -- --nocapture
+
 # Apply migrations against the running Postgres
 migrate:
     cargo run -p egret-bin -- migrate

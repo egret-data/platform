@@ -3659,6 +3659,10 @@ dependencies = [
  "egret-dataapi-api",
  "egret-events",
  "egret-metastore",
+ "egret-query",
+ "egret-query-api",
+ "egret-secrets",
+ "egret-storage",
  "egret-test-db",
  "egret-workflow-api",
  "egret-workspace",
@@ -3681,6 +3685,7 @@ dependencies = [
  "tower",
  "tracing",
  "unicode-normalization",
+ "url",
  "utoipa",
  "uuid",
 ]
