@@ -24,17 +24,41 @@
 //! export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
 //! export EGRET_TEST_STARROCKS_URL=mysql://localhost:9030
 //! cargo test -p egret-workflow --test sql_starrocks_live
+//!
+//! # or, deliberately and visibly, with no engine:
+//! EGRET_ALLOW_ENGINE_SKIP=1 cargo test -p egret-workflow --test sql_starrocks_live
 //! ```
 //!
-//! # It self-skips without the engine, and a skipped run proves nothing
+//! # It FAILS without the engine, and the skip has to be typed
 //!
-//! `DATABASE_URL` is fail-closed workspace-wide; the ENGINE gate is a separate
-//! axis, and CI has no StarRocks, so it follows the existing opt-in-behind-an-
-//! env-var convention (`EGRET_TEST_STARROCKS_URL`, `EGRET_TEST_TRINO_URL`,
-//! `EGRET_TEST_S3_ENDPOINT`). Every assertion below is written so it could not
-//! pass against a fake: the numbers are SUMs StarRocks computed over rows this
-//! file never wrote, and `91`/`13` appear nowhere in the flow source or in any
-//! fixture in this crate.
+//! It used to self-skip, and the whole-branch review measured what that looked
+//! like from outside — the two runs are indistinguishable except by the clock:
+//!
+//! ```text
+//! without EGRET_TEST_STARROCKS_URL:  7 passed; 0 failed; 0 ignored — 0.00s
+//! with    EGRET_TEST_STARROCKS_URL:  7 passed; 0 failed; 0 ignored — 0.88s
+//! ```
+//!
+//! Same counts, same green, nothing `ignored`. So the coverage statement's
+//! *"7 of the 26 tests do not run by default"* was wrong about the observable:
+//! **26 of 26 report `ok` either way**, and the only instrument `egret.sql` has
+//! reports success having asserted nothing. That is the shape
+//! `egret-test-db`'s `skip_verdict` was written against for `DATABASE_URL`, and
+//! the same rule is applied here to the ENGINE axis: a missing engine
+//! **fails**, and skipping requires [`ALLOW_ENGINE_SKIP`] in the invocation, so
+//! the skip and the green that came of it are read together.
+//!
+//! The rule is this task's own, applied to itself: W3b Task 7 wrote *"a missing
+//! `python3` FAILS rather than skips … there is no environment in which
+//! skipping is the right answer"* into `tests/executor.rs` and did not apply it
+//! here, to the suite the coverage statement rests on.
+//!
+//! `DATABASE_URL` is fail-closed workspace-wide and remains a separate axis
+//! with its own variable; [`live`]'s `Err` names which gate was closed, because
+//! the two are different problems. Every assertion below is written so it could
+//! not pass against a fake: the numbers are SUMs StarRocks computed over rows
+//! this file never wrote, and `91`/`13` appear nowhere in the flow source or in
+//! any fixture in this crate.
 
 mod common;
 
@@ -330,8 +354,73 @@ async fn drive(f: &Live, reg: &Handlers, ex: Uuid) -> String {
     panic!("execution {ex} never reached a terminal state");
 }
 
+/// The opt-out, and it has to be **typed into the invocation**.
+///
+/// Deliberately not the same variable as `egret_test_db::ALLOW_SKIP_VAR`: the
+/// metastore and the engine are different axes and a machine may honestly have
+/// one and not the other. Deliberately the same *shape*, because that variable
+/// exists for exactly this failure and the reasoning is written out there.
+pub const ALLOW_ENGINE_SKIP: &str = "EGRET_ALLOW_ENGINE_SKIP";
+
+/// What a run with no engine should do, as a pure function of the two facts
+/// that decide it.
+///
+/// Pure for `egret_test_db::skip_verdict`'s reason: `std::env::set_var` is
+/// `unsafe` and racy beside the `dotenvy` reads other threads are doing, so a
+/// test that flipped the real variable would be a worse test than no test.
+/// This one is driven directly, in both directions, by
+/// [`the_engine_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed`].
+///
+/// `Ok(())` means "skip quietly, the operator asked for it"; `Err` carries the
+/// message the caller panics with.
+fn engine_verdict(has_engine_url: bool, allow_skip: bool) -> Result<(), String> {
+    if has_engine_url {
+        return Ok(());
+    }
+    if allow_skip {
+        return Ok(());
+    }
+    Err(format!(
+        "EGRET_TEST_STARROCKS_URL is not set, so there is no engine to run \
+         `egret.sql` against.\n\
+         \n\
+         This used to SKIP — and a skipped test reports `ok` while asserting \
+         nothing, so the only way to tell a real pass from an empty one was the \
+         duration: 7 passed / 0 failed / 0 ignored in 0.00s against 7 passed / 0 \
+         failed / 0 ignored in 0.88s. This file is the ONLY instrument \
+         `worker::handlers::sql` has — the differential oracle reaches zero \
+         corpus entries for it and can never reach one — so an empty green here \
+         is the whole of that handler's evidence.\n\
+         \n\
+         Pick one:\n\
+         \n\
+         \x20 1. Run against an engine:\n\
+         \x20      just up\n\
+         \x20      ./deploy/seed-starrocks-workflow.sh\n\
+         \x20      export EGRET_TEST_STARROCKS_URL=mysql://localhost:9030\n\
+         \n\
+         \x20 2. Deliberately skip it, visibly, in the invocation:\n\
+         \x20      {ALLOW_ENGINE_SKIP}=1 cargo test -p egret-workflow --test sql_starrocks_live"
+    ))
+}
+
+/// The gate, applied. Panics unless there is an engine or somebody typed the
+/// opt-out.
+fn engine_gate() {
+    if let Err(msg) = engine_verdict(
+        std::env::var_os("EGRET_TEST_STARROCKS_URL").is_some(),
+        std::env::var_os(ALLOW_ENGINE_SKIP).is_some(),
+    ) {
+        panic!("{msg}");
+    }
+}
+
 macro_rules! fixture {
-    () => {
+    () => {{
+        // The engine axis first, and it PANICS: a run with no engine must not
+        // be able to report `ok`. The `DATABASE_URL` axis keeps its own
+        // fail-closed behaviour inside `common::db()`.
+        engine_gate();
         match live().await {
             Ok(f) => f,
             Err(why) => {
@@ -339,7 +428,7 @@ macro_rules! fixture {
                 return;
             }
         }
-    };
+    }};
 }
 
 // ---------------------------------------------------------------------------
@@ -648,5 +737,38 @@ fn the_fetch_spellings_are_the_ones_a_flow_writes() {
         serde_json::from_value::<Fetch>(serde_json::json!("STORE")).is_err(),
         "`STORE` writes a result set to internal storage, which W9 owns; it must \
          be refused rather than silently treated as `NONE`"
+    );
+}
+
+/// **The gate itself, driven in both directions** — and it is the only
+/// assertion in this file that runs without an engine, which is the point.
+///
+/// A gate is a check whose output has to depend on what it checks. The one this
+/// replaced did not: it returned early and libtest printed `ok`, so the
+/// no-engine run and the engine run produced byte-identical summaries. Both
+/// rows below therefore matter — a gate that panicked unconditionally would
+/// pass the first and break every deliberate skip, and one that never panicked
+/// is what shipped.
+#[test]
+fn the_engine_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed() {
+    assert!(
+        engine_verdict(true, false).is_ok(),
+        "an engine is present: run"
+    );
+    assert!(
+        engine_verdict(true, true).is_ok(),
+        "an engine is present and somebody typed the opt-out: still run, \
+         because the opt-out says `I have no engine`, not `do not test`"
+    );
+    assert!(
+        engine_verdict(false, true).is_ok(),
+        "no engine and the opt-out typed into the invocation: skip, visibly"
+    );
+    let msg = engine_verdict(false, false)
+        .expect_err("no engine and nobody asked to skip: this must FAIL, not pass");
+    assert!(
+        msg.contains("EGRET_TEST_STARROCKS_URL") && msg.contains(ALLOW_ENGINE_SKIP),
+        "the message must name the variable that is missing AND the one that \
+         makes a skip legitimate, or the reader is told to do nothing: {msg}"
     );
 }

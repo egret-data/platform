@@ -27,14 +27,19 @@ normalised trace*.
 >   filled rather than empty;
 > - **`Command::SpawnExecution` has an executor** (`worker::spawn`) and this
 >   oracle drives it. Two places still say "nothing executes one until W3b/W6";
-> - **nothing is fed from `golden.json` any more** — 630 run terminals were,
->   575 `Runnable` + 55 `Loop`, and the circular field is gone;
+> - **nothing is fed from `golden.json` any more** — **426** run terminals were
+>   (386 top-level `Runnable` + 40 top-level `Loop`; the 630 this note used to
+>   give counts 204 that were inside sub-executions egret never created and were
+>   therefore never fed), and the circular field is gone;
 > - **"the kept 1104 are the whole of what this oracle asserts about
->   serialisation"** is wrong for the second time. **354** are; the other 750 sit
+>   serialisation"** is wrong for the second time. **357** are; the other 747 sit
 >   on baselined entries and cannot fail, which was as true under W3a as it is
->   now;
+>   now — and the same is true of every other golden field on a baselined entry,
+>   not only of the pairs;
 > - **`egret.sql` ships with no oracle coverage at all** — 0 of 345 corpus flows
->   and 0 of 294 golden entries — and its own suite self-skips without an engine.
+>   and 0 of 294 golden entries — and its own suite **fails** without an engine
+>   now; it used to self-skip and report `7 passed; 0 failed; 0 ignored` in
+>   0.00s, indistinguishable from the run with an engine except by the clock.
 >
 > The coverage statement carries the full list, the derivation of every count,
 > and what a green ratchet still does not prove.
@@ -1152,12 +1157,16 @@ fall in *unplanned*.
 
 **None of those 231 runs is simulated by egret**, which is why the two fed-ish
 descriptions above now carry a split rather than a single count: **189** of the
-565 *fed* and **15** of the 55 *spawner* runs live inside a sub-execution egret
+575 *fed* and **15** of the 55 *spawner* runs live inside a sub-execution egret
 never creates, and for them nothing is fed and nothing is compared. This table
 is a classification of Kestra's runs by egret's plan, not a claim about
 coverage. That was always true of it; Task 6 is the first task large enough to
 make it matter, and the pair `(189, 15)` is asserted so the descriptions stay
-true of every run they cover.
+true of every run they cover. *(The sentence introducing that pair read `189 of
+the 565 fed`; 565 is what Task 6 left the bucket at and the table 23 lines above
+says **575**, which later tasks moved it to. Corrected — and this is exactly the
+shape *The stale twins* is about, one paragraph away from the number that
+contradicts it.)*
 
 **Task 7 moves exactly 10**, `unplanned` 112 → 102 and `fed` 565 → 575, and
 every one of them is the run of a task written inside a **task-level `errors:`**
@@ -1495,8 +1504,12 @@ Two of these are load-bearing:
 
 The table above is **run** histories. `Command::SetExecutionState` carries a
 `RunState` too, so the vocabulary `RunState` actually has to cover is the union
-of both, and that union is **13**, not 12: `RESTARTED` appears 60 times in
-execution histories and **never** in a run history. Going the other way,
+of both, and that union is **13**, not 12: `RESTARTED` appears **12** times in
+`golden.json` execution histories and **never** in a run history. *(This said 60
+until the whole-branch review. 60 is `traces.json`'s count — the raw five-round
+harvest, where every entry appears five times — and `golden.json` is what this
+section is about. A number from the right file's neighbour reads exactly like a
+number from the right file.)* Going the other way,
 `SKIPPED` and `SUBMITTED` appear only in run histories.
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
@@ -3983,7 +3996,10 @@ given a slot past the end of `ALL` is caught by nothing here. That limit is on
 > `150 + 21 = 171` and `21 + 123 = 144`, and the generator asserts both. Task 1's
 > **172** and its eleven named entries are not lost by regenerating: they are in
 > this file's coverage statement, in Task 1's and Task 5's reports, and in this
-> artifact's own git history. What a regeneration must never do is move the
+> artifact's own git history — **not** in the coverage statement, which carries
+> no `172`, no `171` and no `ceiling` at all. That pointer was wrong when it was
+> written, and it is corrected here rather than repaired by adding a number the
+> statement has no use for. What a regeneration must never do is move the
 > ceiling silently, which is why this paragraph exists.
 
 **W3b** is the package that makes `advance()` run for real — a claim loop, a
@@ -4438,8 +4454,11 @@ cause each.
 2. **227 of the 1104 kept ordered pairs were never asserted**, because
    `Trace::restrict_order_to` descends through a `zip` with an empty left side.
    egret now produces **126** pairs inside `spawned`
-   (`the_ordered_pairs_inside_spawned_are_reachable_now`). The golden-side split
-   is unchanged and still asserted at 877 + 227 = 1104.
+   (`the_ordered_pairs_inside_spawned_are_reachable_now`). The golden-side
+   POPULATION is unchanged at 877 + 227 = 1104 — but "asserted" is the word the
+   coverage statement retired: only **357** of those 1104 are pairs a change to
+   which the ratchet can report, because the other 747 live on baselined
+   entries. See *The coverage statement*.
 3. **The oracle was circular for one field** — a `Runnable` run's last state and
    each attempt's last, plus a `Loop` run's terminal. **It is not fed at all any
    more.** `driver::run` takes a flow source and the posted inputs; nothing on
@@ -4628,10 +4647,23 @@ and a fifth whose `region` is the literal text `EU' OR '1'='1`.
   W3b already paid for this hole once: Task 3's guard on `Return`'s output died
   only to in-process tests, because `task_runs.outputs` did not exist yet.
 
-The suite self-skips without `EGRET_TEST_STARROCKS_URL`, following the
-convention this repo already has (`EGRET_TEST_TRINO_URL`, `EGRET_TEST_S3_ENDPOINT`),
-because CI has no StarRocks. **A skipped run therefore proves nothing**, and that
-is the honest cost of the trade rather than a footnote.
+**The suite used to self-skip without `EGRET_TEST_STARROCKS_URL`, and this
+section's account of what that cost was wrong.** It said *"7 of the 26 tests W3b
+Task 6 added do not run by default"*, which is not the observable: measured both
+ways in one command, a run without the engine printed `7 passed; 0 failed;
+0 ignored — 0.00s` and a run with it printed `7 passed; 0 failed; 0 ignored —
+0.88s`. Identical counts, nothing `ignored`; **all 26 report `ok` either way**,
+and only the duration distinguishes an empty green from a real one.
+
+It **fails** now, and a skip has to be typed into the invocation
+(`EGRET_ALLOW_ENGINE_SKIP=1`), which is the rule `egret-test-db` already applies
+to `DATABASE_URL` and the rule W3b Task 7 applied to `python3` in
+`tests/executor.rs` and not here. `just check`, `just test-no-db` and CI carry
+the opt-out explicitly, so a green with no StarRocks says so in the command that
+produced it. `the_engine_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed`
+drives the gate in both directions and is the one assertion in that file that
+runs without an engine — a gate that panicked unconditionally would pass a
+one-direction test and break every deliberate skip.
 
 ### Three things `egret.sql` does not have, stated here rather than found later
 
@@ -5139,7 +5171,11 @@ proves; this is the boundary of it. **W3b Task 7 re-derived every count here on
 this tree** rather than editing the previous statement, because W3b Task 5
 replaced the test harness behind the ratchet with the real driver — a claim loop
 over Postgres, five handlers and a spawner — and the thing being measured
-changed underneath every sentence. Several numbers moved in directions the old
+changed underneath every sentence. **The whole-branch review's fix round
+re-derived them again**, because it banked one more entry (`valids/replay-loop`,
+by giving a sub-execution its parent's `inputs`) and every split below is a
+function of `baseline.txt`. The two flip experiments and the two corruption
+experiments were **re-run**, not adjusted. Several numbers moved in directions the old
 wording did not allow for, and one of them (the ordered pairs) had already been
 found over-claiming by 227 once.
 
@@ -5230,17 +5266,17 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **150** |
-| baselined — egret does not reproduce it yet | **144** |
+| matching | **151** |
+| baselined — egret does not reproduce it yet | **143** |
 
 ```text
-  matching  150 = 127 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 144 = 139 of the 266 `runs` +  5 of the 28 `refused`
+  matching  151 = 128 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 143 = 138 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-144 is simultaneously the mismatching count, the size of `baseline.txt` and the
+143 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
 
@@ -5260,6 +5296,16 @@ banked are sub-executions the driver actually runs. A number that stays still
 because two events cancelled looks identical, in a table, to a number that stayed
 still because nothing ran.
 
+**150 → 151 at the review's fix round**, and that one is a single event:
+`valids/replay-loop`. `worker::spawn`'s INSERT did not name `executions.inputs`,
+so a sub-execution got migration 0136's `DEFAULT '{}'` and a loop body reading
+`{{ inputs.… }}` rendered against nothing. Task 4 wrote the INSERT and Task 5
+added the column — a seam, and the shape this file keeps finding. It also moves
+`valids/finally-loop` and `valids/finally-loop-parallel` out of *differs on more*
+into *differs only inside `spawned`*; those two are the entries whose loop body
+branches on `{{ inputs.failed == false }}` with `true` posted, i.e. the ones that
+name the defect. They stay baselined for `finally:`.
+
 ### The ordered pairs: **kept is not asserted**
 
 ```text
@@ -5267,12 +5313,12 @@ still because nothing ran.
     at the top level                                       877
     inside `spawned`                                       227
 
-  a change to which the ratchet REPORTS                    354
+  a change to which the ratchet REPORTS                    357
     at the top level                                       255
-    inside `spawned`                                        99
-  a change to which it does NOT                            750
+    inside `spawned`                                       102
+  a change to which it does NOT                            747
     at the top level                                       622
-    inside `spawned`                                       128
+    inside `spawned`                                       125
   ----------------------------------------------------------
   TOTAL                                                   1104
 ```
@@ -5299,14 +5345,35 @@ verifying its md5 (`5773748d22d521e6a65afc5e2e2663d1`) after every run:
 
 | flipped | pairs | entries | the ratchet |
 |---|---|---|---|
-| every **nested** pair — W3a's own experiment | 227 | 18 | **FAILS**: 150 mismatching, **6 REGRESSIONs** |
-| every pair on a **baselined** entry | 750 | 91 | green: 144 mismatching, 0 banked |
-| every pair on a **matching** entry | 354 | 40 | **FAILS**: 184 mismatching, **40 REGRESSIONs** |
+| every **nested** pair — W3a's own experiment | 227 | 18 | **FAILS**: 150 mismatching, **7 REGRESSIONs** |
+| every pair on a **baselined** entry | 747 | 90 | green: 143 mismatching, 0 banked |
+| every pair on a **matching** entry | 357 | 41 | **FAILS**: 184 mismatching, **41 REGRESSIONs** |
 
 The first row is the one to read against W3a's, which recorded that flipping all
-227 left this crate **green**. The second is the honest half: three quarters of
-the kept pairs still cannot fail, and the way to make one of them fail is to bank
-its entry.
+227 left this crate **green**. The second is the honest half: two thirds of the
+kept pairs still cannot fail, and the way to make one of them fail is to bank its
+entry.
+
+**And the un-falsifiability is not a fact about ordered pairs.** It is a fact
+about a baselined ENTRY, and it therefore holds of every golden field on it:
+`executor_matches_golden` reports a non-baselined mismatch or a baselined match
+and nothing else, so a change to any field of a baselined entry leaves the
+ratchet saying exactly what it said before. The pairs are simply the family
+somebody measured. The same split over the other families, derived by
+`the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs`:
+
+| family | on a baselined entry, i.e. un-falsifiable | total |
+|---|---|---|
+| run terminals | **461** | 840 |
+| run-history state tokens | **1807** | 3355 |
+| execution-history state tokens | **751** | 1462 |
+| executions (266 entries + their 142 sub-executions) | **191** | 408 |
+| sub-executions | **53** | 142 |
+| kept ordered pairs | **747** | 1104 |
+
+The run-terminal row is the same 840 the fed table classifies, so the two
+sections are talking about one set of runs. Nothing here is a *new* weakness —
+it is the same one sentence, applied to the fields nobody had applied it to.
 
 Two smaller facts about the population, unchanged and still derived: **13 pairs
 were dropped** by the harvest (`valids/dag` 1, `valids/if` 9,
@@ -5318,12 +5385,31 @@ top-level pairs only. egret's relation domain is measured at
 included, so dropping a pair is exactly accepting either value Kestra was seen
 to produce.
 
-### The terminal states this oracle feeds: **630 → 0**
+### The terminal states this oracle feeds: **426 → 0**
 
 W3a's harness was **circular for one field**: `golden_outcome` handed egret's
-side the golden's own terminal for every `Runnable` run and every `Loop` run —
-**630** of them, 575 + 55 — so for that field the oracle compared the golden with
-itself.
+side the golden's own terminal for every `Runnable` run and every `Loop` run.
+
+**The numerator is 426 and it used to be written 630, which overstates it by
+204 — by this file's own table.** 630 is `575 fed + 55 spawner`, the whole of
+those two buckets; but the table those buckets come from says in the same row
+that **189** of the 575 and **15** of the 55 live inside a sub-execution egret
+never created, so nothing was supplied to them and nothing was compared about
+them either. A terminal that was never fed cannot be part of the count of fed
+terminals:
+
+```text
+  fed bucket        575  −  189 inside a sub-execution  =  386
+  spawner bucket     55  −   15 inside a sub-execution  =   40
+  --------------------------------------------------------------
+  terminals actually fed                                   426
+```
+
+The removal is real and is not what is being corrected: `golden_outcome` is
+deleted, and the only golden→egret flow left at HEAD is
+`Trace::restrict_order_to`. What 630 did was make the circularity look 48%
+larger than it was. This is history and not a count — the code that produced it
+is gone — which is why it is derived here rather than printed by a test.
 
 **It feeds none.** `oracle-exec/driver.rs` takes a flow source and the posted
 inputs, starts a real execution with `worker::start_execution`, drives it with
@@ -5339,9 +5425,9 @@ Rewriting one run's last state and its last attempt state from `SUCCESS` to
 
 | corrupted | the ratchet |
 |---|---|
-| `valids/sequential`, a top-level `Runnable` run — an entry that **matches** | **FAILS**: 145 mismatching, `valids/sequential` named a REGRESSION |
-| `valids/loop-serial`, a run **inside a sub-execution** — also matching | **FAILS**: 145 mismatching, `valids/loop-serial` named |
-| `valids/purge_logs_no_arguments`, whose task type has **no handler** | green, 144 mismatching — **the control** |
+| `valids/sequential`, a top-level `Runnable` run — an entry that **matches** | **FAILS**: 144 mismatching, `valids/sequential` named a REGRESSION |
+| `valids/loop-serial`, a run **inside a sub-execution** — also matching | **FAILS**: 144 mismatching, `valids/loop-serial` named |
+| `valids/purge_logs_no_arguments`, whose task type has **no handler** | green, 143 mismatching — **the control** |
 
 The third row is the point. **W3a's first attempt at exactly this demonstration
 was vacuous**: it corrupted `valids/minimal2`, whose golden carried a `SUBMITTED`
@@ -5349,7 +5435,11 @@ that `RunState` could not represent, so that entry could not match under *any*
 value and the experiment could not have reported anything. An entry that already
 mismatches gives the same green answer whether the field is fed or not.
 `a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to` is the
-committed version, and it *derives* its control ("a golden whose first run's
+committed version, and **it now carries the nested half too** — the second row
+above was prose here and nothing in the test file, so the claim that a wrong
+value *inside* a sub-execution is caught rested on nobody's assertion. "The
+field is filled" and "a wrong value in it is caught" are exactly the two things
+this package keeps finding apart. It *derives* its control ("a golden whose first run's
 history holds a state `RunState` cannot hold") instead of naming one — W3c added
 `SUBMITTED` to the enum, so the entry W3a picked by name matches today and would
 have made the control vacuous in its turn.
@@ -5360,35 +5450,47 @@ have made the control vacuous in its turn.
   41   golden entries carry a sub-execution
  142   sub-executions they carry between them
 
-  16   of the 41 now MATCH
-   6   agree on everything the parent execution holds and differ INSIDE `spawned`
-  19   differ on something else as well
+  17   of the 41 now MATCH
+   8   agree on everything the parent execution holds and differ INSIDE `spawned`
+  16   differ on something else as well
   ---
   41   TOTAL
 ```
 
 Asserted, total beside the parts, by
-`the_sub_executions_are_compared_and_this_is_what_they_cost`. Beside it:
-**35 entries produce a `spawned` at all**, where every entry produced an empty
-one for the whole of W3a and W3b Tasks 1–4, and egret produces **126** ordered
-pairs inside `spawned` where it produced 0.
+`the_sub_executions_are_compared_and_this_is_what_they_cost`, which also asserts
+the seventeen **by name**, because `baseline.txt`'s header attributes them one by
+one and got two of those attributions wrong. Beside it: **35 entries produce a
+`spawned` at all**, where every entry produced an empty one for the whole of W3a
+and W3b Tasks 1–4, and egret produces **126** ordered pairs inside `spawned`
+where it produced 0.
 
-The six that differ only inside a sub-execution are
-`invalids/loop-switch-failed`, `valids/retry-flowable-parallel` and the four
+The eight that differ only inside a sub-execution are
+`invalids/loop-switch-failed`, `valids/finally-loop`,
+`valids/finally-loop-parallel`, `valids/retry-flowable-parallel` and the four
 `valids/retry-new-execution-*`. **This is a different sentence from the one W3a's
 `39 of the 41 differ on nothing but spawned` made**: that field was empty, and
-these six are filled and wrong somewhere inside.
+these eight are filled and wrong somewhere inside.
+
+**`baseline.txt` said "Fifteen are the sub-execution hole closing" above sixteen
+names, and W3b Task 5's report said "fifteen … and one needed only the render
+surface".** Neither is right, and the fact that settles it is derived: all
+sixteen of Task 5's banked entries carry a `spawned`, and this test names them.
+None banked on the render surface alone. The same paragraph named **four**
+spawner+render entries where Task 5's own table named **five**; the table is
+right — `switch-in-concurrent-loop` renders a `Switch` inside a sub-execution
+exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-144 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+143 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 21 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
+| 20 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 22 | `Subflow` | **unclaimed** |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
@@ -5402,9 +5504,10 @@ exhaustive and named.
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
 | **29** | **none of the above** | named individually in `UNATTRIBUTED` |
 
-**The `Loop` row was 37 and is 21, and the label moved with the number.** It used
-to mean "a sub-execution egret asks for and cannot run"; W3b executes them, so
-what is left is a sub-execution that runs and diverges. No single package owns
+**The `Loop` row was 37, then 21, and is 20; the label moved with the number.**
+It used to mean "a sub-execution egret asks for and cannot run"; W3b executes
+them, so what is left is a sub-execution that runs and diverges. The 21 → 20 is
+`valids/replay-loop`, which the sub-execution `inputs` fix banked. No single package owns
 the residue and four separate causes are named for parts of it — W1's
 `models::Loop` carrying neither `errors:` nor `finally:` (W3b Task 4), W2's
 missing `is json` test (W3b Task 5), `advance()`'s unimplemented third `values:`
@@ -5442,9 +5545,16 @@ says anything about the flow a user writes tomorrow. The ratchet is a regression
 guard, not a bound on behaviour: it fails when a *comparable* entry moves, and a
 flow nobody wrote is comparable to nothing.
 
-**2. Three quarters of the kept ordered pairs cannot fail.** 750 of 1104, shown
-above by flipping every one of them and watching the ratchet stay green. A pair
-becomes assertable when its entry banks, not before.
+**2. Two thirds of the kept ordered pairs cannot fail — and the pairs are not
+special.** 747 of 1104, shown above by flipping every one of them and watching
+the ratchet stay green. A pair becomes assertable when its entry banks, not
+before. **The same holds of every other golden field on a baselined entry**,
+because `executor_matches_golden` reports only a non-baselined mismatch or a
+baselined match: 461 of 840 run terminals, 1807 of 3355 run-history tokens, 751
+of 1462 execution-history tokens, 191 of 408 executions and 53 of 142
+sub-executions are un-falsifiable for exactly the same reason. The statement used
+to carry this sentence about the pairs alone, with no counterpart, which reads as
+though the pairs were the weak family. They are the measured one.
 
 **3. `egret.sql` reaches zero corpus entries and zero golden entries**, and a
 green ratchet says **nothing whatever** about it.
@@ -5463,14 +5573,51 @@ version*: a scanner requiring `type:` to begin its line gave **106**, missing th
 two flows that write `- type: …` as a list item.
 
 What the handler rests on instead is `tests/sql_starrocks_live.rs` against a real
-StarRocks and `worker::handlers::sql`'s own unit tests — **and that suite
-self-skips without `EGRET_TEST_STARROCKS_URL`**, so a run without an engine
-leaves the handler entirely unmeasured while reporting green. 7 of the 26 tests
-W3b Task 6 added do not run by default. See *W3b Task 6 — `egret.sql`, and the
-coverage this ratchet does NOT give it*.
+StarRocks and `worker::handlers::sql`'s own unit tests.
 
-**4. Durability is proved by W3b Task 2's properties, not by this corpus.**
-`tests/worker.rs` owns all four: two concurrent `tick`s never claim the same run;
+**That suite used to self-skip, and this statement was wrong about what that
+looked like.** It said *"7 of the 26 tests W3b Task 6 added do not run by
+default"*, and the whole-branch review measured the observable in one command:
+
+```text
+without EGRET_TEST_STARROCKS_URL:  7 passed; 0 failed; 0 ignored — 0.00s
+with    EGRET_TEST_STARROCKS_URL:  7 passed; 0 failed; 0 ignored — 0.88s
+```
+
+Identical counts, nothing `ignored`, only the duration differing — so **26 of 26
+reported `ok` either way**, and the only instrument this handler has reported
+success having asserted nothing. It **fails** now, and a skip has to be typed
+into the invocation as `EGRET_ALLOW_ENGINE_SKIP=1`, which is the rule
+`egret-test-db`'s `skip_verdict` already applies to `DATABASE_URL` and the rule
+W3b Task 7 applied to `python3` in `tests/executor.rs` — *"there is no
+environment in which skipping is the right answer"* — and did not apply here, to
+the suite this section rests on. `just check`, `just test-no-db` and CI type the
+opt-out, so a green with no engine says so in the command that produced it. The
+gate itself is driven in both directions by
+`the_engine_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed`, which
+is the one assertion in that file that runs without an engine. See *W3b Task 6 —
+`egret.sql`, and the coverage this ratchet does NOT give it*.
+
+**4. Durability is proved by `tests/worker.rs`'s properties, not by this
+corpus.** There are **five**, and the fifth is the whole-branch review's: *a
+worker whose lease was reaped must not be able to commit.* The first four could
+not see it — the reap property reaps a run whose handler never ran, and nothing
+called `apply_outcome` twice with one `Claimed` — and the hole it names needed no
+configuration at all: `reap` clears `claimed_at` and leaves `state = 'RUNNING'`,
+which is the claim predicate, so a run is re-claimable while its first handler is
+still in flight, `DEFAULT_WORKING_TIMEOUT` is an hour, `Handlers::with_core_tasks`
+registers `Sleep`, and `duration: PT2H` opens the window. Nothing calls
+`TaskHandler::cancel`. Measured on the shipped code, two terminals landed on one
+attempt, the second **wiping `ended_seq` from `Some(4)` to NULL** — the column
+migration 0136 exists to hold and the happens-before endpoint this oracle reads —
+and the execution reached `FAILED` while a successor was `RUNNING` and claimable,
+which is the dual of the plan's Global Constraint. `Claimed` now carries
+`claimed_at` as a fencing token, both of `apply_outcome`'s writes carry
+`AND claimed_at = $n`, and **0 rows affected is a `WorkerError::LeaseLost`
+rather than a silent success** — the two are the same value to `execute()`, which
+is how a fence that is written but never read passes everything.
+
+The other four: two concurrent `tick`s never claim the same run;
 a process killed between the handler and the commit leaves nothing half-applied
 (and the run comes back only *through* `reap`, which is what makes the lease a
 live path rather than an unreachable one); `reap` reclaims exactly what
@@ -5494,10 +5641,21 @@ largest lever left on the ratchet.
 
 **6. 84 of the 294 executions end unfinished**, counted and named by
 `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type
-with no handler makes `Registry::run` refuse, the tick abort for that run and the
-execution stall — which is what the shipping worker does, so the driver returns
-the partial trace and only the step bound or a panic is `Broken`. Nothing here
-exercises what `reap` would then do with the leased run in production.
+with no handler — or a task the executor plans **opaque**, so the claim takes it
+and `models::TaskKind` has no leaf for it — makes `Registry::run` or
+`Claimed::input` refuse, the tick abort for that run and the execution stall,
+which is what the shipping worker does. So the driver returns the partial trace,
+and `Broken` is now reserved for the instrument failing: the step bound, a panic,
+or `WorkerError::Corrupt`, which `driver.rs` used to discard along with every
+other worker error under `Err(_) => continue` and can now be reported. Nothing
+here exercises what `reap` would then do with the leased run in production.
+
+**The count used to exclude the case it exists to bound.** The collection ran
+*after* `if actual == expected { continue; }`, so an execution that stalled and
+nevertheless MATCHED — egret doing less than Kestra and agreeing anyway — was
+excluded by construction. It is collected before the `continue` now and the
+intersection is asserted empty; it is empty today, and it was empty
+unfalsifiably before.
 
 **7. Nothing keyed on elapsed time is reachable**, because `driver::pass_time`
 moves the clock only to the next `not_before` something is already waiting for.
@@ -5570,11 +5728,53 @@ So a claim order is a decision about *which of Kestra's serialisations to
 reproduce*, not a neutral tidy-up, and `run_ix` ascending is chosen because it is
 the executor's own creation order rather than because it banks more.
 
-**10. `advance()` is unchanged by the whole of W3b** — `git diff --stat --
-crates/egret-workflow/src/executor/` is empty against the package's base, checked
-with `if [ -z "$(…)" ]` rather than a bare `&& echo CLEAN`. So every W3a
-statement about the state machine still stands as W3a made it; what changed is
-the driver in front of it.
+**10. Over-acceptance has a runtime register now, and it has eleven rows.**
+`STILL_OVER_ACCEPTED` is **publish-only** — flows Kestra refused and egret plans
+— and W3b creates the first *runtime* instances, egret running something Kestra
+did not. Every one of them was named somewhere in this repository and none was
+counted as the class the plan's Global Constraint forbids shipping.
+`runtime_over_acceptance_is_registered_and_owned` derives them from the two
+traces, on three shapes — egret produced more runs, egret produced more
+sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
+`SUCCESS`/`WARNING` — and requires each to be in the register with an owner:
+
+| owner | entries | what egret does that Kestra did not |
+|---|---|---|
+| **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
+| **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. Nothing calls `TaskHandler::cancel` |
+| **W8** (`sla:`, flow `concurrency:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
+| **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
+
+A **stalled** execution is deliberately not in this class: egret doing less than
+Kestra is under-acceptance, which the ratchet already reports as a mismatch and
+item 6 already counts.
+
+**11. A retry with no live sibling never resumes, and `claim.rs` used to say the
+opposite.** Its module doc justified omitting a `not_before` term with *"the
+delay is `advance()`'s to enforce and it already does"*. The first half of that
+paragraph stands — the claim takes only `RUNNING` and a run carrying a
+`not_before` is `RETRYING`, so the term could never fire — but nothing in this
+worker makes the delay elapse. `retry::reopen_due` is `not_before`'s only reader
+and it runs inside a `settle` whose `now` is fixed; `reap` excludes `RETRYING` as
+the claim does; and `resume`, the one entry point that re-reads the clock, has no
+production caller — its only caller is this oracle's `driver::pass_time`, which
+*rewinds* `executions.created_at` because there is no other way to make time
+pass. W4 owns the loop that wakes on a deadline. The sentence is corrected in
+place rather than left reading like a guarantee.
+
+**12. `advance()` is unchanged by the whole of W3b** — and the sentence that
+used to be here overstated it, so it is restated as measured. `git diff --stat
+-- crates/egret-workflow/src/executor/` against the package's base
+(`aa036cf1`) is **not** empty: it is **16 lines in 2 files**, all of them W3b
+Task 3's `pub(super) fn parse_duration` becoming `pub fn` plus the doc comment
+on its re-export, which that task wrote out in full at the re-export because the
+Global Constraint asks for a sentence saying why. There is no semantic change
+and `advance()` itself is byte-identical, which is the claim that matters and
+the one the whole-branch review checked by blob hash at all 17 commits. The fix
+round adds nothing to that directory — `git diff --stat 91205c08 --
+crates/egret-workflow/src/executor/` is empty, checked with `if [ -z "$(…)" ]`
+rather than a bare `&& echo CLEAN`. So every W3a statement about the state
+machine still stands as W3a made it; what changed is the driver in front of it.
 
 ### The stale twins this statement retires
 
@@ -5594,6 +5794,23 @@ must take from here instead:
 | same section, sub-execution bullet | *"`Command::SpawnExecution` is emitted; **nothing executes one until W3b/W6**"* | `worker::spawn` executes it and this oracle drives it. W3b Task 4 annotated both occurrences and deliberately left them for this sweep |
 | header, W3b Task 1 note | *"11 of the 150 … agree only because the harness feeds a terminal"* | the feed is gone; all 11 were lost, with five more the feed was hiding |
 | `runnable.txt`, W3a Task 6 block | *"**0** sub-executions whose TRACE is compared"* | 35 entries produce one; 126 nested pairs |
+
+Four more, found by the whole-branch review's own sweep, and they are of the
+shapes the sweep above did not look for — a number from the neighbouring file, a
+pointer into a section that does not carry the thing pointed at, a paragraph
+contradicted by a table 23 lines above it, and a word this statement had already
+retired being used again in the same branch:
+
+| where | what it says | why it is not current |
+|---|---|---|
+| *The state vocabulary, measured* | *"`RESTARTED` appears **60** times in execution histories"* | **12**, in `golden.json`. 60 is `traces.json`'s five-round count |
+| *W3b Task 1*, the regeneration note | *"Task 1's **172** … are in this file's coverage statement"* | that statement carries no `172`, no `171` and no `ceiling` |
+| *What the oracle feeds in*, last paragraph | *"**189** of the **565** fed"* | the table 23 lines above says **575**; 565 is where Task 6 left the bucket |
+| *W3b Task 5*, hole 2 | *"still asserted at 877 + 227 = 1104"* | **written in this branch**, and by a task whose own statement had just retired "asserted" for that population: **357** are reportable |
+
+And one number this statement itself published wrong: **630** fed terminals,
+where 204 of them are inside sub-executions egret never created and nothing was
+supplied to them. It is **426**, derived above from this file's own table.
 
 #### Pointers that no longer resolve — thirteen, and this is the worse shape
 

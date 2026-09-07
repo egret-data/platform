@@ -156,10 +156,24 @@ pub async fn run(
         // exactly what the shipping worker does — and the driver carries on so
         // that the rest of the execution still produces the trace it produces.
         // With `BATCH == 1` the refusal can only ever concern the run it names.
+        //
+        // **`WorkerError::Corrupt` is the exception, and it used to be swallowed
+        // with everything else.** It means a stored row cannot be read back into
+        // what `advance()` reads — a `task_ix` the plan does not hold, an
+        // `attempts` entry with no `started_at` — which is the DRIVER's own
+        // storage being wrong rather than the flow diverging. That is the class
+        // of the one product defect this package found, and under `Err(_) =>
+        // continue` it could only ever surface as a stalled execution, i.e. as
+        // an ordinary mismatch, and never as `Broken`. `Broken` is the verdict
+        // `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`
+        // asserts at 0.
         match worker::tick(pool, BATCH, reg).await {
             Ok(0) => {}
             Ok(_) => continue,
-            Err(_) => continue,
+            Err(e) => match corrupt(&e) {
+                true => return Ran::Broken(format!("tick: {e}")),
+                false => continue,
+            },
         }
         match pass_time(pool, id).await {
             Ok(true) => continue,
@@ -172,6 +186,23 @@ pub async fn run(
         Ok(t) => Ran::Trace(Box::new(t)),
         Err(e) => Ran::Broken(format!("read_trace: {e}")),
     }
+}
+
+/// Whether a worker error is the storage being wrong rather than the flow
+/// diverging.
+///
+/// Downcast rather than matched on the message: `WorkerError` reaches here
+/// inside `egret_core::Error::Internal(anyhow::Error)`, and `anyhow!` over a
+/// `std::error::Error` preserves the concrete type, so the classification
+/// cannot drift when somebody rewords the `#[error(...)]` string.
+fn corrupt(e: &egret_core::Error) -> bool {
+    let egret_core::Error::Internal(a) = e else {
+        return false;
+    };
+    matches!(
+        a.downcast_ref::<egret_workflow::worker::WorkerError>(),
+        Some(egret_workflow::worker::WorkerError::Corrupt(..))
+    )
 }
 
 /// The harness's tier 4, against a real clock.

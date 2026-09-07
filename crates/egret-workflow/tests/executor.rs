@@ -1451,13 +1451,13 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (255, 99, 354),
+        (255, 102, 357),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION"
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (622, 128, 750),
+        (622, 125, 747),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 750 leaves \
          the ratchet green and unmoved at 144"
@@ -1474,6 +1474,179 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
          other direction"
     );
 }
+
+/// **The baselining argument is not about the ordered pairs; it is about every
+/// field, and this is the counterpart the coverage statement did not have.**
+///
+/// `executor_matches_golden` reports exactly two things about an entry: a
+/// **non-baselined** mismatch (a REGRESSION) and a **baselined** match
+/// (PROGRESS NOT BANKED). So on a baselined entry every golden field is
+/// un-falsifiable in precisely the way
+/// [`kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`]
+/// shows the pairs to be: change it, the entry still mismatches, the ratchet
+/// still says nothing. That statement published *"three quarters of the kept
+/// ordered pairs cannot fail"* and left the reader to assume the pairs were
+/// special. They are not; they are the family somebody happened to measure.
+///
+/// Four families, each derived from `golden.json` and `baseline.txt` alone —
+/// no driver, so this is cheap and cannot drift from the ratchet's population:
+///
+/// - **run terminals**, the last state of every run, sub-executions included —
+///   the population `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
+///   used to classify, and the one the fed count is a share of;
+/// - **run-history tokens**, every state in every one of those runs;
+/// - **sub-executions**, the nodes under `spawned` at any depth;
+/// - **executions**, i.e. the golden `runs` entries plus those sub-executions,
+///   which is the population whose `execution` history is compared;
+/// - **execution-history tokens**, every state in those execution histories.
+///   Kept apart from the run-history family because "history tokens" naming two
+///   different populations is how a number ends up meaning two things.
+///
+/// The total is asserted beside the parts in each, and the split is the same
+/// line the pairs' is: an entry in `baseline.txt` mismatches whatever any of
+/// these says.
+#[test]
+fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
+    #[derive(Default)]
+    struct Counts {
+        terminals: usize,
+        sub_executions: usize,
+        executions: usize,
+        /// Every state in every RUN's history, which is the field family the
+        /// `runs` comparison is made of.
+        history: usize,
+        /// And every state in every EXECUTION's history, which is a different
+        /// family and a different comparison.
+        execution_history: usize,
+    }
+    fn walk(execution: &[String], runs: &[GoldenRun], spawned: &[GoldenSpawned], c: &mut Counts) {
+        c.executions += 1;
+        c.execution_history += execution.len();
+        for r in runs {
+            if !r.state.is_empty() {
+                c.terminals += 1;
+            }
+            c.history += r.state.len();
+        }
+        for sub in spawned {
+            c.sub_executions += 1;
+            walk(&sub.execution, &sub.runs, &sub.spawned, c);
+        }
+    }
+
+    let baseline = baseline();
+    let (mut banked, mut held) = (Counts::default(), Counts::default());
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let c = if baseline.contains(&entry.id) {
+            &mut held
+        } else {
+            &mut banked
+        };
+        walk(&entry.execution, &entry.runs, &entry.spawned, c);
+    }
+
+    println!(
+        "un-falsifiable because their entry is baselined: {} of {} run terminals, \
+         {} of {} sub-executions, {} of {} executions, {} of {} run-history \
+         tokens, {} of {} execution-history tokens",
+        held.terminals,
+        held.terminals + banked.terminals,
+        held.sub_executions,
+        held.sub_executions + banked.sub_executions,
+        held.executions,
+        held.executions + banked.executions,
+        held.history,
+        held.history + banked.history,
+        held.execution_history,
+        held.execution_history + banked.execution_history,
+    );
+
+    assert_eq!(
+        (
+            held.terminals,
+            banked.terminals,
+            held.terminals + banked.terminals
+        ),
+        (
+            TERMINALS_ON_BASELINED_ENTRIES,
+            840 - TERMINALS_ON_BASELINED_ENTRIES,
+            840
+        ),
+        "run terminals. 840 is the same population the fed table classifies, so \
+         the two sections are talking about one set of runs"
+    );
+    assert_eq!(
+        (
+            held.sub_executions,
+            banked.sub_executions,
+            held.sub_executions + banked.sub_executions
+        ),
+        (
+            SUB_EXECUTIONS_ON_BASELINED_ENTRIES,
+            142 - SUB_EXECUTIONS_ON_BASELINED_ENTRIES,
+            142
+        ),
+        "sub-executions, and 142 is the count \
+         `the_sub_executions_are_compared_and_this_is_what_they_cost` derives \
+         from the other direction"
+    );
+    assert_eq!(
+        (
+            held.executions,
+            banked.executions,
+            held.executions + banked.executions
+        ),
+        (
+            EXECUTIONS_ON_BASELINED_ENTRIES,
+            408 - EXECUTIONS_ON_BASELINED_ENTRIES,
+            408
+        ),
+        "executions: the 266 `runs` entries plus the 142 sub-executions they \
+         carry, and the baselined side is the 143 baselined `runs` entries plus \
+         the sub-executions under them"
+    );
+    assert_eq!(
+        (held.history, banked.history, held.history + banked.history),
+        (
+            HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            3355 - HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            3355
+        ),
+        "every state token in every RUN history -- the family the `runs` \
+         comparison is made of"
+    );
+    assert_eq!(
+        (
+            held.execution_history,
+            banked.execution_history,
+            held.execution_history + banked.execution_history
+        ),
+        (
+            EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            1462 - EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES,
+            1462
+        ),
+        "and every state token in every EXECUTION history, which is a different \
+         family with its own comparison -- carried separately so `history \
+         tokens` cannot mean two things"
+    );
+    // The cross-check that stops this from being four numbers nobody joined up:
+    // the executions are the entries plus their sub-executions, both halves of
+    // which are derived elsewhere in this file.
+    assert_eq!(
+        held.executions + banked.executions,
+        266 + 142,
+        "408 = the comparable `runs` entries + the sub-executions they carry"
+    );
+}
+
+/// The counts above, named so the coverage statement and this file cannot
+/// disagree about them.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 461;
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 53;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 191;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1807;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 751;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -1542,8 +1715,8 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
     );
 }
 
-const RESTRICTION_REMOVES: usize = 87;
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 778;
+const RESTRICTION_REMOVES: usize = 80;
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 771;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -1885,6 +2058,61 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
          directions"
     );
 
+    // **The nested half, which was prose in the README and nothing in this
+    // file.** The coverage statement publishes a three-row table whose second
+    // row corrupts a run INSIDE a sub-execution; only the top-level row was
+    // committed, so the half that says the sub-execution traces are compared
+    // rather than merely populated had no instrument. It is a different claim:
+    // `Trace::restrict_order_to` descends into `spawned` and the comparison
+    // does too, but "the field is filled" and "a wrong value in it is caught"
+    // are exactly the two things this package keeps finding apart.
+    let corrupt_nested = |entry: &GoldenEntry| {
+        let mut t = Trace::from(entry);
+        let sub = t
+            .spawned
+            .first_mut()
+            .expect("the entry has a sub-execution");
+        let run = sub.runs.first_mut().expect("the sub-execution has a run");
+        *run.state.last_mut().expect("the run has a history") = "KILLED".to_string();
+        for a in &mut run.attempts {
+            if let Some(last) = a.last_mut() {
+                *last = "KILLED".to_string();
+            }
+        }
+        t
+    };
+    let nested = golden()
+        .into_iter()
+        .find(|e| e.id == "valids/loop-serial")
+        .expect("valids/loop-serial is in the golden");
+    let Outcome::Trace(nested_actual) = evaluate(side, &nested) else {
+        panic!("valids/loop-serial produces a trace");
+    };
+    let mut nested_actual = nested_actual.clone();
+    let nested_expected = Trace::from(&nested);
+    nested_actual.restrict_order_to(&nested_expected);
+    assert_eq!(
+        nested_actual, nested_expected,
+        "the nested experiment needs a matching entry for the same reason the \
+         top-level one does"
+    );
+    assert_eq!(
+        nested_actual.spawned[0].runs[0]
+            .state
+            .last()
+            .map(String::as_str),
+        Some("SUCCESS"),
+        "and the field about to be corrupted is inside a sub-execution egret \
+         RAN, not one it left empty"
+    );
+    assert_ne!(
+        nested_actual,
+        corrupt_nested(&nested),
+        "a corrupted terminal INSIDE a sub-execution must break the entry too. \
+         Under W3a's harness egret's `spawned` was `Vec::new()` unconditionally, \
+         so nothing in there was compared at all"
+    );
+
     // The negative control: an entry for which the same experiment
     // distinguishes nothing, DERIVED rather than named. W3a's vacuous first
     // attempt used `valids/minimal2` because its golden carried `SUBMITTED`,
@@ -1945,6 +2173,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     let mut total = 0usize;
     let mut order_only: Vec<String> = Vec::new();
     let mut unfinished: Vec<String> = Vec::new();
+    let mut matched_while_stalled: Vec<String> = Vec::new();
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let expected = Trace::from(entry);
@@ -1965,7 +2194,27 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
                 continue;
             }
         };
+        // A run left mid-flight is the shape the DRIVER produces where the
+        // harness could not: `Registry::run` refuses a type it has no handler
+        // for, so the execution stalls exactly as the shipping worker would.
+        //
+        // **This is collected BEFORE the `continue`, and that is the whole
+        // point of the count.** It used to sit after it, so an execution that
+        // stalled and nevertheless MATCHED was excluded by construction — which
+        // is exactly the over-acceptance `ENTRIES_LEFT_UNFINISHED` exists to
+        // bound. A count whose population cannot contain the case it is written
+        // about is a check whose output does not depend on what it checks.
+        let stalled = !actual
+            .execution
+            .last()
+            .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()));
+        if stalled {
+            unfinished.push(entry.id.clone());
+        }
         if actual == expected {
+            if stalled {
+                matched_while_stalled.push(entry.id.clone());
+            }
             continue;
         }
         total += 1;
@@ -1979,16 +2228,6 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         spawned += usize::from(s);
         if o && !e && !r && !s {
             order_only.push(entry.id.clone());
-        }
-        // A run left mid-flight is the shape the DRIVER produces where the
-        // harness could not: `Registry::run` refuses a type it has no handler
-        // for, so the execution stalls exactly as the shipping worker would.
-        if !actual
-            .execution
-            .last()
-            .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()))
-        {
-            unfinished.push(entry.id.clone());
         }
     }
 
@@ -2036,6 +2275,15 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
          is the cause, and it is the same one, so the entry belongs with the \
          other three rather than in a list of its own"
     );
+    assert!(
+        matched_while_stalled.is_empty(),
+        "an execution that STALLED and nevertheless matched the golden is the \
+         over-acceptance this count is written about, and it is the one case \
+         the count could not see: the collection used to run after the \
+         `continue`, so a matching entry was excluded by construction. It is \
+         empty today and the intersection is asserted rather than assumed: \
+         {matched_while_stalled:?}"
+    );
     assert_eq!(
         unfinished.len(),
         ENTRIES_LEFT_UNFINISHED,
@@ -2049,11 +2297,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 
 /// The numbers above, as named constants so this report and the task's own
 /// report cannot disagree about them.
-const MISMATCH_ON_EXECUTION: usize = 107;
-const MISMATCH_ON_RUNS: usize = 127;
+const MISMATCH_ON_EXECUTION: usize = 104;
+const MISMATCH_ON_RUNS: usize = 124;
 const MISMATCH_ON_ORDER: usize = 76;
-const MISMATCH_ON_SPAWNED: usize = 21;
-const MISMATCHING_RUNS_ENTRIES: usize = 139;
+const MISMATCH_ON_SPAWNED: usize = 20;
+const MISMATCHING_RUNS_ENTRIES: usize = 138;
 const ENTRIES_LEFT_UNFINISHED: usize = 84;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
@@ -2191,6 +2439,19 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         agree.iter().all(|id| !baseline.contains(id)),
         "an entry that matches must have been banked in this commit: {agree:?}"
     );
+    // **The names, not only the count** — because `baseline.txt`'s header
+    // attributes each of them and got two attributions wrong: it said `Fifteen
+    // are the sub-execution hole closing` above SIXTEEN names, and W3b Task
+    // 5's report said `fifteen … and one needed only the render surface`. The
+    // fact that settles it is this list: every entry that banked at Task 5
+    // carries a `spawned`, so none banked on the render surface alone. Pinning
+    // the names is what stops that prose from drifting again.
+    assert_eq!(
+        agree, SPAWNED_ENTRIES_THAT_MATCH_BY_NAME,
+        "the entries with a `spawned` that match, by name. `baseline.txt`'s \
+         header attributes each of these; a name appearing or leaving here \
+         without that header moving is the drift this list exists to catch"
+    );
     assert_eq!(
         agree.len(),
         SPAWNED_ENTRIES_THAT_MATCH,
@@ -2215,7 +2476,7 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         (
             SPAWNED_ENTRIES_THAT_MATCH,
             SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
-            19,
+            16,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -2227,12 +2488,36 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 16;
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 17;
+
+/// And the names, which is what `baseline.txt`'s header attributes one by one.
+/// Sixteen banked at W3b Task 5 and `valids/replay-loop` at the whole-branch
+/// review's fix round, when a sub-execution began inheriting its parent's
+/// `inputs`.
+const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
+    "valids/flowable-with-parent-fail",
+    "valids/loop-expression-context",
+    "valids/loop-failed",
+    "valids/loop-failed-no-transmit",
+    "valids/loop-flowable",
+    "valids/loop-map",
+    "valids/loop-multiple",
+    "valids/loop-nested",
+    "valids/loop-parallel-equal",
+    "valids/loop-parallel-less",
+    "valids/loop-parallel-more",
+    "valids/loop-parallel-unlimited",
+    "valids/loop-serial",
+    "valids/loop-serial-multiple-tasks",
+    "valids/loop-switch",
+    "valids/replay-loop",
+    "valids/switch-in-concurrent-loop",
+];
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
 /// successor, and it is a different sentence: egret fills the field now, so
 /// these six differ **inside** it rather than by leaving it empty.
-const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 6;
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 8;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -2384,6 +2669,160 @@ async fn every_sub_execution_egret_runs_is_one_kestra_ran() {
          drove a harness that spawned nothing."
     );
 }
+
+/// **Over-acceptance at RUNTIME, which had no register.**
+///
+/// `STILL_OVER_ACCEPTED` is publish-only: flows Kestra refused and egret plans.
+/// W3b creates the first *runtime* instances — egret running something Kestra
+/// did not — and every one of them is named somewhere in this repository while
+/// none was counted as over-acceptance. The plan's Global Constraint says
+/// *"over-acceptance must not ship"*, so the class needs a register of its own
+/// or the constraint is about half of it.
+///
+/// Three shapes, all derived from the two traces rather than read off a list:
+///
+/// - egret produced **more runs** than Kestra recorded;
+/// - egret produced **more sub-executions** than Kestra recorded;
+/// - a run Kestra ended `KILLED`/`FAILED` that egret ended `SUCCESS` or
+///   `WARNING` — i.e. egret completed work Kestra stopped.
+///
+/// A **stalled** execution is deliberately not one of these: egret doing LESS
+/// than Kestra is under-acceptance, which the ratchet already reports as a
+/// mismatch and `ENTRIES_LEFT_UNFINISHED` already counts.
+#[tokio::test]
+async fn runtime_over_acceptance_is_registered_and_owned() {
+    let side = egret_side().await;
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let Outcome::Trace(actual) = evaluate(side, entry) else {
+            continue;
+        };
+        let expected = Trace::from(entry);
+        let mut why: Vec<String> = Vec::new();
+        if actual.runs.len() > expected.runs.len() {
+            why.push(format!(
+                "runs ({} egret, {} kestra)",
+                actual.runs.len(),
+                expected.runs.len()
+            ));
+        }
+        if actual.spawned.len() > expected.spawned.len() {
+            why.push(format!(
+                "sub-executions ({} egret, {} kestra)",
+                actual.spawned.len(),
+                expected.spawned.len()
+            ));
+        }
+        let stopped = |s: &str| s == "KILLED" || s == "FAILED";
+        let completed = |s: &str| s == "SUCCESS" || s == "WARNING";
+        for (a, e) in actual.runs.iter().zip(expected.runs.iter()) {
+            let (Some(av), Some(ev)) = (a.state.last(), e.state.last()) else {
+                continue;
+            };
+            if completed(av) && stopped(ev) {
+                why.push(format!("run {:?} {ev} -> {av}", a.task));
+            }
+        }
+        if !why.is_empty() {
+            found.insert(entry.id.clone(), why.join("; "));
+        }
+    }
+
+    println!("runtime over-acceptance, derived: {found:#?}");
+    let names: Vec<&str> = found.keys().map(String::as_str).collect();
+    // Sorted for the comparison, grouped by OWNER in the table itself — the
+    // same rule `UNATTRIBUTED` follows, and for the same reason: the derivation
+    // arrives sorted and only one of the two can have both properties.
+    let mut registered: Vec<&str> = STILL_OVER_ACCEPTED_AT_RUNTIME
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    let before_dedup = registered.len();
+    registered.sort_unstable();
+    registered.dedup();
+    assert_eq!(
+        registered.len(),
+        before_dedup,
+        "an id named twice would be two owners for one entry, and the \
+         comparison below would not see it"
+    );
+    assert_eq!(
+        names, registered,
+        "every entry where egret ran something Kestra did not must be in \
+         STILL_OVER_ACCEPTED_AT_RUNTIME with an owner. This is the class the \
+         plan's Global Constraint forbids shipping, and until this test existed \
+         it had no register at all -- `STILL_OVER_ACCEPTED` is publish-only"
+    );
+}
+
+/// The register the assertion above compares against: `(entry, owner)`.
+///
+/// **None of these is new information** — each is named in `baseline.txt`'s
+/// header or in this file — and that is the point: they were named as
+/// divergences and never counted as the class they belong to.
+const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
+    // **W2: egret RENDERS an expression Kestra's renderer throws on**, so the
+    // run succeeds and everything after it runs too. `{{ taskrun.value }}` is
+    // undefined inside a `Loop` body and a `Switch` case in this artifact —
+    // Kestra FAILED both — and `{{ 1 / taskrun.attemptsCount }}` is Java's
+    // `ArithmeticException: / by zero` against minijinja's float `Infinity`.
+    // The last is the one `baseline.txt` names for `restart-child`; the other
+    // three are the same class and were named nowhere.
+    (
+        "valids/all-flowable",
+        "W2: `{{ taskrun.value }}` in a `Loop` body renders where Kestra throws,          so `1-each` succeeds and egret runs 3 iterations and 12 runs where          Kestra ran 1 and 3",
+    ),
+    (
+        "valids/disable-flowable",
+        "W2: `{{ taskrun.value }}` in a `Switch` case renders where Kestra throws",
+    ),
+    (
+        "valids/restart-child",
+        "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java          throws, so the run SUCCEEDS and egret runs one more task",
+    ),
+    (
+        "valids/restart-loop",
+        "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations          where Kestra ran 1",
+    ),
+    // **W4: nothing calls `TaskHandler::cancel`**, so work Kestra stopped runs
+    // to completion here. `baseline.txt` names the first; the kill path is W4's.
+    (
+        "valids/parallel-fail-with-flowable",
+        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`.          Kestra FAILED it; nothing calls `TaskHandler::cancel`, so egret          completes it",
+    ),
+    // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
+    // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
+    // construct, so it runs the tasks.
+    (
+        "valids/flow-concurrency-sla-assert-cancel",
+        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra          recorded 0 runs; egret runs the first task",
+    ),
+    (
+        "valids/flow-concurrency-sla-fail-child",
+        "W8: `sla:` killed the `Sleep`; egret has no `sla:` and completes it",
+    ),
+    (
+        "valids/sla-execution-condition",
+        "W8: the same `EXECUTION_ASSERTION` CANCEL; Kestra recorded 0 runs",
+    ),
+    (
+        "valids/sla-max-duration-fail",
+        "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
+    ),
+    (
+        "valids/sla-subflow",
+        "W8: the same, through a subflow",
+    ),
+    // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
+    // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
+    // the first iteration — succeeds here and runs the other two. Named as a
+    // cause of the residual baseline's `Loop` row and owned by nobody.
+    (
+        "valids/loop-outputs-failed-render",
+        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask          .value }}`. Kestra FAILED the loop at iteration 1; egret runs 3",
+    ),
+];
 
 const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 28;
 const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 13;
@@ -3183,14 +3622,17 @@ fn egret_refuses_every_flow_kestra_refuses() {
 fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     // (label, the strings a flow's own YAML writes for it)
     const CONSTRUCTS: &[(&str, usize, &[&str])] = &[
-        // **37 through W3b Task 4, 21 now.** The label moved with the number:
-        // W3b Task 5 re-points the oracle at the real driver, `worker::spawn`
-        // executes `Command::SpawnExecution`, and 16 of those 37 bank. What is
-        // left is a `Loop` whose SUB-EXECUTION still diverges, which is a
-        // different sentence from the one this row used to make.
+        // **37 through W3b Task 4, 21 at W3b Task 5, 20 now.** The label moved
+        // with the number: W3b Task 5 re-points the oracle at the real driver,
+        // `worker::spawn` executes `Command::SpawnExecution`, and 16 of those
+        // 37 bank. What is left is a `Loop` whose SUB-EXECUTION still diverges,
+        // which is a different sentence from the one this row used to make.
+        // The whole-branch review's fix round banks a seventeenth,
+        // `valids/replay-loop`, by giving a sub-execution its parent's
+        // `inputs`.
         (
             "Loop — a sub-execution egret runs and gets wrong",
-            21,
+            20,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
         (

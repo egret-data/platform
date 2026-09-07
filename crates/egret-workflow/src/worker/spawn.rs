@@ -276,11 +276,32 @@ async fn spawn_one(
     let plan = build_plan(&source)
         .map_err(|e| worker_err(WorkerError::Unplannable(parent.id, e.to_string())))?;
 
+    // **`inputs` is the PARENT's, and it has to be copied here.**
+    //
+    // `render::Surface::load` reads `inputs` for the current execution and only
+    // that one — unlike `outputs`, which walks the `parent_execution_id` chain
+    // — so a sub-execution created without them renders `{{ inputs.x }}`
+    // against 0136's `DEFAULT '{}'` and takes the other branch. Corpus-
+    // reachable and not hypothetical: `valids/finally-loop` declares
+    // `failed: BOOL` defaulting `false`, `corpus.json` posts `true`, and the
+    // loop BODY branches on `{{ inputs.failed == false }}` — so egret ran the
+    // `then` where Kestra ran the `else`. Kestra passes the parent's execution
+    // context down; a `Loop` iteration is not a new execution of a different
+    // flow.
+    //
+    // Read out of the parent row in the same statement rather than carried on
+    // `ExecutionCtx`: the row is the one authority on what this execution was
+    // started with, and a field copied onto the context is a second copy that
+    // can disagree with it. A chain of nested loops therefore inherits
+    // transitively, one level at a time, because each parent already holds what
+    // it inherited.
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
            (workspace_id, flow_id, namespace, flow_key, source, state, history, \
-            parent_execution_id, parent_run_ix, loop_index, loop_value) \
-         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9) RETURNING id",
+            parent_execution_id, parent_run_ix, loop_index, loop_value, inputs) \
+         VALUES ($1,$2,$3,$4,$5,'CREATED','[\"CREATED\"]'::jsonb,$6,$7,$8,$9, \
+                 COALESCE((SELECT inputs FROM workflow.executions WHERE id = $6), '{}'::jsonb)) \
+         RETURNING id",
     )
     .bind(parent.workspace_id)
     .bind(parent.flow_id)

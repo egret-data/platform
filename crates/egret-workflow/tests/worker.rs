@@ -1,10 +1,15 @@
-//! The four durability properties the differential oracle can never see.
+//! The five durability properties the differential oracle can never see.
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.
 //! It has no opinion about whether two workers claimed the same run, whether a
-//! crash left half a transaction applied, or whether a lease expired on time —
-//! so this file is the **only** instrument on any of that, and every property
-//! here was written failing first for that reason.
+//! crash left half a transaction applied, or whether a lease expired on time,
+//! or whether a worker whose lease was reaped can still commit — so this file
+//! is the **only** instrument on any of that, and every property here was
+//! written failing first for that reason.
+//!
+//! The fifth was added by the whole-branch review, which found that the first
+//! four could not see it: the reap property reaps a run whose handler never
+//! ran, and nothing called [`apply_outcome`] twice with one `Claimed`.
 //!
 //! # Why `#[sqlx::test]` and not `common::db()`
 //!
@@ -110,6 +115,19 @@ async fn execution_history(pool: &sqlx::PgPool, execution: Uuid) -> serde_json::
         .fetch_one(pool)
         .await
         .expect("read execution history")
+}
+
+/// The happens-before right endpoint migration 0136 adds — read here because
+/// the fence's whole point is that a stale worker cannot wipe it.
+async fn ended_seq(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT ended_seq FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read ended_seq")
 }
 
 async fn lease_of(
@@ -535,6 +553,177 @@ async fn a_run_whose_result_committed_is_never_claimed_again(pool: sqlx::PgPool)
     );
 }
 
+/// **Property 5: a worker whose lease was reaped must not be able to commit.**
+///
+/// This is the one the other four could not see, and the whole-branch review
+/// found it by driving shipped code with no configuration at all.
+///
+/// [`reap`] clears `claimed_at` and leaves `state = 'RUNNING'`, which is
+/// exactly the claim predicate, so the run is re-claimable **while the first
+/// handler is still in flight** — `DEFAULT_WORKING_TIMEOUT` is an hour and
+/// `core.flow.Sleep` takes an author-chosen duration, so `duration: PT2H` opens
+/// the window with nothing switched on. Nothing calls `TaskHandler::cancel`
+/// (W4 owns the kill path), so both handlers reach [`apply_outcome`].
+///
+/// Measured on the shipped code before the fence existed, with the second
+/// worker committing `SUCCESS` and the first then committing `FAILED`:
+///
+/// ```text
+/// after B: state=SUCCESS  ended_seq=Some(4)  successor b = RUNNING
+/// A's late apply_outcome returned: Ok
+/// after A: state=FAILED   ended_seq=None     successor b still RUNNING
+/// execution history: ["CREATED","RUNNING","FAILED"]
+/// ```
+///
+/// Two terminals on one attempt; `ended_seq` — the happens-before endpoint —
+/// wiped from `Some(4)` to NULL; and the execution FAILED while a successor is
+/// `RUNNING` and claimable, which is the dual of the plan's Global Constraint:
+/// *the execution moved and the task is not finished*.
+///
+/// **The lease is the fencing token.** `claimed_at` is `now()` at the instant
+/// of the claim, it is returned on [`Claimed`], and every write
+/// `apply_outcome` makes carries `AND claimed_at = $n`. A stale claimer
+/// therefore matches no row, and **0 rows affected is an error rather than a
+/// silent success** — the two are indistinguishable to `execute()`, which is
+/// how a fence that is written but not read passes every test.
+///
+/// Both directions are asserted: the reaped worker is refused **and** the live
+/// worker's own commit still works, because a fence that refused everybody
+/// would pass the first half.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_worker_whose_lease_was_reaped_cannot_commit(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &two_tasks("fenced"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    // Worker A claims `a` and is now "in its handler".
+    let a = claim(&pool, 1).await.expect("claim A");
+    assert_eq!(a.len(), 1, "the one runnable run is claimable");
+    assert_eq!(a[0].task_id, "a", "worker A claimed `a`");
+
+    // Its lease expires — `reap` clears `claimed_at` and leaves the run
+    // RUNNING, which is the claim predicate again.
+    assert_eq!(
+        reap(&pool, std::time::Duration::ZERO)
+            .await
+            .expect("reap A's lease"),
+        1,
+        "the expired lease is reclaimed while A is still in its handler"
+    );
+
+    // Worker B claims the SAME run and commits first.
+    let b = claim(&pool, 1).await.expect("claim B");
+    assert_eq!(b.len(), 1, "the reaped run is claimable again");
+    assert_eq!(b[0].id, a[0].id, "B took the run A is still running");
+    let mut tx = pool.begin().await.unwrap();
+    apply_outcome(&mut tx, &b[0], &Outcome::success())
+        .await
+        .expect("B's commit is the LIVE lease and must succeed");
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "B's result is the one on the row"
+    );
+    let ended = ended_seq(&pool, ex, "a").await;
+    assert!(
+        ended.is_some(),
+        "B's commit stamps the happens-before right endpoint"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "b").await.as_deref(),
+        Some("RUNNING"),
+        "and creates the successor"
+    );
+
+    // A now finishes its handler and tries to commit a DIFFERENT terminal,
+    // carrying an output so "A's write did not land" is a fact about a value
+    // and not about two NULLs.
+    //
+    // **It commits if `apply_outcome` lets it**, exactly as `tick` does. A test
+    // that dropped the transaction unconditionally would satisfy every
+    // post-state assertion below by the ROLLBACK, and would go on passing with
+    // the fence deleted — the shape this package has found nine times.
+    let late_outcome = Outcome {
+        state: egret_workflow::executor::RunState::Failed,
+        outputs: Some(serde_json::json!({ "from": "the reaped worker" })),
+        message: None,
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let late = apply_outcome(&mut tx, &a[0], &late_outcome).await;
+    match &late {
+        Ok(()) => tx.commit().await.expect("commit A"),
+        Err(_) => drop(tx),
+    }
+
+    // Nothing A tried to write survived, in every field the review found moving.
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "A's FAILED must not overwrite B's terminal"
+    );
+    assert_eq!(
+        ended_seq(&pool, ex, "a").await,
+        ended,
+        "and `ended_seq` must not be wiped — the column 0136 exists to hold, \
+         and the endpoint the oracle's happens-before relation is read from"
+    );
+    assert_eq!(
+        run_outputs(&pool, ex, "a").await,
+        None,
+        "nor may A's outputs land: the `outputs` UPDATE is the FIRST write \
+         `apply_outcome` makes, so a fence only on the state update would let \
+         this one through and still pass every assertion above"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING"]),
+        "the execution must not reach FAILED while its successor is RUNNING — \
+         that is the dual of the Global Constraint, and it is what shipped"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "b").await.as_deref(),
+        Some("RUNNING"),
+        "the successor B created is untouched"
+    );
+
+    // And it was refused rather than absorbed. The assertions above hold as
+    // long as no ROW moved; this one is what says the worker was TOLD, which
+    // is the difference between a fence that is read and one that is merely
+    // written — 0 rows affected and 1 are the same value to `execute()`.
+    let err = late.expect_err(
+        "a worker whose lease was reaped must not be able to commit: it holds a \
+         `Claimed` from a lease that no longer exists, and nothing else in this \
+         module can tell it so",
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("lease") && msg.contains(&a[0].id.to_string()),
+        "the error must name the lost lease and the run it was on, so a \
+         production log says which run was double-run rather than reporting a \
+         row count: {msg}"
+    );
+
+    // The live half, so the fence is not simply refusing everybody: the
+    // successor's own claim and commit still work.
+    let c = claim(&pool, 1).await.expect("claim the successor");
+    assert_eq!(c.len(), 1, "`b` is claimable");
+    assert_eq!(c[0].task_id, "b");
+    let mut tx = pool.begin().await.unwrap();
+    apply_outcome(&mut tx, &c[0], &Outcome::success())
+        .await
+        .expect("a live lease commits");
+    tx.commit().await.unwrap();
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "and the execution finishes through the live worker"
+    );
+}
+
 /// Non-durability, but it is the assertion that makes every "the execution has
 /// not moved" above mean something: a run and its successor, and the execution
 /// state that goes with them, all land in the SAME commit.
@@ -955,6 +1144,86 @@ async fn settle_everything(pool: &sqlx::PgPool, reg: &Handlers) {
         }
     }
     panic!("the loop never settled in 64 rounds");
+}
+
+/// **A sub-execution inherits its parent's `inputs`, and the corpus can tell.**
+///
+/// The whole-branch review found this at a seam: W3b Task 4 wrote `spawn_one`'s
+/// INSERT and W3b Task 5 added `executions.inputs` (migration 0136), so the
+/// INSERT does not name the column and 0136's `DEFAULT '{}'` applies.
+/// `render::Surface::load` reads `inputs` for the **current** execution only,
+/// unlike `outputs`, which walks the `parent_execution_id` chain — so a loop
+/// body reading `{{ inputs.x }}` rendered against nothing and branched the
+/// other way.
+///
+/// It is corpus-reachable rather than hypothetical: `valids/finally-loop`
+/// declares `failed: BOOL` defaulting `false`, `oracle-exec/corpus.json` posts
+/// `true`, and the loop body is an `If` on `{{ inputs.failed == false }}`. It
+/// could not be seen here because every fixture in this file builds its flows
+/// with no `inputs:` at all.
+///
+/// **The `else` branch is the assertion.** A test whose body took the `then`
+/// would pass with the column missing, since `{}` and a `false` input agree on
+/// that branch — the same reason W3a's first circularity demonstration proved
+/// nothing. So the posted input is `true`, the declared default is `false`, and
+/// the body reaches the `else` only if the sub-execution got the POSTED value
+/// rather than the default or nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_sub_execution_inherits_the_posted_inputs_of_its_parent(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let source = "id: loop-inputs\nnamespace: t\n\
+         inputs:\n  - id: failed\n    type: BOOL\n    defaults: false\n\
+         tasks:\n  - id: loop\n    type: io.kestra.plugin.core.flow.Loop\n    \
+         values: '[\"1\"]'\n    concurrencyLimit: 0\n    tasks:\n      \
+         - id: branch\n        type: io.kestra.plugin.core.flow.If\n        \
+         condition: \"{{ inputs.failed == false }}\"\n        then:\n          \
+         - id: took_then\n            type: io.kestra.plugin.core.log.Log\n            \
+         message: then\n        else:\n          \
+         - id: took_else\n            type: io.kestra.plugin.core.log.Log\n            \
+         message: else\n";
+
+    let parent = start_execution(&pool, ws, None, source, serde_json::json!({"failed": true}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let subs = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT inputs FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(parent)
+    .fetch_all(&pool)
+    .await
+    .expect("read the sub-executions' inputs");
+    assert_eq!(
+        subs,
+        vec![serde_json::json!({"failed": true})],
+        "the one sub-execution carries the inputs POSTED to its parent, not \
+         0136's `DEFAULT '{{}}'`"
+    );
+
+    let sub = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .expect("the sub-execution");
+    assert_eq!(
+        run_state(&pool, sub, "took_else").await.as_deref(),
+        Some("SUCCESS"),
+        "`{{{{ inputs.failed == false }}}}` is FALSE for the posted `true`, so \
+         the body takes the `else`. With the inputs missing it renders against \
+         `{{}}`, the declared default `false` applies, and the `then` runs \
+         instead -- which is `valids/finally-loop` reproduced"
+    );
+    assert_eq!(
+        run_state(&pool, sub, "took_then").await,
+        None,
+        "and the `then` branch is never created -- asserted so the test cannot \
+         pass by running BOTH"
+    );
 }
 
 /// **The brief's property: a `Loop` over two values spawns two executions,

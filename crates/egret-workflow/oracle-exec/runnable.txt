@@ -1199,15 +1199,21 @@ what a green ratchet here does NOT say
 
 Kestra has no `egret.*` task type, so no Kestra corpus can ever reach that
 handler.  What covers it is `tests/sql_starrocks_live.rs` against a real
-StarRocks and `worker::handlers::sql`'s own unit tests -- and that suite
-SELF-SKIPS without `EGRET_TEST_STARROCKS_URL`, so a run without an engine leaves
-the handler entirely unmeasured.
+StarRocks and `worker::handlers::sql`'s own unit tests -- and that suite FAILS
+without `EGRET_TEST_STARROCKS_URL`.  It used to SELF-SKIP, and the two runs were
+indistinguishable except by the clock: `7 passed; 0 failed; 0 ignored` in 0.00s
+without the engine and the identical line in 0.88s with it.  A skip must now be
+typed as `EGRET_ALLOW_ENGINE_SKIP=1`, so a green with no engine says so in the
+command that produced it.
 
 Durability is not in this file either.  Two workers never claiming one run, a
-kill between the handler and the commit, the reaper's two directions, and a
-committed result never being claimed again are `tests/worker.rs`'s, and the last
-of them is invisible to any corpus: a re-run that reaches the same terminal
-state produces an IDENTICAL trace.
+kill between the handler and the commit, the reaper's two directions, a
+committed result never being claimed again, and a worker whose lease was reaped
+being unable to commit are `tests/worker.rs`'s.  The fourth is invisible to any
+corpus: a re-run that reaches the same terminal state produces an IDENTICAL
+trace.  The fifth is the whole-branch review's, and the first four could not see
+it -- the reap property reaps a run whose handler never ran, and nothing called
+`apply_outcome` twice with one `Claimed`.
 
   entries differing on the happens-before relation ALONE          4
     valids/dag  valids/if  valids/parallel-disabled-tasks  valids/full

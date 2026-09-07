@@ -16,13 +16,28 @@
 //!
 //! - it is wrapped in a CTE, because the caller needs `workspace_id`, which
 //!   lives on `workflow.executions` and a `RETURNING` cannot reach;
-//! - there is **no `not_before` term**. Spec §4.1 writes the predicate as
-//!   `state = 'pending' AND not_before <= now()`, and that second half cannot
-//!   fire here: `TaskRun::not_before` is written only by
-//!   `Command::ScheduleRetry`, `executor::retry::reopen_due` is its only
-//!   reader, and a run carrying one is `RETRYING`, never `RUNNING`. A term on
-//!   it would be a guard nobody could ever see fail. The delay is `advance()`'s
-//!   to enforce and it already does.
+//! - there is **no `not_before` term**, and the reason first written here was
+//!   wrong in its second half. The first half stands: spec §4.1's
+//!   `state = 'pending' AND not_before <= now()` cannot fire against this
+//!   predicate, because `TaskRun::not_before` is written only by
+//!   `Command::ScheduleRetry`, a run carrying one is `RETRYING`, and the claim
+//!   takes only `RUNNING` — so a term on it would be a guard nobody could ever
+//!   see fail.
+//!
+//!   What does **not** follow, and what this comment used to assert, is *"the
+//!   delay is `advance()`'s to enforce and it already does"*. Nothing in this
+//!   worker makes a retry's delay elapse. `executor::retry::reopen_due` is
+//!   `not_before`'s only reader and it runs inside a [`settle`], whose `now` is
+//!   fixed for the whole call; [`reap`](super::reap) excludes `RETRYING` as the
+//!   claim does; and [`resume`] — the one entry point that would re-read the
+//!   clock — has no production caller. The only caller today is
+//!   `oracle-exec/driver.rs`'s `pass_time`, which *rewinds*
+//!   `executions.created_at` because there is no other way to make time pass.
+//!
+//!   So a run in `RETRYING` with no concurrently-live sibling to bring a
+//!   `settle` along sits there for ever. **W4 fills the hole** — it owns the
+//!   loop that wakes on a deadline — and this is stated rather than left as a
+//!   sentence that reads like a guarantee.
 
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
@@ -84,6 +99,23 @@ pub struct Claimed {
     /// `None`, which is what [`TaskInput::principal`] means and what
     /// [`super::handlers::sql`] refuses on.
     pub principal_id: Option<Uuid>,
+    /// **The fencing token: the instant this lease was taken.**
+    ///
+    /// Returned by the claim's own `UPDATE … SET claimed_at = now()`, so it is
+    /// the value that statement wrote and not a value read afterwards. Every
+    /// write [`apply_outcome`] makes carries `AND claimed_at = $n` on it, and a
+    /// write that matches no row is [`WorkerError::LeaseLost`].
+    ///
+    /// **Without it there is no value a stale worker could be checked
+    /// against**, and that is how the hole shipped: the claim's `RETURNING`
+    /// selected `created_at`, so `apply_outcome`'s `WHERE execution_id = $8
+    /// AND run_ix = $9` was the whole predicate. [`super::reap`] clears
+    /// `claimed_at` and leaves `state = 'RUNNING'` — the claim predicate — so
+    /// a run is re-claimable while its first handler is still in flight, and
+    /// nothing calls [`super::TaskHandler::cancel`]. Two terminals landed on
+    /// one attempt, the second wiping the first's `ended_seq`. See
+    /// `tests/worker.rs::a_worker_whose_lease_was_reaped_cannot_commit`.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Claimed {
@@ -98,12 +130,9 @@ impl Claimed {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
         let spec = leaf_spec(&flow, &self.task_id).ok_or_else(|| {
-            worker_err(WorkerError::Corrupt(
-                self.id,
-                format!(
-                    "task {:?} is not a leaf of the execution's own source",
-                    self.task_id
-                ),
+            worker_err(WorkerError::NotALeaf(
+                self.execution_id,
+                self.task_id.clone(),
             ))
         })?;
         Ok(TaskInput {
@@ -125,9 +154,18 @@ impl Claimed {
 ///
 /// `models::TaskKind::Leaf`'s `spec` is the task's map with `id`, `type`,
 /// `description`, `retry`, `timeout`, `disabled` and `runIf` already removed
-/// by `models::Task`'s deserializer, which is exactly a handler's surface. A
-/// non-leaf id answers `None`: the claim never takes one (`type_id IS NOT
-/// NULL`), so reaching that arm is a corruption rather than a case.
+/// by `models::Task`'s deserializer, which is exactly a handler's surface.
+///
+/// **A non-leaf id answers `None`, and that is a CASE.** This comment used to
+/// say the opposite — *"the claim never takes one (`type_id IS NOT NULL`), so
+/// reaching that arm is a corruption rather than a case"* — and the corpus
+/// says otherwise: `build_plan` plans `Subflow`, `WorkingDirectory` and
+/// `WaitFor` opaque, which gives them a `type_id` and therefore makes them
+/// claimable, while `models::TaskKind` for the same task is a flowable and not
+/// a `Leaf`. Forty-odd comparable entries reach it. It is
+/// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
+/// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
+/// its own doc says.
 fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Value> {
     fn walk(task: &crate::models::Task, want: &str) -> Option<serde_json::Value> {
         if task.id == want {
@@ -212,10 +250,11 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                LIMIT $1 \
             ) \
             RETURNING id, execution_id, run_ix, task_ix, task_id, type_id, value, \
-                      created_at, jsonb_array_length(attempts) AS attempt \
+                      created_at, claimed_at, jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
-                t.type_id, t.value, t.attempt, e.source, f.created_by AS principal_id \
+                t.type_id, t.value, t.attempt, e.source, f.created_by AS principal_id, \
+                t.claimed_at \
            FROM taken t \
            JOIN workflow.executions e ON e.id = t.execution_id \
            LEFT JOIN workflow.flows f ON f.id = e.flow_id \
@@ -240,19 +279,50 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// successors are one transaction, so no window exists in which a task is
 /// finished and the execution has not moved.
 ///
+/// # One run's failure does not strand the rest of the batch
+///
+/// The claim has **already committed** `n` leases by the time the first handler
+/// starts, so an early return would leave the runs after it leased and untouched
+/// until [`reap`](super::reap) takes them back — one worker timeout of nothing
+/// happening, for a reason that concerned a different run. The first draft did
+/// exactly that with `?`, and it was invisible because the differential oracle's
+/// driver runs at `BATCH == 1`, where there is never a rest of the batch.
+///
+/// So every claimed run is attempted, and the **first** error is returned after
+/// the loop. Returning an error at all is the contract
+/// `a_type_with_no_handler_aborts_the_tick` pins: a run this worker could not
+/// finish must not be reported as finished. The returned count stays "runs whose
+/// result committed", so a partial batch reports what it actually did.
+///
 /// Returns the number of runs whose result committed.
 pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> {
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
+    let mut first_err: Option<Error> = None;
     for c in &claimed {
-        let input = input_for(pool, c).await?;
-        let outcome = reg.run(&input).await?;
-        let mut tx = pool.begin().await.map_err(db_err)?;
-        apply_outcome(&mut tx, c, &outcome).await?;
-        tx.commit().await.map_err(db_err)?;
-        done += 1;
+        match run_one(pool, c, reg).await {
+            Ok(()) => done += 1,
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
     }
-    Ok(done)
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(done),
+    }
+}
+
+/// One claimed run: its handler, and the transaction its result lands in.
+async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
+    let input = input_for(pool, c).await?;
+    let outcome = reg.run(&input).await?;
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    apply_outcome(&mut tx, c, &outcome).await?;
+    tx.commit().await.map_err(db_err)?;
+    Ok(())
 }
 
 /// What one claimed run's handler is handed, render context included.
@@ -306,12 +376,26 @@ pub async fn apply_outcome(
     // for the reason `advance()` does not carry one: the state machine has no
     // use for it and a plan that knew what a `Return` produces would have
     // stopped being a state machine.
-    sqlx::query("UPDATE workflow.task_runs SET outputs = $1 WHERE id = $2")
-        .bind(&outcome.outputs)
-        .bind(claimed.id)
-        .execute(&mut *conn)
-        .await
-        .map_err(db_err)?;
+    //
+    // **`AND claimed_at = $3` is the fence, and this is the first write it has
+    // to be on.** A stale worker reaches here before it reaches `persist`, so
+    // a fence only on the state UPDATE would let an outcome from a reaped
+    // lease overwrite the live worker's outputs and still leave every other
+    // column right.
+    let hit =
+        sqlx::query("UPDATE workflow.task_runs SET outputs = $1 WHERE id = $2 AND claimed_at = $3")
+            .bind(&outcome.outputs)
+            .bind(claimed.id)
+            .bind(claimed.claimed_at)
+            .execute(&mut *conn)
+            .await
+            .map_err(db_err)?;
+    // **0 rows affected is an error, not a success.** They are the same value
+    // to `execute()`, which is exactly how a fence that is written but never
+    // read passes every test there is.
+    if hit.rows_affected() == 0 {
+        return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
+    }
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -326,7 +410,39 @@ pub async fn apply_outcome(
             state: outcome.state,
         },
     );
-    settle(conn, &ctx, &before, &mut state, now, Some(claimed.run_ix)).await
+    settle(
+        conn,
+        &ctx,
+        &before,
+        &mut state,
+        now,
+        Some(Lease {
+            run_ix: claimed.run_ix,
+            run_id: claimed.id,
+            claimed_at: claimed.claimed_at,
+        }),
+    )
+    .await
+}
+
+/// The lease a writer holds, and the run it releases.
+///
+/// Carried as one value rather than as a bare `run_ix` because the two halves
+/// must not be able to drift: the row whose lease is cleared is the row the
+/// fence is checked on, and a signature that took them separately would let a
+/// caller release one run while fencing on another's token.
+///
+/// `None` at [`start_execution`], [`resume`] and every spawn, where nothing is
+/// leased and there is therefore nothing to fence.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Lease {
+    /// The `RunIx` whose lease this write clears.
+    pub run_ix: i32,
+    /// The `task_runs` surrogate key, carried only so a lost lease can be
+    /// reported against the row a production log can look up.
+    pub run_id: Uuid,
+    /// The fencing token — [`Claimed::claimed_at`].
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Everything one round of `advance()` implies, written on one connection.
@@ -352,7 +468,7 @@ pub(super) async fn settle(
     before: &ExecutionState,
     state: &mut ExecutionState,
     now: Tick,
-    release: Option<i32>,
+    release: Option<Lease>,
 ) -> Result<()> {
     let surface = Surface::load(conn, ctx).await?;
     let mut marks = Marks::default();
@@ -761,13 +877,34 @@ fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]
 /// [`start_execution`], where nothing is leased. Only that run's lease is
 /// touched: another worker may hold a lease on a sibling of the same execution,
 /// and clearing it would hand that sibling to a second handler.
+///
+/// **The released run's UPDATE is fenced on that lease and every other run's is
+/// not**, which is the narrowest form of the rule: the only row this writer has
+/// a token for is the one it claimed. A sibling's row is written under the
+/// execution's `FOR UPDATE` lock, which is what serialises two workers there;
+/// fencing it on a token this writer does not hold would refuse every legitimate
+/// successor write.
+///
+/// **Measured: this fence and [`apply_outcome`]'s are ALTERNATIVES, and each is
+/// sufficient on its own.** Four mutations against
+/// `a_worker_whose_lease_was_reaped_cannot_commit`: making both `rows_affected`
+/// checks unread FIRES (`["CREATED","RUNNING","FAILED"]` where the test wants
+/// `["CREATED","RUNNING"]`); deleting both `claimed_at` terms FIRES (`A's
+/// FAILED must not overwrite B's terminal`); deleting either term ALONE leaves
+/// the test green, because the surviving one aborts the same transaction. So
+/// neither is individually necessary today, and that is written down rather
+/// than left for the next reader to discover by deleting one and seeing green.
+/// Both are kept because they answer different questions — "may this worker
+/// write this run's output" and "may it write this run's state" — and W4's
+/// worker pool is the caller that reaches `settle` with a lease and no
+/// `outputs` write in front of it.
 #[allow(clippy::too_many_arguments)]
 async fn persist(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
     after: &ExecutionState,
-    release: Option<i32>,
+    release: Option<Lease>,
     marks: &Marks,
     seq: i64,
 ) -> Result<()> {
@@ -783,17 +920,23 @@ async fn persist(
             .unwrap_or(RunState::Created)
             .wire();
         if ix < before.runs.len() {
-            if before.runs[ix] == *run && release != Some(ix as i32) {
+            let lease = release.filter(|l| l.run_ix == ix as i32);
+            if before.runs[ix] == *run && lease.is_none() {
                 continue;
             }
-            sqlx::query(
+            // The fence, on the one row this writer holds a token for. `$11`
+            // is NULL for every other run, and `claimed_at IS NOT DISTINCT
+            // FROM NULL` would be the wrong reading of that — so the term is
+            // written as "`$11` is null, OR it equals the row's lease".
+            let hit = sqlx::query(
                 "UPDATE workflow.task_runs \
                     SET state = $1, history = $2, attempts = $3, rendered = $4, \
                         rendered_run_if = $5, not_before_ms = $6, \
                         claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
                         ended_seq = $10, \
                         updated_at = now() \
-                  WHERE execution_id = $8 AND run_ix = $9",
+                  WHERE execution_id = $8 AND run_ix = $9 \
+                    AND ($11::timestamptz IS NULL OR claimed_at = $11)",
             )
             .bind(state)
             .bind(&history)
@@ -801,7 +944,7 @@ async fn persist(
             .bind(run.rendered.as_deref())
             .bind(run.rendered_run_if.as_deref())
             .bind(run.not_before.map(|t| t.0))
-            .bind(release == Some(ix as i32))
+            .bind(lease.is_some())
             .bind(execution_id)
             .bind(ix as i32)
             // **No `COALESCE`, and that is a measurement.** Two guards were
@@ -815,9 +958,17 @@ async fn persist(
             // one `normalise.py` describes -- its `relation` reads
             // `state.endDate`, the run's LAST termination.
             .bind(marks.ended.get(&ix).copied())
+            .bind(lease.map(|l| l.claimed_at))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
+            // Same rule as the `outputs` write: 0 rows affected and 1 are the
+            // same value to `execute()`, so the fence has to be read.
+            if let Some(l) = lease {
+                if hit.rows_affected() == 0 {
+                    return Err(worker_err(WorkerError::LeaseLost(l.run_id)));
+                }
+            }
         } else {
             // A plain INSERT, never an upsert: a `CreateRun` for a `run_ix`
             // that already exists is two workers having advanced the same

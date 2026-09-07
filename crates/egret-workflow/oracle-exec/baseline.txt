@@ -104,20 +104,29 @@
 # leaving 144. The two halves are separate events and this file records both,
 # because a net figure would hide the whole of what the step cost.
 #
-# **Banked (16), and every one is attributable.** Fifteen are the sub-execution
-# hole closing: `tests/executor.rs` now drives `worker::start_execution` and
-# `worker::tick` instead of a harness, so `Command::SpawnExecution` is executed
-# by `worker::spawn` (W3b Task 4) and `Trace::spawned` is populated --
+# **Banked (16), and every one is attributable.** **SIXTEEN** are the
+# sub-execution hole closing, not fifteen: this paragraph said `Fifteen` above a
+# list of sixteen names, and W3b Task 5's own report said `fifteen ... and one
+# needed only the render surface`. Neither is right, and the fact that settles it
+# is derived rather than argued -- ALL SIXTEEN carry a `spawned`, and
+# `the_sub_executions_are_compared_and_this_is_what_they_cost` prints and asserts
+# exactly those names as the entries with a `spawned` that match. None banked on
+# the render surface alone. `tests/executor.rs` now drives
+# `worker::start_execution` and `worker::tick` instead of a harness, so
+# `Command::SpawnExecution` is executed by `worker::spawn` (W3b Task 4) and
+# `Trace::spawned` is populated --
 # `flowable-with-parent-fail`, `loop-expression-context`, `loop-failed`,
 # `loop-failed-no-transmit`, `loop-flowable`, `loop-map`, `loop-multiple`,
 # `loop-nested`, `loop-parallel-equal`, `loop-parallel-less`,
 # `loop-parallel-more`, `loop-parallel-unlimited`, `loop-serial`,
 # `loop-serial-multiple-tasks`, `loop-switch`, `switch-in-concurrent-loop`.
-# Four of those additionally needed the widened render surface -- `loop-map`
-# reads `{{item.key}}`, `loop-nested` `{{item.parent.index}}` and
-# `{{item.parents[1].value}}`, `loop-expression-context` reads the PARENT
-# execution's `{{outputs.before.value}}` from inside a sub-execution, and
-# `loop-switch` renders a `Switch` inside one.
+# **FIVE** of those additionally needed the widened render surface, not four:
+# this paragraph named four and Task 5's report named five, and the report's list
+# is the right one -- `loop-map` reads `{{item.key}}`, `loop-nested`
+# `{{item.parent.index}}` and `{{item.parents[1].value}}`,
+# `loop-expression-context` reads the PARENT execution's
+# `{{outputs.before.value}}` from inside a sub-execution, and BOTH `loop-switch`
+# and `switch-in-concurrent-loop` render a `Switch` inside one.
 #
 # **Lost (16), and the cause of each is named.** These are entries the harness
 # reproduced by FEEDING a terminal state out of `golden.json`; the driver runs a
@@ -160,6 +169,25 @@
 # `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`.
 # `valids/full` reaching this list settles W3b Task 1's Concern 3, which said
 # its attribution was wrong and its real cause unknown.
+#
+# The whole-branch review's fix round banks 1 more, leaving 143:
+# `valids/replay-loop`. It is a `Loop` whose body reads `{{ inputs.* }}`, and the
+# cause is a seam rather than a construct: W3b Task 4 wrote `worker::spawn`'s
+# INSERT and W3b Task 5 added `executions.inputs` (migration 0136), so a
+# sub-execution was created without its parent's inputs and 0136's
+# `DEFAULT '{}'` applied. `render::Surface::load` reads `inputs` for the CURRENT
+# execution only -- unlike `outputs`, which walks the parent chain -- so a loop
+# body branched on the declared default instead of on what was posted. No test
+# in `tests/worker.rs` could reach it: every fixture there builds its flows with
+# no `inputs:`. `a_sub_execution_inherits_the_posted_inputs_of_its_parent` is
+# the property, and it asserts the `else` branch, because a body taking the
+# `then` would pass with the column missing.
+#
+# The same fix moves `valids/finally-loop` and `valids/finally-loop-parallel`
+# from `differs on more` into `differs only INSIDE spawned` -- they are the two
+# entries whose loop body is an `If` on `{{ inputs.failed == false }}` with
+# `true` posted and `false` declared, i.e. the two that named the defect. They
+# stay baselined for `finally:`, which has no owner.
 #
 # W3b Task 7 re-derived the whole coverage statement and swept this file with
 # the rest. Three sentences in the W3a blocks above are FALSE now and are left
@@ -267,7 +295,6 @@ valids/purge_logs_no_arguments
 valids/purge_logs_trigger_only
 valids/purge_logs_with_batch_size
 valids/replay
-valids/replay-loop
 valids/restart-child
 valids/restart-loop
 valids/restart-parent

@@ -327,6 +327,27 @@ pub enum WorkerError {
     #[error("{0} holds state {1:?}, which is not one of RunState::ALL")]
     UnknownState(uuid::Uuid, String),
 
+    /// The claimed run's task is not a **leaf** of the execution's own source,
+    /// so this worker has no properties to hand a handler.
+    ///
+    /// **Split out of [`WorkerError::Corrupt`] by the whole-branch review,
+    /// because it is a case and not a corruption.** `claim::leaf_spec`'s
+    /// comment said the arm was unreachable — *"the claim never takes one
+    /// (`type_id IS NOT NULL`), so reaching that arm is a corruption rather
+    /// than a case"* — and that is false of shipped code: `build_plan` plans
+    /// `Subflow`, `WorkingDirectory` and `WaitFor` as **opaque `Runnable`s**,
+    /// which sets `type_id`, while `models::TaskKind` for the same task is not
+    /// `Leaf`. Measured on the corpus, 40-odd comparable entries reach it, and
+    /// every one of them is a construct nothing in W3b implements rather than a
+    /// row that has gone wrong.
+    ///
+    /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
+    /// that run, the execution stalls, and the differential oracle's driver
+    /// carries on. Keeping it inside `Corrupt` is what stopped `Corrupt` from
+    /// ever being reportable as a driver failure.
+    #[error("execution {0} claimed run {1:?}, whose task is not a leaf of its own source — the executor plans it opaque, so this worker has no properties for it")]
+    NotALeaf(uuid::Uuid, String),
+
     /// A stored row that cannot be turned back into what `advance()` reads:
     /// a `run_ix` that is not its own position, a `task_ix` the plan does not
     /// hold, an `attempts` entry with no `started_at`.
@@ -338,6 +359,23 @@ pub enum WorkerError {
     /// defect and sends the reader to the wrong table.
     #[error("{0} cannot be read back into an execution state: {1}")]
     Corrupt(uuid::Uuid, String),
+
+    /// The lease this worker claimed under no longer exists.
+    ///
+    /// [`reap`] cleared it and somebody else claimed the run — which is a
+    /// legitimate state of the world, not a corruption: the reaper's whole job
+    /// is to hand a run whose worker is presumed dead to another worker. What
+    /// is not legitimate is the presumed-dead worker then committing, and
+    /// before the fence existed it could: `apply_outcome`'s `WHERE` named only
+    /// `(execution_id, run_ix)`, so a late result overwrote the live worker's
+    /// terminal, wiped its `ended_seq` and moved the execution while its
+    /// successor was still `RUNNING`.
+    ///
+    /// **The tick treats it as an abort for that run and nothing more.** The
+    /// run belongs to whoever holds the lease now; this worker's transaction
+    /// rolls back and it has nothing left to say about it.
+    #[error("run {0} committed under a lease that no longer exists; it was reaped and re-claimed while this worker was in its handler")]
+    LeaseLost(uuid::Uuid),
 }
 
 /// The most rounds of `advance()` one [`apply_outcome`] will drive.
