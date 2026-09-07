@@ -5821,8 +5821,8 @@ gate itself is driven in both directions by
 is the one assertion in that file that runs without an engine. See *W3b Task 6 —
 `egret.sql`, and the coverage this ratchet does NOT give it*.
 
-**3b. `egret.container` and `egret.python` reach zero corpus entries too, and
-for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
+**3b. `egret.container` and `egret.script.python` reach zero corpus entries too,
+and for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
 rather than trusting the brief:
 
 ```bash
@@ -5844,18 +5844,44 @@ in plugin jars (`/app/plugins/io_kestra_plugin__plugin-script-*.jar`,
 143 after Task 5 is not evidence about either handler.**
 
 What they rest on instead is `tests/container_docker_live.rs` against a real
-Docker daemon — which **fails** without one, `EGRET_ALLOW_DOCKER_SKIP=1` being
-the typed opt-out — and the unit tests in `worker::handlers::container`,
-`worker::handlers::python` and `worker::commands`, which drive a fake runner and
-therefore judge the handler and never the daemon. Measured, the two runs of that
-suite are `11 passed … 5.45s` with a daemon and `11 passed … 0.00s` with the
-opt-out typed, which is exactly the asymmetry item 3 records — the difference is
-that the second now requires somebody to have typed it.
+Docker daemon and the unit tests in `worker::commands`,
+`worker::handlers::container` and `worker::handlers::python`. Fix round 1 moved
+the split between the two: `ingest_line` and `ingest_output_file` are pure
+functions now, so the marker cap, the output-file caps, the missing file, the
+directory and the log level are all judged **without a daemon**, and what stays
+in the live suite is what genuinely needs one — *was a process started*, and
+*does the daemon agree which container this worker owns*.
+
+**That suite does not use libtest**, and that is the other half of item 3's
+rule. libtest has no stable way to report a test IGNORED at run time, so every
+self-skipping suite in this workspace counts a test that did not run as
+**passed** — which is exactly what made the `egret.sql` defect above readable
+only from the clock. Measured, on one binary:
+
+```text
+daemon + images:                      14 passed;  0 failed;  0 ignored — 15.24s
+no daemon, no opt-out:                 1 passed; 13 failed;  0 ignored —  0.00s, exit 101
+no daemon, EGRET_ALLOW_DOCKER_SKIP=1:  1 passed;  0 failed; 13 ignored —  0.00s
+daemon up, images not pulled, opt-out: 1 passed;  0 failed; 13 ignored —  0.00s
+```
+
+The image axis is under the same opt-out as the daemon axis (fix round 1's
+Important 3: it was not, so a machine with Docker running and nothing pulled
+hard-failed through `just check`), and the one test that passes in every row is
+the gate's own, which drives a pure verdict function and needs neither.
 
 Neither handler is in `Handlers::with_core_tasks()` **or** in the ratchet's own
 `oracle-exec/driver.rs` registry, for `egret.sql`'s structural reason plus one
 of their own: a registry that runs arbitrary container images by default is a
 capability decision and not a handler's. A caller wires them in one line.
+
+**Both are in `spec::registry::TASK_TYPES`, and the first version of this
+section was wrong to imply otherwise.** `egret.container` has been there since
+W1; `egret.script.python` was added in fix round 1, because the `egret.python`
+row it first tried to claim is the **notebook-kernel** task (programme spec
+§6.4) and its `notebook` reference is required.
+`worker::handlers::container`'s `the_publish_table_and_these_handlers_agree`
+pins all of that, so this paragraph cannot decay into the last one.
 
 **4. Durability is proved by `tests/worker.rs`'s properties, not by this
 corpus.** There are **five**, and the fifth is the whole-branch review's: *a

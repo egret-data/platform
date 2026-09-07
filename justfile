@@ -150,7 +150,14 @@ test-workflow-docker:
     # enforces is that a recipe DECIDE what happens to an exported skip rather
     # than inherit one, and "this suite has no DB-gated test today" is a fact
     # about today. It caught this recipe on its first run.
-    {{ no_db_skip }} cargo test -p egret-workflow --test container_docker_live -- --nocapture
+    # `env -u EGRET_ALLOW_DOCKER_SKIP` is fix round 1's reviewer plan item 3, and it is the
+    # same rule as `no_db_skip` one axis over: this recipe means "the daemon tests ran", so
+    # an opt-out exported in somebody's shell profile must not be able to turn it into a
+    # green that ignored all thirteen. The suite reports `13 ignored` rather than
+    # `13 passed` when it skips, so the two are distinguishable — but a recipe whose whole
+    # point is the daemon should not be leaving that to the reader.
+    {{ no_db_skip }} env -u EGRET_ALLOW_DOCKER_SKIP \
+      cargo test -p egret-workflow --test container_docker_live -- --nocapture
 
 # Apply migrations against the running Postgres
 migrate:

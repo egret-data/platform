@@ -132,7 +132,8 @@ pub const ENV_WORKING_DIR: &str = "WORKING_DIR";
 /// `CommandsWrapper` carries the same literal `/bin/sh`.
 pub const DEFAULT_INTERPRETER: [&str; 2] = ["/bin/sh", "-c"];
 
-/// The most bytes ONE output file may carry back.
+/// The most bytes ONE output file may carry back, and — summed —
+/// the most all of them may.
 ///
 /// Not a performance number, and the same argument as
 /// [`handlers::sql::MAX_FETCH_ROWS`](super::handlers::sql::MAX_FETCH_ROWS):
@@ -141,6 +142,12 @@ pub const DEFAULT_INTERPRETER: [&str; 2] = ["/bin/sh", "-c"];
 /// need a cap because its equivalent is a URI into internal storage; egret has
 /// no such storage here, so the contents are inline and a cap is the only thing
 /// standing between a flow and an unbounded Postgres row.
+///
+/// **It bounds the total as well as each file, and fix round 1's Important 2 is
+/// why that sentence is here.** `outputFiles:` is an unbounded `Vec`, so a
+/// per-file cap alone bounds nothing: a thousand files a byte under the cap is
+/// a gigabyte, and this doc used to claim it was *the* bound.
+/// [`ingest_output_file`] carries a running total and refuses on either.
 pub const MAX_OUTPUT_FILE_BYTES: usize = 1_048_576;
 
 /// The most bytes the `::{…}::` markers may contribute in total.
@@ -238,6 +245,22 @@ pub struct CommandsResult {
     pub vars: serde_json::Map<String, serde_json::Value>,
     /// Declared output files, name → contents.
     pub output_files: BTreeMap<String, String>,
+    /// Why the task must fail even though the command may have exited `0`.
+    ///
+    /// **This channel exists because fix round 1's Important 1 found the code
+    /// contradicting the principle its own module doc quotes.** Fact 7 is that
+    /// `Docker.run` throws `TaskException(exitCode, logConsumer)` and
+    /// `CommandsWrapper.run` rethrows it as `RunnableTaskException(e,
+    /// ScriptOutput)` — an exception **carrying an Output**. An output-file
+    /// problem used to be an `Err` out of the runner, which threw away the exit
+    /// code and every `::{…}::` var the command had already printed; measured,
+    /// the run reached `outputs: None`.
+    ///
+    /// So a problem the AUTHOR caused after the command ran is recorded here
+    /// and the result is still returned. `Err` out of [`TaskRunner::run`] is
+    /// now reserved for egret's own outage, which is the split
+    /// [`handlers::container::mapped`](super::handlers::container) reads.
+    pub failure: Option<String>,
 }
 
 /// **Where** a command runs.
@@ -361,6 +384,168 @@ pub fn labels(task: &TaskInput) -> Vec<(String, String)> {
     ]
 }
 
+/// **Take one log line: count it, harvest its outputs, and say how to log it.**
+///
+/// A free function over `&mut CommandsResult` rather than a block inside
+/// [`DockerRunner::run_created`], and that is fix round 1's merge condition
+/// rather than a tidy-up. The review measured what the shape cost: mutations to
+/// the line-handling logic were killed **only** by the live suite, because the
+/// unit tests drive a fake [`TaskRunner`] and a mutation *inside* the real one
+/// is invisible to them by construction. A faithful enough fake of a container
+/// runner **is** [`DockerRunner`], so the seam that had to move was the pure
+/// logic out of the async function — which the trait boundary was never going
+/// to give.
+///
+/// Everything here is decided without a daemon, a process or a pipe: the counts,
+/// the marker, the vars cap, and the level. `run_created` keeps only the parts
+/// that genuinely need one.
+///
+/// **The cap sets [`CommandsResult::failure`] and clears the vars rather than
+/// returning an error.** Returning one mid-stream abandoned the exit code and
+/// left `docker start`'s pipes unread, which stalls a container that is still
+/// writing; and the vars are cleared rather than kept because the whole point
+/// of the cap is that this much is not going into `task_runs.outputs`.
+pub(crate) fn ingest_line(
+    result: &mut CommandsResult,
+    vars_bytes: &mut usize,
+    max_vars_bytes: usize,
+    line: &str,
+    is_err: bool,
+) -> Level {
+    if is_err {
+        result.stderr_line_count += 1;
+    } else {
+        result.stdout_line_count += 1;
+    }
+
+    // The marker is consumed as an output AND logged, which is what
+    // `DefaultLogConsumer` does: it calls `parseOut` and then logs the line
+    // either way.
+    if result.failure.is_none() {
+        if let Some(outputs) = parse_marker(line) {
+            for (k, v) in outputs {
+                *vars_bytes += k.len() + v.to_string().len();
+                if *vars_bytes > max_vars_bytes {
+                    result.vars.clear();
+                    result.failure = Some(format!(
+                        "the command emitted more than {max_vars_bytes} bytes of \
+                         `::{{\"outputs\": …}}::` markers, and every byte of that would be \
+                         stored on the task run and re-rendered by every later task in \
+                         the execution"
+                    ));
+                    break;
+                }
+                result.vars.insert(k, v);
+            }
+        }
+    }
+
+    // stdout is INFO and stderr is WARN. Kestra's knob for the second half is
+    // `AbstractExecScript.warningOnStdErr`; egret does not offer it, because a
+    // property with no reader does not ship and nothing here reads a level
+    // back.
+    if is_err {
+        Level::Warn
+    } else {
+        Level::Info
+    }
+}
+
+/// **Resolve one declared output file inside the copied working directory.**
+///
+/// The second pure seam, and the reason the whole working directory is copied
+/// back in one `docker cp` rather than one per declared file: *whether a
+/// declared file is there* becomes a question for the **filesystem** instead of
+/// a question about the wording of a daemon error string.
+///
+/// That is fix round 1's Critical 1 and Important 5 answered together, because
+/// they were one bug seen from two ends:
+///
+/// * **C1** — `outputFiles: ["some-dir"]` copied fine, then `fs::read` on a
+///   directory gave an `io::Error`, which became `Error::Internal`, which
+///   `handlers::container::mapped` correctly reads as **egret's outage** and
+///   turns into a tick-aborting worker failure. One typo'd flow wedged the
+///   worker for ever, blaming egret. A directory is now named and refused here.
+/// * **I5** — the old code asked "is this the daemon?" by looking for
+///   `"no such file or directory"` in the copy's stderr **before** concluding
+///   the author's file was missing, so a CLI wording change would have silently
+///   converted an author error into C1's failure mode. There is no longer a
+///   string test on that path at all: an absent file is `ErrorKind::NotFound`
+///   on a `std::fs::metadata` of a path in egret's own staging directory.
+///
+/// `Err` is the message the **task** fails with — never a worker failure. The
+/// caller puts it in [`CommandsResult::failure`], so the exit code and the vars
+/// the command printed survive it.
+pub(crate) fn ingest_output_file(
+    result: &mut CommandsResult,
+    staged_root: &std::path::Path,
+    rel: &str,
+    max_file_bytes: usize,
+    max_total_bytes: usize,
+    total: &mut usize,
+) -> std::result::Result<(), String> {
+    if let Some(problem) = relative_problem(rel) {
+        return Err(problem);
+    }
+    let path = staged_root.join(rel);
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // **A declared output that is not there fails the task.** The
+            // alternative is a key missing from `outputs`, which nothing
+            // notices until a later `{{ outputs.x.f }}` fails somewhere else
+            // with a message about the wrong task.
+            return Err(format!(
+                "`outputFiles` declares {rel:?}, which the command did not leave in \
+                 {WORKING_DIR}"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "`outputFiles` declares {rel:?}, which could not be read back out of \
+                 {WORKING_DIR}: {e}"
+            ))
+        }
+    };
+    if meta.is_dir() {
+        return Err(format!(
+            "`outputFiles` declares {rel:?}, which is a DIRECTORY. An output is JSON \
+             and egret has no internal storage to hand back an archive URI for (W9 \
+             owns it), so name the files inside it instead"
+        ));
+    }
+    let len = meta.len() as usize;
+    if len > max_file_bytes {
+        return Err(format!(
+            "the output file {rel:?} is {len} bytes, over the {max_file_bytes} an \
+             output may carry. egret has no internal storage for a workflow yet (W9 \
+             owns it), so an output file's CONTENTS are stored on the task run and \
+             re-rendered by every later task in the execution; a prefix is not an \
+             answer"
+        ));
+    }
+    *total += len;
+    if *total > max_total_bytes {
+        return Err(format!(
+            "the output files declared by this task come to {total} bytes, over the \
+             {max_total_bytes} one task may carry. `outputFiles:` is an unbounded \
+             list, so a per-file cap alone bounds nothing"
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| {
+        format!("the output file {rel:?} could not be read out of the staging copy: {e}")
+    })?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "the output file {rel:?} is not UTF-8, and an output is JSON. egret has no \
+             internal storage to hand back a URI to (W9 owns it), so a binary artefact \
+             cannot be an output of this task today"
+        )
+    })?;
+    result.output_files.insert(rel.to_string(), text);
+    Ok(())
+}
+
 /// `TaskLogLineMatcher.LOG_DATA_SYNTAX`, applied to one log line.
 ///
 /// The artifact's regex is `^::(\{.*})::$`, compiled once and matched against
@@ -411,6 +596,22 @@ const DAEMON_ERROR_MARKERS: [&str; 3] = [
     "no such file or directory",
     "Cannot connect to the Docker daemon",
 ];
+
+/// The two of [`DAEMON_ERROR_MARKERS`] that name the **socket** rather than any
+/// missing path.
+///
+/// Fix round 1's Important 5: on a `docker cp` out of a container, the generic
+/// `"no such file or directory"` is far more likely to be the author's own file
+/// than the daemon's socket, and reading it as the daemon turns an author error
+/// into a tick-aborting worker failure. Kestra never applies its list to a copy
+/// — `isDockerSocketAccessError` is used on the client's own `DockerException`
+/// on the connect path — so narrowing here is applying the artifact's own scope,
+/// not diverging from it.
+///
+/// `collect_output_files` is the only user, and the ordering hazard is gone
+/// besides: the question it used to answer with a string is now answered by
+/// [`ingest_output_file`] against the filesystem.
+const DAEMON_SOCKET_MARKERS: [&str; 2] = ["docker.sock", "Cannot connect to the Docker daemon"];
 
 /// A [`TaskRunner`] over the local Docker daemon, driven through the `docker`
 /// CLI.
@@ -683,36 +884,17 @@ impl DockerRunner {
                 },
             };
 
-            if is_err {
-                result.stderr_line_count += 1;
-            } else {
-                result.stdout_line_count += 1;
-            }
-
-            // The marker is consumed as an output AND logged, which is what
-            // `DefaultLogConsumer` does: it calls `parseOut` and then logs the
-            // line either way.
-            if let Some(outputs) = parse_marker(&line) {
-                for (k, v) in outputs {
-                    vars_bytes += k.len() + v.to_string().len();
-                    if vars_bytes > self.max_vars_bytes {
-                        return Err(Error::InvalidInput(format!(
-                            "the command emitted more than {} bytes of \
-                             `::{{\"outputs\": …}}::` markers, and every byte of that is \
-                             stored on the task run and re-rendered by every later task \
-                             in the execution",
-                            self.max_vars_bytes
-                        )));
-                    }
-                    result.vars.insert(k, v);
-                }
-            }
-
-            // stdout is INFO and stderr is WARN. Kestra's knob for the second
-            // half is `AbstractExecScript.warningOnStdErr`; egret does not
-            // offer it, because a property with no reader does not ship and
-            // nothing here reads a level back.
-            sink.log(task, if is_err { Level::Warn } else { Level::Info }, &line);
+            // **Every decision about this line is [`ingest_line`]'s**, and
+            // this loop keeps only the pipes. See that function for why the
+            // split is a merge condition and not a tidy-up.
+            let level = ingest_line(
+                &mut result,
+                &mut vars_bytes,
+                self.max_vars_bytes,
+                &line,
+                is_err,
+            );
+            sink.log(task, level, &line);
         }
 
         let status = child.wait().await.map_err(io_err)?;
@@ -740,7 +922,7 @@ impl DockerRunner {
         })?;
 
         // ---- output files ---------------------------------------------------
-        if !commands.output_files.is_empty() {
+        if !commands.output_files.is_empty() && result.failure.is_none() {
             let staging = tempdir(task)?;
             let collected = self
                 .collect_output_files(name, commands, &staging, &mut result)
@@ -752,8 +934,29 @@ impl DockerRunner {
         Ok(result)
     }
 
-    /// Copy each declared output file out and read it, under
-    /// [`MAX_OUTPUT_FILE_BYTES`].
+    /// Copy the working directory back **once**, then resolve every declared
+    /// file inside it with [`ingest_output_file`].
+    ///
+    /// # One copy, not one per file, and that is the fix and not an optimisation
+    ///
+    /// It is also what the artifact does: `Docker.run` carries the string
+    /// *"Unable to sync the working directory back from the container; the task
+    /// declares no output files, so continuing without failing the run."*, so
+    /// Kestra syncs the **directory** and decides about individual files
+    /// afterwards. Doing the same means "is the author's file there?" is
+    /// answered by `std::fs::metadata` on egret's own staging copy rather than
+    /// by the wording of a `docker cp` error — which is what Important 5 was
+    /// about, and what made Critical 1 reachable.
+    ///
+    /// So the only failure this can attribute to the daemon is the ONE copy,
+    /// and even there the generic `"no such file or directory"` marker is not
+    /// consulted: [`DAEMON_SOCKET_MARKERS`] is the narrower pair, because at
+    /// this call site the generic string is far more likely to be the author's
+    /// container than the socket.
+    ///
+    /// `Err` is a **worker** failure and reaches only the daemon case; an
+    /// author's problem lands in [`CommandsResult::failure`] with the exit code
+    /// and the vars intact.
     async fn collect_output_files(
         &self,
         name: &str,
@@ -762,50 +965,37 @@ impl DockerRunner {
         result: &mut CommandsResult,
     ) -> Result<()> {
         std::fs::create_dir_all(staging).map_err(io_err)?;
-        for (i, rel) in commands.output_files.iter().enumerate() {
-            check_relative(rel)?;
-            let src = format!("{name}:{WORKING_DIR}/{rel}");
-            // A flat, indexed destination: two declared files may share a
-            // basename in different directories, and the index cannot collide
-            // where the basename can.
-            let dst = staging.join(i.to_string());
-            let dst_s = dst.display().to_string();
-            let out = self.cli(&["cp", &src, &dst_s]).await?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if DAEMON_ERROR_MARKERS.iter().any(|m| stderr.contains(m)) {
-                    return Err(self.classify("cp", &stderr));
-                }
-                // **A declared output that is not there fails the task.** The
-                // alternative is a key missing from `outputs`, which nothing
-                // notices until a later `{{ outputs.x.f }}` fails somewhere
-                // else with a message about the wrong task.
-                return Err(Error::InvalidInput(format!(
-                    "`outputFiles` declares {rel:?}, which the command did not leave in \
-                     {WORKING_DIR}: {stderr}"
+        let src = format!("{name}:{WORKING_DIR}/.");
+        let dst = staging.display().to_string();
+        let out = self.cli(&["cp", &src, &dst]).await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if DAEMON_SOCKET_MARKERS.iter().any(|m| stderr.contains(m)) {
+                return Err(Error::Internal(anyhow::anyhow!(
+                    "the Docker daemon could not be reached, so the working directory \
+                     of {name} could not be copied back: {stderr}"
                 )));
             }
-            let meta = std::fs::metadata(&dst).map_err(io_err)?;
-            if meta.len() as usize > self.max_output_bytes {
-                return Err(Error::InvalidInput(format!(
-                    "the output file {rel:?} is {} bytes, over the {} an output may \
-                     carry. egret has no internal storage for a workflow yet (W9 owns \
-                     it), so an output file's CONTENTS are stored on the task run and \
-                     re-rendered by every later task in the execution; a prefix is not \
-                     an answer",
-                    meta.len(),
-                    self.max_output_bytes
-                )));
+            result.failure = Some(format!(
+                "the working directory could not be copied back out of the container, \
+                 so `outputFiles:` cannot be answered: {stderr}"
+            ));
+            return Ok(());
+        }
+
+        let mut total = 0usize;
+        for rel in &commands.output_files {
+            if let Err(problem) = ingest_output_file(
+                result,
+                staging,
+                rel,
+                self.max_output_bytes,
+                self.max_output_bytes,
+                &mut total,
+            ) {
+                result.failure = Some(problem);
+                break;
             }
-            let bytes = std::fs::read(&dst).map_err(io_err)?;
-            let text = String::from_utf8(bytes).map_err(|_| {
-                Error::InvalidInput(format!(
-                    "the output file {rel:?} is not UTF-8, and an output is JSON. \
-                     egret has no internal storage to hand back a URI to (W9 owns it), \
-                     so a binary artefact cannot be an output of this task today"
-                ))
-            })?;
-            result.output_files.insert(rel.clone(), text);
         }
         Ok(())
     }
@@ -836,27 +1026,34 @@ fn tempdir(task: &TaskInput) -> Result<std::path::PathBuf> {
 /// have to be *widened* here — a `docker cp` destination is a path, not a
 /// pattern — and a rule that has to be widened is a rule that stops being read.
 fn check_relative(rel: &str) -> Result<()> {
+    match relative_problem(rel) {
+        None => Ok(()),
+        Some(problem) => Err(Error::InvalidInput(problem)),
+    }
+}
+
+/// The same rule as a **message or nothing**, so [`ingest_output_file`] can use
+/// it without an [`Error`] it would only have to unwrap again.
+fn relative_problem(rel: &str) -> Option<String> {
     if rel.is_empty() {
-        return Err(Error::InvalidInput("a file name must not be empty".into()));
+        return Some("a file name must not be empty".to_string());
     }
     if rel.starts_with('/') {
-        return Err(Error::InvalidInput(format!(
+        return Some(format!(
             "{rel:?} is an absolute path; a file is named relative to {WORKING_DIR}"
-        )));
+        ));
     }
     if rel.split('/').any(|seg| seg == "..") {
-        return Err(Error::InvalidInput(format!(
-            "{rel:?} climbs out of {WORKING_DIR} with `..`"
-        )));
+        return Some(format!("{rel:?} climbs out of {WORKING_DIR} with `..`"));
     }
     if rel.contains(['*', '?', '[']) {
-        return Err(Error::InvalidInput(format!(
+        return Some(format!(
             "{rel:?} looks like a glob, and this task takes literal names only. A glob \
              that matched nothing would leave a declared output absent from the outputs \
              map, which nothing notices until a later expression fails"
-        )));
+        ));
     }
-    Ok(())
+    None
 }
 
 fn io_err(e: std::io::Error) -> Error {
@@ -1008,6 +1205,213 @@ mod tests {
         for good in ["out.txt", "nested/out.txt", "a.b-c_d+e"] {
             check_relative(good).unwrap_or_else(|e| panic!("{good:?} must be allowed: {e}"));
         }
+    }
+
+    /// A staging directory this test owns, prefixed so parallel agents sharing
+    /// one temp dir cannot collide.
+    fn staging(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "egret-w4t5-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("staging");
+        dir
+    }
+
+    /// **Both streams are counted, and the level says which one it was.**
+    ///
+    /// This is one of the four properties fix round 1 moved out of
+    /// `run_created` so a machine with no daemon can judge them. Before the
+    /// split, the only test that could see the level was a live one.
+    #[test]
+    fn a_line_is_counted_on_its_own_stream_and_logged_at_its_own_level() {
+        let mut r = CommandsResult::default();
+        let mut bytes = 0usize;
+        assert_eq!(
+            ingest_line(&mut r, &mut bytes, 1024, "out", false),
+            Level::Info
+        );
+        assert_eq!(
+            ingest_line(&mut r, &mut bytes, 1024, "err", true),
+            Level::Warn,
+            "stderr is WARN and stdout is INFO -- a logger that took the level from \
+             nowhere would still have the text"
+        );
+        assert_eq!((r.stdout_line_count, r.stderr_line_count), (1, 1));
+        assert!(r.vars.is_empty() && r.failure.is_none());
+    }
+
+    /// **A marker becomes vars; an ordinary line does not.**
+    #[test]
+    fn a_marker_line_is_harvested_and_still_logged() {
+        let mut r = CommandsResult::default();
+        let mut bytes = 0usize;
+        ingest_line(&mut r, &mut bytes, 1024, "ordinary", false);
+        ingest_line(
+            &mut r,
+            &mut bytes,
+            1024,
+            r#"::{"outputs":{"a":1}}::"#,
+            false,
+        );
+        assert_eq!(r.vars.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(
+            r.stdout_line_count, 2,
+            "a marker is a line too -- `DefaultLogConsumer` parses it AND logs it"
+        );
+    }
+
+    /// **The vars cap sets a failure, clears what it had, and stops
+    /// collecting** — it does not abandon the stream.
+    #[test]
+    fn the_vars_cap_fails_the_task_and_keeps_reading() {
+        let mut r = CommandsResult::default();
+        let mut bytes = 0usize;
+        let big = "y".repeat(200);
+        ingest_line(
+            &mut r,
+            &mut bytes,
+            32,
+            &format!(r#"::{{"outputs":{{"a":"{big}"}}}}::"#),
+            false,
+        );
+        assert!(
+            r.vars.is_empty(),
+            "the point of the cap is that this much does NOT go into task_runs.outputs"
+        );
+        let why = r.failure.clone().expect("the cap must fail the task");
+        assert!(why.contains("32 bytes"), "the cap must be named: {why}");
+        assert!(why.contains("markers"), "the channel must be named: {why}");
+
+        // And the stream keeps being read, so the container is not left
+        // blocked on a full pipe and the line counts still complete.
+        assert_eq!(
+            ingest_line(&mut r, &mut bytes, 32, "later", true),
+            Level::Warn
+        );
+        assert_eq!(r.stderr_line_count, 1);
+        assert_eq!(
+            r.failure.as_deref(),
+            Some(why.as_str()),
+            "the first reason stands; a later line must not overwrite it"
+        );
+    }
+
+    /// **A declared output that is not in the copied working directory fails
+    /// the task, naming it** — and it is a `std::fs` answer now, not a guess at
+    /// a daemon's wording (fix round 1's Important 5).
+    #[test]
+    fn a_declared_output_that_is_absent_fails_the_task_and_names_itself() {
+        let dir = staging("absent");
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(&mut r, &dir, "gone.txt", 1024, 4096, &mut total)
+            .expect_err("an absent output must not be skipped");
+        assert!(err.contains("gone.txt"), "{err}");
+        assert!(err.contains("did not leave"), "{err}");
+        assert!(r.output_files.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A directory named as an output file fails the TASK, not the worker.**
+    ///
+    /// Fix round 1's Critical 1: `fs::read` on a directory gave an
+    /// `io::Error`, which became `Error::Internal`, which
+    /// `handlers::container::mapped` reads as egret's outage and turns into a
+    /// tick-aborting worker failure. One typo'd flow wedged the worker for
+    /// ever, blaming egret. This function cannot produce a worker failure at
+    /// all — its `Err` is the task's message — and the directory is now named.
+    #[test]
+    fn a_directory_named_as_an_output_file_fails_the_task_rather_than_the_worker() {
+        let dir = staging("dir");
+        std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
+        std::fs::write(dir.join("adir/inner"), "x").expect("write");
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(&mut r, &dir, "adir", 1024, 4096, &mut total)
+            .expect_err("a directory is not an output");
+        assert!(err.contains("DIRECTORY"), "{err}");
+        assert!(err.contains("adir"), "{err}");
+        // The file inside it is nameable, so the refusal is about the shape
+        // and not about the path being unreachable.
+        ingest_output_file(&mut r, &dir, "adir/inner", 1024, 4096, &mut total)
+            .expect("a file inside a directory is a fine output");
+        assert_eq!(
+            r.output_files.get("adir/inner").map(String::as_str),
+            Some("x")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The per-file cap and the TOTAL cap both refuse**, and the second is
+    /// fix round 1's Important 2: `outputFiles:` is an unbounded list, so a
+    /// per-file cap alone bounds nothing.
+    #[test]
+    fn both_the_per_file_cap_and_the_total_cap_refuse() {
+        let dir = staging("caps");
+        std::fs::write(dir.join("a"), "x".repeat(100)).expect("write");
+        std::fs::write(dir.join("b"), "y".repeat(100)).expect("write");
+        std::fs::write(dir.join("c"), "z".repeat(100)).expect("write");
+
+        // Per file.
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(&mut r, &dir, "a", 64, 1_000_000, &mut total)
+            .expect_err("100 bytes is over a 64-byte per-file cap");
+        assert!(err.contains("100 bytes"), "{err}");
+        assert!(err.contains("over the 64"), "{err}");
+        assert!(err.contains("a prefix is not an answer"), "{err}");
+
+        // Total: each file is UNDER the per-file cap, and together they are
+        // over the total. A per-file-only bound passes this.
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        ingest_output_file(&mut r, &dir, "a", 150, 250, &mut total).expect("a fits");
+        ingest_output_file(&mut r, &dir, "b", 150, 250, &mut total).expect("b fits");
+        let err = ingest_output_file(&mut r, &dir, "c", 150, 250, &mut total)
+            .expect_err("three 100-byte files are over a 250-byte total");
+        assert!(err.contains("300 bytes"), "the TOTAL must be named: {err}");
+        assert!(err.contains("unbounded list"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A binary artefact cannot be an output, and says why.
+    #[test]
+    fn a_non_utf8_output_file_fails_the_task_saying_why() {
+        let dir = staging("binary");
+        std::fs::write(dir.join("b.bin"), [0xff_u8, 0xfe, 0x00]).expect("write");
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(&mut r, &dir, "b.bin", 1024, 4096, &mut total)
+            .expect_err("not UTF-8");
+        assert!(err.contains("not UTF-8"), "{err}");
+        assert!(
+            err.contains("W9"),
+            "the reason is the missing storage seam: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name rule reaches the output path too, and before the filesystem
+    /// does.
+    #[test]
+    fn an_escaping_output_name_is_refused_before_the_filesystem_is_touched() {
+        let dir = staging("escape");
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        for (bad, needle) in [
+            ("../secret", "climbs out"),
+            ("/etc/passwd", "absolute path"),
+            ("*.csv", "glob"),
+            ("", "must not be empty"),
+        ] {
+            let err = ingest_output_file(&mut r, &dir, bad, 1024, 4096, &mut total)
+                .expect_err("an escaping name must be refused");
+            assert!(err.contains(needle), "{bad:?} was refused with {err}");
+        }
+        assert_eq!(total, 0, "a refused name must not have been measured");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The daemon's absence is egret's outage; anything else is the author's

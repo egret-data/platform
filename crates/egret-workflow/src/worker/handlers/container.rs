@@ -37,12 +37,28 @@
 //! one, so there is no name to match; `egret.sql` set the precedent for egret's
 //! own short spelling and this follows it.
 //!
-//! **`crate::spec::registry::TASK_TYPES` does not hold it**, so a flow using
-//! this type cannot be published through egret's own publish path today. That
-//! is the same disagreement `worker::registry::Handlers` documents for the
-//! other four and it is reported rather than papered over: deciding egret's
-//! public task vocabulary is a spec-level choice, and adding a row to that
-//! table would also have to decide what a `RefField` means for an image name.
+//! # `TASK_TYPES` DOES hold it, and the sentence that used to stand here was
+//! # false
+//!
+//! This module shipped saying *"`crate::spec::registry::TASK_TYPES` does not
+//! hold it, so a flow using this type cannot be published"*. It has held
+//! `egret.container` since W1 (`spec/registry.rs`, commit `228173f9`), with
+//! `references: &[]` — no `RefField`, because an image name is not an egret
+//! object. The programme spec's own §6.4 table declares the same thing:
+//! *"`egret.container` | cùng launcher; image + command + file in/out — hợp
+//! đồng `TaskCommands`"*.
+//!
+//! So this handler is not a new name beside the table: it is the
+//! **implementation half** of a row that was already there, which is what that
+//! table's own doc says a handler is for. A flow writing `egret.container`
+//! publishes and now finds a handler.
+//!
+//! **The false sentence hid a real collision one row above it** — the
+//! `egret.python` entry, which declares a required `notebook` reference. See
+//! [`super::python`] for what that cost and what was done about it.
+//! [`the_publish_table_and_these_handlers_agree`] is the test that keeps this
+//! paragraph honest, because this package has now found four stale
+//! claims-lists in four tasks and prose cannot be the thing that holds.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -184,6 +200,18 @@ pub(super) fn outputs_for(result: &CommandsResult) -> serde_json::Value {
 /// here as it does there.
 pub(super) fn outcome_for(type_id: &str, result: &CommandsResult) -> Outcome {
     let outputs = outputs_for(result);
+    // **[`CommandsResult::failure`] first**, and it carries the outputs too:
+    // fix round 1's Important 1 was that an output-file problem discarded the
+    // exit code and the marker vars, contradicting fact 7 which this very file
+    // quotes as its principle. `RunnableTaskException(e, ScriptOutput)` is an
+    // exception CARRYING an output; so is this.
+    if let Some(why) = &result.failure {
+        return Outcome {
+            state: crate::executor::RunState::Failed,
+            outputs: Some(outputs),
+            message: Some(format!("{type_id}: {why}")),
+        };
+    }
     if result.exit_code == 0 {
         return Outcome::succeeded_with(outputs);
     }
@@ -625,6 +653,99 @@ mod tests {
         assert_eq!(lines.len(), 1, "got {lines:?}");
         assert_eq!(lines[0].0, Level::Info);
         assert!(lines[0].1.contains("echo one"), "got {:?}", lines[0].1);
+    }
+
+    /// **The publish table and these two handlers agree — asserted, not
+    /// asserted in prose.**
+    ///
+    /// Fix round 1's Critical 2 was a false sentence in this module's doc
+    /// claiming `TASK_TYPES` did not hold `egret.container`, and the false
+    /// premise hid a live name collision on `egret.python`. This package has
+    /// now found four stale claims-lists in four tasks, so the claim is a test:
+    ///
+    /// 1. both handler ids are publishable (present in `TASK_TYPES`);
+    /// 2. neither declares a `RefField`, because an image name and a script are
+    ///    not egret objects — a row that grew one would silently make publish
+    ///    rewrite a field these handlers read verbatim;
+    /// 3. `egret.python` is still the **notebook** task, with its required
+    ///    `notebook` reference, and is **not** what `handlers::python` serves.
+    ///
+    /// Leg 3 is the one that fails if somebody renames the script handler back.
+    #[test]
+    fn the_publish_table_and_these_handlers_agree() {
+        use crate::spec::registry::{known_type, RefKind};
+
+        for id in [TYPE_ID, crate::worker::handlers::python::TYPE_ID] {
+            let row = known_type(id)
+                .unwrap_or_else(|| panic!("{id} is not in TASK_TYPES, so publish refuses it"));
+            assert!(
+                row.references.is_empty(),
+                "{id} declares {:?}; publish would rewrite a field these handlers read \
+                 verbatim",
+                row.references.iter().map(|r| r.field).collect::<Vec<_>>()
+            );
+        }
+
+        let notebook = known_type("egret.python").expect("the notebook task is still declared");
+        assert_eq!(
+            notebook.references.len(),
+            1,
+            "egret.python is the KernelLauncher task and its notebook reference is what \
+             makes it one"
+        );
+        assert_eq!(notebook.references[0].field, "notebook");
+        assert!(matches!(notebook.references[0].kind, RefKind::Notebook));
+        assert_ne!(
+            crate::worker::handlers::python::TYPE_ID,
+            "egret.python",
+            "the container-backed script handler must NOT take the notebook task's \
+             name: a `script:` flow fails publish on the missing `notebook` reference, \
+             and a `notebook:` flow fails at run time on `deny_unknown_fields`"
+        );
+    }
+
+    /// **A failure recorded after the command ran still carries its outputs.**
+    ///
+    /// Fix round 1's Important 1: an output-file problem used to discard the
+    /// exit code and every `::{…}::` var the command had printed. Fact 7 is
+    /// `RunnableTaskException(e, ScriptOutput)` — an exception carrying an
+    /// Output — and this is that.
+    #[tokio::test]
+    async fn a_failure_after_the_command_ran_keeps_the_exit_code_and_the_vars() {
+        let spy = Spy::ok(CommandsResult {
+            exit_code: 0,
+            stdout_line_count: 4,
+            vars: serde_json::json!({"printed": "before the problem"})
+                .as_object()
+                .expect("an object")
+                .clone(),
+            failure: Some("`outputFiles` declares \"gone.txt\", which the command did not leave in /egret/working-dir".to_string()),
+            ..CommandsResult::default()
+        });
+        let h = Container::with_runner(spy);
+        let out = h
+            .run(&input(TYPE_ID, spec()))
+            .await
+            .expect("no worker error");
+
+        assert_eq!(out.state, RunState::Failed);
+        assert!(
+            out.message
+                .as_deref()
+                .expect("a message")
+                .contains("gone.txt"),
+            "got {:?}",
+            out.message
+        );
+        let outputs = out
+            .outputs
+            .expect("a failure after the run still carries outputs");
+        assert_eq!(outputs["exitCode"], serde_json::json!(0));
+        assert_eq!(
+            outputs["vars"],
+            serde_json::json!({"printed": "before the problem"})
+        );
+        assert_eq!(outputs["stdOutLineCount"], serde_json::json!(4));
     }
 
     /// **`cancel` reaches the runner, addressed by the lease.**

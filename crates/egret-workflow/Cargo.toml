@@ -242,3 +242,20 @@ egret-analytics-api.workspace = true
 # `EGRET_TEST_STARROCKS_URL` is a URL, parsed the same way `egret-dataapi`'s live
 # suite parses it.
 url.workspace = true
+
+# `tests/container_docker_live.rs` runs WITHOUT libtest, and that is fix round
+# 1's reviewer plan item 2 rather than a preference.
+#
+# libtest has no stable way for a test to report itself IGNORED at run time, so
+# a suite that self-skips reports `13 passed` — a test that did not run counted
+# as passed. That is exactly the shape `tests/sql_starrocks_live.rs` shipped
+# (`7 passed; 0 failed; 0 ignored` in 0.00s with no engine, the identical line
+# in 0.88s with one) and the reviewer's point is that an honest
+# `0 passed; 13 ignored` would have made it unmisreadable the day it landed.
+#
+# The hand-rolled main() emits libtest's own line format, so `cargo test`'s
+# output and every tool that counts `test result:` lines keep working — see the
+# file's own doc for what it does and does not implement.
+[[test]]
+name = "container_docker_live"
+harness = false

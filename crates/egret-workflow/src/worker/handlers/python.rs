@@ -1,4 +1,40 @@
-//! `egret.python` — run an inline Python script in a container.
+//! `egret.script.python` — run an inline Python script in a container.
+//!
+//! # This handler was called `egret.python` for one commit, and that name was
+//! # already taken
+//!
+//! Fix round 1's Critical 2. `crate::spec::registry::TASK_TYPES` has held an
+//! `egret.python` since W1 (commit `228173f9`) declaring a **required**
+//! `RefField { field: "notebook", kind: RefKind::Notebook }`, and the programme
+//! spec's §6.4 table says what it is for: *"`egret.python` | `KernelLauncher`;
+//! cần port `egret-kernel-api` mới"* — **run a notebook through the kernel
+//! launcher**, needing a port that does not exist yet. `src/models/flow.rs:417`
+//! and `spec/validate.rs`'s fixtures both write `type: egret.python` with a
+//! `notebook:` field, and `tests/common/mod.rs:199` has a `FakeRefs` arm for it.
+//!
+//! A container that runs an inline `script:` is a different task. The collision
+//! was live in both directions and neither was a compile error:
+//!
+//! * a `script:` flow **fails publish**, because publish resolves the declared
+//!   `notebook` reference and there is none;
+//! * a `notebook:` flow that somehow published would **fail at run time**, on
+//!   this module's `deny_unknown_fields`.
+//!
+//! **The existing entry is not bent to fit.** It is a shipped, spec-declared
+//! meaning with fixtures behind it; this handler is the new thing, so this
+//! handler is what renamed. `egret.script.python` follows the vocabulary that is
+//! already there (`egret.dataapi.call`, `egret.dataset.refresh`,
+//! `egret.report.send` all namespace before the verb) and reads as what it is —
+//! a script task, in Python. Nothing outside `crates/egret-workflow` referenced
+//! either name; measured with a repo-wide grep over `*.rs`, `*.ts`, `*.tsx`,
+//! `*.md`, `*.yaml`, `*.json`.
+//!
+//! `TASK_TYPES` gains a `egret.script.python` row with `references: &[]` in the
+//! same change, because publish refuses a type absent from that table and a
+//! handler nothing can publish to is dead surface.
+//! `handlers::container::tests::the_publish_table_and_these_handlers_agree`
+//! pins all of it — including that this handler's id is **not** `egret.python`,
+//! so the collision cannot come back quietly.
 //!
 //! # No oracle coverage either, and for the same measured reason
 //!
@@ -58,7 +94,10 @@ use super::{default_sink, LogSink};
 use crate::runners::render_str;
 
 /// The `type:` a flow writes.
-pub const TYPE_ID: &str = "egret.python";
+///
+/// **Not `egret.python`** — that name is the notebook-kernel task, declared in
+/// `spec::registry::TASK_TYPES` since W1. See this module's doc.
+pub const TYPE_ID: &str = "egret.script.python";
 
 /// `AbstractPythonExecScript`'s own container image default, verbatim.
 pub const DEFAULT_IMAGE: &str = "python:3.13-slim";
@@ -85,7 +124,7 @@ pub const ENV_DEFAULTS: [(&str, &str); 3] = [
     ("PIP_DISABLE_PIP_VERSION_CHECK", "1"),
 ];
 
-/// `egret.python`'s own properties.
+/// `egret.script.python`'s own properties.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Spec {
@@ -110,7 +149,7 @@ fn yes() -> bool {
     true
 }
 
-/// `egret.python`, over a [`TaskRunner`].
+/// `egret.script.python`, over a [`TaskRunner`].
 pub struct Python {
     runner: Arc<dyn TaskRunner>,
     sink: Arc<dyn LogSink>,
@@ -359,7 +398,7 @@ mod tests {
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(
             out.message.as_deref(),
-            Some("egret.python: the command exited with code 1")
+            Some("egret.script.python: the command exited with code 1")
         );
         assert_eq!(
             out.outputs.expect("outputs survive a failure")["vars"],
