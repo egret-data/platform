@@ -155,13 +155,21 @@ four names and hand it to W4, which introduces a real worker pool and owns the
 decision properly. Note this also settles Task 1's Concern 3: `valids/full`'s
 cause was unknown and is now known.
 
-**The `TRUNCATE` must go.** Task 5's `egret_side()` truncates
-`workflow.executions` in the shared `egret_test` database. It is safe today and
-was named rather than hidden — but this repo already has a rule against running
-two suites at once *because* they share that database, and a `TRUNCATE` turns
-contention into destruction: a concurrent run does not merely flake, it loses
-rows it had written. Scope it to the rows the test created, or take a per-test
-database. Task 6 or 7 owns it; whoever takes it says which and why.
+**The `TRUNCATE` must go — and my premise for saying so was false.** I ruled
+that Task 5's `egret_side()` truncates `workflow.executions` in the *shared*
+`egret_test`. Task 6 probed it: `DATABASE_URL` reads `…/egret_test` while
+`current_database()` reads `egret_t_0000…185c6`, because `common::db()` already
+goes through `egret_test_db::url()`, which clones a private per-process database.
+The statement never reached the shared one. Task 5's concern named a real hazard
+about the wrong database, and I ruled on it without checking.
+
+Task 6 took the item anyway and made the invariant **structural** rather than
+incidental: `is_process_clone(current_database())` is asserted immediately before
+the `TRUNCATE`, **anchored at both ends because `LIKE 'egret_t_%'` is exactly what
+once dropped `egret_test` in this repo**, with a two-direction test — on the live
+path the predicate can only ever answer `true`, so a one-direction test would
+prove nothing. That is the right answer to a ruling founded on a mistake: correct
+the premise, then do the work in the form that survives the next reader.
 
 ## Task 6: `egret.sql`, which ships with no oracle coverage
 
