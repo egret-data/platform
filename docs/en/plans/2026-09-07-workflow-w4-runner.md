@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close the three holes W3b handed forward — the `RETRYING` waker, task-level `timeout:`, and the kill path — which are worth **20 baselined entries**; then build `TaskCommands`, `egret.container` and `egret.python`, which reach **zero** corpus entries and carry their own tests.
+**Goal:** Close the three holes W3b handed forward — the `RETRYING` waker, task-level `timeout:`, and the kill path. My original figure of **20 baselined entries** was a union of three declaration greps; Tasks 1 and 2 measured the reachable count at **~0** (see the spec's §1.1), so this package closes real defects in the shipping path that **the oracle cannot see** — the position `egret.sql` was in. Then build `TaskCommands`, `egret.container` and `egret.python`, which reach **zero** corpus entries and carry their own tests.
 
 **Architecture:** `crates/egret-workflow/src/worker/` gains a scheduler term, a timeout budget that comes from the flow rather than a constant, and a cancellation path. The runner lives behind `TaskCommands`, the contract Kestra's own `TaskRunner` takes — a name this repo deliberately does not reuse for the handler trait.
 

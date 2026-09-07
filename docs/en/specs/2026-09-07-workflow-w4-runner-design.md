@@ -24,6 +24,30 @@ Plus the four entries that differ on the happens-before relation alone because W
 
 **So the oracle-visible deliverable of W4 is the holes, not the handlers.** The container runner is product work with its own tests, the way `egret.sql` is. This spec says so at the top rather than letting a green ratchet imply the runner was measured.
 
+## 1.1 The "20 baselined entries" was a union of three declaration greps, and it is ~0
+
+**Correcting §1 rather than editing it.** The table above counts flows that
+*declare* a thing. Tasks 1 and 2 measured what is *reachable*, and the answer is
+almost nothing:
+
+| hole | declared | reachable | measured by |
+|---|---|---|---|
+| `timeout:` | 4 | **0** | Task 2 — three are on a `Pause`, and Kestra's worker **ignores a `timeout:` on a flowable** (measured on the artifact: a `Sequential` around a 4 s `Sleep` succeeds in 4.2 s). The fourth is an *hour* on a `core.log.Log`. Instrumented: the budget was applied 4 times across the whole oracle and expired **0** times. |
+| `retry:` non-zero `interval:` | 14 (not 12) | **10 could stall, 0 moved** | Task 1 — 4 are `CREATE_NEW_EXECUTION` and never write a `not_before`. And the oracle cannot see the fix at all: `driver::pass_time` **rewinds `created_at`**, so the mechanism that makes the oracle fast is what hides a timing bug and its cure. Instrumented: the waker fired **0** times, with a positive control firing on the same build. |
+| kill | 5 | **0** | Re-derived: two match on the flow **id** and declare no runnable task at all, one is `Exit`'s own `state: KILLED` output, and two are `Pause`/flow-concurrency, which are W8's. None is a worker killing a running handler. |
+
+**So W4 moves the ratchet by nothing, and that is the honest headline.** The
+`RETRYING` waker still closed a run that hung for ever; `timeout:` still reaches
+the handler where it used to be a 300 s constant. Those are real defects in the
+shipping path. They are simply defects **this oracle has no way to see** — the
+same position `egret.sql` and the container runner are in, and the same position
+W3c was in when it closed an over-acceptance and banked nothing.
+
+The general lesson, and it is mine: **a `grep` for a keyword counts declarations,
+and a package's headline number must count what a code path can reach.** Every
+one of the three thirds was wrong in the same direction, so their union was wrong
+three times over.
+
 ## 2. What the holes actually are
 
 ### 2.1 `RETRYING` has no waker, and the sentence saying otherwise is false
