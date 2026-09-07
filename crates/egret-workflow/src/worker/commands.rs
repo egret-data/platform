@@ -1296,6 +1296,29 @@ mod tests {
             Some(why.as_str()),
             "the first reason stands; a later line must not overwrite it"
         );
+
+        // **And a later MARKER must not refill what the cap just emptied.**
+        // Fix round 1's mutation round found this leg missing: the guard that
+        // stops collecting once the cap has fired survived its mutation,
+        // because the only line sent after the flood was an ordinary one. A
+        // cap that clears the vars and then lets the next marker repopulate
+        // them bounds nothing at all.
+        ingest_line(
+            &mut r,
+            &mut bytes,
+            32,
+            r#"::{"outputs":{"sneaked":"in"}}::"#,
+            false,
+        );
+        assert!(
+            r.vars.is_empty(),
+            "a marker after the cap fired must contribute nothing: {:?}",
+            r.vars
+        );
+        assert_eq!(
+            r.stdout_line_count, 2,
+            "it is still counted and still logged -- only its payload is dropped"
+        );
     }
 
     /// **A declared output that is not in the copied working directory fails
