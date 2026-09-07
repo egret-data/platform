@@ -40,13 +40,21 @@
 //!    already swallowed its own failure. So [`guarded`] returns the budget's
 //!    outcome untouched whether the cancel succeeded or refused, and the
 //!    refusal goes to `tracing` exactly as Kestra's goes to slf4j.
-//! 3. **egret is louder than the artifact here, deliberately.**
-//!    `WorkerJobLifecycle.kill()` has an empty default body, so a Kestra task
-//!    that cannot stop itself is indistinguishable from one that did;
-//!    `TaskHandler::cancel` has no default body, so egret's five handlers each
-//!    had to answer, and [`handlers::sql`](super::handlers::sql) answers
-//!    `Err`. That refusal is the one thing in this module the artifact has no
-//!    counterpart for.
+//! 3. **egret is louder about a kill it cannot deliver, and that is the only
+//!    sense in which it does more.** `WorkerJobLifecycle.kill()` has an empty
+//!    default body, so a Kestra task that cannot stop itself is
+//!    indistinguishable from one that did; `TaskHandler::cancel` has no default
+//!    body, so egret's five handlers each had to answer, and
+//!    [`handlers::sql`](super::handlers::sql) answers `Err`.
+//!
+//!    **Do not read that as egret cancelling more than Kestra.** Fix round 1
+//!    corrected exactly that reading: one layer below the interface,
+//!    `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` calls
+//!    `Statement.cancel()` and `close()` on a handle it kept, and Kestra's
+//!    Trino and MySQL query tasks both extend it. For the one task class egret
+//!    has a counterpart to, the artifact does strictly **more**, and
+//!    `handlers::sql`'s `cancel` carries the disassembly and the scope
+//!    judgement that leaves it undone.
 //!
 //! # Where the kill path does NOT go, and that is the finding
 //!
@@ -110,7 +118,25 @@ pub(super) async fn guarded(
 ) -> Result<Outcome> {
     let guarded = timeout::guard(budget, reg.run(task)).await?;
     if matches!(guarded, Guarded::Expired(_)) {
-        kill(reg, task).await;
+        // **The value is read here, which is the whole reason it is a value.**
+        // Fix round 1: `kill` used to log and this line used to discard what it
+        // returned, so [`Killed`]'s own doc — "a value rather than a `Result`
+        // swallowed at the call site" — described nothing. The log is the
+        // caller's decision (the artifact makes it in `WorkerTaskCallable.kill`,
+        // the caller of `task.kill()`), so it lives here and `kill` reports.
+        match kill(reg, task).await {
+            Killed::Stopped => {}
+            Killed::Refused(reason) => {
+                tracing::warn!(
+                    execution = %task.execution_id,
+                    run = %task.run_id,
+                    task_id = %task.task_id,
+                    type_id = %task.type_id,
+                    "the worker could not stop this task after its budget expired, \
+                     so its work may still be running: {reason}"
+                );
+            }
+        }
     }
     // **One return path, and that is the invariant made structural.** The
     // outcome is the budget's either way; there is no branch here in which a
@@ -118,17 +144,19 @@ pub(super) async fn guarded(
     Ok(guarded.outcome())
 }
 
-/// Ask `reg` to stop `task`, and report the refusal rather than swallow it.
+/// Ask `reg` to stop `task`, and **report** what came of it.
 ///
-/// The log line is `WorkerTaskCallable.kill`'s
-/// `"Error while killing task: '{}'"` in egret's own words and with egret's own
-/// fields; it is a `tracing` event rather than a row because egret has no
+/// This function decides nothing: it dispatches and turns the answer into a
+/// [`Killed`]. [`guarded`] is what logs a refusal — the artifact splits it the
+/// same way, with `RunnableTask.kill()` throwing and its *caller*
+/// `WorkerTaskCallable.kill` doing the `logger.warn`.
+///
+/// The refusal is a `tracing` event rather than a row because egret has no
 /// workflow-log store at all
-/// ([`LogSink`](super::handlers::LogSink) states that gap and owns it).
-///
-/// **It is deliberately not written to `task_runs.message`.** That column is
-/// the reason the task failed, which an author reads; a kill that could not be
-/// delivered is an operator's fact about egret, and the artifact keeps the two
+/// ([`LogSink`](super::handlers::LogSink) states that gap and owns it), and it
+/// is deliberately **not** written to `task_runs.message`: that column is the
+/// reason the task failed, which an author reads, while a kill that could not
+/// be delivered is an operator's fact about egret. The artifact keeps the two
 /// apart the same way (the message comes from `TimeoutExceededException`, the
 /// kill failure from `logger.warn`). Appending would also be a divergence the
 /// oracle cannot see — `golden.json` records no failure message — which is the
@@ -136,18 +164,7 @@ pub(super) async fn guarded(
 pub(super) async fn kill(reg: &dyn Registry, task: &TaskInput) -> Killed {
     match reg.cancel(task).await {
         Ok(()) => Killed::Stopped,
-        Err(e) => {
-            let reason = e.to_string();
-            tracing::warn!(
-                execution = %task.execution_id,
-                run = %task.run_id,
-                task_id = %task.task_id,
-                type_id = %task.type_id,
-                "the worker could not stop this task after its budget expired, \
-                 so its work may still be running: {reason}"
-            );
-            Killed::Refused(reason)
-        }
+        Err(e) => Killed::Refused(e.to_string()),
     }
 }
 

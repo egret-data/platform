@@ -338,6 +338,39 @@ pub trait TaskHandler: Send + Sync {
     /// artifact catches a throwing `task.kill()`, logs it, and keeps the state
     /// `callWithTimeout` had already decided; egret does the same, and
     /// [`cancel::Killed`](cancel) is what carries the refusal to the log.
+    ///
+    /// # READ THIS BEFORE IMPLEMENTING A HANDLER THAT HOLDS AN EXTERNAL RESOURCE
+    ///
+    /// **This method is addressed by IDENTITY, not by a handle to the work.**
+    /// It is handed a [`TaskInput`] — a snapshot naming a `run_id`, an
+    /// `execution_id` and an `attempt` — and a `&self` shared by every run of
+    /// that type. The artifact's is not: `WorkerTaskCallable` holds *the task
+    /// instance that is running*, and
+    /// `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` reaches
+    /// `this.runningStatement`, a field on that instance. Per-instance
+    /// addressing cannot name the wrong resource; per-identity addressing can.
+    ///
+    /// The four core handlers are safe from this because they hold nothing.
+    /// **A pod-backed handler (W4 Task 5, `egret.container`) is not**, and the
+    /// hazard is concrete: [`reap`] clears a lease and leaves `state =
+    /// 'RUNNING'`, so worker B can claim a run while worker A is still inside
+    /// its handler, and A's own budget then expires and calls this method. A
+    /// handler that named its pod `egret-run-<run_id>` would have A delete
+    /// **B's** pod. `attempt` does not disambiguate either — the reaper leaves
+    /// the attempt open, so A and B share it.
+    ///
+    /// **The value that does disambiguate is the lease token,
+    /// `task_runs.claimed_at`**, which [`claim::Claimed`](claim) carries and
+    /// which is deliberately **not** on [`TaskInput`] today, because no handler
+    /// uses it and a field with no reader is the shape this package has
+    /// refused ten times. Whoever adds a resource-holding handler must add it
+    /// (or a per-run handle registry owned by the handler) in the same change —
+    /// **not** derive an external name from `run_id` alone. `worker::cancel`'s
+    /// module doc records why the kill path cannot simply be suppressed for a
+    /// lost lease instead: the worker never learns the lease is gone until its
+    /// write is refused, which is after the kill.
+    ///
+    /// [`reap`]: reap
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 

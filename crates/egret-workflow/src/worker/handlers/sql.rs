@@ -374,35 +374,85 @@ impl TaskHandler for Sql {
     /// and asserted in both this module's tests and `tests/worker.rs`'s
     /// `a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so`.
     ///
-    /// # Why it still refuses, and exactly where the channel stops
+    /// # THIS IS A MEASURED DIVERGENCE FROM THE ARTIFACT, not a gap the
+    /// # artifact shares
     ///
-    /// Cancellation exists **below** this handler and stops one layer short of
-    /// it:
+    /// Fix round 1 corrected the sentence that used to stand here. W4 Task 3's
+    /// first reading stopped at `WorkerJobLifecycle`, whose `kill()` is
+    /// `default` and empty, and concluded that a Kestra task which cannot stop
+    /// itself is indistinguishable from one that did. That is true of the
+    /// *interface* and false of the task this handler corresponds to.
+    /// Disassembled from the pinned image's plugin jars — `/app/plugins/`
+    /// `io_kestra_plugin__plugin-jdbc-trino__2_0_0.jar` and
+    /// `…plugin-jdbc-mysql__2_0_0.jar`, extracted with `docker cp` and read
+    /// with `javap -c`:
+    ///
+    /// * `io.kestra.plugin.jdbc.trino.Query` and
+    ///   `io.kestra.plugin.jdbc.mysql.Query` both `extends
+    ///   io.kestra.plugin.jdbc.AbstractJdbcQuery`. (Kestra ships no StarRocks
+    ///   task; StarRocks speaks the MySQL wire protocol and users point the
+    ///   MySQL task at it.)
+    /// * `AbstractJdbcQuery` holds `private volatile transient
+    ///   java.sql.Statement runningStatement` and `java.sql.Connection
+    ///   runningConnection`, both assigned during `run`.
+    /// * It **overrides** `public void kill()`, which calls
+    ///   `AbstractJdbcBaseQuery.kill(Statement)` then `kill(Connection)`.
+    /// * `kill(Statement)`: if non-null and `!isClosed()` →
+    ///   `Statement.cancel()`, then `Statement.close()`. A `SQLException` is
+    ///   wrapped in a `RuntimeException` and **thrown**, landing in
+    ///   `WorkerTaskCallable.kill`'s catch/WARN.
+    /// * `kill(Connection)`: if non-null and `!isClosed()` → `close()`.
+    ///
+    /// **So Kestra's own SQL task stops the remote statement, and `egret.sql`
+    /// does not.** A `timeout: PT10S` on a one-hour query is cancelled at ten
+    /// seconds there and runs the full hour here on StarRocks. Whatever
+    /// justifies this refusal, it cannot be *"the artifact has no better
+    /// answer"* — it has one, and it is `Statement.cancel()`.
+    ///
+    /// # Why it still refuses: cost and scope, and one fact that decides it
+    ///
+    /// The cancellation channel exists **below** this handler and stops one
+    /// layer short of it:
     ///
     /// * `egret_query`'s `Connector::execute(sql, limits, CancellationToken)`
-    ///   takes a token, and `TrinoConnector` honours it — it `DELETE`s the
-    ///   statement's `nextUri`, which is Trino's own cancel;
-    ///   `JobManager::cancel` is the consumer that already drives it.
+    ///   takes a token. `TrinoConnector` honours it with a real server-side
+    ///   cancel — it `DELETE`s the statement's `nextUri`.
+    ///   `JobManager::cancel` already drives that.
     /// * `execution::port_impl::run_bounded` — the implementation behind
     ///   [`QueryExecPort`] — builds a token **privately**, cancels it on its own
     ///   `tokio::time::timeout(limits.timeout, …)`, and never lets a caller hold
-    ///   it.
+    ///   it. When the worker's outer budget drops the future first (it does:
+    ///   same instant, armed first) that inner timeout never fires, so the
+    ///   DELETE never happens.
     /// * [`QueryExecPort`] itself has no cancel verb, and that trait's doc gives
     ///   the rule for adding one: *"A trait method with no consumer is untested
-    ///   surface — do not add one ahead of its caller."* It has ten
-    ///   implementations, nine of them hand-written test fakes.
+    ///   surface — do not add one ahead of its caller."* It has **17
+    ///   implementation sites, 16 of them hand-written test fakes** —
+    ///   `execution::port_impl`'s `EngineState` is the only production one.
     ///
-    /// So honouring `cancel` here means a new port verb, a per-run handle
-    /// threaded out of `execute_as_with_params`, and nine fakes updated — and
-    /// the branch that would prove it works (a statement actually stopping on
-    /// an engine) is only observable from `tests/sql_starrocks_live.rs`, which
-    /// needs an engine. That is a guard whose failing branch no test in the
-    /// default gate can reach, which is the trap this programme has fallen into
-    /// ten times. It is left undone deliberately and named here.
+    /// So honouring `cancel` means a new port verb, a per-run handle threaded
+    /// out of `execute_as_with_params` and held by this handler, and 16 fakes
+    /// updated across `egret-dataapi`, `egret-server` and this crate.
+    ///
+    /// **The fact that decides it is that this would not fix the engine where
+    /// the hazard is.** On StarRocks the token is honoured only *cooperatively
+    /// inside the row drain* — `connector/starrocks.rs`'s `drain_rows` checks
+    /// `cancel.is_cancelled()` between rows — so a query still executing before
+    /// its first row is untouched, and breaking out of the loop tells StarRocks
+    /// nothing. A real cancel there needs `KILL QUERY <id>` issued on a **second
+    /// connection**, which no connector does. So the change with the widest
+    /// blast radius would deliver a true cancel only on Trino, which is
+    /// **already** bounded by the `query_max_run_time` this handler sends. That
+    /// is the wrong trade for this task, and it is a scope judgement rather than
+    /// a claim about what is possible.
+    ///
+    /// **Whoever picks this up needs all three, not the first:** the port verb,
+    /// a `KILL QUERY` path in the StarRocks connector, and a live assertion in
+    /// `tests/sql_starrocks_live.rs` that the statement actually stops — the
+    /// default gate cannot see it, and a Trino-only half looks finished from
+    /// inside the unit tests.
     ///
     /// # What the refusal costs today, per engine
-    ///
-    /// Not the same on both, and the difference is the live hazard:
     ///
     /// * **Trino** — [`Limits::timeout`] is sent as a `query_max_run_time`
     ///   session property (`connector/trino.rs`), so the coordinator kills the
@@ -413,8 +463,18 @@ impl TaskHandler for Sql {
     ///   enforce `limits.timeout` by dropping the future"*. The worker's drop is
     ///   that outer caller, and dropping a future tells MySQL-protocol nothing.
     ///   A timed-out `egret.sql` on StarRocks runs to completion on the engine.
+    ///   The cheapest real fix is a `query_timeout` session variable set the way
+    ///   `connector/trino.rs` already sets `query_max_run_time`; it is not done
+    ///   here because that connector is shared with the Data API serving path
+    ///   and would begin failing queries that succeed today.
     ///
-    /// The second is the row this handler contributes to the runtime register.
+    /// **This divergence is not in the oracle's runtime over-acceptance
+    /// register and cannot be.** That register is keyed by corpus id and derived
+    /// from the two traces by
+    /// `runtime_over_acceptance_is_registered_and_owned`; `egret.sql` appears in
+    /// **zero** corpus entries, so it has no id to register under. The earlier
+    /// sentence here claiming a row was false and is withdrawn. This doc
+    /// comment and the task report are the record.
     ///
     /// [`Limits::timeout`]: egret_query_api::Limits
     async fn cancel(&self, task: &TaskInput) -> Result<()> {

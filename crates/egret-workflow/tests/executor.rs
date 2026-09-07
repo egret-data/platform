@@ -4067,12 +4067,26 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
                 .chain(task.error_children())
                 .any(any_timeout)
     }
+    // **All FOUR of `Flow`'s task lists**, not the two the first draft walked.
+    // `models::Flow` has `tasks`, `errors`, `finally_` (`@JsonProperty("finally")`)
+    // and `after_execution` — the fourth being the one `Flow.java:88` has and
+    // the porting brief missed. Walking two of four happened to be sound today,
+    // because `executor::build_plan` names neither `finally_` nor
+    // `after_execution` (grep: no occurrence in `src/executor/plan.rs`), so a
+    // `timeout:` there could not reach a claimable run at all. That is a
+    // property of an unrelated file, though, and this test must not depend on
+    // it silently — so it reads all four and the argument disappears.
     let with_a_budget: Vec<&String> = named
         .iter()
         .filter(|id| {
             let flow = egret_workflow::spec::parse(&corpus_source(id))
                 .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
-            flow.tasks.iter().chain(flow.errors.iter()).any(any_timeout)
+            flow.tasks
+                .iter()
+                .chain(flow.errors.iter())
+                .chain(flow.finally_.iter())
+                .chain(flow.after_execution.iter())
+                .any(any_timeout)
         })
         .collect();
     assert!(

@@ -4684,10 +4684,27 @@ one-direction test and break every deliberate skip.
    > cancellation channel actually stops: `Connector::execute` takes a
    > `CancellationToken` and Trino honours it, but `port_impl::run_bounded`
    > owns that token privately and `QueryExecPort` exposes no cancel verb across
-   > its ten implementations. The refusal now names the per-engine cost — Trino
+   > its 17 implementation sites (16 of them test fakes). The refusal now names
+   > the per-engine cost — Trino
    > bounds the abandoned statement with the `query_max_run_time` the task
    > already sent; the StarRocks connector does not read `Limits::timeout` at
    > all, so nothing bounds it.
+   >
+   > **Fix round 1 — this is a DIVERGENCE, not a gap the artifact shares.** The
+   > first reading stopped at `WorkerJobLifecycle.kill()`, whose default body is
+   > empty. One layer down,
+   > `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` calls
+   > `Statement.cancel()` then `close()` on a handle it kept, and both
+   > `plugin-jdbc-trino`'s and `plugin-jdbc-mysql`'s `Query` extend it
+   > (disassembled from `/app/plugins/*.jar` in the pinned image). **Kestra's
+   > own SQL task stops the remote statement; `egret.sql` does not** — a
+   > `timeout: PT10S` on a one-hour StarRocks query runs the full hour here.
+   > What keeps the refusal is cost and scope, not the artifact: the port verb
+   > would buy a true cancel only on Trino, which `query_max_run_time` already
+   > bounds, because on StarRocks the token is honoured only cooperatively
+   > between drained rows and a real cancel needs `KILL QUERY` on a second
+   > connection. `handlers::sql`'s `cancel` doc carries the full disassembly and
+   > the three things an implementer needs.
 2. **No `run_as`.** The statement runs as `TaskInput::principal`, which
    `worker::claim` reads from `workflow.flows.created_by` through
    `executions.flow_id`. That is the rule `egret-automation` already established
@@ -5547,7 +5564,9 @@ more a fed terminal had been hiding, four of which are W2 divergences that only 
 real handler rendering a real property can reach (`errorLogs()`, `render()`,
 `??` over an undefined *root*, and integer division by zero rendering
 `Infinity`), the fifth being a sibling still in flight when its `Parallel` failed
-— nothing calls `TaskHandler::cancel`, and W4 owns the kill path.
+— W4 Task 3 wired `TaskHandler::cancel`, and deliberately not to that seam: the
+kill path fires on a task's own `timeout:` expiring, while a run a **flowable**
+abandoned is `advance()`'s decision and `advance()` has no worker to tell.
 
 `valids/full`'s entry in that list is a correction: it was attributed to
 flow-level `outputs:` and `variables:`, and the flow has **neither** (W3b Task 1
@@ -5626,8 +5645,11 @@ called `apply_outcome` twice with one `Claimed` — and the hole it names needed
 configuration at all: `reap` clears `claimed_at` and leaves `state = 'RUNNING'`,
 which is the claim predicate, so a run is re-claimable while its first handler is
 still in flight, `DEFAULT_WORKING_TIMEOUT` is an hour, `Handlers::with_core_tasks`
-registers `Sleep`, and `duration: PT2H` opens the window. Nothing calls
-`TaskHandler::cancel`. Measured on the shipped code, two terminals landed on one
+registers `Sleep`, and `duration: PT2H` opens the window, with nothing able to
+tell the first handler to stop — W4 Task 3's kill path fires only on a
+task-level budget, inside the worker that owns the run, and `reap` is an
+`UPDATE` run by another process holding no handle to anyone's future. Measured
+on the shipped code, two terminals landed on one
 attempt, the second **wiping `ended_seq` from `Some(4)` to NULL** — the column
 migration 0136 exists to hold and the happens-before endpoint this oracle reads —
 and the execution reached `FAILED` while a successor was `RUNNING` and claimable,
@@ -5768,7 +5790,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 | owner | entries | what egret does that Kestra did not |
 |---|---|---|
 | **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
-| **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. Nothing calls `TaskHandler::cancel` |
+| **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
 | **W8** (`sla:`, flow `concurrency:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
 | **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
 

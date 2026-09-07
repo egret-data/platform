@@ -2547,9 +2547,13 @@ async fn a_killed_handler_cannot_commit_over_the_worker_that_replaced_it(pool: s
     assert_eq!(
         reg.killed.lock().unwrap().clone(),
         vec!["a".to_string()],
-        "the kill path still runs for a run this worker has already lost: its \
-         own handler is what it is stopping, and losing the lease is the \
-         strongest reason there is to stop it"
+        "the kill path still runs for a run this worker has already lost. It is \
+         stopping its OWN in-flight future, which nothing else can reach -- and \
+         that is the whole of the claim. It is NOT that `cancel` may act on the \
+         run: by now the run belongs to the rival, and a handler that named an \
+         external resource after `run_id` would be reaching the rival's. \
+         `TaskHandler::cancel`'s doc carries that hazard for W4 Task 5, and it \
+         is why the fence below is what protects the row rather than the kill"
     );
 
     assert_eq!(
