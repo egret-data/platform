@@ -76,6 +76,7 @@ mod reaper;
 mod registry;
 mod render;
 mod spawn;
+mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{apply_outcome, claim, resume, start_execution, tick, wake, Claimed};
@@ -140,6 +141,32 @@ pub struct TaskInput {
     /// ancestors' included), and this run's `taskrun`. See that module for what
     /// each name is and what is deliberately still missing.
     pub render: RenderContext,
+    /// The wall-clock budget the author gave this task, and `None` when they
+    /// gave none.
+    ///
+    /// **The author's `timeout:`, rendered — not a constant.** It is on this
+    /// struct for the reason [`handlers::sql::DEFAULT_TIMEOUT`] used to give
+    /// for not having it: `models::Task`'s deserializer takes `timeout` out of
+    /// a leaf's `spec` before a handler ever sees it, so a handler that wanted
+    /// it had nowhere to read it from and used a constant instead.
+    ///
+    /// **A handler is not obliged to look at it**, and most cannot use it:
+    /// [`timeout::guard`] enforces the same budget around
+    /// [`Registry::run`](Registry) whatever the handler does, which is the
+    /// artifact's arrangement (`AbstractWorkerCallable.callWithTimeout` wraps
+    /// the whole of `task.run`). It is here for the handlers that can do
+    /// something *better* than being dropped — [`handlers::sql`] passes it to
+    /// the engine as `Limits::timeout`, which on Trino becomes a
+    /// `query_max_run_time` session property and cancels the statement server
+    /// side instead of abandoning it.
+    ///
+    /// **`None` covers two different things and the difference is spent
+    /// before this field is built**: a task with no `timeout:` at all, and a
+    /// task whose `timeout:` is unusable. The second never reaches a handler —
+    /// `claim::run_one` fails the run with the refusal's own message instead
+    /// of calling one — so nothing downstream has to tell them apart. See
+    /// [`timeout::Budget`].
+    pub timeout: Option<std::time::Duration>,
     /// The identity this execution acts as, and `None` when it has none.
     ///
     /// A workflow runs with nobody logged in, so a handler that reaches an
@@ -215,7 +242,15 @@ pub struct Outcome {
     /// failure message**, so the ratchet cannot tell them apart. This field is
     /// what `handlers::fail`'s own tests assert on instead.
     ///
-    /// `None` on every success. Nothing persists it yet; see the task report.
+    /// `None` on every success.
+    ///
+    /// **It is persisted now** — `task_runs.message`, migration 0137, written
+    /// by [`apply_outcome`] in the same fenced statement as `outputs`. W3b's
+    /// sentence here was *"Nothing persists it yet"*, and W4 Task 2 is what
+    /// forced the column: a task-level `timeout:` is distinguishable from any
+    /// other failure only by its message, so a test that could read a run's
+    /// state and not its message could not tell a budget that fired from a
+    /// handler that failed for an unrelated reason.
     pub message: Option<String>,
 }
 

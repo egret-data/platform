@@ -117,14 +117,24 @@ pub const TYPE_ID: &str = "egret.sql";
 /// rather than being truncated — see [`Sql::run`].
 pub const MAX_FETCH_ROWS: usize = 10_000;
 
-/// The wall-clock budget one statement gets.
+/// The wall-clock budget one statement gets when the author asked for none.
 ///
-/// A constant rather than the task's own `timeout:`, and the reason is a seam
-/// rather than a choice: `models::Task`'s deserializer takes `timeout` out of a
-/// leaf's `spec` before a handler ever sees it, because it belongs to the
-/// executor (`executor::advance` reads it). Wiring the two together means
-/// carrying it on [`TaskInput`], which is W4's business along with the kill path
-/// — see [`Sql::cancel`]. Until then this is the ceiling.
+/// **A fallback now, not a ceiling, and the sentence that used to be here was
+/// the hole W4 Task 2 closed.** It read: *"A constant rather than the task's
+/// own `timeout:`, and the reason is a seam rather than a choice:
+/// `models::Task`'s deserializer takes `timeout` out of a leaf's `spec` before
+/// a handler ever sees it, because it belongs to the executor
+/// (`executor::advance` reads it). Wiring the two together means carrying it on
+/// `TaskInput`, which is W4's business."* Two things in it were wrong and one
+/// is now done:
+///
+/// * the field does **not** belong to the executor — measured on the artifact,
+///   `timeout:` is enforced by the WORKER (`WorkerTaskCallable`), and Kestra's
+///   own validator says the property "is only relevant for runnable tasks";
+///   `executor::plan::PlanTask::timeout` is `None` on every task and
+///   `advance()` never reads one;
+/// * the wiring is done: [`TaskInput::timeout`] carries the author's rendered
+///   budget, and this constant is what a task with no `timeout:` gets.
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// What the task does with the rows.
@@ -235,7 +245,7 @@ impl Sql {
     ///   failure**, which aborts the tick and leaves the execution where it was,
     ///   because the flow is not wrong and failing it would blame the author for
     ///   egret's outage.
-    fn mapped(&self, e: Error) -> Result<Outcome> {
+    fn mapped(&self, e: Error, budget: std::time::Duration) -> Result<Outcome> {
         if let Some(kind) = egret_query_api::ExecFailure::kind_of(&e) {
             return Ok(failed(match kind {
                 ExecFailureKind::EngineUnavailable => {
@@ -243,7 +253,7 @@ impl Sql {
                 }
                 ExecFailureKind::Timeout => format!(
                     "{TYPE_ID}: the statement outran its {}s budget",
-                    self.timeout.as_secs()
+                    budget.as_secs()
                 ),
             }));
         }
@@ -309,9 +319,21 @@ impl TaskHandler for Sql {
         };
         let params: Vec<Param> = bound.iter().map(to_param).collect();
 
+        // **The author's `timeout:` if they wrote one, this handler's
+        // constant if they did not.** What it buys over the worker's own
+        // budget is that the ENGINE is told: on Trino `Limits::timeout`
+        // becomes a `query_max_run_time` session property, so the statement is
+        // cancelled server side rather than left running after this future is
+        // dropped. `super::super::timeout::guard` is the outer bound and is
+        // what reports a budget that expires -- both are the same instant, and
+        // the outer one is armed first, so `Timeout after HH:mm:ss.SSS` is the
+        // message an author sees for a `timeout:` they wrote. The message
+        // below stays reachable for the engine's own deadline (a `NONE`
+        // `timeout:` under this constant, or an engine that answers first).
+        let budget = task.timeout.unwrap_or(self.timeout);
         let limits = Limits {
             max_rows: self.max_rows,
-            timeout: self.timeout,
+            timeout: budget,
         };
         let result = self
             .port
@@ -327,7 +349,7 @@ impl TaskHandler for Sql {
 
         let result = match result {
             Ok(r) => r,
-            Err(e) => return self.mapped(e),
+            Err(e) => return self.mapped(e, budget),
         };
 
         match outputs_for(spec.fetch, &result, self.max_rows) {
@@ -491,7 +513,9 @@ mod tests {
     }
 
     /// A [`TaskInput`] with a principal and a render context, so the tests below
-    /// are about the SQL and not about the two refusals.
+    /// are about the SQL and not about the two refusals. No `timeout:`, which
+    /// is what a task that declares none carries — [`budgeted`] is the other
+    /// half.
     fn input(spec: serde_json::Value, render: RenderContext) -> TaskInput {
         TaskInput {
             workspace_id: Uuid::nil(),
@@ -503,7 +527,20 @@ mod tests {
             attempt: 1,
             spec,
             render,
+            timeout: None,
             principal: Some(UserId(Uuid::nil())),
+        }
+    }
+
+    /// The same input, carrying the author's own `timeout:`.
+    fn budgeted(
+        spec: serde_json::Value,
+        render: RenderContext,
+        timeout: std::time::Duration,
+    ) -> TaskInput {
+        TaskInput {
+            timeout: Some(timeout),
+            ..input(spec, render)
         }
     }
 
@@ -519,6 +556,12 @@ mod tests {
     struct Spy {
         seen: std::sync::Mutex<Vec<Call>>,
         answer: std::sync::Mutex<Option<TabularResult>>,
+        /// The `Limits::timeout` each call was made under, recorded beside
+        /// [`Call`] rather than inside it so that widening what this port
+        /// observes does not rewrite every existing assertion.
+        budgets: std::sync::Mutex<Vec<std::time::Duration>>,
+        /// What the port answers with instead of rows.
+        fails: std::sync::Mutex<Option<ExecFailureKind>>,
     }
 
     impl Spy {
@@ -540,6 +583,20 @@ mod tests {
         }
         fn calls(&self) -> usize {
             self.seen.lock().unwrap().len()
+        }
+        fn last_budget(&self) -> std::time::Duration {
+            *self
+                .budgets
+                .lock()
+                .unwrap()
+                .last()
+                .expect("the port was never called")
+        }
+        /// A port that reports the engine's own deadline.
+        fn timing_out() -> Arc<Self> {
+            let s = Self::default();
+            *s.fails.lock().unwrap() = Some(ExecFailureKind::Timeout);
+            Arc::new(s)
         }
     }
 
@@ -574,12 +631,16 @@ mod tests {
             _principal: UserId,
             sql: &str,
             params: &[Param],
-            _limits: Limits,
+            limits: Limits,
         ) -> std::result::Result<TabularResult, Error> {
             self.seen
                 .lock()
                 .unwrap()
                 .push((sql.to_string(), params.to_vec(), ws, database_id));
+            self.budgets.lock().unwrap().push(limits.timeout);
+            if let Some(kind) = *self.fails.lock().unwrap() {
+                return Err(egret_query_api::ExecFailure::new(kind, "engine said so").into_error());
+            }
             Ok(self
                 .answer
                 .lock()
@@ -587,6 +648,65 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| result(&[], vec![])))
         }
+    }
+
+    /// **The author's `timeout:` is what the engine is given.** W3b measured
+    /// the opposite: `models::Task`'s deserializer takes `timeout` out of a
+    /// leaf's `spec`, so this handler had nothing to read and used
+    /// [`DEFAULT_TIMEOUT`] whatever the author wrote. Both directions are
+    /// driven, because a handler that ignored [`TaskInput::timeout`] and one
+    /// that ignored the constant look the same from one arm.
+    #[tokio::test]
+    async fn the_engine_is_given_the_authors_own_budget_and_the_constant_only_without_one() {
+        let spy = Spy::new();
+        Sql::new(spy.clone())
+            .run(&budgeted(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+                std::time::Duration::from_secs(7),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            spy.last_budget(),
+            std::time::Duration::from_secs(7),
+            "the statement must run under the `timeout:` the author wrote, not \
+             under this handler's fallback"
+        );
+
+        let bare = Spy::new();
+        Sql::new(bare.clone())
+            .run(&input(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            bare.last_budget(),
+            DEFAULT_TIMEOUT,
+            "a task that declares no `timeout:` still gets this handler's own \
+             ceiling — the constant is a fallback now, not a dead value"
+        );
+    }
+
+    /// And the engine's own deadline reports the budget it actually ran under,
+    /// not the constant. Before W4 Task 2 this sentence always said `300s`.
+    #[tokio::test]
+    async fn the_engines_timeout_message_names_the_budget_the_statement_ran_under() {
+        let out = Sql::new(Spy::timing_out())
+            .run(&budgeted(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+                std::time::Duration::from_secs(7),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert_eq!(
+            out.message.as_deref(),
+            Some("egret.sql: the statement outran its 7s budget")
+        );
     }
 
     fn db_id() -> Uuid {

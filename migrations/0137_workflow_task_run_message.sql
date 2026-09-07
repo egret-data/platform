@@ -1,0 +1,33 @@
+-- Workflow W4 Task 2: the message a failed run failed with.
+--
+-- `worker::Outcome` has carried a `message` since W3b Task 3, and its own doc
+-- says what was true until now: "Nothing persists it yet". `apply_outcome`
+-- wrote `outputs` and dropped `message` on the floor, so every reason a task
+-- failed -- `egret.sql`'s carefully-worded refusals, `Sleep`'s
+-- "duration: must be a positive duration", and now a task-level `timeout:`
+-- expiring -- existed only inside the tick that produced it.
+--
+-- W4 Task 2 is what forces the column rather than merely wanting it. The
+-- task-level `timeout:` is enforced by the WORKER (measured on the pinned
+-- artifact: `AbstractWorkerCallable.callWithTimeout` wraps the task in a
+-- Failsafe `Timeout`, and on expiry `exceptionHandler` returns FAILED), and
+-- the thing that distinguishes a timeout from every other failure is exactly
+-- its message -- Kestra's own `Timeout after HH:mm:ss.SSS`. A test that could
+-- assert only "the run is FAILED" cannot tell a budget that fired from a
+-- handler that failed for an unrelated reason, which is the shape this
+-- programme keeps finding: an assertion that passes for the wrong reason.
+--
+-- Nullable, and NULL means "no message", which is what every success carries.
+-- It is written by `apply_outcome` in the SAME statement as `outputs`, under
+-- the SAME lease fence (`AND claimed_at = $n`), because a stale worker that
+-- could overwrite one could overwrite the other.
+--
+-- Kestra has no equivalent column: it writes the message to its own log store
+-- as an ERROR line (measured live -- a timed-out `Sleep` logs
+-- `Timeout after 00:00:01.000` at ERROR) and egret has no workflow-log table
+-- yet (`worker::handlers::LogSink`'s doc records that gap). This column is
+-- therefore egret's own, not a port, and it is the run's LAST message: a
+-- retried run overwrites it on each attempt, so it always describes the
+-- attempt whose state the row is showing.
+ALTER TABLE workflow.task_runs
+  ADD COLUMN message text;

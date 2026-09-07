@@ -2069,3 +2069,226 @@ async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_
         stuck(&pool, waiting, "a").await
     );
 }
+
+/// A one-task flow whose only task declares a `timeout:`.
+///
+/// The task id is a parameter because the whole point of this property is
+/// **which** run the budget belonged to, and three flows whose task is called
+/// `a` cannot tell that.
+fn one_task_with_timeout(id: &str, task: &str, timeout: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: {task}\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    timeout: {timeout}\n"
+    )
+}
+
+/// How long the [`Slow`] handler takes. Longer than the tight budget below and
+/// far shorter than the generous one, so the two arms cannot both be explained
+/// by the same accident.
+const SLOW_HANDLER: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// A [`Registry`] that takes [`SLOW_HANDLER`] to answer, and records the budget
+/// it was handed.
+///
+/// **Two lists, not one.** `started` records the budget each run arrived with
+/// — the "reaches the handler" half — and `completed` records the runs whose
+/// future was allowed to finish. A wrapper that awaited the handler and then
+/// rewrote the outcome would satisfy every state assertion in this test and
+/// leave `completed` holding the timed-out run, so the second list is what
+/// says the handler was actually cut off.
+#[derive(Default)]
+struct Slow {
+    started: Mutex<Vec<(String, Option<std::time::Duration>)>>,
+    completed: Mutex<Vec<String>>,
+}
+
+impl Slow {
+    fn started(&self) -> Vec<(String, Option<std::time::Duration>)> {
+        let mut v = self.started.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+    fn completed(&self) -> Vec<String> {
+        let mut v = self.completed.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for Slow {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.started
+            .lock()
+            .unwrap()
+            .push((task.task_id.clone(), task.timeout));
+        tokio::time::sleep(SLOW_HANDLER).await;
+        self.completed.lock().unwrap().push(task.task_id.clone());
+        Ok(Outcome::success())
+    }
+}
+
+/// The message a run failed with — `task_runs.message`, migration 0137.
+async fn run_message(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read run message")
+}
+
+/// **Property 7: a task-level `timeout:` reaches the handler and is enforced by
+/// the worker.**
+///
+/// W3b measured that a `timeout:` was stripped before a handler saw it —
+/// `models::Task`'s deserializer takes it out of a leaf's `spec` — so
+/// `egret.sql` ran under a 300-second constant unrelated to what the author
+/// wrote, and every other handler ran unbounded. This is the property that
+/// says otherwise, in the three shapes the artifact distinguishes.
+///
+/// # Why it is written this way
+///
+/// **With the old constant in place a `timeout: PT1S` test PASSES**, because
+/// the handler finishes and the run succeeds: a test that asserted "the flow
+/// ran" or "an error occurred somewhere" would record only that time passed.
+/// So every arm here asserts the run's **terminal state and its message**, and
+/// the message is what separates a budget that fired from a handler that
+/// failed for an unrelated reason — the two are the same `FAILED` row
+/// otherwise.
+///
+/// **The generous arm is the positive control.** `timeout: PT30S` over the same
+/// two-second handler must reach `SUCCESS` with no message at all, at the same
+/// moment the tight arm has failed. A worker that simply failed everything
+/// carrying a `timeout:` passes the first arm and fails this one — and that is
+/// the artifact's own answer, measured: the same flow at `PT30S` ran to
+/// SUCCESS in 3.1 s.
+///
+/// # The values are the artifact's
+///
+/// `Timeout after 00:00:01.000` is `TimeoutExceededException(Duration)` — probed
+/// by reflection inside `kestra/kestra@sha256:28f59bf1…` and seen live in that
+/// server's own ERROR log for a `Sleep` cut off by `timeout: PT1S`, whose run
+/// went `['CREATED','SUBMITTED','RUNNING','FAILED']`. `timeout: must be a
+/// positive duration` is the artifact's own sentence for `PT0S`. See
+/// `worker::timeout`'s module doc for both, and for the third case (an
+/// unparseable duration) where egret's wording is deliberately its own.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Slow::default();
+
+    let tight = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("tight", "tight", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start tight");
+    let generous = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("generous", "generous", "PT30S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start generous");
+    let zero = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("zero", "zero", "PT0S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start zero");
+
+    let finished = drain_with(&pool, &reg).await;
+    assert_eq!(
+        finished,
+        3,
+        "all three runs must reach a committed result; a timeout is a task \
+         failure, not a worker failure that aborts the tick. started: {:?}",
+        reg.started()
+    );
+
+    // ---- the budget reaches the handler ----------------------------------
+    assert_eq!(
+        reg.started(),
+        vec![
+            (
+                "generous".to_string(),
+                Some(std::time::Duration::from_secs(30))
+            ),
+            ("tight".to_string(), Some(std::time::Duration::from_secs(1))),
+        ],
+        "the handler must be handed the author's OWN budget, per run, and the \
+         run whose `timeout:` cannot be used must never be started at all. \
+         `zero` appearing here means a refusal ran a handler; a `None` beside \
+         a name means the seam W3b measured is still open and the value was \
+         stripped before the handler saw it"
+    );
+
+    // ---- the worker enforces it ------------------------------------------
+    assert_eq!(
+        run_state(&pool, tight, "tight").await.as_deref(),
+        Some("FAILED"),
+        "a two-second handler under `timeout: PT1S` must fail, and FAILED is \
+         the artifact's answer rather than KILLED (`callWithTimeout` calls \
+         `kill(null)` so `exceptionHandler` falls through to FAILED): {}",
+        stuck(&pool, tight, "tight").await
+    );
+    assert_eq!(
+        run_message(&pool, tight, "tight").await.as_deref(),
+        Some("Timeout after 00:00:01.000"),
+        "and it must carry Kestra's own sentence for the budget the author \
+         wrote, byte for byte: {}",
+        stuck(&pool, tight, "tight").await
+    );
+    assert_eq!(
+        reg.completed(),
+        vec!["generous".to_string()],
+        "the timed-out handler must be DROPPED at its budget. A run in this \
+         list finished its two seconds, which means the budget was applied to \
+         its RESULT rather than to its execution -- indistinguishable from a \
+         real timeout by state and message alone"
+    );
+
+    // ---- the positive control --------------------------------------------
+    assert_eq!(
+        run_state(&pool, generous, "generous").await.as_deref(),
+        Some("SUCCESS"),
+        "the same handler under `timeout: PT30S` must be left alone; without \
+         this arm, a worker that failed every task carrying a `timeout:` would \
+         pass everything above: {}",
+        stuck(&pool, generous, "generous").await
+    );
+    assert_eq!(
+        run_message(&pool, generous, "generous").await,
+        None,
+        "and a success carries no message: {}",
+        stuck(&pool, generous, "generous").await
+    );
+
+    // ---- a budget that cannot be used ------------------------------------
+    assert_eq!(
+        run_state(&pool, zero, "zero").await.as_deref(),
+        Some("FAILED"),
+        "`timeout: PT0S` is refused on the artifact -- `@DurationMin(millis = \
+         1)`, measured at both sides of the boundary -- and the run fails \
+         without the task body ever running: {}",
+        stuck(&pool, zero, "zero").await
+    );
+    assert_eq!(
+        run_message(&pool, zero, "zero").await.as_deref(),
+        Some("timeout: must be a positive duration"),
+        "with the artifact's own sentence, not a duration-parse complaint: {}",
+        stuck(&pool, zero, "zero").await
+    );
+}

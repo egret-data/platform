@@ -3996,3 +3996,127 @@ fn the_step_bound_dominates_the_widest_golden_entry() {
         step_bound()
     );
 }
+
+// --------------------------------------------------------------------------
+// W4 Task 2 — the population a worker-enforced `timeout:` could ever move
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the ratchet-visible population of the task-level
+/// `timeout:` hole is EMPTY, and the "four baselined entries" figure counts
+/// declarations rather than reachable entries.**
+///
+/// W4's spec and plan both say *"four baselined entries declare a `timeout:`"*,
+/// which is true and is re-derived here (`143 = 4 + 139`). What that sentence
+/// does not say is that **three of the four are on a `Pause`** — a flowable,
+/// whose `timeout:` is `advance()`'s and which Kestra's worker never sees
+/// (measured on the pinned artifact: a `Sequential` carrying `timeout: PT1S`
+/// around a four-second `Sleep` ran to SUCCESS in 4.2 s) — and that **the one
+/// runnable among them asks for an hour** on a `core.log.Log`, which cannot
+/// outrun it.
+///
+/// So this test is what stops a green ratchet being read as coverage of the
+/// worker's budget: nothing in `baseline.txt` can move because of it, in either
+/// direction, and that is a property of the corpus rather than of the fix.
+/// Instrumenting `worker::timeout::guard` and running the whole 294-entry
+/// oracle agreed from the other side — the budget was applied exactly **4**
+/// times (`1s`, `1s`, `250ms`, `3600s`, i.e. these four declarations) and
+/// **expired 0** times, with `tests/worker.rs`'s own property as the positive
+/// control for the instrument on the same build.
+#[test]
+fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet() {
+    fn walk(task: &egret_workflow::models::Task, out: &mut Vec<(String, String, String)>) {
+        if let Some(t) = &task.timeout {
+            out.push((task.id.clone(), task.r#type.clone(), t.source().to_string()));
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, out);
+        }
+    }
+
+    let baseline = baseline();
+    let mut declaring: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+    let mut without = 0usize;
+    for id in &baseline {
+        let flow = egret_workflow::spec::parse(&corpus_source(id))
+            .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
+        let mut found = Vec::new();
+        for task in flow.tasks.iter().chain(flow.errors.iter()) {
+            walk(task, &mut found);
+        }
+        if found.is_empty() {
+            without += 1;
+        } else {
+            declaring.insert(id.clone(), found);
+        }
+    }
+
+    // The total beside the parts, so neither can drift alone.
+    assert_eq!(
+        declaring.len() + without,
+        baseline.len(),
+        "every baselined entry is either declaring a `timeout:` or not"
+    );
+    assert_eq!(
+        (declaring.len(), without, baseline.len()),
+        (4, 139, 143),
+        "the baselined population that declares a `timeout:`, and the rest: {:#?}",
+        declaring
+    );
+    assert_eq!(
+        declaring.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "valids/full".to_string(),
+            "valids/pause-errors-finally-after-execution".to_string(),
+            "valids/pause-timeout".to_string(),
+            "valids/pause-timeout-allow-failure".to_string(),
+        ],
+        "and they are these four, by name"
+    );
+
+    // **Which of them a WORKER budget could ever apply to**, split by the
+    // declaring task's own `type:` rather than by anything about the entry.
+    let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+    for tasks in declaring.values() {
+        for (_, ty, _) in tasks {
+            *by_type.entry(ty.clone()).or_default() += 1;
+        }
+    }
+    assert_eq!(
+        by_type,
+        BTreeMap::from([
+            ("io.kestra.plugin.core.flow.Pause".to_string(), 3),
+            ("io.kestra.plugin.core.log.Log".to_string(), 1),
+        ]),
+        "three `Pause`es — a flowable's timeout, which is `advance()`'s and \
+         which Kestra's worker ignores — and one runnable"
+    );
+
+    // The runnable one, and the budget it asks for. `Handlers` is the registry
+    // the shipping worker dispatches on, so "a type this worker can run" is
+    // read from it rather than asserted as a list.
+    let registry = egret_workflow::worker::Handlers::with_core_tasks();
+    let runnable: Vec<(String, String, std::time::Duration)> = declaring
+        .iter()
+        .flat_map(|(id, tasks)| tasks.iter().map(move |t| (id.clone(), t)))
+        .filter(|(_, (_, ty, _))| registry.get(ty).is_some())
+        .map(|(id, (task_id, _, source))| {
+            (
+                id,
+                task_id.clone(),
+                egret_workflow::executor::parse_duration(source)
+                    .expect("every corpus `timeout:` is an ISO-8601 literal"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runnable,
+        vec![(
+            "valids/full".to_string(),
+            "t3".to_string(),
+            std::time::Duration::from_secs(3_600)
+        )],
+        "exactly one baselined `timeout:` is on a task this worker has a \
+         handler for, and it is an HOUR on a `core.log.Log` — a budget that \
+         handler cannot outrun, so the entry cannot move either"
+    );
+}

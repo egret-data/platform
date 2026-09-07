@@ -66,6 +66,7 @@ use uuid::Uuid;
 
 use super::render::{self, Pass, Surface};
 use super::spawn::{self, Requested};
+use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunIx, RunState, TaskKind,
@@ -140,38 +141,66 @@ pub struct Claimed {
 }
 
 impl Claimed {
-    /// What the handler is handed.
+    /// What the handler is handed, and the budget it is handed under.
     ///
     /// `spec` is this task's own properties, found by walking the parsed flow
     /// for [`Claimed::task_id`]. Task ids are unique across a whole flow —
     /// `spec::validate`'s `duplicate_task_id` is a structural check over the
     /// nested walk, not just `flow.tasks` — so the id is a key and not a
     /// guess.
-    fn input(&self, render: crate::runners::RenderContext) -> Result<TaskInput> {
+    ///
+    /// **The budget comes back beside the input rather than only on it**,
+    /// because a `timeout:` that cannot be used is a *refusal* and a refusal
+    /// is not a `None` budget: the run fails without the handler being called
+    /// at all. See [`timeout::Budget`], and [`run_one`] for the branch.
+    ///
+    /// **One walk, not two.** `spec` and `timeout` are two fields of the same
+    /// `models::Task`, and a second traversal to fetch the second one could
+    /// disagree with the first about which task it found.
+    fn input(&self, render: crate::runners::RenderContext) -> Result<(TaskInput, Budget)> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
-        let spec = leaf_spec(&flow, &self.task_id).ok_or_else(|| {
+        let leaf = leaf(&flow, &self.task_id).ok_or_else(|| {
             worker_err(WorkerError::NotALeaf(
                 self.execution_id,
                 self.task_id.clone(),
             ))
         })?;
-        Ok(TaskInput {
-            workspace_id: self.workspace_id,
-            execution_id: self.execution_id,
-            run_id: self.id,
-            task_id: self.task_id.clone(),
-            type_id: self.type_id.clone(),
-            value: self.value.clone(),
-            attempt: self.attempt.max(0) as usize,
-            spec,
-            render,
-            principal: self.principal_id.map(egret_core::UserId),
-        })
+        let budget = timeout::resolve(leaf.timeout, &render);
+        Ok((
+            TaskInput {
+                workspace_id: self.workspace_id,
+                execution_id: self.execution_id,
+                run_id: self.id,
+                task_id: self.task_id.clone(),
+                type_id: self.type_id.clone(),
+                value: self.value.clone(),
+                attempt: self.attempt.max(0) as usize,
+                spec: leaf.spec.clone(),
+                render,
+                timeout: budget.duration(),
+                principal: self.principal_id.map(egret_core::UserId),
+            },
+            budget,
+        ))
     }
 }
 
-/// One task's own properties, by id, from anywhere in the flow.
+/// The two halves of a leaf task this worker needs: what the handler runs on,
+/// and how long it may take.
+///
+/// A struct rather than a tuple because the second field is easy to mistake
+/// for the first's `timeout` key — it is not in `spec` at all, which is the
+/// whole seam this task exists to close.
+struct Leaf<'a> {
+    /// `models::TaskKind::Leaf`'s `spec`.
+    spec: &'a serde_json::Value,
+    /// `models::Task::timeout`, still unrendered.
+    timeout: Option<&'a crate::models::Property<std::time::Duration>>,
+}
+
+/// One task's own properties **and its `timeout:`**, by id, from anywhere in
+/// the flow.
 ///
 /// `models::TaskKind::Leaf`'s `spec` is the task's map with `id`, `type`,
 /// `description`, `retry`, `timeout`, `disabled` and `runIf` already removed
@@ -187,11 +216,18 @@ impl Claimed {
 /// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
 /// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.
-fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Value> {
-    fn walk(task: &crate::models::Task, want: &str) -> Option<serde_json::Value> {
+fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
+    fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
         if task.id == want {
             return match &task.kind {
-                crate::models::TaskKind::Leaf { spec } => Some(spec.clone()),
+                crate::models::TaskKind::Leaf { spec } => Some(Leaf {
+                    spec,
+                    // **Read from the `Task`, not from `spec`.** `timeout` is
+                    // one of the seven keys `models::Task`'s deserializer takes
+                    // OUT of a leaf's `spec`, which is exactly why a handler
+                    // could not see it and `handlers::sql` used a constant.
+                    timeout: task.timeout.as_ref(),
+                }),
                 _ => None,
             };
         }
@@ -448,10 +484,29 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     }
 }
 
-/// One claimed run: its handler, and the transaction its result lands in.
+/// One claimed run: its handler, the budget the handler runs under, and the
+/// transaction its result lands in.
+///
+/// # The budget is the WORKER's, and it is here rather than in a handler
+///
+/// Measured on the pinned artifact, twice (see [`super::timeout`] for both
+/// readings): Kestra enforces `timeout:` in
+/// `AbstractWorkerCallable.callWithTimeout`, around the whole of the task's
+/// `run`, and a task that outruns it is **FAILED** carrying
+/// `Timeout after HH:mm:ss.SSS`. Putting it here rather than inside
+/// [`Registry::run`] is what makes it true of *every* registry — the
+/// production [`Handlers`](super::Handlers), the oracle driver's, and a test's
+/// — instead of only the one that remembered.
+///
+/// A `timeout:` this run cannot use fails the run **without calling a
+/// handler**, which is also the artifact's answer: all three bad spellings
+/// produce a FAILED run whose attempt never ran the task body.
 async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
-    let input = input_for(pool, c).await?;
-    let outcome = reg.run(&input).await?;
+    let (input, budget) = input_for(pool, c).await?;
+    let outcome = match budget {
+        Budget::Refused(message) => Outcome::failed_with(message),
+        other => timeout::guard(other.duration(), reg.run(&input)).await?,
+    };
     let mut tx = pool.begin().await.map_err(db_err)?;
     apply_outcome(&mut tx, c, &outcome).await?;
     tx.commit().await.map_err(db_err)?;
@@ -468,7 +523,7 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// IT; a sibling of the same execution may finish while the handler runs, and
 /// what that costs is that a handler's `outputs` are a snapshot rather than a
 /// live view. Kestra's worker renders from a snapshot for the same reason.
-async fn input_for(pool: &PgPool, c: &Claimed) -> Result<TaskInput> {
+async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
@@ -515,14 +570,24 @@ pub async fn apply_outcome(
     // a fence only on the state UPDATE would let an outcome from a reaped
     // lease overwrite the live worker's outputs and still leave every other
     // column right.
-    let hit =
-        sqlx::query("UPDATE workflow.task_runs SET outputs = $1 WHERE id = $2 AND claimed_at = $3")
-            .bind(&outcome.outputs)
-            .bind(claimed.id)
-            .bind(claimed.claimed_at)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
+    //
+    // **`message` rides in the same statement, and that is not tidiness.** It
+    // is written under the same fence for the same reason `outputs` is — a
+    // stale worker that could overwrite one could overwrite the other — and it
+    // is set on every outcome including a success, so a run that failed, was
+    // retried and then succeeded does not keep the first attempt's reason
+    // beside a `SUCCESS` state. See migration 0137.
+    let hit = sqlx::query(
+        "UPDATE workflow.task_runs SET outputs = $1, message = $4 \
+           WHERE id = $2 AND claimed_at = $3",
+    )
+    .bind(&outcome.outputs)
+    .bind(claimed.id)
+    .bind(claimed.claimed_at)
+    .bind(&outcome.message)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
     // **0 rows affected is an error, not a success.** They are the same value
     // to `execute()`, which is exactly how a fence that is written but never
     // read passes every test there is.

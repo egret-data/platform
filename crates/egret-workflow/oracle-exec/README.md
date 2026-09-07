@@ -3756,8 +3756,10 @@ run and then not execute it", and it was answered from two directions:
   is this shape: `taskCache` restores outputs *instead of* running the body but
   the run still goes `SUBMITTED RUNNING SUCCESS`, and both it and `timeout:` are
   enforced in the **worker** (`WorkerTaskProcessor.java:225`,
-  `WorkerTaskCallable.java:61`) — the same place `timeout:` already sits in the
-  unclaimed list. `allowFailure`/`allowWarning` change a terminal state, not
+  `WorkerTaskCallable.java:61`). *(The clause that stood here — "the same place
+  `timeout:` already sits in the unclaimed list" — is retired twice over: no row
+  of the unclaimed table was ever `timeout:`, and W4 Task 2 implemented it. See
+  item 13.)* `allowFailure`/`allowWarning` change a terminal state, not
   whether the body runs.
 
 So the surface is `runIf:` alone, and the two independent derivations agree.
@@ -5004,9 +5006,14 @@ wrote. Beyond that, the specific holes, each with its count:
   (`WorkerTaskCallable.java:61` wraps `task.run(runContext)` in
   `callWithTimeout`), and Kestra's own validator refuses it on every
   non-`RunnableTask` (`FlowService.java:574`), with `Pause` the single
-  exception. W4 owns it. The plan's Task 7 step said "`timeout` is a deadline
-  compared against the `now` parameter"; it is not, and no line of Task 7
-  implements one.
+  exception. W4 owns it — **and W4 Task 2 has now taken it**: `worker::timeout`
+  renders the budget per run and enforces it around `Registry::run` in
+  `claim::run_one`, which is where the artifact enforces it. What has NOT
+  changed is this bullet's own subject: `PlanTask::timeout` is still `None` on
+  every task and `advance()` still never reads one, so the field is still dead
+  and still will be. See the coverage statement's item 13. The plan's Task 7
+  step said "`timeout` is a deadline compared against the `now` parameter"; it
+  is not, and no line of Task 7 implements one.
 
   `errors` was a model gap and is closed: W1's `Sequential`, `Parallel`, `If`,
   `Switch` and `Dag` now all carry `errors` (Java declares it on all five —
@@ -5803,6 +5810,71 @@ round adds nothing to that directory — `git diff --stat 91205c08 --
 crates/egret-workflow/src/executor/` is empty, checked with `if [ -z "$(…)" ]`
 rather than a bare `&& echo CLEAN`. So every W3a statement about the state
 machine still stands as W3a made it; what changed is the driver in front of it.
+
+**13. A task-level `timeout:` never reached a handler — CLOSED by W4 Task 2, and
+the ratchet is blind to it for a different reason than item 11.** W3b measured
+that `models::Task`'s deserializer takes `timeout` out of a leaf's `spec` before
+a handler sees it, so `egret.sql` ran under a 300-second constant unrelated to
+what the author wrote and every other handler ran unbounded;
+`executor::plan::PlanTask::timeout` is `None` on every task and `advance()`
+never reads one, so nothing anywhere enforced it. W4 Task 2 adds
+`worker::timeout` — the budget is rendered per tick from the execution's frozen
+`source`, carried on `TaskInput::timeout`, and enforced around `Registry::run`
+in `claim::run_one`, which is where the artifact enforces it
+(`AbstractWorkerCallable.callWithTimeout`). A timed-out run is **FAILED, not
+KILLED**, carrying Kestra's own `Timeout after HH:mm:ss.SSS`; both facts were
+taken from the pinned image twice, by `javap` and by running flows through a
+standalone server.
+
+**The ratchet did not move: 143 mismatching before and after, 0 banked, 0
+regressions, over three runs each side** — the "before" measured on `d7233cf0`
+itself, with the branch stashed and `egret_test_template` dropped between the
+two.
+
+**The "four baselined entries declare a `timeout:`" figure counts declarations,
+not reachable entries, and the reachable population is EMPTY.**
+`tests/executor.rs::the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet`
+derives it on every run and asserts the total beside the parts: **143 baselined
+= 4 declaring a `timeout:` + 139 not**; the four are `valids/full`,
+`valids/pause-errors-finally-after-execution`, `valids/pause-timeout` and
+`valids/pause-timeout-allow-failure`; **three of them declare it on a `Pause`**,
+which is a flowable whose `timeout:` is `advance()`'s and which Kestra's own
+worker ignores (measured: a `Sequential` carrying `timeout: PT1S` around a
+four-second `Sleep` ran to SUCCESS in 4.2 s); and the **one** declaration on a
+type this worker has a handler for is `valids/full`'s `t3` — a `core.log.Log`
+asking for `PT60M`, a budget it cannot outrun.
+
+The same answer arrives from the other side. `worker::timeout::guard` was
+instrumented to print every budget it applied and every one that expired, and
+the whole 294-entry oracle was run on that build: the budget was applied
+**4** times — `1s`, `1s`, `250ms`, `3600s`, i.e. exactly those four
+declarations — and expired **0** times, with
+`tests/worker.rs::a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it`
+as the positive control for the instrument on the same build (it printed
+`BUDGET-APPLIED 1s`, `BUDGET-EXPIRED 1s`, `BUDGET-APPLIED 30s`). The
+instrumentation was removed and the file re-hashed against its pre-instrumentation
+copy at the destination, not the source.
+
+Two things that run is also evidence for. First, **a `Pause` IS claimed by this
+worker and DOES get a worker budget applied** — `build_plan` plans `Pause`,
+`Subflow`, `WorkingDirectory`, `WaitFor` and `AllowFailure` as opaque
+`TaskKind::Runnable`s, which Kestra's worker never sees. Nothing reaches the
+hazard today (no handler is registered for `Pause`, so `Registry::run` refuses
+before any budget can expire), and it is written down in `worker::timeout`'s
+module doc rather than special-cased, because a special case there would be a
+guard nobody could ever see fail. Second, **this hole is one the ratchet speaks
+for in neither direction**, like item 11 but for the opposite reason: item 11's
+predicate is never satisfied because `driver::pass_time` moves the clock, while
+this one's predicate IS evaluated, four times, and no corpus budget is short
+enough to fire.
+
+A side effect worth recording because it changes what this repository can
+assert: `worker::Outcome::message` is **persisted** now
+(`workflow.task_runs.message`, migration 0137), written by `apply_outcome` in
+the same fenced statement as `outputs`. W3b's own doc said *"Nothing persists it
+yet"*. Nothing in `golden.json` records a failure message, so the ratchet still
+cannot compare one — but a test can now read a run's reason back, which is what
+made the timeout's boundary assertable at all.
 
 ### The stale twins this statement retires
 
