@@ -1363,18 +1363,33 @@ def self_test():
 
     # -- the derivations' own arithmetic -------------------------------------
     def blocker_rule_too_wide():
-        # `OutputValues` is what holds 6 of the entries that match today. Call
-        # it a FlowableTask and those 6 acquire a `construct` blocker instead of
-        # a `handler` one -- an entry that ALREADY reproduces, blocked by
-        # something the feed does not explain, which is the contradiction.
+        # An entry that MATCHES today, carrying a run state `RunState` cannot
+        # hold: `run_blockers` returns a `state` blocker for it, and the guard
+        # says every blocker on a matching entry must be a `handler` one. Either
+        # the entry does not really match or the state vocabulary is wrong, and
+        # both are contradictions this file must not write out.
         #
-        # Mutating `Return` here does nothing: it is in W3B_HANDLERS and the
-        # rule short-circuits before it reads a kind at all. A mutation that
-        # cannot reach the code under test reads exactly like a guard that
-        # cannot fail.
-        m = copy.deepcopy(kinds)
-        m["io.kestra.plugin.core.output.OutputValues"]["kind"] = "FlowableTask"
-        run(kinds_=m)
+        # **The mutation this case used to make cannot reach the guard any
+        # more, and W3b Task 7 measured that rather than assuming it.** It flipped
+        # `OutputValues` to a `FlowableTask` so the six entries it held would
+        # acquire a `construct` blocker while still matching -- and W3b Task 5
+        # dropped the feed, so those six stopped matching and the mutation went
+        # somewhere else entirely: the case failed with the TRIGGER
+        # reconciliation guard's message ("15 entries the naive pass drops
+        # declare no `triggers:`"), which is a different guard firing for a
+        # different reason. Measured over the whole golden afterwards, **no
+        # entry that matches today runs a task type outside `W3B_HANDLERS` and
+        # `W3A_FLOWABLES` at all** -- which is nearly a tautology, since that is
+        # most of why it matches -- so no `kinds` mutation can reach this guard
+        # and only the `state` arm can.
+        #
+        # The victim is DERIVED, not named: the first matching `runs` entry with
+        # a run. Naming one is how the old case rotted.
+        m = copy.deepcopy(golden)
+        victim = next(e for e in m
+                      if e["verdict"] == "runs" and e["id"] not in baseline and e.get("runs"))
+        victim["runs"][0]["state"] = list(victim["runs"][0]["state"]) + ["WARNING"]
+        run(golden_=m)
     case("a blocker rule that fires on an entry egret already reproduces",
          "the blocker rules are wrong",
          blocker_rule_too_wide)

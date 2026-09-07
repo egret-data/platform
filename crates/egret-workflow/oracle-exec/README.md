@@ -3940,25 +3940,51 @@ given a slot past the end of `ALL` is caught by nothing here. That limit is on
 
 ## W3b Task 1 — the handler surface, and the ceiling it puts on W3b
 
-> **`handler-surface.txt` is Task 1's measurement and it is STALE by
-> construction — found by W3b Task 7's sweep, reproduced without any of that
-> task's edits.** The file is a pure function of `baseline.txt`, which W3b Task
-> 5 moved by 32 entries, so `python3 handler_surface.py --check` exits **1** with
-> 124 diff lines and `--self-test` exits **1** with `12/13 guards fired for the
-> right reason` — its *"a blocker rule that fires on an entry egret already
-> reproduces"* case now trips the trigger-reconciliation guard first
-> (`expected 'the blocker rules are wrong', got: … 15 entries the naive pass
-> drops declare no 'triggers:'`). **Nothing in the test suite runs either**, which
-> is why six tasks passed a green gate over it.
+> **This artifact and its generator's self-test had both been failing, unrun,
+> since W3b Task 5 — found by W3b Task 7's sweep and closed in its fix round.**
+> `handler-surface.txt` is a pure function of `baseline.txt`, which Task 5 moved
+> by 32 entries, so `python3 handler_surface.py --check` exited **1** with 124
+> diff lines; and `--self-test` exited **1** with `12/13 guards fired for the
+> right reason`. Nothing in the test suite ran either command, which is how six
+> green gates passed over a generator whose own self-test could not pass.
 >
-> It is deliberately **not** regenerated: the artifact's content is the evidence
-> for the ceiling of **172** and for the **11** entries the feed was keeping
-> alive, and re-running it would replace that record with today's baseline —
-> "0 at risk, ceiling 171" — which is a sentence about a decision that has
-> already been taken. The ceiling and the 11 are what Task 5 was held to, and
-> `oracle-exec/README.md`'s coverage statement carries what happened to them.
-> Whoever needs a live handler surface should re-run the generator **and** repair
-> the self-test case, in a commit that says the ceiling is being restated.
+> Both are closed, and **both halves of the fix are here rather than one**:
+>
+> - the artifact is **regenerated**, so `--check` exits 0 and the numbers below
+>   are today's;
+> - the rotted self-test case is **repaired**. *"A blocker rule that fires on an
+>   entry egret already reproduces"* provoked its guard by calling
+>   `OutputValues` a `FlowableTask`, which only produced the contradiction while
+>   those entries still matched — and dropping the feed stopped them matching, so
+>   the mutation went somewhere else and the case failed with the *trigger*
+>   reconciliation guard's message. Measured afterwards: **no entry that matches
+>   today runs a task type outside `W3B_HANDLERS` and `W3A_FLOWABLES` at all**,
+>   so no `kinds` mutation can reach that guard and only the `state` arm can. The
+>   case now gives a matching entry a run state `RunState` cannot hold, and its
+>   victim is *derived* — the first matching `runs` entry — because naming one is
+>   how the old case rotted;
+> - both commands are **wired into the suite**
+>   (`the_handler_surface_generator_checks_itself_and_its_artifact`), so their
+>   exit codes are somebody's problem. A missing `python3` **fails rather than
+>   skips**: everything the generator reads is committed.
+>
+> **The ceiling moved, 172 → 171, and every entry that moved is attributed.**
+> The four buckets go `139 safe / 11 at risk / 33 bankable / 111 blocked` →
+> `150 / 0 / 21 / 123`:
+>
+> | movement | entries | cause |
+> |---|---|---|
+> | at risk **11 → 0** | the 11 Task 1 named | the feed is gone (Task 5), so all 11 stopped matching; every one is now **blocked**, on the missing handler Task 1 predicted |
+> | bankable **−16** | the 16 `loop-*` / `switch-in-concurrent-loop` / `flowable-with-parent-fail` entries | banked by the spawner; they moved from *bankable* to *safe* |
+> | bankable **+4** | `errors`, `parallel-fail-with-flowable`, `restart-child`, `variables` | lost when the feed went, and **nothing in this file's rules blocks them** — they are W2 and W4 divergences a declaration-driven rule cannot see |
+> | blocked **+12** | the 11 above plus `webhook-plaintext` | |
+> | **ceiling −1** | `valids/webhook-plaintext` | the only entry that left the ceiling entirely: it matched, it is baselined now, and it is blocked rather than bankable |
+>
+> `150 + 21 = 171` and `21 + 123 = 144`, and the generator asserts both. Task 1's
+> **172** and its eleven named entries are not lost by regenerating: they are in
+> this file's coverage statement, in Task 1's and Task 5's reports, and in this
+> artifact's own git history. What a regeneration must never do is move the
+> ceiling silently, which is why this paragraph exists.
 
 **W3b** is the package that makes `advance()` run for real — a claim loop, a
 reaper, four handlers, a `SpawnExecution` executor — and then re-points this
@@ -5484,32 +5510,65 @@ inside the same window.
 predicate that is wrong in the truthy direction; three mutants prove it rather
 than argue it, and all three leave `executor_matches_golden` passing.
 
-**9. The ratchet itself is not deterministic, and a green run is a sample.**
-Found by W3b Task 7 and **reproduced on the package's base commit**, so it is not
-this task's and not a regression: with the machine under load,
-`executor_matches_golden` fails roughly one run in eight, and it moves in
-**both** directions.
+**9. The ratchet's answer used to depend on scheduling. It does not now, and
+the fix is one `ORDER BY`.** W3b Task 7 found it and W3b Task 7's fix round
+closed it; it is kept here because the *reason* it existed is a property of this
+oracle that a reader has to know.
 
-| observed | entry | what happened |
-|---|---|---|
-| 145 mismatching, 1 REGRESSION | `valids/parallel-nested` | five ordered pairs against run 9 (`1-3-2-2_end`) come out `overlapping` where the golden — and every other run — says `before` |
-| 143 mismatching, 1 PROGRESS NOT BANKED | `valids/parallel-fail-with-flowable` | a baselined entry **matched**: the `Sleep` that is normally still in flight when its sibling fails the `Parallel` had already finished |
+`worker::claim` ordered by `created_at` alone. One `settle` writes every run of
+one round in one transaction and `now()` in Postgres is TRANSACTION time, so
+sibling runs share that instant to the microsecond and the sort had nothing left
+to compare — measured, six siblings whose physical order had been perturbed by an
+ordinary `UPDATE` came back `[0, 2, 4, 3, 1, 5]`. W3b Task 2 recorded the missing
+tiebreak as *"benign — `SKIP LOCKED` already makes it arbitrary"*, and it was:
+which of two ready runs goes first is not a correctness property. **W3b Task 5
+made it one**, because the round a run terminates in is its `ended_seq`, which is
+an endpoint of the happens-before relation this oracle compares.
 
-Both are timing, and the mechanism is on egret's side: `worker::claim` orders by
-`created_at` **with no tiebreak**, and sibling runs of one flowable are inserted
-in a single transaction and therefore share it, so which of several runnable
-siblings a tick takes first is arbitrary. W3b Task 2 recorded that
-(*"benign — `SKIP LOCKED` already makes it arbitrary"*) and it is not benign
-here: the round in which each run terminates is what the logical clock records,
-so an arbitrary claim order is an arbitrary happens-before relation.
+Observed before the fix: `executor_matches_golden` failing about one run in eight
+under load, **in both directions** — `valids/parallel-nested` regressing on five
+ordered pairs, and `valids/parallel-fail-with-flowable` matching its way out of
+the baseline — and reproduced on the package's base commit, so it was neither new
+nor anybody's edit.
 
-**Nothing about this was visible for six tasks**, because the gate was run once
-per task on an idle machine and passed. It is stated here rather than fixed,
-because the fix is a tiebreak in the claim's `ORDER BY` — production code, on the
-hot path of every tick, which would move the corpus and therefore the 16 banked
-and 16 lost this package accounts for. It belongs to whoever owns the next change
-to the worker, with a test that fails without the tiebreak. Until then: **a green
-ratchet is one draw, and two of the 294 entries are known to be a coin toss.**
+The claim now orders by `created_at, execution_id, run_ix`, on **both** the
+subquery that decides *which* rows are taken (the whole answer at `LIMIT 1`,
+which is what `driver::BATCH` is) and the outer select that decides the order
+they come back in. `(execution_id, run_ix)` is `workflow.task_runs`'s own unique
+key, so there is no tie left for a scan to decide, and `run_ix` is `RunIx` — the
+executor's creation order, which is the order Kestra's `taskRunList` carries.
+
+**Proved by mechanism, not by counting green runs**, and that is deliberate:
+a paired measurement under load produced **0 failures in 20 control runs (the
+tiebreak reverted) and 0 in 40 fixed runs**, which is not evidence of anything —
+a control that does not reproduce the fault cannot say the fix removed it. What
+*is* evidence is that the causal channel is exact and deterministic:
+
+| experiment | result |
+|---|---|
+| six siblings, physical order perturbed, tiebreak absent | claim returns `[0, 2, 4, 3, 1, 5]` — an arbitrary permutation |
+| the same, tiebreak present | `[0, 1, 2, 3, 4, 5]`, and `[0,1,2,3,4,5]` for the un-perturbed control too |
+| **tiebreak REVERSED** (`run_ix DESC`), nothing else changed | the ratchet moves: **143 mismatching, `valids/parallel-nested` a REGRESSION, `valids/dag` and `valids/parallel-fail-with-flowable` banking** |
+
+The third row is the one that closes it. It names *the same two entries that were
+observed flaking*, from a deterministic one-token change — so the claim's order is
+demonstrably what decided those entries' verdicts, and that order is now a total
+one over a unique key.
+
+**The corpus did not move.** Every derived figure in this statement is identical
+either side of the tiebreak — 294/144/144/0, 150 matching, 16/6/19, 35 entries
+with a `spawned`, 565 + 126 pairs, 87 removed, the field breakdown, the residual
+baseline. The order the tiebreak pins is the one an idle machine already
+produced; what changed is that it is now guaranteed rather than observed.
+
+**And the tiebreak is a choice, which the third row makes visible.** Under
+`run_ix DESC` this oracle banks `valids/dag` — the entry this file has called
+instrument-bound since W3a Task 4, on the ordered pair `(task3, task4)` "no state
+machine without a clock can bank". It is bankable, by finishing sibling runs in
+the other order; it just costs `valids/parallel-nested`, which is a bank today.
+So a claim order is a decision about *which of Kestra's serialisations to
+reproduce*, not a neutral tidy-up, and `run_ix` ascending is chosen because it is
+the executor's own creation order rather than because it banks more.
 
 **10. `advance()` is unchanged by the whole of W3b** — `git diff --stat --
 crates/egret-workflow/src/executor/` is empty against the package's base, checked

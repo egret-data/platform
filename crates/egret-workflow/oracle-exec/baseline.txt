@@ -174,11 +174,16 @@
 # and carries every count with its derivation.
 #
 # It also found, and reproduced on this package's BASE commit, that the ratchet
-# is NOT deterministic: under load `executor_matches_golden` fails about one run
-# in eight, in both directions -- `valids/parallel-nested` regressing on five
+# was NOT deterministic: under load `executor_matches_golden` failed about one
+# run in eight, in both directions -- `valids/parallel-nested` regressing on five
 # ordered pairs, and `valids/parallel-fail-with-flowable` (immediately above)
-# MATCHING. `worker::claim` orders by `created_at` with no tiebreak and sibling
-# runs share it. A line in this file can therefore be right and still fail.
+# MATCHING. `worker::claim` ordered by `created_at` with no tiebreak and sibling
+# runs share that instant. FIXED in the same task's fix round: the claim orders
+# by `created_at, execution_id, run_ix`, a total order over the table's own
+# unique key. Reversing that tiebreak moves this file by three lines --
+# `parallel-nested` out, `dag` and `parallel-fail-with-flowable` in -- which is
+# what says the order was deciding them. Every line here is unchanged by the
+# fix itself.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations

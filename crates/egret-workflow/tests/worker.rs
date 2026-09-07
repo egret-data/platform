@@ -1364,3 +1364,175 @@ async fn a_transmit_failed_loop_with_several_iterations_in_flight_terminates_onc
         serde_json::json!(["CREATED", "RUNNING", "FAILED"])
     );
 }
+
+// --------------------------------------------------------------------------
+// W3b Task 7 fix round: the claim's order
+// --------------------------------------------------------------------------
+
+/// Replace an execution's runs with `n` claimable siblings sharing ONE
+/// `created_at`, which is what a real `settle` writes: `now()` in Postgres is
+/// TRANSACTION time, so every row one round creates carries the same instant.
+async fn siblings_sharing_one_instant(pool: &sqlx::PgPool, execution: Uuid, n: i32) -> Vec<Uuid> {
+    sqlx::query("DELETE FROM workflow.task_runs WHERE execution_id = $1")
+        .bind(execution)
+        .execute(pool)
+        .await
+        .expect("clear the seeded runs");
+    let mut ids = Vec::new();
+    for run_ix in 0..n {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO workflow.task_runs \
+               (execution_id, run_ix, task_ix, task_id, type_id, state, history, \
+                created_at, updated_at) \
+             VALUES ($1, $2, 0, $3, 'io.kestra.plugin.core.log.Log', 'RUNNING', \
+                     '[\"CREATED\",\"SUBMITTED\",\"RUNNING\"]'::jsonb, \
+                     TIMESTAMPTZ '2026-01-01 00:00:00+00', \
+                     TIMESTAMPTZ '2026-01-01 00:00:00+00') \
+             RETURNING id",
+        )
+        .bind(execution)
+        .bind(run_ix)
+        .bind(format!("t{run_ix}"))
+        .fetch_one(pool)
+        .await
+        .expect("insert a sibling run");
+        ids.push(id);
+    }
+    ids
+}
+
+/// Move rows to the end of the heap, in the order given.
+///
+/// An `UPDATE` writes a NEW tuple version and leaves the old one dead, so the
+/// physical order a sequential scan returns follows the order rows were last
+/// updated. This is not a contrivance: `apply_outcome`, the render pass and
+/// `reap` all update these rows, so in production the physical order drifts
+/// away from the creation order as a matter of course.
+async fn touch_in_order(pool: &sqlx::PgPool, ids: &[Uuid]) {
+    for id in ids {
+        sqlx::query("UPDATE workflow.task_runs SET updated_at = updated_at WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("rewrite the row");
+    }
+}
+
+/// **The claim's order must not depend on where Postgres happens to keep a
+/// row** — W3b Task 7's fix round.
+///
+/// `ORDER BY created_at` alone is not an order over sibling runs: one `settle`
+/// writes them all in one transaction, so they share `now()` to the microsecond
+/// and the sort has nothing left to compare. What came back was then whatever
+/// the scan produced, and since W3b Task 5 that choice is **observable**: the
+/// round in which a run terminates is its `ended_seq`, which is one endpoint of
+/// the happens-before relation the oracle compares. W3b Task 2 recorded the
+/// missing tiebreak as benign; it was benign until Task 5 made termination
+/// order part of the answer.
+///
+/// Measured before the fix: `executor_matches_golden` failed about **one run in
+/// eight** under load, in *both* directions — `valids/parallel-nested`
+/// regressing on five ordered pairs and `valids/parallel-fail-with-flowable`
+/// matching its way out of the baseline.
+///
+/// **Both directions are driven**, because a claim that simply reversed would
+/// pass a one-direction test: one execution's rows are pushed to the end of the
+/// heap in descending `run_ix` and the other's in ascending, and both must come
+/// back ascending. The descending arm is the one that fails without the
+/// tiebreak; the ascending arm is what stops the test passing against a claim
+/// that sorts backwards.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let a = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("shuffled"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution a");
+    let b = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("in-order"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution b");
+
+    let a_ids = siblings_sharing_one_instant(&pool, a, 6).await;
+    let b_ids = siblings_sharing_one_instant(&pool, b, 6).await;
+
+    let mut descending: Vec<Uuid> = a_ids.clone();
+    descending.reverse();
+    touch_in_order(&pool, &descending).await;
+    touch_in_order(&pool, &b_ids).await;
+
+    let taken = claim(&pool, 100).await.expect("claim every runnable run");
+    assert_eq!(
+        taken.len(),
+        12,
+        "both executions' runs must be claimable, or this test is measuring the \
+         predicate rather than the order"
+    );
+
+    let order_of = |execution: Uuid| -> Vec<i32> {
+        taken
+            .iter()
+            .filter(|c| c.execution_id == execution)
+            .map(|c| c.run_ix)
+            .collect()
+    };
+    assert_eq!(
+        order_of(a),
+        vec![0, 1, 2, 3, 4, 5],
+        "the run rewritten LAST must not be claimed FIRST: sibling runs share one \
+         `created_at`, so without a tiebreak the claim returns whatever the scan \
+         produced. `run_ix` is the executor's own creation order and the order \
+         the oracle compares"
+    );
+    assert_eq!(
+        order_of(b),
+        vec![0, 1, 2, 3, 4, 5],
+        "and the control, whose physical order already matches: a claim that \
+         sorted backwards would satisfy the assertion above and fail this one"
+    );
+
+    // The other half, and the one the oracle's driver actually takes: at
+    // `LIMIT 1` the question is not what order the batch comes back in but
+    // WHICH single row is taken, and that is decided by the subquery. Both
+    // executions' rows share one `created_at` here, so the answer is the lowest
+    // `(execution_id, run_ix)` — derived from the ids this test inserted rather
+    // than assumed, because `execution_id` is a random uuid and naming one
+    // would make the assertion a coin toss.
+    sqlx::query("UPDATE workflow.task_runs SET claimed_at = NULL")
+        .execute(&pool)
+        .await
+        .expect("release the leases taken above");
+    touch_in_order(&pool, &descending).await;
+
+    let first_execution = std::cmp::min(a, b);
+    let mut one_at_a_time = Vec::new();
+    for _ in 0..3 {
+        let c = claim(&pool, 1).await.expect("claim one");
+        assert_eq!(c.len(), 1, "one run per claim");
+        one_at_a_time.push((c[0].execution_id, c[0].run_ix));
+    }
+    assert_eq!(
+        one_at_a_time,
+        vec![
+            (first_execution, 0),
+            (first_execution, 1),
+            (first_execution, 2)
+        ],
+        "at `LIMIT 1` the subquery's order IS the answer, and the oracle's driver \
+         ticks one run at a time (`driver::BATCH == 1`). Without the tiebreak \
+         this is the choice that made `executor_matches_golden` return a \
+         different verdict on the same tree"
+    );
+}

@@ -1689,6 +1689,89 @@ fn the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+/// **`handler_surface.py`'s own two checks, wired into this suite** — W3b Task
+/// 7's fix round.
+///
+/// `--check` regenerates `handler-surface.txt` from `corpus/`, `golden.json`,
+/// `baseline.txt` and `task-kinds.json` and diffs it against the committed
+/// file; `--self-test` drives every guard in that generator through the real
+/// code paths and requires each to fire with its **own** message, so a case
+/// cannot pass because a different guard tripped.
+///
+/// **Both exited 1 from W3b Task 5 until this task, and nothing ran either.**
+/// The artifact is a pure function of `baseline.txt`, which Task 5 moved by 32
+/// entries, so `--check` reported 124 diff lines; and the self-test's *"a
+/// blocker rule that fires on an entry egret already reproduces"* case stopped
+/// reaching its guard, because the mutation it used (calling `OutputValues` a
+/// `FlowableTask`) only produced the contradiction while those entries still
+/// matched — and they stopped matching when the feed was dropped. A generator
+/// whose own self-test cannot pass sat beside six green gates, which is the
+/// ninth guard-nobody-has-seen-fail this programme has found. Wiring it here is
+/// what makes its exit code somebody's problem.
+///
+/// **A missing `python3` FAILS rather than skips.** `egret.sql`'s live suite is
+/// already a self-skip this file has to write a paragraph about; a second one
+/// would be a check whose output does not depend on what it checks. Everything
+/// this generator reads is committed — no Kestra, no docker, no third-party
+/// module — so there is no environment in which skipping is the right answer.
+///
+/// **The `--self-test` assertion is a positive control, not a formality.** A
+/// self-test that ran *no* cases exits 0 and looks exactly like one where every
+/// case fired, so the count is read out of its own output and required to be a
+/// whole number of whole successes.
+#[test]
+fn the_handler_surface_generator_checks_itself_and_its_artifact() {
+    fn run(arg: &str) -> (bool, String) {
+        let out = std::process::Command::new("python3")
+            .current_dir(ORACLE)
+            .args(["handler_surface.py", arg])
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "python3 must be available to run oracle-exec/handler_surface.py {arg}: {e}. \
+                     This is not a skip: everything the generator reads is committed, so a \
+                     machine that cannot run it cannot check the artifact at all"
+                )
+            });
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    }
+
+    let (ok, text) = run("--self-test");
+    let fired = text
+        .lines()
+        .find_map(|l| {
+            let rest = l.strip_prefix("[self-test] ")?;
+            let (a, b) = rest.split_once(" guards fired")?.0.split_once('/')?;
+            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+        })
+        .unwrap_or_else(|| {
+            panic!("--self-test printed no `[self-test] N/M guards fired` line:\n{text}")
+        });
+    assert!(
+        fired.0 == fired.1 && fired.1 >= 13,
+        "every guard in handler_surface.py must fire for its OWN reason, and there \
+         must still be at least the 13 W3b Task 1 wrote -- a self-test that ran \
+         nothing would exit 0 and print nothing to contradict it. Got {}/{}:\n{text}",
+        fired.0,
+        fired.1
+    );
+    assert!(ok, "--self-test exited non-zero:\n{text}");
+
+    let (ok, text) = run("--check");
+    assert!(
+        ok,
+        "handler-surface.txt no longer matches what handler_surface.py derives \
+         from the committed corpus, golden and baseline. Re-run \
+         `python3 handler_surface.py` and say in the commit message what moved \
+         the ceiling and why:\n{text}"
+    );
+}
+
 /// The happens-before predicate, strict on both sides — `normalise.py`'s, over
 /// the logical `executions.seq` instead of timestamps.
 #[test]

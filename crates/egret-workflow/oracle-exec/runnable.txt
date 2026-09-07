@@ -1218,12 +1218,12 @@ siblings before either successor existed.  That is a RULING (see the W3b plan),
 not an accident, and W4 owns it.
 
 
-the ratchet is not deterministic, and a green run is one draw
+the ratchet's answer used to depend on scheduling -- FIXED
 ----------------------------------------------------------------------
 
-Found by W3b Task 7 and reproduced on this package's BASE commit, so it is
-neither this task's nor a regression.  Under machine load
-`executor_matches_golden` fails roughly one run in eight, in BOTH directions:
+Found by W3b Task 7, reproduced on this package's BASE commit, and closed in its
+fix round.  Under machine load `executor_matches_golden` used to fail roughly
+one run in eight, in BOTH directions:
 
   145 mismatching, REGRESSION          valids/parallel-nested
     five ordered pairs against run 9 come out `overlapping` where the golden
@@ -1232,8 +1232,33 @@ neither this task's nor a regression.  Under machine load
     a baselined entry MATCHED: the `Sleep` normally still in flight when its
     sibling failed the `Parallel` had already finished
 
-`worker::claim` orders by `created_at` with NO tiebreak and sibling runs of one
-flowable share it, so which one a tick takes first is arbitrary -- and the round
-a run terminates in is what the logical clock records.  W3b Task 2 recorded the
-missing tiebreak as benign.  It is not benign here.  See README.md's coverage
-statement.
+`worker::claim` ordered by `created_at` with NO tiebreak, and sibling runs of
+one flowable share that instant -- one `settle`, one transaction, one `now()`.
+So which run a tick took first was whatever the scan produced, and since Task 5
+the round a run terminates in IS its `ended_seq`, an endpoint of the
+happens-before relation compared here.  W3b Task 2 recorded the missing tiebreak
+as benign; it was, until Task 5 made termination order part of the answer.
+
+The claim now orders by `created_at, execution_id, run_ix` -- a total order over
+the table's own unique key -- on BOTH the subquery that decides which rows are
+taken and the outer select that decides the order they come back in.
+
+Proved by MECHANISM, not by counting green runs.  A paired measurement under
+load gave 0 failures in 20 control runs (tiebreak reverted) and 0 in 40 fixed
+runs, which is evidence of nothing: a control that does not reproduce the fault
+cannot say the fix removed it.  What is evidence:
+
+  six siblings, physical order perturbed, no tiebreak  ->  [0, 2, 4, 3, 1, 5]
+  the same, with the tiebreak                          ->  [0, 1, 2, 3, 4, 5]
+  tiebreak REVERSED (run_ix DESC), nothing else        ->  the ratchet MOVES:
+    143 mismatching; valids/parallel-nested a REGRESSION; valids/dag and
+    valids/parallel-fail-with-flowable banking
+
+The last row names the same two entries that were seen flaking, from a
+one-token change.  The corpus itself did not move: every count in this file is
+identical either side of the tiebreak.
+
+It is also a CHOICE, not a tidy-up: under `run_ix DESC` this oracle banks
+`valids/dag`, the entry called instrument-bound since W3a Task 4 -- it costs
+`valids/parallel-nested` instead.  `run_ix` ascending is chosen because it is the
+executor's own creation order, not because it banks more.

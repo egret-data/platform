@@ -163,6 +163,40 @@ fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Va
 /// reach `RUNNING`, and in this table nothing else tells them apart — see
 /// migration 0134's comment on the column, and `executor::flowable::start` for
 /// the measurement it comes from. Without it a worker would run a `Parallel`.
+///
+/// # `ORDER BY created_at` is not an order, and the tiebreak is load-bearing
+///
+/// One `settle` writes every run of one round in one transaction, and `now()`
+/// in Postgres is TRANSACTION time, so sibling runs share `created_at` to the
+/// microsecond. With nothing left to compare, the rows came back in whatever
+/// order the scan produced — measured, `[0, 2, 4, 3, 1, 5]` for six siblings
+/// whose physical order had been perturbed by an ordinary `UPDATE`.
+///
+/// W3b Task 2 recorded that as benign, and it was: `SKIP LOCKED` already makes
+/// the choice arbitrary between two workers, and which of two ready runs goes
+/// first is not a correctness property. **W3b Task 5 made it one.** The round a
+/// run terminates in is its `ended_seq`, which is an endpoint of the
+/// happens-before relation the differential oracle compares, so an arbitrary
+/// claim order is an arbitrary relation. W3b Task 7 measured
+/// `executor_matches_golden` failing about one run in eight under load, in both
+/// directions.
+///
+/// `(execution_id, run_ix)` is `workflow.task_runs`'s own unique key, so
+/// `created_at, execution_id, run_ix` is a **total** order and there is no
+/// remaining tie for a scan to decide. `run_ix` is the executor's creation
+/// order — `RunIx`, the index into `ExecutionState::runs` — which is the order
+/// Kestra's own `taskRunList` carries and the one the oracle compares, so the
+/// tiebreak is the executor's own ordering rather than an arbitrary column
+/// chosen to break a tie.
+///
+/// **It has to be on BOTH queries, and the first attempt at this fix put it on
+/// one.** The subquery's `ORDER BY` decides *which* rows are taken, which is
+/// the whole answer at `LIMIT 1` — the oracle's driver ticks one run at a time.
+/// The outer `SELECT` decides the order they come back in, which is the order
+/// `tick` hands them to handlers when a caller asks for more than one. With the
+/// tiebreak on the subquery alone the returned order was still
+/// `[3, 0, 4, 2, 5, 1]`. Driven both ways, and at both batch sizes, by
+/// `the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order`.
 pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Claimed>> {
     sqlx::query_as(
         "WITH taken AS ( \
@@ -173,18 +207,19 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
                WHERE type_id IS NOT NULL \
                  AND state = 'RUNNING' \
                  AND claimed_at IS NULL \
-               ORDER BY created_at \
+               ORDER BY created_at, execution_id, run_ix \
                FOR UPDATE SKIP LOCKED \
                LIMIT $1 \
             ) \
             RETURNING id, execution_id, run_ix, task_ix, task_id, type_id, value, \
-                      jsonb_array_length(attempts) AS attempt \
+                      created_at, jsonb_array_length(attempts) AS attempt \
          ) \
          SELECT t.id, t.execution_id, e.workspace_id, t.run_ix, t.task_ix, t.task_id, \
                 t.type_id, t.value, t.attempt, e.source, f.created_by AS principal_id \
            FROM taken t \
            JOIN workflow.executions e ON e.id = t.execution_id \
-           LEFT JOIN workflow.flows f ON f.id = e.flow_id",
+           LEFT JOIN workflow.flows f ON f.id = e.flow_id \
+          ORDER BY t.created_at, t.execution_id, t.run_ix",
     )
     .bind(limit)
     .fetch_all(exec)
