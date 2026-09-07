@@ -142,6 +142,27 @@ This is the package's deliverable. The harness's four tiers go; the driver repla
 
 ---
 
+## Two rulings from Task 5, before Task 6
+
+**One run per tick stays.** Four entries — `valids/dag`, `valids/if`,
+`valids/parallel-disabled-tasks`, `valids/full` — now differ on the
+happens-before relation **alone**, because the driver finishes one run per tick
+where Kestra finishes several. Closing it means claiming and finishing several
+runs before calling `advance()`, which changes the transaction boundary Task 2
+built the durability properties on. **Four ordered-pair entries is the wrong
+price for the durability guarantee.** Record it as a named limitation with those
+four names and hand it to W4, which introduces a real worker pool and owns the
+decision properly. Note this also settles Task 1's Concern 3: `valids/full`'s
+cause was unknown and is now known.
+
+**The `TRUNCATE` must go.** Task 5's `egret_side()` truncates
+`workflow.executions` in the shared `egret_test` database. It is safe today and
+was named rather than hidden — but this repo already has a rule against running
+two suites at once *because* they share that database, and a `TRUNCATE` turns
+contention into destruction: a concurrent run does not merely flake, it loses
+rows it had written. Scope it to the rows the test created, or take a per-test
+database. Task 6 or 7 owns it; whoever takes it says which and why.
+
 ## Task 6: `egret.sql`, which ships with no oracle coverage
 
 **Files:** Create `src/worker/handlers/sql.rs`; modify `oracle-exec/README.md`.
