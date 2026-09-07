@@ -2666,21 +2666,29 @@ fn parallel_of_two_sequences(id: &str) -> String {
 /// Applying a whole batch's results in one transaction before calling
 /// `advance()` banks **`valids/dag`, `valids/full` and
 /// `valids/parallel-disabled-tasks`** (143 mismatching → 140, no regression,
-/// `valids/if` still differing on `order` alone). It was refused for what it
-/// costs, not for what it banks: a batch is one transaction, so ONE
-/// `WorkerError::LeaseLost` discards every result in it. Paired measurement on
-/// this very flow shape with a registry that reaps every lease from inside the
-/// second handler — six rounds, same everything but the discipline:
+/// `valids/if` still differing on `order` alone — so the benefit column is a
+/// LOWER bound while that entry's cause is unknown). It was refused for what it
+/// costs, and the cost it turns on is not an ordering one:
 ///
-/// | | one result per transaction | a batch per transaction |
-/// |---|---|---|
-/// | handler call log | `a, b, b, b, b, b, b` | `a, b, a, b, a, b, a, b, a, b, a, b` |
-/// | `a` after round 1 | `SUCCESS` | `RUNNING` — discarded |
-/// | progress in six rounds | `a` banked | none |
+/// **Widening would ship `a_worker_whose_lease_was_reaped_cannot_commit` and
+/// `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` green
+/// over a path they do not touch.** Both drive `apply_outcome` with a single
+/// `Claimed`; a widened tick releases `n` leases per transaction. Measured:
+/// under the widened prototype, deleting the `outputs` fence outright AND
+/// making `persist` fence only the group's first lease — a defect that is
+/// byte-equivalent at `n == 1` and lets a reaped worker commit over its
+/// replacement at `n > 1` — leaves **the whole crate green** but for this test.
+/// `worker::claim::tick`'s doc carries all four costs in order and
+/// `oracle-exec/w4t4-widened-tick.txt` carries every run behind them, including
+/// the five reap configurations that show the *shipping* tick starving under
+/// the mirror-image adversary — which is why the lease-loss cost is ranked
+/// fourth here and not first, and why the first version of this doc was wrong
+/// to call it a live-lock of the widening's.
 ///
 /// See `oracle-exec/README.md`'s *One result per transaction is a ruling* for
-/// the other three costs and for W3a's deleted guard, which stays unreachable
-/// under the widened tick — measured, not predicted.
+/// W3a's deleted guard, which stays unreachable under the widened tick —
+/// measured, not predicted — and for the savepoint design that is the named way
+/// back in.
 #[sqlx::test(migrations = "../../migrations")]
 async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
     pool: sqlx::PgPool,
@@ -2728,7 +2736,7 @@ async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
     );
     assert!(
         created2 < ended3,
-        "THE RULING. `task1`'s result, `advance()` and `task1`'s successor are          one transaction, so `task2` exists before `task3`'s result is applied          at all. Kestra's worker pool finished both siblings first and its          `created(task2)` is after `ended(task3)`; that divergence is          `valids/dag`, `valids/full` and `valids/parallel-disabled-tasks`, and          W4 Task 4 measured that widening the tick banks all three and refused          it anyway -- see this test's doc for the price. If this assertion is          ever failing, the tick has been widened and the three baseline lines          have to go in the same commit          (task1 {ended1}, task2 {created2}, task3 {ended3})"
+        "THE RULING. `task1`'s result, `advance()` and `task1`'s successor are          one transaction, so `task2` exists before `task3`'s result is applied          at all. Kestra's worker pool finished both siblings first and its          `created(task2)` is after `ended(task3)`; that divergence is          `valids/dag`, `valids/full` and `valids/parallel-disabled-tasks`, and          W4 Task 4 measured that widening the tick banks all three and refused          it anyway -- see this test's doc for the price. TWO things reach this          failure and they want different answers. Either the tick has been          WIDENED, in which case the ruling has been reversed and the three          baseline lines have to go in the same commit; or `task1` and `task3`          were finished CONCURRENTLY by two workers, which produces the same          equality with nothing edited at all and means this test has lost its          isolation -- it drives one `tick` itself, on its own `#[sqlx::test]`          database, and nothing else may be claiming from it          (task1 {ended1}, task2 {created2}, task3 {ended3})"
     );
     assert_ne!(
         ended1, ended3,

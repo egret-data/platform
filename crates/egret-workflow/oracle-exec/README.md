@@ -4587,6 +4587,15 @@ W3b handed W4 the question in *What this ratchet does not prove*, item 5. **The
 answer is that the discipline stays**, and the ruling was written down with its
 justification before the ratchet was run under the alternative.
 
+> **Every number in this section names a run that is not reproducible from this
+> checkout**, because the widened tick is a prototype and the shipped tree does
+> not contain it. The raw output of all four runs — the widened ratchet, the
+> whole crate under the mutation, the five reap configurations on both
+> disciplines, and the fence-hole experiment — is **`w4t4-widened-tick.txt`**,
+> beside this file, together with the literal mutation diff and the probe's
+> source. A count written beside a derivation has to be derived; a count written
+> beside a ruling has to be checkable.
+
 #### "One run per tick" is the wrong name for it
 
 `worker::tick` claims `n` runs and finishes `n`. What is one-at-a-time is the
@@ -4599,7 +4608,7 @@ the lever.
 |---|---|
 | shipping — `driver::BATCH = 1`, one result per transaction | 143 mismatching |
 | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
-| `BATCH = 1`, a whole batch per transaction | 143 mismatching; whole crate green but for the guard below |
+| `BATCH = 1`, a whole batch per transaction | 143 mismatching — **forced by construction**: at `BATCH = 1` a group is one run, so the widened apply *is* `apply_outcome`. A consistency check, not an independent measurement |
 | `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
 
 `BATCH` buys nothing on its own because `worker::claim` orders by
@@ -4637,21 +4646,37 @@ less this one). Before this task the ruling had no instrument at all.
 
 #### Why it was refused, and it is not the number
 
-Four costs, all measured on the prototype rather than argued:
+Four costs, all measured on the prototype rather than argued, in the order of
+how much weight the ruling puts on them. **Every run behind them is in
+`w4t4-widened-tick.txt`**, because the widened code is not in this checkout and
+the numbers are otherwise unreproducible from it.
 
-1. **A batch is one transaction, so one `WorkerError::LeaseLost` discards every
-   result in it.** Paired run, six rounds, a `Parallel` of two leaves and a
-   registry that reaps every lease from inside the second handler — everything
-   identical but the discipline:
+1. **THE ONE THE RULING RESTS ON: two guards would stop being guards, and
+   `persist`'s four-mutation table would start certifying a shape the code no
+   longer has.** That table proves the `outputs` fence and the state fence are
+   ALTERNATIVES, each sufficient alone — measured against a transaction that
+   releases exactly ONE lease. Widened, it releases `n`.
 
-   | | one result per transaction | a batch per transaction |
-   |---|---|---|
-   | handler call log | `a, b, b, b, b, b, b` | `a, b, a, b, a, b, a, b, a, b, a, b` |
-   | `a` after round 1 | `SUCCESS` | `RUNNING` — discarded |
-   | leases reaped per round | 1 | 2 |
-   | progress in six rounds | `a` banked | **none** |
+   The experiment (RUN 4) puts a defect in the surviving alternative that can
+   only bite at `n > 1`: delete the `outputs` fence outright, which the table
+   says is survivable, **and** make `persist` fence only the group's FIRST lease
+   — byte-equivalent at `n == 1`, and at `n > 1` a reaped worker can commit a
+   terminal over its replacement, which is W3b's Critical exactly. Result:
 
-   `a`'s handler is re-run every round for a reason that concerned `b`.
+   | suite | under the widened tick with both fence defects |
+   |---|---|
+   | lib | 589 passed, 0 failed |
+   | `executor.rs` | 34 passed, 0 failed |
+   | `oracle` / `publish` / `repo` / `routes` | 10 / 13 / 10 / 17, all passing |
+   | `sql_starrocks_live` | 8 passed, 0.74s |
+   | `worker.rs` | 26 passed, **1 failed** — the ordering guard, firing for the ordering |
+
+   So `a_worker_whose_lease_was_reaped_cannot_commit` and
+   `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass with
+   both fences effectively gone for every non-first member of a group, because
+   both drive `apply_outcome` with a single `Claimed`. **A programme whose first
+   law is *a guard nobody has seen fail is a guard nobody has seen* cannot buy an
+   ordering nicety with two guards that stop being guards.**
 2. **`working_timeout_s` stops meaning what it says.** A run's lease is held for
    `input_for` plus its own handler today; batched, for the sum over the batch.
    The reaper still reclaims exactly what the timeout says — durability property
@@ -4661,29 +4686,65 @@ Four costs, all measured on the prototype rather than argued:
    failure does not strand the rest of the batch … the first draft did exactly
    that with `?`"* — this time inside the transaction, where an early return
    cannot be softened into "carry on with the next one".
-4. **The fence surface grows from one row per transaction to `n`**, and
-   `persist`'s four-mutation table proving the two fences are alternatives was
-   taken against the one-row shape. Measured: under the prototype,
-   `a_worker_whose_lease_was_reaped_cannot_commit` and
-   `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
-   **unchanged**, because both drive `apply_outcome` with a single `Claimed`.
-   Two greens that would say nothing about the shipped path.
+4. **A lost lease costs the whole group rather than the run it named — the
+   weakest of the four, and the first version of this section got it wrong.** A
+   batch is one transaction, so one `WorkerError::LeaseLost` aborts every result
+   in it. That was first measured in a single configuration — a registry reaping
+   from the SECOND handler — and reported as a live-lock belonging to the
+   widening. **It does not belong to the widening.** Five configurations, one
+   scratch database each (RUN 3), six rounds, handler calls / SUCCESS runs:
+
+   | reap | narrow (shipping) | widened |
+   |---|---|---|
+   | none — the control | 2 / 3 | 2 / 3 |
+   | 2nd handler, every call | 7 / 1 | 12 / 0 |
+   | 2nd handler, once | 3 / 3 | 4 / 3 |
+   | **1st handler, every call** | **12 / 0** | **12 / 0** |
+   | 1st handler, once | 4 / 3 | 4 / 3 |
+
+   The shipping tick live-locks too, with the identical
+   `a, b, a, b, a, b, …` call log, when the reap fires from the first handler.
+   An adversary that reaps on every call starves both disciplines. What widening
+   actually costs is the **asymmetry**: this tick survives one of the two
+   placements and the widened one survives neither. Under a transient reap — the
+   realistic case, since `reap` fires on a lease that has actually expired — both
+   recover fully and the widening costs exactly ONE extra handler re-run.
+
+   The row that makes the other four readable is the control: two handler calls,
+   three SUCCESS runs. Without it every row is compatible with a fixture that
+   never ran.
 
 Against that, the four entries differ on the happens-before relation alone —
 every run, attempt and execution state already matches. Buying them by changing
 what a lease means is the trade W3b refused when reversing the claim's tiebreak
 also banked `valids/dag`, and the reason is the same: **choosing the shape of the
 runner by what it banks is how an oracle gets tuned to its own answer.** The
-ruling and these four costs were written down before the 140 was known; the
-number is reported as measured and did not change them.
+ruling and its costs were written down before the 140 was known; the number is
+reported as measured and did not change them. What the number *is* changed by:
+`valids/if`'s cause is unknown, so **140 is a lower bound on what the widening
+banks** and the benefit column is biased downward, not upward.
 
-#### What would reopen it
+**A fifth thing the widening changes, derived from the code shape rather than
+measured, and it is a BEHAVIOUR change rather than a durability one.** `tick`
+today calls `input_for` and the handler and the commit per run, in that order,
+so the second claimed run's render surface is loaded *after* the first has
+committed and a sibling that writes `{{ outputs.<earlier sibling> }}` resolves
+it. The widened tick runs every `handle_one` before any commit, so no member of
+a batch can see another member's outputs at all. Neither behaviour is Kestra's
+guarantee — a `Parallel` sibling reading a sibling's outputs is a race there too
+— but the widening silently *narrows* what a handler can see, and no test in
+this crate or entry in this corpus would notice.
+
+#### What would reopen it, named rather than left implicit
 
 A design in which a batch's results are applied together **without sharing a
-failure** — a savepoint per run inside the group transaction, so a lost lease
-rolls back one run's writes and not the group's. That removes cost 1 and shrinks
-cost 3; costs 2 and 4 remain and would need their own mutation tables. It is a
-different piece of work from widening the tick.
+failure** — a `SAVEPOINT` per run inside the group transaction, so a lost lease
+rolls back one run's writes and not the group's. That removes cost 4 entirely
+and shrinks cost 3. Costs 1 and 2 remain, and **cost 1 is the binding one**: such
+a design has to bring `n`-lease versions of both fence tests and re-derive
+`persist`'s mutation table against the `n`-row shape, and the savepoint boundary
+needs a mutation table of its own. The three entries stay available at that
+price; this ruling does not spend them.
 
 ### The happens-before endpoints are a logical clock now, and they had to be
 
@@ -5800,8 +5861,11 @@ applies one handler result, drives `advance()` to a fixed point and commits,
 where Kestra's worker pool finished two siblings before either successor
 existed. See *One result per transaction is a ruling* below for both sides of
 the measurement, the three entries the alternative banks, and the four costs it
-was refused for. It is still the single largest lever left on the ratchet, and
-it is now a decided one rather than an open one.
+was refused for — the binding one being that widening would leave two lease-fence
+guards green over a path they do not touch, measured in
+`w4t4-widened-tick.txt` RUN 4. It is still the single largest lever left on the
+ratchet, and it is now a decided one rather than an open one, with a named way
+back in.
 
 **6. 84 of the 294 executions end unfinished**, counted and named by
 `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type

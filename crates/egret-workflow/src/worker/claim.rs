@@ -482,7 +482,7 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// |---|---|
 /// | shipping (`driver::BATCH = 1`, one result per transaction) | 143 mismatching |
 /// | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
-/// | `BATCH = 1`, a whole batch per transaction | 143 mismatching; whole crate green but for this ruling's own test |
+/// | `BATCH = 1`, a whole batch per transaction | 143 mismatching (**forced**: at `BATCH = 1` a group is one run, so the widened apply IS [`apply_outcome`]) |
 /// | `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
 ///
 /// So the batch size buys nothing on its own — the claim orders by
@@ -493,16 +493,28 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// **It was refused for what it costs, not for what it banks**, which is the
 /// rule W3b applied when reversing the claim's tiebreak also banked
 /// `valids/dag`: choosing the shape of the runner by what it banks is how an
-/// oracle gets tuned to its own answer. The costs, measured on a prototype:
+/// oracle gets tuned to its own answer. The costs, in the order of how much
+/// weight the ruling puts on them, every one measured on a prototype whose raw
+/// output is `oracle-exec/w4t4-widened-tick.txt` — the widened code is not in
+/// this checkout, so the numbers below are not otherwise reproducible from it.
 ///
-/// 1. **A batch is one transaction, so one [`WorkerError::LeaseLost`] discards
-///    every result in it.** Paired run over six rounds on a `Parallel` of two
-///    leaves, with a registry that reaps every lease from inside the second
-///    handler — everything identical but the discipline. One result per
-///    transaction: handler log `a, b, b, b, b, b, b`, `a` `SUCCESS` after round
-///    one. A batch per transaction: `a, b, a, b, a, b, a, b, a, b, a, b`, `a`
-///    still `RUNNING`, **no progress at all in six rounds** — `a`'s handler
-///    re-run every round for a reason that concerned `b`.
+/// 1. **THE ONE THE RULING RESTS ON: two guards would stop being guards, and
+///    [`persist`]'s four-mutation table would start certifying a shape the code
+///    no longer has.** That table proves the `outputs` fence and the state
+///    fence are ALTERNATIVES, each sufficient alone — and it was taken against
+///    a transaction that releases exactly ONE lease. Widened, it releases `n`.
+///    Measured (`w4t4-widened-tick.txt`, RUN 4): put a defect in the surviving
+///    alternative that can only bite at `n > 1` — delete the `outputs` fence
+///    outright, which the table says is survivable, and make `persist` fence
+///    only the group's FIRST lease, which is byte-equivalent at `n == 1` — and
+///    **the whole crate is green** but for this ruling's own ordering guard.
+///    So `a_worker_whose_lease_was_reaped_cannot_commit` and
+///    `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
+///    with both fences effectively gone for every non-first member of a group,
+///    because both drive [`apply_outcome`] with a single `Claimed`. A programme
+///    whose first law is *a guard nobody has seen fail is a guard nobody has
+///    seen* cannot buy an ordering nicety with two guards that stop being
+///    guards.
 /// 2. **`working_timeout_s` stops meaning what it says.** Today a run's lease
 ///    is held for `input_for` plus its own handler. Batched, it is held for the
 ///    sum over the batch, so the reaper's timeout bounds a whole batch rather
@@ -510,13 +522,52 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// 3. **It is the coupling this doc's own *One run's failure does not strand
 ///    the rest of the batch* already refused once** — this time inside the
 ///    transaction, where an early return cannot be softened into "carry on".
-/// 4. **The fence surface grows from one row per transaction to `n`**, and the
-///    four-mutation table in [`persist`] that proves the two fences are
-///    alternatives was taken against the one-row shape. Measured: under the
-///    widened prototype, `a_worker_whose_lease_was_reaped_cannot_commit` and
-///    `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
-///    **unchanged**, because both drive [`apply_outcome`] with a single
-///    `Claimed` — two greens that would say nothing about the shipped path.
+/// 4. **A lost lease costs the whole group rather than the run it named — and
+///    this is the WEAKEST of the four, which the first version of this doc got
+///    wrong.** A batch is one transaction, so one [`WorkerError::LeaseLost`]
+///    aborts every result in it. The first measurement of that used a single
+///    adversary — a registry reaping from the SECOND handler, which is the
+///    arrangement most favourable to this tick — and reported a live-lock as
+///    the widening's. It is not. Five configurations, one scratch database
+///    each, six rounds, handler calls / SUCCESS runs
+///    (`w4t4-widened-tick.txt`, RUN 3):
+///
+///    | reap | narrow (shipping) | widened |
+///    |---|---|---|
+///    | none (control) | 2 / 3 | 2 / 3 |
+///    | 2nd handler, every call | 7 / 1 | 12 / 0 |
+///    | 2nd handler, once | 3 / 3 | 4 / 3 |
+///    | **1st handler, every call** | **12 / 0** | **12 / 0** |
+///    | 1st handler, once | 4 / 3 | 4 / 3 |
+///
+///    The shipping tick live-locks too, with the identical call log, when the
+///    reap fires from the first handler. An adversary that reaps on every call
+///    starves both. What widening actually costs is the **asymmetry**: this
+///    tick survives one of the two placements, the widened one survives
+///    neither. Under a transient reap — the realistic case, since [`super::reap`]
+///    fires on a lease that has actually expired — both recover fully and the
+///    widening costs exactly ONE extra handler re-run.
+///
+///
+/// **A fifth thing the widening changes, derived from the code shape rather
+/// than measured, and a BEHAVIOUR change rather than a durability one.** This
+/// loop calls [`input_for`], the handler and the commit per run in that order,
+/// so the second claimed run's render surface is loaded *after* the first has
+/// committed and a sibling writing `{{ outputs.<earlier sibling> }}` resolves
+/// it. A widened tick runs every handler before any commit, so no member of a
+/// batch can see another member's outputs. Neither is Kestra's guarantee — a
+/// `Parallel` sibling reading a sibling's outputs is a race there too — but the
+/// widening silently NARROWS what a handler can see, and nothing in this crate
+/// or in the corpus would notice.
+///
+/// **The way back in, named rather than left implicit.** A design that applies
+/// a batch's results together **without sharing a failure** — a `SAVEPOINT` per
+/// run inside the group transaction, so a lost lease rolls back one run's
+/// writes and not the group's — removes cost 4 entirely and shrinks cost 3.
+/// Costs 1 and 2 remain, and cost 1 is the binding one: such a design has to
+/// bring `n`-lease versions of both fence tests and re-derive [`persist`]'s
+/// mutation table against the `n`-row shape. The three entries stay available
+/// at that price; this ruling does not spend them.
 ///
 /// **W3a's deleted guard did NOT come back, and that was measured rather than
 /// predicted.** W3a removed `resolveParallelNexts`'s "return nothing while any
