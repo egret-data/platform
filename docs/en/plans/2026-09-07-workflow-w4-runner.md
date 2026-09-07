@@ -61,6 +61,10 @@ Twelve baselined entries declare a `retry:` with a non-zero `interval:`. Today a
 
 W3a Task 3 established against the artifact that Kestra's **worker** enforces `timeout` (`WorkerTaskCallable`; its validator warns the property *"is only relevant for runnable tasks"*), correcting an earlier brief of mine that had called it `advance()`'s. W3b then measured that a task-level `timeout:` is **stripped before a handler sees it**, so `egret.sql` runs under a 300 s constant unrelated to what the author wrote. Four baselined entries declare one.
 
+**Task 1 left you a named failure mode, and it is silent.** `advance()` never clears `not_before`, so the **state term is the waker's only defence**: a `RETRYING` run is not runnable until `advance()` returns it to `CREATED`. If your timeout budget reuses that column, the waker breaks **without any test saying so**. The clean fix — clearing it in `reopen_due` — is an `advance()` change, which Task 1 was not allowed to make and you are not either without the sentence the Global Constraints demand. Pick a different column, or make the case for touching `advance()` and measure it.
+
+Also correct before you rely on it: the reachable population is **14 entries with a `retry:` block, of which 4 are `CREATE_NEW_EXECUTION` and never write a `not_before` at all** — so 10 could ever have stalled, not the 12 my Task 1 brief said.
+
 - [ ] **Step 1: Write the failing test** — a flow whose task declares `timeout: PT1S` against a handler that sleeps longer, asserting the run's **terminal state and message**, not that an error occurred.
 - [ ] **Step 2: Run it and watch it pass wrongly** (the 300 s constant lets it finish), which is the interesting failure: the test must be written so that it fails *now*.
 - [ ] **Step 3: Implement**, and read Kestra's own behaviour for the boundary rather than choosing one — `javap` the pinned image or run a flow through it, because the image and the checkout are different builds and that has produced two wrong readings already.
