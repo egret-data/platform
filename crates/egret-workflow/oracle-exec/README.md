@@ -5654,8 +5654,15 @@ here exercises what `reap` would then do with the leased run in production.
 *after* `if actual == expected { continue; }`, so an execution that stalled and
 nevertheless MATCHED — egret doing less than Kestra and agreeing anyway — was
 excluded by construction. It is collected before the `continue` now and the
-intersection is asserted empty; it is empty today, and it was empty
-unfalsifiably before.
+intersection is asserted empty.
+
+**It is empty, and an assertion over an empty set cannot tell a working
+classifier from a broken one** — measured: moving the three lines back below the
+`continue` kills nothing at all. So the classifier is a function, `is_stalled`,
+driven on both answers by `a_stalled_execution_that_also_matched_would_be_counted`,
+and making it answer `false` unconditionally kills that test **and** the
+corpus-wide count. The emptiness is a measurement; the instrument that measures
+it has its own positive control.
 
 **7. Nothing keyed on elapsed time is reachable**, because `driver::pass_time`
 moves the clock only to the next `not_before` something is already waiting for.

@@ -1640,6 +1640,50 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
     );
 }
 
+/// Whether an execution ended mid-flight — no terminal state on its history.
+///
+/// **A function rather than three lines inline**, so the emptiness assertion
+/// above has a positive control. `matched_while_stalled` is empty today and a
+/// mutation that moves the collection back below the `continue` therefore kills
+/// nothing: an assertion over an empty population answers the same way whichever
+/// population it is over. That is the exact shape this programme calls a guard
+/// nobody has seen, so the classifier is driven directly by
+/// [`a_stalled_execution_that_also_matched_would_be_counted`].
+fn is_stalled(execution: &[String]) -> bool {
+    !execution
+        .last()
+        .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()))
+}
+
+/// **The positive control for `matched_while_stalled`.**
+///
+/// The over-acceptance that count exists to bound is *an execution egret left
+/// mid-flight that nevertheless matched the golden* — which is only reachable if
+/// Kestra's own trace also ended mid-flight. No such entry exists, so the
+/// assertion is over an empty set, and an empty set cannot tell a working
+/// classifier from a broken one. This drives the classifier on both answers.
+#[test]
+fn a_stalled_execution_that_also_matched_would_be_counted() {
+    let ended = |s: &str| vec!["CREATED".to_string(), "RUNNING".to_string(), s.to_string()];
+    for terminal in ["SUCCESS", "FAILED", "KILLED", "WARNING"] {
+        assert!(
+            !is_stalled(&ended(terminal)),
+            "{terminal} is a terminal state and must not count as stalled"
+        );
+    }
+    assert!(
+        is_stalled(&["CREATED".to_string(), "RUNNING".to_string()]),
+        "an execution still RUNNING is stalled -- this is the arm that would be \
+         collected, and with the collection below the `continue` a MATCHING \
+         entry in this state was excluded by construction"
+    );
+    assert!(
+        is_stalled(&[]),
+        "and so is one with no history at all, which is what a driver failure \
+         before the first settle would leave"
+    );
+}
+
 /// The counts above, named so the coverage statement and this file cannot
 /// disagree about them.
 const TERMINALS_ON_BASELINED_ENTRIES: usize = 461;
@@ -2204,10 +2248,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         // is exactly the over-acceptance `ENTRIES_LEFT_UNFINISHED` exists to
         // bound. A count whose population cannot contain the case it is written
         // about is a check whose output does not depend on what it checks.
-        let stalled = !actual
-            .execution
-            .last()
-            .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()));
+        let stalled = is_stalled(&actual.execution);
         if stalled {
             unfinished.push(entry.id.clone());
         }
