@@ -32,6 +32,10 @@ pub mod repo;
 pub mod routes;
 pub mod runners;
 pub mod spec;
+// W3b Task 2: the claim loop and the reaper -- the FIRST real caller of
+// `advance()`. `pub` for the same reason `executor` is: `tests/worker.rs` is an
+// integration test and sees only the public API.
+pub mod worker;
 
 pub use publish::publish;
 pub use refs::WorkflowRefs;

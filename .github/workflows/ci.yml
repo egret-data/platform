@@ -124,8 +124,14 @@ jobs:
       # covers the NEXT feature, which will be a different one.
       - name: egret-workflow under the shipping feature resolution
         run: cargo test -p egret-bin -p egret-workflow --lib --test oracle --no-fail-fast
+      # `EGRET_ALLOW_ENGINE_SKIP` is the engine axis, and it is typed here rather
+      # than assumed: `crates/egret-workflow/tests/sql_starrocks_live.rs` is the
+      # only instrument `worker::handlers::sql` has, and it used to self-skip —
+      # `7 passed; 0 failed; 0 ignored` in 0.00s with no engine and the same
+      # line in 0.88s with one. It fails without an engine now, so this runner,
+      # which has no StarRocks, says so in the command that produced the green.
       - name: Test
-        run: cargo test --workspace --no-fail-fast
+        run: EGRET_ALLOW_ENGINE_SKIP=1 cargo test --workspace --no-fail-fast
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
       # mystery SIGBUS — this one cost a full investigation to identify.
       - name: Disk after build

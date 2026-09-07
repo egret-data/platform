@@ -32,6 +32,13 @@ down:
 # _skip.rs` in egret-test-db fails if a recipe here runs `cargo test` without either this
 # prefix or a deliberate `EGRET_ALLOW_DB_SKIP=` of its own.
 no_db_skip := "env -u EGRET_ALLOW_DB_SKIP"
+# The ENGINE axis, which is a different one. `crates/egret-workflow/tests/sql_starrocks_
+# live.rs` is the only instrument `worker::handlers::sql` has — the execution ratchet
+# reaches zero corpus entries for it and can never reach one — and it used to self-skip,
+# reporting `7 passed; 0 failed; 0 ignored` in 0.00s with no engine and the identical line
+# in 0.88s with one. It now FAILS instead, so the recipes that legitimately have no engine
+# say so here, in the command, rather than by producing a green nobody can read.
+no_engine := "EGRET_ALLOW_ENGINE_SKIP=1"
 
 # Format, lint, and test everything
 check:
@@ -41,7 +48,7 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     just test-shipping-resolution
-    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+    {{ no_db_skip }} {{ no_engine }} DATABASE_URL={{ test_database_url }} cargo test --workspace
 
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #
@@ -83,7 +90,7 @@ test-shipping-resolution:
 # `#[sqlx::test]` never call it — they resolve DATABASE_URL through dotenvy themselves —
 # so they are not covered by the opt-out and may still fail here.
 test-no-db:
-    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 cargo test --workspace
+    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 {{ no_engine }} cargo test --workspace
 
 # The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
 #
@@ -99,6 +106,21 @@ test-dataapi-starrocks:
     ./deploy/seed-starrocks-dataapi.sh
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
       cargo test -p egret-dataapi --test serving_starrocks_live -- --nocapture
+
+# `egret.sql` end to end against a real StarRocks — the ONLY instrument that handler has.
+#
+# `worker::handlers::sql` reaches ZERO entries of the Kestra execution corpus (measured;
+# `no_corpus_entry_can_exercise_the_egret_sql_handler` derives it on every run), so the
+# execution ratchet says nothing about it and a green ratchet must not be read as coverage.
+# This publishes nothing — it drives the handler, and the shipping worker, against rows
+# StarRocks computed.
+#
+# Opt-in behind `EGRET_TEST_STARROCKS_URL`, same convention and same reason as above.
+# Prereq: `just up` (StarRocks takes ~30-60s to become healthy).
+test-workflow-starrocks:
+    ./deploy/seed-starrocks-workflow.sh
+    {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
+      cargo test -p egret-workflow --test sql_starrocks_live -- --nocapture
 
 # Apply migrations against the running Postgres
 migrate:

@@ -74,6 +74,21 @@ pub use flowable::loop_::iteration_values;
 /// the measurement.
 pub use flowable::branch::is_truthy;
 
+/// Java's `Duration.parse` over the ISO-8601 subset a flow can write.
+///
+/// **A visibility change, not a semantic one, and this is the sentence the
+/// plan's Global Constraint asks for: nothing here is being fixed, so there
+/// is nothing eight tasks of oracle work failed to catch.** `advance()` is
+/// byte-unchanged; the only edit to `src/executor/` in W3b Task 3 is
+/// `pub(super)` becoming `pub` on this function plus this re-export.
+///
+/// The reason is [`worker::handlers::sleep`](crate::worker::handlers::sleep):
+/// `core.flow.Sleep`'s `duration:` is the same ISO-8601 grammar a `retry:`
+/// writes, and a second parser beside this one would be a second table that
+/// can disagree with the one it copies — including on the case-insensitivity
+/// that `valids/retry-expo`'s `PT0.25s` depends on. One parser, two callers.
+pub use retry::parse_duration;
+
 use flowable::{sequential, Step};
 
 /// Decide what this execution does next.

@@ -1962,6 +1962,194 @@ fn render_once(
     Ok(put_back_raw_tags(&replacers, &rendered))
 }
 
+// ---------------------------------------------------------------------------
+// W3b Task 6: the same source, with values BOUND instead of interpolated.
+// ---------------------------------------------------------------------------
+
+/// The bind marker written in place of every emitted value. Both engines egret
+/// speaks to — Trino and StarRocks — spell it `?`, which is why
+/// `egret_query_api::Param` has no marker of its own.
+pub(crate) const BIND_PLACEHOLDER: &str = "?";
+
+/// The most values one [`render_bound`] will bind.
+///
+/// Not a performance guard: a `{% for %}` over a task output egret did not
+/// write is author-reachable, and a statement with a million markers is a way
+/// to spend an engine's parser rather than a query anyone meant. Kestra has no
+/// counterpart, exactly as [`MAX_OUTPUT_BYTES`] has none — see that constant.
+pub(crate) const MAX_BOUND_VALUES: usize = 10_000;
+
+/// What one `{{ … }}` bound to, as a JSON scalar.
+///
+/// **Deliberately not `egret_query_api::Param`.** `runners` is the expression
+/// layer and touches no I/O (`crate` doc, and the programme spec's crate
+/// table); the mapping from a scalar to an engine's bind type belongs to the
+/// caller that owns the engine, which is `worker::handlers::sql`. Under this
+/// crate's `serde_json` resolution `arbitrary_precision` is **on** (see
+/// `Cargo.toml`), so a number crosses this boundary as its exact text and a
+/// decimal literal cannot become a lossy `f64` on the way.
+pub(crate) type Bound = JsonValue;
+
+/// Renders `template` against `cx` with every emitted value **bound** rather
+/// than written, returning the text and the values in the order their markers
+/// appear.
+///
+/// # Why this exists rather than `render_str` plus quoting
+///
+/// This is `egret-dataapi`'s [`bind_formatter`] idiom
+/// (`crates/egret-dataapi/src/render.rs`), applied to *this* crate's engine.
+/// minijinja's VM writes to the output in exactly two places: `EmitRaw`, whose
+/// argument is a borrowed slice of the **template source**, and `Emit`, which
+/// goes through the formatter. Replacing the formatter therefore removes the
+/// path from `{{ … }}` to SQL text altogether — an author cannot write an
+/// interpolating template even deliberately, because the interpolating code
+/// path no longer exists. That is a structural property rather than an
+/// escaping convention, and it is the reason a workflow's `sql:` is not the
+/// third member of the `quote_string` family.
+///
+/// One trap in that mechanism, and the reason the `set_formatter` call below is
+/// unconditional: `Emit` has a fast path that calls the default escape function
+/// directly and skips the formatter, guarded by a flag that only clears when
+/// `set_formatter` is called. [`environment`] already calls it (for
+/// `json_writer_formatter`), so the flag is clear before this function runs and
+/// clear after — but a future `environment` that stopped setting one must not
+/// silently turn this into a bypass, which is what
+/// `a_bound_render_never_writes_a_value_into_the_text` is written to catch.
+///
+/// # One pass, where [`render_str`] loops
+///
+/// `VariableRenderer` re-renders its own output until it stops changing
+/// (`MAX_RENDERING_AMOUNT`), and that loop is exactly the double-evaluation
+/// this function exists to remove: a value that rendered to `{{ … }}` would be
+/// evaluated as source on the next pass. Binding already stops it — a bound
+/// value never reaches the text, so it can never be re-read as a template — and
+/// looping on top of that would be either a no-op or a second chance to emit,
+/// with the binds of the first pass already recorded. So this renders **once**,
+/// and a `sql:` therefore has one fewer evaluation than a `format:` on the same
+/// flow. That difference is deliberate and is stated on
+/// [`crate::worker::handlers::sql`].
+///
+/// Everything else [`render_str`] does is kept: the `{% raw %}` protection, the
+/// [`rewrite`] of Kestra's operator syntax, the [`MAX_OUTPUT_BYTES`] cap, the
+/// [`ReplaceBudget`](super::filters::ReplaceBudget), and the
+/// [`RENDER_STACK_BYTES`] thread. Composing `environment` and a render by hand
+/// loses all five — see [`environment`]'s own table, and the corpus expression
+/// that overflowed a 2 MiB tokio stack.
+///
+/// # What is refused
+///
+/// A sequence or a map cannot be one bound value: `IN (?)` takes exactly one,
+/// and an author who wrote `{{ inputs.regions }}` meant a list. Those are a
+/// [`RenderError::Template`] naming the `{% for %}` spelling that works, which
+/// is the same answer `egret-dataapi` gives for the same reason.
+pub(crate) fn render_bound(
+    template: &str,
+    cx: &RenderContext,
+) -> Result<(String, Vec<Bound>), RenderError> {
+    // NO `!template.contains('{')` short-circuit, unlike [`render_str`]. It
+    // would be correct (a source with no brace binds nothing) and it is left
+    // out anyway: the value of this function is that ONE code path produces
+    // both halves of the answer, and a second path that produces `(text, [])`
+    // is a second place for the two to disagree about what "no values" means.
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name("egret-render-bound".to_string())
+            .stack_size(RENDER_STACK_BYTES)
+            .spawn_scoped(scope, || bind_on_this_thread(template, cx))
+            .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
+        match worker.join() {
+            Ok(result) => result,
+            Err(_) => Err(RenderError::Template("the render panicked".to_string())),
+        }
+    })
+}
+
+/// [`render_bound`]'s body, on the thread it was given.
+fn bind_on_this_thread(
+    template: &str,
+    cx: &RenderContext,
+) -> Result<(String, Vec<Bound>), RenderError> {
+    let binds: Arc<std::sync::Mutex<Vec<Bound>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut env = environment();
+    env.add_global(
+        CONTEXT_SCOPE_NAMES,
+        MjValue::from_object(ContextScope(
+            cx.bindings().iter().map(|(name, _)| name.clone()).collect(),
+        )),
+    );
+    // AFTER `environment()`, which sets `json_writer_formatter`. Order is the
+    // whole of it: the other way round, Kestra's formatter would win and every
+    // value would be written into the SQL.
+    let sink = Arc::clone(&binds);
+    env.set_formatter(move |out, _state, value| {
+        let mut held = sink
+            .lock()
+            .expect("bind list mutex poisoned by a panic inside the renderer");
+        if held.len() >= MAX_BOUND_VALUES {
+            return Err(MjError::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("this statement binds more than {MAX_BOUND_VALUES} values"),
+            ));
+        }
+        held.push(to_bound(value)?);
+        drop(held);
+        out.write_str(BIND_PLACEHOLDER).map_err(MjError::from)
+    });
+    let env = env;
+
+    let _budget = super::filters::ReplaceBudget::install();
+    let variables = cx.to_minijinja();
+    let rendered = render_once(&env, template, &variables)?;
+
+    // Taken out of the still-shared list rather than unwrapped out of the `Arc`:
+    // the formatter closure holds the other handle and lives as long as `env`,
+    // which is still borrowed by the frame above. An `Arc::try_unwrap` here
+    // fails at run time for that reason — and it did.
+    let values = std::mem::take(
+        &mut *binds
+            .lock()
+            .expect("bind list mutex poisoned by a panic inside the renderer"),
+    );
+    Ok((strip_raw_markers(&rendered), values))
+}
+
+/// The value being emitted, as a JSON scalar an engine can bind.
+///
+/// Mirrors `egret-dataapi`'s `to_param` and diverges from it in one place, for
+/// a reason worth stating: that function has a `Cell` arm, because the Data API
+/// wraps every caller-supplied parameter in an **opaque object** to carry a
+/// `Date` through the template as a `Date`. The cost of the wrapper is that
+/// `{% if mode == 'fast' %}` is silently false for ever, which is why that
+/// module needs `check_static`/`check_dynamic` and why five reviews found five
+/// bypasses of the byte scanner.
+///
+/// egret's workflow render context holds ordinary minijinja values — the
+/// formatter is the only thing this function changes — so **no comparison is
+/// silently false here and there is no lint to bypass.** A workflow's `sql:`
+/// gets W2's whole expression language, tests and comparisons included.
+fn to_bound(value: &MjValue) -> Result<Bound, MjError> {
+    Ok(match value.kind() {
+        ValueKind::Undefined | ValueKind::None => JsonValue::Null,
+        ValueKind::Bool => JsonValue::Bool(value.is_true()),
+        ValueKind::Number => match i64::try_from(value.clone()) {
+            Ok(i) => JsonValue::from(i),
+            // Exact text rather than a lossy float. `arbitrary_precision` is on
+            // in every resolution this crate ships in (`Cargo.toml`), so
+            // `from_str` keeps the digits the author wrote.
+            Err(_) => serde_json::from_str::<JsonValue>(&value.to_string())
+                .unwrap_or_else(|_| JsonValue::String(value.to_string())),
+        },
+        ValueKind::String => JsonValue::String(value.to_string()),
+        _ => {
+            return Err(MjError::new(
+                minijinja::ErrorKind::InvalidOperation,
+                "this value cannot be bound as a single parameter; emit a sequence one \
+                 element at a time inside a `{% for %}` loop",
+            ))
+        }
+    })
+}
+
 /// An [`io::Write`] that refuses past a byte budget instead of growing.
 ///
 /// This bounds *accumulated* output across a whole render, and stops at the
