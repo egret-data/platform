@@ -85,8 +85,37 @@ struct Spec {
 }
 
 /// Sleep for the rendered duration.
+///
+/// # The cap, and the one caller that uses it
+///
+/// [`Sleep::capped`] validates the duration exactly as [`Sleep`] does — the
+/// `@DurationMin(millis = 1)` refusal above included — and then waits
+/// `min(duration, cap)`. It exists for `oracle-exec/driver.rs`, which runs the
+/// whole corpus through this handler and would otherwise wait `PT10M` for
+/// `valids/flow-concurrency-sla-fail-child` and `PT30S` three more times.
+///
+/// **Nothing the oracle compares can see the difference**, and that is a
+/// measurement rather than a hope: `oracle-exec/normalise.py` drops every clock
+/// from the golden, and egret's own happens-before endpoints are the logical
+/// `executions.seq` (migration 0136), not wall-clock instants. A capped sleep
+/// therefore changes no state, no history and no ordered pair. It is stated in
+/// `oracle-exec/README.md` as a property of the driver, not hidden in it.
 #[derive(Debug, Default)]
-pub struct Sleep;
+pub struct Sleep {
+    cap: Option<Duration>,
+}
+
+impl Sleep {
+    /// The product handler: it waits for as long as the author asked.
+    pub fn new() -> Self {
+        Self { cap: None }
+    }
+
+    /// A `Sleep` that validates identically and waits at most `cap`.
+    pub fn capped(cap: Duration) -> Self {
+        Self { cap: Some(cap) }
+    }
+}
 
 #[async_trait::async_trait]
 impl TaskHandler for Sleep {
@@ -131,7 +160,7 @@ impl TaskHandler for Sleep {
             return Ok(Outcome::failed_with(NOT_POSITIVE));
         }
 
-        tokio::time::sleep(d).await;
+        tokio::time::sleep(self.cap.map_or(d, |c| d.min(c))).await;
         // `return null` (`Sleep.java:62`) — a `VoidOutput` task.
         Ok(Outcome::success())
     }
@@ -154,7 +183,7 @@ mod tests {
     /// (`Sleep.java:47`, `:62`).
     #[tokio::test]
     async fn a_sleep_succeeds_and_produces_no_output() {
-        let out = Sleep
+        let out = Sleep::new()
             .run(&input(TYPE_ID, serde_json::json!({"duration": "PT0.001S"})))
             .await
             .unwrap();
@@ -172,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn a_sleep_actually_waits() {
         let t0 = std::time::Instant::now();
-        Sleep
+        Sleep::new()
             .run(&input(TYPE_ID, serde_json::json!({"duration": "PT0.05S"})))
             .await
             .unwrap();
@@ -191,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn a_duration_under_one_millisecond_fails_the_run() {
         for refused in ["PT0S", "PT0.000999S", "PT-1S", "PT0.0005S"] {
-            let out = Sleep
+            let out = Sleep::new()
                 .run(&input(TYPE_ID, serde_json::json!({"duration": refused})))
                 .await
                 .unwrap();
@@ -209,7 +238,7 @@ mod tests {
 
         // The control, and it is what makes the four above mean anything: one
         // millisecond is the boundary and it PASSES.
-        let out = Sleep
+        let out = Sleep::new()
             .run(&input(TYPE_ID, serde_json::json!({"duration": "PT0.001S"})))
             .await
             .unwrap();
@@ -225,7 +254,7 @@ mod tests {
     /// duration that succeeded would be an over-acceptance.
     #[tokio::test]
     async fn a_missing_duration_fails_the_run() {
-        let out = Sleep
+        let out = Sleep::new()
             .run(&input(TYPE_ID, serde_json::json!({})))
             .await
             .unwrap();
@@ -238,7 +267,7 @@ mod tests {
     /// so.
     #[tokio::test]
     async fn an_unparseable_duration_fails_the_run() {
-        let out = Sleep
+        let out = Sleep::new()
             .run(&input(TYPE_ID, serde_json::json!({"duration": "nonsense"})))
             .await
             .unwrap();

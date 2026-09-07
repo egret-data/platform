@@ -45,18 +45,22 @@
 //! `core.execution.Fail` and `core.flow.Sleep`, and Task 6 owns `egret.sql`;
 //! this module takes a [`Registry`] trait object and does not care which.
 //!
-//! **No renderer, and that is the largest hole left here.** `advance()`'s
-//! `rendered` and `rendered_run_if` slots are the caller's to fill and nothing
-//! in this module fills them, so a `runIf:`, an `If`, a `Switch` or a `Loop`
-//! waits until something writes the slot and calls [`resume`]. W3b Task 5 owns
-//! it; until then the only caller that fills a slot is `tests/worker.rs`.
+//! **The renderer is [`render`], and it is inside the tick.** `advance()`'s
+//! `rendered` and `rendered_run_if` slots are the caller's to fill, and Task 2
+//! shipped this module with nothing filling them: a `runIf:`, an `If`, a
+//! `Switch` or a `Loop` got an empty command vector for ever, which is a stall
+//! rather than an error. `claim::drive` now renders between rounds of
+//! `advance()`, so the shipping worker resolves them and [`resume`] is what a
+//! caller uses when something OUTSIDE the execution has changed.
 
 mod claim;
 pub mod handlers;
 mod reaper;
 mod registry;
+mod render;
 mod spawn;
 
+pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{apply_outcome, claim, resume, start_execution, tick, Claimed};
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -114,14 +118,10 @@ pub struct TaskInput {
     pub spec: serde_json::Value,
     /// What a `{{ … }}` in one of those properties renders against.
     ///
-    /// **Today it is empty, and that is a hole rather than a design.**
-    /// `advance()` cannot render and neither can this worker yet: W3b Task 5
-    /// owns the render surface (spec §4.4), and until it lands, a task whose
-    /// property references any variable fails to render and the run goes
-    /// `FAILED`. That is the safe direction — a refusal, not an
-    /// over-acceptance — but it is a divergence from Kestra and it is named
-    /// here rather than discovered. `claim::render_context_for` is the single
-    /// place Task 5 has to change.
+    /// Built by [`render::Surface`] from the execution's own inputs, its flow's
+    /// `variables:`, the outputs of every task that has terminated (its
+    /// ancestors' included), and this run's `taskrun`. See that module for what
+    /// each name is and what is deliberately still missing.
     pub render: RenderContext,
 }
 

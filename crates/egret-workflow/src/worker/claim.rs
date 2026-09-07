@@ -28,10 +28,11 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::render::{self, Pass, Surface};
 use super::spawn::{self, Requested};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunState, TaskKind,
+    advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunIx, RunState, TaskKind,
     TaskRun, Tick,
 };
 
@@ -84,7 +85,7 @@ impl Claimed {
     /// `spec::validate`'s `duplicate_task_id` is a structural check over the
     /// nested walk, not just `flow.tasks` — so the id is a key and not a
     /// guess.
-    fn input(&self) -> Result<TaskInput> {
+    fn input(&self, render: crate::runners::RenderContext) -> Result<TaskInput> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
         let spec = leaf_spec(&flow, &self.task_id).ok_or_else(|| {
@@ -105,7 +106,7 @@ impl Claimed {
             value: self.value.clone(),
             attempt: self.attempt.max(0) as usize,
             spec,
-            render: render_context_for(self),
+            render,
         })
     }
 }
@@ -125,28 +126,21 @@ fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Va
                 _ => None,
             };
         }
-        task.children().into_iter().find_map(|c| walk(c, want))
+        // `children()` AND `error_children()`: an error handler nested inside a
+        // flowable's own `errors:` is a leaf a worker claims like any other,
+        // and a walk that could not reach it aborted the tick with
+        // `WorkerError::Corrupt` and left the run `RUNNING` for ever. See
+        // `models::Task::error_children` for the three corpus entries that
+        // showed it.
+        task.children()
+            .into_iter()
+            .chain(task.error_children())
+            .find_map(|c| walk(c, want))
     }
     flow.tasks
         .iter()
         .chain(flow.errors.iter())
         .find_map(|t| walk(t, task_id))
-}
-
-/// What a handler's `{{ … }}` renders against.
-///
-/// **Empty, and this function exists so that is one edit rather than a
-/// search.** `advance()` cannot render (it is pure) and neither can this
-/// worker yet: spec §4.4 gives the render surface — `inputs`, `vars`,
-/// `outputs`, `taskrun`, `tasksWithState()` — to W3b Task 5, which is also
-/// where the widening's consequences have to be attributed. Until then a task
-/// whose property references a variable fails to render and the run goes
-/// `FAILED`; that is a divergence from Kestra in the safe direction (a
-/// refusal, never an over-acceptance) and `tests/worker.rs`'s
-/// `a_task_whose_property_needs_a_render_fails_rather_than_succeeding` pins
-/// it so the day it changes, something says so.
-fn render_context_for(_claimed: &Claimed) -> crate::runners::RenderContext {
-    crate::runners::RenderContext::new()
 }
 
 /// Take up to `limit` runnable task runs, marking each leased.
@@ -204,13 +198,37 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
     for c in &claimed {
-        let outcome = reg.run(&c.input()?).await?;
+        let input = input_for(pool, c).await?;
+        let outcome = reg.run(&input).await?;
         let mut tx = pool.begin().await.map_err(db_err)?;
         apply_outcome(&mut tx, c, &outcome).await?;
         tx.commit().await.map_err(db_err)?;
         done += 1;
     }
     Ok(done)
+}
+
+/// What one claimed run's handler is handed, render context included.
+///
+/// **Read WITHOUT the execution's row lock**, and that is deliberate: this
+/// happens before the handler runs and therefore before the tick's transaction
+/// is opened, and taking the lock here would hold it across an arbitrarily long
+/// handler -- the exact outage the two-commit split exists to prevent (see the
+/// `worker` module doc). The run itself is leased, so nothing else will move
+/// IT; a sibling of the same execution may finish while the handler runs, and
+/// what that costs is that a handler's `outputs` are a snapshot rather than a
+/// live view. Kestra's worker renders from a snapshot for the same reason.
+async fn input_for(pool: &PgPool, c: &Claimed) -> Result<TaskInput> {
+    let mut conn = pool.acquire().await.map_err(db_err)?;
+    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No).await?;
+    let surface = Surface::load(&mut conn, &ctx).await?;
+    let run = usize::try_from(c.run_ix).map_err(|_| {
+        worker_err(WorkerError::Corrupt(
+            c.id,
+            format!("negative run_ix {}", c.run_ix),
+        ))
+    })?;
+    c.input(surface.context(&ctx.plan, &state, Some(run)))
 }
 
 /// Record one handler's result, drive `advance()` to a fixed point, and write
@@ -234,6 +252,19 @@ pub async fn apply_outcome(
 ) -> Result<()> {
     let (ctx, mut state, now) = load(conn, claimed.execution_id).await?;
     let before = state.clone();
+
+    // The output goes down BEFORE `settle` renders, because a successor's
+    // `{{ outputs.<this task> }}` has to see it in the same transaction that
+    // finished the task. It is a column rather than a field on `ExecutionState`
+    // for the reason `advance()` does not carry one: the state machine has no
+    // use for it and a plan that knew what a `Return` produces would have
+    // stopped being a state machine.
+    sqlx::query("UPDATE workflow.task_runs SET outputs = $1 WHERE id = $2")
+        .bind(&outcome.outputs)
+        .bind(claimed.id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -276,8 +307,17 @@ pub(super) async fn settle(
     now: Tick,
     release: Option<i32>,
 ) -> Result<()> {
-    let spawns = drive(&ctx.plan, state, now, ctx.id)?;
-    persist(conn, ctx, before, state, release).await?;
+    let surface = Surface::load(conn, ctx).await?;
+    let mut marks = Marks::default();
+    // The caller's own command -- a handler's terminal, or the `SetRunState` a
+    // loop's completion applies -- is step `ctx.seq + 1`, and every round below
+    // is one more. Nothing shares a step with a round of the PREVIOUS `settle`,
+    // which is what makes "created strictly after the other ended" mean the
+    // same thing across a transaction boundary as it does inside one.
+    let mut seq = ctx.seq + 1;
+    marks.observe(before, state, seq);
+    let spawns = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
+    persist(conn, ctx, before, state, release, &marks, seq).await?;
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
 
     let was = before.history.last().copied();
@@ -302,6 +342,7 @@ pub async fn start_execution(
     workspace_id: Uuid,
     flow_id: Option<Uuid>,
     source: &str,
+    inputs: serde_json::Value,
 ) -> Result<Uuid> {
     let flow = crate::spec::parse(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
@@ -311,14 +352,19 @@ pub async fn start_execution(
     let mut tx = pool.begin().await.map_err(db_err)?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb) RETURNING id",
+           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
     .bind(&flow.namespace)
     .bind(&flow.id)
     .bind(source)
+    .bind(if inputs.is_object() {
+        inputs
+    } else {
+        serde_json::json!({})
+    })
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -329,6 +375,7 @@ pub async fn start_execution(
         flow_id,
         source: source.to_string(),
         plan,
+        seq: 0,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -374,6 +421,22 @@ pub(super) struct ExecutionCtx {
     pub flow_id: Option<Uuid>,
     pub source: String,
     pub plan: Plan,
+    /// The execution's logical clock, as [`Marks`] describes it: the last step
+    /// a `settle` consumed. Carried on the context rather than read again in
+    /// `persist` because the whole of one settle has to agree about it.
+    pub seq: i64,
+}
+
+/// Whether [`load_with`] takes the execution's row lock.
+///
+/// Every WRITER takes it -- it is the serialisation two workers finishing two
+/// siblings of one `Parallel` need. The one reader that does not is
+/// [`input_for`], which runs before the tick's transaction is opened and must
+/// not hold a lock across a handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Lock {
+    Yes,
+    No,
 }
 
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
@@ -387,11 +450,23 @@ pub(super) async fn load(
     conn: &mut PgConnection,
     execution_id: Uuid,
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
-    let row = sqlx::query(
-        "SELECT source, history, workspace_id, flow_id, \
+    load_with(conn, execution_id, Lock::Yes).await
+}
+
+pub(super) async fn load_with(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    lock: Lock,
+) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
+    let row = sqlx::query(if lock == Lock::Yes {
+        "SELECT source, history, workspace_id, flow_id, seq, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
-           FROM workflow.executions WHERE id = $1 FOR UPDATE",
-    )
+           FROM workflow.executions WHERE id = $1 FOR UPDATE"
+    } else {
+        "SELECT source, history, workspace_id, flow_id, seq, \
+                (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
+           FROM workflow.executions WHERE id = $1"
+    })
     .bind(execution_id)
     .fetch_optional(&mut *conn)
     .await
@@ -409,6 +484,7 @@ pub(super) async fn load(
         flow_id: row.get("flow_id"),
         source,
         plan,
+        seq: row.get("seq"),
     };
 
     let rows = sqlx::query(
@@ -453,36 +529,183 @@ pub(super) async fn load(
     Ok((ctx, state, Tick(now_ms)))
 }
 
-/// Drive `advance()` to a fixed point, applying every command it asks for and
-/// **collecting** the spawns.
+/// **How many times this process has asked `advance()` to create a run while an
+/// existing child of the same parent was still `CREATED`.**
 ///
-/// `Command::SpawnExecution` is the one command `executor::apply` has no arm
-/// for, and that is not an omission: [`ExecutionState`] holds nothing about a
-/// sub-execution, so there is nothing for `apply` to record. It comes back to
-/// the caller instead, which is the only thing that can write one — see
-/// [`spawn::spawn_all`].
+/// A diagnostic, not a guard, and it exists because W3a *deleted* a guard on
+/// exactly this state and named the caller that would bring it back. Kestra's
+/// `resolveParallelNexts` returns nothing while any existing child run is still
+/// `CREATED` — "first created, leave". W3a ported it, found that the mutation
+/// bypassing it (`if !any_created || true`) left the whole crate green and the
+/// ratchet unmoved, and deleted it with the reason written down: *"Deleting it
+/// is right for today's only caller. It is not a property of `advance`… the
+/// trigger to watch for is W4's worker, which is message-driven by
+/// construction."* It measured the decision point at **0** occurrences under
+/// the oracle's harness and at `valids/dag` 1 batch / `valids/if` 3 under a
+/// driver that applies one worker result BETWEEN `advance()` calls.
 ///
-/// Bounded by [`MAX_ROUNDS`]: a caller that does not converge has found a cycle
-/// or is failing to fill a render slot, and both must be loud rather than spin
-/// with a transaction open.
-fn drive(
-    plan: &Plan,
-    state: &mut ExecutionState,
-    now: Tick,
-    execution_id: Uuid,
-) -> Result<Vec<Requested>> {
-    let mut spawns = Vec::new();
-    for _ in 0..MAX_ROUNDS {
-        let cmds = advance(plan, state, now);
-        if cmds.is_empty() {
-            return Ok(spawns);
+/// This worker is that driver. The counter is how W3b answers the question with
+/// a measurement rather than with a prediction — see
+/// `tests/executor.rs`'s `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs`.
+/// It is deliberately **not** a guard: `advance()` may not change (the W3b
+/// plan's first Global Constraint), and the three entries the state occurs on
+/// reproduce Kestra's run list exactly, so nothing observable is wrong.
+pub static CREATE_BESIDE_A_CREATED_SIBLING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The happens-before endpoints one `settle` stamped, by run index.
+///
+/// **Why a logical clock rather than a timestamp.** The oracle compares a
+/// relation over `(created, ended)`, and a `timestamptz` cannot carry it: every
+/// row a `settle` writes shares one `now()`, because `now()` in Postgres is
+/// TRANSACTION time. That is not a suspicion — it is the same shape W3b Task 4
+/// measured on Kestra's side, where all 670 loop sub-executions carry their
+/// parent execution's `startDate` and all 220 multi-sibling groups share one
+/// instant, so the instant does not order siblings badly, it does not order
+/// them at all.
+///
+/// **The left endpoint is stamped once and the right one is not**, and the
+/// asymmetry is `normalise.py`'s rather than a choice: its `relation` reads
+/// `state.startDate` and `state.endDate`, which for a RETRIED run are the first
+/// creation and the LAST termination. So `created` is `or_insert` — a run that
+/// re-enters `CREATED` on a retry must not look created after tasks it preceded
+/// — and `ended` is a plain insert.
+///
+/// A first draft had both as `or_insert` plus a `COALESCE` in the UPDATE to
+/// enforce it, and the mutation removing that guard killed **nothing** across
+/// the whole crate: no compared entry's relation depends on which termination
+/// of a retried run is taken. Rather than ship a guard nobody has seen fail,
+/// the rule was changed to the one `normalise.py` actually uses.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Marks {
+    created: std::collections::BTreeMap<usize, i64>,
+    ended: std::collections::BTreeMap<usize, i64>,
+}
+
+impl Marks {
+    /// Record everything that changed between two snapshots as having happened
+    /// at step `seq`.
+    ///
+    /// Diffing the state rather than reading the commands is deliberate: a
+    /// `SkipRun` terminates a run just as a `SetRunState` does, and W3a shipped
+    /// an arm-per-command version whose `SkipRun` arm nothing in the corpus
+    /// could exercise. A diff has no arms to forget.
+    pub(super) fn observe(&mut self, before: &ExecutionState, after: &ExecutionState, seq: i64) {
+        for ix in before.runs.len()..after.runs.len() {
+            self.created.entry(ix).or_insert(seq);
         }
-        for cmd in &cmds {
-            spawns.extend(Requested::of(cmd));
-            apply(state, cmd);
+        for (ix, run) in after.runs.iter().enumerate() {
+            let was = before
+                .runs
+                .get(ix)
+                .and_then(|b| b.history.last())
+                .is_some_and(|s| s.is_terminal());
+            let is = run.history.last().is_some_and(|s| s.is_terminal());
+            if is && !was {
+                self.ended.insert(ix, seq);
+            }
         }
     }
-    Err(worker_err(WorkerError::NoFixedPoint(execution_id)))
+}
+
+/// Drive `advance()` and the render tier to a joint fixed point.
+///
+/// # Three things happen here, in this order, and the order is measured
+///
+/// 1. **`advance()`**, applying every command it asks for and **collecting**
+///    the spawns. `Command::SpawnExecution` is the one command
+///    `executor::apply` has no arm for, and that is not an omission:
+///    `ExecutionState` holds nothing about a sub-execution, so there is nothing
+///    for `apply` to record. It comes back to the caller instead.
+/// 2. **`runIf:`**, for every run still `CREATED` whose task declares one.
+/// 3. **an `If`/`Switch`/`Loop` expression**, at that kind's own render state.
+///
+/// Each is a step of its own, and that uniformity is a definition rather than a
+/// guard: the mutation removing the increment from BOTH render passes killed
+/// nothing across the whole crate, because a render neither creates nor
+/// terminates a run and the round after it is `seq + 1` either way. It is kept
+/// so the clock means "one step per pass that can change what `advance()`
+/// sees", with the measurement recorded rather than a comment claiming a cost
+/// nobody has seen.
+///
+/// 2 before 3 because Kestra decides a `runIf:`
+/// before it resolves anything else about the task and the order is observable:
+/// a `Loop` whose `runIf:` is falsy is `SKIPPED` without its `values:` ever
+/// being resolved, so a tier that did both at once could fail a run on an
+/// expression Kestra never evaluated.
+///
+/// **The render tier is inside this loop, not outside it**, because a render
+/// unblocks `advance()` and `advance()` creates the runs the next render needs.
+/// Task 2 shipped this loop without one and named the consequence: a flow with
+/// a `runIf:`, an `If`, a `Switch` or a `Loop` got an empty command vector for
+/// ever -- a stall, not an error.
+///
+/// Bounded by [`MAX_ROUNDS`]: a caller that does not converge has found a cycle
+/// or a render that keeps re-arming, and both must be loud rather than spin
+/// with a transaction open.
+fn drive(
+    ctx: &ExecutionCtx,
+    surface: &Surface,
+    state: &mut ExecutionState,
+    now: Tick,
+    marks: &mut Marks,
+    seq: &mut i64,
+) -> Result<Vec<Requested>> {
+    let plan = &ctx.plan;
+    let mut spawns = Vec::new();
+    for _ in 0..MAX_ROUNDS {
+        let snapshot = state.clone();
+        let cmds = advance(plan, state, now);
+        if !cmds.is_empty() {
+            note_create_beside_a_created_sibling(state, &cmds);
+            *seq += 1;
+            for cmd in &cmds {
+                spawns.extend(Requested::of(cmd));
+                apply(state, cmd);
+            }
+            marks.observe(&snapshot, state, *seq);
+            continue;
+        }
+
+        let snapshot = state.clone();
+        if render::render_run_if(surface, plan, state) == Pass::Rendered {
+            *seq += 1;
+            marks.observe(&snapshot, state, *seq);
+            continue;
+        }
+
+        let snapshot = state.clone();
+        if render::render_expressions(surface, plan, state) == Pass::Rendered {
+            *seq += 1;
+            marks.observe(&snapshot, state, *seq);
+            continue;
+        }
+
+        return Ok(spawns);
+    }
+    Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
+}
+
+/// The decision point [`CREATE_BESIDE_A_CREATED_SIBLING`] counts: this round
+/// creates a child of some parent, and a child of that same parent already
+/// exists and is still `CREATED`.
+fn note_create_beside_a_created_sibling(state: &ExecutionState, cmds: &[Command]) {
+    let created_parents: Vec<Option<RunIx>> = state
+        .runs
+        .iter()
+        .filter(|r| r.history.last() == Some(&RunState::Created))
+        .map(|r| r.parent)
+        .collect();
+    let hits = cmds
+        .iter()
+        .filter(|c| match c {
+            Command::CreateRun { parent, .. } => created_parents.contains(parent),
+            _ => false,
+        })
+        .count();
+    if hits > 0 {
+        CREATE_BESIDE_A_CREATED_SIBLING.fetch_add(hits, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Write the difference between `before` and `after`.
@@ -491,12 +714,15 @@ fn drive(
 /// [`start_execution`], where nothing is leased. Only that run's lease is
 /// touched: another worker may hold a lease on a sibling of the same execution,
 /// and clearing it would hand that sibling to a second handler.
+#[allow(clippy::too_many_arguments)]
 async fn persist(
     conn: &mut PgConnection,
     ctx: &ExecutionCtx,
     before: &ExecutionState,
     after: &ExecutionState,
     release: Option<i32>,
+    marks: &Marks,
+    seq: i64,
 ) -> Result<()> {
     let execution_id = ctx.id;
     let plan = &ctx.plan;
@@ -518,6 +744,7 @@ async fn persist(
                     SET state = $1, history = $2, attempts = $3, rendered = $4, \
                         rendered_run_if = $5, not_before_ms = $6, \
                         claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
+                        ended_seq = $10, \
                         updated_at = now() \
                   WHERE execution_id = $8 AND run_ix = $9",
             )
@@ -530,6 +757,17 @@ async fn persist(
             .bind(release == Some(ix as i32))
             .bind(execution_id)
             .bind(ix as i32)
+            // **No `COALESCE`, and that is a measurement.** Two guards were
+            // written here and neither could be seen to fail: keeping the FIRST
+            // termination (`COALESCE(ended_seq, $10)`) killed nothing across
+            // the whole crate, and so did keeping any EXISTING value
+            // (`COALESCE($10, ended_seq)`). The second is not merely unkillable
+            // but wrong: `retry::reopen_due` puts a terminated run back to
+            // `CREATED`, and a run that is running again must not keep a right
+            // endpoint. So the plain assignment is both the simplest and the
+            // one `normalise.py` describes -- its `relation` reads
+            // `state.endDate`, the run's LAST termination.
+            .bind(marks.ended.get(&ix).copied())
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -554,8 +792,9 @@ async fn persist(
             sqlx::query(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
-                    rendered, rendered_run_if, state, history, attempts, not_before_ms) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                    rendered, rendered_run_if, state, history, attempts, not_before_ms, \
+                    created_seq, ended_seq) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
             )
             .bind(execution_id)
             .bind(ix as i32)
@@ -570,11 +809,24 @@ async fn persist(
             .bind(&history)
             .bind(&attempts)
             .bind(run.not_before.map(|t| t.0))
+            .bind(marks.created.get(&ix).copied())
+            .bind(marks.ended.get(&ix).copied())
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
         }
     }
+
+    // The clock, written once per `settle` whatever else moved. It is NOT
+    // conditional on `before.history != after.history`: a settle that only
+    // filled a render slot still consumed steps, and a clock that stood still
+    // there would let the NEXT settle stamp an endpoint at a step already used.
+    sqlx::query("UPDATE workflow.executions SET seq = $1 WHERE id = $2")
+        .bind(seq)
+        .bind(execution_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(db_err)?;
 
     if before.history != after.history {
         sqlx::query(
@@ -663,4 +915,69 @@ fn parse_attempts(owner: Uuid, v: &serde_json::Value) -> Result<Vec<Attempt>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::executor::{Attempt as _Attempt, TaskRun};
+
+    /// **The positive control for [`CREATE_BESIDE_A_CREATED_SIBLING`].**
+    ///
+    /// The corpus measures that counter at **zero**, and a counter that is zero
+    /// because nothing can ever increment it says nothing at all — which is the
+    /// exact shape W3a's deleted guard had (a guard nobody has seen fail is a
+    /// guard nobody has seen). This drives the decision point directly and
+    /// asserts the counter moves, so `tests/executor.rs`'s corpus-wide zero is
+    /// a measurement rather than a broken instrument.
+    #[test]
+    fn the_create_beside_a_created_sibling_counter_can_fire() {
+        let run = |parent: Option<usize>, state: RunState| TaskRun {
+            task: 0,
+            parent,
+            value: None,
+            rendered: None,
+            rendered_run_if: None,
+            history: vec![state],
+            attempts: Vec::<_Attempt>::new(),
+            not_before: None,
+        };
+        let state = ExecutionState {
+            runs: vec![
+                run(None, RunState::Running),
+                run(Some(0), RunState::Created),
+            ],
+            history: vec![RunState::Running],
+        };
+        let before = CREATE_BESIDE_A_CREATED_SIBLING.load(std::sync::atomic::Ordering::Relaxed);
+        // A sibling of run 1 being created while run 1 is still CREATED: the
+        // state Kestra's `resolveParallelNexts` refuses to be in.
+        note_create_beside_a_created_sibling(
+            &state,
+            &[Command::CreateRun {
+                task: 1,
+                parent: Some(0),
+                value: None,
+            }],
+        );
+        let after = CREATE_BESIDE_A_CREATED_SIBLING.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(after, before + 1, "the decision point must be countable");
+
+        // And the negative half, on the SAME state: creating a child of a
+        // DIFFERENT parent is not the decision point, so the counter must not
+        // move. Without this the counter would pass by counting everything.
+        note_create_beside_a_created_sibling(
+            &state,
+            &[Command::CreateRun {
+                task: 2,
+                parent: Some(1),
+                value: None,
+            }],
+        );
+        assert_eq!(
+            CREATE_BESIDE_A_CREATED_SIBLING.load(std::sync::atomic::Ordering::Relaxed),
+            after,
+            "a child of a parent with no CREATED child is not the decision point"
+        );
+    }
 }

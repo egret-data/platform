@@ -63,7 +63,7 @@ impl Handlers {
         r.add(Arc::new(handlers::log::Log::new()));
         r.add(Arc::new(handlers::ret::Return));
         r.add(Arc::new(handlers::fail::Fail::new()));
-        r.add(Arc::new(handlers::sleep::Sleep));
+        r.add(Arc::new(handlers::sleep::Sleep::new()));
         r
     }
 

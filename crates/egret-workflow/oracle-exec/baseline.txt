@@ -100,6 +100,66 @@
 # means "egret over-accepts this flow": an over-acceptance is a divergence this
 # programme forbids shipping, and the five that remain are named in
 # `tests/executor.rs`'s `STILL_OVER_ACCEPTED` with an owner each, not here.
+# W3b Task 5 (the oracle re-pointed at the REAL driver) banks 16 and loses 16,
+# leaving 144. The two halves are separate events and this file records both,
+# because a net figure would hide the whole of what the step cost.
+#
+# **Banked (16), and every one is attributable.** Fifteen are the sub-execution
+# hole closing: `tests/executor.rs` now drives `worker::start_execution` and
+# `worker::tick` instead of a harness, so `Command::SpawnExecution` is executed
+# by `worker::spawn` (W3b Task 4) and `Trace::spawned` is populated --
+# `flowable-with-parent-fail`, `loop-expression-context`, `loop-failed`,
+# `loop-failed-no-transmit`, `loop-flowable`, `loop-map`, `loop-multiple`,
+# `loop-nested`, `loop-parallel-equal`, `loop-parallel-less`,
+# `loop-parallel-more`, `loop-parallel-unlimited`, `loop-serial`,
+# `loop-serial-multiple-tasks`, `loop-switch`, `switch-in-concurrent-loop`.
+# Four of those additionally needed the widened render surface -- `loop-map`
+# reads `{{item.key}}`, `loop-nested` `{{item.parent.index}}` and
+# `{{item.parents[1].value}}`, `loop-expression-context` reads the PARENT
+# execution's `{{outputs.before.value}}` from inside a sub-execution, and
+# `loop-switch` renders a `Switch` inside one.
+#
+# **Lost (16), and the cause of each is named.** These are entries the harness
+# reproduced by FEEDING a terminal state out of `golden.json`; the driver runs a
+# handler instead, so where egret has no handler or renders differently from
+# Kestra, the entry stops matching. W3b Task 1 measured 11 of them in advance
+# and named them individually; five more were invisible to that derivation
+# because a fed terminal hides everything the task would have DONE.
+#
+#   the 11 Task 1 predicted -- a task type W3b writes no handler for, so
+#   `Registry::run` refuses it, the tick aborts for that run and the execution
+#   stalls: `core.output.OutputValues` on `assert`, `flow-with-array-outputs`,
+#   `output-values`, `replay`, `webhook-outputs`, `webhook-wait`;
+#   `core.log.PurgeLogs` on the five `purge_logs_*`; `core.execution.Assert`
+#   also on `assert`.
+#
+#   `errors` -- the `errorLogs()` function, which W2 refuses by name and
+#   assigns to W3 (`runners::functions::REFUSED`); egret has no task-log store
+#   for it to read (W3b Task 3's Concern 7).
+#   `variables` -- the `render()` function, refused by W2 and assigned to W3 in
+#   the same table. Not implemented here; named rather than absorbed.
+#   `webhook-plaintext` -- `{{ trigger.parameters… ?? 'hello-world' }}`. egret's
+#   `??` resolves a missing MEMBER (`outputs.not_existing ?? ''` renders) and
+#   not a missing ROOT, so the fallback is never reached. A W2 divergence the
+#   fed terminal used to hide.
+#   `restart-child` -- `{{ 1 / taskrun.attemptsCount }}` with `attemptsCount`
+#   0 on the first attempt. Java throws `ArithmeticException: / by zero` and the
+#   run FAILED; minijinja divides as floats and renders `Infinity`, so egret
+#   SUCCEEDS and runs one more task. Also W2, also hidden by the feed.
+#   `parallel-fail-with-flowable` -- Kestra FAILED a `Sleep` that was still in
+#   flight when its sibling failed the `Parallel`. Nothing calls
+#   `TaskHandler::cancel` (W4 owns the kill path), so egret completes it.
+#
+# `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks` and `valids/full`
+# are the four entries that now differ on the happens-before relation ALONE --
+# runs, attempts and execution history byte-identical to Kestra's. The cause is
+# this driver's delivery discipline: it finishes ONE task run per tick and
+# creates that run's successors in the same transaction, where Kestra's worker
+# pool finished two siblings before either successor existed. It is NOT the
+# guard W3a deleted; see
+# `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`.
+# `valids/full` reaching this list settles W3b Task 1's Concern 3, which said
+# its attribution was wrong and its real cause unknown.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -113,8 +173,10 @@ valids/after-execution-flowable
 valids/all-flowable
 valids/allow-failure
 valids/allow-failure-with-retry
+valids/assert
 valids/dag
 valids/disable-flowable
+valids/errors
 valids/exit
 valids/exit-cancelled
 valids/exit-killed
@@ -141,8 +203,8 @@ valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-concurrency-subflow
 valids/flow-trigger-paused-flow
+valids/flow-with-array-outputs
 valids/flow-with-outputs-failed
-valids/flowable-with-parent-fail
 valids/full
 valids/if
 valids/if-in-flowable
@@ -152,32 +214,20 @@ valids/labels-update-nested-value-map
 valids/labels-update-task
 valids/labels-update-task-deduplicate
 valids/labels-update-task-empty
-valids/loop-expression-context
-valids/loop-failed
-valids/loop-failed-no-transmit
-valids/loop-flowable
-valids/loop-map
-valids/loop-multiple
-valids/loop-nested
 valids/loop-object
 valids/loop-object-in-list
 valids/loop-outputs
 valids/loop-outputs-auto
 valids/loop-outputs-failed-render
 valids/loop-outputs-store
-valids/loop-parallel-equal
-valids/loop-parallel-less
-valids/loop-parallel-more
-valids/loop-parallel-unlimited
-valids/loop-serial
-valids/loop-serial-multiple-tasks
-valids/loop-switch
 valids/loop-until-restart
 valids/loop-values-from-uri
 valids/loop-with-subflow
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
+valids/output-values
 valids/parallel-disabled-tasks
+valids/parallel-fail-with-flowable
 valids/pause-behavior
 valids/pause-delay
 valids/pause-duration-from-input
@@ -187,7 +237,14 @@ valids/pause-timeout
 valids/pause-timeout-allow-failure
 valids/pause_on_pause
 valids/primitive-labels-flow
+valids/purge_logs_execution_only
+valids/purge_logs_full_arguments
+valids/purge_logs_no_arguments
+valids/purge_logs_trigger_only
+valids/purge_logs_with_batch_size
+valids/replay
 valids/replay-loop
+valids/restart-child
 valids/restart-loop
 valids/restart-parent
 valids/restart-parent-loop
@@ -219,7 +276,6 @@ valids/subflow-parent-of-failed
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-valids/switch-in-concurrent-loop
 valids/task-allow-failure-executable-flow
 valids/task-allow-failure-flowable
 valids/task-allow-failure-runnable
@@ -234,6 +290,7 @@ valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
 valids/trigger-flow-with-pause
 valids/unset-variables
+valids/variables
 valids/waitfor
 valids/waitfor-child-task-warning
 valids/waitfor-max-iterations
@@ -241,6 +298,9 @@ valids/waitfor-multiple-tasks
 valids/waitfor-multiple-tasks-failed
 valids/waitfor-nested
 valids/waitfor-no-success
+valids/webhook-outputs
+valids/webhook-plaintext
+valids/webhook-wait
 valids/working-directory-invalid-runif
 valids/working-directory-taskrun
 valids/working-directory-taskrun-nested

@@ -110,6 +110,37 @@ impl Task {
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
+
+    /// This task's own `errors:` list — the branch that runs when one of its
+    /// [`children`](Task::children) fails.
+    ///
+    /// **Separate from `children()` on purpose, and W3b Task 5 is what proved
+    /// it has to exist at all.** `children()` is the *control-flow* walk, and
+    /// several callers depend on an `errors:` task not being in it. But a walk
+    /// that never reaches one cannot FIND one either, and
+    /// `worker::claim`'s `leaf_spec` — which looks a running task's own
+    /// properties up by id — used `children()` alone: an error handler nested
+    /// inside a flowable's `errors:` was invisible to it, the tick aborted with
+    /// `WorkerError::Corrupt`, and the run stayed `RUNNING` for ever. Three
+    /// corpus entries showed it (`valids/sequential-with-local-errors`,
+    /// `valids/restart_local_errors`,
+    /// `valids/replay-sequential-with-error-handler`), and it is a *product*
+    /// defect rather than an oracle one: nothing but the oracle had ever run a
+    /// flow with a nested `errors:` through a worker.
+    ///
+    /// Five kinds carry one — `Sequential`, `Parallel`, `If`, `Switch`, `Dag`
+    /// — which is `AbstractBranch`'s `errors` in Kestra plus the two branching
+    /// kinds that extend it.
+    pub fn error_children(&self) -> Vec<&Task> {
+        match &self.kind {
+            TaskKind::Sequential(s) => s.errors.iter().collect(),
+            TaskKind::Parallel(p) => p.errors.iter().collect(),
+            TaskKind::If(i) => i.errors.iter().collect(),
+            TaskKind::Switch(s) => s.errors.iter().collect(),
+            TaskKind::Dag(d) => d.errors.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 // kestra: Sequential.java -- `AbstractBranch`'s `tasks`, run one after

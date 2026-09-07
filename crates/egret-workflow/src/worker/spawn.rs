@@ -301,6 +301,11 @@ async fn spawn_one(
         flow_id: parent.flow_id,
         source,
         plan,
+        // A sub-execution's logical clock starts at zero, like its `Tick`: the
+        // happens-before relation is compared PER EXECUTION (`normalise.py`
+        // builds one pair table per node), so a shared counter would be a
+        // number two traces read differently.
+        seq: 0,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();

@@ -89,6 +89,21 @@ async fn run_state(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Optio
     .expect("read run state")
 }
 
+async fn run_outputs(
+    pool: &sqlx::PgPool,
+    execution: Uuid,
+    task_id: &str,
+) -> Option<serde_json::Value> {
+    sqlx::query_scalar(
+        "SELECT outputs FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read run outputs")
+}
+
 async fn execution_history(pool: &sqlx::PgPool, execution: Uuid) -> serde_json::Value {
     sqlx::query_scalar("SELECT history FROM workflow.executions WHERE id = $1")
         .bind(execution)
@@ -129,9 +144,15 @@ async fn two_concurrent_claims_partition_the_runnable_set(pool: sqlx::PgPool) {
 
     let mut all = Vec::new();
     for i in 0..4 {
-        let ex = start_execution(&pool, ws, None, &one_task(&format!("f{i}")))
-            .await
-            .expect("start execution");
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!("f{i}")),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
         all.push(ex);
     }
 
@@ -225,7 +246,7 @@ async fn a_tick_killed_between_the_handler_and_the_commit_applies_nothing(pool: 
     // kill below claimed the CONTROL's run and every assertion about the
     // killed execution passed by never touching it. Each claim below asserts
     // WHICH execution it took for the same reason.
-    let good = start_execution(&pool, ws, None, &two_tasks("good"))
+    let good = start_execution(&pool, ws, None, &two_tasks("good"), serde_json::json!({}))
         .await
         .expect("start good");
     let claimed = claim(&pool, 1).await.expect("claim good");
@@ -273,7 +294,7 @@ async fn a_tick_killed_between_the_handler_and_the_commit_applies_nothing(pool: 
     );
 
     // --- the kill. ---
-    let dead = start_execution(&pool, ws, None, &two_tasks("dead"))
+    let dead = start_execution(&pool, ws, None, &two_tasks("dead"), serde_json::json!({}))
         .await
         .expect("start dead");
     let before = execution_history(&pool, dead).await;
@@ -360,7 +381,7 @@ async fn a_tick_killed_between_the_handler_and_the_commit_applies_nothing(pool: 
 async fn a_failure_partway_through_a_tick_leaves_nothing_half_applied(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
-    let ex = start_execution(&pool, ws, None, &two_tasks("halt"))
+    let ex = start_execution(&pool, ws, None, &two_tasks("halt"), serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -400,10 +421,10 @@ async fn a_failure_partway_through_a_tick_leaves_nothing_half_applied(pool: sqlx
 async fn reap_reclaims_the_expired_lease_and_leaves_the_live_one(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
-    let stale = start_execution(&pool, ws, None, &one_task("stale"))
+    let stale = start_execution(&pool, ws, None, &one_task("stale"), serde_json::json!({}))
         .await
         .expect("start stale");
-    let fresh = start_execution(&pool, ws, None, &one_task("fresh"))
+    let fresh = start_execution(&pool, ws, None, &one_task("fresh"), serde_json::json!({}))
         .await
         .expect("start fresh");
 
@@ -460,7 +481,7 @@ async fn reap_reclaims_the_expired_lease_and_leaves_the_live_one(pool: sqlx::PgP
 async fn a_run_whose_result_committed_is_never_claimed_again(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
-    let ex = start_execution(&pool, ws, None, &two_tasks("once"))
+    let ex = start_execution(&pool, ws, None, &two_tasks("once"), serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -521,7 +542,7 @@ async fn a_run_whose_result_committed_is_never_claimed_again(pool: sqlx::PgPool)
 async fn the_result_the_successor_and_the_execution_land_together(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
-    let ex = start_execution(&pool, ws, None, &two_tasks("atomic"))
+    let ex = start_execution(&pool, ws, None, &two_tasks("atomic"), serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -618,7 +639,7 @@ async fn the_real_registry_runs_all_four_handlers_end_to_end(pool: sqlx::PgPool)
          \x20 - id: r\n    type: io.kestra.plugin.core.debug.Return\n    format: hello\n\
          \x20 - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    condition: \"false\"\n\
          \x20 - id: s\n    type: io.kestra.plugin.core.flow.Sleep\n    duration: PT0.001S\n";
-    let ex = start_execution(&pool, ws, None, source)
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -648,7 +669,7 @@ async fn a_truthy_fail_fails_the_execution_through_the_real_handler(pool: sqlx::
     let source = "id: boom\nnamespace: t\ntasks:\n\
          \x20 - id: f\n    type: io.kestra.plugin.core.execution.Fail\n    condition: \"true\"\n\
          \x20 - id: after\n    type: io.kestra.plugin.core.log.Log\n    message: never\n";
-    let ex = start_execution(&pool, ws, None, source)
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -665,40 +686,139 @@ async fn a_truthy_fail_fails_the_execution_through_the_real_handler(pool: sqlx::
     );
 }
 
-/// **The hole this task leaves, pinned so it cannot close silently.**
+/// **The render surface, end to end through a real tick, and what it still
+/// refuses.**
 ///
-/// `claim::render_context_for` supplies an EMPTY render context — W3b Task 5
-/// owns the render surface (spec §4.4) — so a property that references any
-/// variable cannot render and the run goes `FAILED` where Kestra's would
-/// succeed. That is a divergence in the safe direction (a refusal, never an
-/// over-acceptance), and the day Task 5 fills the context this test fails and
-/// says so.
+/// W3b Task 3 left this test asserting the opposite — *"with no render context,
+/// `{{ inputs.who }}` cannot render"* — and said in as many words that the day
+/// Task 5 filled the context it should fail and be deleted. It did not fail,
+/// and that is worth recording: the flow it used declares no `inputs:` and
+/// posts none, so `who` is undefined whether or not a context exists. **It
+/// would have passed for the wrong reason** — an assertion whose output does
+/// not depend on the thing it names — so it is replaced here rather than
+/// deleted, by one that posts the input it reads.
+///
+/// Three things at once, deliberately, because each is the control for the
+/// others:
+///
+/// 1. a **posted input** renders, and the value reaches the handler — asserted
+///    on `Return`'s persisted `outputs`, which only a `Return` has, so this
+///    cannot pass by reaching a different handler;
+/// 2. a **task output** renders in a later task, which is the whole of what
+///    `task_runs.outputs` is for;
+/// 3. a name this worker does not carry — `trigger` — still FAILS the run. That
+///    is the refusal that keeps the widening honest: a context that answered
+///    everything would be an over-acceptance.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_task_whose_property_needs_a_render_fails_rather_than_succeeding(pool: sqlx::PgPool) {
+async fn the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels(
+    pool: sqlx::PgPool,
+) {
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
-    let source = "id: needs-render\nnamespace: t\ntasks:\n\
-         \x20 - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: \"{{ inputs.who }}\"\n";
-    let ex = start_execution(&pool, ws, None, source)
+    let source = "id: surface\nnamespace: t\ninputs:\n  - id: who\n    type: STRING\ntasks:\n\
+         \x20 - id: a\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ inputs.who }}\"\n\
+         \x20 - id: b\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ outputs.a.value }}!\"\n";
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({"who": "world"}))
         .await
         .expect("start execution");
 
-    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
     assert_eq!(
-        run_state(&pool, ex, "l").await.as_deref(),
-        Some("FAILED"),
-        "with no render context, `{{{{ inputs.who }}}}` cannot render — W3b \
-         Task 5 is what makes this SUCCESS, and when it does, delete this test"
+        (
+            run_state(&pool, ex, "a").await,
+            run_outputs(&pool, ex, "a").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "world"}))
+        ),
+        "the posted input reached the handler and its output was persisted"
+    );
+    assert_eq!(
+        (
+            run_state(&pool, ex, "b").await,
+            run_outputs(&pool, ex, "b").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "world!"}))
+        ),
+        "`{{{{ outputs.a.value }}}}` resolved against the row `a` wrote in the \
+         SAME transaction that finished it -- there is no other place it could \
+         have come from"
     );
 
-    // The control, on the SAME handler and the same tick path: a literal
-    // message needs no context and succeeds. Without it, this test would pass
-    // against a `Log` handler that failed on everything.
-    let lit = start_execution(&pool, ws, None, &one_task("literal"))
+    // The refusal. `trigger` is a name four corpus flows write and this worker
+    // does not carry, and an unrenderable property FAILS the run rather than
+    // rendering to nothing. (`labels` was this test's refusal until the render
+    // surface started carrying it -- which is exactly why the refusal has to be
+    // a name the surface really lacks, and why this half is asserted at all.)
+    let refused = "id: refused\nnamespace: t\ntasks:\n\
+         \x20 - id: l\n    type: io.kestra.plugin.core.log.Log\n    message: \"{{ trigger.executionId }}\"\n";
+    let r = start_execution(&pool, ws, None, refused, serde_json::json!({}))
         .await
         .expect("start execution");
-    assert_eq!(drain(&pool, &Handlers::with_core_tasks()).await, 1);
-    assert_eq!(run_state(&pool, lit, "a").await.as_deref(), Some("SUCCESS"));
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        run_state(&pool, r, "l").await.as_deref(),
+        Some("FAILED"),
+        "`trigger` is not carried, and a refusal is the safe direction -- the \
+         alternative is a run that succeeded on a value Kestra never produced"
+    );
+}
+
+/// **"No output" is `{}` and never an absent key, through the durable path.**
+///
+/// The W3b Task 3 brief said the opposite — that a `Log`, a `Sleep` and a falsy
+/// `Fail` `return null` in Kestra so `outputs.<id>` would be *absent* — and
+/// called the distinction load-bearing for exactly this module. Task 3
+/// measured it on the artifact and it is the other way round: `{{ outputs.a }}`
+/// printed `{}` for all three and for a format-less `Return`, `{{ outputs }}`
+/// over two such tasks printed `{"a":{},"b":{}}`, and `{{ outputs.a.value }}`
+/// FAILED the run in all four.
+///
+/// Both halves are asserted, because only the pair distinguishes the rule from
+/// its two neighbours: omitting the key fails the first, and inventing a
+/// `value` passes the second when it must not.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_key(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ok = "id: empty-ok\nnamespace: t\ntasks:\n\
+         \x20 - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         \x20 - id: b\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ outputs.a }}\"\n";
+    let e1 = start_execution(&pool, ws, None, ok, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        (
+            run_state(&pool, e1, "b").await,
+            run_outputs(&pool, e1, "b").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "{}"}))
+        ),
+        "a `Log` produces no Output object, and `{{{{ outputs.a }}}}` still \
+         renders -- as the empty map, exactly as the artifact printed it"
+    );
+
+    let bad = "id: empty-bad\nnamespace: t\ntasks:\n\
+         \x20 - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n\
+         \x20 - id: b\n    type: io.kestra.plugin.core.debug.Return\n    format: \"{{ outputs.a.value }}\"\n";
+    let e2 = start_execution(&pool, ws, None, bad, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        run_state(&pool, e2, "b").await.as_deref(),
+        Some("FAILED"),
+        "and `{{{{ outputs.a.value }}}}` FAILS -- the empty map has no `value`, \
+         which is what stops the rule above from being 'answer anything'"
+    );
 }
 
 /// A type nothing serves **aborts the tick** and leaves the run where it was.
@@ -714,7 +834,7 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
     let (_db, ws) = seed(&pool).await;
     let source = "id: unhandled\nnamespace: t\ntasks:\n\
          \x20 - id: o\n    type: io.kestra.plugin.core.output.OutputValues\n    values:\n      k: v\n";
-    let ex = start_execution(&pool, ws, None, source)
+    let ex = start_execution(&pool, ws, None, source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -736,10 +856,6 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
 // ---------------------------------------------------------------------------
 // W3b Task 4: `Command::SpawnExecution`.
 // ---------------------------------------------------------------------------
-
-use egret_workflow::executor::{build_plan, TaskKind};
-use egret_workflow::worker::resume;
-use egret_workflow::{render_str, RenderContext};
 
 /// A loop flow, parameterised so one shape serves every property below.
 ///
@@ -821,61 +937,20 @@ async fn spawn_instants(
     .expect("read spawn instants")
 }
 
-/// **The caller tier W3b Task 5 owns, with the empty context it has today.**
+/// Run every claimable task until nothing moves.
 ///
-/// `advance()` is pure and cannot render, and `worker` does not render either,
-/// so a `Loop` waits at `CREATED` until something writes `TaskRun::rendered`
-/// and calls [`resume`]. This is that something, and it is not a fake: it
-/// calls the real `render_str` with the real (empty) `RenderContext`, which is
-/// the identity on a literal `values:` and an error on anything else. When
-/// Task 5 fills the context, this function keeps working unchanged.
-///
-/// Returns how many loop runs it rendered, so a caller can drive to a fixed
-/// point rather than guessing a number of rounds.
-async fn render_pending_loops(pool: &sqlx::PgPool) -> usize {
-    let pending: Vec<(Uuid, String, i32, i32)> = sqlx::query_as(
-        "SELECT e.id, e.source, r.run_ix, r.task_ix \
-           FROM workflow.task_runs r JOIN workflow.executions e ON e.id = r.execution_id \
-          WHERE r.rendered IS NULL AND r.state = 'CREATED' AND r.type_id IS NULL",
-    )
-    .fetch_all(pool)
-    .await
-    .expect("read unrendered flowable runs");
-
-    let mut touched: Vec<Uuid> = Vec::new();
-    for (execution, source, run_ix, task_ix) in pending {
-        let plan = build_plan(&source).expect("the stored source plans");
-        let TaskKind::Loop { values, .. } = &plan.tasks[task_ix as usize].kind else {
-            continue;
-        };
-        let rendered = render_str(values, &RenderContext::new()).expect("a literal `values:`");
-        sqlx::query(
-            "UPDATE workflow.task_runs SET rendered = $1 WHERE execution_id = $2 AND run_ix = $3",
-        )
-        .bind(&rendered)
-        .bind(execution)
-        .bind(run_ix)
-        .execute(pool)
-        .await
-        .expect("write the rendered values");
-        if !touched.contains(&execution) {
-            touched.push(execution);
-        }
-    }
-    for id in &touched {
-        resume(pool, *id).await.expect("resume");
-    }
-    touched.len()
-}
-
-/// Render every waiting loop and run every claimable task until nothing moves.
+/// **W3b Task 5 deleted this function's other half.** Until Task 5 the worker
+/// rendered nothing, so a `Loop` waited at `CREATED` and this file carried a
+/// `render_pending_loops` that wrote `TaskRun::rendered` itself and called
+/// `resume`. `worker::render` is now inside `settle`, so the rendering happens
+/// in the same transaction as the round that needs it and a caller has nothing
+/// to fill.
 async fn settle_everything(pool: &sqlx::PgPool, reg: &Handlers) {
     for _ in 0..64 {
-        let rendered = render_pending_loops(pool).await;
         let ran = egret_workflow::worker::tick(pool, 16, reg)
             .await
             .expect("tick");
-        if rendered == 0 && ran == 0 {
+        if ran == 0 {
             return;
         }
     }
@@ -898,17 +973,16 @@ async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool:
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = loop_flow("two", Some(0), None, r#"["a", "b"]"#, LOG_BODY);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
-    assert_eq!(
-        sub_executions(&pool, ex, 0).await,
-        Vec::new(),
-        "nothing is spawned until the caller has rendered `values:`"
-    );
-    assert_eq!(render_pending_loops(&pool).await, 1, "one loop to render");
-
+    // **The render happens inside `start_execution`'s own `settle`.** Before
+    // W3b Task 5 this read `Vec::new()` and the test had to call a caller-side
+    // renderer to get any further; `worker::render` is now a step of
+    // `claim::drive`, between two rounds of `advance()`, so a literal `values:`
+    // is resolved and its first batch spawned in the transaction that started
+    // the execution.
     let spawned = sub_executions(&pool, ex, 0).await;
     assert_eq!(
         spawned
@@ -959,11 +1033,10 @@ async fn the_default_concurrency_limit_runs_one_iteration_at_a_time(pool: sqlx::
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = loop_flow("serial", None, None, r#"["a", "b", "c"]"#, LOG_BODY);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
-    render_pending_loops(&pool).await;
     let first = sub_executions(&pool, ex, 0).await;
     assert_eq!(
         first.iter().map(|s| s.index).collect::<Vec<_>>(),
@@ -1011,11 +1084,10 @@ async fn an_unlimited_concurrency_limit_spawns_every_value_at_once(pool: sqlx::P
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = loop_flow("unlimited", Some(0), None, r#"["a", "b", "c"]"#, LOG_BODY);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
-    render_pending_loops(&pool).await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await.len(),
         3,
@@ -1035,7 +1107,7 @@ async fn a_failing_iteration_ends_a_transmit_failed_loop_at_once(pool: sqlx::PgP
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = loop_flow("boom", None, None, r#"["a", "b", "c"]"#, FAIL_BODY);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -1079,7 +1151,7 @@ async fn transmit_failed_false_runs_every_iteration_and_the_loop_succeeds(pool: 
         r#"["a", "b", "c"]"#,
         FAIL_BODY,
     );
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -1131,7 +1203,7 @@ async fn a_nested_loop_spawns_from_inside_a_sub_execution(pool: sqlx::PgPool) {
                  values: '[\"x\", \"y\"]'\n        concurrencyLimit: 0\n        tasks:\n\
                  \x20         - id: item\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n";
     let source = loop_flow("nested", Some(0), None, r#"["a", "b"]"#, inner);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
@@ -1201,7 +1273,7 @@ async fn no_run_for_a_loop_body_task_is_ever_created_in_the_parent(pool: sqlx::P
     egret_test_db::assert_database_url_is_exported();
     let (_db, ws) = seed(&pool).await;
     let source = loop_flow("bodyless", Some(0), None, r#"["a", "b"]"#, LOG_BODY);
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
     settle_everything(&pool, &Handlers::with_core_tasks()).await;
@@ -1263,11 +1335,10 @@ async fn a_transmit_failed_loop_with_several_iterations_in_flight_terminates_onc
         r#"["a", "b", "c"]"#,
         FAIL_BODY,
     );
-    let ex = start_execution(&pool, ws, None, &source)
+    let ex = start_execution(&pool, ws, None, &source, serde_json::json!({}))
         .await
         .expect("start execution");
 
-    render_pending_loops(&pool).await;
     assert_eq!(
         sub_executions(&pool, ex, 0).await.len(),
         3,
