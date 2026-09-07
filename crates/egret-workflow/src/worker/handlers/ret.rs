@@ -48,7 +48,10 @@ impl TaskHandler for Return {
         }))
     }
 
-    /// Nothing to cancel: this handler renders a string and returns.
+    /// Nothing to cancel: this handler renders a string and returns, and
+    /// dropping the future stops all of it. See
+    /// [`log`](super::log)'s `cancel` for why `Ok(())` stays right now that the
+    /// kill path calls it.
     async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
         Ok(())
     }

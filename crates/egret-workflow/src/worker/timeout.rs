@@ -283,31 +283,68 @@ pub(super) fn resolve(timeout: Option<&Property<Duration>>, cx: &RenderContext) 
     Budget::Of(d)
 }
 
+/// Which of the two ways a guarded handler ended.
+///
+/// **The outcome alone cannot say.** A budget that expired and a handler that
+/// failed on its own both produce `Outcome { state: Failed, .. }`, and the
+/// message is the only thing that separates them — so a caller that had to
+/// decide whether to kill anything would have to match on a sentence. This
+/// enum is what [`super::cancel::guarded`] matches on instead, and it exists
+/// because W4 Task 3 gave the expiry a consequence: the artifact calls
+/// `task.kill()` there and nowhere else (`AbstractWorkerCallable.callWithTimeout`
+/// → `kill(null)` → `WorkerTaskCallable.kill` → `RunnableTask.kill()`), so the
+/// expiry has to be distinguishable from every other failure at the type level.
+#[derive(Debug, PartialEq)]
+pub(super) enum Guarded {
+    /// The handler answered inside its budget — with its own success, its own
+    /// failure, or no budget at all. Nothing is killed.
+    Finished(Outcome),
+    /// The budget expired, the future was dropped, and the outcome is the
+    /// artifact's own `FAILED` + `Timeout after HH:mm:ss.SSS`.
+    Expired(Outcome),
+}
+
+impl Guarded {
+    /// The outcome either way — what the run commits, which the kill path does
+    /// **not** alter (see [`super::cancel`] for the measurement).
+    pub(super) fn outcome(self) -> Outcome {
+        match self {
+            Guarded::Finished(o) | Guarded::Expired(o) => o,
+        }
+    }
+}
+
 /// Run a handler under `budget`.
 ///
 /// **The future is dropped, not signalled.** Kestra interrupts the worker
 /// thread (`Timeout.withInterrupt()`, then `kill(null)`); dropping the future
 /// is Rust's equivalent and is exactly what
 /// [`handlers::sleep`](super::handlers::sleep)'s `cancel` already says a
-/// caller should do. It is **not** [`TaskHandler::cancel`](super::TaskHandler),
-/// which still has no caller — W4 Task 3 owns the kill path, and calling
-/// `cancel` from here would be that task's work done in the wrong place and
-/// without its test.
+/// caller should do.
+///
+/// **Dropping is not the whole of the artifact's answer, and this function is
+/// still not where the rest of it lives.** `callWithTimeout` also calls
+/// `kill(null)`, which reaches the task's own `RunnableTask.kill()`; egret's
+/// counterpart is [`TaskHandler::cancel`](super::TaskHandler) and its caller is
+/// [`super::cancel::guarded`], which wraps this function. Keeping the two apart
+/// is not tidiness: `guard` is generic over any future and has no registry to
+/// dispatch a cancel through, and a version that took one would make every
+/// caller of the budget also a caller of the kill path.
 ///
 /// A worker failure (`Err`) is passed through unchanged: the budget decides
 /// how long a handler may take, not whether the tick may abort.
-pub(super) async fn guard<F>(budget: Option<Duration>, fut: F) -> Result<Outcome>
+pub(super) async fn guard<F>(budget: Option<Duration>, fut: F) -> Result<Guarded>
 where
     F: std::future::Future<Output = Result<Outcome>>,
 {
     let Some(budget) = budget else {
-        return fut.await;
+        return fut.await.map(Guarded::Finished);
     };
     match tokio::time::timeout(budget, fut).await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => outcome.map(Guarded::Finished),
         // FAILED, not KILLED, and with the artifact's own sentence -- see the
         // module doc for both measurements.
-        Err(_elapsed) => Ok(Outcome::failed_with(exceeded(budget))),
+        Err(_elapsed) => Ok(Guarded::Expired(Outcome::failed_with(exceeded(budget)))),
     }
 }
 
@@ -498,7 +535,12 @@ mod tests {
         })
         .await
         .expect("no worker failure");
-        assert_eq!(out.state, RunState::Success);
+        assert!(
+            matches!(out, Guarded::Finished(_)),
+            "a handler with no budget cannot expire, so nothing may be killed \
+             for it: {out:?}"
+        );
+        assert_eq!(out.outcome().state, RunState::Success);
     }
 
     #[tokio::test]
@@ -509,6 +551,12 @@ mod tests {
         })
         .await
         .expect("no worker failure");
+        assert!(
+            matches!(out, Guarded::Finished(_)),
+            "a handler that FAILED on its own is not an expiry, and reporting it \
+             as one would kill a handler that had already stopped: {out:?}"
+        );
+        let out = out.outcome();
         assert_eq!(out.state, RunState::Failed);
         assert_eq!(out.message.as_deref(), Some("the handler's own reason"));
     }
@@ -524,6 +572,13 @@ mod tests {
         })
         .await
         .expect("a timeout is a task failure, not a worker failure");
+        assert!(
+            matches!(out, Guarded::Expired(_)),
+            "the expiry has to be visible to the caller, because the kill path \
+             hangs off it and the outcome alone cannot distinguish it from a \
+             handler that failed carrying the same sentence: {out:?}"
+        );
+        let out = out.outcome();
         assert_eq!(
             out.state,
             RunState::Failed,

@@ -70,6 +70,7 @@
 //! `advance()`, so the shipping worker resolves them and [`resume`] is what a
 //! caller uses when something OUTSIDE the execution has changed.
 
+mod cancel;
 mod claim;
 pub mod handlers;
 mod reaper;
@@ -325,10 +326,18 @@ pub trait TaskHandler: Send + Sync {
     /// to W4's container handlers, where it is wrong and where nothing would
     /// say so. Each implementation states its own reason.
     ///
-    /// **Nothing calls this yet.** W4 owns the kill path (the programme spec's
-    /// *"the reclaim must kill the pod before retrying, or two pods will write
-    /// at once"*), and until it lands this is a shape with no caller — which
-    /// is stated here rather than left to be discovered.
+    /// **[`cancel`] is the caller, and there is exactly one site**: the
+    /// task-level budget expiring. That is the artifact's own arrangement —
+    /// `AbstractWorkerCallable.callWithTimeout` calls `kill(null)` in its
+    /// timeout catch block and `WorkerTaskCallable.kill` forwards it to
+    /// `RunnableTask.kill()` — and [`cancel`]'s module doc gives the
+    /// disassembly, plus the two seams the kill path deliberately does **not**
+    /// reach (a reaped lease, and a run `advance()` abandoned).
+    ///
+    /// **An `Err` here does not fail the run and does not abort the tick.** The
+    /// artifact catches a throwing `task.kill()`, logs it, and keeps the state
+    /// `callWithTimeout` had already decided; egret does the same, and
+    /// [`cancel::Killed`](cancel) is what carries the refusal to the log.
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 
@@ -345,6 +354,20 @@ pub trait Registry: Send + Sync {
     /// moving the execution; a task that ran and failed returns
     /// `Ok(Outcome { state: Failed })`.
     async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome>;
+
+    /// Stop a run this registry started, dispatching to the same handler
+    /// [`Registry::run`] would.
+    ///
+    /// **No default body, for [`TaskHandler::cancel`]'s reason and one more.**
+    /// A default `Ok(())` would answer for every fake registry a test ever
+    /// writes, so the one property that says the kill path is wired — *this
+    /// handler was asked to stop* — would pass against a worker that asked
+    /// nobody. The trait is the seam the worker holds; every implementation of
+    /// it has to say what stopping means.
+    ///
+    /// `Err` is a **refusal**, not a worker failure: it is logged and the run
+    /// keeps the terminal its budget gave it. See [`cancel`].
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 
 /// The failures this module raises that are not database errors.

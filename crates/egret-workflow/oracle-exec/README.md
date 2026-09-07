@@ -4675,6 +4675,19 @@ one-direction test and break every deliberate skip.
    (W4 owns the kill path), so adding one to the port would be adding a method
    ahead of its caller twice over. The refusal is what makes W4 fail loudly at
    the one place that has to change.
+
+   > **W4 Task 3 correction.** The kill path exists now
+   > (`worker::cancel`), it fires when a task-level `timeout:` expires, and this
+   > refusal is reached — asserted by
+   > `handlers::sql::tests::the_kill_path_reaches_this_refusal_through_the_registry`.
+   > It still refuses, and the reason moved from "nothing calls it" to where the
+   > cancellation channel actually stops: `Connector::execute` takes a
+   > `CancellationToken` and Trino honours it, but `port_impl::run_bounded`
+   > owns that token privately and `QueryExecPort` exposes no cancel verb across
+   > its ten implementations. The refusal now names the per-engine cost — Trino
+   > bounds the abandoned statement with the `query_max_run_time` the task
+   > already sent; the StarRocks connector does not read `Limits::timeout` at
+   > all, so nothing bounds it.
 2. **No `run_as`.** The statement runs as `TaskInput::principal`, which
    `worker::claim` reads from `workflow.flows.created_by` through
    `executions.flow_id`. That is the rule `egret-automation` already established

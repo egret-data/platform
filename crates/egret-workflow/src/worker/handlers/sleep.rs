@@ -165,9 +165,16 @@ impl TaskHandler for Sleep {
         Ok(Outcome::success())
     }
 
-    /// Nothing to cancel **through this method**: the sleep is a future, and a
-    /// caller that wants it stopped drops the future rather than calling here.
-    /// W4's pod-backed handlers are where `cancel` has work to do.
+    /// Nothing to cancel **through this method**: the sleep is a future, and
+    /// the caller has already dropped it by the time this is called.
+    ///
+    /// W3b wrote *"W4's pod-backed handlers are where `cancel` has work to
+    /// do"*, and W4 Task 3 can now say which half of that came true. The kill
+    /// path exists and calls this ([`cancel`](super::super::cancel)); the
+    /// handler that has work to do is [`sql`](super::sql), and it **refuses**
+    /// rather than pretending — dropping a future does not stop a statement on
+    /// a remote engine. For this handler the drop really is the whole of the
+    /// stopping, so `Ok(())` is a measurement and not a shrug.
     async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
         Ok(())
     }

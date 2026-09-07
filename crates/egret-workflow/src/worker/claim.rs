@@ -64,6 +64,7 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::cancel;
 use super::render::{self, Pass, Surface};
 use super::spawn::{self, Requested};
 use super::timeout::{self, Budget};
@@ -133,10 +134,20 @@ pub struct Claimed {
     /// selected `created_at`, so `apply_outcome`'s `WHERE execution_id = $8
     /// AND run_ix = $9` was the whole predicate. [`super::reap`] clears
     /// `claimed_at` and leaves `state = 'RUNNING'` — the claim predicate — so
-    /// a run is re-claimable while its first handler is still in flight, and
-    /// nothing calls [`super::TaskHandler::cancel`]. Two terminals landed on
-    /// one attempt, the second wiping the first's `ended_seq`. See
+    /// a run is re-claimable while its first handler is still in flight. Two
+    /// terminals landed on one attempt, the second wiping the first's
+    /// `ended_seq`. See
     /// `tests/worker.rs::a_worker_whose_lease_was_reaped_cannot_commit`.
+    ///
+    /// **W4 Task 3's kill path does not close this, and the fence is still the
+    /// whole of the answer.** [`super::TaskHandler::cancel`] has a caller now,
+    /// but only one: the task-level budget expiring, inside the worker that
+    /// owns the run. [`super::reap`] is a bare `UPDATE` run by some other
+    /// process and a lease is a `timestamptz`, not a handle to a future, so
+    /// nothing can reach across and stop the abandoned handler — it learns it
+    /// was reaped when this fence refuses its write and not before.
+    /// `a_killed_handler_cannot_commit_over_the_worker_that_replaced_it` drives
+    /// that through the shipping `tick`.
     pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -505,7 +516,11 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
     let (input, budget) = input_for(pool, c).await?;
     let outcome = match budget {
         Budget::Refused(message) => Outcome::failed_with(message),
-        other => timeout::guard(other.duration(), reg.run(&input)).await?,
+        // `cancel::guarded` rather than `timeout::guard` directly: the budget's
+        // expiry is the artifact's only `kill(null)` site, so the kill path
+        // hangs off it. A refusal there does not reach this expression — it is
+        // logged and the budget's outcome stands. See `super::cancel`.
+        other => cancel::guarded(reg, &input, other.duration()).await?,
     };
     let mut tx = pool.begin().await.map_err(db_err)?;
     apply_outcome(&mut tx, c, &outcome).await?;

@@ -116,7 +116,14 @@ impl TaskHandler for Log {
         Ok(Outcome::success())
     }
 
-    /// Nothing to cancel: this handler renders strings and writes them.
+    /// Nothing to cancel: this handler renders strings and writes them, and
+    /// dropping the future stops all of it.
+    ///
+    /// **`Ok(())` is now an answer somebody hears** — W4 Task 3 wired
+    /// [`cancel`](super::super::cancel) to the budget's expiry — and it is
+    /// still the truthful one: there is no remote statement, no pod and no
+    /// handle outliving the drop, so "stopped" and "was already stopped" are
+    /// the same fact here.
     async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
         Ok(())
     }

@@ -87,6 +87,17 @@ impl Registry for Recorder {
         self.seen.lock().unwrap().push(task.task_id.clone());
         Ok(Outcome::success())
     }
+    /// Nothing here has a budget, so nothing here can be killed. A `panic!`
+    /// rather than `Ok(())`: this registry's whole instrument is *which runs
+    /// were handed to a handler*, and a kill it silently absorbed would be a
+    /// kill nobody could see.
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "nothing in these fixtures declares a `timeout:`, so the kill \
+                path must never reach {}",
+            task.task_id
+        );
+    }
 }
 
 async fn seed(pool: &sqlx::PgPool) -> (Db, Uuid) {
@@ -574,8 +585,11 @@ async fn a_run_whose_result_committed_is_never_claimed_again(pool: sqlx::PgPool)
 /// exactly the claim predicate, so the run is re-claimable **while the first
 /// handler is still in flight** — `DEFAULT_WORKING_TIMEOUT` is an hour and
 /// `core.flow.Sleep` takes an author-chosen duration, so `duration: PT2H` opens
-/// the window with nothing switched on. Nothing calls `TaskHandler::cancel`
-/// (W4 owns the kill path), so both handlers reach [`apply_outcome`].
+/// the window with nothing switched on, and nothing can tell the first handler
+/// to stop — W4 Task 3's kill path fires only on a task-level budget, inside
+/// the worker that owns the run — so both handlers reach [`apply_outcome`].
+/// `a_killed_handler_cannot_commit_over_the_worker_that_replaced_it` is the
+/// same property driven through the shipping `tick`.
 ///
 /// Measured on the shipped code before the fence existed, with the second
 /// worker committing `SUCCESS` and the first then committing `FAILED`:
@@ -1859,6 +1873,15 @@ impl Registry for FailsOnce {
             _ => Ok(Outcome::success()),
         }
     }
+    /// A handler that FAILED on its own is not an expiry, so the retry
+    /// property must never see a kill. Same `panic!` as [`Recorder`]'s, and it
+    /// is what says a `Failed` outcome is not mistaken for a timed-out one.
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "a handler that returned its own failure must not be killed: {}",
+            task.task_id
+        );
+    }
 }
 
 /// How many attempts a run has recorded.
@@ -2100,6 +2123,14 @@ const SLOW_HANDLER: std::time::Duration = std::time::Duration::from_millis(2_000
 struct Slow {
     started: Mutex<Vec<(String, Option<std::time::Duration>)>>,
     completed: Mutex<Vec<String>>,
+    /// The runs this registry was asked to STOP — W4 Task 3's kill path.
+    ///
+    /// A third list rather than a flag on the first two, for their own reason:
+    /// "was handed a budget", "was allowed to finish" and "was told to stop"
+    /// are three different facts, and a kill path wired to the wrong branch
+    /// (every run, or none) is only visible by comparing this list with
+    /// `completed`.
+    killed: Mutex<Vec<String>>,
 }
 
 impl Slow {
@@ -2110,6 +2141,11 @@ impl Slow {
     }
     fn completed(&self) -> Vec<String> {
         let mut v = self.completed.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+    fn killed(&self) -> Vec<String> {
+        let mut v = self.killed.lock().unwrap().clone();
         v.sort();
         v
     }
@@ -2125,6 +2161,10 @@ impl Registry for Slow {
         tokio::time::sleep(SLOW_HANDLER).await;
         self.completed.lock().unwrap().push(task.task_id.clone());
         Ok(Outcome::success())
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Ok(())
     }
 }
 
@@ -2252,6 +2292,14 @@ async fn a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it(poo
         stuck(&pool, tight, "tight").await
     );
     assert_eq!(
+        reg.killed(),
+        vec!["tight".to_string()],
+        "the kill path fires on the budget's expiry and on nothing else: \
+         `generous` answered inside its budget and has already stopped, and \
+         `zero` was refused before a handler ran at all, so a kill reaching \
+         either would be reaching a task that is not running"
+    );
+    assert_eq!(
         reg.completed(),
         vec!["generous".to_string()],
         "the timed-out handler must be DROPPED at its budget. A run in this \
@@ -2290,5 +2338,252 @@ async fn a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it(poo
         Some("timeout: must be a positive duration"),
         "with the artifact's own sentence, not a duration-parse complaint: {}",
         stuck(&pool, zero, "zero").await
+    );
+}
+
+/// A two-task flow whose FIRST task carries a `timeout:`.
+///
+/// Two tasks rather than one because the properties below are about what a
+/// stale writer could do to the *rest* of the execution: `b`'s row is the
+/// successor whose existence, and whose being left alone, is the dual of the
+/// plan's Global Constraint.
+fn two_tasks_first_with_timeout(id: &str, timeout: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    timeout: {timeout}\n  - id: b\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: bye\n"
+    )
+}
+
+/// A [`Registry`] whose handler never finishes and whose `cancel` **refuses**,
+/// which is `handlers::sql`'s shape without needing an engine.
+#[derive(Default)]
+struct Stubborn {
+    killed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Registry for Stubborn {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+        unreachable!("this handler is never allowed to finish")
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the statement is still running on the engine"
+        )))
+    }
+}
+
+/// **Property 8: a handler that cannot be stopped still fails on its budget,
+/// and the refusal changes nothing the author sees.**
+///
+/// This is the `egret.sql` shape driven end to end. W3b made that handler's
+/// `cancel` refuse deliberately — *"when W4 wires the kill path this fails
+/// loudly at the one place that has to change"* — and the loudness has to be
+/// bounded: a refusal is an operator's fact about egret, not the reason the
+/// author's task failed, and it must not abort the tick or leave the run
+/// uncommitted.
+///
+/// **Measured on the pinned artifact rather than reasoned**, by `javap -c` over
+/// classes extracted from `/app/kestra` in
+/// `kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd`:
+/// `WorkerTaskCallable.kill(State.Type)` calls `task.kill()` inside a `try`
+/// whose exception table catches `java.lang.Exception`, logs
+/// `"Error while killing task: '{}'"` at WARN, and then calls
+/// `super.kill(state)` on every path. The terminal is still
+/// `exceptionHandler(TimeoutExceededException)`'s — `FAILED`, carrying
+/// `Timeout after HH:mm:ss.SSS`. So a kill that fails is *logged and forgotten*
+/// there, and here.
+///
+/// Three assertions, and the third is the one a wrong implementation passes the
+/// first two without: the tick's own **count**. A version that propagated the
+/// refusal as `Err` would leave the run leased and untouched, and the state
+/// assertion alone cannot tell that apart from a run that failed on its budget.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Stubborn::default();
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &two_tasks_first_with_timeout("stubborn", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let finished = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("a refused kill must NOT be a worker failure -- it would abort the tick");
+    assert_eq!(
+        finished, 1,
+        "the run's result must still commit; a refusal that propagated would \
+         leave it leased and RUNNING until the reaper took it back"
+    );
+
+    assert_eq!(
+        reg.killed.lock().unwrap().clone(),
+        vec!["a".to_string()],
+        "the handler must have been ASKED to stop -- this is the whole of the \
+         kill path, and without it the refusal below is unreachable"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("FAILED"),
+        "FAILED and not KILLED, and not left RUNNING by a refusal: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert_eq!(
+        run_message(&pool, ex, "a").await.as_deref(),
+        Some("Timeout after 00:00:01.000"),
+        "the author-facing reason is the budget's, byte for byte. A kill that \
+         could not be delivered is an operator's fact and goes to `tracing`, \
+         exactly as `WorkerTaskCallable.kill` sends it to slf4j and leaves \
+         `exceptionHandler`'s state alone: {}",
+        stuck(&pool, ex, "a").await
+    );
+}
+
+/// A [`Registry`] that reaps its own lease and lets a rival worker commit,
+/// **from inside its handler**, and then outruns its budget.
+///
+/// The interleaving is deterministic rather than raced: everything the rival
+/// does happens before this handler's sleep, so by the time the budget expires
+/// the run is already somebody else's and this worker is the stale one.
+struct ReapedFromUnderIt {
+    pool: sqlx::PgPool,
+    killed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Registry for ReapedFromUnderIt {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        // The lease expires while this handler is in flight -- `reap` clears
+        // `claimed_at` and leaves `state = 'RUNNING'`, which is the claim
+        // predicate again.
+        assert_eq!(
+            reap(&self.pool, std::time::Duration::ZERO)
+                .await
+                .expect("reap"),
+            1,
+            "the run this handler is executing must be reclaimable"
+        );
+        // A rival claims the same run and commits first.
+        let rival = claim(&self.pool, 1).await.expect("rival claim");
+        assert_eq!(rival.len(), 1, "the reaped run is claimable again");
+        let mut tx = self.pool.begin().await.unwrap();
+        apply_outcome(&mut tx, &rival[0], &Outcome::success())
+            .await
+            .expect("the rival holds the LIVE lease and must be able to commit");
+        tx.commit().await.unwrap();
+        // ... and only now does this worker outrun its budget.
+        tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+        unreachable!("this handler is never allowed to finish")
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Ok(())
+    }
+}
+
+/// **Property 9: a killed handler cannot commit over the worker that replaced
+/// it.**
+///
+/// W3b's Critical was a *reaped* worker committing over its replacement, and
+/// `a_worker_whose_lease_was_reaped_cannot_commit` drives that by calling
+/// `apply_outcome` by hand. Cancellation is the same seam from the other side
+/// and this drives the **shipping `tick`**: the run is killed on its budget,
+/// the kill path runs, and the worker then tries to write a terminal for a run
+/// that is no longer its.
+///
+/// **A cancel is not what protects this seam, and that is the finding.**
+/// [`reap`] is an `UPDATE` run by whatever process calls it — in production not
+/// the one holding the run — and a lease is a `timestamptz` in a row, not a
+/// handle to a future, so nothing can reach across and cancel the abandoned
+/// handler. The abandoned worker finds out only when its write is refused. The
+/// fence is therefore the whole of the protection here, and this test exists to
+/// see it refuse rather than to assume it does. `worker::cancel`'s module doc
+/// carries the same statement.
+///
+/// **Every assertion is one the pre-fence code failed.** W3b measured that
+/// shape directly: `state=FAILED`, `ended_seq` wiped from `Some(4)` to NULL,
+/// the execution FAILED with its successor still live. All four are read back
+/// here, plus the kill path's own footprint — because a test that only checked
+/// the error would pass against an `apply_outcome` that errored *after*
+/// writing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killed_handler_cannot_commit_over_the_worker_that_replaced_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = ReapedFromUnderIt {
+        pool: pool.clone(),
+        killed: Mutex::new(Vec::new()),
+    };
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &two_tasks_first_with_timeout("fenced-kill", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let err = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect_err("a worker whose lease is gone must not report its run finished");
+    assert!(
+        err.to_string().contains("lease that no longer exists"),
+        "and it must say WHY, so a production log names the reclaim rather than \
+         a generic write failure: {err}"
+    );
+
+    assert_eq!(
+        reg.killed.lock().unwrap().clone(),
+        vec!["a".to_string()],
+        "the kill path still runs for a run this worker has already lost: its \
+         own handler is what it is stopping, and losing the lease is the \
+         strongest reason there is to stop it"
+    );
+
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "the rival's terminal stands; a second terminal on one attempt is W3b's \
+         Critical: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert_eq!(
+        run_message(&pool, ex, "a").await,
+        None,
+        "and not even the message may land -- `apply_outcome` writes it before \
+         the state, so a fence only on the state would leave `Timeout after \
+         00:00:01.000` beside somebody else's SUCCESS: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert!(
+        ended_seq(&pool, ex, "a").await.is_some(),
+        "the happens-before right endpoint must survive: the pre-fence \
+         measurement wiped it from Some(4) to NULL"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING"]),
+        "the execution must NOT have reached a terminal; FAILED here is the \
+         dual of the plan's Global Constraint -- the execution moved and the \
+         task is not finished"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "b").await.as_deref(),
+        Some("RUNNING"),
+        "and the successor the rival created is live and claimable -- RUNNING \
+         with no lease IS the claim's predicate, which is what makes an \
+         execution that had reached FAILED beside it the Critical it was"
     );
 }

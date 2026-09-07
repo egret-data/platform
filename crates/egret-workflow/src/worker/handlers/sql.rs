@@ -363,20 +363,67 @@ impl TaskHandler for Sql {
     /// `TaskHandler::cancel` has no default body precisely so that `egret.sql`
     /// could not inherit `Ok(())` from the four handlers that genuinely have
     /// nothing to stop. This one holds a statement running on a remote engine,
-    /// and [`QueryExecPort`] has no cancellation method — deliberately: that
-    /// trait's own doc says a method with no consumer is untested surface and
-    /// must not be added ahead of its caller. Adding one here would be adding it
-    /// ahead of its caller twice over, because **nothing calls `cancel` at all**
-    /// yet (W4 owns the kill path).
+    /// and dropping the future does not stop it.
     ///
-    /// So it refuses. When W4 wires the kill path this fails loudly at the one
-    /// place that has to change, rather than reporting a statement as stopped
-    /// while it goes on consuming the engine.
+    /// # The refusal was a tripwire and W4 Task 3 tripped it
+    ///
+    /// W3b wrote *"nothing calls `cancel` at all yet"*. That is no longer true:
+    /// [`cancel::guarded`](crate::worker) calls it whenever a task-level
+    /// `timeout:` expires, which is the artifact's only `kill(null)` site. This
+    /// is therefore a refusal that is **reached**, logged with its own reason,
+    /// and asserted in both this module's tests and `tests/worker.rs`'s
+    /// `a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so`.
+    ///
+    /// # Why it still refuses, and exactly where the channel stops
+    ///
+    /// Cancellation exists **below** this handler and stops one layer short of
+    /// it:
+    ///
+    /// * `egret_query`'s `Connector::execute(sql, limits, CancellationToken)`
+    ///   takes a token, and `TrinoConnector` honours it — it `DELETE`s the
+    ///   statement's `nextUri`, which is Trino's own cancel;
+    ///   `JobManager::cancel` is the consumer that already drives it.
+    /// * `execution::port_impl::run_bounded` — the implementation behind
+    ///   [`QueryExecPort`] — builds a token **privately**, cancels it on its own
+    ///   `tokio::time::timeout(limits.timeout, …)`, and never lets a caller hold
+    ///   it.
+    /// * [`QueryExecPort`] itself has no cancel verb, and that trait's doc gives
+    ///   the rule for adding one: *"A trait method with no consumer is untested
+    ///   surface — do not add one ahead of its caller."* It has ten
+    ///   implementations, nine of them hand-written test fakes.
+    ///
+    /// So honouring `cancel` here means a new port verb, a per-run handle
+    /// threaded out of `execute_as_with_params`, and nine fakes updated — and
+    /// the branch that would prove it works (a statement actually stopping on
+    /// an engine) is only observable from `tests/sql_starrocks_live.rs`, which
+    /// needs an engine. That is a guard whose failing branch no test in the
+    /// default gate can reach, which is the trap this programme has fallen into
+    /// ten times. It is left undone deliberately and named here.
+    ///
+    /// # What the refusal costs today, per engine
+    ///
+    /// Not the same on both, and the difference is the live hazard:
+    ///
+    /// * **Trino** — [`Limits::timeout`] is sent as a `query_max_run_time`
+    ///   session property (`connector/trino.rs`), so the coordinator kills the
+    ///   statement at the same budget the worker used. The abandoned statement
+    ///   costs at most one budget of engine time.
+    /// * **StarRocks** — `limits.timeout` is **unread** by that connector, which
+    ///   says so in its own doc: it *"relies entirely on an outer caller … to
+    ///   enforce `limits.timeout` by dropping the future"*. The worker's drop is
+    ///   that outer caller, and dropping a future tells MySQL-protocol nothing.
+    ///   A timed-out `egret.sql` on StarRocks runs to completion on the engine.
+    ///
+    /// The second is the row this handler contributes to the runtime register.
+    ///
+    /// [`Limits::timeout`]: egret_query_api::Limits
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         Err(Error::Internal(anyhow::anyhow!(
             "{TYPE_ID}: task {} cannot be cancelled — `QueryExecPort` has no cancellation \
-             method, so the statement continues on the engine after the run is abandoned. \
-             W4 owns the kill path",
+             verb, so the statement continues on the engine after the run is abandoned. \
+             On Trino it is still bounded by the `query_max_run_time` this task sent with \
+             it; on StarRocks that connector does not read `Limits::timeout` at all, so it \
+             is not bounded by anything",
             task.task_id
         )))
     }
@@ -1068,8 +1115,38 @@ mod tests {
             .expect_err("this handler cannot cancel and must not say it can");
         let msg = err.to_string();
         assert!(
-            msg.contains("QueryExecPort") && msg.contains("kill path"),
-            "the refusal must name what is missing and who owns it: {msg}"
+            msg.contains("QueryExecPort") && msg.contains("StarRocks"),
+            "the refusal must name the verb that is missing and the engine where \
+             the consequence is unbounded: {msg}"
+        );
+    }
+
+    /// **The tripwire, tripped.** W3b made this handler refuse so that wiring
+    /// the kill path would fail loudly at the one site that had to change; this
+    /// is that site, driven through the worker's own dispatch rather than by
+    /// calling the method directly.
+    ///
+    /// It is here rather than in `worker::cancel` because the fake
+    /// [`QueryExecPort`] this handler needs already exists in this module, and a
+    /// second one written next to the kill path could drift from it.
+    #[tokio::test]
+    async fn the_kill_path_reaches_this_refusal_through_the_registry() {
+        let mut reg = crate::worker::Handlers::new();
+        reg.add(Arc::new(Sql::new(Spy::new())));
+        let killed =
+            crate::worker::cancel::kill(&reg, &input(serde_json::json!({}), RenderContext::new()))
+                .await;
+        let crate::worker::cancel::Killed::Refused(reason) = killed else {
+            panic!(
+                "the kill path must not report `egret.sql` as stopped; if this \
+                 arm is reached, the path wired by W4 Task 3 does not reach \
+                 `TaskHandler::cancel` at all"
+            );
+        };
+        assert!(
+            reason.contains("QueryExecPort"),
+            "the handler's own reason must survive the trip through the \
+             registry rather than being flattened: {reason}"
         );
     }
 }

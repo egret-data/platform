@@ -2826,11 +2826,16 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "valids/restart-loop",
         "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations          where Kestra ran 1",
     ),
-    // **W4: nothing calls `TaskHandler::cancel`**, so work Kestra stopped runs
-    // to completion here. `baseline.txt` names the first; the kill path is W4's.
+    // **W4 Task 3 wired `TaskHandler::cancel`, and deliberately not to this
+    // seam.** The kill path fires on a task-level `timeout:` expiring, which is
+    // the artifact's only `kill(null)` site
+    // (`AbstractWorkerCallable.callWithTimeout`). A run that a FLOWABLE
+    // abandoned is `advance()`'s decision, and `advance()` has no worker to
+    // tell — so work Kestra stopped still runs to completion here.
+    // `worker::cancel`'s module doc carries the same statement.
     (
         "valids/parallel-fail-with-flowable",
-        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`.          Kestra FAILED it; nothing calls `TaskHandler::cancel`, so egret          completes it",
+        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`.          Kestra FAILED it; the kill path reaches only a task's own expired          `timeout:`, so egret completes it",
     ),
     // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
     // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
@@ -3855,8 +3860,8 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "valids/parallel-fail-with-flowable",
-            "a sibling still in flight when its `Parallel` failed; nothing calls \
-             `TaskHandler::cancel` (W4 owns the kill path)",
+            "a sibling still in flight when its `Parallel` failed; the kill path \
+             W4 Task 3 wired reaches only a task's own expired `timeout:`",
         ),
         (
             "valids/retry-success",
@@ -3995,6 +4000,124 @@ fn the_step_bound_dominates_the_widest_golden_entry() {
         2 * widest_runs,
         step_bound()
     );
+}
+
+// --------------------------------------------------------------------------
+// W4 Task 3 — the population the kill path could ever move
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the kill path's ratchet-visible population is
+/// EMPTY, and it is empty three separate ways.**
+///
+/// W4's spec §1.1 arrived at 0 for this third by looking at the five baselined
+/// ids whose NAME contains "kill". That is a grep over identifiers and it is
+/// not a derivation — an entry can be reached by the kill path without saying
+/// "kill" anywhere, and an entry can say "kill" while declaring nothing this
+/// worker runs. So the answer is re-derived here from what the path actually
+/// needs, and each leg alone is sufficient:
+///
+/// 1. **Nothing expires.** `worker::cancel::guarded` calls
+///    `TaskHandler::cancel` from exactly one branch —
+///    `worker::timeout::Guarded::Expired` — so a kill needs a task-level
+///    `timeout:` that runs out.
+///    [`the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet`]
+///    pins the whole of that population: four declarations, three on a `Pause`
+///    (a flowable, whose `timeout:` is `advance()`'s), and the single runnable
+///    one an HOUR on a `core.log.Log`. Instrumented over all 294 entries the
+///    budget was applied 4 times and expired **0**.
+/// 2. **A kill could not be refused even if one fired.** Every type the oracle's
+///    driver registers answers `Ok(())`, asserted below against the driver's own
+///    registry rather than a copied list.
+/// 3. **A kill changes nothing the golden records.** `guarded` has one return
+///    path and it returns the budget's outcome; the refusal goes to `tracing`,
+///    and `golden.json` holds no failure message in any case.
+///
+/// The five "kill"-named ids are still enumerated, because the spec's number
+/// came from them and a reader will look: none of them declares a `timeout:` on
+/// anything, so none is reachable by leg 1 either.
+#[tokio::test]
+async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population() {
+    let baseline = baseline();
+
+    // ---- the ids the spec's number came from --------------------------------
+    let named: Vec<String> = baseline
+        .iter()
+        .filter(|id| id.to_lowercase().contains("kill"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            "valids/exit-killed".to_string(),
+            "valids/flow-concurrency-parallel-subflow-kill".to_string(),
+            "valids/flow-concurrency-parallel-subflow-kill-child".to_string(),
+            "valids/flow-concurrency-queue-killed-after-execution".to_string(),
+            "valids/pause-kill-delay".to_string(),
+        ],
+        "the five baselined ids whose name contains `kill`"
+    );
+
+    // Not one of them declares a `timeout:` anywhere, so leg 1 excludes every
+    // one of them regardless of what they contain.
+    fn any_timeout(task: &egret_workflow::models::Task) -> bool {
+        task.timeout.is_some()
+            || task
+                .children()
+                .into_iter()
+                .chain(task.error_children())
+                .any(any_timeout)
+    }
+    let with_a_budget: Vec<&String> = named
+        .iter()
+        .filter(|id| {
+            let flow = egret_workflow::spec::parse(&corpus_source(id))
+                .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
+            flow.tasks.iter().chain(flow.errors.iter()).any(any_timeout)
+        })
+        .collect();
+    assert!(
+        with_a_budget.is_empty(),
+        "an id named `kill` that DOES carry a `timeout:` would be reachable by \
+         the kill path and would have to be attributed: {with_a_budget:?}"
+    );
+
+    // ---- leg 2: every handler the ratchet can reach answers `Ok(())` --------
+    //
+    // Read from the driver's own registry, which is what the oracle runs, so a
+    // fifth handler added there is covered without this list being touched.
+    let registry = driver::registry();
+    let types: Vec<String> = registry
+        .type_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !types.is_empty(),
+        "an empty registry would pass leg 2 vacuously"
+    );
+    for ty in &types {
+        let task = egret_workflow::worker::TaskInput {
+            workspace_id: uuid::Uuid::nil(),
+            execution_id: uuid::Uuid::nil(),
+            run_id: uuid::Uuid::nil(),
+            task_id: "t".to_string(),
+            type_id: ty.clone(),
+            value: None,
+            attempt: 1,
+            spec: serde_json::json!({}),
+            render: egret_workflow::runners::RenderContext::new(),
+            timeout: None,
+            principal: None,
+        };
+        egret_workflow::worker::Registry::cancel(&registry, &task)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{ty} refuses a kill, so a corpus entry whose budget expired \
+                     could produce a refusal the ratchet has never seen: {e}"
+                )
+            });
+    }
 }
 
 // --------------------------------------------------------------------------
