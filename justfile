@@ -39,6 +39,15 @@ no_db_skip := "env -u EGRET_ALLOW_DB_SKIP"
 # in 0.88s with one. It now FAILS instead, so the recipes that legitimately have no engine
 # say so here, in the command, rather than by producing a green nobody can read.
 no_engine := "EGRET_ALLOW_ENGINE_SKIP=1"
+# The DOCKER axis, and it is a THIRD one for the reason the second exists: a machine may
+# honestly have a Postgres and no daemon, or a daemon and no StarRocks.
+# `crates/egret-workflow/tests/container_docker_live.rs` is the only instrument
+# `worker::handlers::{container,python}` have against the outside world — zero of the 345
+# corpus flows declare a script, container, shell or command task type, measured — so it
+# FAILS without a daemon rather than self-skipping. The recipes that legitimately have no
+# daemon (CI, and a contributor who has not installed one) say so here, in the command.
+# `just test-workflow-docker` is the recipe that runs it for real.
+no_docker := "EGRET_ALLOW_DOCKER_SKIP=1"
 
 # Format, lint, and test everything
 check:
@@ -48,7 +57,7 @@ check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     just test-shipping-resolution
-    {{ no_db_skip }} {{ no_engine }} DATABASE_URL={{ test_database_url }} cargo test --workspace
+    {{ no_db_skip }} {{ no_engine }} {{ no_docker }} DATABASE_URL={{ test_database_url }} cargo test --workspace
 
 # egret-workflow's tests, compiled under the resolution the BINARY ships.
 #
@@ -90,7 +99,7 @@ test-shipping-resolution:
 # `#[sqlx::test]` never call it — they resolve DATABASE_URL through dotenvy themselves —
 # so they are not covered by the opt-out and may still fail here.
 test-no-db:
-    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 {{ no_engine }} cargo test --workspace
+    env -u DATABASE_URL EGRET_ALLOW_DB_SKIP=1 {{ no_engine }} {{ no_docker }} cargo test --workspace
 
 # The one Data API test executed by a REAL engine, rather than a fake `QueryExecPort`.
 #
@@ -121,6 +130,27 @@ test-workflow-starrocks:
     ./deploy/seed-starrocks-workflow.sh
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
       cargo test -p egret-workflow --test sql_starrocks_live -- --nocapture
+
+# `egret.container` and `egret.python` against a real Docker daemon — the ONLY instrument
+# either handler has that judges the daemon rather than a fake.
+#
+# Both reach ZERO entries of the Kestra execution corpus: 345 flows, none of which declares
+# a script, container, shell or command task type (measured — see that file's module doc for
+# the command). So the execution ratchet says nothing about them in either direction, and a
+# green ratchet must not be read as coverage.
+#
+# No `DATABASE_URL`: nothing here touches Postgres. It needs a daemon and the two images
+# pulled — it refuses rather than pulling inside a test, so its duration stays a measurement
+# of the code and not of the network.
+test-workflow-docker:
+    docker pull alpine:3.20
+    docker pull python:3.13-slim
+    # `{{ no_db_skip }}` even though nothing here touches Postgres: the rule
+    # `egret-test-db`'s `no_just_recipe_runs_cargo_test_with_the_skip_inherited`
+    # enforces is that a recipe DECIDE what happens to an exported skip rather
+    # than inherit one, and "this suite has no DB-gated test today" is a fact
+    # about today. It caught this recipe on its first run.
+    {{ no_db_skip }} cargo test -p egret-workflow --test container_docker_live -- --nocapture
 
 # Apply migrations against the running Postgres
 migrate:

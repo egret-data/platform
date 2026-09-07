@@ -5821,6 +5821,42 @@ gate itself is driven in both directions by
 is the one assertion in that file that runs without an engine. See *W3b Task 6 —
 `egret.sql`, and the coverage this ratchet does NOT give it*.
 
+**3b. `egret.container` and `egret.python` reach zero corpus entries too, and
+for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
+rather than trusting the brief:
+
+```bash
+cd crates/egret-workflow/oracle-exec
+find corpus -name '*.yaml' -o -name '*.yml' | wc -l                     # 345
+grep -rhoE 'type:\s*\S+' corpus | sed 's/.*type:[[:space:]]*//' | sort -u \
+  | grep -icE 'script|container|shell|command|docker|bash|python|node'   # 0
+```
+
+| population | flows naming a script/container/shell/command type | flows naming `core.log.Log` (the control) |
+|---|---|---|
+| the whole corpus — 345 flows | **0** | 108 |
+
+The control is there for item 3's reason: a scanner that parsed nothing would
+report zero and look exactly like the truth, and it cannot also report 108 flows
+naming a type it failed to parse. Kestra's own script and container tasks live
+in plugin jars (`/app/plugins/io_kestra_plugin__plugin-script-*.jar`,
+`…plugin-docker…`) that this corpus never reaches, so **the ratchet sitting at
+143 after Task 5 is not evidence about either handler.**
+
+What they rest on instead is `tests/container_docker_live.rs` against a real
+Docker daemon — which **fails** without one, `EGRET_ALLOW_DOCKER_SKIP=1` being
+the typed opt-out — and the unit tests in `worker::handlers::container`,
+`worker::handlers::python` and `worker::commands`, which drive a fake runner and
+therefore judge the handler and never the daemon. Measured, the two runs of that
+suite are `11 passed … 5.45s` with a daemon and `11 passed … 0.00s` with the
+opt-out typed, which is exactly the asymmetry item 3 records — the difference is
+that the second now requires somebody to have typed it.
+
+Neither handler is in `Handlers::with_core_tasks()` **or** in the ratchet's own
+`oracle-exec/driver.rs` registry, for `egret.sql`'s structural reason plus one
+of their own: a registry that runs arbitrary container images by default is a
+capability decision and not a handler's. A caller wires them in one line.
+
 **4. Durability is proved by `tests/worker.rs`'s properties, not by this
 corpus.** There are **five**, and the fifth is the whole-branch review's: *a
 worker whose lease was reaped must not be able to commit.* The first four could

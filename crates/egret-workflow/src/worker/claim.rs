@@ -191,6 +191,11 @@ impl Claimed {
                 render,
                 timeout: budget.duration(),
                 principal: self.principal_id.map(egret_core::UserId),
+                // **The lease token, handed to the handler.** See
+                // `TaskInput::claimed_at`: a handler that holds an external
+                // resource names it after this and not after `run_id` alone,
+                // so a reaped worker cannot reach its replacement's resource.
+                claimed_at: self.claimed_at,
             },
             budget,
         ))

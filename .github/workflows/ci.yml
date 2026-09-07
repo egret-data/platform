@@ -130,8 +130,15 @@ jobs:
       # `7 passed; 0 failed; 0 ignored` in 0.00s with no engine and the same
       # line in 0.88s with one. It fails without an engine now, so this runner,
       # which has no StarRocks, says so in the command that produced the green.
+      # `EGRET_ALLOW_DOCKER_SKIP` is a third axis, added by W4 Task 5 for the
+      # same reason and typed for the same one:
+      # `crates/egret-workflow/tests/container_docker_live.rs` is the only
+      # instrument `worker::handlers::{container,python}` have against a real
+      # daemon — zero of the 345 corpus flows declare a script or container task
+      # type — so it FAILS without one instead of self-skipping. This runner has
+      # no daemon with those images pulled, so the green says so in the command.
       - name: Test
-        run: EGRET_ALLOW_ENGINE_SKIP=1 cargo test --workspace --no-fail-fast
+        run: EGRET_ALLOW_ENGINE_SKIP=1 EGRET_ALLOW_DOCKER_SKIP=1 cargo test --workspace --no-fail-fast
       # Prints on failure too, so a future disk exhaustion is a number in the log rather than a
       # mystery SIGBUS — this one cost a full investigation to identify.
       - name: Disk after build

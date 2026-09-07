@@ -72,6 +72,7 @@
 
 mod cancel;
 mod claim;
+pub mod commands;
 pub mod handlers;
 mod reaper;
 mod registry;
@@ -200,6 +201,40 @@ pub struct TaskInput {
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
     pub principal: Option<egret_core::UserId>,
+    /// **The lease token this run is being executed under** —
+    /// `task_runs.claimed_at`, the instant the claim's own `UPDATE` wrote.
+    ///
+    /// # Why it is here, and why it was NOT here before W4 Task 5
+    ///
+    /// [`TaskHandler::cancel`]'s *READ THIS BEFORE IMPLEMENTING A HANDLER THAT
+    /// HOLDS AN EXTERNAL RESOURCE* section is this field's specification. W4
+    /// Task 3 wrote it and deliberately left the field off: *"the value that
+    /// does disambiguate is the lease token, `task_runs.claimed_at`, which
+    /// `Claimed` carries and which is deliberately not on `TaskInput` today,
+    /// because no handler uses it and a field with no reader is the shape this
+    /// package has refused ten times. Whoever adds a resource-holding handler
+    /// must add it … in the same change."*
+    ///
+    /// [`handlers::container`] and [`handlers::python`] are that handler and
+    /// this is that change. They name a Docker container after
+    /// `(run_id, claimed_at)` — [`commands::container_name`] — precisely so
+    /// that a stale worker A, reaped and still inside its handler, computes a
+    /// name that **no longer exists** and therefore cannot kill the container
+    /// belonging to worker B, which claimed the same `run_id` under a new
+    /// lease. `attempt` does not disambiguate ([`reap`] leaves it open) and
+    /// `run_id` alone is exactly the hazard.
+    ///
+    /// **A per-run handle registry inside the handler is NOT an alternative if
+    /// it is keyed by `run_id`.** Worker B claiming in the same process would
+    /// overwrite A's entry and A's cancel would reach B's container by another
+    /// route; and where A and B are separate processes — the production case —
+    /// a registry cannot see across them at all, while the name can, because
+    /// the daemon is shared. The disambiguator is load-bearing either way,
+    /// which is Task 3's point restated.
+    ///
+    /// A handler that holds nothing must ignore this field, and the four core
+    /// handlers do.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a handler produces.

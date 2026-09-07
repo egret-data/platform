@@ -636,6 +636,11 @@ mod tests {
             render,
             timeout: None,
             principal: Some(UserId(Uuid::nil())),
+            // `egret.sql` holds a remote statement and cannot cancel it at
+            // all, so the lease token has no reader here. A fixed instant
+            // rather than a clock reading, for `handlers::testing::input`'s
+            // reason.
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
         }
     }
 
