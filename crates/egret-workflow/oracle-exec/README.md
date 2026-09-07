@@ -4139,6 +4139,175 @@ M2–M6 are the arithmetic guards, and they are the reason every count in
 them. None of them can be reached by mutating the committed *data*, which is why
 they are source mutations and the other thirteen are not.
 
+## W3b Task 4 — `SpawnExecution` has an executor, and the two counts have not moved
+
+**Read this before quoting the 39 or the 227 from anywhere else in this file.**
+The hole is not closed. It has an executor for the first time, and the oracle
+still cannot see it.
+
+### The two counts, before and after
+
+Both were re-derived before anything was changed and again after, and both are
+unchanged:
+
+| quantity | before | after | derived by |
+|---|---|---|---|
+| entries carrying a sub-execution | 41 | 41 | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` |
+| sub-executions they carry | 142 | 142 | the same test |
+| entries differing on **nothing but** `spawned` | **39** | **39** | the same test, printed by name |
+| kept ordered pairs at the top level | 877 | 877 | `only_the_top_level_order_pairs_are_ever_asserted` |
+| kept ordered pairs **inside** `spawned` | **227** | **227** | the same test |
+| ratchet: golden / mismatching / baselined / broken | 294 / 144 / 144 / 0 | 294 / 144 / 144 / 0 | `executor_matches_golden` |
+
+**The published figures were right.** The golden-side halves were also
+re-derived independently of this crate, in python straight from `golden.json`:
+41 entries, 142 sub-executions, and `877 + 227 = 1104` with the nested total
+attributed per entry (81 `loop-nested`, 45 `finally-loop`, 45
+`finally-loop-parallel`, 10 `working-directory-taskrun-nested`, 6 `loop-switch`,
+… over 18 entries, summing to 227). The 39 is the one figure a python pass
+cannot reach — it needs egret's own `evaluate()` — so it was checked by counting
+the **names** the test prints rather than by trusting the number it asserts.
+
+### Why nothing moved, and why that is the honest answer
+
+`tests/executor.rs` still drives the **harness**, not the worker.
+`simulate_recording_spawns` collects `Command::SpawnExecution` beside the trace
+and leaves `Trace::spawned` empty on purpose, so the comparison still zips an
+empty left side. Re-pointing the oracle at the real driver is W3b **Task 5**,
+and until it lands:
+
+- the 39 entries still differ on `spawned` and are still baselined;
+- the 227 nested pairs are still unreachable;
+- and the ratchet still matches 150.
+
+There is a second reason, and it is worth stating because it also bounds Task 5:
+**nothing renders.** `advance()` is pure and the worker fills neither render
+slot, so a `Loop` waits at `CREATED` until a caller writes `TaskRun::rendered`
+and calls `worker::resume`. Today the only caller that does is
+`tests/worker.rs`, which calls the real `render_str` with the real (empty)
+`RenderContext` — the identity on a literal `values:`, an error on anything
+else. Task 5 owns the render surface; this task owns what happens after it.
+
+### What did move
+
+`Command::SpawnExecution` went from *refused* to *executed*. Before this task
+`worker::claim::drive` returned `WorkerError::NotYetExecutable` for it, so any
+`Loop` aborted the tick; now `src/worker/spawn.rs` creates the sub-execution,
+runs it, and reports its terminal back to the loop that spawned it.
+Migration 0135 is the four columns that make a sub-execution addressable —
+`parent_execution_id`, `parent_run_ix`, `loop_index`, `loop_value` — with a
+CHECK that they are all set or all null and a UNIQUE index on the triple.
+
+Thirteen tests are the instrument, because the ratchet is not one yet: five unit
+tests in `spawn.rs` (the index derivation, its guard, the continuation's
+branches, the KILLED reading, and a round-trip of the synthesised sub-flow over
+**all 52** `Loop`s the corpus declares) and eight integration tests in
+`tests/worker.rs` driving real Postgres through `start_execution`, `resume` and
+`tick`.
+
+### Three facts measured on the ARTIFACT, not on the checkout
+
+W3b Task 3 established that the image and the `data-portal/kestra` checkout are
+different builds, so every claim below is re-derived from `traces.json` — the
+artifact's own output, harvested from the pinned digest
+`sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd`.
+
+1. **`loopRun.index` is 0-based and contiguous.** Over the 670 loop
+   sub-executions in `traces.json`, the index sets per spawning taskrun are
+   `{0}` ×45, `{0,1}` ×40, `{0,1,2}` ×175 and `{0,1,2,3}` ×5 — 265 groups, none
+   starting at 1, none with a gap. (The other 40 descendants carry `kind: null`
+   and no index; they are not loop iterations.)
+
+2. **The creation instant carries no information at all.** All **670** loop
+   sub-executions have the `startDate` of their *parent execution*, and all
+   **220** multi-sibling groups share one instant between them. `normalise.py`
+   records that ordering by `startDate` made nine flows fail the five-round
+   stability check; this is the stronger form of the same fact — the instant
+   does not order these badly, it does not order them at all, and what actually
+   decided the order in those nine rounds was the ksuid tiebreak. Ordering
+   `spawned` by `loopRun.index` is therefore not a preference.
+
+   `a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index` asserts
+   the same shape on egret's side: both iterations are written in one
+   transaction, so Postgres's `now()` is identical for both and `created_at`
+   cannot order them either.
+
+3. **`concurrencyLimit` is a live cap, not a first-batch size.** `advance()`
+   emits the first batch and cannot emit a second — it is pure over
+   `(plan, state, now)` and `ExecutionState` records nothing about a
+   sub-execution — so everything after the first batch is the spawner's. Three
+   corpus entries pin the three branches, and all three are counts of what
+   Kestra actually ran:
+
+   | entry | limit | values | `transmitFailed` | sub-executions Kestra ran | loop run |
+   |---|---|---|---|---|---|
+   | `valids/loop-parallel-less` | 2 | 4 | default | **4** | SUCCESS |
+   | `valids/loop-failed` | default (1) | 3 | default (true) | **1** | FAILED |
+   | `valids/loop-failed-no-transmit` | default (1) | 3 | `false` | **3**, all FAILED | **SUCCESS** |
+
+   The third row is the one a reader gets wrong from the name: a loop whose
+   every iteration failed **succeeds**, unless `transmitFailed` short-circuited
+   it first.
+
+### Where this is knowingly narrower than Kestra, and what it will cost Task 5
+
+A `Loop`'s own `errors:` and `finally:` run **in the sub-execution**.
+`valids/all-flowable` is the measurement: its sub-execution runs `1-each-1`
+(FAILED) and then `1-each-seq-error`, which is the `Loop` task's `errors:`
+list, while the *flow-level* `errors:` (`error-1st`, `error-2nd`) run in the
+parent. **W1's `models::Loop` carries neither field** — it holds `tasks`,
+`values`, `concurrencyLimit` and `transmitFailed` — so both are gone before the
+spawner can see them, and the synthesised sub-flow cannot put them back. This is
+the same `Loop`-has-no-`errors` gap the unclaimed table already records for
+`advance()`, showing up a second time in a second place. Widening the model is
+W1's; the entries it costs are Task 5's to attribute rather than to discover.
+
+### Mutation
+
+Baseline for every replay: `cargo test -p egret-workflow --no-fail-fast` —
+**648 passed, 0 failed**. Each mutation is one literal `-` → `+` applied by a
+script that **refuses unless the anchor occurs exactly once**, built first and
+asserted to compile (0 errors), run against the whole crate, then restored with
+the restore verified by md5 (`spawn.rs` `4313416512089e9857aa6b534bb32ed8`,
+`claim.rs` `6ad8a5365f969162140faef5e65c0aff`) — `cp` is aliased to `cp -i` in
+this shell and returns 0 having written nothing, which is how W3b Task 2 lost a
+snapshot.
+
+**M0 is the failing-first evidence.** The tests were written beside the
+implementation, so the evidence is a stub pass replayed against the final tree:
+`spawn_all` returns `Ok(vec![])` and `on_execution_terminal` returns `Ok(())`.
+**8 of the 8 integration tests fail**; the five unit tests pass, because they
+drive the pure decisions the stub did not touch, and that is said here rather
+than counted.
+
+| # | mutation (literal) | fires in | message |
+|---|---|---|---|
+| M0 | `spawn_all` → `Ok(Vec::new())`, `on_execution_terminal` → `Ok(())` | 8 | ``two values, two sub-executions, indexed 0 and 1 in `values:` order — left: [], right: [(0, "a"), (1, "b")]``; and ``the body ran once per iteration, in its own execution — left: 0, right: 2`` |
+| M1 | `if transmit_failed && terminated_in_error(child) {` → `if terminated_in_error(child) {` | 2 | `with the flag off a failure starts the next iteration like any other — left: Terminate(Failed), right: Start(1)`; and `left: [a FAILED], right: [a, b, c all FAILED]` |
+| M2 | `} else if started < total {` → `} else if started + 1 < total {` | 3 | `and the other two are started one at a time as each terminates — left: [a, b], right: [a, b, c]` |
+| M3 | `let index = base + k;` → `let index = k;` | 2 | ``an iteration started after two others is index 2, not index 0 -- `loopRun.index` is the flow's numbering, not the batch's`` |
+| M4 | `Some(expected) if expected != value =>` → `… if false && expected != value =>` | 1 | `the batch must be a PREFIX of the values not yet started — left: Ok([0]), right: Err("spawn 0 carries value \"b\", but iteration 0 of its values is \"a\"…")` |
+| M5 | the "loop run already terminal" early return deleted | 1 | `three iterations reported a failure to one loop run; it must carry ONE FAILED, not one per sibling — left: [CREATED, RUNNING, FAILED, FAILED, FAILED], right: [CREATED, RUNNING, FAILED]` |
+| M6 | `matches!(state, RunState::Failed \| RunState::Killed)` → `matches!(state, RunState::Killed)` | 4 | ``one iteration failed and `transmitFailed` defaults to true, so the other two values are never started — left: [a, b, c all FAILED], right: [a FAILED]`` |
+| M7 | `settle`: `if let Some(terminal) = is.filter(\|s\| s.is_terminal())` → `if let Some(terminal) = is` | 7 | `resume: Internal(error returned from database: duplicate key value violates unique constraint "workflow_executions_loop_run_idx")` |
+| M8 | `sub_flow_source`: `flow.tasks = body;` → `flow.tasks.extend(body);` | 9 | ``holds a source that no longer plans: duplicate_task_id: task id 'item' is declared more than once: tasks.loop.item, tasks.item`` |
+
+**M3 and M4 fire only in the unit tests, and that is a finding rather than an
+omission.** `advance()` emits exactly one batch per loop run, so `base` is
+always 0 where `spawn_all` reads it and the batch is always the values' own
+prefix by construction. Both are guards on a path only a *second* emitter could
+take. They are kept because the alternative — indexing by emission order — would
+be silently wrong the day one appears, and they are tested through pure
+functions precisely so that "unreachable today" does not mean "unchecked".
+
+**M7 is the one worth reading twice.** Reporting every state change to the
+parent rather than only a terminal one makes the loop start its next iteration
+while the previous one is still `RUNNING`, and the failure that surfaces is
+migration 0135's `UNIQUE (parent_execution_id, parent_run_ix, loop_index)` —
+the collision `normalise.py` has to *detect and bail on* is, on this side,
+unrepresentable.
+
+
 ## What this oracle does not prove
 
 The corpus is Kestra's own test suite, which is a sample of an infinite space.
@@ -4427,7 +4596,12 @@ wrote. Beyond that, the specific holes, each with its count:
   `every_corpus_flow()` is the population everywhere in this crate.)
 - **Sub-executions are ASKED FOR and still not produced, and Task 6 did not
   close this.** `Command::SpawnExecution` is emitted; nothing executes one until
-  W3b/W6, and `ExecutionState` holds no field for a sub-execution. So egret's
+  W3b/W6, and `ExecutionState` holds no field for a sub-execution.
+  *(**W3b Task 4 changed half of that sentence and not the other half.** The
+  command now HAS an executor — `worker::spawn` — but this oracle still drives
+  the harness, so egret's side of `spawned` is still empty and every number in
+  this bullet is unchanged. See* W3b Task 4 — `SpawnExecution` has an executor,
+  and the two counts have not moved.*)* So egret's
   side of `spawned` is still **always empty** and every one of the **41** golden
   entries that carries a sub-execution mismatches on that field alone. **39 of
   the 41 now differ on nothing else** — they reproduce every run, parent,
@@ -4623,7 +4797,9 @@ the sentence immediately after it already contradicted the claim.)*
 
 **No sub-execution's trace is compared at all** — 41 golden entries carry one,
 **39** of them differ on nothing else, and `Command::SpawnExecution` is emitted
-into a void until W3b/W6. **Nothing keyed on elapsed time is reachable**,
+into a void *by this harness*. (W3b Task 4 gave the command an executor; this
+harness is not it, and re-pointing the oracle is W3b Task 5. Both counts were
+re-derived after that task and both are unchanged.) **Nothing keyed on elapsed time is reachable**,
 because `now` moves only to a deadline something is already waiting for.
 
 Each of those has its own section above with the derivation; they are listed

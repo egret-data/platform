@@ -28,6 +28,7 @@ use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::spawn::{self, Requested};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunState, TaskKind,
@@ -231,7 +232,7 @@ pub async fn apply_outcome(
     claimed: &Claimed,
     outcome: &Outcome,
 ) -> Result<()> {
-    let (plan, mut state, now) = load(conn, claimed.execution_id).await?;
+    let (ctx, mut state, now) = load(conn, claimed.execution_id).await?;
     let before = state.clone();
 
     let run = usize::try_from(claimed.run_ix).map_err(|_| {
@@ -247,16 +248,46 @@ pub async fn apply_outcome(
             state: outcome.state,
         },
     );
-    drive(&plan, &mut state, now, claimed.execution_id)?;
-    persist(
-        conn,
-        claimed.execution_id,
-        &plan,
-        &before,
-        &state,
-        Some(claimed.run_ix),
-    )
-    .await
+    settle(conn, &ctx, &before, &mut state, now, Some(claimed.run_ix)).await
+}
+
+/// Everything one round of `advance()` implies, written on one connection.
+///
+/// Four things, in this order and for this reason:
+///
+/// 1. **drive** `advance()` to a fixed point, collecting the
+///    `Command::SpawnExecution`s — nothing in `executor::apply` records a
+///    spawn, because `ExecutionState` has nowhere to put one;
+/// 2. **persist** the runs that changed and the execution's own state;
+/// 3. **spawn** the sub-executions, which read the run rows step 2 has just
+///    written;
+/// 4. if this execution has itself just reached a terminal state, **tell its
+///    parent**, which is where a `Loop` starts its next iteration or finishes.
+///
+/// The caller owns the transaction and nothing here commits, so all four land
+/// together or none does. That is the plan's Global Constraint one level up
+/// from where Task 2 left it: with a spawner, "the execution has not moved"
+/// includes "the iteration it started does not exist".
+pub(super) async fn settle(
+    conn: &mut PgConnection,
+    ctx: &ExecutionCtx,
+    before: &ExecutionState,
+    state: &mut ExecutionState,
+    now: Tick,
+    release: Option<i32>,
+) -> Result<()> {
+    let spawns = drive(&ctx.plan, state, now, ctx.id)?;
+    persist(conn, ctx, before, state, release).await?;
+    spawn::spawn_all(conn, ctx, state, &spawns).await?;
+
+    let was = before.history.last().copied();
+    let is = state.history.last().copied();
+    if was != is {
+        if let Some(terminal) = is.filter(|s| s.is_terminal()) {
+            spawn::on_execution_terminal(conn, ctx.id, terminal).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Create an execution for `source` and drive `advance()` until it is waiting
@@ -292,15 +323,57 @@ pub async fn start_execution(
     .await
     .map_err(db_err)?;
 
-    let empty = ExecutionState::new(&plan);
+    let ctx = ExecutionCtx {
+        id,
+        workspace_id,
+        flow_id,
+        source: source.to_string(),
+        plan,
+    };
+    let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
     // the execution was created (`executor::state::Tick`), and this is that
     // instant.
-    drive(&plan, &mut state, Tick(0), id)?;
-    persist(&mut tx, id, &plan, &empty, &state, None).await?;
+    settle(&mut tx, &ctx, &empty, &mut state, Tick(0), None).await?;
     tx.commit().await.map_err(db_err)?;
     Ok(id)
+}
+
+/// Drive an execution forward from whatever the **caller** has just supplied.
+///
+/// [`tick`] drives an execution when a task finishes; this is the entry point
+/// for everything else that changes what `advance()` can see. Today that is
+/// the render slots — `TaskRun::rendered` and `rendered_run_if`, which
+/// `advance()` cannot fill because it is pure and which this worker does not
+/// fill either (W3b Task 5 owns the render surface). A `Loop`, an `If`, a
+/// `Switch` or a `runIf:` therefore waits until a caller writes the slot and
+/// calls this.
+///
+/// It takes the same lock and runs the same [`settle`] as every other writer,
+/// so a run created here and a run created by a finishing task are the same
+/// row written by the same code.
+pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+    let (ctx, mut state, now) = load(&mut tx, execution_id).await?;
+    let before = state.clone();
+    settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
+    tx.commit().await.map_err(db_err)
+}
+
+/// Everything a writer needs to know about the execution it is writing.
+///
+/// The `Plan` is rebuilt from `source` rather than stored — `build_plan` is
+/// pure and deterministic over it, so a stored plan is a second copy of a
+/// derivable thing that can disagree with the source beside it — and
+/// `workspace_id`/`flow_id` are carried because a spawn creates a *new*
+/// execution and has to give it both.
+pub(super) struct ExecutionCtx {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub flow_id: Option<Uuid>,
+    pub source: String,
+    pub plan: Plan,
 }
 
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
@@ -310,9 +383,12 @@ pub async fn start_execution(
 /// both would compute the same successor, and both would try to create it. The
 /// `UNIQUE (execution_id, run_ix)` in migration 0134 is what happens if this
 /// lock is ever lost — a collision rather than a duplicate run.
-async fn load(conn: &mut PgConnection, execution_id: Uuid) -> Result<(Plan, ExecutionState, Tick)> {
+pub(super) async fn load(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
     let row = sqlx::query(
-        "SELECT source, history, \
+        "SELECT source, history, workspace_id, flow_id, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
            FROM workflow.executions WHERE id = $1 FOR UPDATE",
     )
@@ -327,6 +403,13 @@ async fn load(conn: &mut PgConnection, execution_id: Uuid) -> Result<(Plan, Exec
     let now_ms: i64 = row.get("now_ms");
     let plan = build_plan(&source)
         .map_err(|e| worker_err(WorkerError::Unplannable(execution_id, e.to_string())))?;
+    let ctx = ExecutionCtx {
+        id: execution_id,
+        workspace_id: row.get("workspace_id"),
+        flow_id: row.get("flow_id"),
+        source,
+        plan,
+    };
 
     let rows = sqlx::query(
         "SELECT id, run_ix, task_ix, parent_ix, value, rendered, rendered_run_if, \
@@ -367,29 +450,35 @@ async fn load(conn: &mut PgConnection, execution_id: Uuid) -> Result<(Plan, Exec
         runs,
         history: parse_states(execution_id, &history)?,
     };
-    Ok((plan, state, Tick(now_ms)))
+    Ok((ctx, state, Tick(now_ms)))
 }
 
-/// Drive `advance()` to a fixed point, applying every command it asks for.
+/// Drive `advance()` to a fixed point, applying every command it asks for and
+/// **collecting** the spawns.
+///
+/// `Command::SpawnExecution` is the one command `executor::apply` has no arm
+/// for, and that is not an omission: [`ExecutionState`] holds nothing about a
+/// sub-execution, so there is nothing for `apply` to record. It comes back to
+/// the caller instead, which is the only thing that can write one — see
+/// [`spawn::spawn_all`].
 ///
 /// Bounded by [`MAX_ROUNDS`]: a caller that does not converge has found a cycle
 /// or is failing to fill a render slot, and both must be loud rather than spin
 /// with a transaction open.
-fn drive(plan: &Plan, state: &mut ExecutionState, now: Tick, execution_id: Uuid) -> Result<()> {
+fn drive(
+    plan: &Plan,
+    state: &mut ExecutionState,
+    now: Tick,
+    execution_id: Uuid,
+) -> Result<Vec<Requested>> {
+    let mut spawns = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let cmds = advance(plan, state, now);
         if cmds.is_empty() {
-            return Ok(());
+            return Ok(spawns);
         }
         for cmd in &cmds {
-            // W3b Task 4 owns this. Refused rather than ignored: an arm that
-            // dropped it would let a `Loop` reach SUCCESS having iterated
-            // nothing, which is the over-acceptance shape spec §7 forbids.
-            if matches!(cmd, Command::SpawnExecution { .. }) {
-                return Err(worker_err(WorkerError::NotYetExecutable(
-                    "Command::SpawnExecution",
-                )));
-            }
+            spawns.extend(Requested::of(cmd));
             apply(state, cmd);
         }
     }
@@ -404,12 +493,13 @@ fn drive(plan: &Plan, state: &mut ExecutionState, now: Tick, execution_id: Uuid)
 /// and clearing it would hand that sibling to a second handler.
 async fn persist(
     conn: &mut PgConnection,
-    execution_id: Uuid,
-    plan: &Plan,
+    ctx: &ExecutionCtx,
     before: &ExecutionState,
     after: &ExecutionState,
     release: Option<i32>,
 ) -> Result<()> {
+    let execution_id = ctx.id;
+    let plan = &ctx.plan;
     for (ix, run) in after.runs.iter().enumerate() {
         let history = states_json(&run.history);
         let attempts = attempts_json(&run.attempts);

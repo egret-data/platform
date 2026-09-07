@@ -732,3 +732,564 @@ async fn a_type_with_no_handler_aborts_the_tick(pool: sqlx::PgPool) {
         "the execution has not moved"
     );
 }
+
+// ---------------------------------------------------------------------------
+// W3b Task 4: `Command::SpawnExecution`.
+// ---------------------------------------------------------------------------
+
+use egret_workflow::executor::{build_plan, TaskKind};
+use egret_workflow::worker::resume;
+use egret_workflow::{render_str, RenderContext};
+
+/// A loop flow, parameterised so one shape serves every property below.
+///
+/// `body` is the loop's `tasks:` list, already indented six spaces.
+fn loop_flow(
+    id: &str,
+    limit: Option<i32>,
+    transmit: Option<bool>,
+    values: &str,
+    body: &str,
+) -> String {
+    let mut s = format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: loop\n    \
+         type: io.kestra.plugin.core.flow.Loop\n    values: '{values}'\n"
+    );
+    if let Some(l) = limit {
+        s.push_str(&format!("    concurrencyLimit: {l}\n"));
+    }
+    if let Some(t) = transmit {
+        s.push_str(&format!("    transmitFailed: {t}\n"));
+    }
+    s.push_str("    tasks:\n");
+    s.push_str(body);
+    s
+}
+
+/// One `Log` as a loop body.
+const LOG_BODY: &str =
+    "      - id: item\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+/// One always-failing `Fail` as a loop body.
+const FAIL_BODY: &str = "      - id: item\n        type: io.kestra.plugin.core.execution.Fail\n";
+
+/// One loop iteration as this schema stores it.
+#[derive(Debug, PartialEq, Eq)]
+struct SubExecution {
+    index: i32,
+    value: String,
+    state: String,
+}
+
+/// Every sub-execution of one loop run, **ordered by `loop_index`**.
+///
+/// Deliberately not ordered by `created_at`: the whole point of the index is
+/// that the instant cannot order these. `spawn_instants` below is what asserts
+/// that it cannot.
+async fn sub_executions(pool: &sqlx::PgPool, parent: Uuid, run_ix: i32) -> Vec<SubExecution> {
+    sqlx::query_as::<_, (i32, String, String)>(
+        "SELECT loop_index, loop_value, state FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix = $2 ORDER BY loop_index",
+    )
+    .bind(parent)
+    .bind(run_ix)
+    .fetch_all(pool)
+    .await
+    .expect("read sub-executions")
+    .into_iter()
+    .map(|(index, value, state)| SubExecution {
+        index,
+        value,
+        state,
+    })
+    .collect()
+}
+
+/// The creation instants of one loop run's sub-executions.
+async fn spawn_instants(
+    pool: &sqlx::PgPool,
+    parent: Uuid,
+    run_ix: i32,
+) -> Vec<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar(
+        "SELECT created_at FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix = $2 ORDER BY loop_index",
+    )
+    .bind(parent)
+    .bind(run_ix)
+    .fetch_all(pool)
+    .await
+    .expect("read spawn instants")
+}
+
+/// **The caller tier W3b Task 5 owns, with the empty context it has today.**
+///
+/// `advance()` is pure and cannot render, and `worker` does not render either,
+/// so a `Loop` waits at `CREATED` until something writes `TaskRun::rendered`
+/// and calls [`resume`]. This is that something, and it is not a fake: it
+/// calls the real `render_str` with the real (empty) `RenderContext`, which is
+/// the identity on a literal `values:` and an error on anything else. When
+/// Task 5 fills the context, this function keeps working unchanged.
+///
+/// Returns how many loop runs it rendered, so a caller can drive to a fixed
+/// point rather than guessing a number of rounds.
+async fn render_pending_loops(pool: &sqlx::PgPool) -> usize {
+    let pending: Vec<(Uuid, String, i32, i32)> = sqlx::query_as(
+        "SELECT e.id, e.source, r.run_ix, r.task_ix \
+           FROM workflow.task_runs r JOIN workflow.executions e ON e.id = r.execution_id \
+          WHERE r.rendered IS NULL AND r.state = 'CREATED' AND r.type_id IS NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read unrendered flowable runs");
+
+    let mut touched: Vec<Uuid> = Vec::new();
+    for (execution, source, run_ix, task_ix) in pending {
+        let plan = build_plan(&source).expect("the stored source plans");
+        let TaskKind::Loop { values, .. } = &plan.tasks[task_ix as usize].kind else {
+            continue;
+        };
+        let rendered = render_str(values, &RenderContext::new()).expect("a literal `values:`");
+        sqlx::query(
+            "UPDATE workflow.task_runs SET rendered = $1 WHERE execution_id = $2 AND run_ix = $3",
+        )
+        .bind(&rendered)
+        .bind(execution)
+        .bind(run_ix)
+        .execute(pool)
+        .await
+        .expect("write the rendered values");
+        if !touched.contains(&execution) {
+            touched.push(execution);
+        }
+    }
+    for id in &touched {
+        resume(pool, *id).await.expect("resume");
+    }
+    touched.len()
+}
+
+/// Render every waiting loop and run every claimable task until nothing moves.
+async fn settle_everything(pool: &sqlx::PgPool, reg: &Handlers) {
+    for _ in 0..64 {
+        let rendered = render_pending_loops(pool).await;
+        let ran = egret_workflow::worker::tick(pool, 16, reg)
+            .await
+            .expect("tick");
+        if rendered == 0 && ran == 0 {
+            return;
+        }
+    }
+    panic!("the loop never settled in 64 rounds");
+}
+
+/// **The brief's property: a `Loop` over two values spawns two executions,
+/// ordered by `loopRun.index` and NOT by the creation instant.**
+///
+/// The second half is asserted directly rather than implied. All the
+/// sub-executions of one loop run are written in **one transaction**, so
+/// Postgres's `now()` is the same for every one of them and the instant cannot
+/// order them at all — which is exactly what the artifact does: measured over
+/// `oracle-exec/traces.json`, all 670 loop sub-executions carry their PARENT
+/// execution's `startDate`, and all 220 multi-sibling groups share one instant
+/// between them. `oracle-exec/normalise.py` records the consequence — ordering
+/// by `startDate` made nine corpus flows fail the five-round stability check.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow("two", Some(0), None, r#"["a", "b"]"#, LOG_BODY);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await,
+        Vec::new(),
+        "nothing is spawned until the caller has rendered `values:`"
+    );
+    assert_eq!(render_pending_loops(&pool).await, 1, "one loop to render");
+
+    let spawned = sub_executions(&pool, ex, 0).await;
+    assert_eq!(
+        spawned
+            .iter()
+            .map(|s| (s.index, s.value.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "a"), (1, "b")],
+        "two values, two sub-executions, indexed 0 and 1 in `values:` order"
+    );
+
+    let instants = spawn_instants(&pool, ex, 0).await;
+    assert_eq!(instants.len(), 2);
+    assert_eq!(
+        instants[0], instants[1],
+        "both iterations are written in ONE transaction, so the creation \
+         instant is identical and cannot order them -- ordering `spawned` by \
+         the instant is not unstable, it is undefined. `loop_index` is the \
+         only thing that orders these, which is why migration 0135 makes two \
+         iterations sharing one index unrepresentable."
+    );
+
+    // And each sub-execution really runs the loop's body, in its own right.
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    let done = sub_executions(&pool, ex, 0).await;
+    assert_eq!(
+        done.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(),
+        vec!["SUCCESS", "SUCCESS"]
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// **`concurrencyLimit` defaults to 1, and 1 is full serialisation.**
+///
+/// `advance()` emits the first batch and cannot emit a second, so every
+/// iteration after the first is this module's. The measurement that settles
+/// the default is Kestra's own traces rather than either schema:
+/// `valids/loop-serial` has three values, no `concurrencyLimit:`, and the
+/// artifact ran its three iterations one at a time.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_default_concurrency_limit_runs_one_iteration_at_a_time(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow("serial", None, None, r#"["a", "b", "c"]"#, LOG_BODY);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    render_pending_loops(&pool).await;
+    let first = sub_executions(&pool, ex, 0).await;
+    assert_eq!(
+        first.iter().map(|s| s.index).collect::<Vec<_>>(),
+        vec![0],
+        "the default limit is 1, so the first batch is ONE iteration -- a \
+         default of 0 (unlimited) would have spawned all three here"
+    );
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await,
+        vec![
+            SubExecution {
+                index: 0,
+                value: "a".into(),
+                state: "SUCCESS".into()
+            },
+            SubExecution {
+                index: 1,
+                value: "b".into(),
+                state: "SUCCESS".into()
+            },
+            SubExecution {
+                index: 2,
+                value: "c".into(),
+                state: "SUCCESS".into()
+            },
+        ],
+        "and the other two are started one at a time as each terminates"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("SUCCESS")
+    );
+}
+
+/// **`concurrencyLimit: 0` is unlimited, not zero.**
+///
+/// The control for the test above, and the reason it is worth its own test:
+/// `0` read as a cap of zero spawns nothing and hangs every unlimited loop in
+/// the corpus, and that mistake is invisible in a flow whose limit is
+/// defaulted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unlimited_concurrency_limit_spawns_every_value_at_once(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow("unlimited", Some(0), None, r#"["a", "b", "c"]"#, LOG_BODY);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    render_pending_loops(&pool).await;
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await.len(),
+        3,
+        "`concurrencyLimit: 0` means no limit, so the first batch is every value"
+    );
+}
+
+/// **`transmitFailed` (default true): the loop ends on the FIRST failure.**
+///
+/// `valids/loop-failed` measured on the artifact: three values, a body that
+/// always fails, and Kestra ran **one** sub-execution — the loop terminated
+/// before the second was started. That is the one branch of the continuation a
+/// count of sub-executions can see, and it is why "fewer iterations than
+/// values" is evidence about `transmitFailed` rather than about the limit.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_failing_iteration_ends_a_transmit_failed_loop_at_once(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow("boom", None, None, r#"["a", "b", "c"]"#, FAIL_BODY);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await,
+        vec![SubExecution {
+            index: 0,
+            value: "a".into(),
+            state: "FAILED".into()
+        }],
+        "one iteration failed and `transmitFailed` defaults to true, so the \
+         other two values are never started"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("FAILED")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}
+
+/// **`transmitFailed: false`: every iteration runs and the loop SUCCEEDS.**
+///
+/// The pair to the test above, and what makes it mean something: the same
+/// body, the same values, the same default limit, one flag different, and the
+/// artifact's answer is three FAILED sub-executions under a **SUCCESSFUL**
+/// loop run (`valids/loop-failed-no-transmit`). A spawner that stopped at the
+/// first failure whatever the flag said passes the test above and fails this
+/// one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn transmit_failed_false_runs_every_iteration_and_the_loop_succeeds(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow(
+        "no-transmit",
+        None,
+        Some(false),
+        r#"["a", "b", "c"]"#,
+        FAIL_BODY,
+    );
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await,
+        vec![
+            SubExecution {
+                index: 0,
+                value: "a".into(),
+                state: "FAILED".into()
+            },
+            SubExecution {
+                index: 1,
+                value: "b".into(),
+                state: "FAILED".into()
+            },
+            SubExecution {
+                index: 2,
+                value: "c".into(),
+                state: "FAILED".into()
+            },
+        ],
+    );
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("SUCCESS"),
+        "Kestra's loop terminates SUCCESS once every iteration has terminated, \
+         whatever they terminated AS, unless `transmitFailed` short-circuited it"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// **A loop body that is itself a `Loop` spawns from inside a sub-execution.**
+///
+/// `valids/loop-nested` is this shape and it is the reason the sub-execution's
+/// terminal has to walk **up**: the innermost iteration finishing is what
+/// finishes the inner loop run, which finishes its sub-execution, which
+/// finishes the outer loop run. Two levels, 2x2 iterations, and the assertion
+/// is on the whole tree rather than on the count.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_nested_loop_spawns_from_inside_a_sub_execution(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let inner = "      - id: inner\n        type: io.kestra.plugin.core.flow.Loop\n        \
+                 values: '[\"x\", \"y\"]'\n        concurrencyLimit: 0\n        tasks:\n\
+                 \x20         - id: item\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n";
+    let source = loop_flow("nested", Some(0), None, r#"["a", "b"]"#, inner);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let outer = sub_executions(&pool, ex, 0).await;
+    assert_eq!(
+        outer,
+        vec![
+            SubExecution {
+                index: 0,
+                value: "a".into(),
+                state: "SUCCESS".into()
+            },
+            SubExecution {
+                index: 1,
+                value: "b".into(),
+                state: "SUCCESS".into()
+            },
+        ],
+    );
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 ORDER BY loop_index",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .expect("read outer sub-executions");
+    for id in &ids {
+        assert_eq!(
+            sub_executions(&pool, *id, 0).await,
+            vec![
+                SubExecution {
+                    index: 0,
+                    value: "x".into(),
+                    state: "SUCCESS".into()
+                },
+                SubExecution {
+                    index: 1,
+                    value: "y".into(),
+                    state: "SUCCESS".into()
+                },
+            ],
+            "each outer iteration runs the inner loop's own two iterations"
+        );
+    }
+    assert_eq!(
+        run_state(&pool, ex, "loop").await.as_deref(),
+        Some("SUCCESS")
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])
+    );
+}
+
+/// **A sub-execution is a task run of nobody: the loop body never gets a run
+/// in the parent.**
+///
+/// The control for every count above. Measured over the whole golden: across
+/// the 39 comparable entries holding a `Loop`, not one of the 82 tasks inside
+/// a loop body has a run in its parent — on either side. A spawner that ALSO
+/// created the body's runs in the parent would pass every assertion above and
+/// produce a trace Kestra never produces.
+#[sqlx::test(migrations = "../../migrations")]
+async fn no_run_for_a_loop_body_task_is_ever_created_in_the_parent(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow("bodyless", Some(0), None, r#"["a", "b"]"#, LOG_BODY);
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let parent_runs: Vec<String> = sqlx::query_scalar(
+        "SELECT task_id FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
+    )
+    .bind(ex)
+    .fetch_all(&pool)
+    .await
+    .expect("read parent runs");
+    assert_eq!(
+        parent_runs,
+        vec!["loop".to_string()],
+        "the parent holds the `Loop`'s own run and nothing else"
+    );
+
+    // The positive control: the body task DID run, twice, in the two
+    // sub-executions. Without this the assertion above passes against a
+    // spawner that created no sub-execution at all.
+    let body_runs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.task_runs r \
+           JOIN workflow.executions e ON e.id = r.execution_id \
+          WHERE e.parent_execution_id = $1 AND r.task_id = 'item' AND r.state = 'SUCCESS'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("read body runs");
+    assert_eq!(
+        body_runs, 2,
+        "the body ran once per iteration, in its own execution"
+    );
+}
+
+/// **A `transmitFailed` loop with several iterations in flight terminates
+/// ONCE.**
+///
+/// `advance()` emits three spawns at once here, so all three fail and all
+/// three report their terminal to the same loop run. The first ends it; the
+/// other two must find it already ended and do nothing. Without that check
+/// each of them applies a second `FAILED` and the run's history grows a
+/// duplicate — which is a state Kestra never records and which
+/// `oracle-exec/golden.json` compares element by element.
+///
+/// No corpus entry has this shape (`valids/loop-failed` is limit 1, so only
+/// one iteration ever exists), which is exactly why it needs a test rather
+/// than an entry.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_transmit_failed_loop_with_several_iterations_in_flight_terminates_once(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let source = loop_flow(
+        "boom-parallel",
+        Some(0),
+        None,
+        r#"["a", "b", "c"]"#,
+        FAIL_BODY,
+    );
+    let ex = start_execution(&pool, ws, None, &source)
+        .await
+        .expect("start execution");
+
+    render_pending_loops(&pool).await;
+    assert_eq!(
+        sub_executions(&pool, ex, 0).await.len(),
+        3,
+        "unlimited: all three iterations are in flight before any of them fails"
+    );
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    let history: serde_json::Value = sqlx::query_scalar(
+        "SELECT history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = 'loop'",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("read the loop run's history");
+    assert_eq!(
+        history,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "three iterations reported a failure to one loop run; it must carry ONE \
+         FAILED, not one per sibling"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"])
+    );
+}

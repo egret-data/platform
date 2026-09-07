@@ -43,17 +43,21 @@
 //!
 //! No handler. W3b Task 3 owns `core.log.Log`, `core.debug.Return`,
 //! `core.execution.Fail` and `core.flow.Sleep`, and Task 6 owns `egret.sql`;
-//! this module takes a [`Registry`] trait object and does not care which. Task 4
-//! owns [`Command::SpawnExecution`](crate::executor::Command::SpawnExecution),
-//! which [`apply_outcome`] currently **refuses** rather than ignores — see
-//! [`WorkerError`].
+//! this module takes a [`Registry`] trait object and does not care which.
+//!
+//! **No renderer, and that is the largest hole left here.** `advance()`'s
+//! `rendered` and `rendered_run_if` slots are the caller's to fill and nothing
+//! in this module fills them, so a `runIf:`, an `If`, a `Switch` or a `Loop`
+//! waits until something writes the slot and calls [`resume`]. W3b Task 5 owns
+//! it; until then the only caller that fills a slot is `tests/worker.rs`.
 
 mod claim;
 pub mod handlers;
 mod reaper;
 mod registry;
+mod spawn;
 
-pub use claim::{apply_outcome, claim, start_execution, tick, Claimed};
+pub use claim::{apply_outcome, claim, resume, start_execution, tick, Claimed};
 pub use reaper::reap;
 pub use registry::Handlers;
 
@@ -262,16 +266,6 @@ pub trait Registry: Send + Sync {
 /// The failures this module raises that are not database errors.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {
-    /// A [`Command`](crate::executor::Command) no task in W3b Task 2 executes.
-    ///
-    /// **A refusal rather than a no-op, and that is the point.**
-    /// `Command::SpawnExecution` is W3b Task 4's, and an arm that silently
-    /// dropped it would let a `Loop` run to `SUCCESS` having iterated nothing —
-    /// which is precisely the over-acceptance shape the spec §7 says must not
-    /// ship. Task 4 replaces this with an executor.
-    #[error("the worker cannot execute {0} yet (W3b Task 4)")]
-    NotYetExecutable(&'static str),
-
     /// `advance()` asked for more rounds than [`MAX_ROUNDS`] allows.
     ///
     /// `advance()` is a fixed point in every corpus flow; a caller that does not
@@ -290,11 +284,10 @@ pub enum WorkerError {
     /// No handler is registered for a claimed run's `type_id`.
     ///
     /// **A refusal, and it aborts the tick for that run** rather than
-    /// completing it in some state — the same rule
-    /// [`WorkerError::NotYetExecutable`] follows. An unknown type that
-    /// "succeeded" would be the over-acceptance shape spec §7 forbids, and an
-    /// unknown type that "failed" would be worse: it would look like the
-    /// author's flow was wrong.
+    /// completing it in some state. An unknown type that "succeeded" would be
+    /// the over-acceptance shape spec §7 forbids, and an unknown type that
+    /// "failed" would be worse: it would look like the author's flow was
+    /// wrong.
     #[error("no handler is registered for task type {0:?}")]
     NoHandler(String),
 
