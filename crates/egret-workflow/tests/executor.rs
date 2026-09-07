@@ -1252,7 +1252,7 @@ async fn executor_matches_golden() {
          {uncompared_pairs} ordered pair(s) removed from egret's side for having no \
          counterpart in the golden (see Trace::restrict_order_to; the golden-side \
          population is derived by \
-         the_order_pairs_the_golden_dropped_are_the_only_ones_not_compared)",
+         the_golden_has_no_relation_for_exactly_these_pairs)",
         golden.len(),
         mismatched.len(),
         baseline.len(),
@@ -1382,6 +1382,99 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 35;
 const EGRET_TOP_LEVEL_PAIRS: usize = 565;
 const EGRET_NESTED_PAIRS: usize = 126;
 
+/// **KEPT is not ASSERTED, and the line between them is the baseline rather
+/// than the nesting** — W3b Task 7.
+///
+/// W3a published *"877 asserted, 227 never"* and the 227 were right for a
+/// structural reason: [`Trace::restrict_order_to`] descends through
+/// `self.spawned.iter_mut().zip(&golden.spawned)` and egret's `spawned` was
+/// `Vec::new()`, so that `zip` never iterated. W3b Task 5 fills `spawned`, so
+/// the reason is gone — and the replacement is **not** 1104, because *compared*
+/// and *asserted* are different claims. A pair on a **baselined** entry is
+/// compared and cannot be falsified: the entry mismatches whatever that pair
+/// says, so changing it changes nothing the ratchet reports.
+///
+/// That is the same class of over-claim W3a's coverage statement made and the
+/// whole-branch review caught — *"the kept 1104 are the whole of what this
+/// oracle asserts about serialisation"*, when 227 of them could not fail.
+///
+/// **Measured rather than reasoned**, by flipping `before` ⇄ `overlapping` in
+/// `golden.json` and reading the ratchet, with the file restored from a
+/// snapshot and its md5 (`5773748d22d521e6a65afc5e2e2663d1`) verified after
+/// every run:
+///
+/// | flipped | pairs | ratchet |
+/// |---|---|---|
+/// | every **nested** pair — W3a's own experiment | 227 | **FAILS**: 150 mismatching, 6 REGRESSIONs |
+/// | every pair on a **baselined** entry | 750 | green: 144 mismatching, 0 banked |
+/// | every pair on a **matching** entry | 354 | **FAILS**: 184 mismatching, 40 REGRESSIONs |
+///
+/// The first row is the one to read against W3a's, which recorded that flipping
+/// all 227 left this crate green.
+///
+/// This test derives the split from `golden.json` and `baseline.txt` alone —
+/// no driver — so it is cheap enough to run everywhere and cannot drift from
+/// the ratchet's own population.
+#[test]
+fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
+    fn count(node: &GoldenEntry, top: &mut usize, nested: &mut usize) {
+        *top += node.order.len();
+        fn deeper(subs: &[GoldenSpawned], nested: &mut usize) {
+            for s in subs {
+                *nested += s.order.len();
+                deeper(&s.spawned, nested);
+            }
+        }
+        deeper(&node.spawned, nested);
+    }
+
+    let baseline = baseline();
+    let (mut m_top, mut m_nested) = (0usize, 0usize);
+    let (mut b_top, mut b_nested) = (0usize, 0usize);
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let (mut top, mut nested) = (0usize, 0usize);
+        count(entry, &mut top, &mut nested);
+        if baseline.contains(&entry.id) {
+            b_top += top;
+            b_nested += nested;
+        } else {
+            m_top += top;
+            m_nested += nested;
+        }
+    }
+
+    println!(
+        "kept ordered pairs: {} asserted ({m_top} top + {m_nested} nested), \
+         {} not ({b_top} top + {b_nested} nested)",
+        m_top + m_nested,
+        b_top + b_nested
+    );
+    assert_eq!(
+        (m_top, m_nested, m_top + m_nested),
+        (255, 99, 354),
+        "the pairs a change to which the ratchet REPORTS: they live on entries \
+         that match, so any change to one makes its entry a REGRESSION"
+    );
+    assert_eq!(
+        (b_top, b_nested, b_top + b_nested),
+        (622, 128, 750),
+        "and the pairs a change to which it does not: they live on baselined \
+         entries, which mismatch whatever the pair says. Flipping all 750 leaves \
+         the ratchet green and unmoved at 144"
+    );
+    assert_eq!(
+        (
+            m_top + b_top,
+            m_nested + b_nested,
+            m_top + m_nested + b_top + b_nested
+        ),
+        (877, 227, 1104),
+        "the total asserted beside the parts, and the same 877 / 227 / 1104 \
+         `the_ordered_pairs_inside_spawned_are_reachable_now` derives from the \
+         other direction"
+    );
+}
+
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
 ///
@@ -1451,6 +1544,150 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
 
 const RESTRICTION_REMOVES: usize = 87;
 const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 778;
+
+/// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
+/// its successor or an empty string where there is none — W3b Task 7.
+///
+/// A stale *number* can be checked by reading the sentence beside it. A pointer
+/// that resolves to nothing cannot be checked at all, and the sweep this task
+/// ran found **thirteen** of them: nine deleted with W3a's harness at W3b Task
+/// 5, two renamed by the same task, and two renamed on `main` by `05083cbc`
+/// before this branch existed. The README's *stale twins* table carries the
+/// same list for a reader; this one is what stops the two drifting.
+const RETIRED_POINTERS: &[(&str, &str)] = &[
+    // Renamed on `main` by `05083cbc`, before this package.
+    (
+        "a_null_task_list_is_an_over_refusal_that_reaches_the_http_api",
+        "a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own",
+    ),
+    (
+        "every_flow_kestra_published_plans_except_three_named_over_refusals",
+        "every_flow_kestra_published_plans_except_two_named_over_refusals",
+    ),
+    // Renamed by W3b Task 5, because the question each asks changed. Both say
+    // so in their own doc comments.
+    (
+        "only_the_top_level_order_pairs_are_ever_asserted",
+        "the_ordered_pairs_inside_spawned_are_reachable_now",
+    ),
+    (
+        "the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank",
+        "the_sub_executions_are_compared_and_this_is_what_they_cost",
+    ),
+    // The prefix check became a whole-set comparison once the driver ran the
+    // sub-executions: a prefix was all `advance()`'s single batch could offer.
+    (
+        "every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran",
+        "every_sub_execution_egret_runs_is_one_kestra_ran",
+    ),
+    // Deleted with the four-tier harness at W3b Task 5. There is no successor:
+    // the tier each pinned does not exist. The render tier moved into
+    // `worker::render`, which has its own tests; the feed is 0; the loop
+    // completion tier is `worker::spawn`.
+    ("a_skipped_run_still_gets_a_happens_before_endpoint", ""),
+    (
+        "an_order_pair_is_before_only_if_the_second_run_was_created_after_the_first_ended",
+        "",
+    ),
+    (
+        "restricting_the_order_cannot_hide_a_disagreement_on_a_kept_pair",
+        "",
+    ),
+    ("the_caller_renders_and_a_failed_render_fails_the_run", ""),
+    (
+        "the_caller_can_render_every_expression_except_the_ones_named",
+        "",
+    ),
+    (
+        "the_caller_can_render_every_branch_expression_except_the_two_kestra_could_not",
+        "",
+    ),
+    (
+        "the_feed_absorbs_a_measured_share_of_the_golden_run_terminals",
+        "",
+    ),
+    (
+        "the_loop_completion_tier_is_load_bearing_for_exactly_these_entries",
+        "",
+    ),
+];
+
+/// Every `.rs` file under this crate's `src/` and `tests/`, concatenated.
+fn crate_rust_sources() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = String::new();
+    let mut stack = vec![root.join("src"), root.join("tests")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read a crate source directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push_str(&std::fs::read_to_string(&path).expect("read a source file"));
+            }
+        }
+    }
+    out
+}
+
+/// **The retired-pointer table cannot drift from the code or from the README.**
+///
+/// Three ways it could, each asserted: a retired name coming back as a live
+/// test without the row being removed; a successor that does not exist; and a
+/// row for a name the README no longer cites, which is dead weight pretending
+/// to be a correction.
+///
+/// **The positive control is load-bearing and is not decoration.** Every "is
+/// not a live `fn`" assertion below passes against an *empty* source string, so
+/// a walk that read no files — a moved directory, a changed extension, a
+/// `read_dir` that silently found nothing — would report the same clean result
+/// as the truth. The control is the first assertion for that reason.
+#[test]
+fn the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do() {
+    let sources = crate_rust_sources();
+    assert!(
+        sources.contains("fn executor_matches_golden")
+            && sources.contains("fn tick")
+            && sources.len() > 200_000,
+        "the source walk found {} bytes and must have found this crate: every \
+         other assertion here is a `does not contain`, and an empty string \
+         satisfies all of them",
+        sources.len()
+    );
+
+    // Both files a reader is pointed at, with whitespace collapsed: the README
+    // wraps long names across lines, so a literal search would miss a citation
+    // and report the row as dead weight.
+    let prose = format!(
+        "{}\n{}",
+        std::fs::read_to_string(format!("{ORACLE}/README.md")).expect("read the README"),
+        std::fs::read_to_string(format!("{ORACLE}/runnable.txt")).expect("read runnable.txt"),
+    );
+    let flat: String = prose.split_whitespace().collect::<Vec<_>>().join("");
+
+    let mut problems: Vec<String> = Vec::new();
+    for (retired, successor) in RETIRED_POINTERS {
+        if sources.contains(&format!("fn {retired}")) {
+            problems.push(format!(
+                "`{retired}` is a live test again; take it out of RETIRED_POINTERS \
+                 and out of the README's stale-twin table"
+            ));
+        }
+        if !successor.is_empty() && !sources.contains(&format!("fn {successor}")) {
+            problems.push(format!(
+                "`{retired}`'s successor `{successor}` does not exist, so the \
+                 correction points at nothing too"
+            ));
+        }
+        if !flat.contains(retired) {
+            problems.push(format!(
+                "neither README.md nor runnable.txt cites `{retired}` any more, so \
+                 its row here is dead weight; delete the row with the last citation"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
 
 /// The happens-before predicate, strict on both sides — `normalise.py`'s, over
 /// the logical `executions.seq` instead of timestamps.
@@ -1880,11 +2117,39 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
          The count is asserted rather than printed so that a later change which \
          loses one has to say so."
     );
+    // W3b Task 7. The second figure was PRINTED and not asserted, and the
+    // coverage statement quotes it — a count written down beside a derivation,
+    // which is the defect this programme has shipped eight times. The three
+    // parts are asserted together with the total they must make.
+    let rest = with_spawned.len() - agree.len() - only_spawned.len();
+    assert_eq!(
+        (
+            agree.len(),
+            only_spawned.len(),
+            rest,
+            agree.len() + only_spawned.len() + rest
+        ),
+        (
+            SPAWNED_ENTRIES_THAT_MATCH,
+            SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
+            19,
+            41
+        ),
+        "the 41 partitioned: how many MATCH, how many agree on everything the \
+         PARENT execution holds and differ somewhere inside a sub-execution, and \
+         how many differ on something else as well. The total is asserted beside \
+         the parts because the coverage statement publishes all three"
+    );
 }
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
 const SPAWNED_ENTRIES_THAT_MATCH: usize = 16;
+
+/// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
+/// successor, and it is a different sentence: egret fills the field now, so
+/// these six differ **inside** it rather than by leaving it empty.
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 6;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -2914,13 +3179,20 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     ];
 
     // Every baselined entry that declares none of them, with what holds it.
-    // Eleven of the thirteen are already accounted for elsewhere in this file.
     // Sorted, because the derivation walks `baseline()` -- a `BTreeSet`.
     //
-    // There were fourteen. `valids/switch-impossible` is banked by the null-list
-    // fix: what held it was never a construct the executor lacked but an
-    // OVER-REFUSAL in W1's model, and this list is where that showed -- an entry
-    // no construct explains, because no construct was missing.
+    // **There are 29, and this comment said "eleven of the thirteen" until W3b
+    // Task 7's sweep.** W3b Task 5 added sixteen rows here in one commit and
+    // left the sentence above them describing the list before it did -- the
+    // same stale-twin shape the README carried, one file over. There were
+    // fourteen before that: `valids/switch-impossible` is banked by the
+    // null-list fix, and what held it was never a construct the executor lacked
+    // but an OVER-REFUSAL in W1's model. This list is where that showed -- an
+    // entry no construct explains, because no construct was missing.
+    //
+    // The count is deliberately NOT restated here as a number: the derivation
+    // below compares this table against `baseline()` element by element, so a
+    // count in a comment would be a third place for it to be wrong.
     const UNATTRIBUTED: &[(&str, &str)] = &[
         (
             "invalids/dag-invalid-subtask",

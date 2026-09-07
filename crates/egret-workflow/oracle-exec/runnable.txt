@@ -1,7 +1,13 @@
 W3a execution oracle -- how much of Kestra's own corpus runs standalone
 ========================================================================
 
-Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.
+Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13 -- a MUTABLE tag
+over a NIGHTLY build (`version=nightly`, `revision=169ca7f2...`), pulled with
+`pull_policy: always` when this golden was harvested.  So the provenance of
+every number below is `the tag as it stood`, NOT a version and NOT a digest.
+docker-compose.yml pins sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd
+since e72c83cc, which is AFTER the harvest: that digest is what a re-harvest
+would use, not what this one used.
 Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,
 core/src/test/resources/flows/{valids,invalids}, BOTH .yaml and .yml.
 
@@ -753,6 +759,7 @@ recovered inputs with no checkable assertion
     with an EXPECTED row          38
     with no checkable assertion   2
 
+=====  hand-written notes below -- `--rewrite-runnable` PRESERVES them  =====
 
 
 The one ordered pair Task 4 could not reach (W3a Task 4, `parallel` + `dag`)
@@ -1072,3 +1079,161 @@ and so adds no creation that could land out of order.  The order test's removal
 map is unchanged at 25 pairs across the same 7 entries; egret's pair population
 moved 557 -> 555, both losses being the two entries this task banked.  Task 7 is
 the next candidate.
+
+
+W3b: what this ratchet judges now, and the three lines above it retires
+======================================================================
+
+Everything above this heading is W3a's and is kept as the record of what a task
+measured on the day it ran.  W3b re-pointed the oracle at the REAL driver --
+`oracle-exec/driver.rs` starts an execution with `worker::start_execution`,
+drives it with `worker::tick`, and reads the trace back out of Postgres -- so
+three of those lines are now false.  They are named here rather than rewritten
+in place, because rewriting a record makes two chances to disagree instead of
+one.  Derived by `tests/executor.rs` on this tree.
+
+  the `W3a Task 6` block above says       measured now (W3b Task 7)
+  -----------------------------------     -------------------------------------
+  33  of the 41 differ on NOTHING BUT     16  of the 41 MATCH
+        `spawned`                          6  differ only INSIDE `spawned`
+                                          19  differ on something else as well
+  0   sub-executions whose TRACE is       35  entries produce a `spawned` at all
+        compared                         126  ordered pairs egret produces
+                                               inside `spawned` (0 before)
+  "Nothing executes                       `worker::spawn` executes it, and this
+    `Command::SpawnExecution` until        oracle drives it.  W3b Task 4 built
+    W3b/W6"                                it; W3b Task 5 put it behind the
+                                           ratchet
+
+  16 + 6 + 19 = 41, asserted beside the parts by
+  `the_sub_executions_are_compared_and_this_is_what_they_cost`.
+
+
+the denominators, re-derived
+----------------------------------------------------------------------
+
+  corpus flows                                 345
+    compared (a golden entry)                  294
+    never compared                              51
+      not-standalone                            26
+      rejections that are not evidence          23
+      traces that did not reproduce              2
+    TOTAL                                      345
+
+  golden entries                               294
+    `runs` verdict                             266
+    `refused` verdict                           28
+    TOTAL                                      294
+
+  matching                                     150
+    of the 266 `runs`                          127
+    of the 28 `refused`                         23
+  baselined                                    144
+    of the 266 `runs`                          139
+    of the 28 `refused`                          5   (over-acceptances)
+  TOTAL                                        294
+
+Printed by `every_corpus_flow_is_compared_or_excluded_by_name`, the ratchet and
+`egret_refuses_every_flow_kestra_refuses`.  `150` is `294 - 144`, and 144 is
+both the mismatching count and the size of `baseline.txt`: 0 stale, 0
+regressions, 0 banked.
+
+
+the ordered pairs: KEPT is not ASSERTED
+----------------------------------------------------------------------
+
+  kept by the harvest (identical in all 5 rounds)          1104
+    at the top level                                        877
+    inside `spawned`                                        227
+
+  of those, a change to which the ratchet REPORTS            354
+    at the top level                                        255
+    inside `spawned`                                         99
+  a change to which the ratchet does NOT report              750
+    at the top level                                        622
+    inside `spawned`                                        128
+  TOTAL                                                    1104
+
+The line is the BASELINE, not the nesting.  A pair on a baselined entry is
+compared and cannot be falsified: the entry mismatches whatever that pair says.
+W3a published `877 asserted, 227 never`, and the 227 were unreachable for a
+structural reason that is now gone -- but the replacement is not 1104.
+Measured by flipping `before` <-> `overlapping` in golden.json and reading the
+ratchet, with the file restored and its md5 verified after each run:
+
+  flipped                                    pairs   ratchet
+  every nested pair (W3a's own experiment)     227   FAILS, 6 REGRESSIONs
+  every pair on a BASELINED entry              750   green, 144 mismatching
+  every pair on a MATCHING entry               354   FAILS, 40 REGRESSIONs
+
+The first row is the one to read against W3a's: flipping all 227 used to leave
+the crate green.
+
+
+the terminal states this oracle FEEDS
+----------------------------------------------------------------------
+
+  golden run terminals fed to egret's side                     0
+    (630 under W3a's harness -- 575 `Runnable` + 55 `Loop`)
+
+Nothing on egret's side reads `golden.json`.  The golden still supplies the
+POPULATION -- which flows are driven, by id -- and `corpus.json` supplies the
+inputs `harvest.py` posted; no state comes from either.  Demonstrated, not
+argued: rewriting one run's terminal from SUCCESS to KILLED in an entry that
+MATCHES makes the ratchet report it as a REGRESSION, at the top level
+(`valids/sequential`) and inside a sub-execution (`valids/loop-serial`) alike.
+The same corruption on `valids/purge_logs_no_arguments` -- whose task type has
+no handler, so egret produces no terminal for it under any value -- leaves the
+ratchet green at 144.  That row is the control W3a's first attempt at this
+demonstration lacked, and it is why the demonstration needs an entry that
+matches.
+
+
+what a green ratchet here does NOT say
+----------------------------------------------------------------------
+
+  `egret.sql` corpus flows naming an `egret.*` type              0
+  `egret.sql` golden entries naming one                          0
+  corpus flows naming `core.log.Log` (the control)             108
+  golden entries naming it                                      97
+
+Kestra has no `egret.*` task type, so no Kestra corpus can ever reach that
+handler.  What covers it is `tests/sql_starrocks_live.rs` against a real
+StarRocks and `worker::handlers::sql`'s own unit tests -- and that suite
+SELF-SKIPS without `EGRET_TEST_STARROCKS_URL`, so a run without an engine leaves
+the handler entirely unmeasured.
+
+Durability is not in this file either.  Two workers never claiming one run, a
+kill between the handler and the commit, the reaper's two directions, and a
+committed result never being claimed again are `tests/worker.rs`'s, and the last
+of them is invisible to any corpus: a re-run that reaches the same terminal
+state produces an IDENTICAL trace.
+
+  entries differing on the happens-before relation ALONE          4
+    valids/dag  valids/if  valids/parallel-disabled-tasks  valids/full
+
+Those four reproduce every run, attempt and execution-state Kestra recorded.
+The driver finishes ONE task run per tick; Kestra's worker pool finished two
+siblings before either successor existed.  That is a RULING (see the W3b plan),
+not an accident, and W4 owns it.
+
+
+the ratchet is not deterministic, and a green run is one draw
+----------------------------------------------------------------------
+
+Found by W3b Task 7 and reproduced on this package's BASE commit, so it is
+neither this task's nor a regression.  Under machine load
+`executor_matches_golden` fails roughly one run in eight, in BOTH directions:
+
+  145 mismatching, REGRESSION          valids/parallel-nested
+    five ordered pairs against run 9 come out `overlapping` where the golden
+    and every other run say `before`
+  143 mismatching, PROGRESS NOT BANKED valids/parallel-fail-with-flowable
+    a baselined entry MATCHED: the `Sleep` normally still in flight when its
+    sibling failed the `Parallel` had already finished
+
+`worker::claim` orders by `created_at` with NO tiebreak and sibling runs of one
+flowable share it, so which one a tick takes first is arbitrary -- and the round
+a run terminates in is what the logical clock records.  W3b Task 2 recorded the
+missing tiebreak as benign.  It is not benign here.  See README.md's coverage
+statement.

@@ -160,6 +160,25 @@
 # `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`.
 # `valids/full` reaching this list settles W3b Task 1's Concern 3, which said
 # its attribution was wrong and its real cause unknown.
+#
+# W3b Task 7 re-derived the whole coverage statement and swept this file with
+# the rest. Three sentences in the W3a blocks above are FALSE now and are left
+# as the record of what each task measured on its own day: `33 of those 41 now
+# differ on NOTHING ELSE`, `the spawned hole is now 38 of 41` and `nothing
+# executes Command::SpawnExecution until W3b/W6`. It is 16 of the 41 MATCHING,
+# 6 differing only INSIDE `spawned` and 19 on more; the command has an executor
+# and this oracle drives it. The test named in the Task 6 block --
+# `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` -- was
+# renamed to `the_sub_executions_are_compared_and_this_is_what_they_cost`.
+# `oracle-exec/README.md`'s coverage statement is the single current authority
+# and carries every count with its derivation.
+#
+# It also found, and reproduced on this package's BASE commit, that the ratchet
+# is NOT deterministic: under load `executor_matches_golden` fails about one run
+# in eight, in both directions -- `valids/parallel-nested` regressing on five
+# ordered pairs, and `valids/parallel-fail-with-flowable` (immediately above)
+# MATCHING. `worker::claim` orders by `created_at` with no tiebreak and sibling
+# runs share it. A line in this file can therefore be right and still fail.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations

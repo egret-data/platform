@@ -169,6 +169,33 @@ def order_table(golden, stab):
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Everything after this line in `runnable.txt` is written by hand, and
+# `--rewrite-runnable` PRESERVES it instead of deleting it.
+#
+# W3b Task 7 measured the loss rather than assuming it: a copy of this script
+# plus the committed inputs, run with `--rewrite-runnable` in a scratch
+# directory, took `runnable.txt` from 1074 lines to 755 and removed every task
+# note appended to it -- including the sections README.md tells a reader to
+# believe over itself ("if this file and `runnable.txt` ever disagree,
+# `runnable.txt` is right"). A documented command that deletes the authoritative
+# half of the authoritative file is a landmine, not a regeneration.
+HANDWRITTEN_SENTINEL = (
+    "=====  hand-written notes below -- `--rewrite-runnable` PRESERVES them  ====="
+)
+
+# The artifact the golden was harvested from, and the honest shape of that
+# claim. `v2.0.0-rc13` is a MUTABLE tag over a nightly build (the image's own
+# labels read `version=nightly`, `revision=169ca7f2...`), and it was pulled with
+# `pull_policy: always` for the whole of W3a, W3c and W3b Tasks 1-3. The digest
+# below is what `docker-compose.yml` pins TODAY, read off the running container
+# on 2026-09-06 by W3b Task 3; the golden predates the pin, so its provenance is
+# the tag as it stood, and nothing establishes the two are the same image.
+IMAGE_TAG = "kestra/kestra:v2.0.0-rc13"
+IMAGE_DIGEST_PINNED_NOW = (
+    "sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd"
+)
+
 PROJECT = "w3oracle"
 BASE = "http://localhost:8080/api/v1"
 TENANT = "main"
@@ -2368,6 +2395,29 @@ def disposition_table(records, label, total_label="TOTAL"):
     return rows
 
 
+def handwritten_tail_of(body):
+    """The lines after [`HANDWRITTEN_SENTINEL`], or a guard failure.
+
+    A missing sentinel is refused rather than treated as "no notes": that is
+    exactly the state the file was in before W3b Task 7, and treating it as
+    empty is what made `--rewrite-runnable` delete 319 lines without a word.
+    """
+    if HANDWRITTEN_SENTINEL not in body:
+        bail("runnable.txt carries no hand-written sentinel, so a rewrite cannot "
+             "tell the generated half from the notes appended after it and would "
+             f"DELETE them. Put this line back before rewriting:\n  "
+             f"{HANDWRITTEN_SENTINEL}")
+    return body[body.index(HANDWRITTEN_SENTINEL) + 1:]
+
+
+def handwritten_tail():
+    path = os.path.join(HERE, "runnable.txt")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return handwritten_tail_of(f.read().splitlines())
+
+
 def write_runnable(out, probe, task2=None):
     check_outputs(out, probe)
     buckets = {}
@@ -2378,7 +2428,13 @@ def write_runnable(out, probe, task2=None):
     lines.append("W3a execution oracle -- how much of Kestra's own corpus runs standalone")
     lines.append("=" * 72)
     lines.append("")
-    lines.append("Measured by oracle-exec/harvest.py against kestra/kestra:v2.0.0-rc13.")
+    lines.append(f"Measured by oracle-exec/harvest.py against {IMAGE_TAG} -- a MUTABLE tag")
+    lines.append("over a NIGHTLY build (`version=nightly`, `revision=169ca7f2...`), pulled with")
+    lines.append("`pull_policy: always` when this golden was harvested.  So the provenance of")
+    lines.append("every number below is `the tag as it stood`, NOT a version and NOT a digest.")
+    lines.append(f"docker-compose.yml pins {IMAGE_DIGEST_PINNED_NOW}")
+    lines.append("since e72c83cc, which is AFTER the harvest: that digest is what a re-harvest")
+    lines.append("would use, not what this one used.")
     lines.append("Corpus: kestra @ 96893b589a02e5d5d85c722855f76c08e79085af,")
     lines.append("core/src/test/resources/flows/{valids,invalids}, BOTH .yaml and .yml.")
     lines.append("")
@@ -2572,9 +2628,25 @@ def write_runnable(out, probe, task2=None):
     lines.append(f"    with no checkable assertion   {len(set(recovered) & set(NO_ASSERTION))}")
     lines.append("")
 
-    with open(os.path.join(HERE, "runnable.txt"), "w", encoding="utf-8") as f:
+    # The hand-written half, carried across the rewrite rather than deleted.
+    tail = handwritten_tail()
+    lines.append(HANDWRITTEN_SENTINEL)
+    lines.extend(tail)
+
+    path = os.path.join(HERE, "runnable.txt")
+    with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
         f.write("\n")
+
+    # Read it back and count what survived.  A guard that only inspects the
+    # `lines` list it just built cannot fail for the reason this one exists --
+    # the failure mode is a rewrite that drops the tail on the way to disk.
+    with open(path, encoding="utf-8") as f:
+        after = handwritten_tail_of(f.read().splitlines())
+    if len(after) < len(tail):
+        bail(f"the rewrite lost the hand-written half of runnable.txt: {len(tail)} "
+             f"line(s) before, {len(after)} after. Those notes are not derivable "
+             f"from corpus.json and probe.json and nothing else holds them.")
 
 
 if __name__ == "__main__":
