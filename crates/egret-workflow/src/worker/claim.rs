@@ -963,6 +963,8 @@ pub async fn start_execution(
         source: source.to_string(),
         plan,
         seq: 0,
+        // A caller that starts an execution is the bottom of the stack.
+        depth: 0,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -1012,6 +1014,33 @@ pub(super) struct ExecutionCtx {
     /// a `settle` consumed. Carried on the context rather than read again in
     /// `persist` because the whole of one settle has to agree about it.
     pub seq: i64,
+    /// **How many nested `settle`s deep this one is** — the recursion depth on
+    /// the *stack*, not a property of the execution.
+    ///
+    /// # Why it is carried rather than derived, and it was derived first
+    ///
+    /// `spawn_one` drives a child's first settle **inside its caller's
+    /// transaction**, so a chain of child executions is a chain of nested
+    /// `settle` frames and depth in the data is depth on the stack. W6 Task 3's
+    /// fix round bounded that with a recursive CTE over the link columns — and
+    /// mutation **M9 showed the bound was worthless against the defect it was
+    /// meant to backstop**: it shared its walk with the cycle guard, so
+    /// breaking the walk broke both and the mutation aborted the test binary
+    /// with SIGABRT instead of failing an assertion.
+    ///
+    /// This is the same fix one level down: a counter that is **not derived
+    /// from anything that can be wrong**. Every entry point that begins a fresh
+    /// call stack sets it to `0` — [`start_execution`] and [`load_with`], which
+    /// is every caller that loads an execution — and the only two places that
+    /// nest a settle inside another, `spawn::spawn_one` and
+    /// `subflow::spawn_one`, set it to their caller's plus one.
+    ///
+    /// **Only `subflow::spawn_one` refuses on it.** A `Loop` cannot recurse
+    /// without bound — its body is its own parent's `tasks:` and is strictly
+    /// smaller each time — so bounding the loop spawner would be a behaviour
+    /// change to a construct that cannot reach it. Loop links are still
+    /// *counted*, because each one is a real frame.
+    pub depth: usize,
 }
 
 /// Whether [`load_with`] takes the execution's row lock.
@@ -1072,6 +1101,12 @@ pub(super) async fn load_with(
         source,
         plan,
         seq: row.get("seq"),
+        // **Zero, and that is the right answer rather than a missing one.** A
+        // caller that LOADS an execution is starting a fresh call stack: it is
+        // `apply_outcome`, `resume`, a terminal callback or `subflow::complete`,
+        // and none of them is inside another `settle`. Depth is a fact about
+        // the stack, so a row read off the database cannot carry it.
+        depth: 0,
     };
 
     let rows = sqlx::query(

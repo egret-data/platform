@@ -330,6 +330,11 @@ async fn spawn_one(
         // builds one pair table per node), so a shared counter would be a
         // number two traces read differently.
         seq: 0,
+        // **One deeper than its caller**, because the `settle` below runs
+        // inside this one. A `Loop` is never refused on it -- see
+        // `ExecutionCtx::depth` -- but its frames are real and are counted, so
+        // a `Subflow` nested inside loops is bounded by the loops it sits in.
+        depth: parent.depth + 1,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();

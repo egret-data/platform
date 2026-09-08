@@ -7639,9 +7639,35 @@ and `a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowin
 is its positive control — twelve distinct chained flows, so only the bound can
 stop them.
 
-It is also what lets the SIGABRT reproduction live in this suite: a regression
-of the cycle guard now fails an assertion instead of aborting the test binary
-and taking every other test in it along.
+### The backstop then failed its own test, and that is the second finding
+
+The bound was first written as a second column in the guard's **own** recursive
+CTE. **Mutation M9 — reverting the walk to one link kind — proved that
+worthless**: it shared the walk, so breaking the walk broke both, and the
+reproduction **aborted the test binary with SIGABRT** rather than failing an
+assertion. *A backstop derived from the thing it is backstopping is not a
+backstop.*
+
+So the bound moved onto `claim::ExecutionCtx::depth`, a counter carried **down
+the call stack** — `0` at every entry point that begins a fresh stack
+(`start_execution`, `load_with`), and `caller + 1` at the only two places that
+nest a settle inside another (`spawn::spawn_one`, `subflow::spawn_one`). It
+counts the frames, which is what a stack cares about, and it is derived from
+nothing that can be wrong. Only `subflow::spawn_one` refuses on it: a `Loop`
+cannot recurse without bound, so bounding the loop spawner would be a behaviour
+change to a construct that cannot reach it.
+
+Re-running M9 after that move is the measurement that matters — an **assertion**
+naming the runaway chain, with the process intact:
+
+```text
+left:  [… "cyl-b (loop)", "cyl-a (subflow)", "cyl-a (loop)", …]  10 executions
+right: ["cyl-a (loop)", "cyl-a (loop)", "cyl-b (subflow)", "cyl-b (loop)"]  4
+```
+
+That is what lets the SIGABRT reproduction live in this suite at all: a
+regression of the cycle guard now fails an assertion instead of aborting the
+test binary and taking every other test in it along.
 
 **What neither closes, in the words the class deserves: `spawn_one` settles the
 child inside its caller's transaction, so depth in the data is depth on the
