@@ -5310,3 +5310,76 @@ async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: s
         );
     }
 }
+
+/// **A `maxDuration` chain stops when the ORIGINAL execution's clock runs out**
+/// — the second of the two facts migration 0139 stores, driven on its own.
+///
+/// `a_replay_chain_carries_its_attempt_number_and_its_origin_offset` ends its
+/// chain on `maxAttempts`, so it cannot tell a working origin from a broken
+/// one: a policy with no attempt cap and a `maxDuration` is the only shape that
+/// reads `origin` at all.
+///
+/// `PT2S` over `PT1S` intervals gives the shortest chain with both an end and a
+/// middle: the first execution's next retry is one second in, which is inside
+/// the budget, and the second's is **two** seconds into the ORIGINAL's clock,
+/// which is not. An origin that reset per execution — or one whose sign was
+/// wrong — measures the second retry as one second again and the chain never
+/// ends.
+///
+/// The margin is about a second on both sides and does not depend on how fast
+/// this machine is: the offset is at least the interval by construction
+/// (the replay is created no earlier than its deadline), and the failure that
+/// schedules each retry happens milliseconds into its own execution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_max_duration_chain_stops_when_the_original_clock_runs_out(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let source = "id: dur\nnamespace: t\ntasks:\n  - id: a\n    \
+                  type: io.kestra.plugin.core.log.Log\n    message: hi\n    retry:\n      \
+                  behavior: CREATE_NEW_EXECUTION\n      type: constant\n      \
+                  interval: PT1S\n      maxDuration: PT2S\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        run_state(&pool, root, "a").await.as_deref(),
+        Some("RETRIED"),
+        "the first retry is one second in, well inside PT2S: {}",
+        stuck(&pool, root, "a").await
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![root]);
+    let second = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    drain_with(&pool, &reg).await;
+
+    assert_eq!(
+        run_state(&pool, second, "a").await.as_deref(),
+        Some("FAILED"),
+        "the second execution's next retry would be TWO seconds into the \
+         original's clock, which is not inside PT2S -- so it fails rather than \
+         being retried. An origin measured from its OWN creation, or one with \
+         the sign flipped, reads one second and retries: {}",
+        stuck(&pool, second, "a").await
+    );
+    assert_eq!(
+        not_before_of(&pool, second, "a").await,
+        None,
+        "and no third delay is scheduled at all"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    assert!(
+        wake(&pool, 8).await.expect("wake").is_empty(),
+        "nothing more is due"
+    );
+    assert_eq!(
+        replay_of(&pool, second).await,
+        None,
+        "and no third execution"
+    );
+}
