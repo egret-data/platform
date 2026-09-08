@@ -551,7 +551,14 @@ fn corpus_inputs(corpus_id: &str) -> serde_json::Value {
 /// silently corrected because it is the exact failure this control exists to
 /// catch — a scanner that under-reads looks like a true zero.
 ///
-/// Totals asserted beside the parts, both populations.
+/// **W4 Task 5's population is folded in** rather than left as the shell
+/// pipeline the coverage statement used to quote for it: no corpus flow names a
+/// script, container, shell or command task of *any* vendor either, because
+/// Kestra keeps those in plugin jars this corpus never reaches. The filter that
+/// answers that has a positive control of its own, since a corpus-wide zero
+/// from a predicate that always says `false` is not a measurement.
+///
+/// Totals asserted beside the parts, all three populations.
 #[test]
 fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     fn task_types(source: &str) -> Vec<String> {
@@ -565,14 +572,55 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
             .collect()
     }
 
+    // W4 Task 5's population, folded in here rather than left in a shell
+    // pipeline the coverage statement quoted: Kestra's OWN script, shell and
+    // container tasks. `egret.container` and `egret.script.python` are covered
+    // by the `egret.` prefix below — this is the other half of the sentence,
+    // that no Kestra flow in this corpus runs a process either, because those
+    // plugins live in jars (`plugin-script-*`, `plugin-docker`) the corpus
+    // never reaches. Same control, same reason.
+    fn is_process_task(t: &str) -> bool {
+        let t = t.to_ascii_lowercase();
+        [
+            "script",
+            "container",
+            "shell",
+            "command",
+            "docker",
+            "bash",
+            "python",
+            "node",
+        ]
+        .iter()
+        .any(|needle| t.contains(needle))
+    }
+
+    // The predicate's own positive control, because a corpus-wide zero from a
+    // predicate that answers `false` to everything is not a measurement. The
+    // 108 `Log` flows control the SCANNER; this controls the FILTER, and they
+    // are different instruments — the `egret.` prefix above has the same shape
+    // and the same need, which its `egret.container` row supplies.
+    assert!(
+        is_process_task("io.kestra.plugin.scripts.python.Commands")
+            && is_process_task("io.kestra.plugin.docker.Run")
+            && is_process_task("egret.script.python")
+            && is_process_task("egret.container")
+            && !is_process_task("io.kestra.plugin.core.log.Log"),
+        "the process-task filter must be able to say yes, and must not say it \
+         to the control's own type"
+    );
+
     let corpus: Vec<CorpusEntry> = corpus();
     let mut corpus_total = 0usize;
-    let (mut corpus_egret, mut corpus_log) = (0usize, 0usize);
+    let (mut corpus_egret, mut corpus_log, mut corpus_process) = (0usize, 0usize, 0usize);
     for entry in &corpus {
         corpus_total += 1;
         let types = task_types(&corpus_source(&entry.id));
         if types.iter().any(|t| t.starts_with("egret.")) {
             corpus_egret += 1;
+        }
+        if types.iter().any(|t| is_process_task(t)) {
+            corpus_process += 1;
         }
         if types.iter().any(|t| t == "io.kestra.plugin.core.log.Log") {
             corpus_log += 1;
@@ -593,9 +641,10 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     }
 
     assert_eq!(
-        (corpus_total, corpus_egret, corpus_log),
-        (345, 0, 108),
-        "every corpus flow, how many name an `egret.*` task type, and the control: \
+        (corpus_total, corpus_egret, corpus_process, corpus_log),
+        (345, 0, 0, 108),
+        "every corpus flow, how many name an `egret.*` task type, how many name \
+         a script/container/shell/command type of ANY vendor, and the control: \
          how many name `core.log.Log`"
     );
     assert_eq!(
@@ -4178,7 +4227,23 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         let flow = egret_workflow::spec::parse(&corpus_source(id))
             .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
         let mut found = Vec::new();
-        for task in flow.tasks.iter().chain(flow.errors.iter()) {
+        // **All four of `Flow`'s task lists.** This walked `tasks:` and
+        // `errors:` only, which was sound today and derived nothing: W4 Task 3
+        // wrote out the argument for reading all four in
+        // `the_kill_path_cannot_move_the_ratchet_…` — `finally:` and
+        // `afterExecution:` are lists `build_plan` does not name, so a
+        // `timeout:` there could not reach a claimable run — and then this test,
+        // written one task earlier, was left depending on that unrelated file.
+        // The count is unchanged at 4, which is the point: a walk that agrees
+        // with the wider one is worth having, and one that only happens to
+        // agree is not.
+        for task in flow
+            .tasks
+            .iter()
+            .chain(flow.errors.iter())
+            .chain(flow.finally_.iter())
+            .chain(flow.after_execution.iter())
+        {
             walk(task, &mut found);
         }
         if found.is_empty() {
@@ -4256,5 +4321,203 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         "exactly one baselined `timeout:` is on a task this worker has a \
          handler for, and it is an HOUR on a `core.log.Log` — a budget that \
          handler cannot outrun, so the entry cannot move either"
+    );
+}
+
+// --------------------------------------------------------------------------
+// W4 Task 6 — the population `claim::wake` could ever have moved
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the retry declarations this oracle carries, and
+/// which of them the waker could ever reach.**
+///
+/// W4's spec and brief said *"twelve baselined entries declare a `retry:`"*;
+/// W4 Task 1 re-derived **14** and could not reconstruct 12 from any grouping.
+/// The coverage statement then quoted the 14 with the words *"which is derived
+/// rather than assumed"* — and **nothing derived it**: no test in this crate
+/// counted a `retry:` declaration until this one. That is the shape this
+/// programme keeps shipping, a number beside a derivation that does not exist,
+/// so the count lives here now and the statement cites it.
+///
+/// Three splits, each with the total asserted beside its parts:
+///
+/// 1. **Over the whole golden**, because the coverage question is not a
+///    question about `baseline.txt`. A change on a *matching* entry is
+///    reportable; a change on a baselined one is not, whatever it says — the
+///    argument *The ordered pairs: kept is not asserted* makes about pairs,
+///    which holds of every field. So the retry population splits into a half
+///    the ratchet speaks for and a half it cannot, and only the second half is
+///    the waker's.
+/// 2. **By `behavior:`**, because `CREATE_NEW_EXECUTION` never writes a
+///    `not_before` at all: `executor::retry::scan`'s `CreateNewExecution` arm
+///    emits `SetRunState`/`SetExecutionState` and no `ScheduleRetry`, so no run
+///    of those entries ever reaches `RETRYING` and no waker could have touched
+///    one. The default is `RETRY_FAILED_TASK` (`RetryBehavior`'s `#[default]`,
+///    from `AbstractRetry`'s own), so this is read from the parsed model rather
+///    than from the presence of the key — seven of the ten never write it.
+/// 3. **Flow-level against task-level**, because `Flow::retry` is the same
+///    `AbstractRetry` type and a walk over `tasks:` alone would miss the five
+///    entries that declare it there.
+///
+/// What the ratchet says about the waker, after all that, is **nothing** — see
+/// the coverage statement's item 11 for the mechanism and its measurement.
+#[test]
+fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
+    use egret_workflow::models::{Retry, RetryBehavior};
+
+    fn behavior(r: &Retry) -> RetryBehavior {
+        match r {
+            Retry::Constant { common, .. }
+            | Retry::Exponential { common, .. }
+            | Retry::Random { common, .. } => common.behavior.clone(),
+        }
+    }
+
+    fn walk(task: &egret_workflow::models::Task, out: &mut Vec<RetryBehavior>) {
+        if let Some(r) = &task.retry {
+            out.push(behavior(r));
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, out);
+        }
+    }
+
+    let baseline = baseline();
+    // `declaring[id] = (behaviours, flow_level)`.
+    let mut declaring: BTreeMap<String, (Vec<RetryBehavior>, bool)> = BTreeMap::new();
+    let (mut without, mut unparseable) = (0usize, 0usize);
+    let mut total = 0usize;
+
+    for entry in golden() {
+        total += 1;
+        // A `refused` entry can fail to parse — that is what egret refusing it
+        // sometimes means — and an entry this walk cannot read is counted
+        // rather than skipped, so the instrument's own blind spot is a number
+        // on this page instead of a silent subtraction.
+        let Ok(flow) = egret_workflow::spec::parse(&corpus_source(&entry.id)) else {
+            unparseable += 1;
+            continue;
+        };
+        let mut found: Vec<RetryBehavior> = Vec::new();
+        // **All four of `Flow`'s task lists**, for the reason
+        // `the_kill_path_cannot_move_the_ratchet_…` gives: `finally:` and
+        // `afterExecution:` are lists a two-list walk silently drops.
+        for task in flow
+            .tasks
+            .iter()
+            .chain(flow.errors.iter())
+            .chain(flow.finally_.iter())
+            .chain(flow.after_execution.iter())
+        {
+            walk(task, &mut found);
+        }
+        let flow_level = flow.retry.is_some();
+        if let Some(r) = &flow.retry {
+            found.push(behavior(r));
+        }
+        if found.is_empty() {
+            without += 1;
+        } else {
+            declaring.insert(entry.id.clone(), (found, flow_level));
+        }
+    }
+
+    assert_eq!(
+        (declaring.len(), without, unparseable, total),
+        (25, 264, 5, 294),
+        "every golden entry either declares a `retry:`, does not, or cannot be \
+         parsed at all; the parts and the total: {:#?}",
+        declaring.keys().collect::<Vec<_>>()
+    );
+
+    let (baselined, matching): (Vec<&String>, Vec<&String>) = declaring
+        .keys()
+        .partition(|id| baseline.contains(id.as_str()));
+    assert_eq!(
+        (baselined.len(), matching.len(), declaring.len()),
+        (14, 11, 25),
+        "the split the coverage question turns on: a `retry:` on a MATCHING \
+         entry is one the ratchet would report a change to, and a `retry:` on \
+         a baselined entry is one it would not. matching: {matching:?}"
+    );
+    assert_eq!(
+        baselined.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        vec![
+            "valids/allow-failure-with-retry",
+            "valids/full",
+            "valids/retry-failed-flow-duration",
+            "valids/retry-flowable-parallel",
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+            "valids/retry-subflow",
+            "valids/retry-success",
+            "valids/retry-with-flowable-errors",
+            "valids/subflow-parent-retry",
+            "valids/task-allow-failure-runnable",
+            "valids/task-allow-warning-runnable",
+        ],
+        "the fourteen, by name. W4's spec said twelve"
+    );
+
+    // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
+    // ever writes a `not_before`, so only those entries could ever have stalled
+    // on the missing waker.
+    let mut new_execution: Vec<&str> = Vec::new();
+    let mut failed_task: Vec<&str> = Vec::new();
+    for id in &baselined {
+        let (behaviours, _) = &declaring[*id];
+        match behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            true => new_execution.push(id),
+            false => failed_task.push(id),
+        }
+    }
+    assert_eq!(
+        (new_execution.len(), failed_task.len(), baselined.len()),
+        (4, 10, 14),
+        "four `CREATE_NEW_EXECUTION` entries write no `not_before` at all, so \
+         the waker's whole baselined population is the other ten"
+    );
+    assert_eq!(
+        new_execution,
+        vec![
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+        ],
+        "and they are these four"
+    );
+
+    // **The half the ratchet DOES speak for.** A `retry:` on a matching entry
+    // is one a change to would be reported, so retrying itself — `ScheduleRetry`,
+    // the `RETRYING` state, `reopen_due` putting the run back — is covered here.
+    // The waker is the part that is not, and these two counts are what keep the
+    // two claims apart.
+    let mut matching_failed_task: Vec<&str> = Vec::new();
+    for id in &matching {
+        let (behaviours, _) = &declaring[*id];
+        if !behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            matching_failed_task.push(id);
+        }
+    }
+    assert_eq!(
+        (matching_failed_task.len(), matching.len()),
+        (11, 11),
+        "every matching entry that declares a `retry:` declares the behaviour          that writes a `not_before`, so all eleven are entries whose retry the          ratchet would report a change to: {matching_failed_task:?}"
+    );
+
+    // Flow-level against task-level, over the whole 25: a walk over `tasks:`
+    // alone would have reported a smaller population and looked right.
+    let flow_level: Vec<&String> = declaring
+        .iter()
+        .filter(|(_, (_, at_flow_level))| *at_flow_level)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        flow_level.len(),
+        5,
+        "golden entries whose `retry:` is the FLOW's: {flow_level:?}"
     );
 }
