@@ -1854,6 +1854,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **The staging directory is private and unguessable.**
+    ///
+    /// Review Minor 3, and the leg that makes it more than a disclosure issue:
+    /// the name used to be a pure function of `(run_id, claimed_at)` in a
+    /// world-writable directory, so it could be pre-created as a symlink to
+    /// somewhere else and `create_dir_all` would follow it — putting every
+    /// `docker cp` destination under an attacker's path.
+    #[test]
+    fn the_staging_directory_is_private_and_not_predictable() {
+        let task = leased(1_700_000_000);
+        let a = tempdir(&task).expect("staging");
+        let b = tempdir(&task).expect("staging");
+        assert_ne!(
+            a, b,
+            "two runs of the SAME task must not agree on the path -- a guessable \
+             name in a world-writable directory can be pre-created as a symlink"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&a).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o700,
+                "the author's rendered `script:` is written here, so it is not \
+                 world-readable: got {mode:o}"
+            );
+        }
+
+        // And an existing path is an error rather than a silent reuse.
+        assert!(
+            std::fs::DirBuilder::new().create(&a).is_err(),
+            "`create_dir` must refuse a path that is already there"
+        );
+
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
     /// The daemon's absence is egret's outage; anything else is the author's
     /// flow. The split is a substring test on stderr, so it is asserted on the
     /// artifact's own three strings.
