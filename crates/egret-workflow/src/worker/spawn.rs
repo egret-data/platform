@@ -333,7 +333,10 @@ async fn spawn_one(
         // **One deeper than its caller**, because the `settle` below runs
         // inside this one. A `Loop` is never refused on it -- see
         // `ExecutionCtx::depth` -- but its frames are real and are counted, so
-        // a `Subflow` nested inside loops is bounded by the loops it sits in.
+        // a `Subflow` nested inside loops carries the loops it sits in toward
+        // `subflow::MAX_SPAWN_CHAIN`. **That is not a bound on the loop
+        // nesting itself**, which nothing refuses: see that constant's
+        // "What neither bound closes".
         depth: parent.depth + 1,
     };
     let empty = ExecutionState::new(&ctx.plan);
@@ -396,10 +399,22 @@ pub(super) async fn on_execution_terminal(
 ) -> Result<()> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
-    // up the chain. The chain cannot cycle — `parent_execution_id` always names
-    // a row that existed before this one was inserted — so there is no depth
-    // bound here, for the reason `flowable::descend` gives for not having one
-    // either: a guard nobody could ever see fire is a guard nobody has seen.
+    // up the chain, and each level is a nested `settle` inside the caller's
+    // transaction. The chain cannot **cycle** — `parent_execution_id` always
+    // names a row that existed before this one was inserted — but it can be
+    // arbitrarily **deep**, and nothing here refuses it.
+    //
+    // **The comment that used to sit here cited `flowable::descend`'s reason
+    // for having no depth guard, and it does not transfer.** `descend`'s
+    // recursion is bounded by `state.runs.len()` for any plan; this one is
+    // bounded only by how deeply an author nested `Loop`s, which `build_plan`
+    // caps at `plan::MAX_TASK_DEPTH` = 48. Measured: 12 nested one-value
+    // `Loop`s run at `ctx.depth = 12` with no `Subflow` anywhere, and **47
+    // abort the process with a stack overflow** — so this is not a guard
+    // nobody could see fire, it is an absent guard on a reachable recursion.
+    // It predates W6 (this recursion is W3b `ad93ef2d`, the cap is W3a
+    // `6f046e57`) and it is recorded with its owner and with what the artifact
+    // does instead on `subflow::MAX_SPAWN_CHAIN`.
     Box::pin(on_execution_terminal_inner(
         conn,
         execution_id,

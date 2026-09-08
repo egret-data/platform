@@ -158,6 +158,25 @@ use crate::runners::{render_str, RenderContext};
 /// control, because a test that exercises only the descent cannot see a defect
 /// in the ascent.
 ///
+/// # What 8 means once the ascent is counted, which is not "8 subflow links"
+///
+/// It is **8 nested `settle` frames**, and a completing chain spends more than
+/// one per link. A plain descent still gets 8 links — each spawn is one frame.
+/// But a flow that spawns a subflow, *waits for it to finish*, and then spawns
+/// another **in the same execution** costs two frames per subflow: the
+/// `complete` that re-enters the parent's settle, and the spawn it then makes.
+/// So ~3-4 such subflows reach the bound where round 1's counter would have
+/// said 8.
+///
+/// **That is honest rather than a regression**, and the distinction is where
+/// the child terminates. A child that runs a real task needs a worker tick, and
+/// the tick enters at [`claim::Stack::Fresh`] with nothing of this crate's
+/// below it — a genuinely fresh stack, and the counter is right to restart. The
+/// frames only pile up when children terminate **inside** the caller's
+/// transaction, which is exactly when the stack really is that deep. Nothing in
+/// the corpus is near it (deepest chain: 2 links) and the ratchet is unmoved at
+/// 131 with the same twelve, which is what says so.
+///
 /// # What neither bound closes, measured on the artifact rather than assumed
 ///
 /// **A nested `Loop` reaches this same recursion with no `Subflow` anywhere,

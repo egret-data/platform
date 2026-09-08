@@ -4202,6 +4202,16 @@ async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::P
 ///
 /// The chain is `dep-0 → dep-1 → … → dep-11`, twelve DISTINCT flows, so the
 /// cycle guard has nothing to say about it and only the bound can stop it.
+///
+/// **This covers the DESCENT only, and that is a limit of it rather than a
+/// property of the bound.** Its chain never completes — it runs straight down
+/// through nested `spawn_one`s and hits the bound before any child terminates —
+/// so it could not see fix round 2's Critical, where the counter was reset on
+/// every re-entrant load and a *completing* chain walked past the bound into a
+/// stack overflow. The ascent is
+/// [`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter`], and
+/// the two are a pair: mutation M10 (the re-entrant loads say `Stack::Fresh`
+/// again) kills that one and leaves this one green.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing(
     pool: sqlx::PgPool,
