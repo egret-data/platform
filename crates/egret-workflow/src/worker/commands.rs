@@ -421,22 +421,29 @@ pub(crate) fn ingest_line(
     // The marker is consumed as an output AND logged, which is what
     // `DefaultLogConsumer` does: it calls `parseOut` and then logs the line
     // either way.
-    if result.failure.is_none() {
-        if let Some(outputs) = parse_marker(line) {
-            for (k, v) in outputs {
-                *vars_bytes += k.len() + v.to_string().len();
-                if *vars_bytes > max_vars_bytes {
-                    result.vars.clear();
-                    result.failure = Some(format!(
-                        "the command emitted more than {max_vars_bytes} bytes of \
-                         `::{{\"outputs\": …}}::` markers, and every byte of that would be \
-                         stored on the task run and re-rendered by every later task in \
-                         the execution"
-                    ));
-                    break;
-                }
-                result.vars.insert(k, v);
+    //
+    // **There is deliberately no `if result.failure.is_none()` guard around
+    // this**, and fix round 1's mutation round is why. There was one; mutating
+    // it to `if true` was killed by **nothing** in the whole crate, and the
+    // reason is that it could not be: `vars_bytes` only ever grows, so once the
+    // cap has fired every later marker re-fires it on its first key and clears
+    // the map again before inserting anything. The guard was unobservable, so
+    // it went — a guard nobody can see fail is a guard nobody has seen, and
+    // this package has refused ten of them.
+    if let Some(outputs) = parse_marker(line) {
+        for (k, v) in outputs {
+            *vars_bytes += k.len() + v.to_string().len();
+            if *vars_bytes > max_vars_bytes {
+                result.vars.clear();
+                result.failure = Some(format!(
+                    "the command emitted more than {max_vars_bytes} bytes of \
+                     `::{{\"outputs\": …}}::` markers, and every byte of that would be \
+                     stored on the task run and re-rendered by every later task in \
+                     the execution"
+                ));
+                break;
             }
+            result.vars.insert(k, v);
         }
     }
 
