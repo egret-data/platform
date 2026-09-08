@@ -186,9 +186,16 @@ flow concurrency, `disabled:`, `ExecutionUpdatableTask` and **`Subflow`** — th
 strand baselined entries with no owner. See *What Task 3 had to change, and what
 it banked*.
 
-Every number below is a number `harvest.py` prints. If this file and
-`runnable.txt` ever disagree, `runnable.txt` is right and this file is stale —
-it has been wrong that way once already.
+Every number **in this harvest section** is a number `harvest.py` prints. If this
+file and `runnable.txt` ever disagree, `runnable.txt` is right and this file is
+stale — it has been wrong that way once already.
+
+*(Scoped by the whole-branch review's Important 3 sweep. It used to say "every
+number **below**", written when this section was the end of the file; six
+sections have been appended under it since, and almost none of their numbers
+comes from `harvest.py`. Same defect as the provenance rule in the coverage
+statement, found by asking formulation 3 of the RULES rather than of the
+figures: a rule that says "below" ages every time somebody appends.)*
 
 ## Requirements
 
@@ -5427,14 +5434,34 @@ runs this worker.
 
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
-retires* at the end. Every **count** below is printed by a named test in
-`crates/egret-workflow/tests/executor.rs` on every run, so none of them is a
-number written down beside a derivation. Three things here are not counts and
-say so where they appear: the **426** fed terminals, which is history and whose
-code was deleted with the harness; the provenance, which is a fact about a
-docker tag; and the two **experiments** — flipping ordered pairs and corrupting a
-terminal — which are recorded with their method and their control so they can be
-re-run rather than believed.
+retires* at the end.
+
+**The provenance rule below used to be stated for the whole statement and was
+itself stale — the whole-branch review's Important 3.** It read: *"Every **count**
+below is printed by a named test in `crates/egret-workflow/tests/executor.rs` on
+every run, so none of them is a number written down beside a derivation"*, with
+three named exceptions. That was true when W3b wrote it and **the W4 section
+appended underneath it falsified it**, because W4 added figures that no test
+compares. A stale *rule*, which is why five sweeps for stale *figures* went past
+it: they were looking for numbers that had drifted, and this is a sentence that
+stopped being true without any number changing.
+
+So the rule is restated per family rather than for everything:
+
+| family | compared by a running program? |
+|---|---|
+| the ratchet/corpus **counts** (143, 345, 294, 266, …) | **yes** — a named test in `tests/executor.rs` on every run |
+| the **426** fed terminals | no — history, and its code was deleted with the harness |
+| the **provenance** | no — a fact about a docker tag |
+| the two **experiments** (flipped pairs, corrupted terminal) | no — recorded with method and control so they can be re-run |
+| W4's instrumented **`wake` / `guard`** figures | **no** — measured once, under instrumentation that is not in the tree |
+| W4's prototype **143 → 140** | **no**, and `claim.rs` says so itself: not reproducible from this checkout |
+| W4 Task 5's **29-row mutation table** | **no** — derived by a harness in a scratch directory, not by anything `cargo test` runs |
+
+A figure is safe only if a running program compares it. Everything in rows 2–7
+is a figure a reader must treat as a measurement someone took, not as a fact the
+suite maintains — which is the honest statement, and the one that survives the
+next section being appended.
 
 ### Provenance, stated as narrowly as it is true
 
