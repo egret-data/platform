@@ -372,7 +372,7 @@ W7 — a screen inventory is not a UX review.
 | **W3b** Durable executor | claim loops; reaper; `SpawnExecution`; handlers `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; the oracle re-pointed at the real driver | W3a |
 | **W4** Runner & container | the `RETRYING` waker, task-level `timeout:`, the kill path — the three holes W3b handed forward, **worth ~0 baselined entries, not the 20 this row first claimed** (that figure was a union of three declaration greps; see the W4 spec §1.1); then `TaskCommands`, `egret.container`, `egret.script.python`, which reach ZERO corpus entries and carry their own tests. **`egret.python` is NOT W4's** — §6.4 gives that name to the notebook `KernelLauncher`, and `TASK_TYPES` has held it since W1 | W3b |
 | **W5** Kestra plugin host | the JVM image, `ShimRunContext`, `StorageInterface` bridge, `kestra.<FQCN>` dispatch, plugin jar resolution | W4 |
-| **W6** Triggers & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
+| **W6** Triggers & subflow | `subflow` + `CREATE_NEW_EXECUTION` replay (**13–15 baselined entries, one migration**); then cron, webhook, flow trigger and backfill — which reach **0** baselined entries and carry their own tests. Written before the corpus was measured: four of those five words are worth **zero**, and backfill has **no live declaration in 345 flows**. See the W6 spec §1 | W3b |
 | **W7** Frontend | Workflows nav group; YAML editor; read-only topology; execution gantt and logs | W1, W3b |
 | **W8** Advanced semantics | `pause`/`resume`, `allowFailure`, `loopUntil`, concurrency limits, `WorkingDirectory`, labels | W3b |
 | **W9** Remaining Kestra infrastructure | KV store, namespace files, internal storage, outputs | W4 |

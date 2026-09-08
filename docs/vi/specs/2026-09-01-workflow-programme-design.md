@@ -365,7 +365,7 @@ W7 — một bản kiểm kê màn hình không phải một cuộc khảo sát 
 | **W3b** Executor bền vững | vòng claim; reaper; `SpawnExecution`; handler `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; nối oracle vào driver thật | W3a |
 | **W4** Runner & container | bộ đánh thức `RETRYING`, `timeout:` cấp task, đường kill — ba lỗ W3b chuyển giao, **đáng ~0 mục baseline, KHÔNG phải 20 như dòng này viết ban đầu** (con số ấy là hợp của ba lần grep khai báo; xem W4 spec §1.1); rồi mới tới `TaskCommands`, `egret.container`, `egret.script.python`, vốn chạm KHÔNG mục corpus nào và có test riêng. **`egret.python` KHÔNG phải của W4** — §6.4 giao tên ấy cho `KernelLauncher` của notebook, và `TASK_TYPES` giữ nó từ W1 | W3b |
 | **W5** Kestra plugin host | image JVM, `ShimRunContext`, cầu `StorageInterface`, điều phối `kestra.<FQCN>`, giải jar plugin | W4 |
-| **W6** Trigger & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
+| **W6** Trigger & subflow | `subflow` + replay `CREATE_NEW_EXECUTION` (**13–15 mục baseline, chung một migration**); rồi mới cron, webhook, flow trigger và backfill — vốn chạm **0** mục baseline và có test riêng. Dòng này viết TRƯỚC khi corpus được đo: bốn trong năm chữ ấy đáng **KHÔNG** mục nào, và backfill **không có lấy một dòng khai báo sống trong 345 flow**. Xem W6 spec §1 | W3b |
 | **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution | W1, W3b |
 | **W8** Ngữ nghĩa nâng cao | `pause`/`resume`, `allowFailure`, `loopUntil`, concurrency limit, `WorkingDirectory`, label | W3b |
 | **W9** Hạ tầng Kestra còn lại | KV store, namespace file, internal storage, output | W4 |
