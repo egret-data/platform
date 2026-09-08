@@ -1270,18 +1270,21 @@ It is also a CHOICE, not a tidy-up: under `run_ix DESC` this oracle banks
 executor's own creation order, not because it banks more.
 
 
-W4: the runner, and the five numbers above it retires
+W4: the runner, and the six numbers above it retires
 ======================================================================
 
 Everything above this heading is W3a's and W3b's, and is kept as the record of
 what a task measured on the day it ran.  W4 built the worker's missing halves --
 a waker, a task-level timeout, a kill path, a container runner -- and ruled on
 the transaction boundary.  THE RATCHET DID NOT MOVE ONCE: 143 mismatching before
-Task 1 and 143 at this commit, measured before and after by every task.  Five
+Task 1 and 143 at this commit, measured before and after by every task.  SIX
 lines above are now false.  FOUR of them for one reason -- the whole-branch
 review's fix round banked `valids/replay-loop` after W3b Task 7 wrote them, and
-a bank re-derives the tables it appears in and nothing else -- and the fifth
-because W4 TOOK the ruling that line hands forward.  Named here rather than
+a bank re-derives the tables it appears in and nothing else.  The fifth because
+W4 TOOK the ruling that line hands forward.  The sixth -- the 630 fed terminals
+-- because the coverage statement corrected it and nothing propagated: it was
+found by the RE-REVIEW of this task's second fix round, nine lines from a figure
+this same sweep had already superseded.  Named here rather than
 rewritten in place, which is the convention W3b used on W3a's block.
 
   the W3b blocks above say                measured now (W4 Task 6, on this tree)
@@ -1305,6 +1308,18 @@ rewritten in place, which is the convention W3b used on W3a's block.
   19 differ on something else             16 differ on something else
 
   corruption control: "green at 144"      green at 143
+
+  "the terminal states this oracle        426.  630 is `575 fed + 55 spawner`,
+    FEEDS": 630 under W3a's harness         the WHOLE of those two buckets, and
+    (575 `Runnable` + 55 `Loop`)            189 of the 575 and 15 of the 55 sit
+                                            inside a sub-execution egret never
+                                            created -- nothing was supplied to
+                                            them and nothing compared about
+                                            them.  575-189=386, 55-15=40, 386+
+                                            40=426.  W4 Task 6's sweep opened
+                                            that very section to fix the `144`
+                                            nine lines below this and left this
+                                            one standing.
 
   "That is a RULING ... and W4 owns it"   W4 TOOK it -- Task 4 ruled that one
                                           handler result stays one TRANSACTION.

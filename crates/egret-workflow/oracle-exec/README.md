@@ -5407,13 +5407,17 @@ found over-claiming by 227 once.
 not moved at any point in the package: **143 before Task 1 and 143 at this
 commit**. Nothing here changed because of what W4 shipped — three holes were
 closed and none of them is visible to this corpus, for three *different* reasons
-— so the re-derivation's whole yield is a sweep. It ran **four times**, and each
+— so the re-derivation's whole yield is a sweep. It ran **five times**, and each
 pass found what the one before it missed: eight figures in this file and five in
 `runnable.txt`; then a fourteenth **inside the note that retires the other
-thirteen**; then five more in `src/`, `tests/` and `oracle-exec/driver.rs`, once
-the predicate was corrected from *"look where no test asserts"* to **"a value a
-test compares is safe; prose beside one is not"**. Three of the four passes were
-prompted by review rather than by the sweep noticing its own gap. They
+thirteen**; then five more in `src/`, `tests/` and `oracle-exec/driver.rs`; then
+two — a fifteenth and its twin — **in this section's own preamble and in
+`runnable.txt` nine lines from a figure the same sweep had already superseded**.
+Four of the five passes were prompted by review rather than by the sweep
+noticing its own gap, and each of the five scoped itself by *surface* when the
+property is about *mechanism*. **The rule that would have caught all seventeen
+is in *The rule this sweep ends with* at the end, and it is the third
+formulation, not the first.** They
 are in *The stale twins W4 retires* at the end, with what each is now. The one
 number that moved in this package's own arithmetic is the count of things this
 statement does not prove: it was thirteen and it is seventeen — and the
@@ -5426,7 +5430,7 @@ and the disagreements are listed by name in *The stale twins this statement
 retires* at the end. Every **count** below is printed by a named test in
 `crates/egret-workflow/tests/executor.rs` on every run, so none of them is a
 number written down beside a derivation. Three things here are not counts and
-say so where they appear: the **630** fed terminals, which is history and whose
+say so where they appear: the **426** fed terminals, which is history and whose
 code was deleted with the harness; the provenance, which is a fact about a
 docker tag; and the two **experiments** — flipping ordered pairs and corrupting a
 terminal — which are recorded with their method and their control so they can be
@@ -6568,7 +6572,20 @@ retired being used again in the same branch:
 
 And one number this statement itself published wrong: **630** fed terminals,
 where 204 of them are inside sub-executions egret never created and nothing was
-supplied to them. It is **426**, derived above from this file's own table.
+supplied to them. It is **426**, derived above from this file's own table
+(`575 − 189 = 386`, `55 − 15 = 40`, `386 + 40 = 426`) — **and this statement's
+own preamble went on saying 630 for three more commits**, four lines under the
+sentence claiming this section outranks every other. The re-review of W4 Task
+6's second fix round found it, together with its twin in `runnable.txt`.
+
+**Two sites still read 630 and are correct, so a sixth pass does not need to
+touch them**, and the distinction is the whole of the correction: *What the
+oracle feeds in* (whose blockquote already opens *"nothing in this section is
+current"*) and W3b Task 5's before/after table both count the **gross size of
+the two buckets** — 575 `Runnable` + 55 `Loop` — which is 630 and always was.
+**630 is wrong only as a count of terminals *fed***, which is what the preamble
+called it. A quantity with two readings needs the reading named beside the
+number, not the number changed everywhere it appears.
 
 #### The stale twins W4 retires, and the class one correction did not close
 
@@ -6619,23 +6636,52 @@ own convention put there twice already: rewriting a record makes two chances to
 disagree instead of one, and those blocks are headed with the task that measured
 them.
 
-#### The fourth pass, and the predicate that made it find anything
+#### The rule this sweep ends with, and the two it had to discard to get there
 
-The three passes above ran on one rule: *every figure a test asserts was already
-right, so look where no test asserts.* W4 Task 6's review falsified half of it
-with a single site — `tests/executor.rs` carried a **fourth** copy of the flip
-table (750 / 354 / 144 / 6 / 40) in a doc comment, and the assertion **message**
-under `(622, 125, 747)` said *"flipping all 750 … at 144"*. A message is not
-asserted by anything; it is prose that happens to live inside an `assert_eq!`.
-So the rule is narrower than it was written:
+**Read this first if you are sweeping.** Three formulations were tried, each
+falsified by the pass after it, and only the third survives:
 
-> **A value a test *compares* is safe. Prose that merely sits beside one is not
-> — a doc comment, an assertion message, a module header — and being inside a
-> test file buys it nothing.**
+| # | formulation | what falsified it |
+|---|---|---|
+| 1 | *every figure a test asserts was already right, so look where no test asserts* | `tests/executor.rs` carried a **fourth** copy of the flip table in a doc comment, and the assertion **message** under `(622, 125, 747)` read *"flipping all 750 … at 144"*. A message is not asserted by anything; it is prose that happens to live inside an `assert_eq!` |
+| 2 | *a value a test **compares** is safe; prose that merely sits **beside** one is not — being inside a test file buys it nothing* | closer, and still too narrow: **every example in it is adjacent to a derivation**, and the two figures the re-review then found are adjacent to nothing. The `630` at the top of this statement sits beside no test at all, and the `630` in `runnable.txt` sits in a file that runs nothing |
+| **3** | **a figure is safe only if a running program compares it. Every other figure — in any file, at any distance from any derivation — is stale until re-derived.** | nothing yet. Checked backwards against every miss this package produced: the thirteen, the fourteenth inside the note retiring them, the two in the flip-table copy, the fourth pass's five, and the re-review's two. It catches all of them |
 
-Run again under that predicate, over every doc comment and string literal in
-`src/`, `tests/` and `oracle-exec/driver.rs`, a fourth pass found **five more**,
-in surfaces the first three never read:
+Formulations 1 and 2 are recorded rather than deleted because **the way they
+failed is the finding**. Both are *locality* rules — they ask where a figure
+sits. The third is a *provenance* rule: it asks whether anything recomputes the
+figure when the code runs. A locality rule cannot be applied to a file nobody
+has opened, which is exactly where the last two hid.
+
+#### Five passes, and every one scoped by surface when the predicate is about mechanism
+
+This is the structural finding, and it explains the sequence better than any of
+the individual misses. **Five sweeps have now run over this document, and each
+one missed what the next found:**
+
+| pass | scope it chose | what the next pass found |
+|---|---|---|
+| 1 (W3b Task 7) | this README | `runnable.txt`'s copies |
+| 2 (W4 Task 6) | this README + `runnable.txt` | a row **inside its own correction table**, and the specs in two languages |
+| 3 (the review) | the files the task edited | four surfaces it had not read: `src/`, `tests/`, `driver.rs`, the plan |
+| 4 (this task, corrected predicate) | `src/`, `tests/`, `driver.rs` prose | the statement's **own preamble**, and `runnable.txt` nine lines from a figure the same sweep had superseded |
+| 5 (the re-review) | those two | *(nothing yet — and the rule above is what a sixth should use instead of a sixth surface)* |
+
+**Every one of them, the reviews included, scoped by surface — and the predicate
+is about mechanism.** "Sweep this file" is a question about where somebody
+happened to type a number; "is anything recomputing this figure?" is a question
+about the number. The first has to be repeated once per file and is never
+finished; the second is finished when every figure either has a derivation or is
+marked as history. That is why five passes each found the sixth's work, and it
+is the argument for the third formulation over any list of places to look.
+
+#### What the last two passes found
+
+Run under formulation 2, over every doc comment and string literal in `src/`,
+`tests/` and `oracle-exec/driver.rs`, a **fourth** pass found five, in surfaces
+the first three never read; the **fifth** pass — the re-review — then found two
+more that formulation 2 could not have caught, because neither sits beside a
+derivation:
 
 | where | what it said | what it is |
 |---|---|---|
@@ -6644,12 +6690,21 @@ in surfaces the first three never read:
 | `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | cites `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` | **no test has ever had that name.** A dangling pointer from product source into this test file, i.e. the "worse shape" in a surface the pointer table did not cover |
 | `oracle-exec/driver.rs` and `src/worker/claim.rs`, the `BATCH` tables | *"`executor.rs` at 34/34"* | 35 since this task added a test. Annotated rather than restated: the row's claim is the **143**, and the binary size was never the measurement |
 | `tests/worker.rs`, module header | *"the other **707** tests pass"* | one larger now, for the same reason. The claim is *"the only test that can tell the two disciplines apart"*, which no total carries — so the total is **removed** rather than corrected |
+| **this statement's own preamble**, four lines under *"where this section and anything above it disagree, this section is right"* | *"the **630** fed terminals, which is history"* | **426**, which this statement's own section derives and which *predates this task entirely*. The fifteenth stale figure, in the paragraph that establishes the statement's authority, on the quantity the same commit was re-litigating in `tests/executor.rs` |
+| `runnable.txt`, *the terminal states this oracle FEEDS* | *"630 under W3a's harness — 575 `Runnable` + 55 `Loop`"* | **426.** The sweep opened that section, superseded the `144` **nine lines below this line**, and left it |
 
-Two of the five are this task's own arithmetic ageing by one within the same
-commit, which is the cheapest possible demonstration of the rule: **a figure
-nobody re-derives goes stale, and a figure that is a by-product of a claim goes
-stale fastest.** The last row is the only one where the right answer was to
-delete the number rather than update it.
+Two of the fourth pass's five are this task's own arithmetic ageing by one
+within the same commit, which is the cheapest possible demonstration of the
+rule: **a figure nobody re-derives goes stale, and a figure that is a by-product
+of a claim goes stale fastest.** The `707` row is the only one where the right
+answer was to delete the number rather than update it.
+
+**The last two are the ones that killed formulation 2**, and both are `426`,
+derived from this file's own table: `575 − 189 = 386`, `55 − 15 = 40`,
+`386 + 40 = 426`. Neither sits beside a test. One sits in the paragraph claiming
+this section outranks every other, and the other sits nine lines from a figure
+this same sweep superseded by name. **Proximity was never the property**; being
+recomputed by a running program is.
 
 **The prediction, recorded because it was made before the pass ran and was
 half wrong:** more stale figures would turn up, most likely in `tests/worker.rs`
@@ -6667,12 +6722,18 @@ other language's copy of the correction. **A correction is not a class-closing
 event.**
 
 And the one part that did not drift is the part this file already knew how to
-do. **Every figure this sweep had to fix is one no test asserts, and every
-figure a test asserts was already right** — 143, 151, 17/8/16, 80, 771, 565,
-126, 35, 84, 461/1807/751/191/53, the residual baseline's thirteen rows. That is
-the case for the rule this statement opens with, made by the exceptions rather
-than by restating it: `RESTRICTION_REMOVES` was correct in the source and wrong
-in the prose beside it, in the same commit, for the same quantity.
+do. **Every figure any of the five passes had to fix is one no running program
+recomputes, and every figure a test compares was already right** — 143, 151,
+17/8/16, 80, 771, 565, 126, 35, 84, 461/1807/751/191/53, the residual baseline's
+thirteen rows. **23 corrections — `13 + 1 + 2 + 5 + 2`**: the thirteen this
+task's own table retires, the fourteenth inside the note retiring them, the two
+in `tests/executor.rs`'s copy of the flip table (a doc comment and an assertion
+*message*), the fourth pass's five, and the re-review's two. **Not one of the 23
+landed on a value inside an `assert_eq!`.** That is the case for formulation 3, made by the
+exceptions rather than by restating it: `RESTRICTION_REMOVES` was correct in the
+source and wrong in the prose beside it, in the same commit, for the same
+quantity — and `426` was correct in this section and wrong in its own preamble,
+across all three of this task's commits.
 
 #### Pointers that no longer resolve — thirteen, and this is the worse shape
 
@@ -6712,16 +6773,37 @@ on a principle:
 |---|---|---|
 | `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` — **a name no test has ever had**, and so not even in the thirteen | **fixed**: it is `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction` |
 | `tests/executor.rs`, the field-family list | `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | **fixed** — marked as deleted at the point of use |
-| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only** |
-| `src/executor/flowable/loop_.rs`, module doc and the `values:` note | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`, `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only** |
+| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only.** Read it as `every_sub_execution_egret_runs_is_one_kestra_ran` — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison now |
+| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **recorded only.** Read it as `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
+| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only**, and it has **no successor**: it was deleted with W3a's harness and its render tier. Rendering lives in `worker::render` and is tested there |
 
-The last two rows are `src/executor/`, which **must stay byte-unchanged** — the
-Global Constraint W3a, W3b and W4 all inherit. So they are recorded here and not
-touched, and the reason is a constraint a reader can check rather than a
-preference: fixing a doc comment there would break the one invariant every
-package in this programme is measured against. That is the correct trade, and it
-is also the honest reason those two pointers will still be dangling when the next
-package reads them.
+The last three rows are `src/executor/`, which **must stay byte-unchanged**, and
+their successors are named above so that the record is a lookup rather than a
+dead end — the `fixed` rows tell a reader what happened, and a `recorded only`
+row that did not name its successor would be a second dangling pointer standing
+in for the first.
+
+**The reason for not touching them is stronger than "a constraint says so", and
+it is worth stating properly: `src/executor/` byte-unchanged is the calibration
+of this instrument.** Everything in this file rests on `advance()` being
+demonstrably the same function eight packages of oracle work judged; item 12
+exists for no other purpose than to report a `git diff --stat` over that
+directory. One harmless doc-comment edit turns a **one-command machine check**
+into a judgement call — *"the diff is not empty, but only comments changed"* —
+and every future package inherits that judgement call rather than the check. Two
+dangling pointers cost a reader one lookup; a diff that is no longer empty costs
+every later reader the guarantee.
+
+**Named so the defect has an owner rather than a shrug:** they should be fixed
+by **the first package that legitimately opens `src/executor/`**, in the same
+commit that opens it, because that commit already pays the whole cost. By this
+file's own residual-baseline table that is **W8** — `Pause` (12 entries),
+`LoopUntil`/`WaitFor` (9), flow `concurrency:` (7) and `sla:` (5) are all its,
+and all four are flowables that must be ported into `advance()` — unless **W6**
+gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
+`executor/retry.rs`. Whoever it is: the two lines are in `command.rs`'s
+`SpawnExecution` doc and `loop_.rs`'s module doc and `values:` note, and this
+table is the successor list.
 What is **not** left to prose is the table's own accuracy:
 `the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do`
 fails if a retired name comes back as a live test, if a successor named here does
