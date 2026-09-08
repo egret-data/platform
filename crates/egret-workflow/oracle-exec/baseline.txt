@@ -249,15 +249,12 @@ valids/finally-sequential
 valids/finally-sequential-error
 valids/finally-sequential-error-first
 valids/flow-concurrency-cancel-pause
-valids/flow-concurrency-parallel-subflow-kill
-valids/flow-concurrency-parallel-subflow-kill-child
 valids/flow-concurrency-queue-after-execution
 valids/flow-concurrency-queue-killed-after-execution
 valids/flow-concurrency-queue-pause
 valids/flow-concurrency-sla-assert-cancel
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
-valids/flow-concurrency-subflow
 valids/flow-trigger-paused-flow
 valids/flow-with-array-outputs
 valids/flow-with-outputs-failed
@@ -278,7 +275,6 @@ valids/loop-outputs-failed-render
 valids/loop-outputs-store
 valids/loop-until-restart
 valids/loop-values-from-uri
-valids/loop-with-subflow
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
 valids/output-values
@@ -322,12 +318,6 @@ valids/sla-parent-flow
 valids/sla-subflow
 valids/sleep-long
 valids/sleep-long-after-execution-flowable
-valids/subflow-child
-valids/subflow-inherited-labels-parent
-valids/subflow-nullable-input-parent
-valids/subflow-parent
-valids/subflow-parent-no-wait
-valids/subflow-parent-of-failed
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
@@ -337,8 +327,6 @@ valids/task-allow-failure-runnable
 valids/task-allow-warning-executable-flow
 valids/task-allow-warning-flowable
 valids/task-allow-warning-runnable
-valids/task-flow
-valids/task-flow-inherited-labels
 valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate

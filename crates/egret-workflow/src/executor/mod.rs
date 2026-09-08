@@ -437,18 +437,30 @@ mod tests {
         );
     }
 
-    /// **A `Runnable` is `SUBMITTED` before it is `RUNNING`; a flowable is not.**
+    /// **A `Runnable` is `SUBMITTED` before it is `RUNNING`; a flowable is not,
+    /// and neither is a [`TaskKind::Executable`].**
     ///
-    /// Measured on `valids/sequential`, which nests both: the `Sequential` runs
-    /// go `CREATED RUNNING SUCCESS` and every `Return` goes `CREATED SUBMITTED
-    /// RUNNING SUCCESS`. Deleting the `SUBMITTED` emission leaves a trace that
-    /// still has the right runs in the right order and matches nothing.
+    /// Measured on `valids/sequential`, which nests the first two: the
+    /// `Sequential` runs go `CREATED RUNNING SUCCESS` and every `Return` goes
+    /// `CREATED SUBMITTED RUNNING SUCCESS`. Deleting the `SUBMITTED` emission
+    /// leaves a trace that still has the right runs in the right order and
+    /// matches nothing.
+    ///
+    /// **The third arm is W6's whole reason for opening `src/executor/`**, and
+    /// `valids/subflow-parent` is the flow that pins it: its one `Subflow` run
+    /// reads `CREATED RUNNING SUCCESS` in `golden.json`, and it read
+    /// `CREATED SUBMITTED RUNNING SUCCESS` here for as long as a `Subflow` was
+    /// planned an opaque `Runnable`. The golden side of the same claim is
+    /// derived over all 25 declarers by `tests/executor.rs`'s
+    /// `no_subflow_run_in_the_golden_passes_through_submitted`; this is the
+    /// egret side of it.
     #[test]
     fn only_a_runnable_passes_through_submitted() {
         // One flow per flowable this executor drives, so the discriminator is
         // pinned on all three and not only on the one Task 3 shipped.
         let mut flowables = 0;
         let mut runnables = 0;
+        let mut executables = 0;
         for (corpus_id, renders) in [
             ("valids/sequential", &[][..]),
             ("valids/parallel", &[][..]),
@@ -456,6 +468,7 @@ mod tests {
             ("valids/if-condition", &[("if", "true")][..]),
             ("valids/switch", &[("parent-seq", "FIRST")][..]),
             ("valids/loop-serial", &[][..]),
+            ("valids/subflow-parent", &[][..]),
         ] {
             let plan = plan_of(corpus_id);
             let state = run_to_fixpoint_rendering(&plan, RunState::Success, renders);
@@ -484,6 +497,16 @@ mod tests {
                             plan.tasks[run.task].id
                         );
                     }
+                    TaskKind::Executable { .. } => {
+                        executables += 1;
+                        assert_eq!(
+                            wire(&run.history),
+                            ["CREATED", "RUNNING", "SUCCESS"],
+                            "{corpus_id}: executable {} must NOT pass through SUBMITTED -- \
+                             no Subflow run in golden.json carries it",
+                            plan.tasks[run.task].id
+                        );
+                    }
                 }
                 assert_eq!(
                     run.attempts.len(),
@@ -498,10 +521,11 @@ mod tests {
             }
         }
         assert!(
-            flowables >= 8 && runnables >= 21,
-            "the six flows must exercise both sides, and the two Task 5 added \
-             plus the one Task 6 added must each contribute a flowable; saw \
-             {flowables} flowable(s) and {runnables} runnable(s)"
+            flowables >= 8 && runnables >= 21 && executables >= 1,
+            "the seven flows must exercise all three sides, and the two Task 5 \
+             added plus the one Task 6 added must each contribute a flowable; \
+             saw {flowables} flowable(s), {runnables} runnable(s) and \
+             {executables} executable(s)"
         );
     }
 
@@ -1239,7 +1263,7 @@ mod tests {
             let in_flight = (0..state.runs.len()).find(|&ix| {
                 matches!(
                     plan.tasks[state.runs[ix].task].kind,
-                    TaskKind::Runnable { .. } | TaskKind::Loop { .. }
+                    TaskKind::Runnable { .. } | TaskKind::Loop { .. } | TaskKind::Executable { .. }
                 ) && state.runs[ix].history.last() == Some(&RunState::Running)
             });
             match in_flight {

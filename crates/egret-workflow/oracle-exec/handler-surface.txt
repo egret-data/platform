@@ -314,31 +314,31 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    151  reproduced today, and by nothing the driver removes
+    163  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     20  not reproduced today, and nothing found here blocks it
-    123  not reproduced today, and blocked -- by cause below
+     26  not reproduced today, and nothing found here blocks it
+    105  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 151 + 20 = **171**
-  CEILING, feed retained = 151 + 0 + 20 = 171
+  CEILING, feed removed  = 163 + 26 = **189**
+  CEILING, feed retained = 163 + 0 + 26 = 189
 
-  Today the ratchet matches 151. The two ceilings are the same
+  Today the ratchet matches 163. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **171 is the bound this package should be held to**, because removing
+  **189 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  171 -- reported as a decision, not as progress.
+  189 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 20 nothing here blocks:
+  The 26 nothing here blocks:
     invalids/loop-switch-failed
     valids/all-flowable
     valids/dag
@@ -356,15 +356,20 @@ Two rules, and they are deliberately different:
     valids/parallel-fail-with-flowable
     valids/restart-child
     valids/restart-loop
+    valids/restart-parent
+    valids/restart-parent-loop
     valids/retry-failed-flow-duration
     valids/retry-flowable-parallel
+    valids/retry-subflow
+    valids/sla-parent-flow
+    valids/subflow-parent-retry
+    valids/subflow-secret-output-parent
     valids/variables
 
   What blocks the rest, by cause. The rows OVERLAP -- an entry may be
   blocked several times over -- so they do not sum to the bucket:
 
        23  handler    io.kestra.plugin.core.output.OutputValues
-       22  construct  io.kestra.plugin.core.flow.Subflow
        18  state      PAUSED, which RunState cannot hold
        16  construct  finally:
        12  construct  io.kestra.plugin.core.flow.Pause
@@ -372,9 +377,9 @@ Two rules, and they are deliberately different:
        10  construct  afterExecution:
        10  state      WARNING, which RunState cannot hold
         8  construct  allowFailure:
-        7  construct  flow concurrency:
         7  construct  flow-level outputs:
         7  construct  io.kestra.plugin.core.execution.Labels
+        6  construct  flow concurrency:
         6  construct  io.kestra.plugin.core.flow.WaitFor
         5  construct  flow sla:
         5  construct  io.kestra.plugin.core.execution.SetVariables
@@ -391,12 +396,12 @@ Two rules, and they are deliberately different:
         2  handler    io.kestra.plugin.core.storage.Write
         1  handler    io.kestra.plugin.core.kv.Set
     -----
-      123  DISTINCT entries blocked (the rows above overlap)
+      105  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        32  a missing handler
-      106  a construct no W3b task owns
+       87  a construct no W3b task owns
        29  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
@@ -459,7 +464,7 @@ Two rules, and they are deliberately different:
     valids/parallel-disabled-tasks           one `order` pair, same cause
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
 
-    working expectation = 171 - 5 = 166
+    working expectation = 189 - 5 = 184
 
   Two of them deserve a sentence each:
 

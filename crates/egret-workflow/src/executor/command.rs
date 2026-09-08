@@ -95,13 +95,85 @@ pub enum Command {
     ///
     /// # Nothing executes this yet, and that is a hole with a count
     ///
-    /// W3b/W6 own creating the sub-execution and reporting its outcome back.
-    /// Until then [`advance`](super::advance) emits the command and the oracle's
-    /// side of `spawned` stays empty, so the 41 golden entries that carry a
-    /// sub-execution mismatch on that field whatever else they get right.
-    /// `oracle-exec/README.md` records it under *What this oracle does not
-    /// prove*; `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran`
-    /// is what compares the part of it that can be compared.
+    /// **This section is corrected rather than deleted, in the commit that
+    /// opened `src/executor/`** — W6 Task 3, which is the first package that
+    /// legitimately did, and the condition under which the pointer was left
+    /// here (`oracle-exec/README.md`, *Pointers that no longer resolve*).
+    ///
+    /// It said *"Nothing executes this yet"*, and W3b Task 4 made that false:
+    /// `worker::spawn::spawn_all` executes it, so the oracle's side of
+    /// `spawned` is filled and 18 of the 41 entries that carry a sub-execution
+    /// match. It also pointed at
+    /// `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran`, **a
+    /// test that no longer exists**: the prefix comparison was all one batch
+    /// could offer, and the successor is
+    /// `every_sub_execution_egret_runs_is_one_kestra_ran`, a whole-set
+    /// comparison. `the_sub_executions_are_compared_and_this_is_what_they_cost`
+    /// derives the 41/142 population and what it still costs.
+    /// Start the child execution a
+    /// [`Subflow`](super::TaskKind::Executable) names, and link it by
+    /// `trigger_execution_id`/`trigger_run_ix` -- **never** by
+    /// `parent_execution_id`. W6.
+    ///
+    /// # Why this is not a [`Command::SpawnExecution`]
+    ///
+    /// Four reasons, each measured, and the third is the decisive one:
+    ///
+    /// 1. a `SpawnExecution` derives the child's source from the PARENT's own
+    ///    YAML and carries a loop `value`; a `Subflow` resolves a **different
+    ///    flow** by `(namespace, flowId)`;
+    /// 2. migration 0135's CHECK made a child with a parent and no loop index
+    ///    unrepresentable (0138 relaxed it, for the replay, not for this);
+    /// 3. `oracle-exec/driver.rs` builds the oracle's `spawned` field from
+    ///    `parent_execution_id`, and **all 41 golden `spawned`-carrying entries
+    ///    have zero `Subflow` children** -- linking one that way would turn the
+    ///    entries this command exists to bank into `spawned` mismatches;
+    /// 4. Kestra itself makes the distinction: `parentId` for a loop iteration
+    ///    and for a `CREATE_NEW_EXECUTION` replay, **NULL** for a subflow
+    ///    child. Measured on the pinned artifact, four flows, four rounds:
+    ///    `io.kestra.tests/subflow-parent`'s child carries `parentId: null` and
+    ///    `trigger: {id: <task id>, type:
+    ///    io.kestra.plugin.core.flow.Subflow, variables: {executionId,
+    ///    taskRunId, taskId, namespace, flowId, flowRevision}}`.
+    ///
+    /// # It is emitted BESIDE the `StartRun`, in one round
+    ///
+    /// `apply` records nothing for it -- [`ExecutionState`](super::ExecutionState)
+    /// has nowhere to put a child execution, exactly as for
+    /// [`Command::SpawnExecution`] -- so a round that emitted this and left the
+    /// run `CREATED` would emit it again on the next round, for ever.
+    /// [`super::flowable::start`] therefore emits `[StartRun, SpawnSubflow]`
+    /// together, which is also what Kestra does: `ExecutableUtils.subflowExecution`
+    /// builds its `SubflowExecution` with
+    /// `parentTaskRun(currentTaskRun.withState(State.Type.RUNNING))`.
+    ///
+    /// **The one shape this costs is recorded rather than hidden.** Measured on
+    /// the artifact (`egret.probe/probe-unresolvable`), a `Subflow` whose
+    /// `(namespace, flowId)` resolves to nothing gives a run reading
+    /// `["CREATED", "FAILED"]` with one attempt reading `["FAILED"]` -- no
+    /// `RUNNING` at all, because Kestra never gets as far as building the
+    /// `SubflowExecution`. egret has already emitted `StartRun` by the time the
+    /// lookup happens, so it produces `["CREATED", "RUNNING", "FAILED"]` with
+    /// the matching attempt. **No golden entry reaches this**: the corpus's one
+    /// unresolvable target is `valids/task-runif`'s `notexecutedflowable`,
+    /// whose falsy `runIf:` skips it before anything resolves. See
+    /// `worker::subflow` for the decision this shape is the tail of.
+    SpawnSubflow {
+        /// The `Subflow` task itself -- the caller reads its
+        /// `namespace`/`flowId`/`inputs`/`wait` out of the execution's frozen
+        /// source, because a `Plan` carrying a task's properties would be a
+        /// second copy of the source.
+        task: TaskIx,
+        /// The run of that task this child belongs to -- `trigger_run_ix`.
+        ///
+        /// It is on the command rather than derived by the caller because two
+        /// `Subflow` tasks may name the same target
+        /// (`valids/subflow-parent-retry`'s `subflow1` and `subflow2` do), and
+        /// a retried `Subflow` starts a second child under the SAME
+        /// `(execution, run_ix)` -- which is why migration 0138's reverse index
+        /// is deliberately not unique.
+        run: RunIx,
+    },
     SpawnExecution {
         task: TaskIx,
         /// The iteration value, already resolved to the string Kestra puts on

@@ -116,7 +116,7 @@ impl Plan {
     /// alone.
     fn direct_task_children(&self, ix: TaskIx) -> Vec<TaskIx> {
         match &self.tasks[ix].kind {
-            TaskKind::Runnable { .. } => Vec::new(),
+            TaskKind::Runnable { .. } | TaskKind::Executable { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
             | TaskKind::Loop { tasks, .. } => tasks.clone(),
@@ -248,6 +248,49 @@ pub enum TaskKind {
     /// Tasks 5-8 own — see [`build_plan`] for why that is the safe default and
     /// not an approximation.
     Runnable {
+        type_id: String,
+    },
+    /// A task the executor does not see into either, but which it **runs
+    /// itself** rather than handing to a worker: Kestra's `ExecutableTask`, of
+    /// which `io.kestra.plugin.core.flow.Subflow` is the one implementation
+    /// this executor plans.
+    ///
+    /// # Why it is not a [`TaskKind::Runnable`], measured rather than argued
+    ///
+    /// It opens `src/executor/` for the first time since W3a, so the reason is
+    /// a single measured fact and not a preference. [`super::flowable::start`]
+    /// emits `SUBMITTED` for a `Runnable` -- the one thing in Kestra's record
+    /// that separates a task the worker ran from one the executor ran -- and
+    /// **no `Subflow` run in `golden.json` carries it**: all 24 executed ones,
+    /// across 22 entries, read `CREATED RUNNING ...`, and the one skipped run
+    /// reads `CREATED SKIPPED`. Re-derived from the golden on every run by
+    /// `tests/executor.rs`'s
+    /// `no_subflow_run_in_the_golden_passes_through_submitted`, so the sentence
+    /// above is compared by a running program rather than remembered.
+    ///
+    /// A `Subflow` left planned `Runnable` therefore mismatches **every** entry
+    /// W6 exists to bank, whatever else its handler got right, which is why
+    /// "keep it opaque and let a handler spawn and wait" -- the cheaper answer
+    /// the plan asked to be tried first -- banks nothing.
+    ///
+    /// # What is the same as a `Runnable`, and what is not
+    ///
+    /// Everything except three things:
+    ///
+    /// * no `SUBMITTED` ([`super::flowable::start`]);
+    /// * [`super::flowable::start`] emits a
+    ///   [`Command::SpawnSubflow`](super::Command::SpawnSubflow) beside the
+    ///   `StartRun`, so the caller creates the child execution in the same
+    ///   settle that started the run;
+    /// * `worker::claim::persist` writes **no** `type_id` for it, so the claim
+    ///   -- whose whole predicate for "a worker runs this" is
+    ///   `type_id IS NOT NULL` -- never takes it and no handler is ever asked
+    ///   for a type it does not have.
+    ///
+    /// It is retried exactly as a `Runnable` is: Kestra's own eligibility test
+    /// is `task instanceof RunnableTask<?> || task instanceof Subflow`, and
+    /// [`super::retry::scan`] now spells both halves.
+    Executable {
         type_id: String,
     },
     Sequential {
@@ -525,6 +568,8 @@ const DAG_TYPE: &str = "dag";
 const IF_TYPE: &str = "if";
 const SWITCH_TYPE: &str = "switch";
 const LOOP_TYPE: &str = "loop";
+/// `io.kestra.plugin.core.flow.Subflow`, in the same canonical spelling. W6.
+const SUBFLOW_TYPE: &str = "subflow";
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
@@ -814,6 +859,14 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 value,
                 cases,
                 default,
+            };
+        }
+        // W6. It takes no children: a `Subflow` runs a DIFFERENT flow, whose
+        // tasks get runs in the child execution and never in this one -- which
+        // is why `models::TaskKind::Subflow` has no `children()` either.
+        (ModelKind::Subflow(_), Some(SUBFLOW_TYPE)) => {
+            out[ix].kind = TaskKind::Executable {
+                type_id: task.r#type.clone(),
             };
         }
         (ModelKind::Loop(lp), Some(LOOP_TYPE)) => {

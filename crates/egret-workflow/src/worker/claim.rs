@@ -67,6 +67,7 @@ use uuid::Uuid;
 use super::cancel;
 use super::render::{self, Pass, Surface};
 use super::spawn::{self, Requested};
+use super::subflow;
 use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
@@ -884,15 +885,33 @@ pub(super) async fn settle(
     // same thing across a transaction boundary as it does inside one.
     let mut seq = ctx.seq + 1;
     marks.observe(before, state, seq);
-    let spawns = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
+    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
+    // **After `persist`, exactly like the loop spawner, and for the same
+    // reason**: the child's row names `(execution, run_ix)` and that run has to
+    // exist. It differs in one way that matters for what comes next --
+    // `subflow::spawn_one` may complete the parent's own run (a `wait: false`
+    // subflow, or a target that does not resolve), and it does so through a
+    // nested `settle` on this same execution. That is the same re-entrancy
+    // `spawn::spawn_all` already has via `on_execution_terminal`, and it is why
+    // the terminal check below reads `state` -- this transaction's in-memory
+    // copy, which a nested settle deliberately does not update -- rather than
+    // the row: a nested settle that terminated the execution has ALREADY told
+    // its parent, and firing again from here would report one terminal twice.
+    subflow::spawn_all(conn, ctx, &surface, state, &subflows).await?;
 
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
         if let Some(terminal) = is.filter(|s| s.is_terminal()) {
             spawn::on_execution_terminal(conn, ctx.id, terminal).await?;
+            // The other kind of link. `on_execution_terminal` reads
+            // `parent_execution_id` and this reads `trigger_execution_id`, and
+            // `workflow_executions_one_link_kind` makes it impossible for both
+            // to find something -- so the pair is a dispatch, not two chances
+            // to report the same terminal.
+            subflow::on_child_terminal(conn, ctx.id, terminal).await?;
         }
     }
     Ok(())
@@ -1224,9 +1243,10 @@ fn drive(
     now: Tick,
     marks: &mut Marks,
     seq: &mut i64,
-) -> Result<Vec<Requested>> {
+) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
+    let mut subflows = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let snapshot = state.clone();
         let cmds = advance(plan, state, now);
@@ -1235,6 +1255,7 @@ fn drive(
             *seq += 1;
             for cmd in &cmds {
                 spawns.extend(Requested::of(cmd));
+                subflows.extend(subflow::Requested::of(cmd));
                 apply(state, cmd);
             }
             marks.observe(&snapshot, state, *seq);
@@ -1255,7 +1276,7 @@ fn drive(
             continue;
         }
 
-        return Ok(spawns);
+        return Ok((spawns, subflows));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
 }

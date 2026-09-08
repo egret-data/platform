@@ -3380,3 +3380,500 @@ tasks:
          error anywhere"
     );
 }
+
+// ---------------------------------------------------------------------------
+// W6 Task 3: `Subflow`
+//
+// The oracle compares the PARENT's trace and nothing else -- a subflow child is
+// linked by `trigger_execution_id` and is deliberately invisible to the
+// `spawned` query that builds it (`driver::read_trace_inner`, migration 0138).
+// So everything about the child, the link and the failure paths is this file's
+// to assert or it is asserted nowhere.
+// ---------------------------------------------------------------------------
+
+/// File one flow into `workflow.flows` through the product's own create path,
+/// so a `(namespace, flowId)` pair has something to resolve against.
+///
+/// `FlowRepo::create` and not an INSERT, for `driver::publish_corpus`'s reason:
+/// the resolver reads the same table the product writes, and a fixture that
+/// wrote the row itself could keep passing after that stopped being true.
+///
+/// It is deliberately NOT published to a live version. W6 Task 1 measured why
+/// that has to work: only 16 of the corpus's 345 flows reach one, so a resolver
+/// reading `flow_versions` would resolve 2 of the 20 `Subflow` targets. See
+/// `worker::subflow::resolve`.
+async fn file_flow(db: &Db, ws: Uuid, by: egret_core::UserId, source: &str) -> Uuid {
+    let flow = egret_workflow::spec::parse(source).expect("the fixture flow parses");
+    let input = egret_workflow::CreateFlowInput {
+        namespace: flow.namespace.clone(),
+        flow_id: flow.id.clone(),
+        source: source.to_string(),
+        plan: serde_json::to_value(&flow).expect("a parsed flow serialises"),
+        folder_id: None,
+    };
+    egret_workflow::FlowRepo::new(db.clone())
+        .create(ws, by, &input)
+        .await
+        .expect("file the flow")
+        .id
+}
+
+/// Every execution linked to `parent` as a **subflow child**, with the columns
+/// that say which kind of child it is.
+async fn children_by_trigger(
+    pool: &sqlx::PgPool,
+    parent: Uuid,
+) -> Vec<(Uuid, Option<i32>, Option<Uuid>, String, String)> {
+    sqlx::query_as(
+        "SELECT id, trigger_run_ix, parent_execution_id, flow_key, state \
+           FROM workflow.executions \
+          WHERE trigger_execution_id = $1 \
+          ORDER BY created_at, id",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .expect("read subflow children")
+}
+
+async fn run_history(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read run history")
+}
+
+async fn attempt_histories(
+    pool: &sqlx::PgPool,
+    execution: Uuid,
+    task_id: &str,
+) -> Vec<serde_json::Value> {
+    let attempts: serde_json::Value = sqlx::query_scalar(
+        "SELECT attempts FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read attempts");
+    attempts
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|x| x.get("history").cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn subflow_parent(id: &str, target: &str, extra: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: sub\n    \
+         type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+         flowId: {target}\n{extra}  - id: after\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: after\n"
+    )
+}
+
+/// **The link is `trigger_execution_id`, the parent run never passes through
+/// `SUBMITTED`, and the child is invisible to the query that builds `spawned`.**
+///
+/// All three at once, because they are one decision seen from three sides, and
+/// because each alone would pass against a different wrong implementation: a
+/// child linked by `parent_execution_id` would still make the parent SUCCEED,
+/// and a `Subflow` planned an opaque `Runnable` would still create a child if
+/// its handler did.
+///
+/// The artifact's own answer, measured on the pinned digest with
+/// `io.kestra.tests/subflow-parent`: the parent run is
+/// `CREATED RUNNING SUCCESS`, the child's `parentId` is **null**, its `trigger`
+/// is `{"type": "io.kestra.plugin.core.flow.Subflow", "variables":
+/// {"executionId": …, "taskRunId": …}}`, and
+/// `SELECT id FROM executions WHERE parent_id = <parent>` returns nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("child")).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "exactly one child, and it exists: {kids:?}");
+    let (child, run_ix, parent_link, flow_key, child_state) = kids[0].clone();
+    assert_eq!(
+        (run_ix, parent_link, flow_key.as_str(), child_state.as_str()),
+        (Some(0), None, "child", "SUCCESS"),
+        "the child names the parent's run 0 through `trigger_run_ix`, carries NO \
+         `parent_execution_id` (migration 0138's \
+         `workflow_executions_one_link_kind` makes carrying both \
+         unrepresentable), runs the TARGET flow rather than the parent's, and \
+         reaches a terminal of its own"
+    );
+
+    // The query `driver::read_trace_inner` builds `spawned` from, verbatim.
+    // All 41 golden `spawned`-carrying entries have zero `Subflow` children, so
+    // a child this finds turns every entry W6 banks into a `spawned` mismatch.
+    let spawned: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+          ORDER BY parent_run_ix, loop_index",
+    )
+    .bind(parent)
+    .fetch_all(&pool)
+    .await
+    .expect("read the spawned query");
+    assert_eq!(
+        spawned,
+        Vec::<Uuid>::new(),
+        "the child is {child}, and the `spawned` query must not see it"
+    );
+
+    assert_eq!(
+        run_history(&pool, parent, "sub").await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "no SUBMITTED. That is the measurement W6 opened src/executor/ for -- \
+         `no_subflow_run_in_the_golden_passes_through_submitted` derives the \
+         Kestra side of it over all 24 executed `Subflow` runs in the golden"
+    );
+    assert_eq!(
+        run_outputs(&pool, parent, "sub").await,
+        Some(serde_json::json!({
+            "executionId": child.to_string(),
+            "state": "SUCCESS",
+            "outputs": {},
+        })),
+        "what the parent sees of its child. Measured on the artifact with \
+         `egret.probe/probe-outputs-parent`, which printed `eid=… state=SUCCESS \
+         o1=hello`; `outputs` is the empty map here because nothing in egret \
+         evaluates a flow-level `outputs:` block"
+    );
+    assert_eq!(
+        run_state(&pool, parent, "after").await,
+        Some("SUCCESS".to_string()),
+        "and the successor runs, so the parent really did wait rather than \
+         merely record a terminal"
+    );
+}
+
+/// **A target that does not resolve fails the RUN, not the flow, and creates no
+/// child.**
+///
+/// Measured on the artifact (`egret.probe/probe-unresolvable`): Kestra
+/// published the flow with **200**, executing it left the `Subflow` run FAILED,
+/// the successor never ran, the execution FAILED, and no child existed.
+///
+/// **The decision is what agrees; one shape does not, and it is unreachable.**
+/// Kestra's run reads `["CREATED","FAILED"]` with an attempt of `["FAILED"]` --
+/// no `RUNNING`, because it never gets as far as building the
+/// `SubflowExecution`. egret emits `StartRun` in the same round as the spawn
+/// request (`Command::SpawnSubflow` says why it cannot be emitted alone), so it
+/// reads `["CREATED","RUNNING","FAILED"]`. Asserted here rather than left as
+/// prose, so the divergence is a thing a reader can see and a change to it
+/// fails a test. `the_only_unresolvable_subflow_target_in_the_corpus_is_skipped`
+/// is why no golden entry can tell.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_child(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    // Nothing is filed. The flow still STARTS -- a `build_plan` that refused it
+    // would turn `valids/task-runif` from `runs` into `refused`.
+    let source = subflow_parent("parent", "nobody-holds-this", "");
+    assert!(
+        egret_workflow::executor::build_plan(&source).is_ok(),
+        "the plan must not refuse a flow for an unresolvable target: nothing at \
+         plan time can know what `workflow.flows` holds, and Kestra published \
+         the same flow with 200"
+    );
+    let parent = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        children_by_trigger(&pool, parent).await.len(),
+        0,
+        "no child may be created for a target that does not resolve"
+    );
+    assert_eq!(
+        (
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+            run_state(&pool, parent, "after").await,
+            execution_history(&pool, parent).await,
+        ),
+        (
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'nobody-holds-this'".to_string()),
+            None,
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        ),
+        "the run fails carrying the reason, the successor is never created, and \
+         the execution takes the failure -- which is what the artifact did"
+    );
+    assert_eq!(
+        (
+            run_history(&pool, parent, "sub").await,
+            attempt_histories(&pool, parent, "sub").await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+            vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+        ),
+        "THE KNOWN DIVERGENCE, pinned rather than described: the artifact reads \
+         `[CREATED, FAILED]` with an attempt of `[FAILED]`. egret has already \
+         started the run by the time the lookup happens. No golden entry \
+         reaches this"
+    );
+}
+
+/// **A `Subflow` target in ANOTHER workspace does not resolve.**
+///
+/// `FlowRepo::find_by_name` -- what `publish` resolves a `RefKind::Subflow`
+/// through -- is deliberately unscoped, and its own doc records why it cannot
+/// be: `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
+/// **This caller has one**, on `ExecutionCtx`, so `worker::subflow::resolve`
+/// uses it.
+///
+/// The test is written so that the ONLY difference from the passing case is the
+/// workspace: the same namespace, the same flow id, the same source. An
+/// unscoped resolver reads the other tenant's flow source and executes it, and
+/// migration 0138's composite foreign key would then refuse the child row --
+/// after the source had already been read, which is the wrong order to find out.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (theirs, their_user) = common::seed_workspace(&db).await;
+    let (ours, _our_user) = common::seed_workspace(&db).await;
+    file_flow(&db, theirs, their_user, &one_task("child")).await;
+
+    let parent = start_execution(
+        &pool,
+        ours,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a flow that exists in another workspace must be as invisible as one \
+         that does not exist at all. The SAME source, filed into THIS workspace, \
+         is what `a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id` \
+         runs, so a failure here is the scoping and nothing else"
+    );
+}
+
+/// **`wait: false` does not wait, and what the parent sees is the child's state
+/// at SPAWN time.**
+///
+/// Measured on the artifact: `egret.probe/probe-nowait-parent`'s successor
+/// printed `raw={"state":"CREATED","executionId":"61J0wKdkpWSS8MUTSfOPd8"}` --
+/// no `outputs` key, and `CREATED` rather than the `SUCCESS` the child reached a
+/// moment later. `valids/subflow-parent-no-wait` is the golden entry, and it is
+/// one of the 12 W6 Task 3 banks.
+///
+/// **The child still runs**, which is the half a `wait: false` implemented as
+/// "do nothing" would also pass. So both are asserted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_still_runs_it(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // A child that FAILS, so "did not wait" and "waited and transmitted" cannot
+    // both produce SUCCESS: a parent that waited would take the failure.
+    let child_src = "id: child\nnamespace: t\ntasks:\n  - id: boom\n    \
+                     type: io.kestra.plugin.core.execution.Fail\n";
+    file_flow(&db, ws, user, child_src).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", "    wait: false\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "the child is still created and driven");
+    let (child, _, _, _, child_state) = kids[0].clone();
+    assert_eq!(
+        (
+            child_state.as_str(),
+            run_state(&pool, parent, "sub").await,
+            run_history(&pool, parent, "sub").await,
+            run_outputs(&pool, parent, "sub").await,
+            run_state(&pool, parent, "after").await,
+        ),
+        (
+            "FAILED",
+            Some("SUCCESS".to_string()),
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            Some(serde_json::json!({
+                "executionId": child.to_string(),
+                "state": "CREATED",
+            })),
+            Some("SUCCESS".to_string()),
+        ),
+        "the child really ran and really FAILED; the parent's run SUCCEEDED \
+         anyway, records `CREATED` for it, carries NO `outputs` key, and its \
+         successor ran. A `wait: false` that reported the child's terminal would \
+         fail this on three of the five"
+    );
+}
+
+/// **`transmitFailed` decides what a failing child does to its parent, and the
+/// two directions are asserted as a PAIR.**
+///
+/// One direction alone cannot tell a working implementation from a constant:
+/// with `transmitFailed` hard-coded true, the second case fails; hard-coded
+/// false, the first does. The measurements are
+/// `valids/task-flow`'s golden (`transmitFailed: true`, child FAILED, parent
+/// run `CREATED RUNNING FAILED`) and `egret.probe/probe-notransmit-parent` on
+/// the artifact (`transmitFailed: false`, same child, parent run
+/// `CREATED RUNNING FAILED SUCCESS`).
+///
+/// **The second is the two-step `ExecutableUtils.guessState` produces**, and
+/// egret's run history reproduces it. Its ATTEMPT does not:
+/// `executor::state::apply` rule 1 stops a terminated attempt taking further
+/// state, and that rule's own doc records this as the second measured shape it
+/// is wrong for. Unreachable from the corpus --
+/// `no_corpus_subflow_turns_transmit_failed_off` derives that -- and asserted
+/// here so the boundary is visible rather than remembered.
+#[sqlx::test(migrations = "../../migrations")]
+async fn transmit_failed_decides_what_a_failing_child_does_to_its_parent(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child_src = "id: child\nnamespace: t\ntasks:\n  - id: boom\n    \
+                     type: io.kestra.plugin.core.execution.Fail\n";
+    file_flow(&db, ws, user, child_src).await;
+
+    let on = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("p-on", "child", "    transmitFailed: true\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    let off = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("p-off", "child", "    transmitFailed: false\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            run_history(&pool, on, "sub").await,
+            run_state(&pool, on, "after").await,
+            execution_history(&pool, on).await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+            None,
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        ),
+        "transmitFailed ON: the child's FAILED reaches the parent run, the \
+         successor is never created and the execution fails -- `valids/task-flow`"
+    );
+    assert_eq!(
+        (
+            run_history(&pool, off, "sub").await,
+            attempt_histories(&pool, off, "sub").await,
+            run_state(&pool, off, "after").await,
+            execution_history(&pool, off).await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED", "SUCCESS"]),
+            vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+            Some("SUCCESS".to_string()),
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        ),
+        "transmitFailed OFF: the run takes the child's FAILED first and \
+         `guessState`'s SUCCESS after it -- the artifact's two-step. The ATTEMPT \
+         stops at FAILED, where the artifact's carries the SUCCESS too; that is \
+         `state::apply` rule 1 and it is unreachable from the corpus"
+    );
+}
+
+/// **A `Subflow` inside a flowable's `errors:` is reached, spawned and run.**
+///
+/// Measured on the artifact with `egret.probe/probe-errors-subflow`: the
+/// `handler` run reads `CREATED RUNNING SUCCESS` and a child execution exists.
+///
+/// It is the shape `spec::validate` and `publish::resolve_task` both miss --
+/// they walk `children()` only -- and `worker::subflow::subflow_of` walks
+/// `error_children()` for exactly this. No corpus flow reaches it, which is why
+/// `driver::subflow_targets` could measure its own wider walk as redundant;
+/// here it is not, and this is the test that says so.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_inside_an_errors_list_is_reached_and_spawned(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("child")).await;
+
+    let source = "id: errors-subflow\nnamespace: t\ntasks:\n  - id: seq\n    \
+                  type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      \
+                  - id: boom\n        type: io.kestra.plugin.core.execution.Fail\n    \
+                  errors:\n      - id: handler\n        \
+                  type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n        \
+                  flowId: child\n";
+    let parent = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_history(&pool, parent, "handler").await,
+        ),
+        (1, serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])),
+        "a walk that stopped at `children()` would answer `None` here and report \
+         a corruption for a flow the artifact merely finds unusual"
+    );
+}

@@ -1443,7 +1443,11 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
 }
 
 const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 35;
-const EGRET_TOP_LEVEL_PAIRS: usize = 565;
+// +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
+// `Subflow` run now finish, so the runs after it exist and have endpoints.
+// The nested figure does not move -- a `Subflow` child is linked by
+// `trigger_execution_id` and is deliberately invisible to `spawned`.
+const EGRET_TOP_LEVEL_PAIRS: usize = 580;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -1528,16 +1532,18 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (255, 102, 357),
+        (258, 102, 360),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
-         that match, so any change to one makes its entry a REGRESSION"
+         that match, so any change to one makes its entry a REGRESSION. W6 Task \
+         3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
+         entries it banked carry 3 ordered pairs between them"
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (622, 125, 747),
+        (619, 125, 744),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 747 leaves \
-         the ratchet green and unmoved at 143"
+         entries, which mismatch whatever the pair says. Flipping all 744 leaves \
+         the ratchet green and unmoved at 131"
     );
     assert_eq!(
         (
@@ -1764,11 +1770,17 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
 
 /// The counts above, named so the coverage statement and this file cannot
 /// disagree about them.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 461;
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 53;
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 191;
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1807;
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 751;
+// **All five fell when W6 Task 3 banked 12 entries**, and they fell together
+// because they are five projections of one set: the runs, sub-executions,
+// executions and history tokens that live on a baselined entry. The 12 carry 16
+// run terminals, 2 sub-executions (`valids/loop-with-subflow`'s), 14 executions
+// (12 entries + those 2), 48 run-history tokens and 42 execution-history tokens
+// between them, and every one of those is falsifiable now instead of held.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 445;
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 51;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 177;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1759;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 709;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -1842,6 +1854,15 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
                 "valids/parallel-nested".to_string(),
                 "valids/restart-child".to_string(),
                 "valids/restart-loop".to_string(),
+                // W6 Task 3: three `Subflow` parents that used to stall at
+                // their `Subflow` run and now run past it, producing pairs the
+                // golden has no counterpart for -- exactly because they run a
+                // successor Kestra never reached. All three are registered in
+                // `STILL_OVER_ACCEPTED_AT_RUNTIME`, which is where the reason
+                // lives; this list is where it is visible.
+                "valids/restart-parent".to_string(),
+                "valids/restart-parent-loop".to_string(),
+                "valids/subflow-secret-output-parent".to_string(),
             ]
         ),
         "the entries the restriction removes a pair from, by name and by count"
@@ -1860,12 +1881,21 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
     );
 }
 
-const RESTRICTION_REMOVES: usize = 80;
-/// How many entries those 80 pairs come from — the other half of the coverage
+/// 80 through W5; **85 since W6 Task 3**, and the five come from the three
+/// entries it added to the list above: `valids/restart-parent` 2,
+/// `valids/restart-parent-loop` 2 and `valids/subflow-secret-output-parent` 1.
+/// Each is a pair between a run Kestra has and a run it does not, produced
+/// because the parent got past a `Subflow` whose child SUCCEEDS here and FAILED
+/// there.
+const RESTRICTION_REMOVES: usize = 85;
+/// How many entries those pairs come from — the other half of the coverage
 /// statement's *"80 pairs across 6 entries"*, which was printed and not
-/// asserted until W4 Task 6.
-const RESTRICTION_REMOVES_ENTRIES: usize = 6;
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 771;
+/// asserted until W4 Task 6. It is 85 across 9 since W6 Task 3.
+const RESTRICTION_REMOVES_ENTRIES: usize = 9;
+/// 771 through W5; **791 since W6 Task 3**, because 12 `Subflow` entries that
+/// stalled at their first run now finish and the runs after them have
+/// endpoints.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 791;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -2443,12 +2473,32 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 
 /// The numbers above, as named constants so this report and the task's own
 /// report cannot disagree about them.
-const MISMATCH_ON_EXECUTION: usize = 104;
-const MISMATCH_ON_RUNS: usize = 124;
-const MISMATCH_ON_ORDER: usize = 76;
-const MISMATCH_ON_SPAWNED: usize = 20;
-const MISMATCHING_RUNS_ENTRIES: usize = 138;
-const ENTRIES_LEFT_UNFINISHED: usize = 84;
+// W6 Task 3: 12 entries left the mismatching population, and each of the four
+// field counters fell by however many of the 12 differed on that field.
+// `spawned` fell by exactly one, `valids/loop-with-subflow`, which is the only
+// one of the 12 that carries a sub-execution at all.
+const MISMATCH_ON_EXECUTION: usize = 90;
+const MISMATCH_ON_RUNS: usize = 112;
+const MISMATCH_ON_ORDER: usize = 72;
+const MISMATCH_ON_SPAWNED: usize = 19;
+const MISMATCHING_RUNS_ENTRIES: usize = 126;
+/// **84 through W5; 63 since W6 Task 3, and the 21 that left are the whole of
+/// `Subflow`.**
+///
+/// Through W5 a `Subflow` was planned an opaque `TaskKind::Runnable`, which set
+/// `task_runs.type_id`, which made it claimable -- and `claim::leaf` then
+/// answered `None` for it, because `models::TaskKind` for the same task is not
+/// a `Leaf`. `WorkerError::NotALeaf` aborted the tick and the execution stalled
+/// there for ever. All 21 entries holding an executed top-level `Subflow` were
+/// in this population for that reason and none is now: a `TaskKind::Executable`
+/// gets no `type_id`, so nothing claims it, and `worker::subflow` terminates it.
+///
+/// The 21 are the 12 this commit banks plus nine that still mismatch on
+/// something else -- five registered in `STILL_OVER_ACCEPTED_AT_RUNTIME`, two
+/// held by `state::apply`'s attempt rule (`valids/retry-subflow`,
+/// `valids/subflow-parent-retry`) and two by the missing `WARNING`
+/// (`valids/task-allow-{failure,warning}-executable-flow`).
+const ENTRIES_LEFT_UNFINISHED: usize = 63;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -2622,7 +2672,7 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         (
             SPAWNED_ENTRIES_THAT_MATCH,
             SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
-            16,
+            15,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -2634,12 +2684,13 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 17;
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 18;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
-/// Sixteen banked at W3b Task 5 and `valids/replay-loop` at the whole-branch
+/// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
 /// review's fix round, when a sub-execution began inheriting its parent's
-/// `inputs`.
+/// `inputs`, and `valids/loop-with-subflow` at W6 Task 3 -- its loop body is a
+/// `Subflow`, so the body ran and the `Subflow` inside it stalled.
 const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/flowable-with-parent-fail",
     "valids/loop-expression-context",
@@ -2656,6 +2707,10 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/loop-serial",
     "valids/loop-serial-multiple-tasks",
     "valids/loop-switch",
+    // W6 Task 3's only bank that carries a sub-execution: its `Loop` body is a
+    // `Subflow`, so the body ran but its `Subflow` run stalled -- the whole
+    // entry hung on the one construct this task shipped.
+    "valids/loop-with-subflow",
     "valids/replay-loop",
     "valids/switch-in-concurrent-loop",
 ];
@@ -2981,6 +3036,54 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask.value }}`. Kestra \
          FAILED the loop at iteration 1; egret runs 3",
     ),
+    // **W6 made a `Subflow` execute, and these five are what that revealed: an
+    // over-acceptance that was already registered on the CHILD, now visible in
+    // its PARENT.** None of them is a new divergence. Before W6 Task 3 the
+    // parent's `Subflow` run stalled -- `build_plan` planned it an opaque
+    // `Runnable`, the claim took it, and `WorkerError::NotALeaf` aborted the
+    // tick -- so the parent could not get as far as running anything Kestra did
+    // not. It can now, and what it then does is transmit its child's terminal:
+    // the child SUCCEEDS here because of the row above or below it in this very
+    // list, `transmitFailed` faithfully carries that up, and the parent runs
+    // its successor.
+    //
+    // The owner of each is therefore the CHILD's row, named in the message, and
+    // fixing that row fixes this one with it. Registered separately rather than
+    // folded into the child's entry because this test compares entry ids and a
+    // parent that is not named here is indistinguishable from one nobody
+    // looked at.
+    (
+        "valids/flow-concurrency-sla-fail-parent",
+        "W8, through a subflow: its child `valids/flow-concurrency-sla-fail-child` is over-accepted \
+         above (no `sla:`), so the child SUCCEEDS, `transmitFailed` carries SUCCESS up, and the \
+         parent's `subflow` run SUCCEEDS where Kestra FAILED it",
+    ),
+    (
+        "valids/sla-parent-flow",
+        "W8, through a subflow: its child `valids/sla-subflow` is over-accepted above, so the \
+         parent's `subflow` run SUCCEEDS where Kestra FAILED it",
+    ),
+    (
+        "valids/restart-parent",
+        "W2, through a subflow: its child `valids/restart-child` is over-accepted above (the \
+         `Infinity` render), so the child SUCCEEDS and egret runs one more task in the parent",
+    ),
+    (
+        "valids/restart-parent-loop",
+        "W2, through a subflow inside a `Loop`: the same `valids/restart-child`, reached from a \
+         loop sub-execution, so egret runs 3 sub-executions and 3 runs where Kestra ran 1 and 2",
+    ),
+    // The only one of the five whose cause is not already in this list, because
+    // its cause is not a flow anybody runs -- it is a construct nothing in
+    // egret evaluates.
+    (
+        "valids/subflow-secret-output-parent",
+        "unclaimed: the flow-level `outputs:` block is not evaluated anywhere in egret, so a child \
+         declaring `type: SECRET` outputs simply SUCCEEDS. On the artifact the PARENT fails inside \
+         `ExecutableUtils.subflowExecutionResultFromChildExecution`'s catch block while extracting \
+         them -- which is what gives its golden run `[CREATED, RUNNING, FAILED]` beside an attempt \
+         of `[CREATED, FAILED]` -- so egret's `subflow` run SUCCEEDS and its `hello` successor runs",
+    ),
 ];
 
 const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 28;
@@ -3105,6 +3208,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // makes the 40 a measurement -- swapping them for whatever today prints
     // would leave this test agreeing with itself.
     let mut in_an_errors_list = 0usize;
+    // **W6 widened it once more, and this is the movement that IS the package's
+    // finding.** A `Subflow` was a `TaskKind::Runnable` through W5, so every
+    // one of its runs landed in `fed` AND in `over_fed` -- fed because
+    // `golden_outcome` supplied its terminal, over-fed because `advance()`
+    // emitted a `SUBMITTED` no `Subflow` run in `golden.json` carries. It is a
+    // `TaskKind::Executable` now, so those runs are `flowable` and the
+    // `SUBMITTED` is gone. Derived here rather than folded into the constants
+    // below, for `in_an_errors_list`'s reason: constants swapped for whatever
+    // today prints leave this test agreeing with itself.
+    let mut is_a_subflow = 0usize;
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -3154,6 +3267,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             *over_fed.entry(type_id.clone()).or_default() += 1;
                         }
                     }
+                    Some(TaskKind::Executable { .. }) => {
+                        flowable += 1;
+                        is_a_subflow += 1;
+                        assert!(
+                            !submitted,
+                            "{}: `Subflow` run {} carries SUBMITTED in the GOLDEN, which would \
+                             refute the whole reason W6 opened src/executor/",
+                            entry.id, run.task
+                        );
+                    }
                     Some(_) => flowable += 1,
                 }
             }
@@ -3169,11 +3292,19 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          has been populated since Task 3"
     );
     assert_eq!(
+        is_a_subflow, 22,
+        "every `Subflow` run in the comparable golden: 21 that executed, across \
+         20 entries, plus `valids/task-runif`'s `notexecutedflowable`, which a \
+         falsy `runIf:` SKIPPED. All 22 were `fed` and over-submitted through \
+         W5; none of them is either since W6 planned `Subflow` as \
+         `TaskKind::Executable`"
+    );
+    assert_eq!(
         (
-            fed - in_an_errors_list,
-            flowable,
+            fed - in_an_errors_list + is_a_subflow,
+            flowable - is_a_subflow,
             unplanned + in_an_errors_list,
-            over_fed.values().sum::<usize>()
+            over_fed.values().sum::<usize>() + is_a_subflow
         ),
         (424, 74, 342, 114),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -3182,8 +3313,9 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          numbers, and up to the one the null-list fix moved out of `unplanned` \
          and into `flowable` (`valids/switch-impossible`'s `impossible` run: the \
          flow is planned at all now, so its `Switch` is a flowable rather than a \
-         task with no plan). If it does not, nothing below is a measurement of \
-         anything"
+         task with no plan), and up to the 22 W6 moved out of `fed` and out of \
+         the over-feed at the same time. If it does not, nothing below is a \
+         measurement of anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -3202,10 +3334,20 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         .filter(|(t, _)| t.starts_with("io.kestra.plugin.core.flow."))
         .map(|(_, n)| *n)
         .sum();
+    // W6 took a whole TYPE out of this bucket as well as 22 runs, so the `+ 1`
+    // is checked rather than assumed: `Subflow` must be absent from the map
+    // entirely, which is what a type that is no longer fed looks like.
+    assert!(
+        !over_fed.contains_key("io.kestra.plugin.core.flow.Subflow"),
+        "`Subflow` must contribute NO over-submitted run since W6 planned it \
+         `TaskKind::Executable`; it contributed {:?}",
+        over_fed.get("io.kestra.plugin.core.flow.Subflow")
+    );
     assert_eq!(
-        (flow_then, over_fed.len()),
+        (flow_then + is_a_subflow, over_fed.len() + 1),
         (89, 12),
-        "Task 5's flow bucket, reconstructed: 7 types and 89 runs"
+        "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
+         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6"
     );
 }
 
@@ -3791,14 +3933,21 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `inputs`.
         (
             "Loop — a sub-execution egret runs and gets wrong",
-            20,
+            19,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
-        (
-            "Subflow",
-            22,
-            &["io.kestra.plugin.core.flow.Subflow", "core.subflow"],
-        ),
+        // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
+        // it rather than lowering it to 10.** Same rule as `disabled: true` and
+        // `runIf:` below, run for the third time: a row attributes an entry to
+        // the construct that HOLDS it, and `Subflow` holds nothing now — it
+        // executes, and 12 of the 22 banked in the commit that removed this row.
+        //
+        // The remaining 10 are all held by something else, and lowering the
+        // number instead would have kept six of them attributed to a construct
+        // that works. Four are absorbed by rows that stayed (`flow
+        // concurrency:` once, `Loop` once, `AllowFailure` twice); the other six
+        // are named one by one in `UNATTRIBUTED` below, which is where the
+        // honest attribution for each of them lives.
         ("finally:", 16, &["finally:"]),
         (
             "ExecutionUpdatableTask",
@@ -3835,7 +3984,11 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
                 "core.waitfor",
             ],
         ),
-        ("flow concurrency:", 7, &["\nconcurrency:"]),
+        // 7 through W5; `valids/flow-concurrency-parallel-subflow-kill-child`
+        // banked at W6 Task 3, because what its `concurrency: {behavior:
+        // QUEUE}` changes is WHEN its own child starts and its trace does not
+        // record that.
+        ("flow concurrency:", 6, &["\nconcurrency:"]),
         // `disabled: true` was a row here through Task 8 with 6 entries, and
         // `runIf:` was a row with 7 through W3a's final review. Both are
         // implemented now, so neither holds anything and a row for either would
@@ -3901,6 +4054,36 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/dag",
             "one `order` pair a clockless machine cannot reach",
+        ),
+        // **The six W6 Task 3 moved here from the `Subflow` row**, each with
+        // the cause that actually holds it now that `Subflow` runs. Five of the
+        // six are pinned from a second direction as well:
+        // `STILL_OVER_ACCEPTED_AT_RUNTIME` names three of them and
+        // `no_corpus_subflow_turns_transmit_failed_off`'s two companions in
+        // `executor::state::apply` name the other two.
+        (
+            "valids/restart-parent",
+            "its child `valids/restart-child`'s `1 / taskrun.attemptsCount`              renders Infinity here and throws in Java, so the child SUCCEEDS              and the parent transmits a SUCCESS Kestra never had",
+        ),
+        (
+            "valids/retry-subflow",
+            "`state::apply` rule 1: Kestra accumulates a retried `Subflow`'s              sub-execution retries INSIDE the parent's attempt, so its attempt              reads `... FAILED RETRYING CREATED RUNNING FAILED` where a              terminated attempt here takes no further state",
+        ),
+        (
+            "valids/subflow-parent-retry",
+            "the same rule 1, twice: `subflow1` and `subflow2` each carry two              attempts of that shape",
+        ),
+        (
+            "valids/sla-parent-flow",
+            "`sla:` in its child `valids/sla-subflow`, which egret does not              implement, so the child SUCCEEDS and the parent transmits it",
+        ),
+        (
+            "valids/subflow-secret-output-parent",
+            "the flow-level `outputs:` block, which nothing in egret evaluates;              on the artifact the PARENT fails while extracting the child's              SECRET output",
+        ),
+        (
+            "valids/task-runif",
+            "`io.kestra.plugin.core.output.OutputValues`, which has no handler.              Its `Subflow` is the corpus's only unresolvable target and a falsy              `runIf:` SKIPS it, so `Subflow` was never what held this entry",
         ),
         (
             "valids/flow-with-outputs-failed",
@@ -4162,12 +4345,15 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
         named,
         vec![
             "valids/exit-killed".to_string(),
-            "valids/flow-concurrency-parallel-subflow-kill".to_string(),
-            "valids/flow-concurrency-parallel-subflow-kill-child".to_string(),
             "valids/flow-concurrency-queue-killed-after-execution".to_string(),
             "valids/pause-kill-delay".to_string(),
         ],
-        "the five baselined ids whose name contains `kill`"
+        "the baselined ids whose name contains `kill`. It was FIVE through W5; \
+         W6 Task 3 banked two of them -- `valids/flow-concurrency-parallel-subflow-kill` \
+         and its `-child` -- and neither is a kill at all: the name is the \
+         Java test's, the flows declare `concurrency:` with `behavior: QUEUE`, and \
+         what QUEUE changes is WHEN a child starts, which a parent's trace does \
+         not record"
     );
 
     // Not one of them declares a `timeout:` anywhere, so leg 1 excludes every
@@ -4325,8 +4511,10 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (4, 139, 143),
-        "the baselined population that declares a `timeout:`, and the rest: {:#?}",
+        (4, 127, 131),
+        "the baselined population that declares a `timeout:`, and the rest. It \
+         was (4, 139, 143) through W5: W6 Task 3 banked 12, and not one of the \
+         12 declares a `timeout:` anywhere, so the numerator did not move: {:#?}",
         declaring
     );
     assert_eq!(
@@ -4585,5 +4773,230 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         flow_level.len(),
         5,
         "golden entries whose `retry:` is the FLOW's: {flow_level:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W6 Task 3: the three derivations `src/` cites for `Subflow`
+// ---------------------------------------------------------------------------
+
+/// Every `Subflow` task id a corpus flow declares, from all four root lists and
+/// through `children()` **and** `error_children()`.
+///
+/// Wider than `publish::resolve_task`'s walk on purpose and for
+/// `driver::subflow_targets`' reason — the question here is *what would a
+/// resolver have to reach*, not *what does publish reach today*.
+fn subflow_tasks(source: &str) -> BTreeMap<String, egret_workflow::models::Subflow> {
+    let mut out = BTreeMap::new();
+    let Ok(flow) = egret_workflow::spec::parse(source) else {
+        return out;
+    };
+    fn walk(
+        t: &egret_workflow::models::Task,
+        out: &mut BTreeMap<String, egret_workflow::models::Subflow>,
+    ) {
+        if let egret_workflow::models::TaskKind::Subflow(s) = &t.kind {
+            out.insert(t.id.clone(), s.clone());
+        }
+        for c in t.children().into_iter().chain(t.error_children()) {
+            walk(c, out);
+        }
+    }
+    for list in [
+        &flow.tasks,
+        &flow.errors,
+        &flow.finally_,
+        &flow.after_execution,
+    ] {
+        for t in list {
+            walk(t, &mut out);
+        }
+    }
+    out
+}
+
+/// **The measurement W6 opened `src/executor/` for: no `Subflow` run in the
+/// golden carries `SUBMITTED`.**
+///
+/// `SUBMITTED` is the one state in Kestra's record that separates a task the
+/// worker ran from one the executor ran (`RunState::Submitted`'s own doc: 580
+/// of the golden's 840 run histories), and `flowable::start` emits it for every
+/// [`TaskKind::Runnable`]. So a `Subflow` left planned `Runnable` mismatches
+/// **every** entry W6 exists to bank, whatever else it gets right — which is
+/// why "keep it opaque and let a handler spawn and wait", the cheaper answer,
+/// banks nothing.
+///
+/// Derived over the golden rather than remembered, per the plan's rule that a
+/// figure is safe only if a running program compares it. The counts are
+/// asserted too: a walk that found no `Subflow` run at all would pass the
+/// `SUBMITTED` half vacuously, which is the shape this programme has paid for
+/// ten times.
+#[test]
+fn no_subflow_run_in_the_golden_passes_through_submitted() {
+    let (mut executed, mut skipped, mut entries) = (0usize, 0usize, 0usize);
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let subflows = subflow_tasks(&corpus_source(&entry.id));
+        if subflows.is_empty() {
+            continue;
+        }
+        let trace = Trace::from(entry);
+        let mut here = 0usize;
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for run in &t.runs {
+                if !subflows.contains_key(&run.task) {
+                    continue;
+                }
+                here += 1;
+                assert!(
+                    !run.state.iter().any(|s| s == "SUBMITTED"),
+                    "{}: `Subflow` run {:?} reads {:?} in the golden. If this ever \
+                     carries SUBMITTED, `TaskKind::Executable` is the wrong shape \
+                     and plan.rs's whole argument for opening src/executor/ falls",
+                    entry.id,
+                    run.task,
+                    run.state
+                );
+                assert!(
+                    !run.attempts.iter().flatten().any(|s| s == "SUBMITTED"),
+                    "{}: `Subflow` attempt of {:?} carries SUBMITTED",
+                    entry.id,
+                    run.task
+                );
+                match run.state.as_slice() {
+                    [c, s] if c == "CREATED" && s == "SKIPPED" => skipped += 1,
+                    _ => executed += 1,
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if here > 0 {
+            entries += 1;
+        }
+    }
+    assert_eq!(
+        (executed, skipped, entries),
+        (24, 1, 22),
+        "the population this claim rests on: 24 executed `Subflow` runs and one \
+         SKIPPED (`valids/task-runif`'s `notexecutedflowable`), over 22 entries. \
+         Three of the 24 are inside a loop sub-execution rather than at the top \
+         level (`valids/loop-with-subflow` twice, `valids/restart-parent-loop` \
+         once), which is why `planning_the_loop_removed_forty_spurious_submitted_emissions` \
+         -- whose reconstruction excludes a loop body, because Task 5's builder \
+         had no plan for one -- counts 22 and not 25"
+    );
+}
+
+/// **The corpus names exactly one `Subflow` target no corpus flow holds, and
+/// the run that names it is SKIPPED before anything resolves it.**
+///
+/// That is what makes `worker::subflow`'s unresolvable-target decision safe to
+/// take: egret fails the RUN rather than refusing the FLOW, matching the
+/// artifact (`egret.probe/probe-unresolvable`), and the one shape where the two
+/// still differ — Kestra never emits `RUNNING`, egret does — is unreachable
+/// here. A `build_plan` that refused the flow instead would turn
+/// `valids/task-runif` from `runs` into `refused`, which is a regression rather
+/// than a bank.
+#[test]
+fn the_only_unresolvable_subflow_target_in_the_corpus_is_skipped() {
+    let held: BTreeSet<String> = corpus()
+        .iter()
+        .filter_map(|e| egret_workflow::spec::parse(&corpus_source(&e.id)).ok())
+        .map(|f| format!("{}/{}", f.namespace, f.id))
+        .collect();
+    let mut unresolvable: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in corpus() {
+        for (task, sub) in subflow_tasks(&corpus_source(&entry.id)) {
+            let (Some(ns), Some(id)) = (&sub.namespace, &sub.flow_id) else {
+                continue;
+            };
+            // The one target that is not a name at all --
+            // `valids/task-flow-dynamic`'s `{{ inputs.namespace }}` -- is left
+            // out here rather than counted as missing: `driver::target_census`
+            // owns it as `SUBFLOW_TARGETS_UNRENDERED`, and a flow that has no
+            // golden entry cannot be regressed by this decision anyway.
+            let name = format!("{ns}/{id}");
+            if name.contains("{{") || held.contains(&name) {
+                continue;
+            }
+            unresolvable
+                .entry(name)
+                .or_default()
+                .push((entry.id.clone(), task));
+        }
+    }
+    assert_eq!(
+        unresolvable
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect::<Vec<_>>(),
+        vec![(
+            "dummy_namespace/dummy_flow",
+            &[(
+                "valids/task-runif".to_string(),
+                "notexecutedflowable".to_string()
+            )][..]
+        )],
+        "the whole population of unresolvable literal `Subflow` targets in the \
+         corpus. `driver::SUBFLOW_TARGETS_ABSENT` counts the same one from the \
+         other side"
+    );
+
+    let entry = golden()
+        .into_iter()
+        .find(|e| e.id == "valids/task-runif")
+        .expect("valids/task-runif has a golden entry");
+    let run = entry
+        .runs
+        .iter()
+        .find(|r| r.task == "notexecutedflowable")
+        .expect("its `notexecutedflowable` run is in the golden");
+    assert_eq!(
+        run.state,
+        ["CREATED", "SKIPPED"],
+        "the only unresolvable target in the corpus belongs to a run a falsy \
+         `runIf:` skips, so nothing egret does when a target does not resolve is \
+         visible to the ratchet -- which is why `worker::subflow` measured the \
+         artifact for it instead"
+    );
+}
+
+/// **No corpus `Subflow` writes `transmitFailed: false`.**
+///
+/// Cited twice in `src/`: by `executor::state::apply`, for the attempt-history
+/// rule its two-step terminal would break, and by `worker::subflow::guess_state`,
+/// which implements the branch anyway. Both statements are only safe while this
+/// holds, so it is derived rather than remembered.
+///
+/// The default is `true` (`Subflow.java:132`) and `models::Subflow` carries the
+/// same default, so this reads the effective value and not the presence of a
+/// key.
+#[test]
+fn no_corpus_subflow_turns_transmit_failed_off() {
+    let mut declarers = 0usize;
+    let mut subflows = 0usize;
+    for entry in corpus() {
+        let tasks = subflow_tasks(&corpus_source(&entry.id));
+        if tasks.is_empty() {
+            continue;
+        }
+        declarers += 1;
+        for (task, sub) in tasks {
+            subflows += 1;
+            assert!(
+                sub.transmit_failed,
+                "{}: `Subflow` {task:?} turns `transmitFailed` off, which makes \
+                 `guess_state`'s second branch reachable -- and `executor::state::apply` \
+                 rule 1 would then drop the second state off the attempt. Both \
+                 doc comments say this cannot happen",
+                entry.id
+            );
+        }
+    }
+    assert_eq!(
+        (declarers, subflows),
+        (25, 27),
+        "the population: corpus flows declaring at least one `Subflow`, and the \
+         `Subflow` tasks between them"
     );
 }

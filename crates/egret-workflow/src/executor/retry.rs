@@ -300,8 +300,18 @@ fn millis(d: &Duration) -> i64 {
 /// is never retried**, however its own `retry:` reads. `valids/retry-flowable`
 /// is the measurement: its `retry:` sits on a `Sequential` and it is the
 /// `Sequential`'s *child* that runs three attempts, while the `Sequential`
-/// itself has one and ends `FAILED`. `Subflow` is planned opaque today, so
-/// [`TaskKind::Runnable`] is both halves of that test here.
+/// itself has one and ends `FAILED`.
+///
+/// **This used to read *"`Subflow` is planned opaque today, so
+/// [`TaskKind::Runnable`] is both halves of that test here"*, and W6 made that
+/// false in the commit that could have left it standing.** A `Subflow` is a
+/// [`TaskKind::Executable`] now, so the predicate spells both halves the way
+/// Kestra does. It is corpus-reachable: `valids/subflow-parent-retry`'s
+/// `subflow1` and `subflow2` each run **2** attempts and `valids/retry-subflow`'s
+/// single `subflow` run runs **3**, and a second attempt starts a SECOND child
+/// execution under the same `(execution, run_ix)` -- which is exactly why
+/// migration 0138's reverse index is not unique. Both entries stay baselined,
+/// on `state::apply`'s rule 1 rather than on this.
 pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     for run in 0..state.runs.len() {
         if state.runs[run].history.last() != Some(&RunState::Failed) {
@@ -310,7 +320,7 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
         let task = state.runs[run].task;
         if !matches!(
             plan.tasks.get(task).map(|t| &t.kind),
-            Some(TaskKind::Runnable { .. })
+            Some(TaskKind::Runnable { .. } | TaskKind::Executable { .. })
         ) {
             continue;
         }

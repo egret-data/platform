@@ -78,6 +78,7 @@ mod reaper;
 mod registry;
 mod render;
 mod spawn;
+mod subflow;
 mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;

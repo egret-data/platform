@@ -304,10 +304,28 @@ impl RunState {
 /// second attempt reads `CREATED RUNNING FAILED RETRYING CREATED RUNNING
 /// FAILED` — Kestra accumulates the sub-execution's retries inside the parent's
 /// attempt — and `valids/subflow-parent-retry` is the same shape. Both are
-/// baselined, `Subflow` is planned opaque and is W6's, and no reachable entry
-/// has an attempt that continues past its own terminal. That is why the rule
-/// is stated here with its counter-example rather than left as an invariant
-/// somebody later discovers is not one.
+/// baselined -- `Subflow` is a [`TaskKind::Executable`](super::TaskKind::Executable)
+/// since W6, not opaque, and the two entries stay baselined on exactly this
+/// rule -- and no reachable entry has an attempt that continues past its own
+/// terminal. That is why the rule is stated here with its counter-example
+/// rather than left as an invariant somebody later discovers is not one.
+///
+/// **W6 measured a SECOND `Subflow` shape this rule is wrong for, and left the
+/// rule alone because nothing reachable can express it.** When a `Subflow`'s
+/// child terminates, Kestra writes the CHILD's state onto the parent run and
+/// then, if `ExecutableUtils.guessState` disagrees, writes that too -- and the
+/// attempt takes **both**. Measured on the pinned artifact,
+/// `egret.probe/probe-notransmit-parent` (`transmitFailed: false` over a child
+/// that FAILS) gives a run AND an attempt each reading
+/// `["CREATED","RUNNING","FAILED","SUCCESS"]`, and the golden holds the same
+/// shape for `valids/task-allow-failure-executable-flow` (`... FAILED,
+/// WARNING`). Neither is reachable here: [`RunState`] has no `Warning`,
+/// `models::Task` carries neither `allowFailure` nor `allowWarning`, and **no
+/// corpus `Subflow` writes `transmitFailed: false`** -- re-derived over all 25
+/// declarers by `tests/executor.rs`'s
+/// `no_corpus_subflow_turns_transmit_failed_off`.
+/// `worker::subflow::guess_state` records the same boundary from the other
+/// side.
 ///
 /// ## 2. A run re-entering `CREATED` has no render (W3c fix round 2)
 ///
@@ -402,6 +420,13 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // would be a non-exhaustive match rather than a decision, so it is
         // spelled out.
         Command::SpawnExecution { .. } => {}
+        // Nothing to record, for `SpawnExecution`'s reason and with one extra
+        // consequence spelled out on `Command::SpawnSubflow` itself: because
+        // this leaves the state untouched, a round that emitted it without also
+        // starting the run would emit it again for ever, which is why
+        // `flowable::start` emits it BESIDE the `StartRun` rather than instead
+        // of one.
+        Command::SpawnSubflow { .. } => {}
     }
 }
 
