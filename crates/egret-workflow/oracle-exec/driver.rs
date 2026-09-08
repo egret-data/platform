@@ -99,7 +99,10 @@ pub const STEP_BOUND: usize = 4 * 765;
 /// the happens-before endpoints are `executions.seq`, bumped once per `settle`,
 /// so two siblings finished in one batch still end at different steps.
 /// Measured: **`BATCH = 32` with the shipping worker leaves
-/// `executor_matches_golden` at 143 mismatching and `executor.rs` at 34/34.**
+/// `executor_matches_golden` at 143 mismatching and `executor.rs` at 34/34** —
+/// the ratchet figure is the claim, and the `34/34` is the binary's size on the
+/// day W4 Task 4 ran it. It is **35** since W4 Task 6 added a derivation test,
+/// so a reader re-running this gets `35/35`; the row is about the 143.
 ///
 /// The lever is the worker applying one handler result per **transaction**.
 /// `BATCH = 32` with a prototype that applies a whole batch's results before

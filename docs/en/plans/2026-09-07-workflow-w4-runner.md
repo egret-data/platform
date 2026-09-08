@@ -120,7 +120,7 @@ W3b ruled that the tick finishes one run because widening it changes the transac
 **Files:** modify `oracle-exec/README.md`, `oracle-exec/runnable.txt`.
 
 - [ ] **Step 1: Re-derive** every number the statement carries. W3a's was found over-claiming by 227; W3b's own Task 7 then cut the same claim by a further 750, on the grounds that a pair on a *baselined* entry is compared and cannot be falsified. Check whether that argument now applies anywhere new.
-- [ ] **Step 2: Separate what the ratchet speaks for from what it cannot.** Twenty entries were reachable by the holes; the runner reaches zero and rests on its own tests; and durability rests on five properties, one of which the ratchet can never see because a task run twice producing the same terminal produces an identical trace.
+- [ ] **Step 2: Separate what the ratchet speaks for from what it cannot.** ~~Twenty entries were reachable by the holes~~ — **~0 were; see the spec's §1.1**, and this line kept the retracted union figure while the Goal at the top of this file already carried its correction, which is how it reached Task 6's brief and had to be re-derived there. The runner reaches zero and rests on its own tests; and durability rests on five properties, one of which the ratchet can never see because a task run twice producing the same terminal produces an identical trace.
 - [ ] **Step 3: Sweep for a stale twin.** W3a's README carried two true-at-different-moments figures for one quantity with only prose to say which; W3b's sweep found thirteen cited test names that no longer existed, nine of them deleted with the harness it replaced.
 - [ ] **Step 4: Full gate, commit.**
 

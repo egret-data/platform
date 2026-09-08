@@ -400,8 +400,19 @@ pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> 
 /// Public and callable on its own, for [`reap`](super::reap)'s reason: a real
 /// worker pool may want to wake on its own cadence, and a waker reachable only
 /// from inside [`tick`] would be one nothing could drive directly. [`tick`]
-/// calls it, which is what gives it a production caller — the thing `resume`
-/// did not have, and the whole reason this hole survived a package.
+/// calls it, which is what gives it a caller **inside this crate's own
+/// source** — the thing `resume` did not have, its only caller being
+/// `oracle-exec/driver.rs`, and the whole reason this hole survived a package.
+///
+/// **That sentence said "a production caller", and W4 Task 6 measured that it
+/// is not one yet.** [`tick`] itself has no production caller: a grep for
+/// `tick(`, `reap(` and `start_execution(` over every `crates/*/src` finds no
+/// call site at all, and `egret-bin` builds a `WorkflowState` — the flow repo
+/// and its refs — with no claim loop. So the chain this doc describes is real
+/// and ends one link short of a deployment, and this is exactly the sentence a
+/// reader would quote as evidence the waker is wired. It is wired to
+/// **`tick`**; nothing is wired to `tick`. `oracle-exec/README.md`'s coverage
+/// statement carries it as item 15, and W4's own section as its sixth fact.
 ///
 /// **Every named execution is attempted and the first error is returned after
 /// the loop**, which is [`tick`]'s own rule for the same reason: one
@@ -486,7 +497,7 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 /// | configuration | `executor_matches_golden` |
 /// |---|---|
 /// | shipping (`driver::BATCH = 1`, one result per transaction) | 143 mismatching |
-/// | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
+/// | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 (its size at W4 Task 4; **35** since Task 6 added a derivation test — the claim in this row is the 143) |
 /// | `BATCH = 1`, a whole batch per transaction | 143 mismatching (**forced**: at `BATCH = 1` a group is one run, so the widened apply IS [`apply_outcome`]) |
 /// | `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
 ///
@@ -1044,7 +1055,13 @@ pub(super) async fn load_with(
 ///
 /// This worker is that driver. The counter is how W3b answers the question with
 /// a measurement rather than with a prediction — see
-/// `tests/executor.rs`'s `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs`.
+/// `tests/executor.rs`'s
+/// `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`.
+/// (That citation read `…_is_reachable_again_and_what_it_costs` until W4 Task
+/// 6's fourth sweep pass: **no test has ever had that name.** A pointer into a
+/// test file, from product source, that resolves to nothing — the shape
+/// `oracle-exec/README.md` calls the worse one, in a surface its own table did
+/// not cover.)
 /// It is deliberately **not** a guard: `advance()` may not change (the W3b
 /// plan's first Global Constraint), and the three entries the state occurs on
 /// reproduce Kestra's run list exactly, so nothing observable is wrong.

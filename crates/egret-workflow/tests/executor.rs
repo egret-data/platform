@@ -54,9 +54,17 @@
 //! held a four-tier harness that supplied one thing out of `golden.json`: the
 //! last element of the `state` sequence of a run whose `PlanTask` is `Runnable`
 //! — and, from W3a Task 6, of a `Loop` — plus the last of each of that run's
-//! attempts. 630 of the golden's 840 run terminals were fed, the comparison was
-//! circular for exactly that field, and a normalisation bug in it was invisible
-//! in both directions.
+//! attempts. **426** of the golden's 840 run terminals were fed, the comparison
+//! was circular for exactly that field, and a normalisation bug in it was
+//! invisible in both directions.
+//!
+//! *(This said **630** until W4 Task 6's fourth sweep pass. 630 is
+//! `575 fed + 55 spawner`, the whole of those two buckets, and 204 of them are
+//! inside sub-executions egret never created — nothing was supplied to them and
+//! nothing was compared about them. `oracle-exec/README.md`'s coverage
+//! statement derived 426 from this file's own table and listed 630 as a number
+//! it had itself published wrong; the retired figure went on standing here, in
+//! the module doc of the file that holds the derivation.)*
 //!
 //! Nothing on egret's side reads `golden.json` now. [`driver::run`] starts a
 //! real execution with `worker::start_execution`, drives it with
@@ -716,7 +724,10 @@ async fn egret_side() -> &'static Side {
             .expect("read the current database");
         assert!(
             is_process_clone(&here),
-            "refusing to TRUNCATE {here:?}: this statement is only ever safe against              THIS PROCESS's own `egret_test_db` clone, which is named `egret_t_` plus              the pid as 32 hex digits and is dropped when the process exits. A shared              database would not flake under a concurrent run — it would lose rows that              run had written."
+            "refusing to TRUNCATE {here:?}: this statement is only ever safe against THIS PROCESS's \
+             own `egret_test_db` clone, which is named `egret_t_` plus the pid as 32 hex digits and \
+             is dropped when the process exits. A shared database would not flake under a \
+             concurrent run — it would lose rows that run had written."
         );
         sqlx::query("TRUNCATE workflow.executions CASCADE")
             .execute(&db.pool)
@@ -1454,12 +1465,25 @@ const EGRET_NESTED_PAIRS: usize = 126;
 ///
 /// | flipped | pairs | ratchet |
 /// |---|---|---|
-/// | every **nested** pair — W3a's own experiment | 227 | **FAILS**: 150 mismatching, 6 REGRESSIONs |
-/// | every pair on a **baselined** entry | 750 | green: 144 mismatching, 0 banked |
-/// | every pair on a **matching** entry | 354 | **FAILS**: 184 mismatching, 40 REGRESSIONs |
+/// | every **nested** pair — W3a's own experiment | 227 | **FAILS**: 150 mismatching, 7 REGRESSIONs |
+/// | every pair on a **baselined** entry | 747 | green: 143 mismatching, 0 banked |
+/// | every pair on a **matching** entry | 357 | **FAILS**: 184 mismatching, 41 REGRESSIONs |
 ///
 /// The first row is the one to read against W3a's, which recorded that flipping
 /// all 227 left this crate green.
+///
+/// **This table had a stale twin under it for a whole package, and it was in
+/// this file.** It read 750 / 354 / 144 / 6 / 40 — the values before the
+/// whole-branch review's fix round banked `valids/replay-loop` — fifty lines
+/// above an `assert_eq!` that has been deriving 747 and 357 the whole time.
+/// W4 Task 6's sweep corrected the copy in `oracle-exec/README.md` and listed
+/// the copy in `runnable.txt` as retired, in the same commit that edited **this
+/// file**, and did not check the copy it was editing. The rule that missed it
+/// was *"every figure a test asserts was already right"*: true, and too narrow.
+/// **A value a test compares is safe; prose that merely sits beside one is not,
+/// even inside a test file** — a doc comment and an assertion *message* are
+/// prose, and the message under the `(622, 125, 747)` assertion said *"flipping
+/// all 750 … at 144"* while the tuple beside it said otherwise.
 ///
 /// This test derives the split from `golden.json` and `baseline.txt` alone —
 /// no driver — so it is cheap enough to run everywhere and cannot drift from
@@ -1508,8 +1532,8 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (b_top, b_nested, b_top + b_nested),
         (622, 125, 747),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 750 leaves \
-         the ratchet green and unmoved at 144"
+         entries, which mismatch whatever the pair says. Flipping all 747 leaves \
+         the ratchet green and unmoved at 143"
     );
     assert_eq!(
         (
@@ -1541,8 +1565,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
 /// no driver, so this is cheap and cannot drift from the ratchet's population:
 ///
 /// - **run terminals**, the last state of every run, sub-executions included —
-///   the population `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
-///   used to classify, and the one the fed count is a share of;
+///   the population the deleted `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
+///   used to classify (retired with W3a's harness — see the README's pointer
+///   table), and the one the fed count is a share of;
 /// - **run-history tokens**, every state in every one of those runs;
 /// - **sub-executions**, the nodes under `spawned` at any depth;
 /// - **executions**, i.e. the golden `runs` entries plus those sub-executions,
@@ -1794,6 +1819,29 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
          because there were none. Task 6 named spawned executions as the thing \
          that could break it; they do not"
     );
+    // **The entry count too, and W4 Task 6's review is why.** The coverage
+    // statement's sentence is "80 pairs across 6 entries"; the 80 was asserted
+    // here and the 6 was only `println!`ed above, which by that sweep's own
+    // generalisation makes it the figure in that sentence that goes stale
+    // next -- it is prose sitting beside a derivation rather than a value the
+    // derivation compares. Asserted as a pair with the names, because a count
+    // that moves without saying which entry left is the shape `baseline.txt`'s
+    // header keeps getting wrong.
+    assert_eq!(
+        (removed.len(), removed.keys().cloned().collect::<Vec<_>>()),
+        (
+            RESTRICTION_REMOVES_ENTRIES,
+            vec![
+                "valids/all-flowable".to_string(),
+                "valids/dag".to_string(),
+                "valids/if".to_string(),
+                "valids/parallel-nested".to_string(),
+                "valids/restart-child".to_string(),
+                "valids/restart-loop".to_string(),
+            ]
+        ),
+        "the entries the restriction removes a pair from, by name and by count"
+    );
     assert_eq!(
         removed.values().sum::<usize>(),
         RESTRICTION_REMOVES,
@@ -1809,6 +1857,10 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
 }
 
 const RESTRICTION_REMOVES: usize = 80;
+/// How many entries those 80 pairs come from — the other half of the coverage
+/// statement's *"80 pairs across 6 entries"*, which was printed and not
+/// asserted until W4 Task 6.
+const RESTRICTION_REMOVES_ENTRIES: usize = 6;
 const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 771;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
@@ -2606,7 +2658,13 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
 /// successor, and it is a different sentence: egret fills the field now, so
-/// these six differ **inside** it rather than by leaving it empty.
+/// these **eight** differ **inside** it rather than by leaving it empty.
+///
+/// *(The word was "six" and the constant under it was 8, on adjacent lines,
+/// since the whole-branch review's fix round moved `valids/finally-loop` and
+/// `valids/finally-loop-parallel` into this bucket. W4 Task 6's fourth sweep
+/// pass found it. The value was compared on every run and was right; the word
+/// beside it was not compared by anything.)*
 const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 8;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
@@ -2861,7 +2919,8 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     // three are the same class and were named nowhere.
     (
         "valids/all-flowable",
-        "W2: `{{ taskrun.value }}` in a `Loop` body renders where Kestra throws,          so `1-each` succeeds and egret runs 3 iterations and 12 runs where          Kestra ran 1 and 3",
+        "W2: `{{ taskrun.value }}` in a `Loop` body renders where Kestra throws, so `1-each` \
+         succeeds and egret runs 3 iterations and 12 runs where Kestra ran 1 and 3",
     ),
     (
         "valids/disable-flowable",
@@ -2869,11 +2928,12 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     ),
     (
         "valids/restart-child",
-        "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java          throws, so the run SUCCEEDS and egret runs one more task",
+        "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws, so the run \
+         SUCCEEDS and egret runs one more task",
     ),
     (
         "valids/restart-loop",
-        "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations          where Kestra ran 1",
+        "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations where Kestra ran 1",
     ),
     // **W4 Task 3 wired `TaskHandler::cancel`, and deliberately not to this
     // seam.** The kill path fires on a task-level `timeout:` expiring, which is
@@ -2884,14 +2944,16 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     // `worker::cancel`'s module doc carries the same statement.
     (
         "valids/parallel-fail-with-flowable",
-        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`.          Kestra FAILED it; the kill path reaches only a task's own expired          `timeout:`, so egret completes it",
+        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`. Kestra FAILED it; \
+         the kill path reaches only a task's own expired `timeout:`, so egret completes it",
     ),
     // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
     // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
     // construct, so it runs the tasks.
     (
         "valids/flow-concurrency-sla-assert-cancel",
-        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra          recorded 0 runs; egret runs the first task",
+        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
+         runs the first task",
     ),
     (
         "valids/flow-concurrency-sla-fail-child",
@@ -2905,17 +2967,15 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "valids/sla-max-duration-fail",
         "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
     ),
-    (
-        "valids/sla-subflow",
-        "W8: the same, through a subflow",
-    ),
+    ("valids/sla-subflow", "W8: the same, through a subflow"),
     // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
     // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
     // the first iteration — succeeds here and runs the other two. Named as a
     // cause of the residual baseline's `Loop` row and owned by nobody.
     (
         "valids/loop-outputs-failed-render",
-        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask          .value }}`. Kestra FAILED the loop at iteration 1; egret runs 3",
+        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask.value }}`. Kestra \
+         FAILED the loop at iteration 1; egret runs 3",
     ),
 ];
 
@@ -4505,7 +4565,9 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     assert_eq!(
         (matching_failed_task.len(), matching.len()),
         (11, 11),
-        "every matching entry that declares a `retry:` declares the behaviour          that writes a `not_before`, so all eleven are entries whose retry the          ratchet would report a change to: {matching_failed_task:?}"
+        "every matching entry that declares a `retry:` declares the behaviour that writes a \
+         `not_before`, so all eleven are entries whose retry the ratchet would report a change to: \
+         {matching_failed_task:?}"
     );
 
     // Flow-level against task-level, over the whole 25: a walk over `tasks:`

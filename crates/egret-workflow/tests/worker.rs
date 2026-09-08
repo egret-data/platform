@@ -5,8 +5,13 @@
 //! happens-before relation alone), and it is the only test in the crate that
 //! can tell the ruling from its alternative — measured, under a prototype that
 //! applies a whole claim batch in one transaction at `driver::BATCH = 1`, it is
-//! the sole failure and the other 707 tests pass, `tests/executor.rs`
-//! included. See
+//! the sole failure and every other test in the crate passes, `tests/executor.rs`
+//! included. *(That was **707** when W4 Task 4 measured it, from a per-suite sum
+//! that is one larger now: Task 6 added a derivation test to `tests/executor.rs`.
+//! The claim is "the only test that can tell the two disciplines apart", which
+//! the total does not carry — so the total is not restated here, because a
+//! figure nobody re-derives is a figure that goes stale, and this one already
+//! had.)* See
 //! [`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`].
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.

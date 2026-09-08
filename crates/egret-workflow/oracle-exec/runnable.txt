@@ -1329,8 +1329,11 @@ useful half twice.
     `due_retries` runs on EVERY tick and selects 0 rows.  `driver::pass_time`
     is the only thing here that makes a deadline elapse, and it calls
     `worker::resume` ITSELF in the same call -- so a due retry is consumed
-    inside the call that made it due.  Instrumented `wake`: 0 fires over 294
-    entries, `tests/worker.rs` the positive control on the same build.
+    inside the call that made it due.  driver.rs's OWN MODULE DOC has said so
+    since W3b ("it changes one timestamp and calls the same `resume` any other
+    caller would"), and this package wrote the opposite for five tasks.
+    Instrumented `wake`: 0 fires over 294 entries, `tests/worker.rs` the
+    positive control on the same build.
     NOT a hole in retrying: a change on any of the 11 matching entries IS
     reported.
 
@@ -1390,5 +1393,8 @@ the named way back.
 `egret-bin` wires a `WorkflowState` and no claim loop, so nothing in this
 workspace runs this worker.  A grep for `tick(`, `reap(` and `start_execution(`
 over every `crates/*/src` finds no call site; the four files that call them are
-oracle-exec/driver.rs and tests/{worker,executor,sql_starrocks_live}.rs.  Read 143 as a statement about a state machine and a driver, not
+oracle-exec/driver.rs and tests/{worker,executor,sql_starrocks_live}.rs -- and
+that is the COMPILED BINARY's scope, not the file's: tests/executor.rs pulls the
+driver in with `#[path = "../oracle-exec/driver.rs"] mod driver;` and contains
+no such call in its own text.  Read 143 as a statement about a state machine and a driver, not
 about a deployment.

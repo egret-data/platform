@@ -5407,11 +5407,19 @@ found over-claiming by 227 once.
 not moved at any point in the package: **143 before Task 1 and 143 at this
 commit**. Nothing here changed because of what W4 shipped — three holes were
 closed and none of them is visible to this corpus, for three *different* reasons
-— so the re-derivation's whole yield is a sweep, and it found eight figures in
-this file and five in `runnable.txt` that were true at a different moment. They
+— so the re-derivation's whole yield is a sweep. It ran **four times**, and each
+pass found what the one before it missed: eight figures in this file and five in
+`runnable.txt`; then a fourteenth **inside the note that retires the other
+thirteen**; then five more in `src/`, `tests/` and `oracle-exec/driver.rs`, once
+the predicate was corrected from *"look where no test asserts"* to **"a value a
+test compares is safe; prose beside one is not"**. Three of the four passes were
+prompted by review rather than by the sweep noticing its own gap. They
 are in *The stale twins W4 retires* at the end, with what each is now. The one
 number that moved in this package's own arithmetic is the count of things this
-statement does not prove: it was thirteen and it is seventeen.
+statement does not prove: it was thirteen and it is seventeen — and the
+seventeenth is not the last one a reader should look at. **Item 15 is**, which is
+why it is also the sixth fact of the W4 section above: nothing in this workspace
+runs this worker.
 
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
@@ -5787,7 +5795,7 @@ measured it and reported no movement. **A number that never moves is the hardest
 thing to read honestly**, because "nothing happened" and "everything that
 happened was invisible here" print identically. This section is what separates
 them, and it is a W4 section rather than a W4 paragraph because the five tasks
-produced **five different facts** and one number:
+produced **six different facts** and one number:
 
 1. the **retry** hole is hidden by the *harness* — this oracle does the
    product's job for it;
@@ -5796,10 +5804,18 @@ produced **five different facts** and one number:
 3. the **kill** hole is hidden by being *downstream of the timeout*, so its
    predicate is never evaluated at all;
 4. three entries were **bankable and declined**, which is not invisibility;
-5. the **runner** reaches zero entries and rests entirely on its own tests.
+5. the **runner** reaches zero entries and rests entirely on its own tests;
+6. and **nothing in this workspace runs this worker at all** — `worker::tick`
+   has no production caller, so `143` is a statement about a state machine and
+   a driver and not about a deployment. That is item 15 below, and it bounds
+   every one of the five above.
 
 Only the first three are "the ratchet cannot see this". The fourth is a
-decision, and the fifth is a population that does not exist.
+decision, the fifth is a population that does not exist, and **the sixth is the
+one to read first**: it was the fifteenth of seventeen items in a list six
+hundred lines below this section when W4 Task 6 first wrote it, and a reader who
+reads exactly the section this document points them at would have finished it
+believing `143` bounds a shipping worker.
 
 | | ratchet | what the task shipped |
 |---|---|---|
@@ -5833,8 +5849,8 @@ and only one of them ends there for the reason a reader would guess.
 
 | hole | the population, derived | is the predicate reached? | why nothing can move |
 |---|---|---|---|
-| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = 14 baselined + 11 matching; of the 14, **4** are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all, leaving **10** the waker could ever have touched | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
-| **`timeout:`** (Task 2) | **5** golden entries declare one. **4** are baselined; the **1** matching is `invalids/duplicate-parallel`, a flow Kestra *refused* — so it has no runs at all, and the reportable half of this population is empty for a reason nothing can change | **Yes, exactly four times.** Instrumented `worker::timeout::guard` over all 294 entries: the budget was applied `1s`, `1s`, `250ms`, `3600s` — precisely the four declarations — and **expired 0 times** | **No corpus budget is short enough to fire.** Three of the four sit on a `Pause`, a flowable whose `timeout:` is `advance()`'s and which Kestra's own worker ignores (measured on the artifact: a `Sequential` carrying `timeout: PT1S` around a four-second `Sleep` ran to SUCCESS in 4.2 s); the fourth is an **hour** on a `core.log.Log` |
+| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = 14 baselined + 11 matching; of the 14, **4** are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all, leaving **10** the waker could ever have touched | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
+| **`timeout:`** (Task 2) | **5** golden entries declare one. **4** are baselined; the **1** matching is `invalids/duplicate-parallel`, a flow Kestra *refused* — so it has no runs at all, and the reportable half of this population is empty for a reason nothing can change. *(W4's spec §1.1 says **4** for this row and is right over **its** population, the baseline; this table counts the golden. Both now name the population they count over, because a reader holding the two documents open sees a contradiction where there is a scope difference — and this file's whole subject is figures that are true under a scope nobody wrote down.)* | **Yes, exactly four times.** Instrumented `worker::timeout::guard` over all 294 entries: the budget was applied `1s`, `1s`, `250ms`, `3600s` — precisely the four declarations — and **expired 0 times** | **No corpus budget is short enough to fire.** Three of the four sit on a `Pause`, a flowable whose `timeout:` is `advance()`'s and which Kestra's own worker ignores (measured on the artifact: a `Sequential` carrying `timeout: PT1S` around a four-second `Sleep` ran to SUCCESS in 4.2 s); the fourth is an **hour** on a `core.log.Log` |
 | **kill** (Task 3) | **5** baselined ids contain `kill`, and **0** of them declare a `timeout:` anywhere in any of `Flow`'s four task lists | **No, zero times.** `Registry::cancel` hangs off the budget expiring, and the row above is why that never happens | **The five named ids are not this path's population at all**, and their own YAML says what they are: `exit-killed` is `Exit` carrying `state: KILLED`, an author-declared terminal rather than a kill anybody performs; `pause-kill-delay` is a bare `Pause`; `flow-concurrency-queue-killed-after-execution` and `flow-concurrency-parallel-subflow-kill-child` declare `concurrency: {behavior: QUEUE, limit: 1}`; and `flow-concurrency-parallel-subflow-kill` declares two `Subflow`s and no `concurrency:` of its own — it is named for what happens to its child. Four of the five are W8 constructs and the fifth is an output. The one runtime kill this corpus *does* hold — `parallel-fail-with-flowable`'s `Sleep`, abandoned by a failed `Parallel` — is `advance()`'s decision, and `advance()` has no worker to tell |
 
 **Two of these three would be lost by merging them**, which is why the middle
@@ -5887,6 +5903,29 @@ run inside one transaction would give the interleaving without giving up the
 one-lease-per-commit shape the fence table is measured against. Nobody has built
 it; this file's job is to make sure the 143 is not read as though nothing were
 available.
+
+#### Nothing runs this worker, and that bounds all five facts above
+
+`worker::tick` has **no production caller**. A grep for `tick(`, `reap(` and
+`start_execution(` over every `crates/*/src` finds no call site; the four files
+that call them are `oracle-exec/driver.rs`, `tests/worker.rs`,
+`tests/executor.rs` and `tests/sql_starrocks_live.rs` — and `tests/executor.rs`
+does it through `#[path = "../oracle-exec/driver.rs"] mod driver;`, so the call
+is in the compiled binary rather than in that file's own text. `egret-bin`
+builds a `WorkflowState` — the flow repo and its refs, so flows can be authored,
+published and read over HTTP — and no claim loop.
+
+So the reaper, the lease fence, the waker and the budget have never met an
+operator's `working_timeout_s`. **The three holes above are real defects that
+were really closed**, and every durability property in item 4 is really proved —
+of code that no deployment executes. Item 15 has the full derivation, and
+`worker::claim`'s doc for `wake` now carries it too, because that doc said
+`tick` calling the waker *"is what gives it a production caller"* and that is
+the sentence a reader would quote as evidence the waker is wired. It is wired to
+`tick`; nothing is wired to `tick`.
+
+This is not W4's to fix and it is not a defect in anything W4 shipped. It is the
+scope of the number.
 
 #### The runner reaches zero entries, and its own tests are the whole instrument
 
@@ -5968,16 +6007,31 @@ is the one assertion in that file that runs without an engine. See *W3b Task 6 �
 and for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
 rather than trusting the brief:
 
+| population | flows naming a script/container/shell/command type | flows naming `core.log.Log` (the control) |
+|---|---|---|
+| the whole corpus — 345 flows | **0** | 108 |
+
+**Derived by `no_corpus_entry_can_exercise_the_egret_sql_handler`**, the same
+test item 3 rests on, which asserts `(345, 0, 0, 108)` — every corpus flow, the
+`egret.*` flows, the script/container/shell/command flows of any vendor, and the
+control — with the total beside the parts. W4 Task 6 moved it there; it was a
+shell pipeline quoted in this section, which is the one thing this statement
+says it never does:
+
 ```bash
+# W4 Task 5's original derivation, kept as the record of how the zero was found
 cd crates/egret-workflow/oracle-exec
 find corpus -name '*.yaml' -o -name '*.yml' | wc -l                     # 345
 grep -rhoE 'type:\s*\S+' corpus | sed 's/.*type:[[:space:]]*//' | sort -u \
   | grep -icE 'script|container|shell|command|docker|bash|python|node'   # 0
 ```
 
-| population | flows naming a script/container/shell/command type | flows naming `core.log.Log` (the control) |
-|---|---|---|
-| the whole corpus — 345 flows | **0** | 108 |
+**The pipeline and the test count different things and agree**, which is worth
+saying rather than leaving for someone to notice: `sort -u` makes the pipeline's
+zero a count of distinct **types**, and the test's is a count of **flows**. Both
+are zero, and only one of them is asserted on every run. The test's filter also
+carries a positive control of its own — a filter that answers `false` to
+everything produces this table exactly.
 
 The control is there for item 3's reason: a scanner that parsed nothing would
 report zero and look exactly like the truth, and it cannot also report 108 flows
@@ -6005,18 +6059,28 @@ only from the clock. Measured, on one binary:
 daemon + images:                      15 passed;  0 failed;  0 ignored — 15.21s
 no daemon, no opt-out:                 1 passed; 14 failed;  0 ignored —  0.00s, exit 101
 no daemon, EGRET_ALLOW_DOCKER_SKIP=1:  1 passed;  0 failed; 14 ignored —  0.00s
-daemon up, images not pulled, opt-out: 1 passed;  0 failed; 13 ignored —  0.00s
+daemon up, images not pulled, opt-out: 1 passed;  0 failed; 14 ignored —  0.00s
 ```
 
-*(The first three rows were **re-measured by W4 Task 6 on this tree** — the
-"no daemon" half by pointing `DOCKER_HOST` at a socket that does not exist,
-which is the axis the gate reads. They said 14/13/13 when this table was
-written, one fix round before the suite gained
-`a_symlinked_output_file_cannot_read_the_worker_hosts_files`; the suite is
-**15** tests now and every row moved by one. The fourth row is Task 5's and was
-not re-measured, because emptying this machine's image cache to check a row
-about image absence costs more than the row is worth — it is marked rather than
-silently carried, which is the whole rule this table exists under.)*
+*(All four rows moved by one, because the suite gained
+`a_symlinked_output_file_cannot_read_the_worker_hosts_files` in Task 5's fix
+round 2 and this table was written before it. The first three were **re-measured
+on this tree** — the "no daemon" half by pointing `DOCKER_HOST` at a socket that
+does not exist, which is the axis the gate reads.*
+
+*The fourth was **derived from `main`**, and W4 Task 6's first attempt at this
+paragraph got it wrong twice over: it left the row at 13 and wrote that the row
+had not been re-measured because emptying this machine's image cache costs more
+than the row is worth. **The figure is not about the image cache.** `main`'s
+`Ok(false)` arm reports `selected.len()` ignored; `selected` is
+`daemon_cases()` — **14** cases — filtered by the CLI filter; and the image axis
+decides only **which verdict** is produced, never how many cases are in it. So
+the row is 14 by reading thirty lines of `container_docker_live.rs`, and the
+"not re-measured" caveat was a category error sitting **two lines under a note
+saying every row moved by one**. It was the fourteenth stale figure, inside the
+correction that retires the other thirteen. A caveat is not a substitute for a
+derivation, and "I did not measure it" is only honest when measuring is what the
+figure needed.)*
 
 The image axis is under the same opt-out as the daemon axis (fix round 1's
 Important 3: it was not, so a machine with Docker running and nothing pulled
@@ -6261,7 +6325,19 @@ the predicate would be satisfied. The true mechanism is one line further on:
 itself**, in the same function (`driver.rs`, the `UPDATE` and the `resume`
 immediately under it). So the oracle contains a second waker, and it consumes
 every due retry inside the call that made it due — `tick`'s own `wake` runs on
-every step and never sees a `RETRYING` run past its deadline. `due_retries`'
+every step and never sees a `RETRYING` run past its deadline.
+
+**And `driver.rs` had already documented that**, in the module doc every task in
+this package read before touching the oracle: *"it changes one timestamp and
+**calls the same `resume` any other caller would**"* (`driver.rs`, the numbered
+list, item 2). So the sentence this statement carried — that the oracle's
+intervention is the rewind — did not merely lack a derivation; it contradicted
+the driver's own doc, in the same directory, for a whole package. That is the
+strongest available argument for why this section exists at all: **the fact was
+not missing, it was written down in the file the claim is about, and five tasks
+wrote the opposite anyway.** A claim about a mechanism has to be read off the
+mechanism, and the cheapest place to read it off is the doc of the function
+being described. `due_retries`'
 `SELECT` is therefore *evaluated constantly and selects nothing*, which is a
 different fact from a predicate that is never reached, and item 13 is a third
 thing again. The zero was measured correctly either way; only the explanation
@@ -6390,11 +6466,20 @@ the `Parallel`. That is `advance()` abandoning a run, and `advance()` has no
 worker to tell — a different seam from the budget, deliberately not wired to it.
 
 **15. Nothing in this workspace runs this worker, and that bounds every claim
-above.** `worker::tick` has **no production caller**: a grep for `tick(`, `reap(` and
-`start_execution(` over every `crates/*/src` finds no call site at all, and the
-four files that do call them are `oracle-exec/driver.rs`, `tests/worker.rs`,
-`tests/executor.rs` and `tests/sql_starrocks_live.rs`. `worker::reap` and
-`worker::start_execution` are in the same position. `egret-bin` builds a `WorkflowState` — the flow repo and its refs, so
+above.** *(Also stated as the sixth fact in W4's own section, and deliberately
+in both places: it was only here when this statement was first written, fifteenth
+of seventeen, six hundred lines under the section a reader is pointed at.)*
+
+`worker::tick` has **no production caller**: a grep for `tick(`, `reap(` and
+`start_execution(` over every `crates/*/src` finds no call site at all. Four
+files reach them, all four on the test side — `oracle-exec/driver.rs`,
+`tests/worker.rs`, `tests/executor.rs` and `tests/sql_starrocks_live.rs` — and
+**the scope of that sentence is the compiled binary rather than the file**:
+`tests/executor.rs` contains no such call in its own text and pulls the driver
+in with `#[path = "../oracle-exec/driver.rs"] mod driver;`. In a document whose
+subject is figures that are true under an unstated scope, that distinction is
+not a footnote. `worker::reap` and `worker::start_execution` are in the same
+position. `egret-bin` builds a `WorkflowState` — the flow repo and its refs, so
 that flows can be authored, published and read over HTTP — and no claim loop.
 So the runner this package built is exercised by exactly two things, this oracle
 and this crate's tests, and a deployment runs none of it. **That is not a defect
@@ -6534,6 +6619,45 @@ own convention put there twice already: rewriting a record makes two chances to
 disagree instead of one, and those blocks are headed with the task that measured
 them.
 
+#### The fourth pass, and the predicate that made it find anything
+
+The three passes above ran on one rule: *every figure a test asserts was already
+right, so look where no test asserts.* W4 Task 6's review falsified half of it
+with a single site — `tests/executor.rs` carried a **fourth** copy of the flip
+table (750 / 354 / 144 / 6 / 40) in a doc comment, and the assertion **message**
+under `(622, 125, 747)` said *"flipping all 750 … at 144"*. A message is not
+asserted by anything; it is prose that happens to live inside an `assert_eq!`.
+So the rule is narrower than it was written:
+
+> **A value a test *compares* is safe. Prose that merely sits beside one is not
+> — a doc comment, an assertion message, a module header — and being inside a
+> test file buys it nothing.**
+
+Run again under that predicate, over every doc comment and string literal in
+`src/`, `tests/` and `oracle-exec/driver.rs`, a fourth pass found **five more**,
+in surfaces the first three never read:
+
+| where | what it said | what it is |
+|---|---|---|
+| `tests/executor.rs`, module header | *"**630** of the golden's 840 run terminals were fed"* | **426.** This statement derived 426 and published 630 as a number *it had itself got wrong* — and the retired figure went on standing in the module doc of the file that holds the derivation |
+| `tests/executor.rs`, `SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED`'s doc | *"these **six** differ inside it"* | **eight** — and the constant `= 8` is the *next line*. The value was compared on every run and was right; the word beside it was not compared by anything |
+| `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | cites `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` | **no test has ever had that name.** A dangling pointer from product source into this test file, i.e. the "worse shape" in a surface the pointer table did not cover |
+| `oracle-exec/driver.rs` and `src/worker/claim.rs`, the `BATCH` tables | *"`executor.rs` at 34/34"* | 35 since this task added a test. Annotated rather than restated: the row's claim is the **143**, and the binary size was never the measurement |
+| `tests/worker.rs`, module header | *"the other **707** tests pass"* | one larger now, for the same reason. The claim is *"the only test that can tell the two disciplines apart"*, which no total carries — so the total is **removed** rather than corrected |
+
+Two of the five are this task's own arithmetic ageing by one within the same
+commit, which is the cheapest possible demonstration of the rule: **a figure
+nobody re-derives goes stale, and a figure that is a by-product of a claim goes
+stale fastest.** The last row is the only one where the right answer was to
+delete the number rather than update it.
+
+**The prediction, recorded because it was made before the pass ran and was
+half wrong:** more stale figures would turn up, most likely in `tests/worker.rs`
+or `driver.rs`, and at least one dangling pointer. Both those files did carry
+one — but the two sharpest were in `tests/executor.rs`, the file this task had
+already edited twice, and one of them sits one line above the constant that
+contradicts it.
+
 **The largest group is one event; the rest is one habit.** Nothing in the list
 is a task reporting a number it did not measure — every figure was true when it
 was written. What failed is that a bank re-derives the tables it appears in and
@@ -6578,6 +6702,26 @@ an oversight.** Nine of the thirteen are cited inside a *W3a task's own section*
 describing what that task asserted on the day it ran; renaming them there would
 rewrite a record rather than correct one, and this file has already paid twice
 for having two versions of one sentence. The table above is the single lookup.
+
+**That sentence's scope was this file, and W4 Task 6's fourth sweep pass found
+the same names cited in the crate's own source, where the record argument does
+not apply.** Four sites, and the disposition splits on a constraint rather than
+on a principle:
+
+| site | cites | disposition |
+|---|---|---|
+| `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` — **a name no test has ever had**, and so not even in the thirteen | **fixed**: it is `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction` |
+| `tests/executor.rs`, the field-family list | `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | **fixed** — marked as deleted at the point of use |
+| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only** |
+| `src/executor/flowable/loop_.rs`, module doc and the `values:` note | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`, `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only** |
+
+The last two rows are `src/executor/`, which **must stay byte-unchanged** — the
+Global Constraint W3a, W3b and W4 all inherit. So they are recorded here and not
+touched, and the reason is a constraint a reader can check rather than a
+preference: fixing a doc comment there would break the one invariant every
+package in this programme is measured against. That is the correct trade, and it
+is also the honest reason those two pointers will still be dangling when the next
+package reads them.
 What is **not** left to prose is the table's own accuracy:
 `the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do`
 fails if a retired name comes back as a live test, if a successor named here does

@@ -49,8 +49,8 @@ Task 1 và Task 2 đo cái *chạm tới được*, và câu trả lời gần n
 
 | lỗ | khai báo | chạm tới được | ai đo |
 |---|---|---|---|
-| `timeout:` | 4 | **0** | Task 2 — ba cái nằm trên một `Pause`, và worker của Kestra **bỏ qua `timeout:` trên một flowable** (đo trên artifact: một `Sequential` bọc một `Sleep` 4 giây chạy SUCCESS trong 4,2 s). Cái thứ tư xin **một giờ** trên một `core.log.Log`. Có đo đạc: ngân sách được áp **4** lần trên toàn oracle và hết hạn **0** lần. |
-| `retry:` có `interval:` khác 0 | **14, không phải 12** | **10 cái có thể kẹt, 0 cái nhúc nhích** | Task 1 — 4 cái là `CREATE_NEW_EXECUTION` và không bao giờ ghi `not_before`. Và oracle **không thấy được cả lỗ lẫn thuốc**: `driver::pass_time` vừa lùi `created_at` vừa **tự gọi `worker::resume`**, nên một retry đến hạn bị tiêu thụ ngay bên trong lời gọi làm nó đến hạn. Có đo đạc: bộ đánh thức chạy **0** lần, với một positive control chạy được trên cùng bản build. |
+| `timeout:` | 4 **trên baseline** (5 nếu đếm trên cả golden — cái thứ năm là `invalids/duplicate-parallel`, một mục MATCHING trên một flow Kestra ĐÃ TỪ CHỐI, nên nó không có run nào; mục W4 của `oracle-exec/README.md` đếm trên golden, dòng này đếm trên baseline, và cả hai nay đều nói rõ) | **0** | Task 2 — ba cái nằm trên một `Pause`, và worker của Kestra **bỏ qua `timeout:` trên một flowable** (đo trên artifact: một `Sequential` bọc một `Sleep` 4 giây chạy SUCCESS trong 4,2 s). Cái thứ tư xin **một giờ** trên một `core.log.Log`. Có đo đạc: ngân sách được áp **4** lần trên toàn oracle và hết hạn **0** lần. |
+| `retry:` có `interval:` khác 0 | **14, không phải 12** | **10 cái có thể kẹt, 0 cái nhúc nhích** | Task 1 — 4 cái là `CREATE_NEW_EXECUTION` và không bao giờ ghi `not_before`. Và oracle **không thấy được cả lỗ lẫn thuốc**: `driver::pass_time` vừa lùi `created_at` vừa **tự gọi `worker::resume`**, nên một retry đến hạn bị tiêu thụ ngay bên trong lời gọi làm nó đến hạn. Và `oracle-exec/driver.rs` ĐÃ ghi điều đó trong module doc của chính nó — *"nó đổi một dấu thời gian và gọi đúng cái `resume` mà bất kỳ caller nào cũng gọi"* — nên suốt năm task, tài liệu này nói ngược với chính tệp nó mô tả. Có đo đạc: bộ đánh thức chạy **0** lần, với một positive control chạy được trên cùng bản build. |
 | kill | 5 | **0** | Đọc lại từ chính YAML của năm flow ấy: một `Exit` mang `state: KILLED` (một trạng thái tác giả KHAI, không phải ai giết), một `Pause` trơn, hai flow khai `concurrency: {behavior: QUEUE, limit: 1}`, và một flow cha khai hai `Subflow` và được đặt tên theo giới hạn concurrency của **con** nó. Bốn cấu trúc của W8 và một output; **không cái nào khai một `timeout:`**, thứ duy nhất chạm tới đường kill. |
 
 **Vậy W4 làm ratchet nhúc nhích đúng bằng không, và đó là tiêu đề trung thực.**
@@ -119,10 +119,15 @@ và sự phân biệt phải giữ được.
 
 Ba dụng cụ, và chỉ một trong số đó là ratchet.
 
-1. **Ratchet, cho mấy cái lỗ.** Hai mươi mục baseline chạm tới được bằng cách sửa
-   lập lịch, timeout và hủy. Đó là con số phải báo **trước và sau**, với **mọi
-   mục dịch chuyển đều được quy trách nhiệm** — một mục bank vì lý do chưa quy
-   được là một **trùng hợp**, không phải một bank.
+1. **Ratchet, cho mấy cái lỗ.** ~~Hai mươi mục baseline chạm tới được bằng cách
+   sửa lập lịch, timeout và hủy.~~ **Số chạm tới được là ~0 — xem §1.1.** Con số
+   hai mươi là hợp của ba lần grep khai báo, và cả ba phần ba đều sai cùng một
+   chiều. Cái còn lại của tiêu chí này, và là phần quan trọng, là kỷ luật: **báo
+   con số trước và sau**, với **mọi mục dịch chuyển đều được quy trách nhiệm** —
+   một mục bank vì lý do chưa quy được là một **trùng hợp**, không phải một bank;
+   và một ratchet đứng yên là một kết quả phải GIẢI THÍCH, không phải giấu đi.
+   (W4 Task 6 gạch con số này. §1.1 sửa bảng của §1 rồi để lại câu này, cách đó
+   bảy mươi dòng, vẫn đọc con số đã rút.)
 2. **Test riêng của bộ chạy container.** Như `egret.sql`, và kèm bài học W3b học
    theo cách đắt: bộ test của `egret.sql` in `7 passed` khi **không có engine
    nào**, giống hệt lúc có, cho tới khi bị bắt phải hỏng. **Một bộ test tự bỏ
@@ -170,5 +175,8 @@ Giữ nguyên, và hai điều dưới đây chịu lực ở gói này:
 - `TaskCommands`, `egret.container`, `egret.script.python`, với test riêng và một lỗi
   **ồn ào** khi thiếu daemon.
 - Một phán quyết về một-run-mỗi-tick, kèm giá đã đo.
-- Một tuyên bố độ phủ **tách bạch** hai mươi mục ratchet nói được với bộ chạy mà
-  nó không nói được.
+- Một tuyên bố độ phủ **tách bạch** cái ratchet nói được với bộ chạy mà nó không
+  nói được. (Câu này từng viết *"hai mươi mục ratchet nói được"*; không có mục
+  nào — xem §1.1. Tuyên bố W4 Task 6 viết tách **ba cái lỗ ratchet không thấy
+  được, vì ba lý do khác nhau**, khỏi **ba mục nó thấy được và đã bị từ chối**,
+  khỏi một bộ chạy chạm KHÔNG mục nào.)
