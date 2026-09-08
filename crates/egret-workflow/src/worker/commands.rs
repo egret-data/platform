@@ -1126,7 +1126,7 @@ impl DockerRunner {
         result: &mut CommandsResult,
     ) -> Result<()> {
         let mut total = 0usize;
-        for rel in &commands.output_files {
+        for (i, rel) in commands.output_files.iter().enumerate() {
             // The name is vetted BEFORE it is interpolated into a `docker cp`
             // argument, so `..` never reaches the daemon and the staged path
             // cannot land outside `staging`.
@@ -1134,15 +1134,17 @@ impl DockerRunner {
                 result.failure = Some(problem);
                 return Ok(());
             }
-            let dst = staging.join(rel);
-            // **Parents are created here, by egret, as real directories.** That
-            // is the other half of the intermediate-component defence: nothing
-            // the container wrote can become a path component of the staged
-            // tree. `ingest_output_file` still `lstat`s every component, so the
-            // guard is one a test can plant a link under and watch fail.
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent).map_err(io_err)?;
-            }
+            // **One private root per declared name** — see
+            // [`stage_destination`] for the whole argument. Nothing an author
+            // declares can reach another declared name's staging tree.
+            let root = staging.join(i.to_string());
+            let dst = match stage_destination(&root, rel) {
+                Ok(dst) => dst,
+                Err(problem) => {
+                    result.failure = Some(problem);
+                    return Ok(());
+                }
+            };
             let src = format!("{name}:{WORKING_DIR}/{rel}");
             let dst_s = dst.display().to_string();
             let out = self.cli(&["cp", &src, &dst_s]).await?;
@@ -1159,7 +1161,7 @@ impl DockerRunner {
             }
             if let Err(problem) = ingest_output_file(
                 result,
-                staging,
+                &root,
                 rel,
                 self.max_output_bytes,
                 self.max_output_bytes,
@@ -1171,6 +1173,63 @@ impl DockerRunner {
         }
         Ok(())
     }
+}
+
+/// Make the staging destination for **one** declared output name, under a root
+/// that is private to that name.
+///
+/// # The general statement, which is what the whole-branch review asked for
+///
+/// **Nothing computed from an author's `outputFiles` string may produce a
+/// worker failure.** Only egret's own environment may — the `docker` binary not
+/// being spawnable, and the daemon socket not answering. That is the class, and
+/// it has now been violated twice from two different code paths:
+///
+/// * Task 5 review's Critical 1 — `fs::read` on a declared **directory** gave
+///   `Error::Internal`, so `outputFiles: ["a-dir"]` aborted the tick;
+/// * the whole-branch review's Critical — `create_dir_all(staging/a)` gave
+///   `AlreadyExists` when the container wrote a **regular file** `a` and the
+///   author declared `["a", "a/b.txt"]`, so that flow aborted the tick, left the
+///   run `RUNNING` and leased, and repeated for ever at every reap. Measured:
+///   `File exists (os error 17)`.
+///
+/// The second was reintroduced by fix round 2 restoring the per-file copy, which
+/// is why patching the measured case is not the fix: the *shape* keeps coming
+/// back. Two things enforce the class instead of a branch:
+///
+/// 1. **This function's error type is `String`, not [`Error`]** — the same
+///    discipline [`ingest_output_file`] already has (it contains zero
+///    `Error::Internal`). An author's path is now handled end to end by
+///    functions that *cannot* express a worker failure, so the classification
+///    happens once, at the type, rather than at each `?`.
+/// 2. **One private root per declared name.** `staging/<i>/<rel>`, so no
+///    declared name can create, occupy or block a path another declared name
+///    needs. `["a", "a/b.txt"]` cannot collide because they never share a tree.
+///
+/// After this, the only `?` left on the author's route in
+/// [`DockerRunner::collect_output_files`] is `self.cli(...)`, which fails only
+/// when the `docker` binary cannot be spawned, and the explicit
+/// [`DAEMON_SOCKET_MARKERS`] branch. Both are egret's environment, which is what
+/// the class permits.
+fn stage_destination(
+    root: &std::path::Path,
+    rel: &str,
+) -> std::result::Result<std::path::PathBuf, String> {
+    let dst = root.join(rel);
+    // **Parents are created here, by egret, as real directories.** That is the
+    // other half of the intermediate-component defence: nothing the container
+    // wrote can become a path component of the staged tree.
+    // `ingest_output_file` still `lstat`s every component, so the guard is one
+    // a test can plant a link under and watch fail.
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "`outputFiles` declares {rel:?}, and egret could not make a place to \
+                 copy it into: {e}"
+            )
+        })?;
+    }
+    Ok(dst)
 }
 
 /// A private staging directory for one run's file copies.
@@ -1967,6 +2026,119 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// **A parent and a child declared together is a TASK failure, never a
+    /// worker one.**
+    ///
+    /// The whole-branch review's Critical: `outputFiles: ["a", "a/b.txt"]`
+    /// where the container writes a regular file `a`. Staging `a` first left a
+    /// regular file where `a/b.txt`'s parent had to go, `create_dir_all` gave
+    /// `AlreadyExists`, `io_err` made it `Error::Internal`, and the tick
+    /// aborted — leaving the run `RUNNING` and leased, unclaimable for an hour,
+    /// then repeating for ever. Measured live: `File exists (os error 17)`.
+    ///
+    /// The reviewer's finding was that **no test declared a parent and a child
+    /// together**. This one does, with no daemon: the shim fails the `cp` for
+    /// the child exactly as Docker does when `a` is a file, so the run reaches
+    /// the same state by the same route.
+    ///
+    /// `expect` on the `Result` **is** the assertion — an `Err` here is the bug.
+    #[tokio::test]
+    async fn a_parent_and_a_child_declared_together_never_aborts_the_tick() {
+        let dir = staging("parent-child");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> {log}\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo fake-container-id ;;\n\
+                 \x20 inspect) echo 0 ;;\n\
+                 \x20 cp) case \"$2\" in\n\
+                 \x20        *a/b.txt) echo 'Error response from daemon: not a directory' >&2; exit 1 ;;\n\
+                 \x20        *) printf 'regular-file' > \"$3\" ;;\n\
+                 \x20      esac ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let out = runner
+            .run(
+                &leased(1_700_000_000),
+                &TaskCommands {
+                    container_image: "alpine:3.20".into(),
+                    commands: vec!["true".into()],
+                    output_files: vec!["a".into(), "a/b.txt".into()],
+                    ..TaskCommands::default()
+                },
+                &super::super::handlers::TracingSink,
+            )
+            .await
+            .expect(
+                "an author declaring a parent and a child must never abort the tick -- \
+                 a worker failure here leaves the run RUNNING and leased for an hour, \
+                 then repeats for ever",
+            );
+
+        let why = out
+            .failure
+            .clone()
+            .expect("the child cannot be produced, so the task fails");
+        assert!(
+            why.contains("a/b.txt"),
+            "the failure must name the child, not egret's plumbing: {why}"
+        );
+        assert!(
+            !why.contains("File exists") && !why.contains("os error 17"),
+            "and it must not be a staging-collision message -- each declared name \
+             gets its own root precisely so they cannot collide: {why}"
+        );
+        assert_eq!(
+            out.output_files.get("a").map(String::as_str),
+            Some("regular-file"),
+            "the parent still came back; only the child failed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two declared names never share a staging tree.**
+    ///
+    /// The structural half of the general statement: the collision that produced
+    /// the Critical is unrepresentable, not guarded against.
+    #[test]
+    fn each_declared_output_gets_a_staging_root_of_its_own() {
+        let dir = staging("roots");
+        std::fs::create_dir_all(dir.join("0")).expect("root 0");
+        let a = stage_destination(&dir.join("0"), "a").expect("a");
+        std::fs::write(&a, "regular-file").expect("write");
+
+        // Within ONE root the collision is real -- which is why there is one
+        // root per declared name.
+        let problem = stage_destination(&dir.join("0"), "a/b.txt")
+            .expect_err("a regular file where a directory must go");
+        assert!(problem.contains("a/b.txt"), "{problem}");
+
+        // Under its own root the same name is fine, which is what the runner
+        // actually does.
+        std::fs::create_dir_all(dir.join("1")).expect("root 1");
+        stage_destination(&dir.join("1"), "a/b.txt")
+            .expect("a private root cannot be blocked by another declared name");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The daemon's absence is egret's outage; anything else is the author's
