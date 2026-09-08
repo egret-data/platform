@@ -879,22 +879,23 @@ async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
     );
 }
 
-/// **A parent and a child declared together never aborts the tick.**
+/// **A parent and a child declared together never wedges the run.**
 ///
 /// The whole-branch review's Critical, against a real daemon. The container
 /// writes a **regular file** `a`; the author declares `["a", "a/b.txt"]`. Before
 /// the fix, staging `a` left a regular file where `a/b.txt`'s parent had to go,
 /// `create_dir_all` gave `AlreadyExists`, and it surfaced as
 /// `egret.container: the container runner failed for a reason that is not the
-/// author's flow: File exists (os error 17)` — a **worker** failure, so the tick
-/// aborted, the run stayed `RUNNING` and leased, and every later claim repeated
-/// it for ever.
+/// author's flow: File exists (os error 17)` — a **worker** failure, so no outcome
+/// was applied: the run stayed `RUNNING` and leased and every later claim
+/// repeated it for ever. (`tick` itself carries on with the rest of the batch —
+/// the phrase "aborts the tick" overstates it.)
 ///
 /// `expect` on the `Result` **is** the assertion: an `Err` here is the bug, and
 /// it is the same shape as `a_directory_named_as_an_output_file_does_not_wedge_
 /// the_worker` because it is the same class — an author's `outputFiles` must
 /// never become an engine failure.
-async fn a_parent_and_a_child_declared_together_never_aborts_the_tick() {
+async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
     let h = container::Container::new();
     let t = task(
         container::TYPE_ID,
@@ -905,8 +906,8 @@ async fn a_parent_and_a_child_declared_together_never_aborts_the_tick() {
         }),
     );
     let out = h.run(&t).await.expect(
-        "an author declaring a parent and a child must never abort the tick -- a \
-         worker failure leaves the run RUNNING and leased for an hour, then repeats",
+        "an author declaring a parent and a child must never wedge the run -- a worker \
+         failure applies no outcome, so it stays RUNNING and leased for an hour",
     );
 
     let msg = failed(&out);
@@ -1020,7 +1021,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it),
         case!(a_flood_of_output_markers_is_refused_rather_than_stored),
         case!(a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure),
-        case!(a_parent_and_a_child_declared_together_never_aborts_the_tick),
+        case!(a_parent_and_a_child_declared_together_never_wedges_the_run),
         case!(a_path_that_escapes_the_working_directory_is_refused_by_the_runner),
         case!(a_reaped_workers_cancel_cannot_reach_its_replacements_container),
         case!(a_symlinked_output_file_cannot_read_the_worker_hosts_files),

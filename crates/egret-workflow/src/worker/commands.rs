@@ -626,38 +626,6 @@ pub fn parse_marker(line: &str) -> Option<serde_json::Map<String, serde_json::Va
     }
 }
 
-/// The three substrings Kestra reads as "the daemon is not there".
-///
-/// `Docker.DOCKER_SOCKET_ERROR_MESSAGES = List.of("docker.sock",
-/// "no such file or directory", "Cannot connect to the Docker daemon")`,
-/// verbatim from the class's static initialiser, used by
-/// `Docker.isDockerSocketAccessError`.
-///
-/// It is what separates a **worker** failure from a **task** failure here: a
-/// daemon that is not running is egret's outage and must not fail the author's
-/// flow, while an image that does not exist is the author's and must.
-const DAEMON_ERROR_MARKERS: [&str; 3] = [
-    "docker.sock",
-    "no such file or directory",
-    "Cannot connect to the Docker daemon",
-];
-
-/// The two of [`DAEMON_ERROR_MARKERS`] that name the **socket** rather than any
-/// missing path.
-///
-/// Fix round 1's Important 5: on a `docker cp` out of a container, the generic
-/// `"no such file or directory"` is far more likely to be the author's own file
-/// than the daemon's socket, and reading it as the daemon turns an author error
-/// into a tick-aborting worker failure. Kestra never applies its list to a copy
-/// — `isDockerSocketAccessError` is used on the client's own `DockerException`
-/// on the connect path — so narrowing here is applying the artifact's own scope,
-/// not diverging from it.
-///
-/// `collect_output_files` is the only user, and the ordering hazard is gone
-/// besides: the question it used to answer with a string is now answered by
-/// [`ingest_output_file`] against the filesystem.
-const DAEMON_SOCKET_MARKERS: [&str; 2] = ["docker.sock", "Cannot connect to the Docker daemon"];
-
 /// What a symlink in the staged output tree means, and why it is refused
 /// outright.
 ///
@@ -744,6 +712,53 @@ const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docke
      file rather than the container's, outside the sandbox the task ran in. Name the \
      file itself instead";
 
+/// **egret does NOT classify a docker failure by reading its stderr**, and the
+/// whole-branch re-review's Critical is why.
+///
+/// There were two substring tables here — `DAEMON_ERROR_MARKERS`
+/// (`"docker.sock"`, `"no such file or directory"`, `"Cannot connect to the
+/// Docker daemon"`, Kestra's own three) and the narrower `DAEMON_SOCKET_MARKERS`
+/// — and every failure was classified by testing the daemon's stderr against
+/// them. **An author can put text into that stderr**, so an author could choose
+/// egret's classification. Proven live on daemon 28.4.0, through the shipping
+/// handler:
+///
+/// ```text
+/// outputFiles: ["docker.sock"]
+///   → Error response from daemon: Could not find the file
+///     /egret/working-dir/docker.sock in container egret-run-…
+///   → contains "docker.sock" → Error::Internal → WORKER failure
+/// image: "docker.sock/nope:1"
+///   → Unable to find image 'docker.sock/nope:1' locally …
+///   → contains "docker.sock" → Error::Internal → WORKER failure
+/// ```
+///
+/// Both wedge the run `RUNNING` and leased, blaming a daemon that had just
+/// answered three calls in the same run.
+///
+/// **Sanitising the one value was rejected.** The suggested one-liner
+/// (`stderr.replace(rel, "")`) fixes `outputFiles` and leaves `image:`, which is
+/// the second flow — and it leaves the *shape*: an author's string being tested
+/// against markers at all. So the classification no longer reads the failing
+/// call's stderr. It **asks the daemon**:
+/// [`DockerRunner::daemon_answers`] runs `docker version --format
+/// {{.Server.Version}}`, whose command line and output contain **no author
+/// input of any kind**.
+///
+/// # Why this diverges from the artifact, deliberately
+///
+/// `Docker.isDockerSocketAccessError` *is* a substring test over exactly those
+/// three strings. It is safe there because Kestra applies it to the **client's
+/// own `DockerException`** on the connect path — never to a message built from
+/// the user's declared paths. egret shells out, so the user's string is *in*
+/// the message. Same intent, different plumbing, so the same test is unsafe
+/// here.
+///
+/// The cost is one extra `docker version` on the failure path only.
+///
+/// [`DockerRunner::daemon_answers`]: DockerRunner::daemon_answers
+const _CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST: () = ();
+
 /// A [`TaskRunner`] over the local Docker daemon, driven through the `docker`
 /// CLI.
 ///
@@ -758,10 +773,10 @@ const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docke
 /// framing that would otherwise be a dependency of its own.
 ///
 /// The cost is stated: this shells out, so it inherits the CLI's exit codes and
-/// its message text, and [`DAEMON_ERROR_MARKERS`] is a **substring** test on
-/// stderr rather than a typed error. That is exactly what
-/// `Docker.isDockerSocketAccessError` does with the same three strings, so it
-/// is the artifact's own precision and not a shortcut past a better one.
+/// its message text. It does **not** inherit the artifact's substring
+/// classification, though: [`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`]
+/// records why an author could otherwise choose egret's own error type, and
+/// [`DockerRunner::daemon_answers`] is what replaced it.
 #[derive(Clone, Debug)]
 pub struct DockerRunner {
     /// The binary. A field so a test can point it at a script that is not
@@ -818,6 +833,14 @@ impl DockerRunner {
         Command::new(&self.binary)
             .args(args)
             .stdin(Stdio::null())
+            // **`kill_on_drop`, so a dropped future does not orphan a `docker`
+            // process** — the re-review's NEW Minor 2. `timeout::guard` drops
+            // the whole future when a task-level budget expires, and without
+            // this the `docker cp`/`inspect` in flight at that moment keeps
+            // running with nobody waiting on it. The leak test made it visible
+            // by leaving a `sleep 300` behind on every run; the production case
+            // is the same shape.
+            .kill_on_drop(true)
             .output()
             .await
             .map_err(|e| {
@@ -831,14 +854,32 @@ impl DockerRunner {
 
     /// Split one failed `docker` invocation into egret's outage and the
     /// author's mistake.
-    fn classify(&self, what: &str, stderr: &str) -> Error {
+    async fn classify(&self, what: &str, stderr: &str) -> Error {
         let stderr = stderr.trim();
-        if DAEMON_ERROR_MARKERS.iter().any(|m| stderr.contains(m)) {
+        if !self.daemon_answers().await {
             return Error::Internal(anyhow::anyhow!(
                 "the Docker daemon could not be reached, so `{what}` did not run: {stderr}"
             ));
         }
         Error::InvalidInput(format!("docker {what}: {stderr}"))
+    }
+
+    /// Ask the daemon whether it is there — **the classification's only input,
+    /// and one no author can reach.**
+    ///
+    /// `docker version --format {{.Server.Version}}` and not `docker --version`:
+    /// the second prints the CLI's own version without talking to anything, so
+    /// it is green on a machine with a client and no daemon. The `--format`
+    /// asks for a **server** field, so it fails unless the server answered.
+    ///
+    /// Neither this command line nor its output contains any author-supplied
+    /// value, which is the whole point: see
+    /// [`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`].
+    async fn daemon_answers(&self) -> bool {
+        self.cli(&["version", "--format", "{{.Server.Version}}"])
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 }
 
@@ -890,7 +931,9 @@ impl TaskRunner for DockerRunner {
         let borrowed: Vec<&str> = create.iter().map(String::as_str).collect();
         let created = self.cli(&borrowed).await?;
         if !created.status.success() {
-            return Err(self.classify("create", &String::from_utf8_lossy(&created.stderr)));
+            return Err(self
+                .classify("create", &String::from_utf8_lossy(&created.stderr))
+                .await);
         }
 
         // Everything from here on owns a container, so every exit runs through
@@ -940,7 +983,9 @@ impl TaskRunner for DockerRunner {
         // therefore handled by the success arm above, which is also the
         // artifact's answer (`Docker.kill` catches `NotFoundException` and
         // returns without logging).
-        Err(self.classify("rm", &String::from_utf8_lossy(&out.stderr)))
+        Err(self
+            .classify("rm", &String::from_utf8_lossy(&out.stderr))
+            .await)
     }
 }
 
@@ -983,7 +1028,9 @@ impl DockerRunner {
             let dst = format!("{name}:{WORKING_DIR}");
             let out = self.cli(&["cp", &src, &dst]).await?;
             if !out.status.success() {
-                return Err(self.classify("cp", &String::from_utf8_lossy(&out.stderr)));
+                return Err(self
+                    .classify("cp", &String::from_utf8_lossy(&out.stderr))
+                    .await);
             }
         }
 
@@ -993,6 +1040,10 @@ impl DockerRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // The attach is the long one, so it is the one most likely to be
+            // dropped mid-flight. `kill_on_drop` reaps the CLI; the container
+            // itself is the daemon's and is stopped by `cancel`.
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 Error::Internal(anyhow::anyhow!(
@@ -1048,7 +1099,9 @@ impl DockerRunner {
             .cli(&["inspect", "--format", "{{.State.ExitCode}}", name])
             .await?;
         if !inspected.status.success() {
-            return Err(self.classify("inspect", &String::from_utf8_lossy(&inspected.stderr)));
+            return Err(self
+                .classify("inspect", &String::from_utf8_lossy(&inspected.stderr))
+                .await);
         }
         let raw = String::from_utf8_lossy(&inspected.stdout)
             .trim()
@@ -1099,12 +1152,14 @@ impl DockerRunner {
     ///
     /// # The daemon-free property is preserved, deliberately
     ///
-    /// The copy's exit status is **ignored**. A file that did not copy simply is
-    /// not in the staging tree, and `ingest_output_file` says so from
-    /// `symlink_metadata` — so the merge condition still holds: the missing
-    /// file, the directory, the symlink and both caps are all decided with no
-    /// daemon. Only a *daemon that is not answering* is read out of stderr, and
-    /// only through [`DAEMON_SOCKET_MARKERS`].
+    /// The copy's exit status is **ignored except to ask the daemon whether it
+    /// is still there**. A file that did not copy simply is not in the staging
+    /// tree, and `ingest_output_file` says so from `symlink_metadata` — so the
+    /// merge condition still holds: the missing file, the directory, the
+    /// symlink and both caps are all decided with no daemon. Nothing about the
+    /// author's declared name is read out of stderr any more; the only input to
+    /// the worker-versus-task decision is
+    /// [`daemon_answers`](DockerRunner::daemon_answers).
     ///
     /// `Err` is a **worker** failure and reaches only the daemon case; an
     /// author's problem lands in [`CommandsResult::failure`] with the exit code
@@ -1139,17 +1194,21 @@ impl DockerRunner {
             let src = format!("{name}:{WORKING_DIR}/{rel}");
             let dst_s = dst.display().to_string();
             let out = self.cli(&["cp", &src, &dst_s]).await?;
-            if !out.status.success() {
+            if !out.status.success() && !self.daemon_answers().await {
+                // **The daemon is asked, not the stderr.** `docker cp` echoes
+                // the author's own path into its error message, so a declared
+                // `outputFiles: ["docker.sock"]` used to be read as the socket
+                // being unreachable and wedged the run. See
+                // [`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`].
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if DAEMON_SOCKET_MARKERS.iter().any(|m| stderr.contains(m)) {
-                    return Err(Error::Internal(anyhow::anyhow!(
-                        "the Docker daemon could not be reached, so {rel:?} could not be \
-                         copied back out of {name}: {stderr}"
-                    )));
-                }
-                // Anything else is left to the filesystem: the file is simply
-                // not staged, and `ingest_output_file` produces the message.
+                return Err(Error::Internal(anyhow::anyhow!(
+                    "the Docker daemon could not be reached, so {rel:?} could not be \
+                     copied back out of {name}: {stderr}"
+                )));
             }
+            // A copy that failed while the daemon is up is left to the
+            // filesystem: the file is simply not staged, and
+            // `ingest_output_file` produces the author-facing message.
             if let Err(problem) = ingest_output_file(
                 result,
                 &root,
@@ -1180,8 +1239,8 @@ impl DockerRunner {
 ///   `Error::Internal`, so `outputFiles: ["a-dir"]` aborted the tick;
 /// * the whole-branch review's Critical — `create_dir_all(staging/a)` gave
 ///   `AlreadyExists` when the container wrote a **regular file** `a` and the
-///   author declared `["a", "a/b.txt"]`, so that flow aborted the tick, left the
-///   run `RUNNING` and leased, and repeated for ever at every reap. Measured:
+///   author declared `["a", "a/b.txt"]`, so that flow left the run `RUNNING` and leased with
+///   no outcome applied, and repeated for ever at every reap. Measured:
 ///   `File exists (os error 17)`.
 ///
 /// The second was reintroduced by fix round 2 restoring the per-file copy, which
@@ -1197,11 +1256,26 @@ impl DockerRunner {
 ///    declared name can create, occupy or block a path another declared name
 ///    needs. `["a", "a/b.txt"]` cannot collide because they never share a tree.
 ///
-/// After this, the only `?` left on the author's route in
-/// [`DockerRunner::collect_output_files`] is `self.cli(...)`, which fails only
-/// when the `docker` binary cannot be spawned, and the explicit
-/// [`DAEMON_SOCKET_MARKERS`] branch. Both are egret's environment, which is what
-/// the class permits.
+/// # Exactly what the type-level half covers, which is less than it used to say
+///
+/// This sentence used to read *"the only `?` left on the author's route … Both
+/// are egret's environment"*, and the re-review is right that it was **false as
+/// written**: [`DockerRunner::collect_output_files`] returns
+/// `Result<(), Error>` and builds an `Error::Internal` inline, so the route is
+/// not type-proof end to end. A rule this task wrote and this task falsified —
+/// the category I named last round.
+///
+/// Stated precisely instead:
+///
+/// * **[`stage_destination`] and [`ingest_output_file`] cannot express a worker
+///   failure**, by their signatures — `Result<_, String>`. Everything decided
+///   *about the author's declared name* happens in those two.
+/// * **[`DockerRunner::collect_output_files`] can**, and does, for exactly one
+///   reason: the daemon stopped answering. Its `Error` values are now built
+///   solely from [`daemon_answers`](DockerRunner::daemon_answers), which takes
+///   no author input — so an author still cannot *cause* one, which is the
+///   property the class actually needs. The type does not carry that claim; the
+///   probe does.
 fn stage_destination(
     root: &std::path::Path,
     rel: &str,
@@ -2057,9 +2131,10 @@ mod tests {
     /// The whole-branch review's Critical: `outputFiles: ["a", "a/b.txt"]`
     /// where the container writes a regular file `a`. Staging `a` first left a
     /// regular file where `a/b.txt`'s parent had to go, `create_dir_all` gave
-    /// `AlreadyExists`, `io_err` made it `Error::Internal`, and the tick
-    /// aborted — leaving the run `RUNNING` and leased, unclaimable for an hour,
-    /// then repeating for ever. Measured live: `File exists (os error 17)`.
+    /// `AlreadyExists` and `io_err` made it `Error::Internal` — so no outcome
+    /// was applied and the run stayed `RUNNING` and leased, unclaimable for an
+    /// hour, then repeating for ever. (`tick` keeps going with the rest of the
+    /// batch; it is this run that is lost. See `claim::tick`.) Measured live: `File exists (os error 17)`.
     ///
     /// The reviewer's finding was that **no test declared a parent and a child
     /// together**. This one does, with no daemon: the shim fails the `cp` for
@@ -2068,7 +2143,7 @@ mod tests {
     ///
     /// `expect` on the `Result` **is** the assertion — an `Err` here is the bug.
     #[tokio::test]
-    async fn a_parent_and_a_child_declared_together_never_aborts_the_tick() {
+    async fn a_parent_and_a_child_declared_together_never_wedges_the_run() {
         let dir = staging("parent-child");
         let log = dir.join("argv.log");
         let shim = dir.join("docker-shim.sh");
@@ -2112,8 +2187,8 @@ mod tests {
             .await
             .expect(
                 "an author declaring a parent and a child must never abort the tick -- \
-                 a worker failure here leaves the run RUNNING and leased for an hour, \
-                 then repeats for ever",
+                 a worker failure here applies no outcome, so the run stays RUNNING and \
+                 leased for an hour, then repeats for ever",
             );
 
         let why = out
@@ -2138,28 +2213,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **Two declared names never share a staging tree.**
+    /// **Two declared names never share a staging tree — asserted through the
+    /// wiring, not beside it.**
     ///
-    /// The structural half of the general statement: the collision that produced
-    /// the Critical is unrepresentable, not guarded against.
-    #[test]
-    fn each_declared_output_gets_a_staging_root_of_its_own() {
+    /// The re-review's NEW Minor 1: this test used to call `stage_destination`
+    /// twice with roots it chose itself, so it **passed with the per-name root
+    /// removed from `collect_output_files`** — it never touched the wiring it
+    /// was named for. A test that passes with the thing it names deleted is the
+    /// defect this programme opens with.
+    ///
+    /// It now drives the real `collect_output_files` through the shim and reads
+    /// the destinations the runner actually issued, so removing the per-name
+    /// root makes it fail.
+    #[tokio::test]
+    async fn each_declared_output_gets_a_staging_root_of_its_own() {
         let dir = staging("roots");
-        std::fs::create_dir_all(dir.join("0")).expect("root 0");
-        let a = stage_destination(&dir.join("0"), "a").expect("a");
-        std::fs::write(&a, "regular-file").expect("write");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo id ;;\n\
+                 \x20 version) exit 0 ;;\n\
+                 \x20 inspect) echo 0 ;;\n\
+                 \x20 cp) echo \"$3\" >> {log}; printf x > \"$3\" ;;\n\
+                 esac\nexit 0\n",
+                log = log.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        // Within ONE root the collision is real -- which is why there is one
-        // root per declared name.
-        let problem = stage_destination(&dir.join("0"), "a/b.txt")
-            .expect_err("a regular file where a directory must go");
-        assert!(problem.contains("a/b.txt"), "{problem}");
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["a".into(), "a/b.txt".into()],
+            ..TaskCommands::default()
+        };
+        let sink = super::super::handlers::TracingSink;
+        runner
+            .run(&leased(1_700_000_000), &cmds, &sink)
+            .await
+            .expect("no worker failure");
 
-        // Under its own root the same name is fine, which is what the runner
-        // actually does.
-        std::fs::create_dir_all(dir.join("1")).expect("root 1");
-        stage_destination(&dir.join("1"), "a/b.txt")
-            .expect("a private root cannot be blocked by another declared name");
+        let logged = std::fs::read_to_string(&log).expect("the shim logged");
+        let dests: Vec<&str> = logged
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(dests.len(), 2, "one copy per declared name: {dests:?}");
+        let root_of = |d: &str| {
+            // `<staging>/<i>/<rel>` — the root is the component before `rel`.
+            let p = std::path::Path::new(d);
+            let depth = p.components().count();
+            p.components()
+                .take(depth.saturating_sub(1))
+                .collect::<std::path::PathBuf>()
+        };
+        assert_ne!(
+            root_of(dests[0]),
+            root_of(dests[1])
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default(),
+            "the two names must not be staged under one root: {dests:?}"
+        );
+        assert!(
+            dests[0] != dests[1] && !dests[1].starts_with(dests[0]),
+            "`a/b.txt` must not be staged underneath `a` -- that is the collision \
+             the Critical came from: {dests:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2229,7 +2361,7 @@ mod tests {
         // Exactly what `timeout::guard` does to a handler that outruns its
         // budget: drop the future.
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(600), fut)
+            tokio::time::timeout(std::time::Duration::from_millis(1500), fut)
                 .await
                 .is_err(),
             "the shim hangs, so the future must still have been running"
@@ -2260,27 +2392,121 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The daemon's absence is egret's outage; anything else is the author's
-    /// flow. The split is a substring test on stderr, so it is asserted on the
-    /// artifact's own three strings.
-    #[test]
-    fn a_daemon_that_is_not_there_is_a_worker_failure_and_a_bad_image_is_not() {
-        let runner = DockerRunner::new();
-        for daemon in [
-            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
-            "error during connect: ... /var/run/docker.sock: no such file or directory",
-        ] {
+    /// **An author cannot choose egret's error type by spelling a marker.**
+    ///
+    /// The whole-branch re-review's Critical. `docker cp` and `docker create`
+    /// echo the author's own strings into stderr, and the classification used
+    /// to be `stderr.contains("docker.sock")` — so `outputFiles: ["docker.sock"]`
+    /// **and** `image: "docker.sock/nope:1"` both became worker failures,
+    /// wedging the run while the daemon was answering. Proven live on both
+    /// flows before the fix.
+    ///
+    /// The classification asks the daemon now, so this drives the daemon's
+    /// answer (via the shim's `version`) and puts every marker string in the
+    /// stderr, both ways round. If any of it were still read from stderr, the
+    /// `daemon up` half would come back `Internal`.
+    #[tokio::test]
+    async fn the_classification_asks_the_daemon_and_never_reads_the_authors_string() {
+        let dir = staging("classify");
+        let mk = |name: &str, version_ok: bool| {
+            let shim = dir.join(name);
+            std::fs::write(
+                &shim,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  version) exit {} ;;\nesac\nexit 0\n",
+                    if version_ok { 0 } else { 1 }
+                ),
+            )
+            .expect("write shim");
+            let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+            {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(0o700);
+            }
+            std::fs::set_permissions(&shim, perms).expect("chmod");
+            DockerRunner::with_binary(shim.display().to_string())
+        };
+
+        // Every string an author could spell to imitate a daemon outage, plus
+        // the two real messages from the live reproduction.
+        let authors_strings = [
+            "docker.sock",
+            "no such file or directory",
+            "Cannot connect to the Docker daemon",
+            "Error response from daemon: Could not find the file \
+             /egret/working-dir/docker.sock in container egret-run-1",
+            "Unable to find image 'docker.sock/nope:1' locally",
+        ];
+
+        let up = mk("up.sh", true);
+        for stderr in authors_strings {
+            let e = up.classify("cp", stderr).await;
             assert!(
-                matches!(runner.classify("create", daemon), Error::Internal(_)),
-                "{daemon:?} is egret's outage and must not fail the author's flow"
+                matches!(e, Error::InvalidInput(_)),
+                "the daemon answered, so this is the AUTHOR's flow whatever their \
+                 string says -- got {e:?} for {stderr:?}"
             );
         }
+
+        // And when the daemon really is gone it is egret's outage, even for a
+        // stderr that mentions nothing at all.
+        let down = mk("down.sh", false);
+        let e = down.classify("cp", "something entirely unrelated").await;
         assert!(
-            matches!(
-                runner.classify("create", "Unable to find image 'nope:1' locally"),
-                Error::InvalidInput(_)
-            ),
-            "an image that does not exist is the author's flow, not egret's outage"
+            matches!(e, Error::Internal(_)),
+            "the daemon did not answer, so this is egret's outage: {e:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The same property end to end**: a declared `outputFiles` naming a
+    /// marker is a task failure, not a worker one.
+    #[tokio::test]
+    async fn an_output_file_named_like_a_daemon_marker_fails_the_task() {
+        let dir = staging("marker-output");
+        let shim = dir.join("docker-shim.sh");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             \x20 create) echo id ;;\n\
+             \x20 version) exit 0 ;;\n\
+             \x20 inspect) echo 0 ;;\n\
+             \x20 cp) echo \"Error response from daemon: Could not find the file \
+             /egret/working-dir/docker.sock in container c\" >&2; exit 1 ;;\n\
+             esac\nexit 0\n",
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            output_files: vec!["docker.sock".into()],
+            ..TaskCommands::default()
+        };
+        let sink = super::super::handlers::TracingSink;
+        let out = runner
+            .run(&leased(1_700_000_000), &cmds, &sink)
+            .await
+            .expect(
+                "an author naming a file `docker.sock` must not be able to make egret \
+                 report its own daemon as unreachable",
+            );
+        let why = out.failure.clone().expect("the file is not there");
+        assert!(why.contains("docker.sock"), "{why}");
+        assert!(
+            why.contains("did not leave"),
+            "and it is the ordinary missing-output message: {why}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

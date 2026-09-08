@@ -438,6 +438,42 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
     }
 }
 
+/// # READ THIS BEFORE WIRING `tick` INTO A BINARY
+///
+/// Nothing in this workspace calls `tick` in production yet. Whoever first does
+/// makes two things reachable that are only latent today, and both are recorded
+/// here because this is the function they will be looking at — not at the
+/// handler docs where they were first written.
+///
+/// **1. One unbounded handler can get a later run in the same batch reaped
+/// before its handler is invoked, and then run twice.** [`claim`] leases up to
+/// `n` rows in a **single** `UPDATE … SET claimed_at = now() … LIMIT $1`, and
+/// the loop below is **sequential**, so every lease in a batch is taken at one
+/// instant and run *k*'s is already held for the sum of handlers 1..*k*−1.
+/// `handlers::sql` bounds itself at 300s when the author writes no `timeout:`;
+/// `handlers::container` and `handlers::python` bound themselves at **nothing**,
+/// so one container can hold the last lease past
+/// [`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT) before that run
+/// starts. Twelve bounded `egret.sql` runs reach the same threshold, so this is
+/// **this function's** property and not a handler's. The options are: lease one
+/// run at a time; refresh each lease immediately before its handler; or measure
+/// the reaper's timeout per run. See W4 Task 5's report and cost 2 above.
+///
+/// **2. Pick `n` deliberately.** `n = 1` makes the property above unreachable
+/// and is what `oracle-exec/driver.rs` uses.
+///
+/// # An `Err` from one run does NOT abandon the others
+///
+/// Stated because the phrase *"aborts the tick"* is used loosely throughout this
+/// crate and overstates it (the whole-branch re-review's Minor 3). What actually
+/// happens is in the loop below: the error is kept in `first_err`, **the loop
+/// continues**, every other claimed run is still handled, and the first error is
+/// returned at the end. What the failing run loses is its **own** outcome — no
+/// result is applied, so it stays `RUNNING` and leased until [`reap`] returns
+/// it, which is the consequence every finding about this has correctly named.
+///
+/// [`reap`]: super::reap
+///
 /// Claim up to `n` runnable task runs, hand each to `reg`, and commit each
 /// result with `advance()`'s commands and the successors.
 ///
