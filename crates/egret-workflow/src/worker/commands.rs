@@ -2169,19 +2169,41 @@ mod tests {
     /// The whole-branch review's Minor 3, and it is cross-task: `timeout::guard`
     /// enforces a task-level `timeout:` by **dropping the future** (Task 2), and
     /// the directory holding the author's rendered `script:` is Task 5's. An
-    /// explicit cleanup after the `await` cannot run on that path, so this
-    /// asserts the property the way the reviewer measured it — by counting
-    /// `$TMPDIR/egret-workflow-*` across the drop.
+    /// explicit cleanup after the `await` cannot run on that path, so
+    /// [`StagingDir`] removes itself on `Drop`.
+    ///
+    /// # This test counted a GLOBAL directory once, and the full suite caught it
+    ///
+    /// The first version counted `$TMPDIR/egret-workflow-*` before and after,
+    /// which is how the reviewer measured the leak by hand. It passed alone and
+    /// **failed in `cargo test --workspace`** — `left: 66, right: 65` — because
+    /// the lib tests run in parallel and a *different* test's staging directory
+    /// appeared between the two counts. A global counter is not an observation
+    /// of this run.
+    ///
+    /// So the shim reports the path it was handed, and the assertion is about
+    /// **that** directory: immune to whatever else is running, and a stronger
+    /// claim than a count besides.
     #[tokio::test]
     async fn a_dropped_run_future_leaves_no_staging_directory_behind() {
         let dir = staging("drop-leak");
+        let log = dir.join("argv.log");
         let shim = dir.join("docker-shim.sh");
-        // `cp` never returns, so the future is guaranteed to be dropped inside
-        // the window between creating the staging directory and removing it.
+        // `cp` records the staging path it was given and then never returns, so
+        // the future is guaranteed to be dropped inside the window between
+        // creating that directory and removing it.
         std::fs::write(
             &shim,
-            "#!/bin/sh\ncase \"$1\" in\n  create) echo id ;;\n  cp) sleep 300 ;;\n  \
-             inspect) echo 0 ;;\nesac\nexit 0\n",
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo id ;;\n\
+                 \x20 cp) echo \"$2\" >> {log}; sleep 300 ;;\n\
+                 \x20 inspect) echo 0 ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display()
+            ),
         )
         .expect("write shim");
         let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
@@ -2191,21 +2213,6 @@ mod tests {
         }
         std::fs::set_permissions(&shim, perms).expect("chmod");
 
-        let count = || {
-            std::fs::read_dir(std::env::temp_dir())
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .filter(|e| {
-                            e.file_name()
-                                .to_string_lossy()
-                                .starts_with("egret-workflow-")
-                        })
-                        .count()
-                })
-                .unwrap_or(0)
-        };
-
-        let before = count();
         let runner = DockerRunner::with_binary(shim.display().to_string());
         let task = leased(1_700_000_000);
         let cmds = TaskCommands {
@@ -2222,18 +2229,32 @@ mod tests {
         // Exactly what `timeout::guard` does to a handler that outruns its
         // budget: drop the future.
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(400), fut)
+            tokio::time::timeout(std::time::Duration::from_millis(600), fut)
                 .await
                 .is_err(),
             "the shim hangs, so the future must still have been running"
         );
 
-        assert_eq!(
-            count(),
-            before,
-            "dropping the future must not leave a staging directory holding the \
-             author's rendered `script:` -- an explicit cleanup after the `await` \
-             never runs on this path, which is why `StagingDir` uses `Drop`"
+        let logged = std::fs::read_to_string(&log)
+            .expect("the shim was reached, so it logged the staging path");
+        let src = logged
+            .lines()
+            .next()
+            .expect("one `cp` happened")
+            .trim()
+            .to_string();
+        let staged = src
+            .strip_suffix("/.")
+            .expect("the input-file copy is `<staging>/.`");
+        assert!(
+            staged.contains("egret-workflow-"),
+            "sanity: {staged} should be a staging directory"
+        );
+        assert!(
+            !std::path::Path::new(staged).exists(),
+            "dropping the future left {staged} behind, holding the author's \
+             rendered `script:` -- an explicit cleanup after the `await` never \
+             runs on this path, which is why `StagingDir` uses `Drop`"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
