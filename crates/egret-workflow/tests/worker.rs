@@ -5149,3 +5149,164 @@ async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool:
          here and diverge from the artifact"
     );
 }
+
+/// **A second `resume` on an execution whose replay already exists starts no
+/// second one**, and the database would refuse it if it tried.
+///
+/// Two mechanisms sit on this and they are not the same fence, which is why
+/// both are driven here:
+///
+/// - `replay::spawn_due` asks whether a replay exists and answers "already
+///   done" rather than inserting. Without it the insert is attempted, and
+/// - migration 0138's `workflow_executions_loop_run_idx` — `(parent_execution_id,
+///   parent_run_ix, loop_index)` with `NULLS NOT DISTINCT` — makes the second
+///   row **unrepresentable**, so the attempt aborts the whole transaction
+///   rather than producing a fan-out.
+///
+/// The first is what keeps an ordinary second `resume` from being an error, and
+/// an ordinary second `resume` is not hypothetical: nothing ever clears a
+/// `not_before`, `worker::wake` filters on the child's absence but the oracle's
+/// driver resumes by deadline alone, and any caller may resume any execution at
+/// any time.
+///
+/// One replay per parent is the artifact's behaviour, measured: over the 710
+/// descendants in `traces.json`, 40 carry a NULL `loopIndex` and no parent
+/// carries two.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("twice", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    drain_with(&pool, &reg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    egret_workflow::worker::resume(&pool, root)
+        .await
+        .expect("the first resume");
+    let first = replay_of(&pool, root).await.expect("one replay");
+
+    egret_workflow::worker::resume(&pool, root)
+        .await
+        .expect("the second resume must SUCCEED, not abort on a unique index");
+    let all: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NULL ORDER BY id",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("read the replays");
+    assert_eq!(
+        all,
+        vec![first],
+        "the deadline is still past and nothing cleared it, so the second \
+         resume asked the same question and must answer `already done`"
+    );
+}
+
+/// **Migration 0139's CHECK: the replay metadata is unrepresentable on a row
+/// that is not a replay.**
+///
+/// A guard nobody has seen fail is a guard nobody has seen, and this one cannot
+/// be reached through `src/` at all: `worker::replay::spawn_one` is the only
+/// writer of a non-default `attempt_number`, and it writes the replay's own
+/// shape. So it is driven directly, at the level it lives at — a statement the
+/// database must refuse.
+///
+/// **Three rows, because one refusal proves nothing about which clause did it.**
+/// The permitted row is asserted first so a CHECK that refused everything would
+/// fail here rather than pass three times.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    async fn insert(
+        pool: &sqlx::PgPool,
+        ws: Uuid,
+        parent: Option<Uuid>,
+        loop_ix: Option<i32>,
+        attempt: i32,
+        offset: i64,
+    ) -> Result<Uuid, sqlx::Error> {
+        sqlx::query_scalar(
+            "INSERT INTO workflow.executions \
+               (workspace_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value, \
+                attempt_number, origin_offset_ms) \
+             VALUES ($1,'t','f','src','CREATED','[\"CREATED\"]'::jsonb, \
+                     $2,$3,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(ws)
+        .bind(parent)
+        .bind(loop_ix)
+        .bind(loop_ix.map(|_| "v"))
+        .bind(attempt)
+        .bind(offset)
+        .fetch_one(pool)
+        .await
+    }
+
+    let root = insert(&pool, ws, None, None, 1, 0)
+        .await
+        .expect("a top-level execution with the default metadata is legal");
+    let replay = insert(&pool, ws, Some(root), None, 2, 1_234)
+        .await
+        .expect("a replay -- a parent, no loop index, attempt 2 -- is legal");
+    assert_ne!(replay, root);
+
+    let cases = [
+        (
+            "a top-level execution claiming to be attempt 2",
+            None,
+            None,
+            2,
+            0,
+        ),
+        (
+            "a top-level execution carrying an origin offset",
+            None,
+            None,
+            1,
+            5,
+        ),
+        (
+            "a LOOP iteration claiming to be attempt 2",
+            Some(root),
+            Some(0),
+            2,
+            0,
+        ),
+        (
+            "a replay claiming to be attempt 1 while carrying an offset",
+            Some(root),
+            None,
+            1,
+            9,
+        ),
+    ];
+    for (what, parent, loop_ix, attempt, offset) in cases {
+        let refused = insert(&pool, ws, parent, loop_ix, attempt, offset).await;
+        let Err(e) = refused else {
+            panic!("{what} was ACCEPTED; migration 0139's CHECK did not refuse it");
+        };
+        assert!(
+            e.to_string()
+                .contains("workflow_executions_metadata_belongs_to_a_replay")
+                || e.to_string()
+                    .contains("workflow_executions_origin_offset_non_negative"),
+            "{what} was refused by the wrong constraint, which means this case \
+             is not driving the CHECK it is written about: {e}"
+        );
+    }
+}
