@@ -392,6 +392,7 @@ pub(super) async fn on_execution_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
@@ -399,18 +400,31 @@ pub(super) async fn on_execution_terminal(
     // a row that existed before this one was inserted — so there is no depth
     // bound here, for the reason `flowable::descend` gives for not having one
     // either: a guard nobody could ever see fire is a guard nobody has seen.
-    Box::pin(on_execution_terminal_inner(conn, execution_id, state)).await
+    Box::pin(on_execution_terminal_inner(
+        conn,
+        execution_id,
+        state,
+        caller_depth,
+    ))
+    .await
 }
 
 async fn on_execution_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
         return Ok(());
     };
-    let (ctx, mut state, now) = claim::load(conn, parent_id).await?;
+    // **`Nested`, and the fix round 2 Critical is that this used to be `0`.**
+    // This is called from `claim::settle` step 4, so the `settle` at the bottom
+    // of this function nests inside the one that called it -- a `Loop` that
+    // starts its next iteration from here is one more frame, not a fresh
+    // stack. See `claim::Stack`.
+    let (ctx, mut state, now) =
+        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
     let before = state.clone();
 
     let run = usize::try_from(parent_run).map_err(|_| {

@@ -4273,3 +4273,166 @@ async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overfl
         "and `transmitFailed` carries the refusal all the way back to the root"
     );
 }
+
+/// **The same counter, on the ASCENT — where a completing chain climbs the
+/// stack and the counter used to be reset to zero on every link.**
+///
+/// # Why the sibling test above cannot see this, in the reviewer's own words
+///
+/// *"`a_chain_of_subflows_deeper_than_the_bound…` cannot see this defect
+/// because its chain never completes."* It runs straight down through nested
+/// `spawn_one`s, where the `caller + 1` arithmetic was always right, and hits
+/// the bound before any child terminates. **A test that exercises only the
+/// descent cannot see a defect in the ascent** — and the ascent is where a
+/// `wait: true` subflow actually spends its life, because that is how it
+/// resumes its parent.
+///
+/// # The defect this pins
+///
+/// `claim::load_with` wrote `depth: 0` for every caller, under a comment
+/// asserting that no caller that loads an execution is inside another
+/// `settle`. Two are: `subflow::complete` and `spawn::on_execution_terminal`
+/// are both reached from `claim::settle`. So a completing chain reset the
+/// counter once per link — the reviewer instrumented it and watched it cycle
+/// `0,1,2,0,1,2,…` — and **nine flows filed in one workspace, plain
+/// `wait: true`, aborted the worker process with
+/// `fatal runtime error: stack overflow`**. `claim::Stack` is the fix: a load
+/// must SAY which of the two it is.
+///
+/// # The shape, and why each part of it is needed
+///
+/// Each `asc-i` runs two subflows in sequence:
+///
+/// * `leaf` → `asc-leaf`, a flow whose only task carries an unrenderable
+///   `runIf:` so it FAILS **inside `spawn_one`'s own settle**, with no worker
+///   tick in between. That is what makes the ascent happen inside the descent's
+///   frames rather than on a fresh stack — the same fixture the `wait: false`
+///   positive control uses, and for the same reason.
+/// * `transmitFailed: false` on it, so `guess_state` turns that FAILED into a
+///   SUCCESS and the execution carries on to the second task instead of ending
+///   there. Without it the ascent stops at the first leaf and the flow never
+///   descends again.
+/// * `next` → `asc-{i+1}`, which is the link that must be refused.
+///
+/// So one level costs three frames — spawn the leaf, re-enter through
+/// `complete`, spawn the next — and `MAX_SPAWN_CHAIN` is reached partway down
+/// the third `asc-`. **`asc-4` is deliberately NOT filed**, so a counter that
+/// never fires runs to a *different* refusal (`unable to find flow 't'.'asc-4'`)
+/// and one more execution rather than running away: the mutation that reverts
+/// the threading fails this as an ASSERTION with the process intact, which is
+/// the whole reason the numbers here are small.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // Terminates inside its own first settle: `render::render_run_if` fails
+    // with no handler, so there is no worker tick between the spawn and the
+    // callback that walks back up.
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: asc-leaf\nnamespace: t\ntasks:\n  - id: x\n    \
+         type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{ outputs.notexists == 2 }}\"\n    message: hi\n",
+    )
+    .await;
+    // Four levels. `asc-4` is never filed -- see the doc.
+    for i in 0..4 {
+        let src = format!(
+            "id: asc-{i}\nnamespace: t\ntasks:\n  - id: leaf\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: asc-leaf\n    transmitFailed: false\n  - id: next\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: asc-{}\n",
+            i + 1
+        );
+        file_flow(&db, ws, user, &src).await;
+    }
+
+    let root_src = "id: asc-0\nnamespace: t\ntasks:\n  - id: leaf\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: asc-leaf\n    transmitFailed: false\n  - id: next\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: asc-1\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // By NAME and in order, not by count: a count alone cannot say the chain
+    // stopped at the right link, and `asc-3` appearing here is exactly what the
+    // unthreaded counter allowed.
+    //
+    // **Ordered by a walk of the chain, never by `created_at`.** All six rows
+    // are written in ONE transaction and `now()` in Postgres is transaction
+    // time, so they share the instant to the microsecond and the tie falls to a
+    // random uuid -- Concern 13 of this task's report, met a second time. The
+    // walk orders by `(depth, trigger_run_ix)`: `leaf` is run 0 and `next` is
+    // run 1 at every level, so the sequence below is a fact about the flow.
+    let names: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE down AS ( \
+             SELECT id, 0 AS depth, -1 AS ix FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, down.depth + 1, e.trigger_run_ix \
+               FROM workflow.executions e JOIN down ON e.trigger_execution_id = down.id \
+         ) \
+         SELECT e.flow_key FROM down JOIN workflow.executions e ON e.id = down.id \
+          ORDER BY down.depth, down.ix",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("walk the chain from the root");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all as usize,
+        names.len(),
+        "the walk reaches every execution there is, so the list below is the \
+         whole of what ran and not a subgraph of it"
+    );
+    assert_eq!(
+        names,
+        vec!["asc-0", "asc-leaf", "asc-1", "asc-leaf", "asc-2", "asc-leaf",],
+        "three levels and their three leaves, and then it stops. `asc-3` in \
+         this list is the defect: it means the counter was reset on the way \
+         back up and the stack kept climbing"
+    );
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        refused.len(),
+        1,
+        "exactly one run is refused -- the one at the bound: {refused:?}"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "this execution is 8 child execution(s) down a chain and 8 is as \
+                 deep as this worker will build in one transaction; 't'.'asc-3' \
+                 is not started"
+            )
+        ),
+        "and it is the DEPTH refusal naming `asc-3`. `unable to find flow \
+         't'.'asc-4'` here would mean the chain ran one level further than the \
+         bound allows and stopped only because the fixture ran out of flows"
+    );
+    assert_eq!(
+        run_state(&pool, root, "next").await,
+        Some("FAILED".to_string()),
+        "and `transmitFailed` carries the refusal back through every level to \
+         the root"
+    );
+}

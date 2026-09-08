@@ -7675,6 +7675,72 @@ stack.** Every bound here is a number chosen against a stack size this code does
 not control. The real fix is to stop settling the child there — a change to how
 `tick` finds work — and nothing in this package does it.
 
+> **Fix round 2 correction.** The paragraph above this one — *"it counts the
+> frames … derived from nothing that can be wrong … only `subflow::spawn_one`
+> refuses on it: a `Loop` cannot recurse without bound"* — is wrong in both
+> halves and is corrected below. **The sentence you are reading now is the one
+> that survived**, and it was true before that round and after it.
+
+### Fix round 2 — the counter counted one descent, and a `Loop` needs no `Subflow`
+
+**A. The counter was zeroed on every re-entrant load.** `claim::load_with` set
+`depth: 0` for every caller, under a comment asserting that a caller that loads
+an execution *"is starting a fresh call stack … a terminal callback or
+`subflow::complete`, and none of them is inside another `settle`"*. **Both named
+callers are inside another `settle`**: `claim::settle` step 4 calls
+`spawn::on_execution_terminal` and `subflow::on_child_terminal`, and step 3
+reaches `subflow::complete` through `subflow::spawn_all`. So a *completing*
+chain reset the counter once per link while the stack climbed —
+`0,1,2,0,1,2,…` — and **nine flows filed in one workspace, plain `wait: true`,
+aborted the worker with `fatal runtime error: stack overflow`** (eight on
+`wait: false`). `MAX_SPAWN_CHAIN` never fired on the reachable shape.
+
+The fix is `claim::Stack`, a two-armed enum every `load`/`load_with` now takes:
+`Stack::Fresh` for the three entry points that begin a stack (`apply_outcome`,
+`resume`, `input_for`) and `Stack::Nested(caller_depth)` for the three
+re-entrant sites. **There is no default**, which is the point: the false
+sentence was a `0` that could be written by omission.
+
+`tests/worker.rs`'s
+`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter` is the
+control and it exercises the **ascent** — the sibling test cannot, because *its
+chain never completes*: it runs straight down through nested `spawn_one`s,
+where the `caller + 1` arithmetic was always right.
+
+**B. Nested `Loop`s reach the same recursion with no `Subflow` in the flow, and
+this is what the ARTIFACT does about it.** Measured on the pinned digest,
+namespace `egret.probe2`, one flow per depth, one-value `Loop`s around a
+`Return`:
+
+| nested `Loop`s | Kestra (pinned artifact) | egret |
+|---|---|---|
+| 2 / 12 | published, executed, `CREATED RUNNING SUCCESS` | runs; depth 12 is 50 % past `MAX_SPAWN_CHAIN` and unrefused |
+| 47 | published, executed, **SUCCESS** | **SIGABRT — stack overflow**, one flow file, no `Subflow` |
+| 100 | published, executed, **SUCCESS** in 18 s | not reached |
+| 498 | published (`200`) | — |
+| 499 | **`422`** — `Illegal genericflow source: YAML parsing error: Document nesting depth (1001) exceeds the maximum allowed (1000, from StreamReadConstraints.getMaxNestingDepth())` | — |
+
+**Kestra imposes no semantic bound on `Loop` nesting.** Its only refusal is
+Jackson's document-nesting limit inside the YAML reader — two levels per
+`Loop`, so 498 publish and 499 does not — and it is a *parse* error, not a rule
+about flowables. The 498/499 boundary was bisected; the flow source is written
+flow-style so its size is linear in the depth (an indented source hits the
+request-size limit at ~352 and returns `413`, which is not a semantic answer).
+
+So *"fix it with the artifact's behaviour"* is not available: the artifact's
+behaviour is **accept and run it**, and egret cannot, because `spawn_one`
+settles the child inside its caller's transaction. **It is therefore recorded
+with an owner rather than patched with a new number.** It predates W6 —
+`spawn::on_execution_terminal`'s recursion is W3b (`ad93ef2d`),
+`plan::MAX_TASK_DEPTH` is W3a (`6f046e57`), and neither is in W6 Task 3's diff —
+and it is raised only because fix round 1 asserted it could not happen. The
+owner is **whoever changes `claim::settle` to stop driving a child's first
+settle inside its caller's transaction**; until then `MAX_TASK_DEPTH = 48` is
+the number on the wrong side of the cliff and it is W3a's constant.
+
+**What the two `Subflow` guards do bound is `Subflow` recursion, and that is
+all the text on this branch now claims.**
+
 ### A false claim about a defence that does not exist, in two files
 
 `worker::subflow::resolve`'s doc said *"Migration 0138's composite foreign key

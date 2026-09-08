@@ -106,7 +106,7 @@ use crate::runners::{render_str, RenderContext};
 /// **How far down a chain of child executions this worker will spawn**, and the
 /// second half of the one answer this module gives that is NOT the artifact's.
 ///
-/// It is a **backstop**, not the guard. [`chain_refusal`] is the guard: it
+/// It is a **backstop**, not the guard. [`chain_holds`] is the guard: it
 /// refuses a spawn whose target is already somewhere up this execution's own
 /// causal chain, which is what a cycle is. This bounds the case a cycle check
 /// cannot see — a legitimately **acyclic** chain deep enough to exhaust a
@@ -142,6 +142,60 @@ use crate::runners::{render_str, RenderContext};
 /// mutation that broke the walk broke the bound too and the reproduction
 /// aborted the test binary instead of failing an assertion. A backstop derived
 /// from the thing it is backstopping is not a backstop.
+///
+/// # Fix round 2: it counted ONE DESCENT, and a completing chain reset it
+///
+/// *"Only frames can count frames"* was right and the counter was still not
+/// counting them. `claim::load_with` wrote `depth: 0` for every caller, under
+/// a comment claiming none of them was inside another `settle` — and the two
+/// that a **completing** chain goes through both are. So this bound never
+/// fired on the shape a `wait: true` subflow actually has: the reviewer
+/// instrumented the counter, watched it cycle `0,1,2,0,1,2,…`, and aborted the
+/// worker with `fatal runtime error: stack overflow` from **nine flows filed
+/// in one workspace**. `claim::Stack` is the fix — a load must SAY whether it
+/// begins a fresh stack or nests inside one — and
+/// `a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter` is the
+/// control, because a test that exercises only the descent cannot see a defect
+/// in the ascent.
+///
+/// # What neither bound closes, measured on the artifact rather than assumed
+///
+/// **A nested `Loop` reaches this same recursion with no `Subflow` anywhere,
+/// and nothing refuses it.** 12 statically nested one-value `Loop`s run to
+/// completion at `ctx.depth = 12`; **47 of them abort the process**, from a
+/// single flow file. `spawn::spawn_one` does not consult this constant, and
+/// `plan::MAX_TASK_DEPTH` (`8 * MEASURED_MAX_CORPUS_DEPTH` = **48**) is the
+/// only limit on the nesting — a number chosen for headroom over the corpus,
+/// never against a stack, and it sits on the wrong side of the cliff.
+///
+/// **What the artifact does, measured on the pinned digest** (`egret.probe2`,
+/// one flow per depth, one-value `Loop`s around a `Return`):
+///
+/// | nested `Loop`s | Kestra | egret |
+/// |---|---|---|
+/// | 12 | published, executed, `CREATED RUNNING SUCCESS` | runs, depth 12, unrefused |
+/// | 47 | published, executed, **SUCCESS** | **SIGABRT — stack overflow** |
+/// | 100 | published, executed, **SUCCESS** in 18 s | not reached |
+/// | 498 | published | — |
+/// | 499 | **422** `Illegal genericflow source: YAML parsing error: Document nesting depth (1001) exceeds the maximum allowed (1000, from StreamReadConstraints.getMaxNestingDepth())` | — |
+///
+/// So **Kestra imposes no semantic bound on `Loop` nesting at all**: its only
+/// refusal is Jackson's document-nesting limit in the YAML reader, two levels
+/// per `Loop`, and it is a *parse* error rather than a rule about flowables.
+/// "Fix it with the artifact's behaviour" is therefore not available to
+/// `spawn::spawn_one` — the artifact's behaviour is *accept and run it*, and
+/// egret cannot, because [`spawn_one`] settles the child inside its caller's
+/// transaction.
+///
+/// **This is recorded rather than fixed, and it is recorded with an owner.**
+/// It predates W6 — `spawn::on_execution_terminal`'s recursion is W3b
+/// (`ad93ef2d`) and `MAX_TASK_DEPTH` is W3a (`6f046e57`), and neither is in
+/// this task's diff — and every candidate fix is a new number chosen against a
+/// stack this code does not own, measured in a test thread and shipped to a
+/// tokio worker with a different one. **It belongs to whoever changes
+/// `claim::settle` to stop driving a child's first settle inside its caller's
+/// transaction**; until that happens, `plan::MAX_TASK_DEPTH` is the number that
+/// has to move and it is W3a's constant, not this module's.
 pub const MAX_SPAWN_CHAIN: usize = 8;
 
 /// One [`Command::SpawnSubflow`], kept as data.
@@ -424,6 +478,10 @@ async fn spawn_one(
             &[RunState::Success],
             Some(json!({"executionId": child_id.to_string(), "state": "CREATED"})),
             None,
+            // `Nested`: this is inside this execution's own `settle`, and the
+            // one `complete` runs below nests inside it. It is the re-entrancy
+            // `claim::settle`'s step-3 comment names.
+            claim::Stack::Nested(ctx.depth),
         )
         .await;
     }
@@ -442,14 +500,22 @@ pub(super) async fn on_child_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
-    Box::pin(on_child_terminal_inner(conn, execution_id, child_state)).await
+    Box::pin(on_child_terminal_inner(
+        conn,
+        execution_id,
+        child_state,
+        caller_depth,
+    ))
+    .await
 }
 
 async fn on_child_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
     let Some((parent_id, parent_run)) = trigger_of(conn, execution_id).await? else {
         return Ok(());
@@ -460,7 +526,14 @@ async fn on_child_terminal_inner(
             format!("negative trigger_run_ix {parent_run}"),
         ))
     })?;
-    let (ctx, state, _now) = claim::load(conn, parent_id).await?;
+    // **`Nested`, and this is the ASCENT the fix round 2 Critical lived on.**
+    // This runs from `claim::settle` step 4 of the CHILD, which is itself
+    // nested inside the parent's `spawn_one`; the `settle` `complete` runs
+    // below nests inside both. `Stack::Fresh` here -- which is what
+    // `load_with`'s unconditional `depth: 0` amounted to -- reset the counter
+    // once per link of a completing chain. See `claim::Stack`.
+    let (ctx, state, _now) =
+        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
     let task = state.runs.get(run).map(|r| r.task).ok_or_else(|| {
         worker_err(WorkerError::Corrupt(
             parent_id,
@@ -534,6 +607,7 @@ async fn on_child_terminal_inner(
             "outputs": {},
         })),
         None,
+        claim::Stack::Nested(caller_depth),
     )
     .await
 }
@@ -593,8 +667,9 @@ async fn complete(
     states: &[RunState],
     outputs: Option<Value>,
     message: Option<&str>,
+    stack: claim::Stack,
 ) -> Result<()> {
-    let (ctx, mut state, now) = claim::load(conn, execution_id).await?;
+    let (ctx, mut state, now) = claim::load(conn, execution_id, stack).await?;
     let before = state.clone();
     sqlx::query(
         "UPDATE workflow.task_runs SET outputs = $1, message = $2 \
@@ -624,7 +699,18 @@ async fn fail_run(
     run: RunIx,
     message: &str,
 ) -> Result<()> {
-    complete(conn, ctx.id, run, &[RunState::Failed], None, Some(message)).await
+    complete(
+        conn,
+        ctx.id,
+        run,
+        &[RunState::Failed],
+        None,
+        Some(message),
+        // `Nested`: every caller of this is inside `spawn_one`, which is inside
+        // its own execution's `settle`.
+        claim::Stack::Nested(ctx.depth),
+    )
+    .await
 }
 
 /// `(flow id, source)` of the flow named `(namespace, flow_id)` **in this
@@ -796,29 +882,21 @@ impl Refusal {
 ///
 /// # What is left, in the words the class deserves
 ///
-/// Between this and [`MAX_SPAWN_CHAIN`] the two shapes that can recurse are
-/// both refused. **The thing neither closes is the reason they are needed**:
+/// Between this and [`MAX_SPAWN_CHAIN`] the two shapes a **`Subflow`** can
+/// recurse through are refused. **That is not the same as the class being
+/// bounded, and fix round 1's text said it was.** Nested `Loop`s reach the
+/// same recursion with no `Subflow` anywhere and nothing refuses them —
+/// [`MAX_SPAWN_CHAIN`]'s *"What neither bound closes"* carries the measurement
+/// and the owner.
+///
+/// **The thing none of it closes is the reason a bound is needed at all**:
 /// `spawn_one` settles the child inside its caller's transaction, so depth in
-/// the data is depth on the stack. Until that changes, every bound here is a
-/// number chosen against a stack size this code does not control. The real fix
-/// is to stop settling the child there — a change to how `tick` finds work —
-/// and it belongs to whoever needs a deep chain.
+/// the data is depth on the stack, and every number here is chosen against a
+/// stack size this code does not control. The real fix is to stop settling the
+/// child there — a change to how `tick` finds work — and it belongs to whoever
+/// needs a deep chain.
 ///
-///
-/// # It follows BOTH link columns, and reading only one is the defect fix
-/// round 1 was opened for
-///
-/// `COALESCE(trigger_execution_id, parent_execution_id)` — **"whichever link
-/// this row has"**, and it is a `COALESCE` and not a choice because
-/// `workflow_executions_one_link_kind` makes a row carrying both
-/// unrepresentable. A subflow child carries the first; a `Loop` sub-execution
-/// and a `CREATE_NEW_EXECUTION` replay carry the second. All three are one
-/// nested `settle` inside the caller's transaction, so all three are one link
-/// of the thing this guard is about.
-///
-/// The first version followed `trigger_execution_id` alone and therefore
-/// truncated at every loop boundary — see [`MAX_SPAWN_CHAIN`]'s neighbour above
-/// for the reproduction that shipped past it.
+/// # What it compares, where it starts, and why it terminates
 ///
 /// It reads `flow_key` / `namespace` — the identity pair a `Subflow` names —
 /// rather than `flow_id`, the surrogate key, because two workspaces' rows are

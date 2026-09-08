@@ -733,7 +733,7 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// live view. Kestra's worker renders from a snapshot for the same reason.
 async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No).await?;
+    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
     let run = usize::try_from(c.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -763,7 +763,7 @@ pub async fn apply_outcome(
     claimed: &Claimed,
     outcome: &Outcome,
 ) -> Result<()> {
-    let (ctx, mut state, now) = load(conn, claimed.execution_id).await?;
+    let (ctx, mut state, now) = load(conn, claimed.execution_id, Stack::Fresh).await?;
     let before = state.clone();
 
     // The output goes down BEFORE `settle` renders, because a successor's
@@ -905,13 +905,13 @@ pub(super) async fn settle(
     let is = state.history.last().copied();
     if was != is {
         if let Some(terminal) = is.filter(|s| s.is_terminal()) {
-            spawn::on_execution_terminal(conn, ctx.id, terminal).await?;
+            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
             // The other kind of link. `on_execution_terminal` reads
             // `parent_execution_id` and this reads `trigger_execution_id`, and
             // `workflow_executions_one_link_kind` makes it impossible for both
             // to find something -- so the pair is a dispatch, not two chances
             // to report the same terminal.
-            subflow::on_child_terminal(conn, ctx.id, terminal).await?;
+            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
         }
     }
     Ok(())
@@ -991,7 +991,7 @@ pub async fn start_execution(
 /// row written by the same code.
 pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let (ctx, mut state, now) = load(&mut tx, execution_id).await?;
+    let (ctx, mut state, now) = load(&mut tx, execution_id, Stack::Fresh).await?;
     let before = state.clone();
     settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
     tx.commit().await.map_err(db_err)
@@ -1029,17 +1029,38 @@ pub(super) struct ExecutionCtx {
     /// with SIGABRT instead of failing an assertion.
     ///
     /// This is the same fix one level down: a counter that is **not derived
-    /// from anything that can be wrong**. Every entry point that begins a fresh
-    /// call stack sets it to `0` — [`start_execution`] and [`load_with`], which
-    /// is every caller that loads an execution — and the only two places that
-    /// nest a settle inside another, `spawn::spawn_one` and
-    /// `subflow::spawn_one`, set it to their caller's plus one.
+    /// from anything that can be wrong**. It is `0` only where a fresh call
+    /// stack begins — [`start_execution`], and every [`load_with`] whose caller
+    /// passes [`Stack::Fresh`] — and it is the caller's plus one everywhere a
+    /// frame nests inside another: the two spawners (`spawn::spawn_one` and
+    /// `subflow::spawn_one`) **and the three re-entrant loads**
+    /// ([`Stack::Nested`]).
     ///
-    /// **Only `subflow::spawn_one` refuses on it.** A `Loop` cannot recurse
-    /// without bound — its body is its own parent's `tasks:` and is strictly
-    /// smaller each time — so bounding the loop spawner would be a behaviour
-    /// change to a construct that cannot reach it. Loop links are still
-    /// *counted*, because each one is a real frame.
+    /// # The descent was right and the ASCENT was the hole, and it was reachable
+    ///
+    /// Fix round 1 shipped this counter with `load_with` writing `0`
+    /// unconditionally, on a written-down claim that no caller that loads an
+    /// execution is inside another `settle`. Two of them are, and they are the
+    /// two that a *completing* chain goes through — so the counter went
+    /// `0,1,2,0,1,2,…` up a chain that was climbing the stack the whole time,
+    /// and **nine flows filed in one workspace aborted the worker process**.
+    /// [`Stack`] is why that can no longer be written by omission.
+    ///
+    /// **Only `subflow::spawn_one` refuses on it, and the recorded reason for
+    /// that used to be false.** It said *"a `Loop` cannot recurse without
+    /// bound — its body is its own parent's `tasks:`, strictly smaller each
+    /// time — so bounding the loop spawner would be a behaviour change to a
+    /// construct that cannot reach it."* **It reaches it**: 12 statically
+    /// nested one-value `Loop`s, with no `Subflow` anywhere, run to completion
+    /// at depth 12 — half again past [`super::subflow::MAX_SPAWN_CHAIN`] — and
+    /// 47 of them abort the process. The true reason the loop spawner does not
+    /// refuse here is narrower and is not a safety argument at all:
+    /// `build_plan` accepts a nesting up to `plan::MAX_TASK_DEPTH` (48), so
+    /// refusing at 8 would refuse flows the planner accepts, and the artifact
+    /// accepts far more than either (measured: 498). See
+    /// [`super::subflow::MAX_SPAWN_CHAIN`]'s *"What neither bound closes"* for
+    /// the whole measurement and who owns it. Loop links are counted here,
+    /// because each one is a real frame.
     pub depth: usize,
 }
 
@@ -1055,6 +1076,55 @@ pub(super) enum Lock {
     No,
 }
 
+/// **Where on the CALL STACK the caller loading this execution already is** —
+/// the one thing [`load_with`] cannot read off the row it reads.
+///
+/// # It is an enum, and a `usize` with a default is what it replaces
+///
+/// `load_with` used to write `depth: 0` under a comment asserting that every
+/// caller that loads an execution *"is starting a fresh call stack"*. **Two of
+/// them are not**: `claim::settle` step 4 calls
+/// [`spawn::on_execution_terminal`](super::spawn::on_execution_terminal) and
+/// [`subflow::on_child_terminal`](super::subflow::on_child_terminal), and
+/// `settle` step 3 reaches `subflow::complete` through
+/// `subflow::spawn_all`. Each re-enters `load_with` **inside the caller's own
+/// frame**, so the counter was reset once per level of a completing chain and
+/// [`super::subflow::MAX_SPAWN_CHAIN`] never fired: nine flows filed in one
+/// workspace, plain `wait: true`, aborted the worker process with
+/// `fatal runtime error: stack overflow`.
+///
+/// The fix is not a better default — it is **having no default**. A caller
+/// must say which of the two it is, at the call site, and the two answers are
+/// different *kinds* rather than two numbers, so [`Stack::Fresh`] cannot be
+/// written by forgetting.
+///
+/// `tests/worker.rs`'s
+/// `a_chain_of_subflows_that_COMPLETES_is_bounded_by_the_same_counter` is the
+/// control: it is the ascent, where the reset lived, as distinct from the
+/// descent the sibling test covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stack {
+    /// **This caller begins a fresh call stack.** The tick (`apply_outcome`),
+    /// [`resume`], and `input_for`, which runs before the tick's transaction
+    /// is even opened. Each is entered from `worker::run`, with nothing of
+    /// this crate's below it.
+    Fresh,
+    /// **This load happens inside a `settle` that is already `.0` deep**, and
+    /// the `settle` it is about to run nests inside that one — so the frame it
+    /// produces is `.0 + 1`.
+    Nested(usize),
+}
+
+impl Stack {
+    /// [`ExecutionCtx::depth`] for the context this load is building.
+    fn depth(self) -> usize {
+        match self {
+            Stack::Fresh => 0,
+            Stack::Nested(caller) => caller + 1,
+        }
+    }
+}
+
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
 ///
 /// `FOR UPDATE` is the serialisation two workers finishing two siblings of the
@@ -1065,14 +1135,16 @@ pub(super) enum Lock {
 pub(super) async fn load(
     conn: &mut PgConnection,
     execution_id: Uuid,
+    stack: Stack,
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
-    load_with(conn, execution_id, Lock::Yes).await
+    load_with(conn, execution_id, Lock::Yes, stack).await
 }
 
 pub(super) async fn load_with(
     conn: &mut PgConnection,
     execution_id: Uuid,
     lock: Lock,
+    stack: Stack,
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
     let row = sqlx::query(if lock == Lock::Yes {
         "SELECT source, history, workspace_id, flow_id, seq, \
@@ -1101,12 +1173,14 @@ pub(super) async fn load_with(
         source,
         plan,
         seq: row.get("seq"),
-        // **Zero, and that is the right answer rather than a missing one.** A
-        // caller that LOADS an execution is starting a fresh call stack: it is
-        // `apply_outcome`, `resume`, a terminal callback or `subflow::complete`,
-        // and none of them is inside another `settle`. Depth is a fact about
-        // the stack, so a row read off the database cannot carry it.
-        depth: 0,
+        // **The CALLER says, because only the caller knows.** Depth is a fact
+        // about the stack and a row read off the database cannot carry it --
+        // but "therefore it is zero" was the fix round 1 defect: two of the
+        // callers here are re-entered from *inside* another `settle`
+        // (`subflow::complete` and `spawn::on_execution_terminal`), so zeroing
+        // it made the counter walk in place while the stack climbed. See
+        // [`Stack`].
+        depth: stack.depth(),
     };
 
     let rows = sqlx::query(

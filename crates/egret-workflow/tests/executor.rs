@@ -5019,7 +5019,8 @@ fn no_corpus_subflow_turns_transmit_failed_off() {
 /// **This measures the SUBFLOW GRAPH, and that is narrower than what the guard
 /// walks** — the name says so since fix round 1's Minor 3, which pointed out
 /// that the old one (`…_is_far_inside_the_bound`) promised a bound that at the
-/// time did not exist. `chain_refusal` walks the EXECUTION chain, which counts
+/// time did not exist. `worker::subflow::chain_holds` walks the EXECUTION
+/// chain, which counts
 /// a `Loop` sub-execution as a link too; this walk cannot see loop nesting at
 /// all. So the 2 below is a lower bound on the real chain, and what says
 /// `MAX_SPAWN_CHAIN` refuses nothing real is the ratchet: 131 with the same
