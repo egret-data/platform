@@ -92,13 +92,19 @@ pub(super) struct Surface {
     execution: Value,
     /// `item`, for a loop sub-execution. `None` at the top level.
     item: Option<Value>,
-    /// The outputs of every ANCESTOR execution's terminated runs, by task id.
+    /// The outputs of every LOOP ancestor's terminated runs, by task id.
     ///
     /// A loop body renders in its own sub-execution and reads the parent's
     /// outputs: `valids/loop-expression-context`'s body is
     /// `format: "{{outputs.before.value}}"` where `before` is a `Return` in the
     /// PARENT. Kestra passes the parent context down; this is that, read up the
     /// `parent_execution_id` chain.
+    ///
+    /// **It stops at the first link that is not a loop iteration** -- see
+    /// `inheriting` in [`Surface::load`]. Migration 0138 made a second kind of
+    /// `parent_execution_id` child representable, the `CREATE_NEW_EXECUTION`
+    /// replay, and a replay must not read the outputs of the attempt it is
+    /// replacing.
     inherited: Map<String, Value>,
     /// This execution's own stored outputs, by `run_ix`.
     own: std::collections::BTreeMap<usize, Value>,
@@ -171,6 +177,30 @@ impl Surface {
             row.get("parent_run_ix"),
         );
         let mut ancestor: Option<Uuid> = here.2;
+        // **Whether the chain walked so far is loops all the way up.**
+        //
+        // Until migration 0138 this could not be false: 0135's CHECK made a
+        // row with a parent and no loop index unrepresentable, so every
+        // `parent_execution_id` was a loop iteration's and the walk below could
+        // merge unconditionally. 0138 admits the `CREATE_NEW_EXECUTION` replay
+        // -- a parent, no loop columns -- and a replay is a NEW execution of
+        // the same flow, not a body running inside its parent's context. It
+        // must not read `{{ outputs.<task> }}` off the attempt it is replacing:
+        // that would render a value from a FAILED run and take the other
+        // branch, silently, with no error anywhere. (The sibling consumer,
+        // `oracle-exec/driver.rs`'s `spawned` decode, fails loudly on the same
+        // row; this one would not, which is why it is guarded rather than
+        // documented.)
+        //
+        // Sticky: once a non-loop link is crossed, everything above it is
+        // reachable only THROUGH that link, so nothing above it may contribute
+        // either.
+        //
+        // `root` deliberately keeps walking the whole chain. It feeds
+        // `labels.system.correlationId`, no golden entry pairs a replay with a
+        // `correlationId` read, and narrowing it would be an unmeasured change
+        // to an observable value -- W6 Task 4 owns that question.
+        let mut inheriting = true;
         // Nearest ancestor first, so a nearer scope wins where two ancestors
         // ran a task of the same id. The chain is a DAG by construction --
         // `parent_execution_id` always names a row that existed before this one
@@ -212,24 +242,29 @@ impl Surface {
                         }),
                 }));
             }
-            let rows = sqlx::query(
-                "SELECT task_id, outputs, state FROM workflow.task_runs \
-                   WHERE execution_id = $1 ORDER BY run_ix",
-            )
-            .bind(id)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(db_err)?;
-            for r in &rows {
-                let state: String = r.get("state");
-                if !super::from_wire(&state).is_some_and(|s| s.is_terminal()) {
-                    continue;
+            // `here.0` is the loop index of the row BELOW `id`, i.e. of the
+            // link about to be traversed.
+            inheriting = inheriting && here.0.is_some();
+            if inheriting {
+                let rows = sqlx::query(
+                    "SELECT task_id, outputs, state FROM workflow.task_runs \
+                       WHERE execution_id = $1 ORDER BY run_ix",
+                )
+                .bind(id)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(db_err)?;
+                for r in &rows {
+                    let state: String = r.get("state");
+                    if !super::from_wire(&state).is_some_and(|s| s.is_terminal()) {
+                        continue;
+                    }
+                    let task_id: String = r.get("task_id");
+                    let outputs: Option<Value> = r.get("outputs");
+                    inherited
+                        .entry(task_id)
+                        .or_insert_with(|| outputs.unwrap_or_else(|| json!({})));
                 }
-                let task_id: String = r.get("task_id");
-                let outputs: Option<Value> = r.get("outputs");
-                inherited
-                    .entry(task_id)
-                    .or_insert_with(|| outputs.unwrap_or_else(|| json!({})));
             }
             root = id;
             let up = sqlx::query(

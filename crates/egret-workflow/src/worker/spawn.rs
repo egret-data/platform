@@ -33,8 +33,11 @@
 //!    220 multi-sibling groups share one instant between them. Ordering
 //!    `spawned` by the instant is therefore not "unstable", it is undefined —
 //!    which is why `normalise.py` orders by the index and bails when two
-//!    iterations claim one, and why migration 0135 makes that collision
-//!    unrepresentable rather than detectable.
+//!    iterations claim one, and why `workflow_executions_loop_run_idx` makes
+//!    that collision unrepresentable rather than detectable. (Migration 0135
+//!    created that index; **migration 0138 owns it now** -- it drops and
+//!    recreates it under the same name with `NULLS NOT DISTINCT`, so that the
+//!    same argument covers the replay child, whose key is all NULLs.)
 //! 3. **`concurrencyLimit` is a live cap, not just a first-batch size.**
 //!    `advance()` emits the first batch and cannot emit a second — it is pure
 //!    over `(plan, state, now)` and `ExecutionState` records nothing about a

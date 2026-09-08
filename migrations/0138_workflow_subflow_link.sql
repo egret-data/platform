@@ -73,7 +73,12 @@ ALTER TABLE workflow.executions
   -- a case that does not arise rather than guessing at it; a workspace
   -- deletion still cascades, because it removes parent and child in one
   -- statement and the referential check runs after it.
-  ADD COLUMN trigger_execution_id uuid REFERENCES workflow.executions(id),
+  --
+  -- **The reference itself is declared below, as a composite foreign key that
+  -- carries `workspace_id`** -- see *Both links are workspace-scoped*. A plain
+  -- `REFERENCES workflow.executions(id)` would let a child in one workspace
+  -- name a trigger in another.
+  ADD COLUMN trigger_execution_id uuid,
   -- WHICH taskrun of `trigger_execution_id` caused this execution -- the
   -- `RunIx`, addressed positionally exactly as `parent_run_ix` is, and with no
   -- foreign key for the same reason that column has none.
@@ -84,6 +89,53 @@ ALTER TABLE workflow.executions
   -- child belonged to which run -- `valids/subflow-parent-retry` is that flow,
   -- with `subflow1` and `subflow2` targeting the same `(namespace, flowId)`.
   ADD COLUMN trigger_run_ix       integer;
+
+-- # Both links are workspace-scoped, and neither was before
+--
+-- `parent_execution_id` (0135) and `trigger_execution_id` are id columns that
+-- point at a row in another workspace just as happily as at one in this
+-- workspace: `executions_parent_execution_id_fkey` checks that the row EXISTS
+-- and says nothing about whose it is. **This repository has already paid for
+-- that shape once** -- five columns of exactly this kind, one of which
+-- (`chart_id`) allowed a cross-workspace read, patched only after it shipped.
+--
+-- The fix is the standard one: make `workspace_id` part of the reference, so
+-- the child can only name a row that carries the SAME workspace. Postgres
+-- needs a unique key on the referenced pair, and `id` is already the primary
+-- key, so `(id, workspace_id)` is unique by construction -- the added index is
+-- the whole cost.
+--
+-- **Both columns, not just the new one.** Closing it for `trigger_execution_id`
+-- alone would leave a guard that reads as complete and is not -- the same
+-- reason `workflow_executions_no_self_link` below closes 0135's hole as well
+-- as this migration's. `worker::spawn::spawn_one` is the only writer of
+-- `parent_execution_id` and it binds the parent's own `workspace_id`, so no
+-- row can be violating this today; a database that somehow holds one fails
+-- this migration loudly, which is the right direction for data that is
+-- already wrong.
+--
+-- 0135's single-column foreign key is REPLACED rather than kept beside the new
+-- one, so there is exactly one referential statement per column and one error
+-- a reader has to interpret. `ON DELETE CASCADE` is carried over unchanged:
+-- 0135's reasoning for it -- a loop sub-execution is a part of its parent's
+-- record -- is untouched by this.
+ALTER TABLE workflow.executions
+  ADD CONSTRAINT workflow_executions_id_workspace_key UNIQUE (id, workspace_id);
+
+ALTER TABLE workflow.executions
+  DROP CONSTRAINT executions_parent_execution_id_fkey;
+
+ALTER TABLE workflow.executions
+  ADD CONSTRAINT workflow_executions_parent_same_workspace
+    FOREIGN KEY (parent_execution_id, workspace_id)
+    REFERENCES workflow.executions (id, workspace_id) ON DELETE CASCADE,
+  -- No `ON DELETE` action, for the reason given on the column above. MATCH
+  -- SIMPLE is what makes a top-level execution legal under both of these: with
+  -- the link NULL and `workspace_id` NOT NULL the key is partially null, and
+  -- the reference is not checked at all.
+  ADD CONSTRAINT workflow_executions_trigger_same_workspace
+    FOREIGN KEY (trigger_execution_id, workspace_id)
+    REFERENCES workflow.executions (id, workspace_id);
 
 -- 0135's CHECK, re-stated so that it still forbids a half-written loop link
 -- but no longer forbids a parent without one.
@@ -124,6 +176,15 @@ ALTER TABLE workflow.executions
   -- checked. 0135 left that hole for `parent_execution_id`; closing it for the
   -- new column only would leave a guard that reads as complete and is not, so
   -- this closes both.
+  --
+  -- **It is added VALIDATING, so a database already holding a self-parented
+  -- row fails this migration** rather than carrying the row forward. That is
+  -- deliberate: `NOT VALID` would install a constraint nobody has ever seen
+  -- evaluated AND keep the corrupt row, which is strictly worse than a loud
+  -- stop. Nothing in `src/` can write such a row -- `worker::spawn::spawn_one`
+  -- lets `id` default to `gen_random_uuid()` and binds a parent that already
+  -- existed -- so the failure mode is a hand-written row, and a hand-written
+  -- row that names itself is exactly what this wants to hear about.
   ADD CONSTRAINT workflow_executions_no_self_link CHECK (
     parent_execution_id IS DISTINCT FROM id
     AND trigger_execution_id IS DISTINCT FROM id
@@ -151,6 +212,16 @@ ALTER TABLE workflow.executions
 -- keep referring to something that exists. It changes nothing for a row that
 -- was already legal: before this migration the key could not contain a NULL at
 -- all.
+--
+-- **The drop and rebuild are not `CONCURRENTLY`, so they take a write lock,
+-- and that is forced rather than chosen.** sqlx runs each migration file
+-- inside one transaction unless the file opts out, and `CREATE INDEX
+-- CONCURRENTLY` cannot run inside a transaction block at all -- opting out
+-- would mean the ALTERs above stop being atomic with this, which is a worse
+-- trade than a brief outage. The window is bounded by `workflow.executions`,
+-- one row per execution, and the ALTERs above already take ACCESS EXCLUSIVE on
+-- the same table for the duration, so the index rebuild does not add a lock
+-- that was not already held.
 DROP INDEX workflow.workflow_executions_loop_run_idx;
 
 CREATE UNIQUE INDEX workflow_executions_loop_run_idx
@@ -160,11 +231,15 @@ CREATE UNIQUE INDEX workflow_executions_loop_run_idx
 
 -- The lookup the other direction: "what did this execution's run N spawn".
 --
--- **Not unique, and that is measured.** A `Subflow` task may carry its own
--- `retry:`, and each attempt starts a NEW child execution under the SAME
--- `(execution, run_ix)`: `valids/subflow-parent-retry` declares two `Subflow`
--- tasks with `retry: {type: constant, maxAttempts: 3}`, and
--- `valids/retry-subflow` puts a flow-level `retry:` over one. A unique index
+-- **Not unique, and that is measured on what HAPPENED rather than on what was
+-- declared.** A `Subflow` task may carry its own `retry:`, and each attempt
+-- starts a NEW child execution under the SAME `(execution, run_ix)`. Two
+-- corpus flows declare such a retry -- but the golden shows the retries
+-- actually occurring, which is the stronger form: in
+-- `valids/subflow-parent-retry` the runs `subflow1` and `subflow2` each carry
+-- **2 attempts** (`… FAILED, RETRYING, CREATED, RUNNING, SUCCESS`), and in
+-- `valids/retry-subflow` the single `subflow` run carries **3**. So several
+-- children really do hang off one `(execution, run_ix)`, and a unique index
 -- here would make the second attempt unrepresentable.
 CREATE INDEX workflow_executions_trigger_idx
   ON workflow.executions (trigger_execution_id, trigger_run_ix)

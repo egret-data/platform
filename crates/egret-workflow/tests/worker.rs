@@ -1323,8 +1323,10 @@ async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool:
         "both iterations are written in ONE transaction, so the creation \
          instant is identical and cannot order them -- ordering `spawned` by \
          the instant is not unstable, it is undefined. `loop_index` is the \
-         only thing that orders these, which is why migration 0135 makes two \
-         iterations sharing one index unrepresentable."
+         only thing that orders these, which is why \
+         `workflow_executions_loop_run_idx` makes two iterations sharing one \
+         index unrepresentable. Migration 0135 created that index; migration \
+         0138 owns it now -- same name, plus `NULLS NOT DISTINCT`."
     );
 
     // And each sub-execution really runs the loop's body, in its own right.
@@ -3140,7 +3142,7 @@ async fn a_subflow_childs_parent_cannot_be_deleted_alone_but_the_workspace_casca
         .expect_err("deleting an execution a subflow child still names must be refused");
     assert_eq!(
         refusing_constraint(&err),
-        "executions_trigger_execution_id_fkey",
+        "workflow_executions_trigger_same_workspace",
         "the child must outlive nothing here silently: the refusal has to name \
          the link, not some later CHECK"
     );
@@ -3161,4 +3163,220 @@ async fn a_subflow_childs_parent_cannot_be_deleted_alone_but_the_workspace_casca
         .await
         .expect("count what is left");
     assert_eq!(left, 0, "the cascade removed the parent AND the child");
+}
+
+/// **Neither link may cross a workspace boundary.**
+///
+/// `parent_execution_id` (0135) and `trigger_execution_id` are id columns whose
+/// single-column foreign key checked only that the row EXISTS -- never whose it
+/// was. This repository has already paid for that shape once: five columns of
+/// exactly this kind, one of which (`chart_id`) allowed a cross-workspace read,
+/// patched only after it shipped.
+///
+/// 0138 replaces both foreign keys with composite ones carrying `workspace_id`,
+/// so a child can only name a row in its OWN workspace. **Both columns, not
+/// just the new one** -- closing it for `trigger_execution_id` alone would leave
+/// a guard that reads as complete and is not, the same reason
+/// `workflow_executions_no_self_link` closes 0135's hole as well as this
+/// migration's.
+///
+/// The same-workspace inserts are the positive control: a composite key that
+/// refused everything would look identical here to one that refuses the right
+/// thing. A nonexistent parent is checked too, because replacing a foreign key
+/// is a chance to lose plain referential integrity while gaining the scoping.
+#[sqlx::test(migrations = "../../migrations")]
+async fn neither_child_link_may_cross_a_workspace_boundary(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    let (_db, other) = seed(&pool).await;
+
+    for (kind, link) in [
+        (
+            "a loop iteration in the parent's own workspace",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        ),
+        (
+            "a subflow child in the trigger's own workspace",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        ),
+    ] {
+        insert_linked(&pool, ws, link)
+            .await
+            .unwrap_or_else(|e| panic!("{kind} must stay legal, and was refused: {e}"));
+    }
+
+    let cases: Vec<(&str, Link, &str)> = vec![
+        (
+            "a loop iteration whose parent is in ANOTHER workspace",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(1),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+        (
+            "a replay whose parent is in ANOTHER workspace",
+            Link {
+                parent: Some(root),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+        (
+            "a subflow child whose trigger is in ANOTHER workspace",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(1),
+                ..Link::default()
+            },
+            "workflow_executions_trigger_same_workspace",
+        ),
+        (
+            "a parent that does not exist at all -- the scoping must not have \
+             cost plain referential integrity",
+            Link {
+                parent: Some(Uuid::new_v4()),
+                parent_run_ix: Some(0),
+                loop_index: Some(2),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+    ];
+
+    for (what, link, constraint) in cases {
+        // `other` is the child's workspace; `root` lives in `ws`.
+        let err = insert_linked(&pool, other, link)
+            .await
+            .expect_err("a cross-workspace link must be unrepresentable");
+        assert_eq!(
+            refusing_constraint(&err),
+            constraint,
+            "{what} must be refused by {constraint}"
+        );
+    }
+}
+
+/// **A replay does not inherit the outputs of the execution it replays, and a
+/// loop iteration still does.**
+///
+/// `render::Surface::load` walks the `parent_execution_id` chain and copies
+/// every ancestor's terminated outputs into `inherited`. Until migration 0138
+/// that was unconditionally right: 0135's CHECK made a row with a parent and no
+/// loop index unrepresentable, so every parent link was a loop iteration's.
+/// 0138 admits the `CREATE_NEW_EXECUTION` replay, and a replay is a NEW
+/// execution of the same flow -- it must not read `{{ outputs.<task> }}` off the
+/// attempt it is replacing.
+///
+/// **The asymmetry is the reason this is guarded rather than merely written
+/// down.** The other consumer of the same widened invariant,
+/// `oracle-exec/driver.rs`'s `spawned` decode, would PANIC on a replay row and
+/// announce itself. This one would have rendered a value from a failed previous
+/// run and taken the other branch, in silence.
+///
+/// **Both halves hang off ONE parent execution with ONE terminated `before`
+/// run**, so the only difference between them is the kind of link -- a control
+/// that a second fixture could not give.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_does_not_inherit_outputs_but_a_loop_iteration_still_does(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let parent = r#"id: inherit-parent
+namespace: t
+tasks:
+  - id: before
+    type: io.kestra.plugin.core.debug.Return
+    format: parent-output
+  - id: loop
+    type: io.kestra.plugin.core.flow.Loop
+    values: '["x"]'
+    tasks:
+      - id: item
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{ outputs.before.value }}"
+"#;
+    let ex = start_execution(&pool, ws, None, parent, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let sub: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+           AND loop_index IS NOT NULL",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the loop spawned exactly one sub-execution");
+    assert_eq!(
+        (
+            run_state(&pool, sub, "item").await,
+            run_outputs(&pool, sub, "item").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "parent-output"}))
+        ),
+        "the positive control: a LOOP iteration reads its parent's outputs, \
+         which is `valids/loop-expression-context`'s whole shape and is what \
+         `inherited` exists for"
+    );
+
+    // The replay. Two tasks, because `start_execution` settles once itself and
+    // the run that reads the parent must not exist until the link is set:
+    // `reads` is created only when `gate` finishes, which is after the UPDATE.
+    let replayed = r#"id: inherit-replay
+namespace: t
+tasks:
+  - id: gate
+    type: io.kestra.plugin.core.log.Log
+    message: hi
+  - id: reads
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{ outputs.before.value }}"
+"#;
+    let child = start_execution(&pool, ws, None, replayed, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    assert!(
+        run_state(&pool, child, "reads").await.is_none(),
+        "the run that reads the parent must not exist yet, or it was rendered \
+         before the link was set and this test would pass for the wrong reason"
+    );
+    // Written by hand because nothing spawns a replay yet -- W6 Task 4 does.
+    sqlx::query("UPDATE workflow.executions SET parent_execution_id = $1 WHERE id = $2")
+        .bind(ex)
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("link the child as a replay: a parent, and no loop columns");
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        (
+            run_state(&pool, child, "reads").await,
+            run_outputs(&pool, child, "reads").await
+        ),
+        (Some("FAILED".to_string()), None),
+        "a replay must NOT see `before`'s output. The same expression, over the \
+         same parent, SUCCEEDED for the loop iteration above -- so a failure \
+         here is the link kind and nothing else. Rendering it would have \
+         produced a value from the attempt this execution replaces, with no \
+         error anywhere"
+    );
 }
