@@ -6996,3 +6996,183 @@ The second is the one worth reading twice. The exception table shrank from three
 rows to two, and the sweep is what makes that shrinkage *mandatory*: with the row
 deleted and the rule restored, the flow is not "a known exception" — it is an
 unlisted over-refusal, reported by name with its message.
+
+---
+
+# W6 Task 1 — the corpus in `workflow.flows`, and the publish path that refuses it
+
+Until this task `driver.rs` called `start_execution(pool, ws, None, source,
+inputs)` and **nothing ever wrote a row to `workflow.flows`**. A `core.subflow`
+task names its target by `(namespace, flowId)` and the only lookup that pair can
+go through is `FlowRepo::find_by_name`, which reads that table — so egret could
+not execute a `Subflow` at all, and nothing else in W6 was measurable until it
+could. 25 corpus flows declare one.
+
+`driver::publish_corpus` now files the whole corpus through the product's own
+path — `spec::parse` + `serde_json::to_value` + `FlowRepo::create` (that is
+`routes::create_flow` minus the HTTP), then `publish::publish` through the real
+`WorkflowRefs` (that is `routes::publish_flow` minus the HTTP). Nothing here
+INSERTs a row itself.
+
+## The ratchet did not move, and the mechanism is nameable
+
+**143 mismatching before, 143 after; 0 broken; `tests/executor.rs` 35/35 both
+times.** The ratchet fails in *both* directions — a mismatch outside
+`baseline.txt` is a regression, a baselined id that now matches is unbanked
+progress — so "143 → 143" is set equality and not two counts that happen to
+agree.
+
+Zero moves is the *expected* answer here rather than a disappointment, and the
+reason is structural rather than statistical: **nothing on the execution path
+reads `workflow.flows`.** The single reference is `worker::claim`'s
+`LEFT JOIN workflow.flows f ON f.id = e.flow_id`, which reads `flows.created_by`
+as the run's `principal_id`; the driver still passes `None` for `flow_id`, so
+that column is NULL for every execution the ratchet judges and the join
+contributes nothing. `handlers::sql` is `principal_id`'s only reader, and
+`no_corpus_entry_can_exercise_the_egret_sql_handler` already measures that no
+corpus flow reaches it.
+
+That `None` is deliberate and is called out in `publish_corpus`'s own doc:
+handing the flow id to `start_execution` would be a *second* widening with a
+second population to attribute, bought for a field nothing in this corpus can
+see. W6's `Subflow` links its child by its own column rather than by
+`parent_execution_id`, and takes the target's id from this table directly.
+
+## The census, and every number in it is asserted
+
+`driver::census` compares each figure against a constant in the same file and
+prints the whole table, because a figure nothing compares is stale the moment
+the code moves.
+
+| | corpus flows | |
+|---|---:|---|
+| **live version** | **16** | `publish` ran to `set_live` |
+| draft only — unported task type | 301 | `registry::known_type` refused a `Leaf` |
+| draft only — egret's own `validate` | 19 | a real disagreement about the flow |
+| unparseable — no row at all | 5 | `spec::parse` refused; `namespace`/`flow_id` are `NOT NULL` |
+| name-contested — no row at all | 4 | an earlier file already holds the `(namespace, flowId)` |
+| | **345** | |
+
+**336 of 345 corpus flows have a draft row, and that is what a `Subflow`
+resolves against.**
+
+## The finding: the product's publish path cannot publish this corpus
+
+**`publish` reaches a live version for 16 of 345, and 301 of the 320 refusals
+are one rule.** Publish step 4 asks `spec::registry::known_type` for every
+`TaskKind::Leaf`, and that table is an allow-list of the eight `egret.*` types
+plus `core.http`/`core.slack`/`core.log`. The corpus is Kestra's: every leaf in
+it is an `io.kestra.plugin.core.*` or `io.kestra.core.*` FQCN. So the refusals
+are, in order of population, `debug.Return` ×114, `log.Log` ×65,
+`execution.Fail` ×32, `flow.Sleep` ×19, `flow.Pause` ×18, and twenty more
+classes.
+
+**This is not a defect and no fix is proposed here.** Refusing an unported
+plugin at publish is exactly what W1 built `TASK_TYPES` for, and it is the same
+answer Kestra gives for a class its own image does not carry — 50 of these 345
+were refused by Kestra with a 422 `Invalid type:` for precisely that reason. It
+is a statement about the *instrument*: the oracle drives flows the product would
+not publish, and that asymmetry now has a number on it.
+
+Two consequences the rest of W6 inherits:
+
+1. **A `Subflow` must resolve against the DRAFT row, not a live version.** 320
+   of the 336 rows have no version at all, and among them are seven of the nine
+   remaining `Subflow` declarers. `FlowRepo::find_by_name` reads
+   `workflow.flows` and does not look at `live_version_id`, so the lookup the
+   product already uses is the right one; a resolver that went via
+   `flow_versions` would reach 16 flows out of 345.
+2. **The 16 that do publish are not a random 16.** They are exactly the corpus
+   flows whose every task is control flow or a `core.subflow` — a `Subflow` is a
+   typed `TaskKind`, dispatched in `kind_for` before any `Leaf` arm exists to
+   consult the registry, so it never meets the allow-list. All sixteen are
+   `Subflow` declarers, and each of them resolved its `(namespace, flowId)`
+   through `find_by_name` and froze a `flow_ref`: `flow-concurrency-subflow`,
+   `flow-concurrency-parallel-subflow-kill`(`-child`),
+   `flow-concurrency-sla-fail-parent`, `loop-with-subflow`, `retry-subflow`,
+   `sla-parent-flow`, `subflow-child`, `subflow-inherited-labels-parent`,
+   `subflow-nullable-input-parent`, `subflow-parent`, `subflow-parent-no-wait`,
+   `subflow-parent-of-failed`, `subflow-parent-retry`, `task-flow`,
+   `task-flow-inherited-labels`. That is the two-pass order below working, not
+   an assumption about it.
+
+## The 19 `validate` refusals found no new over-refusal
+
+Sixteen are `invalids/` flows Kestra itself refused with a 422. Three are
+`valids/`, and all three are already accounted for:
+
+- `valids/invalid-draft-flow` — Kestra refused it too (`422 tasks: must not be
+  empty`), and egret's message is the same rule.
+- `valids/task-flow-dynamic` and
+  `valids/trigger-flow-listener-namespace-condition` — Kestra published both
+  with 200. Both are already the *whole* of
+  `executor::mod`'s `PUBLISHED_BUT_REFUSED` table, both are W1-owned, and
+  `every_flow_kestra_published_plans_except_two_named_over_refusals` already
+  sweeps for a third. Neither has a golden entry (`disposition:
+  not-standalone`), so neither can move the ratchet.
+
+So: **widening the resolution surface to the whole corpus surfaced no
+over-refusal that was not already recorded.** That is the sweep this task was
+positioned to make, and its answer is a clean one. The `task-flow-dynamic` row
+is the one W6 should read twice — egret cannot express a *dynamic* subflow
+target at all, and the fix its row names is to `publish::subflow_ref_name`'s
+encoding, not to the check.
+
+## Two passes, and the order is `harvest.py`'s rather than the alphabet's
+
+Every draft is created before anything is published. `harvest.py`'s own capture
+loop records why, in the comment above its publish loop: ten corpus flows name a
+target that sorts later than they do, and it measured the cost on
+`valids/loop-with-subflow` — harvested flow-by-flow it failed with one loop
+iteration, harvested after everything was published it succeeds with two,
+"which is the whole of the 141-vs-142 gap".
+
+The iteration order is `corpus.json`'s **array** order, not the sorted key order
+`corpus_json()` hands back, and that is load-bearing. Three `(namespace,
+flowId)` pairs are claimed by more than one corpus file —
+`io.kestra.tests/switch-impossible` by 2, `/duplicate` by 3, `/empty` by 4 — and
+`UNIQUE (workspace_id, namespace, flow_id)` (migration 0132) lets only the first
+of each win. Sorted, `invalids/switch-invalid` takes
+`io.kestra.tests/switch-impossible` from `valids/switch-impossible`: the invalid
+file *parses* perfectly well, so `FlowRepo::create` accepts it and egret's
+refusal only arrives at publish, by which time the row is in the table. The
+loser is the one member of the three groups that Kestra published and executed
+and that has a golden entry.
+
+`driver::name_contest_won_by_the_right_file` is the guard, and it asks the
+question the way a `Subflow` will: it calls `FlowRepo::find_by_name` on each
+contested pair and asserts the row that comes back is the file
+`NAME_CONTESTED` names.
+
+## `RefKind::DataApiEndpoint` and `RefKind::Notebook` are asserted unreachable
+
+`publish_corpus` builds the real `WorkflowRefs` with two `unreachable!()`
+doubles for the other seams' ports — the same shape, and the same reason, as
+`refs.rs`'s own `UnreachableDataApi`/`UnreachableNotebooks`. Both kinds are
+declared only by an `egret.*` task type, `publish` reads a `RefField` only after
+`known_type` has matched, and no corpus flow names an `egret.*` type at all
+(`no_corpus_entry_can_exercise_the_egret_sql_handler` measures that). A double
+answering `Ok(None)` would turn a corpus that had grown one into a silent
+`NotFound`, indistinguishable from the 320 refusals beside it.
+
+## Mutations
+
+Three, each applied by a script that asserts its anchor is **unique in the whole
+file** and that the file's hash actually changed, each run against the committed
+code, each restored with `git checkout --` and confirmed by
+`if [ -z "$(git status --porcelain)" ]`.
+
+| mutation | what died, and with what |
+|---|---|
+| iterate `super::corpus()`'s array order sorted by id | `name_contest_won_by_the_right_file` — *`io.kestra.tests/switch-impossible` must resolve to `valids/switch-impossible`; it resolves to `invalids/switch-invalid`* |
+| drop pass 2 — never call `publish::publish` | `census` — `live versions: []`, left `0`, right `16` |
+| publish each flow inside pass 1, at the moment its draft is created, instead of in a second pass | `census` — left `11`, right `16` |
+
+The third is the one worth reading, and it is the only one whose number could
+not have been predicted from the code. **Five flows lose their target**, because
+the target had not been created yet when they were published:
+`loop-with-subflow` — `harvest.py`'s own named example, and the flow its
+141-vs-142 measurement was taken on — plus `sla-parent-flow`, `subflow-child`,
+`subflow-parent-retry` and `flow-concurrency-parallel-subflow-kill-child`. That
+is the same defect `harvest.py` hit on Kestra's side, reproduced on egret's, and
+it is why the two passes are two.

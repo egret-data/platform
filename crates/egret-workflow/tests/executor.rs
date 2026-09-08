@@ -733,7 +733,11 @@ async fn egret_side() -> &'static Side {
             .execute(&db.pool)
             .await
             .expect("empty the execution tables");
-        let (ws, _user) = common::seed_workspace(&db).await;
+        let (ws, user) = common::seed_workspace(&db).await;
+        // W6 Task 1: the corpus goes into `workflow.flows` BEFORE any entry
+        // runs, because ten corpus flows name a target that sorts later than
+        // they do. See `driver::publish_corpus`.
+        driver::publish_corpus(&db.pool, ws, user).await;
 
         let mut out = Side::default();
         for entry in golden() {
