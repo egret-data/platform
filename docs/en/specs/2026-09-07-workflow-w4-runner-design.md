@@ -33,8 +33,8 @@ almost nothing:
 | hole | declared | reachable | measured by |
 |---|---|---|---|
 | `timeout:` | 4 | **0** | Task 2 — three are on a `Pause`, and Kestra's worker **ignores a `timeout:` on a flowable** (measured on the artifact: a `Sequential` around a 4 s `Sleep` succeeds in 4.2 s). The fourth is an *hour* on a `core.log.Log`. Instrumented: the budget was applied 4 times across the whole oracle and expired **0** times. |
-| `retry:` non-zero `interval:` | 14 (not 12) | **10 could stall, 0 moved** | Task 1 — 4 are `CREATE_NEW_EXECUTION` and never write a `not_before`. And the oracle cannot see the fix at all: `driver::pass_time` **rewinds `created_at`**, so the mechanism that makes the oracle fast is what hides a timing bug and its cure. Instrumented: the waker fired **0** times, with a positive control firing on the same build. |
-| kill | 5 | **0** | Re-derived: two match on the flow **id** and declare no runnable task at all, one is `Exit`'s own `state: KILLED` output, and two are `Pause`/flow-concurrency, which are W8's. None is a worker killing a running handler. |
+| `retry:` non-zero `interval:` | 14 (not 12) | **10 could stall, 0 moved** | Task 1 — 4 are `CREATE_NEW_EXECUTION` and never write a `not_before`. And the oracle cannot see the fix at all: `driver::pass_time` **rewinds `created_at` and then calls `worker::resume` itself**, so a due retry is consumed inside the call that made it due and `tick`'s own waker never sees one — the mechanism that makes the oracle fast is what hides both a timing bug and its cure. (W4 Task 6 added the second half of that sentence: as first written it said the rewind happened *before* any deadline could elapse, which is backwards — the rewind is what makes one elapse.) Instrumented: the waker fired **0** times, with a positive control firing on the same build. |
+| kill | 5 | **0** | Re-derived off the five flows' own YAML (W4 Task 6 corrected this row: *"two match on the flow id and declare no runnable task at all"* was not what they contain — a `Subflow` is planned, opaquely, as a runnable): one `Exit` carrying `state: KILLED`, an author-declared terminal; one bare `Pause`; two flows declaring `concurrency: {behavior: QUEUE, limit: 1}`; and one parent declaring two `Subflow`s, named for the concurrency limit on its **child**. Four W8 constructs and one output, and **not one of them declares a `timeout:`**, which is the only thing that reaches the kill path. None is a worker killing a running handler. |
 
 **So W4 moves the ratchet by nothing, and that is the honest headline.** The
 `RETRYING` waker still closed a run that hung for ever; `timeout:` still reaches
@@ -54,7 +54,7 @@ three times over.
 
 `claim.rs` justifies omitting a `not_before` term with *"the delay is `advance()`'s to enforce and it already does"*. Enumerated during W3b's whole-branch review: the claim excludes `RETRYING`; `reap` excludes it; `reopen_due` only fires inside a `settle` whose `now` is fixed for the transaction; and `resume`'s only caller is the oracle driver, reached through `pass_time`, which **rewinds `executions.created_at`** to fake the delay.
 
-So a retry on a run with no concurrently-live sibling sits `RETRYING` **for ever**, silently. Twelve baselined entries declare a non-zero interval.
+So a retry on a run with no concurrently-live sibling sits `RETRYING` **for ever**, silently. **Fourteen** baselined entries declare a non-zero interval — see §1.1; this sentence said *twelve* until Task 1 derived it, and §1.1 correcting the table above did not correct the prose below it.
 
 This is the package's first deliverable, and it is a scheduling problem, not a container problem.
 

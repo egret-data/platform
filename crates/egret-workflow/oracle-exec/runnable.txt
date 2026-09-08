@@ -1268,3 +1268,127 @@ It is also a CHOICE, not a tidy-up: under `run_ix DESC` this oracle banks
 `valids/dag`, the entry called instrument-bound since W3a Task 4 -- it costs
 `valids/parallel-nested` instead.  `run_ix` ascending is chosen because it is the
 executor's own creation order, not because it banks more.
+
+
+W4: the runner, and the five numbers above it retires
+======================================================================
+
+Everything above this heading is W3a's and W3b's, and is kept as the record of
+what a task measured on the day it ran.  W4 built the worker's missing halves --
+a waker, a task-level timeout, a kill path, a container runner -- and ruled on
+the transaction boundary.  THE RATCHET DID NOT MOVE ONCE: 143 mismatching before
+Task 1 and 143 at this commit, measured before and after by every task.  Five
+lines above are now false.  FOUR of them for one reason -- the whole-branch
+review's fix round banked `valids/replay-loop` after W3b Task 7 wrote them, and
+a bank re-derives the tables it appears in and nothing else -- and the fifth
+because W4 TOOK the ruling that line hands forward.  Named here rather than
+rewritten in place, which is the convention W3b used on W3a's block.
+
+  the W3b blocks above say                measured now (W4 Task 6, on this tree)
+  -----------------------------------     -------------------------------------
+  matching   150   (127 + 23)             matching   151   (128 + 23)
+  baselined  144   (139 +  5)             baselined  143   (138 +  5)
+
+  ordered pairs REPORTABLE      354       ordered pairs REPORTABLE      357
+    top level  255 / nested  99             top level  255 / nested 102
+  NOT reportable                750       NOT reportable                747
+    top level  622 / nested 128             top level  622 / nested 125
+  flip a MATCHING entry's pairs:            flip a MATCHING entry's pairs:
+    354 pairs, 40 REGRESSIONs                357 pairs, 41 REGRESSIONs
+  flip a BASELINED entry's pairs:           flip a BASELINED entry's pairs:
+    750 pairs, green at 144                  747 pairs, green at 143
+  flip every NESTED pair:                   flip every NESTED pair:
+    227 pairs, 6 REGRESSIONs                 227 pairs, 7 REGRESSIONs
+
+  16 of the 41 MATCH                      17 of the 41 MATCH
+   6 differ only INSIDE `spawned`          8 differ only INSIDE `spawned`
+  19 differ on something else             16 differ on something else
+
+  corruption control: "green at 144"      green at 143
+
+  "That is a RULING ... and W4 owns it"   W4 TOOK it -- Task 4 ruled that one
+                                          handler result stays one TRANSACTION.
+
+  Asserted by `kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`,
+  `the_sub_executions_are_compared_and_this_is_what_they_cost` and the ratchet.
+  The flip experiments themselves were re-run by the whole-branch review's fix
+  round, which is where 7 / 41 / green-at-143 come from.  W4 Task 6 re-derived
+  the POPULATIONS on this tree and did not re-run the experiments.
+
+
+the three holes W4 closed, and why this ratchet sees none of them
+----------------------------------------------------------------------
+
+Three different mechanisms reaching one verdict.  Merging them would lose the
+useful half twice.
+
+  retry: / the waker (Task 1)
+    25 golden entries declare a `retry:`   14 baselined + 11 matching
+    of the 14, CREATE_NEW_EXECUTION         4   (writes no `not_before` at all)
+              RETRY_FAILED_TASK            10   <- the waker's whole population
+    `due_retries` runs on EVERY tick and selects 0 rows.  `driver::pass_time`
+    is the only thing here that makes a deadline elapse, and it calls
+    `worker::resume` ITSELF in the same call -- so a due retry is consumed
+    inside the call that made it due.  Instrumented `wake`: 0 fires over 294
+    entries, `tests/worker.rs` the positive control on the same build.
+    NOT a hole in retrying: a change on any of the 11 matching entries IS
+    reported.
+
+  timeout: (Task 2)
+     5 golden entries declare one          4 baselined + 1 matching
+    the 1 matching is `invalids/duplicate-parallel`, a flow Kestra REFUSED, so
+    it has no runs at all.  Of the 4: three on a `Pause` (a flowable, whose
+    `timeout:` Kestra's own worker ignores -- measured on the artifact) and one
+    HOUR on a `core.log.Log`.  Instrumented `worker::timeout::guard` over 294
+    entries: budget APPLIED 4 times (1s, 1s, 250ms, 3600s), EXPIRED 0.
+
+  kill (Task 3)
+     5 baselined ids contain `kill`         0 of them declare a `timeout:`
+    `Registry::cancel` is reached 0 times -- the path hangs off a budget
+    expiring, and none does.  What the five are, off their own YAML: one `Exit`
+    with `state: KILLED` (an author-declared terminal), one bare `Pause`, two
+    flows declaring `concurrency: {behavior: QUEUE, limit: 1}`, and one parent
+    named for the concurrency limit on its CHILD.  Four W8 constructs and one
+    output; none of them a task-level budget.
+
+  Derived on every run by
+    the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them
+    the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet
+    the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population
+
+
+what a green ratchet here does NOT say, after W4
+----------------------------------------------------------------------
+
+  corpus flows naming an `egret.*` type                          0
+  corpus flows naming a script/container/shell/command type      0
+  corpus flows naming `core.log.Log` (the control)             108
+
+Both zeros are in `no_corpus_entry_can_exercise_the_egret_sql_handler` now,
+with the 108 controlling the scanner and a literal-type check controlling the
+filter.  Kestra keeps its script and container tasks in plugin jars this corpus
+never reaches, so no harvest can close either gap.  `egret.container` and
+`egret.script.python` rest on `tests/container_docker_live.rs` (15 tests; with
+no daemon and no typed opt-out it FAILS 14, with `EGRET_ALLOW_DOCKER_SKIP=1` it
+reports 14 ignored) and on the pure-function unit tests in `worker::commands`,
+plus a 29-row mutation table: 29 compiled, 29 killed, 0 survivors, 70 killers,
+27 killable with no daemon.
+
+  entries a WIDER transaction would bank                          3
+    valids/dag  valids/full  valids/parallel-disabled-tasks
+
+Those three are not invisible -- they are DECLINED.  A worker that applies a
+whole claimed batch before calling advance() reaches 143 -> 140 with no
+regression (raw output: w4t4-widened-tick.txt).  W4 Task 4 refused it because
+`persist`'s four-mutation table proves its two fences are ALTERNATIVES against a
+transaction that releases exactly ONE lease; widened it releases n, and two
+durability tests pass with both fences effectively gone.  A savepoint per run is
+the named way back.
+
+  production callers of `worker::tick`                            0
+
+`egret-bin` wires a `WorkflowState` and no claim loop, so nothing in this
+workspace runs this worker.  A grep for `tick(`, `reap(` and `start_execution(`
+over every `crates/*/src` finds no call site; the four files that call them are
+oracle-exec/driver.rs and tests/{worker,executor,sql_starrocks_live}.rs.  Read 143 as a statement about a state machine and a driver, not
+about a deployment.

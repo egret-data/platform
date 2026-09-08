@@ -42,6 +42,34 @@ HANDLER.** Bộ chạy container là việc sản phẩm, có test riêng, đún
 `egret.sql`. Spec này nói điều đó **ngay đầu** thay vì để một ratchet xanh ngụ ý
 rằng bộ chạy đã được đo.
 
+## 1.1 Con số "20 mục baseline" là hợp của ba lần grep khai báo, và nó là ~0
+
+**Sửa §1 chứ không sửa vào §1.** Bảng trên đếm những flow *khai báo* một thứ.
+Task 1 và Task 2 đo cái *chạm tới được*, và câu trả lời gần như là không có gì:
+
+| lỗ | khai báo | chạm tới được | ai đo |
+|---|---|---|---|
+| `timeout:` | 4 | **0** | Task 2 — ba cái nằm trên một `Pause`, và worker của Kestra **bỏ qua `timeout:` trên một flowable** (đo trên artifact: một `Sequential` bọc một `Sleep` 4 giây chạy SUCCESS trong 4,2 s). Cái thứ tư xin **một giờ** trên một `core.log.Log`. Có đo đạc: ngân sách được áp **4** lần trên toàn oracle và hết hạn **0** lần. |
+| `retry:` có `interval:` khác 0 | **14, không phải 12** | **10 cái có thể kẹt, 0 cái nhúc nhích** | Task 1 — 4 cái là `CREATE_NEW_EXECUTION` và không bao giờ ghi `not_before`. Và oracle **không thấy được cả lỗ lẫn thuốc**: `driver::pass_time` vừa lùi `created_at` vừa **tự gọi `worker::resume`**, nên một retry đến hạn bị tiêu thụ ngay bên trong lời gọi làm nó đến hạn. Có đo đạc: bộ đánh thức chạy **0** lần, với một positive control chạy được trên cùng bản build. |
+| kill | 5 | **0** | Đọc lại từ chính YAML của năm flow ấy: một `Exit` mang `state: KILLED` (một trạng thái tác giả KHAI, không phải ai giết), một `Pause` trơn, hai flow khai `concurrency: {behavior: QUEUE, limit: 1}`, và một flow cha khai hai `Subflow` và được đặt tên theo giới hạn concurrency của **con** nó. Bốn cấu trúc của W8 và một output; **không cái nào khai một `timeout:`**, thứ duy nhất chạm tới đường kill. |
+
+**Vậy W4 làm ratchet nhúc nhích đúng bằng không, và đó là tiêu đề trung thực.**
+Bộ đánh thức `RETRYING` vẫn đóng lại một run treo vĩnh viễn; `timeout:` vẫn tới
+được handler ở chỗ trước đây nó là một hằng số 300 s. Đó là những lỗi thật trong
+đường chạy sản phẩm. Chúng chỉ đơn giản là những lỗi **oracle này không có cách
+nào nhìn thấy** — đúng vị trí của `egret.sql` và của bộ chạy container, và đúng
+vị trí W3c đã đứng khi nó đóng một over-acceptance mà không bank được gì.
+
+Bài học chung, và nó là của tôi: **`grep` một từ khoá thì đếm được khai báo, còn
+con số tiêu đề của một gói phải đếm cái mà một đường mã chạm tới được.** Cả ba
+phần ba đều sai cùng một chiều, nên hợp của chúng sai ba lần.
+
+> **W4 Task 6 thêm mục này**, vì bản tiếng Anh có §1.1 từ Task 2 còn bản tiếng
+> Việt thì không: bản tham chiếu vẫn mang nguyên khẳng định chưa sửa, không một
+> dấu hiệu nào. Một đính chính chỉ làm ở một ngôn ngữ là một cặp số đúng-ở-hai-
+> thời-điểm-khác-nhau, đúng cái hình dạng mục *coverage statement* của
+> `oracle-exec/README.md` tồn tại để thu hồi.
+
 ## 2. Ba cái lỗ ấy thực chất là gì
 
 ### 2.1 `RETRYING` không có bộ đánh thức, và câu nói ngược lại là SAI
@@ -54,7 +82,8 @@ trong cây là driver của oracle, đi qua `pass_time` — thứ **quay ngượ
 `executions.created_at`** để giả lập độ trễ.
 
 Nên một retry trên một run **không có anh em nào còn sống** sẽ ngồi `RETRYING`
-**vĩnh viễn**, im lặng. Mười hai mục baseline khai `interval:` khác 0.
+**vĩnh viễn**, im lặng. **Mười bốn** mục baseline khai `interval:` khác 0 —
+xem §1.1; câu này viết "mười hai" cho tới khi Task 1 đo lại.
 
 Đây là sản phẩm đầu tiên của gói, và nó là một bài toán **lập lịch**, không phải
 bài toán container.
