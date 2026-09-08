@@ -879,6 +879,60 @@ async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
     );
 }
 
+/// **A parent and a child declared together never aborts the tick.**
+///
+/// The whole-branch review's Critical, against a real daemon. The container
+/// writes a **regular file** `a`; the author declares `["a", "a/b.txt"]`. Before
+/// the fix, staging `a` left a regular file where `a/b.txt`'s parent had to go,
+/// `create_dir_all` gave `AlreadyExists`, and it surfaced as
+/// `egret.container: the container runner failed for a reason that is not the
+/// author's flow: File exists (os error 17)` — a **worker** failure, so the tick
+/// aborted, the run stayed `RUNNING` and leased, and every later claim repeated
+/// it for ever.
+///
+/// `expect` on the `Result` **is** the assertion: an `Err` here is the bug, and
+/// it is the same shape as `a_directory_named_as_an_output_file_does_not_wedge_
+/// the_worker` because it is the same class — an author's `outputFiles` must
+/// never become an engine failure.
+async fn a_parent_and_a_child_declared_together_never_aborts_the_tick() {
+    let h = container::Container::new();
+    let t = task(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "commands": ["echo regular-file > a", "echo '::{\"outputs\":{\"ran\":1}}::'"],
+            "outputFiles": ["a", "a/b.txt"],
+        }),
+    );
+    let out = h.run(&t).await.expect(
+        "an author declaring a parent and a child must never abort the tick -- a \
+         worker failure leaves the run RUNNING and leased for an hour, then repeats",
+    );
+
+    let msg = failed(&out);
+    assert!(
+        msg.contains("a/b.txt"),
+        "the failure must name the child the container could not produce: {msg}"
+    );
+    assert!(
+        !msg.contains("File exists") && !msg.contains("os error 17"),
+        "and it must not be egret's staging collision -- each declared name gets \
+         its own root precisely so they cannot collide: {msg}"
+    );
+
+    let o = outputs(&out);
+    assert_eq!(
+        o["outputFiles"]["a"],
+        serde_json::json!("regular-file\n"),
+        "the parent still came back; only the child failed: {o}"
+    );
+    assert_eq!(
+        o["vars"],
+        serde_json::json!({"ran": 1}),
+        "and the run's own outputs survive the failure: {o}"
+    );
+}
+
 /// **An output file over the cap fails the task rather than being truncated**,
 /// end to end. The per-file and total caps themselves are
 /// `worker::commands`'s unit business; what this adds is that a real
@@ -966,6 +1020,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_dropped_future_leaves_the_container_running_and_cancel_is_what_stops_it),
         case!(a_flood_of_output_markers_is_refused_rather_than_stored),
         case!(a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure),
+        case!(a_parent_and_a_child_declared_together_never_aborts_the_tick),
         case!(a_path_that_escapes_the_working_directory_is_refused_by_the_runner),
         case!(a_reaped_workers_cancel_cannot_reach_its_replacements_container),
         case!(a_symlinked_output_file_cannot_read_the_worker_hosts_files),

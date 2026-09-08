@@ -155,10 +155,12 @@ test-workflow-docker:
     # `env -u EGRET_ALLOW_DOCKER_SKIP` is fix round 1's reviewer plan item 3, and it is the
     # same rule as `no_db_skip` one axis over: this recipe means "the daemon tests ran", so
     # an opt-out exported in somebody's shell profile must not be able to turn it into a
-    # green that ignored all fourteen. The suite reports `14 ignored` rather than
-    # `14 passed` when it skips, so the two are distinguishable — but a recipe whose whole
-    # point is the daemon should not be leaving that to the reader. (The count is derived,
-    # not remembered: 15 cases, of which the pure gate test needs no daemon and runs.)
+    # green that ignored all fifteen. The suite reports `15 ignored` rather than
+    # `15 passed` when it skips, so the two are distinguishable — but a recipe whose whole
+    # point is the daemon should not be leaving that to the reader. (Measured from the
+    # binary, not remembered: 16 cases, of which the pure gate test needs no daemon and
+    # runs. A count in a comment beside a growing suite is a stale figure waiting to
+    # happen — if it disagrees with the suite, the suite is right.)
     {{ no_db_skip }} env -u EGRET_ALLOW_DOCKER_SKIP \
       cargo test -p egret-workflow --test container_docker_live -- --nocapture
 
