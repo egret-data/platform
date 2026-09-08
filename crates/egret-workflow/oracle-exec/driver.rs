@@ -57,7 +57,7 @@
 //! `tests/executor.rs` counts and names them, which keeps
 //! that population from growing silently.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,6 +237,12 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
     let entries = super::corpus();
     let mut filed: BTreeMap<String, Filed> = BTreeMap::new();
     let mut drafts: Vec<(String, Uuid)> = Vec::new();
+    // `"{namespace}/{flowId}"` for every `core.subflow` in the corpus, and the
+    // same key for every corpus flow that HOLDS one of those names. The two
+    // together are what [`target_census`] joins — see its doc for why the
+    // population that matters is the targets and not the declarers.
+    let mut targets: BTreeSet<String> = BTreeSet::new();
+    let mut holder: BTreeMap<String, String> = BTreeMap::new();
 
     // Pass 1 — the draft. `routes::create_flow`'s three steps, minus the HTTP.
     for entry in &entries {
@@ -259,8 +265,16 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
             plan,
             folder_id: None,
         };
+        // Collected from every corpus flow that PARSES, before the create can
+        // refuse it: a `Subflow`'s target is a name its author wrote, and the
+        // population is not narrowed by whether the flow naming it won a
+        // `(namespace, flowId)` contest.
+        subflow_targets(&flow, &mut targets);
         match repo.create(ws, by, &input).await {
-            Ok(row) => drafts.push((entry.id.clone(), row.id)),
+            Ok(row) => {
+                holder.insert(format!("{}/{}", flow.namespace, flow.id), entry.id.clone());
+                drafts.push((entry.id.clone(), row.id));
+            }
             Err(e) => {
                 filed.insert(entry.id.clone(), Filed::Absent(format!("create: {e}")));
             }
@@ -273,22 +287,262 @@ pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<Str
     // real `WorkflowRefs`: `RefKind::Subflow` resolves through the same
     // `FlowRepo::find_by_name` the product uses, over the table pass 1 has just
     // finished filling.
-    let refs = WorkflowRefs {
-        flows: FlowRepo::new(Db { pool: pool.clone() }),
-        dataapi_endpoints: Arc::new(NoDataApi),
-        notebooks: Arc::new(NoNotebooks),
+    let refs = CountingRefs {
+        inner: WorkflowRefs {
+            flows: FlowRepo::new(Db { pool: pool.clone() }),
+            dataapi_endpoints: Arc::new(NoDataApi),
+            notebooks: Arc::new(NoNotebooks),
+        },
+        subflow_lookups: std::sync::atomic::AtomicUsize::new(0),
     };
+    let (mut on_published, mut on_refused) = (0usize, 0usize);
     for (corpus_id, flow) in &drafts {
+        let before = refs.count();
         let outcome =
             match egret_workflow::publish::publish(&repo, &refs, ws, by, *flow, "oracle").await {
                 Ok(_) => Filed::Live,
                 Err(e) => Filed::DraftOnly(format!("{e}")),
             };
+        // Attributed to the publish that made them, because a lookup on a flow
+        // that goes on to be refused proves nothing about a flow that ships.
+        let made = refs.count() - before;
+        match outcome {
+            Filed::Live => on_published += made,
+            _ => on_refused += made,
+        }
         filed.insert(corpus_id.clone(), outcome);
     }
+    lookup_census(on_published, on_refused);
 
     census(&filed);
+    target_census(&filed, &targets, &holder);
     filed
+}
+
+/// Every `(namespace, flowId)` a `core.subflow` in `flow` names, as
+/// `"{namespace}/{flowId}"` — the exact key `publish::subflow_ref_name` builds
+/// and `FlowRepo::find_by_name` splits back apart.
+///
+/// # This walk is deliberately WIDER than the product's, and the corpus cannot
+/// tell
+///
+/// All four root lists, then `Task::children()` **and**
+/// `Task::error_children()` at every depth. Neither `spec::validate`
+/// (`validate.rs:1283`) nor `publish::resolve_task` recurses through
+/// `error_children()` — both walk `children()` only — so **a `Subflow` nested
+/// inside a flowable's `errors:` would never have its reference resolved at
+/// publish.** That is the same blind spot W3b Task 5 found in
+/// `worker::claim`'s `leaf_spec`, one seam over; it is latent rather than a
+/// live defect, and it belongs to whoever owns `Subflow` resolution.
+///
+/// This census asks a different question from `publish` — *what would a
+/// resolver have to reach* — so it takes the wider walk on purpose. **Measured:
+/// the extra arm is redundant on today's corpus.** Deleting it (fix round 1
+/// mutation 4) changes no figure and fails no test, because no corpus flow puts
+/// a `core.subflow` inside an `errors:`. Recorded rather than removed, per
+/// W4's rule that a redundant guard and a weak one look identical in a mutation
+/// table unless somebody measures the difference and writes it down.
+fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<String>) {
+    fn walk(t: &egret_workflow::models::Task, out: &mut BTreeSet<String>) {
+        if let egret_workflow::models::TaskKind::Subflow(s) = &t.kind {
+            if let (Some(namespace), Some(flow_id)) = (&s.namespace, &s.flow_id) {
+                out.insert(format!("{namespace}/{flow_id}"));
+            }
+        }
+        for child in t.children() {
+            walk(child, out);
+        }
+        for child in t.error_children() {
+            walk(child, out);
+        }
+    }
+    for list in [
+        &flow.tasks,
+        &flow.errors,
+        &flow.finally_,
+        &flow.after_execution,
+    ] {
+        for task in list {
+            walk(task, out);
+        }
+    }
+}
+
+/// **`RefKind::Subflow` resolutions `publish` made inside a publish that
+/// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
+///
+/// One per `core.subflow` task in the 16 flows that reach a live version, and
+/// zero from anywhere else: no corpus flow declares an `egret.*` type (so no
+/// other `RefKind` is reachable at all), and none of the 16 declares a
+/// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
+const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 18;
+
+/// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
+/// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
+/// refused the flow. Counted apart because a lookup on a flow nobody can
+/// publish is not evidence the reference resolution shipped.
+const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 4;
+
+/// Count and assert the reference lookups, so the claim about how big this
+/// task's genuinely-new surface is has a running program behind it rather than
+/// a sentence.
+fn lookup_census(on_published: usize, on_refused: usize) {
+    eprintln!(
+        "[publish_corpus] {on_published} `RefKind::Subflow` lookup(s) inside a publish that \
+         succeeded, {on_refused} inside one that failed"
+    );
+    assert_eq!(
+        on_published, SUBFLOW_LOOKUPS_ON_PUBLISHED,
+        "Subflow lookups on a flow that reached a live version"
+    );
+    assert_eq!(
+        on_refused, SUBFLOW_LOOKUPS_ON_REFUSED,
+        "Subflow lookups on a flow publish then refused"
+    );
+}
+
+/// The real [`WorkflowRefs`], wrapped so the lookups it is asked for can be
+/// counted. It delegates every call unchanged — the port under test is still
+/// the product's.
+struct CountingRefs {
+    inner: WorkflowRefs,
+    subflow_lookups: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingRefs {
+    fn count(&self) -> usize {
+        self.subflow_lookups
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::WorkflowRefPort for CountingRefs {
+    async fn workspace_of(
+        &self,
+        kind: egret_workflow::RefKind,
+        name_or_id: &str,
+    ) -> Result<Option<(Uuid, Uuid)>, egret_core::Error> {
+        if matches!(kind, egret_workflow::RefKind::Subflow) {
+            self.subflow_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.inner.workspace_of(kind, name_or_id).await
+    }
+}
+
+/// Every distinct string a corpus `core.subflow` names as its target, including
+/// the one that is not a name at all — see [`SUBFLOW_TARGETS_UNRENDERED`].
+const SUBFLOW_TARGETS: usize = 21;
+
+/// **Targets whose corpus flow has a live version — what a resolver that went
+/// through `flow_versions` would reach, and it is 2 of the 20 literal names.**
+const SUBFLOW_TARGETS_LIVE: usize = 2;
+
+/// Targets whose corpus flow has a draft row and no version — reachable only by
+/// a resolver that reads `workflow.flows`, which is what
+/// `FlowRepo::find_by_name` does.
+const SUBFLOW_TARGETS_DRAFT_ONLY: usize = 17;
+
+/// A literal `(namespace, flowId)` no corpus flow holds: `dummy_namespace/
+/// dummy_flow`, named by `valids/task-runif`. Task 3's decision, not this
+/// task's — and explicitly not to be "fixed" by inventing a target.
+const SUBFLOW_TARGETS_ABSENT: usize = 1;
+
+/// **Not a name: `{{inputs.namespace}}/{{inputs.flowId}}`, counted apart so the
+/// literal-name population is exactly 20.**
+///
+/// `valids/task-flow-dynamic`'s dynamic target, read out of the UNRENDERED
+/// source because that is where `publish` reads it too. No corpus flow can hold
+/// it, and it is not "a target that is missing" — it is the recorded
+/// `executor::mod::PUBLISHED_BUT_REFUSED` row, the thing egret structurally
+/// cannot express. Counted in the total rather than dropped, so a reader sees
+/// the exclusion instead of inheriting it.
+const SUBFLOW_TARGETS_UNRENDERED: usize = 1;
+
+/// **What a `Subflow` resolver would actually reach, by target rather than by
+/// declarer — and this is the figure Task 3's choice of resolution source turns
+/// on.**
+///
+/// Fix round 1. The first version of this section published a figure that no
+/// running program compared, and it was wrong twice over: it said "seven of the
+/// nine remaining `Subflow` declarers" would be missed by a `flow_versions`
+/// resolver. All nine of those declarers have a draft row, so nothing about
+/// them is missed — and **declarers is the wrong population entirely.** What a
+/// resolver has to reach is the set of names `Subflow` tasks POINT AT, and a
+/// declarer that publishes says nothing about whether its target did.
+///
+/// So this is asserted here, beside the rest, rather than written into a
+/// document nothing executes.
+fn target_census(
+    filed: &BTreeMap<String, Filed>,
+    targets: &BTreeSet<String>,
+    holder: &BTreeMap<String, String>,
+) {
+    let (mut live, mut draft_only, mut absent) = (Vec::new(), Vec::new(), Vec::new());
+    let mut unrendered = Vec::new();
+    for target in targets {
+        // Split BEFORE the lookup, not after: a template is not a name that
+        // happens to be missing, and folding it into `absent` is how the
+        // literal-name denominator would silently become 21.
+        if target.contains("{{") {
+            unrendered.push(target.clone());
+            continue;
+        }
+        match holder
+            .get(target)
+            .and_then(|corpus_id| filed.get(corpus_id))
+        {
+            Some(Filed::Live) => live.push(target.clone()),
+            Some(_) => draft_only.push(target.clone()),
+            None => absent.push(target.clone()),
+        }
+    }
+
+    eprintln!(
+        "[publish_corpus] {} distinct `Subflow` target(s) = {} literal name(s) \
+         ({} live, {} draft-only, {} held by no corpus flow) + {} unrendered",
+        targets.len(),
+        live.len() + draft_only.len() + absent.len(),
+        live.len(),
+        draft_only.len(),
+        absent.len(),
+        unrendered.len(),
+    );
+    eprintln!("[publish_corpus]   targets live: {live:?}");
+    eprintln!("[publish_corpus]   targets held by no corpus flow: {absent:?}");
+    eprintln!("[publish_corpus]   targets unrendered: {unrendered:?}");
+
+    assert_eq!(
+        targets.len(),
+        SUBFLOW_TARGETS,
+        "distinct `Subflow` targets: {targets:?}"
+    );
+    assert_eq!(
+        live.len(),
+        SUBFLOW_TARGETS_LIVE,
+        "targets a `flow_versions` resolver would reach: {live:?}"
+    );
+    assert_eq!(
+        draft_only.len(),
+        SUBFLOW_TARGETS_DRAFT_ONLY,
+        "targets only a DRAFT-row resolver reaches: {draft_only:?}"
+    );
+    assert_eq!(
+        absent.len(),
+        SUBFLOW_TARGETS_ABSENT,
+        "targets no corpus flow holds -- Task 3's decision, not this task's: {absent:?}"
+    );
+    assert_eq!(
+        unrendered.len(),
+        SUBFLOW_TARGETS_UNRENDERED,
+        "targets that are not names at all: {unrendered:?}"
+    );
+    assert_eq!(
+        live.len() + draft_only.len() + absent.len() + unrendered.len(),
+        targets.len(),
+        "every target is classified exactly once"
+    );
 }
 
 /// The three `(namespace, flowId)` pairs more than one corpus file claims, and

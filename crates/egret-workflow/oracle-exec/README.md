@@ -7076,12 +7076,34 @@ not publish, and that asymmetry now has a number on it.
 
 Two consequences the rest of W6 inherits:
 
-1. **A `Subflow` must resolve against the DRAFT row, not a live version.** 320
-   of the 336 rows have no version at all, and among them are seven of the nine
-   remaining `Subflow` declarers. `FlowRepo::find_by_name` reads
-   `workflow.flows` and does not look at `live_version_id`, so the lookup the
-   product already uses is the right one; a resolver that went via
-   `flow_versions` would reach 16 flows out of 345.
+1. **A `Subflow` must resolve against the DRAFT row, not a live version — and
+   the population that decides this is the TARGETS, not the declarers.**
+   Corrected in fix round 1; the first version of this line said "seven of the
+   nine remaining `Subflow` declarers", which was wrong in both the number and
+   the population. All nine of those declarers have a draft row, so nothing
+   about *them* is missed; what a resolver has to reach is the set of names
+   `Subflow` tasks point AT, and a declarer that publishes says nothing about
+   whether its target did. Measured by `driver::target_census`, asserted
+   against `SUBFLOW_TARGETS*` on every run:
+
+   | of the 21 distinct target strings a corpus `core.subflow` names | |
+   |---|---:|
+   | **literal `(namespace, flowId)` names** | **20** |
+   | — held by a corpus flow with a **live version** | **2** |
+   | — held by a corpus flow with a draft row only | 17 |
+   | — held by no corpus flow at all (`dummy_namespace/dummy_flow`) | 1 |
+   | not a name: `{{inputs.namespace}}/{{inputs.flowId}}` | 1 |
+
+   **A resolver that went through `flow_versions` would resolve 2 of 20**
+   (`io.kestra.tests/subflow-child` and
+   `io.kestra.tests/flow-concurrency-parallel-subflow-kill-child`) — not "miss
+   seven of nine". `FlowRepo::find_by_name` reads `workflow.flows` and does not
+   look at `live_version_id`, so the lookup the product already uses is the one
+   that reaches 19 of the 20. The 21st string is counted apart rather than
+   dropped so the denominator is visible: it is `valids/task-flow-dynamic`'s
+   dynamic target, read unrendered because that is where `publish` reads it too,
+   and it is the recorded `PUBLISHED_BUT_REFUSED` row rather than a name that
+   happens to be missing.
 2. **The 16 that do publish are not a random 16.** They are exactly the corpus
    flows whose every task is control flow or a `core.subflow` — a `Subflow` is a
    typed `TaskKind`, dispatched in `kind_for` before any `Leaf` arm exists to
@@ -7111,12 +7133,43 @@ Sixteen are `invalids/` flows Kestra itself refused with a 422. Three are
   sweeps for a third. Neither has a golden entry (`disposition:
   not-standalone`), so neither can move the ratchet.
 
-So: **widening the resolution surface to the whole corpus surfaced no
-over-refusal that was not already recorded.** That is the sweep this task was
-positioned to make, and its answer is a clean one. The `task-flow-dynamic` row
-is the one W6 should read twice — egret cannot express a *dynamic* subflow
+So: **no over-refusal that was not already recorded.** The `task-flow-dynamic`
+row is the one W6 should read twice — egret cannot express a *dynamic* subflow
 target at all, and the fix its row names is to `publish::subflow_ref_name`'s
 encoding, not to the check.
+
+### How much of a sweep this actually is, bounded
+
+Fix round 1 corrects an overclaim here. The first version called this "the sweep
+this task was positioned to make", on the premise that publishing was the first
+thing to run `spec::validate` over the corpus. **That premise was stale:**
+`build_plan` has called `validate` since W1's fix — `src/executor/plan.rs:642`,
+"W1's `validate`, as the third gate" — so every flow Kestra published was
+already swept for a validate-level over-refusal by
+`every_flow_kestra_published_plans_except_two_named_over_refusals`, and the 19
+refusals above **reproduce** that sweep rather than extend it. (The stale
+premise came from the task brief, not from this file; recording the correction
+here because a decayed fact repeated is the class this programme has now found
+in six consecutive packages.)
+
+What publishing genuinely exercises for the first time is **steps 4–7**:
+`registry::known_type`, `RefKind` resolution through `WorkflowRefs`,
+`insert_version` and `set_live`. And that ran on **16 flows and 18
+`RefKind::Subflow` lookups** — counted by `driver::CountingRefs` and asserted
+as `SUBFLOW_LOOKUPS_ON_PUBLISHED`, not estimated — because step 4 refuses the
+other 301 drafts before their references are read. Four further lookups happen
+inside publishes that then fail (`SUBFLOW_LOOKUPS_ON_REFUSED`), on a `Subflow`
+that `resolve_all` reached before it met the unported `Leaf` that refused the
+flow; they are counted apart, because a lookup on a flow nobody can publish is
+not evidence the resolution shipped. **No other `RefKind` is exercised at all**,
+and no `core.trigger.flow` `dependsOn` either — none of the 16 declares one.
+
+**Those 16 are self-selected by step 4's own refusal** — they are exactly the
+flows with no unported leaf type, i.e. the ones whose every task is control flow
+or a `core.subflow`. So a green census here is evidence that `RefKind::Subflow`
+resolution works *for those 16*; it is **not** corpus-wide evidence, and nothing
+about the other 329 flows' references has been resolved even once. Task 3 should
+read it that way.
 
 ## Two passes, and the order is `harvest.py`'s rather than the alphabet's
 
@@ -7176,3 +7229,34 @@ the target had not been created yet when they were published:
 `subflow-parent-retry` and `flow-concurrency-parallel-subflow-kill-child`. That
 is the same defect `harvest.py` hit on Kestra's side, reproduced on egret's, and
 it is why the two passes are two.
+
+### Fix round 1's mutations
+
+Three more, same harness — unique anchor asserted against the whole file,
+SHA-256 asserted changed, run against committed code, restored with
+`git checkout --` and confirmed by `if [ -z "$(git status --porcelain)" ]`.
+
+| mutation | what died |
+|---|---|
+| drop `Task::error_children()` from `subflow_targets`' walk | **nothing — 35/35 still green.** Recorded rather than reverted; see below |
+| weaken the `{{` split so a template falls through into `absent` | `target_census` — *targets no corpus flow holds*, left `2`, right `1` |
+| attribute every `Subflow` lookup to the published bucket | `lookup_census` — left `22`, right `18` |
+
+The second was first written as a *deletion* of the `if` block and **failed to
+compile** (`type annotations needed for Vec<_>` — `unrendered` was then never
+pushed to). A mutation that does not build looks exactly like one where no test
+died, so it was rewritten as a predicate no real target can match.
+
+**The first is a finding rather than a dead guard.** `subflow_targets` walks
+`Task::children()` *and* `Task::error_children()`; neither `spec::validate`
+(`validate.rs:1283`) nor `publish::resolve_task` recurses through
+`error_children()` at all — both walk `children()` only. So **a `Subflow`
+nested inside a flowable's `errors:` would never have its reference resolved at
+publish**: the same blind spot W3b Task 5 found in `worker::claim`'s
+`leaf_spec` one seam over, and the same shape as the whole-branch-review
+finding that `publish` never walked `flow.triggers`. It is latent — no corpus
+flow puts a `core.subflow` inside an `errors:`, which is exactly why the
+mutation survives — and it belongs to whoever owns `Subflow` resolution. The
+wider arm is kept because this census asks a different question from `publish`
+(*what would a resolver have to reach*), and its redundancy is written down
+here rather than left for a future reader to mistake for strength.
