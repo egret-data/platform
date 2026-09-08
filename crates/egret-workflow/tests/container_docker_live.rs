@@ -793,10 +793,12 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
 /// was found on.
 ///
 /// The residual is stated rather than hidden: a declared name can still reach
-/// outside the working directory *within the container*. Kestra's tar-stream
-/// copy would return an **empty** file there (a link entry carries no content
-/// for `Files.copy` to materialise); egret returns the container's file. Both
-/// are inside the sandbox; neither is the host.
+/// outside the working directory *within the container*, and egret returns the
+/// container's file. Kestra's answer differs **per leg** — an empty file for the
+/// leaf (the link's tar entry has no content for `Files.copy` to materialise),
+/// and **no entry at all** for the intermediate one (`FilesService.outputFiles`
+/// matches declared names with `Files.walkFileTree`, so an unmatched name
+/// yields nothing). Both are inside the sandbox; neither is the host.
 async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
     let h = container::Container::new();
 

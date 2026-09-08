@@ -713,11 +713,22 @@ const DAEMON_SOCKET_MARKERS: [&str; 2] = ["docker.sock", "Cannot connect to the 
 /// That is deliberate and it is not the defect: the boundary that matters is
 /// the worker host, and the task already owns its container. The residual is
 /// that a declared name can still name a file outside the working directory
-/// *within the container*. Kestra's tar-stream copy returns an **empty** file
-/// there instead (a link entry carries no content for `Files.copy` to
-/// materialise), so the two diverge — both inside the sandbox, neither on the
-/// host. `a_symlinked_output_file_cannot_read_the_worker_hosts_files` drives
-/// both legs and asserts the host's file appears on neither.
+/// *within the container*. What Kestra does instead differs **per leg**, and
+/// fix round 3 corrects this paragraph, which had one answer for both:
+///
+/// * **leaf** (`leaked.txt`) — the tar entry for a link carries no content, so
+///   `Files.copy(InputStream, Path)` materialises an **empty regular file**,
+///   which `Files.walkFileTree` then matches. Kestra returns an empty file.
+/// * **intermediate** (`etcdir/passwd`) — there is no such entry to materialise.
+///   `FilesService.outputFiles` resolves declared names through
+///   `WorkingDir.findAllFilesMatching`, which is a `MatcherFileVisitor` over
+///   `Files.walkFileTree` (`LocalWorkingDir`), so an unmatched name yields **no
+///   entry at all**. Kestra returns *nothing*, not an empty file.
+///
+/// Either way both are inside the sandbox and neither is the host, so the
+/// judgement is unchanged — only its justification was wrong.
+/// `a_symlinked_output_file_cannot_read_the_worker_hosts_files` drives both legs
+/// and asserts the host's file appears on neither.
 ///
 /// # Why a refusal rather than "resolve it and check it stays inside"
 ///
@@ -1186,14 +1197,34 @@ fn tempdir(task: &TaskInput) -> Result<std::path::PathBuf> {
         task.run_id.simple(),
         uuid::Uuid::new_v4().simple()
     ));
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Create one directory, private to this user, refusing a path that is already
+/// there.
+///
+/// **Split out of [`tempdir`] so the properties can be asserted against THIS
+/// code.** Fix round 3's NEW Minor 1: the test used to check that
+/// `std::fs::DirBuilder::new().create(existing)` errors, which is a fact about
+/// `std` — it passed with this implementation reverted to `create_dir_all`, and
+/// a test that passes with the implementation reverted is not a test. It cannot
+/// be asserted through `tempdir` directly either, because `tempdir`'s whole
+/// point is that its path is random and therefore never already there.
+///
+/// `create_dir` and not `create_dir_all`: the recursive form **succeeds** on a
+/// path that already exists, including one an attacker pre-created as a symlink
+/// to a directory, which would silently relocate every `docker cp` destination
+/// underneath it.
+fn create_private_dir(dir: &std::path::Path) -> Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(&dir).map_err(io_err)?;
-    Ok(dir)
+    // Deliberately NOT `.recursive(true)`.
+    builder.create(dir).map_err(io_err)
 }
 
 /// A file name a handler may name, relative to [`WORKING_DIR`].
@@ -1226,6 +1257,18 @@ fn relative_problem(rel: &str) -> Option<String> {
     }
     if rel.split('/').any(|seg| seg == "..") {
         return Some(format!("{rel:?} climbs out of {WORKING_DIR} with `..`"));
+    }
+    // `.` and `./x` and a trailing `/` are how a declared name asks for a
+    // DIRECTORY, and `docker cp c:<wd>/. dst` copies the whole subtree before
+    // anything can refuse it — fix round 3's NEW Minor 2. The refusal for a
+    // directory that is only discovered after the copy still happens in
+    // `ingest_output_file`; this closes the spellings that ask for one by name.
+    if rel.split('/').any(|seg| seg == ".") || rel.ends_with('/') {
+        return Some(format!(
+            "{rel:?} names a DIRECTORY rather than a file. An output is JSON and egret \
+             has no internal storage to hand back an archive URI for (W9 owns it), so \
+             name the files inside it instead"
+        ));
     }
     if rel.contains(['*', '?', '[']) {
         return Some(format!(
@@ -1378,6 +1421,21 @@ mod tests {
             ("out[0].txt", "glob"),
         ] {
             let err = check_relative(bad).expect_err("{bad:?} must be refused");
+            assert!(
+                err.to_string().contains(needle),
+                "{bad:?} was refused with {err}, which does not say {needle:?}"
+            );
+        }
+        // A name that ASKS for a directory is refused before any copy happens
+        // -- fix round 3's NEW Minor 2, because `docker cp c:<wd>/. dst` would
+        // otherwise put the whole subtree on the worker's disk first.
+        for (bad, needle) in [
+            (".", "DIRECTORY"),
+            ("./out.txt", "DIRECTORY"),
+            ("sub/./out.txt", "DIRECTORY"),
+            ("sub/", "DIRECTORY"),
+        ] {
+            let err = check_relative(bad).expect_err("a directory spelling must be refused");
             assert!(
                 err.to_string().contains(needle),
                 "{bad:?} was refused with {err}, which does not say {needle:?}"
@@ -1883,11 +1941,29 @@ mod tests {
             );
         }
 
-        // And an existing path is an error rather than a silent reuse.
+        // **And an existing path is an error rather than a silent reuse —
+        // asserted against `create_private_dir`, which is THIS code.**
+        // Fix round 3's NEW Minor 1: this leg used to call
+        // `std::fs::DirBuilder::new().create(..)` itself, which is a fact about
+        // `std` and passed with `tempdir` reverted to `create_dir_all`.
         assert!(
-            std::fs::DirBuilder::new().create(&a).is_err(),
-            "`create_dir` must refuse a path that is already there"
+            create_private_dir(&a).is_err(),
+            "`create_dir` must refuse a path that is already there -- the recursive \
+             form succeeds, including through a symlink somebody pre-created"
         );
+
+        // The same property where it actually bites: a directory standing in
+        // for the staging path must not be adopted.
+        let squatted = a.parent().expect("a parent").join(format!(
+            "egret-w4t5-squat-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&squatted).expect("pre-create");
+        assert!(
+            create_private_dir(&squatted).is_err(),
+            "a path somebody else created first must be refused, not reused"
+        );
+        let _ = std::fs::remove_dir_all(&squatted);
 
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
