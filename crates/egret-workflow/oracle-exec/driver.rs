@@ -79,17 +79,46 @@ use super::{step_relation, Run, Trace};
 /// are loose rather than tight.
 pub const STEP_BOUND: usize = 4 * 765;
 
-/// **One run per tick, and that is the interleaving the golden was normalised
-/// against.**
+/// **One run per tick — but the interleaving the golden was normalised against
+/// is the WORKER's discipline, not this constant.**
 ///
 /// The harness's tier 3 completed exactly one task per step — the
 /// earliest-created still in flight — so exactly one interleaving was
-/// reachable. A batch of `n` here would let two siblings of one `Parallel`
-/// finish inside one round and would make which of them created its successor
-/// first depend on the batch size. It also bounds the blast radius of a worker
-/// error: `Registry::run` refusing an unknown type aborts the tick, and with a
-/// batch the runs claimed beside it would keep a lease nothing would ever
-/// release.
+/// reachable.
+///
+/// # This constant is not the lever, and W4 Task 4 measured that
+///
+/// This doc used to say that a batch of `n` "would let two siblings of one
+/// `Parallel` finish inside one round and would make which of them created its
+/// successor first depend on the batch size". **Both halves are false**, and
+/// they are corrected here rather than left standing with a note beneath them.
+/// `worker::claim` orders by `created_at, execution_id, run_ix` (W3b Task 7's
+/// fix), which makes a batch of `n` indistinguishable from `n` successive
+/// claims of 1 — a successor's `created_at` is strictly later than every
+/// sibling already claimable, so the order is breadth-first either way — and
+/// the happens-before endpoints are `executions.seq`, bumped once per `settle`,
+/// so two siblings finished in one batch still end at different steps.
+/// Measured: **`BATCH = 32` with the shipping worker leaves
+/// `executor_matches_golden` at 143 mismatching and `executor.rs` at 34/34** —
+/// the ratchet figure is the claim, and the `34/34` is the binary's size on the
+/// day W4 Task 4 ran it. It is **35** since W4 Task 6 added a derivation test,
+/// so a reader re-running this gets `35/35`; the row is about the 143.
+///
+/// The lever is the worker applying one handler result per **transaction**.
+/// `BATCH = 32` with a prototype that applies a whole batch's results before
+/// calling `advance()` banks `valids/dag`, `valids/full` and
+/// `valids/parallel-disabled-tasks` (143 → 140, no regression); the raw output
+/// is `oracle-exec/w4t4-widened-tick.txt`. W4 Task 4 ruled against it —
+/// `worker::tick`'s doc carries the ruling and its costs, and
+/// `tests/worker.rs::one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+/// is the instrument. **Neither half moves the ratchet alone**, so raising this
+/// constant without re-opening that ruling changes nothing.
+///
+/// What DOES still argue for 1 here, and is unaffected by the above: it bounds
+/// the blast radius of a worker error. `Registry::run` refusing an unknown type
+/// aborts the tick, and with a batch the runs claimed beside it keep a lease
+/// until `reap` — which for a driver that must attribute every entry to the
+/// flow rather than to the harness is noise it does not need.
 const BATCH: usize = 1;
 
 /// The registry the ratchet judges: the four handlers W3b ships, with `Sleep`

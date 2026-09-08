@@ -319,7 +319,11 @@ fn input(f: &Live, spec: serde_json::Value, cx: serde_json::Value) -> TaskInput 
         spec,
         render: egret_workflow::runners::RenderContext::from_json_object(&cx)
             .expect("the render context is an object"),
+        // No `timeout:` — these flows declare none, so `egret.sql` falls back
+        // to its own `DEFAULT_TIMEOUT` exactly as it did before W4 Task 2.
+        timeout: None,
         principal: Some(f.owner),
+        claimed_at: chrono::DateTime::UNIX_EPOCH,
     }
 }
 

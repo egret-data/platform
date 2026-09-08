@@ -110,7 +110,10 @@ impl TaskHandler for Fail {
         Ok(Outcome::failed_with(CONDITIONAL_MESSAGE))
     }
 
-    /// Nothing to cancel: this handler renders at most two strings.
+    /// Nothing to cancel: this handler renders at most two strings, and
+    /// dropping the future stops all of it. See
+    /// [`log`](super::log)'s `cancel` for why `Ok(())` stays right now that the
+    /// kill path calls it.
     async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
         Ok(())
     }

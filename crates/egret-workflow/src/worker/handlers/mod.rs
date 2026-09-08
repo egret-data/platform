@@ -39,8 +39,10 @@
 //! Kestra does: a render throws inside `run`, and a task whose `run` throws is
 //! `FAILED`, not a worker fault.
 
+pub mod container;
 pub mod fail;
 pub mod log;
+pub mod python;
 pub mod ret;
 pub mod sleep;
 pub mod sql;
@@ -158,11 +160,21 @@ pub(crate) mod testing {
             attempt: 1,
             spec,
             render: crate::runners::RenderContext::new(),
+            // No budget, which is what a task with no `timeout:` gets. A
+            // handler test that wants one sets it on the returned value, so a
+            // default here can never make a bounded test look unbounded.
+            timeout: None,
             // `None`, and that is right for the four handlers that share this
             // helper: not one of them reaches an egret object, so an identity
             // they cannot use must not be there to be quietly relied on.
             // `handlers::sql` builds its own input for that reason.
             principal: None,
+            // A fixed instant rather than `Utc::now()`: this helper's callers
+            // assert on values derived from the input, and a clock reading
+            // would make `commands::container_name`'s output differ between
+            // two runs of the same test. `handlers::container`'s tests build
+            // their own input when they need two DIFFERENT leases.
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
         }
     }
 }

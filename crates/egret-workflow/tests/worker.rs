@@ -1,4 +1,18 @@
-//! The five durability properties the differential oracle can never see.
+//! The properties the differential oracle can never see: five durability ones,
+//! one scheduling one, and one **ruling** — W4 Task 4's, that a handler result
+//! is applied one per transaction. The seventh is the odd one out twice over:
+//! the oracle CAN see its consequence (four entries that differ on the
+//! happens-before relation alone), and it is the only test in the crate that
+//! can tell the ruling from its alternative — measured, under a prototype that
+//! applies a whole claim batch in one transaction at `driver::BATCH = 1`, it is
+//! the sole failure and every other test in the crate passes, `tests/executor.rs`
+//! included. *(That was **707** when W4 Task 4 measured it, from a per-suite sum
+//! that is one larger now: Task 6 added a derivation test to `tests/executor.rs`.
+//! The claim is "the only test that can tell the two disciplines apart", which
+//! the total does not carry — so the total is not restated here, because a
+//! figure nobody re-derives is a figure that goes stale, and this one already
+//! had.)* See
+//! [`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`].
 //!
 //! `tests/executor.rs` compares execution traces against Kestra's own corpus.
 //! It has no opinion about whether two workers claimed the same run, whether a
@@ -10,6 +24,17 @@
 //! The fifth was added by the whole-branch review, which found that the first
 //! four could not see it: the reap property reaps a run whose handler never
 //! ran, and nothing called [`apply_outcome`] twice with one `Claimed`.
+//!
+//! **The sixth is not a durability property at all** — it is the `RETRYING`
+//! waker, W4 Task 1, and the oracle cannot see it for a different reason than
+//! the other five. It is not that the trace does not carry the fact; it is
+//! that `oracle-exec/driver.rs`'s `pass_time` *rewinds*
+//! `executions.created_at` to fake the delay, so no retry deadline ever
+//! elapses in wall-clock time there and the waker's predicate is never
+//! satisfied. Measured: instrumented to print every execution it selects, the
+//! waker fires **zero** times across the whole 294-entry oracle run, with this
+//! file as the positive control for the instrument. See
+//! [`a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`].
 //!
 //! # Why `#[sqlx::test]` and not `common::db()`
 //!
@@ -31,7 +56,7 @@ use std::sync::Mutex;
 
 use egret_metastore::Db;
 use egret_workflow::worker::{
-    apply_outcome, claim, reap, start_execution, Outcome, Registry, TaskInput,
+    apply_outcome, claim, reap, start_execution, wake, Outcome, Registry, TaskInput,
 };
 use uuid::Uuid;
 
@@ -74,6 +99,17 @@ impl Registry for Recorder {
     async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
         self.seen.lock().unwrap().push(task.task_id.clone());
         Ok(Outcome::success())
+    }
+    /// Nothing here has a budget, so nothing here can be killed. A `panic!`
+    /// rather than `Ok(())`: this registry's whole instrument is *which runs
+    /// were handed to a handler*, and a kill it silently absorbed would be a
+    /// kill nobody could see.
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "nothing in these fixtures declares a `timeout:`, so the kill \
+                path must never reach {}",
+            task.task_id
+        );
     }
 }
 
@@ -128,6 +164,21 @@ async fn ended_seq(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Optio
     .fetch_one(pool)
     .await
     .expect("read ended_seq")
+}
+
+/// The happens-before LEFT endpoint, read for the same reason `ended_seq` is:
+/// [`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`]
+/// compares the two across two runs, and a helper per column keeps the query
+/// that reads them from being the thing that drifts.
+async fn created_seq(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT created_seq FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read created_seq")
 }
 
 async fn lease_of(
@@ -562,8 +613,11 @@ async fn a_run_whose_result_committed_is_never_claimed_again(pool: sqlx::PgPool)
 /// exactly the claim predicate, so the run is re-claimable **while the first
 /// handler is still in flight** — `DEFAULT_WORKING_TIMEOUT` is an hour and
 /// `core.flow.Sleep` takes an author-chosen duration, so `duration: PT2H` opens
-/// the window with nothing switched on. Nothing calls `TaskHandler::cancel`
-/// (W4 owns the kill path), so both handlers reach [`apply_outcome`].
+/// the window with nothing switched on, and nothing can tell the first handler
+/// to stop — W4 Task 3's kill path fires only on a task-level budget, inside
+/// the worker that owns the run — so both handlers reach [`apply_outcome`].
+/// `a_killed_handler_cannot_commit_over_the_worker_that_replaced_it` is the
+/// same property driven through the shipping `tick`.
 ///
 /// Measured on the shipped code before the fence existed, with the second
 /// worker committing `SUCCESS` and the first then committing `FAILED`:
@@ -1803,5 +1857,894 @@ async fn the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order(pool
          ticks one run at a time (`driver::BATCH == 1`). Without the tiebreak \
          this is the choice that made `executor_matches_golden` return a \
          different verdict on the same tree"
+    );
+}
+
+/// A one-task flow whose only task carries a `retry:` with a non-zero
+/// `interval:` — and **no sibling**, which is the condition that makes the
+/// stall reachable: with a second live task, a `settle` for that task would
+/// carry a fresh `now` past the deadline and `retry::reopen_due` would fire
+/// inside it by accident.
+fn one_task_with_retry(id: &str, interval: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    retry:\n      type: constant\n      interval: {interval}\n\
+         \x20     maxAttempts: 2\n"
+    )
+}
+
+/// Fails every run's **first** attempt and succeeds on every later one.
+///
+/// The failure is what makes `advance()` schedule the retry; the success on
+/// attempt 2 is what makes "the run moved" observable as a state rather than
+/// as the absence of an error.
+#[derive(Default)]
+struct FailsOnce {
+    seen: Mutex<Vec<(String, usize)>>,
+}
+
+impl FailsOnce {
+    fn seen(&self) -> Vec<(String, usize)> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for FailsOnce {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((task.task_id.clone(), task.attempt));
+        match task.attempt {
+            1 => Ok(Outcome::failed_with("the first attempt always fails")),
+            _ => Ok(Outcome::success()),
+        }
+    }
+    /// A handler that FAILED on its own is not an expiry, so the retry
+    /// property must never see a kill. Same `panic!` as [`Recorder`]'s, and it
+    /// is what says a `Failed` outcome is not mistaken for a timed-out one.
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "a handler that returned its own failure must not be killed: {}",
+            task.task_id
+        );
+    }
+}
+
+/// How many attempts a run has recorded.
+async fn attempts_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> i32 {
+    sqlx::query_scalar(
+        "SELECT jsonb_array_length(attempts) FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read attempts")
+}
+
+/// The deadline a `Command::ScheduleRetry` wrote, in `Tick` milliseconds.
+async fn not_before_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT not_before_ms FROM workflow.task_runs \
+          WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read not_before_ms")
+}
+
+async fn run_id_of(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2")
+        .bind(execution)
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("read run id")
+}
+
+/// Everything about a stuck run, in one string, so an assertion can say **what**
+/// is stuck rather than that a count was zero.
+async fn stuck(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> String {
+    format!(
+        "run {} (execution {execution}, task `{task_id}`) is {:?} with {} attempt(s) \
+         and not_before_ms {:?}; the execution is {:?}",
+        run_id_of(pool, execution, task_id).await,
+        run_state(pool, execution, task_id).await,
+        attempts_of(pool, execution, task_id).await,
+        not_before_of(pool, execution, task_id).await,
+        execution_history(pool, execution)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+    )
+}
+
+/// Drive `tick` until it claims nothing.
+async fn drain_with(pool: &sqlx::PgPool, reg: &dyn Registry) -> usize {
+    let mut total = 0;
+    for _ in 0..64 {
+        let n = egret_workflow::worker::tick(pool, 8, reg)
+            .await
+            .expect("tick");
+        if n == 0 {
+            return total;
+        }
+        total += n;
+    }
+    panic!("tick never stopped claiming; {total} runs finished");
+}
+
+/// **Property 6: a retry whose delay has elapsed is woken, and one whose delay
+/// has not is left alone.**
+///
+/// This is the hole W3b handed to W4, and it is a *scheduling* property rather
+/// than a durability one: a run in `RETRYING` with no concurrently-live sibling
+/// had nothing in this worker that would ever look at its deadline again. The
+/// claim takes only `RUNNING`, [`reap`] takes only `RUNNING`,
+/// `retry::reopen_due` fires only inside a `settle` whose `now` is fixed for
+/// the transaction, and `resume`'s only caller in the tree was the differential
+/// oracle's driver — which fakes the delay by rewinding
+/// `executions.created_at`.
+///
+/// **Nothing here rewinds anything.** The delay elapses in real time, which is
+/// what makes this the shipping worker's problem rather than the driver's.
+///
+/// **It asserts what is stuck, not that nothing happened**, because "no rows
+/// claimed" is also what a correct idle loop returns: a test that asserted a
+/// tick returned zero would pass with the bug present *and* with it fixed.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = FailsOnce::default();
+
+    let due = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("due", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start due");
+    let waiting = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_retry("waiting", "PT30S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start waiting");
+
+    // Both first attempts fail, so both runs take `RETRYING` and a deadline.
+    assert_eq!(
+        drain_with(&pool, &reg).await,
+        2,
+        "both first attempts must have run: {:?}",
+        reg.seen()
+    );
+    for (label, execution, interval_ms) in [("due", due, 1_000), ("waiting", waiting, 30_000)] {
+        assert_eq!(
+            run_state(&pool, execution, "a").await.as_deref(),
+            Some("RETRYING"),
+            "the {label} run must be RETRYING before anything is measured: {}",
+            stuck(&pool, execution, "a").await
+        );
+        let deadline = not_before_of(&pool, execution, "a")
+            .await
+            .expect("a retry was scheduled");
+        assert!(
+            deadline >= interval_ms,
+            "the {label} run's deadline must be at least its own interval past \
+             the execution's origin: {}",
+            stuck(&pool, execution, "a").await
+        );
+    }
+
+    // The delay passes in REAL time. `executions.created_at` is untouched.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    // The waker names the execution whose deadline has passed **by id**, and
+    // no other. A count would not say which one moved, and an entry that moved
+    // for an unattributed reason is a coincidence rather than a wake.
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![due],
+        "the waker must name the execution whose retry came due and no other. \
+         due={due} (interval PT1S, elapsed); waiting={waiting} (interval PT30S, \
+         not elapsed). It named {woken:?}"
+    );
+
+    let finished = drain_with(&pool, &reg).await;
+
+    assert_eq!(
+        run_state(&pool, due, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "the retry's delay has elapsed and nothing else is alive in this \
+         execution, so the worker itself has to reopen it. Instead: {}\n\
+         handler calls: {:?}",
+        stuck(&pool, due, "a").await,
+        reg.seen()
+    );
+    assert_eq!(
+        attempts_of(&pool, due, "a").await,
+        2,
+        "the woken run must open a SECOND attempt rather than reuse the first: {}",
+        stuck(&pool, due, "a").await
+    );
+    assert_eq!(
+        finished,
+        1,
+        "exactly one run's result committed after the wake — the due retry's \
+         second attempt: {:?}",
+        reg.seen()
+    );
+
+    // The other direction, which is what a widened predicate breaks: a retry
+    // whose interval has NOT elapsed must still be sitting there.
+    assert_eq!(
+        run_state(&pool, waiting, "a").await.as_deref(),
+        Some("RETRYING"),
+        "a retry 30 seconds away must not be started 1.3 seconds in: {}",
+        stuck(&pool, waiting, "a").await
+    );
+    assert_eq!(
+        attempts_of(&pool, waiting, "a").await,
+        1,
+        "and it must not have opened a second attempt: {}",
+        stuck(&pool, waiting, "a").await
+    );
+
+    // **The `RETRYING` term's own assertion, and the one that names it.**
+    // `advance()` never clears a `not_before` — `executor::apply`'s
+    // `ScheduleRetry` arm writes one and nothing ever writes `None` back — so
+    // `due`'s run STILL carries the deadline its retry wrote and that deadline
+    // is still in the past. The state term is the only thing between the waker
+    // and a finished execution it would relock and re-settle on every tick for
+    // ever.
+    let again = wake(&pool, 8).await.expect("wake again");
+    assert!(
+        again.is_empty(),
+        "the waker named {again:?} when nothing is RETRYING. Due side: {}. \
+         Waiting side: {}",
+        stuck(&pool, due, "a").await,
+        stuck(&pool, waiting, "a").await
+    );
+}
+
+/// A one-task flow whose only task declares a `timeout:`.
+///
+/// The task id is a parameter because the whole point of this property is
+/// **which** run the budget belonged to, and three flows whose task is called
+/// `a` cannot tell that.
+fn one_task_with_timeout(id: &str, task: &str, timeout: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: {task}\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    timeout: {timeout}\n"
+    )
+}
+
+/// How long the [`Slow`] handler takes. Longer than the tight budget below and
+/// far shorter than the generous one, so the two arms cannot both be explained
+/// by the same accident.
+const SLOW_HANDLER: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// A [`Registry`] that takes [`SLOW_HANDLER`] to answer, and records the budget
+/// it was handed.
+///
+/// **Two lists, not one.** `started` records the budget each run arrived with
+/// — the "reaches the handler" half — and `completed` records the runs whose
+/// future was allowed to finish. A wrapper that awaited the handler and then
+/// rewrote the outcome would satisfy every state assertion in this test and
+/// leave `completed` holding the timed-out run, so the second list is what
+/// says the handler was actually cut off.
+#[derive(Default)]
+struct Slow {
+    started: Mutex<Vec<(String, Option<std::time::Duration>)>>,
+    completed: Mutex<Vec<String>>,
+    /// The runs this registry was asked to STOP — W4 Task 3's kill path.
+    ///
+    /// A third list rather than a flag on the first two, for their own reason:
+    /// "was handed a budget", "was allowed to finish" and "was told to stop"
+    /// are three different facts, and a kill path wired to the wrong branch
+    /// (every run, or none) is only visible by comparing this list with
+    /// `completed`.
+    killed: Mutex<Vec<String>>,
+}
+
+impl Slow {
+    fn started(&self) -> Vec<(String, Option<std::time::Duration>)> {
+        let mut v = self.started.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+    fn completed(&self) -> Vec<String> {
+        let mut v = self.completed.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+    fn killed(&self) -> Vec<String> {
+        let mut v = self.killed.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for Slow {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.started
+            .lock()
+            .unwrap()
+            .push((task.task_id.clone(), task.timeout));
+        tokio::time::sleep(SLOW_HANDLER).await;
+        self.completed.lock().unwrap().push(task.task_id.clone());
+        Ok(Outcome::success())
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Ok(())
+    }
+}
+
+/// The message a run failed with — `task_runs.message`, migration 0137.
+async fn run_message(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT message FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read run message")
+}
+
+/// **Property 7: a task-level `timeout:` reaches the handler and is enforced by
+/// the worker.**
+///
+/// W3b measured that a `timeout:` was stripped before a handler saw it —
+/// `models::Task`'s deserializer takes it out of a leaf's `spec` — so
+/// `egret.sql` ran under a 300-second constant unrelated to what the author
+/// wrote, and every other handler ran unbounded. This is the property that
+/// says otherwise, in the three shapes the artifact distinguishes.
+///
+/// # Why it is written this way
+///
+/// **With the old constant in place a `timeout: PT1S` test PASSES**, because
+/// the handler finishes and the run succeeds: a test that asserted "the flow
+/// ran" or "an error occurred somewhere" would record only that time passed.
+/// So every arm here asserts the run's **terminal state and its message**, and
+/// the message is what separates a budget that fired from a handler that
+/// failed for an unrelated reason — the two are the same `FAILED` row
+/// otherwise.
+///
+/// **The generous arm is the positive control.** `timeout: PT30S` over the same
+/// two-second handler must reach `SUCCESS` with no message at all, at the same
+/// moment the tight arm has failed. A worker that simply failed everything
+/// carrying a `timeout:` passes the first arm and fails this one — and that is
+/// the artifact's own answer, measured: the same flow at `PT30S` ran to
+/// SUCCESS in 3.1 s.
+///
+/// # The values are the artifact's
+///
+/// `Timeout after 00:00:01.000` is `TimeoutExceededException(Duration)` — probed
+/// by reflection inside `kestra/kestra@sha256:28f59bf1…` and seen live in that
+/// server's own ERROR log for a `Sleep` cut off by `timeout: PT1S`, whose run
+/// went `['CREATED','SUBMITTED','RUNNING','FAILED']`. `timeout: must be a
+/// positive duration` is the artifact's own sentence for `PT0S`. See
+/// `worker::timeout`'s module doc for both, and for the third case (an
+/// unparseable duration) where egret's wording is deliberately its own.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Slow::default();
+
+    let tight = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("tight", "tight", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start tight");
+    let generous = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("generous", "generous", "PT30S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start generous");
+    let zero = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_with_timeout("zero", "zero", "PT0S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start zero");
+
+    let finished = drain_with(&pool, &reg).await;
+    assert_eq!(
+        finished,
+        3,
+        "all three runs must reach a committed result; a timeout is a task \
+         failure, not a worker failure that aborts the tick. started: {:?}",
+        reg.started()
+    );
+
+    // ---- the budget reaches the handler ----------------------------------
+    assert_eq!(
+        reg.started(),
+        vec![
+            (
+                "generous".to_string(),
+                Some(std::time::Duration::from_secs(30))
+            ),
+            ("tight".to_string(), Some(std::time::Duration::from_secs(1))),
+        ],
+        "the handler must be handed the author's OWN budget, per run, and the \
+         run whose `timeout:` cannot be used must never be started at all. \
+         `zero` appearing here means a refusal ran a handler; a `None` beside \
+         a name means the seam W3b measured is still open and the value was \
+         stripped before the handler saw it"
+    );
+
+    // ---- the worker enforces it ------------------------------------------
+    assert_eq!(
+        run_state(&pool, tight, "tight").await.as_deref(),
+        Some("FAILED"),
+        "a two-second handler under `timeout: PT1S` must fail, and FAILED is \
+         the artifact's answer rather than KILLED (`callWithTimeout` calls \
+         `kill(null)` so `exceptionHandler` falls through to FAILED): {}",
+        stuck(&pool, tight, "tight").await
+    );
+    assert_eq!(
+        run_message(&pool, tight, "tight").await.as_deref(),
+        Some("Timeout after 00:00:01.000"),
+        "and it must carry Kestra's own sentence for the budget the author \
+         wrote, byte for byte: {}",
+        stuck(&pool, tight, "tight").await
+    );
+    assert_eq!(
+        reg.killed(),
+        vec!["tight".to_string()],
+        "the kill path fires on the budget's expiry and on nothing else: \
+         `generous` answered inside its budget and has already stopped, and \
+         `zero` was refused before a handler ran at all, so a kill reaching \
+         either would be reaching a task that is not running"
+    );
+    assert_eq!(
+        reg.completed(),
+        vec!["generous".to_string()],
+        "the timed-out handler must be DROPPED at its budget. A run in this \
+         list finished its two seconds, which means the budget was applied to \
+         its RESULT rather than to its execution -- indistinguishable from a \
+         real timeout by state and message alone"
+    );
+
+    // ---- the positive control --------------------------------------------
+    assert_eq!(
+        run_state(&pool, generous, "generous").await.as_deref(),
+        Some("SUCCESS"),
+        "the same handler under `timeout: PT30S` must be left alone; without \
+         this arm, a worker that failed every task carrying a `timeout:` would \
+         pass everything above: {}",
+        stuck(&pool, generous, "generous").await
+    );
+    assert_eq!(
+        run_message(&pool, generous, "generous").await,
+        None,
+        "and a success carries no message: {}",
+        stuck(&pool, generous, "generous").await
+    );
+
+    // ---- a budget that cannot be used ------------------------------------
+    assert_eq!(
+        run_state(&pool, zero, "zero").await.as_deref(),
+        Some("FAILED"),
+        "`timeout: PT0S` is refused on the artifact -- `@DurationMin(millis = \
+         1)`, measured at both sides of the boundary -- and the run fails \
+         without the task body ever running: {}",
+        stuck(&pool, zero, "zero").await
+    );
+    assert_eq!(
+        run_message(&pool, zero, "zero").await.as_deref(),
+        Some("timeout: must be a positive duration"),
+        "with the artifact's own sentence, not a duration-parse complaint: {}",
+        stuck(&pool, zero, "zero").await
+    );
+}
+
+/// A two-task flow whose FIRST task carries a `timeout:`.
+///
+/// Two tasks rather than one because the properties below are about what a
+/// stale writer could do to the *rest* of the execution: `b`'s row is the
+/// successor whose existence, and whose being left alone, is the dual of the
+/// plan's Global Constraint.
+fn two_tasks_first_with_timeout(id: &str, timeout: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    timeout: {timeout}\n  - id: b\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: bye\n"
+    )
+}
+
+/// A [`Registry`] whose handler never finishes and whose `cancel` **refuses**,
+/// which is `handlers::sql`'s shape without needing an engine.
+#[derive(Default)]
+struct Stubborn {
+    killed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Registry for Stubborn {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+        unreachable!("this handler is never allowed to finish")
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Err(egret_core::Error::Internal(anyhow::anyhow!(
+            "the statement is still running on the engine"
+        )))
+    }
+}
+
+/// **Property 8: a handler that cannot be stopped still fails on its budget,
+/// and the refusal changes nothing the author sees.**
+///
+/// This is the `egret.sql` shape driven end to end. W3b made that handler's
+/// `cancel` refuse deliberately — *"when W4 wires the kill path this fails
+/// loudly at the one place that has to change"* — and the loudness has to be
+/// bounded: a refusal is an operator's fact about egret, not the reason the
+/// author's task failed, and it must not abort the tick or leave the run
+/// uncommitted.
+///
+/// **Measured on the pinned artifact rather than reasoned**, by `javap -c` over
+/// classes extracted from `/app/kestra` in
+/// `kestra/kestra@sha256:28f59bf175e1158158022db31c5addebe4801747faf41e8bad83065c787fc4bd`:
+/// `WorkerTaskCallable.kill(State.Type)` calls `task.kill()` inside a `try`
+/// whose exception table catches `java.lang.Exception`, logs
+/// `"Error while killing task: '{}'"` at WARN, and then calls
+/// `super.kill(state)` on every path. The terminal is still
+/// `exceptionHandler(TimeoutExceededException)`'s — `FAILED`, carrying
+/// `Timeout after HH:mm:ss.SSS`. So a kill that fails is *logged and forgotten*
+/// there, and here.
+///
+/// Three assertions, and the third is the one a wrong implementation passes the
+/// first two without: the tick's own **count**. A version that propagated the
+/// refusal as `Err` would leave the run leased and untouched, and the state
+/// assertion alone cannot tell that apart from a run that failed on its budget.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Stubborn::default();
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &two_tasks_first_with_timeout("stubborn", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let finished = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("a refused kill must NOT be a worker failure -- it would abort the tick");
+    assert_eq!(
+        finished, 1,
+        "the run's result must still commit; a refusal that propagated would \
+         leave it leased and RUNNING until the reaper took it back"
+    );
+
+    assert_eq!(
+        reg.killed.lock().unwrap().clone(),
+        vec!["a".to_string()],
+        "the handler must have been ASKED to stop -- this is the whole of the \
+         kill path, and without it the refusal below is unreachable"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("FAILED"),
+        "FAILED and not KILLED, and not left RUNNING by a refusal: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert_eq!(
+        run_message(&pool, ex, "a").await.as_deref(),
+        Some("Timeout after 00:00:01.000"),
+        "the author-facing reason is the budget's, byte for byte. A kill that \
+         could not be delivered is an operator's fact and goes to `tracing`, \
+         exactly as `WorkerTaskCallable.kill` sends it to slf4j and leaves \
+         `exceptionHandler`'s state alone: {}",
+        stuck(&pool, ex, "a").await
+    );
+}
+
+/// A [`Registry`] that reaps its own lease and lets a rival worker commit,
+/// **from inside its handler**, and then outruns its budget.
+///
+/// The interleaving is deterministic rather than raced: everything the rival
+/// does happens before this handler's sleep, so by the time the budget expires
+/// the run is already somebody else's and this worker is the stale one.
+struct ReapedFromUnderIt {
+    pool: sqlx::PgPool,
+    killed: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Registry for ReapedFromUnderIt {
+    async fn run(&self, _task: &TaskInput) -> egret_core::Result<Outcome> {
+        // The lease expires while this handler is in flight -- `reap` clears
+        // `claimed_at` and leaves `state = 'RUNNING'`, which is the claim
+        // predicate again.
+        assert_eq!(
+            reap(&self.pool, std::time::Duration::ZERO)
+                .await
+                .expect("reap"),
+            1,
+            "the run this handler is executing must be reclaimable"
+        );
+        // A rival claims the same run and commits first.
+        let rival = claim(&self.pool, 1).await.expect("rival claim");
+        assert_eq!(rival.len(), 1, "the reaped run is claimable again");
+        let mut tx = self.pool.begin().await.unwrap();
+        apply_outcome(&mut tx, &rival[0], &Outcome::success())
+            .await
+            .expect("the rival holds the LIVE lease and must be able to commit");
+        tx.commit().await.unwrap();
+        // ... and only now does this worker outrun its budget.
+        tokio::time::sleep(std::time::Duration::from_secs(3_600)).await;
+        unreachable!("this handler is never allowed to finish")
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        self.killed.lock().unwrap().push(task.task_id.clone());
+        Ok(())
+    }
+}
+
+/// **Property 9: a killed handler cannot commit over the worker that replaced
+/// it.**
+///
+/// W3b's Critical was a *reaped* worker committing over its replacement, and
+/// `a_worker_whose_lease_was_reaped_cannot_commit` drives that by calling
+/// `apply_outcome` by hand. Cancellation is the same seam from the other side
+/// and this drives the **shipping `tick`**: the run is killed on its budget,
+/// the kill path runs, and the worker then tries to write a terminal for a run
+/// that is no longer its.
+///
+/// **A cancel is not what protects this seam, and that is the finding.**
+/// [`reap`] is an `UPDATE` run by whatever process calls it — in production not
+/// the one holding the run — and a lease is a `timestamptz` in a row, not a
+/// handle to a future, so nothing can reach across and cancel the abandoned
+/// handler. The abandoned worker finds out only when its write is refused. The
+/// fence is therefore the whole of the protection here, and this test exists to
+/// see it refuse rather than to assume it does. `worker::cancel`'s module doc
+/// carries the same statement.
+///
+/// **Every assertion is one the pre-fence code failed.** W3b measured that
+/// shape directly: `state=FAILED`, `ended_seq` wiped from `Some(4)` to NULL,
+/// the execution FAILED with its successor still live. All four are read back
+/// here, plus the kill path's own footprint — because a test that only checked
+/// the error would pass against an `apply_outcome` that errored *after*
+/// writing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_killed_handler_cannot_commit_over_the_worker_that_replaced_it(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = ReapedFromUnderIt {
+        pool: pool.clone(),
+        killed: Mutex::new(Vec::new()),
+    };
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &two_tasks_first_with_timeout("fenced-kill", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let err = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect_err("a worker whose lease is gone must not report its run finished");
+    assert!(
+        err.to_string().contains("lease that no longer exists"),
+        "and it must say WHY, so a production log names the reclaim rather than \
+         a generic write failure: {err}"
+    );
+
+    assert_eq!(
+        reg.killed.lock().unwrap().clone(),
+        vec!["a".to_string()],
+        "the kill path still runs for a run this worker has already lost. It is \
+         stopping its OWN in-flight future, which nothing else can reach -- and \
+         that is the whole of the claim. It is NOT that `cancel` may act on the \
+         run: by now the run belongs to the rival, and a handler that named an \
+         external resource after `run_id` would be reaching the rival's. \
+         `TaskHandler::cancel`'s doc carries that hazard for W4 Task 5, and it \
+         is why the fence below is what protects the row rather than the kill"
+    );
+
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("SUCCESS"),
+        "the rival's terminal stands; a second terminal on one attempt is W3b's \
+         Critical: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert_eq!(
+        run_message(&pool, ex, "a").await,
+        None,
+        "and not even the message may land -- `apply_outcome` writes it before \
+         the state, so a fence only on the state would leave `Timeout after \
+         00:00:01.000` beside somebody else's SUCCESS: {}",
+        stuck(&pool, ex, "a").await
+    );
+    assert!(
+        ended_seq(&pool, ex, "a").await.is_some(),
+        "the happens-before right endpoint must survive: the pre-fence \
+         measurement wiped it from Some(4) to NULL"
+    );
+    assert_eq!(
+        execution_history(&pool, ex).await,
+        serde_json::json!(["CREATED", "RUNNING"]),
+        "the execution must NOT have reached a terminal; FAILED here is the \
+         dual of the plan's Global Constraint -- the execution moved and the \
+         task is not finished"
+    );
+    assert_eq!(
+        run_state(&pool, ex, "b").await.as_deref(),
+        Some("RUNNING"),
+        "and the successor the rival created is live and claimable -- RUNNING \
+         with no lease IS the claim's predicate, which is what makes an \
+         execution that had reached FAILED beside it the Critical it was"
+    );
+}
+
+/// Two `Sequential` branches of one `Parallel`, four leaves. The shape of
+/// `valids/parallel-disabled-tasks` without the `disabled:`, which is the
+/// entry W4 Task 4's ruling is about.
+fn parallel_of_two_sequences(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: s1\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task1\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n          - id: task2\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n      - id: s2\n        type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          - id: task3\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n          - id: task4\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n"
+    )
+}
+
+/// **The seventh property, and it is a RULING rather than a durability one:
+/// one handler result per transaction.**
+///
+/// W3b handed W4 the question of whether the tick should stay this shape, and
+/// W4 Task 4 ruled that it does. The ruling is invisible to every other test in
+/// this file and only *half*-visible to the oracle — `oracle-exec` sees it as
+/// four entries that reproduce every run, attempt and execution state Kestra
+/// recorded and differ on the happens-before relation alone — so it is stated
+/// here as the thing a future change would have to break on purpose.
+///
+/// # What is asserted, and why it is these three runs
+///
+/// `task1` and `task3` are the first leaves of two `Sequential` branches of one
+/// `Parallel`, so both are claimable at once and ONE tick finishes both. The
+/// question the ruling answers is what `advance()` sees in between:
+///
+/// - egret applies `task1`'s result, drives `advance()` to a fixed point (which
+///   creates `task2`) and commits, then does the same for `task3`. So
+///   `ended(task1) < created(task2) < ended(task3)`.
+/// - Kestra's worker pool finished both siblings before either successor
+///   existed, so on its side `created(task2)` is AFTER `ended(task3)`.
+///
+/// The middle inequality is therefore the whole of the divergence, and it is
+/// the assertion below. Measured, on this flow, both ways: shipping gives
+/// `ended(task1)=8, created(task2)=9, ended(task3)=11`; the widened tick gives
+/// `ended(task1)=8, created(task2)=9, ended(task3)=8` — both siblings on step
+/// 8 and both successors on step 9, which is Kestra's shape exactly.
+///
+/// # This is not about the batch size, and that was measured
+///
+/// The tick claims **eight** runs here and finishes two of them, so "one run
+/// per tick" is the wrong name for it: the discipline is one result per
+/// TRANSACTION. Setting `oracle-exec/driver.rs`'s `BATCH` to 32 with this
+/// discipline unchanged left the ratchet at 143 baselined and every test in
+/// this file green — the claim orders by `created_at, execution_id, run_ix`, so
+/// a batch of n is indistinguishable from n successive claims of 1.
+///
+/// # The cost of the ruling, measured rather than argued
+///
+/// Applying a whole batch's results in one transaction before calling
+/// `advance()` banks **`valids/dag`, `valids/full` and
+/// `valids/parallel-disabled-tasks`** (143 mismatching → 140, no regression,
+/// `valids/if` still differing on `order` alone — so the benefit column is a
+/// LOWER bound while that entry's cause is unknown). It was refused for what it
+/// costs, and the cost it turns on is not an ordering one:
+///
+/// **Widening would ship `a_worker_whose_lease_was_reaped_cannot_commit` and
+/// `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` green
+/// over a path they do not touch.** Both drive `apply_outcome` with a single
+/// `Claimed`; a widened tick releases `n` leases per transaction. Measured:
+/// under the widened prototype, deleting the `outputs` fence outright AND
+/// making `persist` fence only the group's first lease — a defect that is
+/// byte-equivalent at `n == 1` and lets a reaped worker commit over its
+/// replacement at `n > 1` — leaves **the whole crate green** but for this test.
+/// `worker::claim::tick`'s doc carries all four costs in order and
+/// `oracle-exec/w4t4-widened-tick.txt` carries every run behind them, including
+/// the five reap configurations that show the *shipping* tick starving under
+/// the mirror-image adversary — which is why the lease-loss cost is ranked
+/// fourth here and not first, and why the first version of this doc was wrong
+/// to call it a live-lock of the widening's.
+///
+/// See `oracle-exec/README.md`'s *One result per transaction is a ruling* for
+/// W3a's deleted guard, which stays unreachable under the widened tick —
+/// measured, not predicted — and for the savepoint design that is the named way
+/// back in.
+#[sqlx::test(migrations = "../../migrations")]
+async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(
+        &pool,
+        ws,
+        None,
+        &parallel_of_two_sequences("ruling"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+
+    let reg = Recorder::default();
+    let finished = egret_workflow::worker::tick(&pool, 8, &reg)
+        .await
+        .expect("one tick, eight claimable slots");
+    assert_eq!(
+        finished, 2,
+        "both first leaves are claimable at once and ONE tick finishes both, so          the ruling is not about how many runs a tick takes: {:?}",
+        reg.seen()
+    );
+    assert_eq!(
+        reg.seen(),
+        vec!["task1".to_string(), "task3".to_string()],
+        "and it takes them in `run_ix` order, which is what the claim's          tiebreak is for"
+    );
+
+    let ended1 = ended_seq(&pool, ex, "task1")
+        .await
+        .expect("task1 terminated in this tick");
+    let created2 = created_seq(&pool, ex, "task2")
+        .await
+        .expect("task1's successor exists");
+    let ended3 = ended_seq(&pool, ex, "task3")
+        .await
+        .expect("task3 terminated in this tick");
+
+    assert!(
+        ended1 < created2,
+        "a successor is created strictly after the run that caused it ends          (task1 {ended1}, task2 {created2}, task3 {ended3})"
+    );
+    assert!(
+        created2 < ended3,
+        "THE RULING. `task1`'s result, `advance()` and `task1`'s successor are          one transaction, so `task2` exists before `task3`'s result is applied          at all. Kestra's worker pool finished both siblings first and its          `created(task2)` is after `ended(task3)`; that divergence is          `valids/dag`, `valids/full` and `valids/parallel-disabled-tasks`, and          W4 Task 4 measured that widening the tick banks all three and refused          it anyway -- see this test's doc for the price. TWO things reach this          failure and they want different answers. Either the tick has been          WIDENED, in which case the ruling has been reversed and the three          baseline lines have to go in the same commit; or `task1` and `task3`          were finished CONCURRENTLY by two workers, which produces the same          equality with nothing edited at all and means this test has lost its          isolation -- it drives one `tick` itself, on its own `#[sqlx::test]`          database, and nothing else may be claiming from it          (task1 {ended1}, task2 {created2}, task3 {ended3})"
+    );
+    assert_ne!(
+        ended1, ended3,
+        "two siblings finished in one tick must not share a step: the step IS          the happens-before endpoint, and a shared one is exactly what a batched          transaction produces"
     );
 }

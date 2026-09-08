@@ -33,6 +33,23 @@
 //! transaction, a crash rolls the claim back too and the reaper could never
 //! reclaim anything.
 //!
+//! # The third statement: [`wake`]
+//!
+//! There is a **step 0**, and W3b did not have it. A run in `RETRYING` is not
+//! claimable — it carries a deadline and has to re-enter `CREATED` before a
+//! handler may touch it, which only `advance()` may do — so neither the claim
+//! nor [`reap`] can reach one, and `executor::retry::reopen_due` fires only
+//! inside a [`settle`](claim) whose `now` is fixed for the transaction. A retry
+//! on a run with **no concurrently-live sibling** therefore sat `RETRYING` for
+//! ever. [`wake`] is the statement that re-reads the clock: it names the
+//! executions holding a due retry and hands each to [`resume`], and [`tick`]
+//! calls it **ahead of** the claim so the run it reopens is claimed by the same
+//! tick. See [`claim`]'s module doc for the two-clocks rule the predicate rests
+//! on, and `tests/worker.rs`'s
+//! `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+//! for the property — which the differential oracle cannot see, because its
+//! driver rewinds `executions.created_at` to fake the delay.
+//!
 //! The cost of the split is stated rather than hidden: a worker killed between
 //! the claim and the commit leaves its run **leased**, and it becomes claimable
 //! again only when [`reap`] takes it back. `tests/worker.rs`'s
@@ -53,15 +70,18 @@
 //! `advance()`, so the shipping worker resolves them and [`resume`] is what a
 //! caller uses when something OUTSIDE the execution has changed.
 
+mod cancel;
 mod claim;
+pub mod commands;
 pub mod handlers;
 mod reaper;
 mod registry;
 mod render;
 mod spawn;
+mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
-pub use claim::{apply_outcome, claim, resume, start_execution, tick, Claimed};
+pub use claim::{apply_outcome, claim, resume, start_execution, tick, wake, Claimed};
 pub use reaper::reap;
 pub use registry::Handlers;
 
@@ -123,6 +143,32 @@ pub struct TaskInput {
     /// ancestors' included), and this run's `taskrun`. See that module for what
     /// each name is and what is deliberately still missing.
     pub render: RenderContext,
+    /// The wall-clock budget the author gave this task, and `None` when they
+    /// gave none.
+    ///
+    /// **The author's `timeout:`, rendered — not a constant.** It is on this
+    /// struct for the reason [`handlers::sql::DEFAULT_TIMEOUT`] used to give
+    /// for not having it: `models::Task`'s deserializer takes `timeout` out of
+    /// a leaf's `spec` before a handler ever sees it, so a handler that wanted
+    /// it had nowhere to read it from and used a constant instead.
+    ///
+    /// **A handler is not obliged to look at it**, and most cannot use it:
+    /// [`timeout::guard`] enforces the same budget around
+    /// [`Registry::run`](Registry) whatever the handler does, which is the
+    /// artifact's arrangement (`AbstractWorkerCallable.callWithTimeout` wraps
+    /// the whole of `task.run`). It is here for the handlers that can do
+    /// something *better* than being dropped — [`handlers::sql`] passes it to
+    /// the engine as `Limits::timeout`, which on Trino becomes a
+    /// `query_max_run_time` session property and cancels the statement server
+    /// side instead of abandoning it.
+    ///
+    /// **`None` covers two different things and the difference is spent
+    /// before this field is built**: a task with no `timeout:` at all, and a
+    /// task whose `timeout:` is unusable. The second never reaches a handler —
+    /// `claim::run_one` fails the run with the refusal's own message instead
+    /// of calling one — so nothing downstream has to tell them apart. See
+    /// [`timeout::Budget`].
+    pub timeout: Option<std::time::Duration>,
     /// The identity this execution acts as, and `None` when it has none.
     ///
     /// A workflow runs with nobody logged in, so a handler that reaches an
@@ -155,6 +201,40 @@ pub struct TaskInput {
     /// scheduled run acts as, so it is left to own that column rather than
     /// guessed at here.
     pub principal: Option<egret_core::UserId>,
+    /// **The lease token this run is being executed under** —
+    /// `task_runs.claimed_at`, the instant the claim's own `UPDATE` wrote.
+    ///
+    /// # Why it is here, and why it was NOT here before W4 Task 5
+    ///
+    /// [`TaskHandler::cancel`]'s *READ THIS BEFORE IMPLEMENTING A HANDLER THAT
+    /// HOLDS AN EXTERNAL RESOURCE* section is this field's specification. W4
+    /// Task 3 wrote it and deliberately left the field off: *"the value that
+    /// does disambiguate is the lease token, `task_runs.claimed_at`, which
+    /// `Claimed` carries and which is deliberately not on `TaskInput` today,
+    /// because no handler uses it and a field with no reader is the shape this
+    /// package has refused ten times. Whoever adds a resource-holding handler
+    /// must add it … in the same change."*
+    ///
+    /// [`handlers::container`] and [`handlers::python`] are that handler and
+    /// this is that change. They name a Docker container after
+    /// `(run_id, claimed_at)` — [`commands::container_name`] — precisely so
+    /// that a stale worker A, reaped and still inside its handler, computes a
+    /// name that **no longer exists** and therefore cannot kill the container
+    /// belonging to worker B, which claimed the same `run_id` under a new
+    /// lease. `attempt` does not disambiguate ([`reap`] leaves it open) and
+    /// `run_id` alone is exactly the hazard.
+    ///
+    /// **A per-run handle registry inside the handler is NOT an alternative if
+    /// it is keyed by `run_id`.** Worker B claiming in the same process would
+    /// overwrite A's entry and A's cancel would reach B's container by another
+    /// route; and where A and B are separate processes — the production case —
+    /// a registry cannot see across them at all, while the name can, because
+    /// the daemon is shared. The disambiguator is load-bearing either way,
+    /// which is Task 3's point restated.
+    ///
+    /// A handler that holds nothing must ignore this field, and the four core
+    /// handlers do.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a handler produces.
@@ -198,7 +278,15 @@ pub struct Outcome {
     /// failure message**, so the ratchet cannot tell them apart. This field is
     /// what `handlers::fail`'s own tests assert on instead.
     ///
-    /// `None` on every success. Nothing persists it yet; see the task report.
+    /// `None` on every success.
+    ///
+    /// **It is persisted now** — `task_runs.message`, migration 0137, written
+    /// by [`apply_outcome`] in the same fenced statement as `outputs`. W3b's
+    /// sentence here was *"Nothing persists it yet"*, and W4 Task 2 is what
+    /// forced the column: a task-level `timeout:` is distinguishable from any
+    /// other failure only by its message, so a test that could read a run's
+    /// state and not its message could not tell a budget that fired from a
+    /// handler that failed for an unrelated reason.
     pub message: Option<String>,
 }
 
@@ -273,10 +361,72 @@ pub trait TaskHandler: Send + Sync {
     /// to W4's container handlers, where it is wrong and where nothing would
     /// say so. Each implementation states its own reason.
     ///
-    /// **Nothing calls this yet.** W4 owns the kill path (the programme spec's
-    /// *"the reclaim must kill the pod before retrying, or two pods will write
-    /// at once"*), and until it lands this is a shape with no caller — which
-    /// is stated here rather than left to be discovered.
+    /// **[`cancel`] is the caller, and there is exactly one site**: the
+    /// task-level budget expiring. That is the artifact's own arrangement —
+    /// `AbstractWorkerCallable.callWithTimeout` calls `kill(null)` in its
+    /// timeout catch block and `WorkerTaskCallable.kill` forwards it to
+    /// `RunnableTask.kill()` — and [`cancel`]'s module doc gives the
+    /// disassembly, plus the two seams the kill path deliberately does **not**
+    /// reach (a reaped lease, and a run `advance()` abandoned).
+    ///
+    /// **An `Err` here does not fail the run and does not abort the tick.** The
+    /// artifact catches a throwing `task.kill()`, logs it, and keeps the state
+    /// `callWithTimeout` had already decided; egret does the same, and
+    /// [`cancel::Killed`](cancel) is what carries the refusal to the log.
+    ///
+    /// # READ THIS BEFORE IMPLEMENTING A HANDLER THAT HOLDS AN EXTERNAL RESOURCE
+    ///
+    /// **This method is addressed by IDENTITY, not by a handle to the work.**
+    /// It is handed a [`TaskInput`] — a snapshot naming a `run_id`, an
+    /// `execution_id` and an `attempt` — and a `&self` shared by every run of
+    /// that type. The artifact's is not: `WorkerTaskCallable` holds *the task
+    /// instance that is running*, and
+    /// `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` reaches
+    /// `this.runningStatement`, a field on that instance. Per-instance
+    /// addressing cannot name the wrong resource; per-identity addressing can.
+    ///
+    /// The four core handlers are safe from this because they hold nothing.
+    /// **A pod-backed handler (W4 Task 5, `egret.container`) is not**, and the
+    /// hazard is concrete: [`reap`] clears a lease and leaves `state =
+    /// 'RUNNING'`, so worker B can claim a run while worker A is still inside
+    /// its handler, and A's own budget then expires and calls this method. A
+    /// handler that named its pod `egret-run-<run_id>` would have A delete
+    /// **B's** pod. `attempt` does not disambiguate either — the reaper leaves
+    /// the attempt open, so A and B share it.
+    ///
+    /// **The value that does disambiguate is the lease token,
+    /// `task_runs.claimed_at`, and it IS on [`TaskInput`] now** — see
+    /// [`TaskInput::claimed_at`]. W4 Task 5 added it, because
+    /// [`handlers::container`] and [`handlers::python`] are the
+    /// resource-holding handlers this section was written for: they name a
+    /// container `egret-run-<run_id>-<lease µs>`
+    /// ([`commands::container_name`]), so a reaped worker A computes a name
+    /// that no longer exists and cannot reach worker B's container.
+    ///
+    /// **This paragraph used to say the field was "deliberately not on
+    /// `TaskInput` today", and the whole-branch review is right that satisfying
+    /// the instruction falsified the instruction.** It is corrected rather than
+    /// deleted, because the hazard it describes is still exactly right and the
+    /// next resource-holding handler still has to obey it — what changed is
+    /// that the disambiguator is now supplied rather than owed.
+    ///
+    /// **The per-run handle registry this used to offer as an alternative is
+    /// NOT one**, and both [`TaskInput::claimed_at`] and
+    /// [`commands::container_name`] carry the argument: keyed by `run_id` it has
+    /// the identical bug (B overwrites A's entry in the same process), keyed by
+    /// `(run_id, claimed_at)` it is the name with more moving parts, and in the
+    /// case the hazard is actually about — A and B in **different processes** —
+    /// a registry cannot see across them while the daemon can.
+    ///
+    /// `worker::cancel`'s module doc records why the kill path cannot simply be
+    /// suppressed for a lost lease instead: the worker never learns the lease is
+    /// gone until its write is refused, which is after the kill.
+    ///
+    /// [`handlers::container`]: handlers::container
+    /// [`handlers::python`]: handlers::python
+    /// [`commands::container_name`]: commands::container_name
+    ///
+    /// [`reap`]: reap
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 
@@ -293,6 +443,20 @@ pub trait Registry: Send + Sync {
     /// moving the execution; a task that ran and failed returns
     /// `Ok(Outcome { state: Failed })`.
     async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome>;
+
+    /// Stop a run this registry started, dispatching to the same handler
+    /// [`Registry::run`] would.
+    ///
+    /// **No default body, for [`TaskHandler::cancel`]'s reason and one more.**
+    /// A default `Ok(())` would answer for every fake registry a test ever
+    /// writes, so the one property that says the kill path is wired — *this
+    /// handler was asked to stop* — would pass against a worker that asked
+    /// nobody. The trait is the seam the worker holds; every implementation of
+    /// it has to say what stopping means.
+    ///
+    /// `Err` is a **refusal**, not a worker failure: it is logged and the run
+    /// keeps the terminal its budget gave it. See [`cancel`].
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;
 }
 
 /// The failures this module raises that are not database errors.

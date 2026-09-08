@@ -16,35 +16,58 @@
 //!
 //! - it is wrapped in a CTE, because the caller needs `workspace_id`, which
 //!   lives on `workflow.executions` and a `RETURNING` cannot reach;
-//! - there is **no `not_before` term**, and the reason first written here was
-//!   wrong in its second half. The first half stands: spec §4.1's
-//!   `state = 'pending' AND not_before <= now()` cannot fire against this
-//!   predicate, because `TaskRun::not_before` is written only by
-//!   `Command::ScheduleRetry`, a run carrying one is `RETRYING`, and the claim
-//!   takes only `RUNNING` — so a term on it would be a guard nobody could ever
-//!   see fail.
+//! - there is **no `not_before` term on the claim**, and both halves of the
+//!   reason that used to be written here were wrong.
 //!
-//!   What does **not** follow, and what this comment used to assert, is *"the
-//!   delay is `advance()`'s to enforce and it already does"*. Nothing in this
-//!   worker makes a retry's delay elapse. `executor::retry::reopen_due` is
-//!   `not_before`'s only reader and it runs inside a [`settle`], whose `now` is
-//!   fixed for the whole call; [`reap`](super::reap) excludes `RETRYING` as the
-//!   claim does; and [`resume`] — the one entry point that would re-read the
-//!   clock — has no production caller. The only caller today is
-//!   `oracle-exec/driver.rs`'s `pass_time`, which *rewinds*
-//!   `executions.created_at` because there is no other way to make time pass.
+//!   The half that reads like a guarantee — *"the delay is `advance()`'s to
+//!   enforce and it already does"* — was withdrawn by W3b, which enumerated
+//!   why nothing in this worker made a retry's delay elapse. The half that
+//!   replaced it — *"a term on it would be a guard nobody could ever see
+//!   fail"* — is false too, and W4 Task 1 is what makes it false: the term
+//!   exists, it is in [`due_retries`], and
+//!   `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+//!   has seen it fail in both directions.
 //!
-//!   So a run in `RETRYING` with no concurrently-live sibling to bring a
-//!   `settle` along sits there for ever. **W4 fills the hole** — it owns the
-//!   loop that wakes on a deadline — and this is stated rather than left as a
-//!   sentence that reads like a guarantee.
+//!   What is true is narrower and is about **which statement** carries the
+//!   term. A `RETRYING` run is not runnable: it has to re-enter `CREATED`
+//!   first, and only `advance()` may put it there
+//!   (`executor::retry::reopen_due`). So the claim — whose whole job is to
+//!   hand a run to a handler — cannot take one, and a `not_before` term on
+//!   *this* predicate really would be unreachable, because
+//!   `TaskRun::not_before` is written only by `Command::ScheduleRetry` and a
+//!   run carrying one is `RETRYING` rather than `RUNNING`. The waker is
+//!   therefore a **second statement** rather than a widened claim:
+//!   [`due_retries`] names the executions holding a run whose deadline has
+//!   passed, [`wake`] calls [`resume`] on each, and [`tick`] runs it **ahead
+//!   of** the claim so a run this call reopens is claimed by the same call.
+//!
+//!   **The two clocks are one expression, deliberately.** [`due_retries`]'s
+//!   `now` is spelled exactly as [`load_with`] spells it —
+//!   `(EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint`, the origin
+//!   `Tick` is measured from — so an execution the waker names is one
+//!   `reopen_due` will actually move. Two different readings of the clock
+//!   would give a waker that resumes an execution `advance()` then declines to
+//!   advance: a settle that writes nothing, bumps `executions.seq`, and is
+//!   selected again on the next tick for ever. `now()` only ever grows between
+//!   the two statements, and that is the safe direction — a run the waker
+//!   found due is still due by the time `resume` reads the clock.
+//!
+//!   What this does **not** do is invent a state. The waker moves nothing
+//!   itself; it re-reads the clock and hands the execution to the same
+//!   [`settle`] every other writer uses, exactly as
+//!   `oracle-exec/driver.rs`'s `pass_time` did — except that `pass_time`
+//!   *rewinds* `executions.created_at` to fake the delay, and is why this hole
+//!   was invisible for a whole package: the only caller `resume` had was one
+//!   that had already moved the clock itself.
 
 use egret_core::{Error, Result};
 use sqlx::{PgConnection, PgPool, Row};
 use uuid::Uuid;
 
+use super::cancel;
 use super::render::{self, Pass, Surface};
 use super::spawn::{self, Requested};
+use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
     advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunIx, RunState, TaskKind,
@@ -111,46 +134,89 @@ pub struct Claimed {
     /// selected `created_at`, so `apply_outcome`'s `WHERE execution_id = $8
     /// AND run_ix = $9` was the whole predicate. [`super::reap`] clears
     /// `claimed_at` and leaves `state = 'RUNNING'` — the claim predicate — so
-    /// a run is re-claimable while its first handler is still in flight, and
-    /// nothing calls [`super::TaskHandler::cancel`]. Two terminals landed on
-    /// one attempt, the second wiping the first's `ended_seq`. See
+    /// a run is re-claimable while its first handler is still in flight. Two
+    /// terminals landed on one attempt, the second wiping the first's
+    /// `ended_seq`. See
     /// `tests/worker.rs::a_worker_whose_lease_was_reaped_cannot_commit`.
+    ///
+    /// **W4 Task 3's kill path does not close this, and the fence is still the
+    /// whole of the answer.** [`super::TaskHandler::cancel`] has a caller now,
+    /// but only one: the task-level budget expiring, inside the worker that
+    /// owns the run. [`super::reap`] is a bare `UPDATE` run by some other
+    /// process and a lease is a `timestamptz`, not a handle to a future, so
+    /// nothing can reach across and stop the abandoned handler — it learns it
+    /// was reaped when this fence refuses its write and not before.
+    /// `a_killed_handler_cannot_commit_over_the_worker_that_replaced_it` drives
+    /// that through the shipping `tick`.
     pub claimed_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Claimed {
-    /// What the handler is handed.
+    /// What the handler is handed, and the budget it is handed under.
     ///
     /// `spec` is this task's own properties, found by walking the parsed flow
     /// for [`Claimed::task_id`]. Task ids are unique across a whole flow —
     /// `spec::validate`'s `duplicate_task_id` is a structural check over the
     /// nested walk, not just `flow.tasks` — so the id is a key and not a
     /// guess.
-    fn input(&self, render: crate::runners::RenderContext) -> Result<TaskInput> {
+    ///
+    /// **The budget comes back beside the input rather than only on it**,
+    /// because a `timeout:` that cannot be used is a *refusal* and a refusal
+    /// is not a `None` budget: the run fails without the handler being called
+    /// at all. See [`timeout::Budget`], and [`run_one`] for the branch.
+    ///
+    /// **One walk, not two.** `spec` and `timeout` are two fields of the same
+    /// `models::Task`, and a second traversal to fetch the second one could
+    /// disagree with the first about which task it found.
+    fn input(&self, render: crate::runners::RenderContext) -> Result<(TaskInput, Budget)> {
         let flow = crate::spec::parse(&self.source)
             .map_err(|e| worker_err(WorkerError::Unplannable(self.execution_id, e.message)))?;
-        let spec = leaf_spec(&flow, &self.task_id).ok_or_else(|| {
+        let leaf = leaf(&flow, &self.task_id).ok_or_else(|| {
             worker_err(WorkerError::NotALeaf(
                 self.execution_id,
                 self.task_id.clone(),
             ))
         })?;
-        Ok(TaskInput {
-            workspace_id: self.workspace_id,
-            execution_id: self.execution_id,
-            run_id: self.id,
-            task_id: self.task_id.clone(),
-            type_id: self.type_id.clone(),
-            value: self.value.clone(),
-            attempt: self.attempt.max(0) as usize,
-            spec,
-            render,
-            principal: self.principal_id.map(egret_core::UserId),
-        })
+        let budget = timeout::resolve(leaf.timeout, &render);
+        Ok((
+            TaskInput {
+                workspace_id: self.workspace_id,
+                execution_id: self.execution_id,
+                run_id: self.id,
+                task_id: self.task_id.clone(),
+                type_id: self.type_id.clone(),
+                value: self.value.clone(),
+                attempt: self.attempt.max(0) as usize,
+                spec: leaf.spec.clone(),
+                render,
+                timeout: budget.duration(),
+                principal: self.principal_id.map(egret_core::UserId),
+                // **The lease token, handed to the handler.** See
+                // `TaskInput::claimed_at`: a handler that holds an external
+                // resource names it after this and not after `run_id` alone,
+                // so a reaped worker cannot reach its replacement's resource.
+                claimed_at: self.claimed_at,
+            },
+            budget,
+        ))
     }
 }
 
-/// One task's own properties, by id, from anywhere in the flow.
+/// The two halves of a leaf task this worker needs: what the handler runs on,
+/// and how long it may take.
+///
+/// A struct rather than a tuple because the second field is easy to mistake
+/// for the first's `timeout` key — it is not in `spec` at all, which is the
+/// whole seam this task exists to close.
+struct Leaf<'a> {
+    /// `models::TaskKind::Leaf`'s `spec`.
+    spec: &'a serde_json::Value,
+    /// `models::Task::timeout`, still unrendered.
+    timeout: Option<&'a crate::models::Property<std::time::Duration>>,
+}
+
+/// One task's own properties **and its `timeout:`**, by id, from anywhere in
+/// the flow.
 ///
 /// `models::TaskKind::Leaf`'s `spec` is the task's map with `id`, `type`,
 /// `description`, `retry`, `timeout`, `disabled` and `runIf` already removed
@@ -166,11 +232,18 @@ impl Claimed {
 /// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
 /// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.
-fn leaf_spec(flow: &crate::models::Flow, task_id: &str) -> Option<serde_json::Value> {
-    fn walk(task: &crate::models::Task, want: &str) -> Option<serde_json::Value> {
+fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
+    fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
         if task.id == want {
             return match &task.kind {
-                crate::models::TaskKind::Leaf { spec } => Some(spec.clone()),
+                crate::models::TaskKind::Leaf { spec } => Some(Leaf {
+                    spec,
+                    // **Read from the `Task`, not from `spec`.** `timeout` is
+                    // one of the seven keys `models::Task`'s deserializer takes
+                    // OUT of a leaf's `spec`, which is exactly why a handler
+                    // could not see it and `handlers::sql` used a constant.
+                    timeout: task.timeout.as_ref(),
+                }),
                 _ => None,
             };
         }
@@ -266,6 +339,141 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
+/// The executions holding a `RETRYING` run whose retry delay has elapsed.
+///
+/// **The `RETRYING` term is the whole predicate's point** and it is not a
+/// tidiness: `advance()` never CLEARS a `not_before` — `executor::apply`'s
+/// `ScheduleRetry` arm writes one and nothing writes `None` back — so a run
+/// that has been retried and has since succeeded still carries the deadline
+/// its retry wrote, for ever. Without the state term this statement would name
+/// every finished execution whose retry deadline is in the past, on every
+/// tick, and each would take the execution's row lock and a settle that writes
+/// nothing but a new `executions.seq`. Driven by
+/// `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`,
+/// whose last assertion is exactly that: nothing is `RETRYING` any more, the
+/// deadline is still there and still past, and the waker must name nobody.
+///
+/// **The clock is [`load_with`]'s, spelled the same way**, so an execution
+/// named here is one `retry::reopen_due` will actually reopen — see the module
+/// doc's `not_before` bullet.
+///
+/// # `ORDER BY` the shortfall, and the tiebreak for the same reason the claim has one
+///
+/// `not_before_ms` is measured from each execution's OWN `created_at`, so it
+/// is not comparable across executions; the shortfall
+/// `not_before_ms - now_ms` is, because both are the same instant minus the
+/// same `now()`. It is the quantity `oracle-exec/driver.rs`'s `pass_time`
+/// calls by that name, and ordering by it is "the retry that came due first
+/// goes first". `execution_id` breaks the remaining tie, for
+/// [`claim`]'s reason: without a total order the rows come back in whatever
+/// the scan produced, and at `LIMIT 1` that decides *which* execution is
+/// woken rather than merely in what order.
+pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT r.execution_id \
+           FROM workflow.task_runs r \
+           JOIN workflow.executions e ON e.id = r.execution_id \
+          WHERE r.state = 'RETRYING' \
+            AND r.not_before_ms IS NOT NULL \
+            AND r.not_before_ms <= \
+                (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
+          GROUP BY r.execution_id \
+          ORDER BY MIN(r.not_before_ms \
+                       - (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint), \
+                   r.execution_id \
+          LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(exec)
+    .await
+    .map_err(db_err)
+}
+
+/// Reopen every retry whose delay has elapsed, up to `limit` executions.
+///
+/// Returns the executions it resumed, **by id and in the order it took them**,
+/// rather than a count: an entry that moved for an unattributed reason is a
+/// coincidence, and a caller — a test included — that can only see a number
+/// cannot tell which execution moved. [`reap`](super::reap) returns a count
+/// because a reclaimed lease is fungible; a woken execution is not.
+///
+/// Public and callable on its own, for [`reap`](super::reap)'s reason: a real
+/// worker pool may want to wake on its own cadence, and a waker reachable only
+/// from inside [`tick`] would be one nothing could drive directly. [`tick`]
+/// calls it, which is what gives it a caller **inside this crate's own
+/// source** — the thing `resume` did not have, its only caller being
+/// `oracle-exec/driver.rs`, and the whole reason this hole survived a package.
+///
+/// **That sentence said "a production caller", and W4 Task 6 measured that it
+/// is not one yet.** [`tick`] itself has no production caller: a grep for
+/// `tick(`, `reap(` and `start_execution(` over every `crates/*/src` finds no
+/// call site at all, and `egret-bin` builds a `WorkflowState` — the flow repo
+/// and its refs — with no claim loop. So the chain this doc describes is real
+/// and ends one link short of a deployment, and this is exactly the sentence a
+/// reader would quote as evidence the waker is wired. It is wired to
+/// **`tick`**; nothing is wired to `tick`. `oracle-exec/README.md`'s coverage
+/// statement carries it as item 15, and W4's own section as its sixth fact.
+///
+/// **Every named execution is attempted and the first error is returned after
+/// the loop**, which is [`tick`]'s own rule for the same reason: one
+/// execution's failure to settle must not leave the executions behind it
+/// asleep for a reason that concerned a different execution.
+pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
+    let due = due_retries(pool, limit).await?;
+    let mut woken = Vec::with_capacity(due.len());
+    let mut first_err: Option<Error> = None;
+    for execution in due {
+        match resume(pool, execution).await {
+            Ok(()) => woken.push(execution),
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(woken),
+    }
+}
+
+/// # READ THIS BEFORE WIRING `tick` INTO A BINARY
+///
+/// Nothing in this workspace calls `tick` in production yet. Whoever first does
+/// makes two things reachable that are only latent today, and both are recorded
+/// here because this is the function they will be looking at — not at the
+/// handler docs where they were first written.
+///
+/// **1. One unbounded handler can get a later run in the same batch reaped
+/// before its handler is invoked, and then run twice.** [`claim`] leases up to
+/// `n` rows in a **single** `UPDATE … SET claimed_at = now() … LIMIT $1`, and
+/// the loop below is **sequential**, so every lease in a batch is taken at one
+/// instant and run *k*'s is already held for the sum of handlers 1..*k*−1.
+/// `handlers::sql` bounds itself at 300s when the author writes no `timeout:`;
+/// `handlers::container` and `handlers::python` bound themselves at **nothing**,
+/// so one container can hold the last lease past
+/// [`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT) before that run
+/// starts. Twelve bounded `egret.sql` runs reach the same threshold, so this is
+/// **this function's** property and not a handler's. The options are: lease one
+/// run at a time; refresh each lease immediately before its handler; or measure
+/// the reaper's timeout per run. See W4 Task 5's report and cost 2 above.
+///
+/// **2. Pick `n` deliberately.** `n = 1` makes the property above unreachable
+/// and is what `oracle-exec/driver.rs` uses.
+///
+/// # An `Err` from one run does NOT abandon the others
+///
+/// Stated because the phrase *"aborts the tick"* is used loosely throughout this
+/// crate and overstates it (the whole-branch re-review's Minor 3). What actually
+/// happens is in the loop below: the error is kept in `first_err`, **the loop
+/// continues**, every other claimed run is still handled, and the first error is
+/// returned at the end. What the failing run loses is its **own** outcome — no
+/// result is applied, so it stays `RUNNING` and leased until [`reap`] returns
+/// it, which is the consequence every finding about this has correctly named.
+///
+/// [`reap`]: super::reap
+///
 /// Claim up to `n` runnable task runs, hand each to `reg`, and commit each
 /// result with `advance()`'s commands and the successors.
 ///
@@ -294,11 +502,175 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// finish must not be reported as finished. The returned count stays "runs whose
 /// result committed", so a partial batch reports what it actually did.
 ///
-/// Returns the number of runs whose result committed.
+/// # The waker runs first, and inside the same call
+///
+/// A run in `RETRYING` is not claimable — it has to re-enter `CREATED` first,
+/// and only `advance()` may put it there. [`wake`] is what re-reads the clock
+/// for it, and it is called **ahead of** the claim rather than beside it so
+/// that a run this call reopens is a run this call also claims: `resume` drives
+/// the reopened run to `RUNNING` inside its own transaction, which is exactly
+/// the claim's predicate. A waker after the claim would cost one whole tick of
+/// latency per retry for no reason.
+///
+/// It is `n` executions rather than an unbounded sweep, for the claim's
+/// reason: a tick is the unit of work a caller asked for.
+///
+/// # One result per TRANSACTION — W4 Task 4's ruling, and what it costs
+///
+/// The loop above hands one result at a time to [`apply_outcome`], which opens
+/// its own transaction, applies that one terminal, drives `advance()` to a
+/// fixed point and commits. W3b left the question of whether it should stay
+/// that way to W4, on the grounds that W4 introduces a real worker pool. **It
+/// stays.**
+///
+/// **"One run per tick" is the wrong name for the discipline and this loop is
+/// the proof**: the tick claims `n` and finishes `n`. The discipline is one
+/// result per transaction, and `tests/worker.rs`'s
+/// `one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+/// finishes two runs in one tick while asserting it. The two halves are
+/// independently measurable and were measured separately:
+///
+/// | configuration | `executor_matches_golden` |
+/// |---|---|
+/// | shipping (`driver::BATCH = 1`, one result per transaction) | 143 mismatching |
+/// | `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 (its size at W4 Task 4; **35** since Task 6 added a derivation test — the claim in this row is the 143) |
+/// | `BATCH = 1`, a whole batch per transaction | 143 mismatching (**forced**: at `BATCH = 1` a group is one run, so the widened apply IS [`apply_outcome`]) |
+/// | `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
+///
+/// So the batch size buys nothing on its own — the claim orders by
+/// `created_at, execution_id, run_ix`, which makes a batch of `n`
+/// indistinguishable from `n` successive claims of 1 — and the entries are
+/// bought by applying several results **before** calling `advance()`.
+///
+/// **It was refused for what it costs, not for what it banks**, which is the
+/// rule W3b applied when reversing the claim's tiebreak also banked
+/// `valids/dag`: choosing the shape of the runner by what it banks is how an
+/// oracle gets tuned to its own answer. The costs, in the order of how much
+/// weight the ruling puts on them, every one measured on a prototype whose raw
+/// output is `oracle-exec/w4t4-widened-tick.txt` — the widened code is not in
+/// this checkout, so the numbers below are not otherwise reproducible from it.
+///
+/// 1. **THE ONE THE RULING RESTS ON: two guards would stop being guards, and
+///    [`persist`]'s four-mutation table would start certifying a shape the code
+///    no longer has.** That table proves the `outputs` fence and the state
+///    fence are ALTERNATIVES, each sufficient alone — and it was taken against
+///    a transaction that releases exactly ONE lease. Widened, it releases `n`.
+///    Measured (`w4t4-widened-tick.txt`, RUN 4): put a defect in the surviving
+///    alternative that can only bite at `n > 1` — delete the `outputs` fence
+///    outright, which the table says is survivable, and make `persist` fence
+///    only the group's FIRST lease, which is byte-equivalent at `n == 1` — and
+///    **the whole crate is green** but for this ruling's own ordering guard.
+///    So `a_worker_whose_lease_was_reaped_cannot_commit` and
+///    `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass
+///    with both fences effectively gone for every non-first member of a group,
+///    because both drive [`apply_outcome`] with a single `Claimed`. A programme
+///    whose first law is *a guard nobody has seen fail is a guard nobody has
+///    seen* cannot buy an ordering nicety with two guards that stop being
+///    guards.
+/// 2. **`working_timeout_s` already does not mean what it says, and this cost
+///    was WRONG about the shipping tick.** The sentence here used to read
+///    *"Today a run's lease is held for `input_for` plus its own handler.
+///    Batched, it is held for the sum over the batch"*, attributing to the
+///    widening a property the tick **already has**. The whole-branch review
+///    caught it and it is right: [`claim`] leases up to `n` rows in **one**
+///    `UPDATE … SET claimed_at = now() … LIMIT $1`, and [`tick`] then walks
+///    them with a sequential `for c in &claimed { run_one(…).await }`. So run
+///    *k*'s lease is taken at the same instant as run 1's and is already held
+///    for the sum of handlers 1..*k*−1 before its own handler is invoked.
+///    Widening changes the transaction, not this.
+///
+///    **What the widening would still cost is a lost lease costing the group**
+///    (cost 4), not this — so this row is now an argument for neither side, and
+///    is kept because it is a real property of the tick that the operator who
+///    sets `working_timeout_s` cannot see.
+///
+///    **And W4 Task 5 made it bite.** `handlers::sql` bounds itself with
+///    `DEFAULT_TIMEOUT` (300s) when the author writes none;
+///    `handlers::container` and `handlers::python` have **no default budget at
+///    all**, so one `egret.container` with no `timeout:` can hold its own lease
+///    — and every later lease in its batch — for longer than
+///    [`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT). The last
+///    member of a batch can then be **reaped before its handler is invoked**
+///    and run twice. Nothing bounds this today; see
+///    [`handlers::container`](super::handlers::container)'s module doc for the
+///    proposal and why it was not taken in a bookkeeping round.
+/// 3. **It is the coupling this doc's own *One run's failure does not strand
+///    the rest of the batch* already refused once** — this time inside the
+///    transaction, where an early return cannot be softened into "carry on".
+/// 4. **A lost lease costs the whole group rather than the run it named — and
+///    this is the WEAKEST of the four, which the first version of this doc got
+///    wrong.** A batch is one transaction, so one [`WorkerError::LeaseLost`]
+///    aborts every result in it. The first measurement of that used a single
+///    adversary — a registry reaping from the SECOND handler, which is the
+///    arrangement most favourable to this tick — and reported a live-lock as
+///    the widening's. It is not. Five configurations, one scratch database
+///    each, six rounds, handler calls / SUCCESS runs
+///    (`w4t4-widened-tick.txt`, RUN 3):
+///
+///    | reap | narrow (shipping) | widened |
+///    |---|---|---|
+///    | none (control) | 2 / 3 | 2 / 3 |
+///    | 2nd handler, every call | 7 / 1 | 12 / 0 |
+///    | 2nd handler, once | 3 / 3 | 4 / 3 |
+///    | **1st handler, every call** | **12 / 0** | **12 / 0** |
+///    | 1st handler, once | 4 / 3 | 4 / 3 |
+///
+///    The shipping tick live-locks too, with the identical call log, when the
+///    reap fires from the first handler. An adversary that reaps on every call
+///    starves both. What widening actually costs is the **asymmetry**: this
+///    tick survives one of the two placements, the widened one survives
+///    neither. Under a transient reap — the realistic case, since [`super::reap`]
+///    fires on a lease that has actually expired — both recover fully and the
+///    widening costs exactly ONE extra handler re-run.
+///
+///
+/// **A fifth thing the widening changes, derived from the code shape rather
+/// than measured, and a BEHAVIOUR change rather than a durability one.** This
+/// loop calls [`input_for`], the handler and the commit per run in that order,
+/// so the second claimed run's render surface is loaded *after* the first has
+/// committed and a sibling writing `{{ outputs.<earlier sibling> }}` resolves
+/// it. A widened tick runs every handler before any commit, so no member of a
+/// batch can see another member's outputs. Neither is Kestra's guarantee — a
+/// `Parallel` sibling reading a sibling's outputs is a race there too — but the
+/// widening silently NARROWS what a handler can see, and nothing in this crate
+/// or in the corpus would notice.
+///
+/// **The way back in, named rather than left implicit.** A design that applies
+/// a batch's results together **without sharing a failure** — a `SAVEPOINT` per
+/// run inside the group transaction, so a lost lease rolls back one run's
+/// writes and not the group's — removes cost 4 entirely and shrinks cost 3.
+/// Costs 1 and 2 remain, and cost 1 is the binding one: such a design has to
+/// bring `n`-lease versions of both fence tests and re-derive [`persist`]'s
+/// mutation table against the `n`-row shape. The three entries stay available
+/// at that price; this ruling does not spend them.
+///
+/// **W3a's deleted guard did NOT come back, and that was measured rather than
+/// predicted.** W3a removed `resolveParallelNexts`'s "return nothing while any
+/// child is still `CREATED`" and named the trigger that would restore it as *"a
+/// caller that applies a batch partially — W4's worker"*, on the same three
+/// entries. [`CREATE_BESIDE_A_CREATED_SIBLING`] is **0** under the widened
+/// prototype exactly as it is today: the guard's state needs a worker result
+/// delivered *between two rounds of one `advance()` cascade*, and [`drive`]
+/// runs that cascade to a fixed point inside one transaction under either
+/// ruling. The overlap of entries is a coincidence of which flows have
+/// observable sibling order, not a shared mechanism.
+///
+/// Returns the number of runs whose result committed. **A tick that only woke
+/// something returns 0**, and that is deliberate — the count means "results
+/// committed", not "work done", and a caller that looped until zero would
+/// otherwise never stop on an execution whose retry it had just reopened. The
+/// run it reopened is claimed by this same call, so the count moves on the
+/// tick that runs it.
 pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> {
+    let mut first_err: Option<Error> = None;
+    // Ahead of the claim, and its failure does not stop the claim: an
+    // execution that cannot settle must not keep this worker from running the
+    // runs that are already claimable.
+    if let Err(e) = wake(pool, n as i64).await {
+        first_err = Some(e);
+    }
     let claimed = claim(pool, n as i64).await?;
     let mut done = 0usize;
-    let mut first_err: Option<Error> = None;
     for c in &claimed {
         match run_one(pool, c, reg).await {
             Ok(()) => done += 1,
@@ -315,10 +687,33 @@ pub async fn tick(pool: &PgPool, n: usize, reg: &dyn Registry) -> Result<usize> 
     }
 }
 
-/// One claimed run: its handler, and the transaction its result lands in.
+/// One claimed run: its handler, the budget the handler runs under, and the
+/// transaction its result lands in.
+///
+/// # The budget is the WORKER's, and it is here rather than in a handler
+///
+/// Measured on the pinned artifact, twice (see [`super::timeout`] for both
+/// readings): Kestra enforces `timeout:` in
+/// `AbstractWorkerCallable.callWithTimeout`, around the whole of the task's
+/// `run`, and a task that outruns it is **FAILED** carrying
+/// `Timeout after HH:mm:ss.SSS`. Putting it here rather than inside
+/// [`Registry::run`] is what makes it true of *every* registry — the
+/// production [`Handlers`](super::Handlers), the oracle driver's, and a test's
+/// — instead of only the one that remembered.
+///
+/// A `timeout:` this run cannot use fails the run **without calling a
+/// handler**, which is also the artifact's answer: all three bad spellings
+/// produce a FAILED run whose attempt never ran the task body.
 async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
-    let input = input_for(pool, c).await?;
-    let outcome = reg.run(&input).await?;
+    let (input, budget) = input_for(pool, c).await?;
+    let outcome = match budget {
+        Budget::Refused(message) => Outcome::failed_with(message),
+        // `cancel::guarded` rather than `timeout::guard` directly: the budget's
+        // expiry is the artifact's only `kill(null)` site, so the kill path
+        // hangs off it. A refusal there does not reach this expression — it is
+        // logged and the budget's outcome stands. See `super::cancel`.
+        other => cancel::guarded(reg, &input, other.duration()).await?,
+    };
     let mut tx = pool.begin().await.map_err(db_err)?;
     apply_outcome(&mut tx, c, &outcome).await?;
     tx.commit().await.map_err(db_err)?;
@@ -335,7 +730,7 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// IT; a sibling of the same execution may finish while the handler runs, and
 /// what that costs is that a handler's `outputs` are a snapshot rather than a
 /// live view. Kestra's worker renders from a snapshot for the same reason.
-async fn input_for(pool: &PgPool, c: &Claimed) -> Result<TaskInput> {
+async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
     let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
@@ -382,14 +777,24 @@ pub async fn apply_outcome(
     // a fence only on the state UPDATE would let an outcome from a reaped
     // lease overwrite the live worker's outputs and still leave every other
     // column right.
-    let hit =
-        sqlx::query("UPDATE workflow.task_runs SET outputs = $1 WHERE id = $2 AND claimed_at = $3")
-            .bind(&outcome.outputs)
-            .bind(claimed.id)
-            .bind(claimed.claimed_at)
-            .execute(&mut *conn)
-            .await
-            .map_err(db_err)?;
+    //
+    // **`message` rides in the same statement, and that is not tidiness.** It
+    // is written under the same fence for the same reason `outputs` is — a
+    // stale worker that could overwrite one could overwrite the other — and it
+    // is set on every outcome including a success, so a run that failed, was
+    // retried and then succeeded does not keep the first attempt's reason
+    // beside a `SUCCESS` state. See migration 0137.
+    let hit = sqlx::query(
+        "UPDATE workflow.task_runs SET outputs = $1, message = $4 \
+           WHERE id = $2 AND claimed_at = $3",
+    )
+    .bind(&outcome.outputs)
+    .bind(claimed.id)
+    .bind(claimed.claimed_at)
+    .bind(&outcome.message)
+    .execute(&mut *conn)
+    .await
+    .map_err(db_err)?;
     // **0 rows affected is an error, not a success.** They are the same value
     // to `execute()`, which is exactly how a fence that is written but never
     // read passes every test there is.
@@ -709,7 +1114,13 @@ pub(super) async fn load_with(
 ///
 /// This worker is that driver. The counter is how W3b answers the question with
 /// a measurement rather than with a prediction — see
-/// `tests/executor.rs`'s `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs`.
+/// `tests/executor.rs`'s
+/// `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`.
+/// (That citation read `…_is_reachable_again_and_what_it_costs` until W4 Task
+/// 6's fourth sweep pass: **no test has ever had that name.** A pointer into a
+/// test file, from product source, that resolves to nothing — the shape
+/// `oracle-exec/README.md` calls the worse one, in a surface its own table did
+/// not cover.)
 /// It is deliberately **not** a guard: `advance()` may not change (the W3b
 /// plan's first Global Constraint), and the three entries the state occurs on
 /// reproduce Kestra's run list exactly, so nothing observable is wrong.

@@ -363,7 +363,7 @@ W7 — một bản kiểm kê màn hình không phải một cuộc khảo sát 
 | **W2** Biểu thức | minijinja + 37 filter + 40 function + viết lại `??`/`?:` + **oracle differential Pebble** | W0 |
 | **W3a** Máy trạng thái executor | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; oracle vết thực thi Kestra. Không I/O | W1, W2 |
 | **W3b** Executor bền vững | vòng claim; reaper; `SpawnExecution`; handler `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; nối oracle vào driver thật | W3a |
-| **W4** Runner & container | hợp đồng `TaskCommands`; `egret.container`, `egret.python`; stream log; file output; cancel/kill | W3b |
+| **W4** Runner & container | bộ đánh thức `RETRYING`, `timeout:` cấp task, đường kill — ba lỗ W3b chuyển giao, **đáng ~0 mục baseline, KHÔNG phải 20 như dòng này viết ban đầu** (con số ấy là hợp của ba lần grep khai báo; xem W4 spec §1.1); rồi mới tới `TaskCommands`, `egret.container`, `egret.script.python`, vốn chạm KHÔNG mục corpus nào và có test riêng. **`egret.python` KHÔNG phải của W4** — §6.4 giao tên ấy cho `KernelLauncher` của notebook, và `TASK_TYPES` giữ nó từ W1 | W3b |
 | **W5** Kestra plugin host | image JVM, `ShimRunContext`, cầu `StorageInterface`, điều phối `kestra.<FQCN>`, giải jar plugin | W4 |
 | **W6** Trigger & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
 | **W7** Frontend | nhóm nav Workflows; editor YAML; topology chỉ-đọc; gantt và log của execution | W1, W3b |

@@ -136,6 +136,20 @@ impl Registry for Handlers {
             ))),
         }
     }
+
+    /// The same lookup as [`Registry::run`], and the same refusal on a miss.
+    ///
+    /// A miss cannot be `Ok(())`: the kill path would then report a task as
+    /// stopped by a registry that has never heard of its type, which is
+    /// [`WorkerError::NoHandler`]'s own argument applied to the other method.
+    async fn cancel(&self, task: &TaskInput) -> Result<()> {
+        match self.get(&task.type_id) {
+            Some(h) => h.cancel(task).await,
+            None => Err(egret_core::Error::Internal(anyhow::anyhow!(
+                WorkerError::NoHandler(task.type_id.clone())
+            ))),
+        }
+    }
 }
 
 #[cfg(test)]

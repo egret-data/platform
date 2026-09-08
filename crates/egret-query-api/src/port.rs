@@ -86,7 +86,10 @@ pub trait QueryExecPort: Send + Sync {
     /// # Why it is defaulted, and why the default REFUSES
     ///
     /// The same reasoning as [`Self::execute_as_with_params`], which see: the
-    /// trait has ten implementations, nine of them hand-written test fakes, and a
+    /// trait has 17 implementation sites, 16 of them hand-written test fakes
+    /// (`execution::port_impl`'s `EngineState` is the only production one —
+    /// counted with `grep -rn "QueryExecPort for" crates/`, W4 Task 3 fix round
+    /// 1; the previous "ten … nine" was stale and had been copied outward), and a
     /// default that quietly ignored `param_count` would let every fake answer a
     /// parameterised describe with its canned columns while nothing exercised the
     /// parameter-aware path at all. So it delegates only where delegating is

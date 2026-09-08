@@ -117,14 +117,24 @@ pub const TYPE_ID: &str = "egret.sql";
 /// rather than being truncated — see [`Sql::run`].
 pub const MAX_FETCH_ROWS: usize = 10_000;
 
-/// The wall-clock budget one statement gets.
+/// The wall-clock budget one statement gets when the author asked for none.
 ///
-/// A constant rather than the task's own `timeout:`, and the reason is a seam
-/// rather than a choice: `models::Task`'s deserializer takes `timeout` out of a
-/// leaf's `spec` before a handler ever sees it, because it belongs to the
-/// executor (`executor::advance` reads it). Wiring the two together means
-/// carrying it on [`TaskInput`], which is W4's business along with the kill path
-/// — see [`Sql::cancel`]. Until then this is the ceiling.
+/// **A fallback now, not a ceiling, and the sentence that used to be here was
+/// the hole W4 Task 2 closed.** It read: *"A constant rather than the task's
+/// own `timeout:`, and the reason is a seam rather than a choice:
+/// `models::Task`'s deserializer takes `timeout` out of a leaf's `spec` before
+/// a handler ever sees it, because it belongs to the executor
+/// (`executor::advance` reads it). Wiring the two together means carrying it on
+/// `TaskInput`, which is W4's business."* Two things in it were wrong and one
+/// is now done:
+///
+/// * the field does **not** belong to the executor — measured on the artifact,
+///   `timeout:` is enforced by the WORKER (`WorkerTaskCallable`), and Kestra's
+///   own validator says the property "is only relevant for runnable tasks";
+///   `executor::plan::PlanTask::timeout` is `None` on every task and
+///   `advance()` never reads one;
+/// * the wiring is done: [`TaskInput::timeout`] carries the author's rendered
+///   budget, and this constant is what a task with no `timeout:` gets.
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// What the task does with the rows.
@@ -235,7 +245,7 @@ impl Sql {
     ///   failure**, which aborts the tick and leaves the execution where it was,
     ///   because the flow is not wrong and failing it would blame the author for
     ///   egret's outage.
-    fn mapped(&self, e: Error) -> Result<Outcome> {
+    fn mapped(&self, e: Error, budget: std::time::Duration) -> Result<Outcome> {
         if let Some(kind) = egret_query_api::ExecFailure::kind_of(&e) {
             return Ok(failed(match kind {
                 ExecFailureKind::EngineUnavailable => {
@@ -243,7 +253,7 @@ impl Sql {
                 }
                 ExecFailureKind::Timeout => format!(
                     "{TYPE_ID}: the statement outran its {}s budget",
-                    self.timeout.as_secs()
+                    budget.as_secs()
                 ),
             }));
         }
@@ -309,9 +319,21 @@ impl TaskHandler for Sql {
         };
         let params: Vec<Param> = bound.iter().map(to_param).collect();
 
+        // **The author's `timeout:` if they wrote one, this handler's
+        // constant if they did not.** What it buys over the worker's own
+        // budget is that the ENGINE is told: on Trino `Limits::timeout`
+        // becomes a `query_max_run_time` session property, so the statement is
+        // cancelled server side rather than left running after this future is
+        // dropped. `super::super::timeout::guard` is the outer bound and is
+        // what reports a budget that expires -- both are the same instant, and
+        // the outer one is armed first, so `Timeout after HH:mm:ss.SSS` is the
+        // message an author sees for a `timeout:` they wrote. The message
+        // below stays reachable for the engine's own deadline (a `NONE`
+        // `timeout:` under this constant, or an engine that answers first).
+        let budget = task.timeout.unwrap_or(self.timeout);
         let limits = Limits {
             max_rows: self.max_rows,
-            timeout: self.timeout,
+            timeout: budget,
         };
         let result = self
             .port
@@ -327,7 +349,7 @@ impl TaskHandler for Sql {
 
         let result = match result {
             Ok(r) => r,
-            Err(e) => return self.mapped(e),
+            Err(e) => return self.mapped(e, budget),
         };
 
         match outputs_for(spec.fetch, &result, self.max_rows) {
@@ -341,20 +363,127 @@ impl TaskHandler for Sql {
     /// `TaskHandler::cancel` has no default body precisely so that `egret.sql`
     /// could not inherit `Ok(())` from the four handlers that genuinely have
     /// nothing to stop. This one holds a statement running on a remote engine,
-    /// and [`QueryExecPort`] has no cancellation method — deliberately: that
-    /// trait's own doc says a method with no consumer is untested surface and
-    /// must not be added ahead of its caller. Adding one here would be adding it
-    /// ahead of its caller twice over, because **nothing calls `cancel` at all**
-    /// yet (W4 owns the kill path).
+    /// and dropping the future does not stop it.
     ///
-    /// So it refuses. When W4 wires the kill path this fails loudly at the one
-    /// place that has to change, rather than reporting a statement as stopped
-    /// while it goes on consuming the engine.
+    /// # The refusal was a tripwire and W4 Task 3 tripped it
+    ///
+    /// W3b wrote *"nothing calls `cancel` at all yet"*. That is no longer true:
+    /// [`cancel::guarded`](crate::worker) calls it whenever a task-level
+    /// `timeout:` expires, which is the artifact's only `kill(null)` site. This
+    /// is therefore a refusal that is **reached**, logged with its own reason,
+    /// and asserted in both this module's tests and `tests/worker.rs`'s
+    /// `a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so`.
+    ///
+    /// # THIS IS A MEASURED DIVERGENCE FROM THE ARTIFACT, not a gap the
+    /// # artifact shares
+    ///
+    /// Fix round 1 corrected the sentence that used to stand here. W4 Task 3's
+    /// first reading stopped at `WorkerJobLifecycle`, whose `kill()` is
+    /// `default` and empty, and concluded that a Kestra task which cannot stop
+    /// itself is indistinguishable from one that did. That is true of the
+    /// *interface* and false of the task this handler corresponds to.
+    /// Disassembled from the pinned image's plugin jars — `/app/plugins/`
+    /// `io_kestra_plugin__plugin-jdbc-trino__2_0_0.jar` and
+    /// `…plugin-jdbc-mysql__2_0_0.jar`, extracted with `docker cp` and read
+    /// with `javap -c`:
+    ///
+    /// * `io.kestra.plugin.jdbc.trino.Query` and
+    ///   `io.kestra.plugin.jdbc.mysql.Query` both `extends
+    ///   io.kestra.plugin.jdbc.AbstractJdbcQuery`. (Kestra ships no StarRocks
+    ///   task; StarRocks speaks the MySQL wire protocol and users point the
+    ///   MySQL task at it.)
+    /// * `AbstractJdbcQuery` holds `private volatile transient
+    ///   java.sql.Statement runningStatement` and `java.sql.Connection
+    ///   runningConnection`, both assigned during `run`.
+    /// * It **overrides** `public void kill()`, which calls
+    ///   `AbstractJdbcBaseQuery.kill(Statement)` then `kill(Connection)`.
+    /// * `kill(Statement)`: if non-null and `!isClosed()` →
+    ///   `Statement.cancel()`, then `Statement.close()`. A `SQLException` is
+    ///   wrapped in a `RuntimeException` and **thrown**, landing in
+    ///   `WorkerTaskCallable.kill`'s catch/WARN.
+    /// * `kill(Connection)`: if non-null and `!isClosed()` → `close()`.
+    ///
+    /// **So Kestra's own SQL task stops the remote statement, and `egret.sql`
+    /// does not.** A `timeout: PT10S` on a one-hour query is cancelled at ten
+    /// seconds there and runs the full hour here on StarRocks. Whatever
+    /// justifies this refusal, it cannot be *"the artifact has no better
+    /// answer"* — it has one, and it is `Statement.cancel()`.
+    ///
+    /// # Why it still refuses: cost and scope, and one fact that decides it
+    ///
+    /// The cancellation channel exists **below** this handler and stops one
+    /// layer short of it:
+    ///
+    /// * `egret_query`'s `Connector::execute(sql, limits, CancellationToken)`
+    ///   takes a token. `TrinoConnector` honours it with a real server-side
+    ///   cancel — it `DELETE`s the statement's `nextUri`.
+    ///   `JobManager::cancel` already drives that.
+    /// * `execution::port_impl::run_bounded` — the implementation behind
+    ///   [`QueryExecPort`] — builds a token **privately**, cancels it on its own
+    ///   `tokio::time::timeout(limits.timeout, …)`, and never lets a caller hold
+    ///   it. When the worker's outer budget drops the future first (it does:
+    ///   same instant, armed first) that inner timeout never fires, so the
+    ///   DELETE never happens.
+    /// * [`QueryExecPort`] itself has no cancel verb, and that trait's doc gives
+    ///   the rule for adding one: *"A trait method with no consumer is untested
+    ///   surface — do not add one ahead of its caller."* It has **17
+    ///   implementation sites, 16 of them hand-written test fakes** —
+    ///   `execution::port_impl`'s `EngineState` is the only production one.
+    ///
+    /// So honouring `cancel` means a new port verb, a per-run handle threaded
+    /// out of `execute_as_with_params` and held by this handler, and 16 fakes
+    /// updated across `egret-dataapi`, `egret-server` and this crate.
+    ///
+    /// **The fact that decides it is that this would not fix the engine where
+    /// the hazard is.** On StarRocks the token is honoured only *cooperatively
+    /// inside the row drain* — `connector/starrocks.rs`'s `drain_rows` checks
+    /// `cancel.is_cancelled()` between rows — so a query still executing before
+    /// its first row is untouched, and breaking out of the loop tells StarRocks
+    /// nothing. A real cancel there needs `KILL QUERY <id>` issued on a **second
+    /// connection**, which no connector does. So the change with the widest
+    /// blast radius would deliver a true cancel only on Trino, which is
+    /// **already** bounded by the `query_max_run_time` this handler sends. That
+    /// is the wrong trade for this task, and it is a scope judgement rather than
+    /// a claim about what is possible.
+    ///
+    /// **Whoever picks this up needs all three, not the first:** the port verb,
+    /// a `KILL QUERY` path in the StarRocks connector, and a live assertion in
+    /// `tests/sql_starrocks_live.rs` that the statement actually stops — the
+    /// default gate cannot see it, and a Trino-only half looks finished from
+    /// inside the unit tests.
+    ///
+    /// # What the refusal costs today, per engine
+    ///
+    /// * **Trino** — [`Limits::timeout`] is sent as a `query_max_run_time`
+    ///   session property (`connector/trino.rs`), so the coordinator kills the
+    ///   statement at the same budget the worker used. The abandoned statement
+    ///   costs at most one budget of engine time.
+    /// * **StarRocks** — `limits.timeout` is **unread** by that connector, which
+    ///   says so in its own doc: it *"relies entirely on an outer caller … to
+    ///   enforce `limits.timeout` by dropping the future"*. The worker's drop is
+    ///   that outer caller, and dropping a future tells MySQL-protocol nothing.
+    ///   A timed-out `egret.sql` on StarRocks runs to completion on the engine.
+    ///   The cheapest real fix is a `query_timeout` session variable set the way
+    ///   `connector/trino.rs` already sets `query_max_run_time`; it is not done
+    ///   here because that connector is shared with the Data API serving path
+    ///   and would begin failing queries that succeed today.
+    ///
+    /// **This divergence is not in the oracle's runtime over-acceptance
+    /// register and cannot be.** That register is keyed by corpus id and derived
+    /// from the two traces by
+    /// `runtime_over_acceptance_is_registered_and_owned`; `egret.sql` appears in
+    /// **zero** corpus entries, so it has no id to register under. The earlier
+    /// sentence here claiming a row was false and is withdrawn. This doc
+    /// comment and the task report are the record.
+    ///
+    /// [`Limits::timeout`]: egret_query_api::Limits
     async fn cancel(&self, task: &TaskInput) -> Result<()> {
         Err(Error::Internal(anyhow::anyhow!(
             "{TYPE_ID}: task {} cannot be cancelled — `QueryExecPort` has no cancellation \
-             method, so the statement continues on the engine after the run is abandoned. \
-             W4 owns the kill path",
+             verb, so the statement continues on the engine after the run is abandoned. \
+             On Trino it is still bounded by the `query_max_run_time` this task sent with \
+             it; on StarRocks that connector does not read `Limits::timeout` at all, so it \
+             is not bounded by anything",
             task.task_id
         )))
     }
@@ -491,7 +620,9 @@ mod tests {
     }
 
     /// A [`TaskInput`] with a principal and a render context, so the tests below
-    /// are about the SQL and not about the two refusals.
+    /// are about the SQL and not about the two refusals. No `timeout:`, which
+    /// is what a task that declares none carries — [`budgeted`] is the other
+    /// half.
     fn input(spec: serde_json::Value, render: RenderContext) -> TaskInput {
         TaskInput {
             workspace_id: Uuid::nil(),
@@ -503,7 +634,25 @@ mod tests {
             attempt: 1,
             spec,
             render,
+            timeout: None,
             principal: Some(UserId(Uuid::nil())),
+            // `egret.sql` holds a remote statement and cannot cancel it at
+            // all, so the lease token has no reader here. A fixed instant
+            // rather than a clock reading, for `handlers::testing::input`'s
+            // reason.
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// The same input, carrying the author's own `timeout:`.
+    fn budgeted(
+        spec: serde_json::Value,
+        render: RenderContext,
+        timeout: std::time::Duration,
+    ) -> TaskInput {
+        TaskInput {
+            timeout: Some(timeout),
+            ..input(spec, render)
         }
     }
 
@@ -519,6 +668,12 @@ mod tests {
     struct Spy {
         seen: std::sync::Mutex<Vec<Call>>,
         answer: std::sync::Mutex<Option<TabularResult>>,
+        /// The `Limits::timeout` each call was made under, recorded beside
+        /// [`Call`] rather than inside it so that widening what this port
+        /// observes does not rewrite every existing assertion.
+        budgets: std::sync::Mutex<Vec<std::time::Duration>>,
+        /// What the port answers with instead of rows.
+        fails: std::sync::Mutex<Option<ExecFailureKind>>,
     }
 
     impl Spy {
@@ -540,6 +695,20 @@ mod tests {
         }
         fn calls(&self) -> usize {
             self.seen.lock().unwrap().len()
+        }
+        fn last_budget(&self) -> std::time::Duration {
+            *self
+                .budgets
+                .lock()
+                .unwrap()
+                .last()
+                .expect("the port was never called")
+        }
+        /// A port that reports the engine's own deadline.
+        fn timing_out() -> Arc<Self> {
+            let s = Self::default();
+            *s.fails.lock().unwrap() = Some(ExecFailureKind::Timeout);
+            Arc::new(s)
         }
     }
 
@@ -574,12 +743,16 @@ mod tests {
             _principal: UserId,
             sql: &str,
             params: &[Param],
-            _limits: Limits,
+            limits: Limits,
         ) -> std::result::Result<TabularResult, Error> {
             self.seen
                 .lock()
                 .unwrap()
                 .push((sql.to_string(), params.to_vec(), ws, database_id));
+            self.budgets.lock().unwrap().push(limits.timeout);
+            if let Some(kind) = *self.fails.lock().unwrap() {
+                return Err(egret_query_api::ExecFailure::new(kind, "engine said so").into_error());
+            }
             Ok(self
                 .answer
                 .lock()
@@ -587,6 +760,65 @@ mod tests {
                 .clone()
                 .unwrap_or_else(|| result(&[], vec![])))
         }
+    }
+
+    /// **The author's `timeout:` is what the engine is given.** W3b measured
+    /// the opposite: `models::Task`'s deserializer takes `timeout` out of a
+    /// leaf's `spec`, so this handler had nothing to read and used
+    /// [`DEFAULT_TIMEOUT`] whatever the author wrote. Both directions are
+    /// driven, because a handler that ignored [`TaskInput::timeout`] and one
+    /// that ignored the constant look the same from one arm.
+    #[tokio::test]
+    async fn the_engine_is_given_the_authors_own_budget_and_the_constant_only_without_one() {
+        let spy = Spy::new();
+        Sql::new(spy.clone())
+            .run(&budgeted(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+                std::time::Duration::from_secs(7),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            spy.last_budget(),
+            std::time::Duration::from_secs(7),
+            "the statement must run under the `timeout:` the author wrote, not \
+             under this handler's fallback"
+        );
+
+        let bare = Spy::new();
+        Sql::new(bare.clone())
+            .run(&input(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            bare.last_budget(),
+            DEFAULT_TIMEOUT,
+            "a task that declares no `timeout:` still gets this handler's own \
+             ceiling — the constant is a fallback now, not a dead value"
+        );
+    }
+
+    /// And the engine's own deadline reports the budget it actually ran under,
+    /// not the constant. Before W4 Task 2 this sentence always said `300s`.
+    #[tokio::test]
+    async fn the_engines_timeout_message_names_the_budget_the_statement_ran_under() {
+        let out = Sql::new(Spy::timing_out())
+            .run(&budgeted(
+                serde_json::json!({"database": db_id().to_string(), "sql": "SELECT 1"}),
+                RenderContext::new(),
+                std::time::Duration::from_secs(7),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out.state, RunState::Failed);
+        assert_eq!(
+            out.message.as_deref(),
+            Some("egret.sql: the statement outran its 7s budget")
+        );
     }
 
     fn db_id() -> Uuid {
@@ -948,8 +1180,38 @@ mod tests {
             .expect_err("this handler cannot cancel and must not say it can");
         let msg = err.to_string();
         assert!(
-            msg.contains("QueryExecPort") && msg.contains("kill path"),
-            "the refusal must name what is missing and who owns it: {msg}"
+            msg.contains("QueryExecPort") && msg.contains("StarRocks"),
+            "the refusal must name the verb that is missing and the engine where \
+             the consequence is unbounded: {msg}"
+        );
+    }
+
+    /// **The tripwire, tripped.** W3b made this handler refuse so that wiring
+    /// the kill path would fail loudly at the one site that had to change; this
+    /// is that site, driven through the worker's own dispatch rather than by
+    /// calling the method directly.
+    ///
+    /// It is here rather than in `worker::cancel` because the fake
+    /// [`QueryExecPort`] this handler needs already exists in this module, and a
+    /// second one written next to the kill path could drift from it.
+    #[tokio::test]
+    async fn the_kill_path_reaches_this_refusal_through_the_registry() {
+        let mut reg = crate::worker::Handlers::new();
+        reg.add(Arc::new(Sql::new(Spy::new())));
+        let killed =
+            crate::worker::cancel::kill(&reg, &input(serde_json::json!({}), RenderContext::new()))
+                .await;
+        let crate::worker::cancel::Killed::Refused(reason) = killed else {
+            panic!(
+                "the kill path must not report `egret.sql` as stopped; if this \
+                 arm is reached, the path wired by W4 Task 3 does not reach \
+                 `TaskHandler::cancel` at all"
+            );
+        };
+        assert!(
+            reason.contains("QueryExecPort"),
+            "the handler's own reason must survive the trip through the \
+             registry rather than being flattened: {reason}"
         );
     }
 }

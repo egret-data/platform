@@ -370,7 +370,7 @@ W7 — a screen inventory is not a UX review.
 | **W2** Expressions | minijinja + 37 filters + 40 functions + `??`/`?:` rewrite + **the Pebble differential oracle** | W0 |
 | **W3a** Executor state machine | `advance()`; `sequential/parallel/if/switch/dag/loop`; retry/timeout/`errors:`; the Kestra execution-trace oracle. No I/O | W1, W2 |
 | **W3b** Durable executor | claim loops; reaper; `SpawnExecution`; handlers `core.log`, `core.debug.Return`, `core.execution.Fail`, `core.flow.Sleep`, `egret.sql`; the oracle re-pointed at the real driver | W3a |
-| **W4** Runner & container | `TaskCommands` contract; `egret.container`, `egret.python`; log streaming; output files; cancel/kill | W3b |
+| **W4** Runner & container | the `RETRYING` waker, task-level `timeout:`, the kill path — the three holes W3b handed forward, **worth ~0 baselined entries, not the 20 this row first claimed** (that figure was a union of three declaration greps; see the W4 spec §1.1); then `TaskCommands`, `egret.container`, `egret.script.python`, which reach ZERO corpus entries and carry their own tests. **`egret.python` is NOT W4's** — §6.4 gives that name to the notebook `KernelLauncher`, and `TASK_TYPES` has held it since W1 | W3b |
 | **W5** Kestra plugin host | the JVM image, `ShimRunContext`, `StorageInterface` bridge, `kestra.<FQCN>` dispatch, plugin jar resolution | W4 |
 | **W6** Triggers & subflow | cron, webhook, flow trigger, `subflow`, backfill | W3b |
 | **W7** Frontend | Workflows nav group; YAML editor; read-only topology; execution gantt and logs | W1, W3b |

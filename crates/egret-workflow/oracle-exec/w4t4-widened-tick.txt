@@ -1,0 +1,1405 @@
+W4 Task 4 — the widened tick, measured. The runs the ruling trades on.
+=======================================================================
+
+WHY THIS FILE EXISTS
+--------------------
+`worker::tick`'s doc and this directory's README both state a ruling — one
+handler result per transaction — and quote two numbers against the alternative:
+the ratchet the widened tick reaches (140, banking three entries) and the crate
+run under the widened tick. Neither number is reproducible from the shipped
+tree, because the shipped tree does not contain the widened tick. This file is
+the raw output of those runs, plus the exact mutation that produces them, so
+that a reader can check the ruling instead of believing it. It is the same kind
+of artifact as `harvest-run.txt`: a measurement whose subject no longer exists
+in the checkout.
+
+Everything below was produced on `87d2792b` (W4 Task 4) with
+  DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
+  EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399
+  EGRET_TEST_STARROCKS_URL=mysql://localhost:9030
+
+THE MUTATION (`widen.py`) — replayable against 87d2792b
+-------------------------------------------------------
+Applied by a `set -e` script that asserts each anchor is unique in the file and
+that the file's hash changed. Every anchor is a signature line or a call site,
+none of which any W4 Task 4 commit edits — only doc comments were shipped — so
+the mutation replays against each of them; it is re-verified after every commit
+rather than assumed. Verified against
+`git show 87d2792b:crates/egret-workflow/src/worker/{claim,spawn}.rs`, which
+gives `claim.rs` 57f9d51c3b989cc2b607781ceb856e4272bb61f8 ->
+26342f46ebac454fdb565a5a3938cc8cdc5098de; and against the fix-round commit that
+adds this file, whose own before-hash differs because its doc changed.
+
+@@ -544,10 +544,10 @@
+         first_err = Some(e);
+     }
+     let claimed = claim(pool, n as i64).await?;
+-    let mut done = 0usize;
++    let mut results: Vec<(Claimed, Outcome)> = Vec::new();
+     for c in &claimed {
+-        match run_one(pool, c, reg).await {
+-            Ok(()) => done += 1,
++        match handle_one(pool, c, reg).await {
++            Ok(o) => results.push((c.clone(), o)),
+             Err(e) => {
+                 if first_err.is_none() {
+                     first_err = Some(e);
+@@ -555,12 +555,95 @@
+             }
+         }
+     }
++    let mut order: Vec<Uuid> = Vec::new();
++    let mut by_exec: std::collections::HashMap<Uuid, Vec<(Claimed, Outcome)>> = Default::default();
++    for (c, o) in results {
++        let id = c.execution_id;
++        if !by_exec.contains_key(&id) {
++            order.push(id);
++        }
++        by_exec.entry(id).or_default().push((c, o));
++    }
++    let mut done = 0usize;
++    for id in order {
++        let group = by_exec.remove(&id).expect("every ordered id has a group");
++        match commit_group(pool, &group).await {
++            Ok(()) => done += group.len(),
++            Err(e) => {
++                if first_err.is_none() {
++                    first_err = Some(e);
++                }
++            }
++        }
++    }
+     match first_err {
+         Some(e) => Err(e),
+         None => Ok(done),
+     }
+ }
+ 
++#[allow(dead_code)]
++async fn handle_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<Outcome> {
++    let (input, budget) = input_for(pool, c).await?;
++    Ok(match budget {
++        Budget::Refused(message) => Outcome::failed_with(message),
++        other => cancel::guarded(reg, &input, other.duration()).await?,
++    })
++}
++
++#[allow(dead_code)]
++async fn commit_group(pool: &PgPool, group: &[(Claimed, Outcome)]) -> Result<()> {
++    let mut tx = pool.begin().await.map_err(db_err)?;
++    apply_outcomes(&mut tx, group).await?;
++    tx.commit().await.map_err(db_err)
++}
++
++#[allow(dead_code)]
++pub async fn apply_outcomes(conn: &mut PgConnection, group: &[(Claimed, Outcome)]) -> Result<()> {
++    let Some((first, _)) = group.first() else {
++        return Ok(());
++    };
++    let (ctx, mut state, now) = load(conn, first.execution_id).await?;
++    let before = state.clone();
++    let mut leases: Vec<Lease> = Vec::with_capacity(group.len());
++    for (claimed, outcome) in group {
++        let hit = sqlx::query(
++            "UPDATE workflow.task_runs SET outputs = $1, message = $4 \
++               WHERE id = $2 AND claimed_at = $3",
++        )
++        .bind(&outcome.outputs)
++        .bind(claimed.id)
++        .bind(claimed.claimed_at)
++        .bind(&outcome.message)
++        .execute(&mut *conn)
++        .await
++        .map_err(db_err)?;
++        if hit.rows_affected() == 0 {
++            return Err(worker_err(WorkerError::LeaseLost(claimed.id)));
++        }
++        let run = usize::try_from(claimed.run_ix).map_err(|_| {
++            worker_err(WorkerError::Corrupt(
++                claimed.id,
++                format!("negative run_ix {}", claimed.run_ix),
++            ))
++        })?;
++        apply(
++            &mut state,
++            &Command::SetRunState {
++                run,
++                state: outcome.state,
++            },
++        );
++        leases.push(Lease {
++            run_ix: claimed.run_ix,
++            run_id: claimed.id,
++            claimed_at: claimed.claimed_at,
++        });
++    }
++    settle(conn, &ctx, &before, &mut state, now, &leases).await
++}
++
++#[allow(dead_code)]
+ /// One claimed run: its handler, the budget the handler runs under, and the
+ /// transaction its result lands in.
+ ///
+@@ -695,11 +778,11 @@
+         &before,
+         &mut state,
+         now,
+-        Some(Lease {
++        &[Lease {
+             run_ix: claimed.run_ix,
+             run_id: claimed.id,
+             claimed_at: claimed.claimed_at,
+-        }),
++        }],
+     )
+     .await
+ }
+@@ -747,7 +830,7 @@
+     before: &ExecutionState,
+     state: &mut ExecutionState,
+     now: Tick,
+-    release: Option<Lease>,
++    release: &[Lease],
+ ) -> Result<()> {
+     let surface = Surface::load(conn, ctx).await?;
+     let mut marks = Marks::default();
+@@ -824,7 +907,7 @@
+     // `Tick(0)` is the execution's own origin — `Tick` is milliseconds since
+     // the execution was created (`executor::state::Tick`), and this is that
+     // instant.
+-    settle(&mut tx, &ctx, &empty, &mut state, Tick(0), None).await?;
++    settle(&mut tx, &ctx, &empty, &mut state, Tick(0), &[]).await?;
+     tx.commit().await.map_err(db_err)?;
+     Ok(id)
+ }
+@@ -846,7 +929,7 @@
+     let mut tx = pool.begin().await.map_err(db_err)?;
+     let (ctx, mut state, now) = load(&mut tx, execution_id).await?;
+     let before = state.clone();
+-    settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
++    settle(&mut tx, &ctx, &before, &mut state, now, &[]).await?;
+     tx.commit().await.map_err(db_err)
+ }
+ 
+@@ -1183,7 +1266,7 @@
+     ctx: &ExecutionCtx,
+     before: &ExecutionState,
+     after: &ExecutionState,
+-    release: Option<Lease>,
++    release: &[Lease],
+     marks: &Marks,
+     seq: i64,
+ ) -> Result<()> {
+@@ -1199,7 +1282,7 @@
+             .unwrap_or(RunState::Created)
+             .wire();
+         if ix < before.runs.len() {
+-            let lease = release.filter(|l| l.run_ix == ix as i32);
++            let lease = release.iter().copied().find(|l| l.run_ix == ix as i32);
+             if before.runs[ix] == *run && lease.is_none() {
+                 continue;
+             }
+
+@@ -338,7 +338,7 @@
+     // `settle` -> `spawn_all` -> here -> `settle` is a real cycle in the type
+     // graph. It is not a cycle in the data — a sub-flow is strictly smaller
+     // than the flow it came from, since it is one `Loop`'s `tasks:` list.
+-    Box::pin(claim::settle(conn, &ctx, &empty, &mut state, Tick(0), None)).await?;
++    Box::pin(claim::settle(conn, &ctx, &empty, &mut state, Tick(0), &[])).await?;
+     Ok(id)
+ }
+ 
+@@ -463,7 +463,7 @@
+             state: terminal,
+         },
+     );
+-    claim::settle(conn, &ctx, &before, &mut state, now, None).await
++    claim::settle(conn, &ctx, &before, &mut state, now, &[]).await
+ }
+ 
+ /// The loop's resolved iteration values, as
+
+
+RUN 1 — THE WIDENED RATCHET, driver::BATCH = 32
+----------------------------------------------
+$ cargo test -p egret-workflow --test executor --no-fail-fast
+
+running 34 tests
+test a_baselined_id_that_panicked_is_not_reported_as_banked ... ok
+test a_panic_fails_even_when_the_ratchet_is_satisfied ... ok
+test a_stale_baseline_line_fails_and_names_it ... ok
+test a_regression_outside_the_baseline_fails_and_carries_its_detail ... ok
+test a_stalled_execution_that_also_matched_would_be_counted ... ok
+test kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line ... ok
+test every_corpus_flow_is_compared_or_excluded_by_name ... ok
+test egret_refuses_every_flow_kestra_refuses ... ok
+test progress_that_is_not_banked_fails_and_names_it ... ok
+test no_corpus_entry_can_exercise_the_egret_sql_handler ... ok
+test step_relation_is_strict_on_both_sides ... ok
+test the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet ... ok
+test the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs ... ok
+test planning_the_loop_removed_forty_spurious_submitted_emissions ... ok
+test the_golden_has_no_relation_for_exactly_these_pairs ... ok
+test the_default_concurrency_limit_is_one_and_the_corpus_can_tell ... ok
+test the_handler_surface_generator_checks_itself_and_its_artifact ... ok
+test the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population ... ok
+test every_sub_execution_egret_runs_is_one_kestra_ran ... ok
+test every_mismatching_entry_is_attributed_to_the_field_it_differs_on ... FAILED
+test runtime_over_acceptance_is_registered_and_owned ... ok
+test the_ordered_pairs_inside_spawned_are_reachable_now ... ok
+test the_residual_baseline_is_attributed_to_a_construct_or_named ... ok
+test executor_matches_golden ... FAILED
+test the_skipped_state_comes_from_runif_and_never_from_disabled ... ok
+test the_state_vocabulary_this_enum_holds_is_derived_from_the_golden ... ok
+test the_truncate_is_confined_to_this_process_own_clone ... ok
+test the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction ... ok
+test a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to ... ok
+test the_step_bound_dominates_the_widest_golden_entry ... ok
+test the_sub_executions_are_compared_and_this_is_what_they_cost ... ok
+test what_the_order_restriction_removes_is_derived_and_egret_never_says_after ... ok
+test the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do ... ok
+test no_run_is_ever_created_for_a_task_inside_a_loop ... ok
+
+failures:
+
+---- every_mismatching_entry_is_attributed_to_the_field_it_differs_on stdout ----
+mismatch by field: execution 104, runs 124, order 73, spawned 20, refused 0, broken 0; TOTAL entries 135
+differ on `order` ALONE: ["valids/if"]
+egret left 84 execution(s) unfinished: ["valids/allow-failure", "valids/allow-failure-with-retry", "valids/assert", "valids/exit", "valids/exit-cancelled", "valids/exit-killed", "valids/exit-nested", "valids/finally-allowfailure", "valids/flow-concurrency-cancel-pause", "valids/flow-concurrency-parallel-subflow-kill", "valids/flow-concurrency-parallel-subflow-kill-child", "valids/flow-concurrency-queue-pause", "valids/flow-concurrency-sla-fail-parent", "valids/flow-concurrency-subflow", "valids/flow-trigger-paused-flow", "valids/flow-with-array-outputs", "valids/if-in-parallel", "valids/labels-update-nested-value-list", "valids/labels-update-nested-value-map", "valids/labels-update-task", "valids/labels-update-task-deduplicate", "valids/labels-update-task-empty", "valids/loop-outputs-auto", "valids/loop-until-restart", "valids/loop-values-from-uri", "valids/loop-with-subflow", "valids/loopuntil-failed-flowable", "valids/npe-labels-update-task", "valids/output-values", "valids/pause-behavior", "valids/pause-delay", "valids/pause-duration-from-input", "valids/pause-errors-finally-after-execution", "valids/pause-kill-delay", "valids/pause-timeout", "valids/pause-timeout-allow-failure", "valids/pause_on_pause", "valids/primitive-labels-flow", "valids/purge_logs_execution_only", "valids/purge_logs_full_arguments", "valids/purge_logs_no_arguments", "valids/purge_logs_trigger_only", "valids/purge_logs_with_batch_size", "valids/replay", "valids/restart-parent", "valids/restart-parent-loop", "valids/retry-new-execution-flow-attempts", "valids/retry-new-execution-flow-duration", "valids/retry-new-execution-task-attempts", "valids/retry-new-execution-task-duration", "valids/retry-subflow", "valids/retry-with-flowable-errors", "valids/set-variables", "valids/set-variables-duplicate", "valids/sla-parent-flow", "valids/subflow-child", "valids/subflow-inherited-labels-parent", "valids/subflow-nullable-input-parent", "valids/subflow-parent", "valids/subflow-parent-no-wait", "valids/subflow-parent-of-failed", "valids/subflow-parent-retry", "valids/subflow-secret-output-parent", "valids/task-allow-failure-executable-flow", "valids/task-allow-warning-executable-flow", "valids/task-flow", "valids/task-flow-inherited-labels", "valids/task-runif", "valids/task-runif-executionupdating", "valids/task-runif-workingdirectory", "valids/trigger-flow-with-pause", "valids/unset-variables", "valids/waitfor", "valids/waitfor-child-task-warning", "valids/waitfor-max-iterations", "valids/waitfor-multiple-tasks", "valids/waitfor-multiple-tasks-failed", "valids/waitfor-nested", "valids/waitfor-no-success", "valids/webhook-outputs", "valids/webhook-wait", "valids/working-directory-invalid-runif", "valids/working-directory-taskrun", "valids/working-directory-taskrun-nested"]
+
+thread 'every_mismatching_entry_is_attributed_to_the_field_it_differs_on' (103718847) panicked at crates/egret-workflow/tests/executor.rs:2285:5:
+assertion `left == right` failed: the field breakdown. `refused` and `broken` are both 0 and that is the load-bearing half: a `refused` here would be egret refusing a flow Kestra ran, and a `broken` would be the DRIVER failing rather than the flow diverging
+  left: (104, 124, 73, 20, 0, 0, 135)
+ right: (104, 124, 76, 20, 0, 0, 138)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- executor_matches_golden stdout ----
+oracle-exec ratchet: 294 golden entries, 140 mismatching, 143 baselined, 0 broken, 80 ordered pair(s) removed from egret's side for having no counterpart in the golden (see Trace::restrict_order_to; the golden-side population is derived by the_golden_has_no_relation_for_exactly_these_pairs)
+
+thread 'executor_matches_golden' (103718850) panicked at crates/egret-workflow/tests/executor.rs:1269:5:
+
+PROGRESS NOT BANKED: 3 entr(y/ies) in oracle-exec/baseline.txt now MATCH. Delete these lines from oracle-exec/baseline.txt in the same commit that fixed them:
+  valids/dag
+  valids/full
+  valids/parallel-disabled-tasks
+
+
+
+failures:
+    every_mismatching_entry_is_attributed_to_the_field_it_differs_on
+    executor_matches_golden
+
+test result: FAILED. 32 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.08s
+
+error: test failed, to rerun pass `-p egret-workflow --test executor`
+error: 1 target failed:
+    `-p egret-workflow --test executor`
+
+
+RUN 2 — THE WHOLE CRATE UNDER THE MUTATION, driver::BATCH = 1
+------------------------------------------------------------
+$ cargo test -p egret-workflow --no-fail-fast
+
+     Running unittests src/lib.rs (target/debug/deps/egret_workflow-1db5efbac7076344)
+
+running 589 tests
+test executor::state::tests::a_skipped_run_is_terminal ... ok
+test executor::state::tests::skipping_a_run_records_the_attempt_kestra_records ... ok
+test executor::state::tests::run_state_all_holds_every_variant_in_order ... ok
+test executor::tests::a_dag_node_with_no_task_is_refused ... ok
+test executor::tests::a_dag_node_downstream_of_a_skipped_dependency_still_runs ... ok
+test executor::tests::a_falsy_run_if_creates_the_run_skips_it_and_the_sequence_continues ... ok
+test executor::tests::a_failing_child_stops_the_sequence_and_the_execution_takes_its_state ... ok
+test executor::tests::a_flowable_is_never_retried_and_its_child_inherits_the_policy ... ok
+test executor::tests::a_dag_creates_nothing_downstream_of_a_failed_dependency ... ok
+test executor::tests::a_dag_creates_a_node_only_when_every_dependency_has_succeeded ... ok
+test executor::tests::a_loop_with_no_values_is_refused_by_name ... ok
+test executor::tests::a_loop_spawns_one_execution_per_value_and_no_child_run ... ok
+test executor::tests::a_dag_dependency_on_a_task_that_is_not_a_node_is_refused_by_name ... ok
+test executor::tests::a_cyclic_dag_is_refused_by_name ... ok
+test executor::tests::a_parallel_takes_the_worst_of_its_children ... ok
+test executor::tests::a_null_or_negative_concurrency_limit_takes_kestras_class_default ... ok
+test executor::tests::a_parallel_drives_every_branch_in_the_same_round ... ok
+test executor::tests::a_parallel_concurrency_cap_bounds_the_batch ... ok
+test executor::tests::a_run_if_is_re_asked_on_every_attempt ... ok
+test executor::tests::a_retried_task_has_two_attempts_and_the_execution_passes_through_retrying ... ok
+test executor::tests::a_skipped_branch_does_not_fail_its_siblings ... ok
+test executor::tests::a_skipped_flowable_creates_no_children_and_leaves_its_parent_successful ... ok
+test executor::tests::a_retry_is_bounded_by_max_attempts_and_separately_by_max_duration ... ok
+test executor::tests::a_null_task_list_parses_and_the_two_accidental_refusals_stand_on_their_own ... ok
+test executor::tests::a_skipped_loop_spawns_nothing ... ok
+test executor::tests::a_skipped_runs_attempt_records_the_tick_the_skip_was_decided_at ... ok
+test executor::tests::a_run_if_survives_every_position_the_builder_flattens ... ok
+test executor::tests::a_switch_whose_matched_case_is_empty_asks_for_nothing_for_ever ... ok
+test executor::tests::a_switch_with_no_value_is_refused_by_name ... ok
+test executor::tests::a_terminated_attempt_takes_no_further_state ... ok
+test executor::tests::a_switch_with_no_matching_case_and_no_defaults_fails ... ok
+test executor::tests::a_terminal_execution_is_finished ... ok
+test executor::tests::an_attempt_records_the_tick_it_was_started_at ... ok
+test executor::tests::a_switch_picks_the_case_whose_key_equals_the_rendered_value ... ok
+test executor::tests::an_if_branch_is_sequential_and_stops_at_the_first_failure ... ok
+test executor::tests::a_run_ifs_truthiness_is_the_same_predicate_an_if_uses ... ok
+test executor::tests::an_empty_loop_succeeds_without_running_and_an_unresolvable_one_fails ... ok
+test executor::tests::an_if_whose_chosen_branch_is_empty_succeeds_with_no_children ... ok
+test executor::tests::an_if_with_no_condition_is_refused_by_name ... ok
+test executor::tests::an_if_takes_then_when_true_and_else_when_false ... ok
+test executor::tests::an_error_list_runs_on_failure_and_the_state_stays_the_task_lists_own ... ok
+test executor::tests::an_unrendered_run_if_asks_for_nothing_and_is_not_an_error ... ok
+test executor::tests::create_new_execution_ends_the_execution_retried ... ok
+test executor::tests::create_new_execution_marks_every_ancestor_run_retried ... ok
+test executor::tests::an_if_with_no_rendered_condition_asks_for_nothing_and_is_not_an_error ... ok
+test executor::tests::disabled_removes_the_run_and_run_if_skips_it ... ok
+test executor::tests::a_nested_sequential_takes_its_childrens_outcome ... ok
+test executor::tests::a_sequential_runs_its_children_one_at_a_time ... ok
+test executor::tests::an_errors_list_belongs_to_whoever_declared_it ... ok
+test executor::tests::children_are_addressed_by_index_in_pre_order ... ok
+test executor::tests::every_other_flowable_stays_opaque ... ok
+test executor::tests::every_spelling_of_a_flowable_reaches_the_same_plan ... ok
+test executor::tests::kestra_deduplicates_a_list_of_values_and_not_a_map_of_them ... ok
+test executor::tests::kestra_truthiness_is_four_exact_strings_compared_after_trimming ... ok
+test executor::tests::every_corpus_concurrent_is_a_literal_integer ... ok
+test executor::tests::nesting_past_the_bound_is_refused_by_name ... ok
+test executor::tests::no_corpus_dag_node_is_disabled ... ok
+test executor::tests::no_corpus_flow_has_both_a_retry_and_a_run_if ... ok
+test executor::tests::every_corpus_loop_declares_its_values_and_a_readable_limit ... ok
+test executor::tests::no_corpus_flow_writes_a_null_run_if ... ok
+test executor::tests::one_invalid_sibling_fails_every_sibling ... ok
+test executor::tests::only_a_runnable_can_re_enter_created ... ok
+test executor::tests::only_a_runnable_passes_through_submitted ... ok
+test executor::tests::parallel_creates_every_child_before_starting_any ... ok
+test executor::tests::no_corpus_parallel_or_dag_child_declares_a_run_if ... ok
+test executor::tests::the_concurrency_limit_bounds_the_first_batch_and_zero_means_unlimited ... ok
+test executor::tests::the_exponential_delay_doubles_and_the_random_one_stays_inside_its_bounds ... ok
+test executor::tests::the_next_child_is_not_created_until_the_previous_one_terminated ... ok
+test executor::tests::the_plan_holds_the_unrendered_expression ... ok
+test executor::tests::the_retry_duration_grammar_is_javas_and_is_case_insensitive ... ok
+test executor::tests::the_run_start_and_the_attempt_start_are_different_instants ... ok
+test executor::tests::every_flow_kestra_published_plans_except_two_named_over_refusals ... ok
+test executor::tests::the_two_retry_behaviours_measure_max_duration_from_different_instants ... ok
+test executor::tests::three_ifs_in_a_parallel_produce_kestras_own_run_order ... ok
+test executor::tests::two_retries_due_in_one_round_move_the_execution_to_running_once ... ok
+test executor::tests::unparseable_source_is_refused_with_its_location ... ok
+test models::execution::tests::execution_and_task_run_round_trip ... ok
+test models::execution::tests::state_history_current_matches_last_history_entry_in_a_well_formed_execution ... ok
+test models::execution::tests::task_run_defaults_its_collections_when_absent ... ok
+test models::flow::tests::a_minimal_flow_parses_with_empty_collections ... ok
+test models::flow::tests::after_execution_is_a_fourth_task_list_the_brief_missed ... ok
+test models::flow::tests::finally_is_read_under_its_kestra_spelling ... ok
+test models::flow::tests::labels_accepts_both_map_and_list_shapes ... ok
+test models::flow::tests::labels_list_form_coerces_scalars_like_the_map_form_does ... ok
+test models::flow::tests::parses_the_reference_flow ... ok
+test models::input::tests::defaults_and_prefill_both_survive_round_trip ... ok
+test models::input::tests::every_type_round_trips_in_kestra_spelling ... ok
+test models::input::tests::parses_a_kestra_input_block_verbatim ... ok
+test models::input::tests::required_defaults_to_true ... ok
+test models::property::tests::a_lone_brace_still_goes_through_the_engine ... ok
+test models::property::tests::a_missing_variable_surfaces_as_a_template_error ... ok
+test models::property::tests::a_render_that_is_not_the_target_type_is_refused ... ok
+test models::property::tests::a_source_without_an_expression_renders_to_itself ... ok
+test models::property::tests::bare_property_rejects_null ... ok
+test models::property::tests::every_yaml_shape_becomes_source_text ... ok
+test models::property::tests::render_converts_to_the_target_type ... ok
+test models::property::tests::serialises_back_to_its_source ... ok
+test models::state::tests::has_all_seventeen_variants ... ok
+test models::state::tests::predicates_match_kestra_exactly ... ok
+test models::state::tests::serialises_as_kestra_spells_it ... ok
+test models::task::tests::a_boolean_run_if_is_a_parse_error_not_a_silent_none ... ok
+test models::task::tests::allow_failure_carries_tasks_like_sequential ... ok
+test models::task::tests::an_unknown_type_becomes_an_opaque_leaf ... ok
+test models::task::tests::children_are_the_control_flow_nodes_only ... ok
+test models::task::tests::control_flow_is_typed_under_both_spellings ... ok
+test models::task::tests::dag_depends_on_is_camel_case_and_concurrent_is_ported ... ok
+test models::task::tests::description_with_a_non_string_value_is_a_parse_error ... ok
+test models::task::tests::disabled_defaults_to_false ... ok
+test models::task::tests::disabled_still_defaults_to_false_when_the_key_is_absent ... ok
+test models::task::tests::disabled_with_a_number_value_is_a_parse_error ... ok
+test models::task::tests::disabled_with_a_string_value_is_a_parse_error_not_a_silent_false ... ok
+test models::task::tests::explicit_null_description_parses_like_an_absent_one ... ok
+test models::task::tests::explicit_null_disabled_parses_like_an_absent_one ... ok
+test models::task::tests::explicit_null_run_if_parses_like_an_absent_one ... ok
+test models::task::tests::explicit_null_still_parses_on_notnull_property_fields ... ok
+test models::task::tests::foreach_is_really_named_loop_in_this_checkout ... ok
+test models::task::tests::if_uses_else_not_r_else_on_the_wire ... ok
+test models::task::tests::leaf_round_trips_without_growing_a_spec_wrapper ... ok
+test models::task::tests::loop_until_is_a_control_flow_type_the_plan_missed ... ok
+test models::task::tests::nested_sequential_leaf_round_trips_without_growing_a_spec_wrapper ... ok
+test models::task::tests::parallel_carries_its_own_tasks_and_concurrent ... ok
+test models::task::tests::retry_dispatches_all_three_json_subtypes ... ok
+test models::task::tests::run_if_is_none_when_the_key_is_absent ... ok
+test models::task::tests::run_if_is_read_off_the_task_and_not_left_in_the_leafs_spec ... ok
+test models::task::tests::run_if_round_trips_and_an_absent_one_emits_no_key ... ok
+test models::task::tests::subflow_uses_flow_id_camel_case_and_defaults_wait_true ... ok
+test models::task::tests::switch_cases_are_keyed_by_the_matched_value ... ok
+test models::task::tests::working_directory_carries_tasks_like_sequential ... ok
+test models::task::tests::wrong_typed_id_is_a_type_error_not_a_misleading_missing_field ... ok
+test models::task::tests::wrong_typed_non_null_disabled_is_still_rejected ... ok
+test models::trigger::tests::an_unknown_trigger_type_becomes_an_opaque_leaf ... ok
+test models::trigger::tests::description_with_a_non_string_value_is_a_parse_error ... ok
+test models::trigger::tests::disabled_and_stop_after_actually_round_trip ... ok
+test models::trigger::tests::disabled_and_stop_after_parse ... ok
+test models::trigger::tests::disabled_with_a_number_value_is_a_parse_error ... ok
+test models::trigger::tests::disabled_with_a_string_value_is_a_parse_error_not_a_silent_false ... ok
+test models::trigger::tests::every_other_trigger_boolean_rejects_a_wrong_typed_value ... ok
+test models::trigger::tests::explicit_null_description_parses_like_an_absent_one ... ok
+test models::trigger::tests::explicit_null_disabled_parses_like_an_absent_one ... ok
+test models::trigger::tests::flow_trigger_states_default_to_terminated_plus_paused ... ok
+test models::trigger::tests::leaf_trigger_round_trips_without_growing_a_spec_wrapper ... ok
+test models::trigger::tests::schedule_is_typed_under_both_spellings ... ok
+test models::trigger::tests::schedule_round_trips_byte_identically ... ok
+test models::trigger::tests::schedule_without_cron_still_parses ... ok
+test models::trigger::tests::trigger_booleans_still_default_to_false_when_absent ... ok
+test models::trigger::tests::webhook_carries_its_own_key_and_fetch_type ... ok
+test models::trigger::tests::wrong_typed_id_is_a_type_error_not_a_misleading_missing_field ... ok
+test models::trigger::tests::wrong_typed_non_null_disabled_is_still_rejected ... ok
+test refs::tests::a_kind_with_no_port_refuses_even_a_well_formed_reference ... ok
+test refs::tests::a_non_uuid_value_for_an_id_based_kind_refuses_without_asking_the_port ... ok
+test refs::tests::an_unresolvable_kind_refuses_rather_than_resolving_vacuously ... ok
+test runners::env::tests::a_missing_variable_is_an_error_not_an_empty_string ... ok
+test runners::env::tests::a_multiline_raw_region_is_not_protected_by_the_pattern ... ok
+test runners::env::tests::a_non_converging_render_is_refused ... ok
+test runners::env::tests::a_non_object_context_is_rejected_rather_than_emptied ... ok
+test runners::env::tests::a_null_renders_as_the_empty_string ... ok
+test runners::env::tests::a_render_nested_past_a_worker_stack_still_answers ... ok
+test runners::env::tests::a_runaway_loop_runs_out_of_fuel ... ok
+test runners::env::tests::a_wide_map_answers_exactly_what_the_narrow_one_does ... ok
+test runners::env::tests::an_oversized_render_is_refused_by_the_output_cap ... ok
+test runners::env::tests::an_undefined_is_in_operand_raises_rather_than_answering_false ... ok
+test runners::env::tests::booleans_and_containers_render_the_way_jsonwriter_does ... ok
+test runners::env::tests::floats_render_the_way_java_double_tostring_does ... ok
+test runners::env::tests::is_in_is_kestras_in_expression_not_minijinjas ... ok
+test runners::env::tests::java_double_formatting_switches_at_the_documented_boundaries ... ok
+test runners::env::tests::macro_and_include_tags_do_not_parse ... ok
+test runners::env::tests::map_keys_render_in_document_order_not_sorted ... ok
+test executor::tests::build_plan_survives_every_corpus_flow ... ok
+test runners::env::tests::no_name_egret_binds_is_missing_from_the_surface_fixture ... ok
+test runners::env::tests::null_map_entries_are_omitted_recursively_but_null_array_elements_are_not ... ok
+test runners::env::tests::output_that_is_itself_a_template_renders_again ... ok
+test runners::env::tests::the_arbitrary_precision_sentinel_is_still_spelled_this_way ... ok
+test executor::tests::an_errors_list_inside_a_loop_body_is_a_shape_the_corpus_does_not_reach ... ok
+test runners::env::tests::the_context_scope_global_is_unreachable_from_a_template ... ok
+test runners::env::tests::raw_regions_are_preserved_in_every_spelling_kestra_accepts ... ok
+test runners::env::tests::the_operator_spelled_tests_are_unreachable_rather_than_removed ... ok
+test runners::env::tests::the_render_context_can_cross_a_thread ... ok
+test runners::env::tests::the_render_stack_is_the_size_the_deepest_cap_needs ... ok
+test runners::env::tests::the_state_dumping_globals_are_removed ... ok
+test runners::env::tests::the_two_coalescing_operators_differ_on_a_present_null ... ok
+test runners::env::tests::the_defined_test_is_pebbles_and_it_is_the_only_one_overridden ... ok
+test runners::filters::tests::a_bad_group_argument_is_reported ... ok
+test runners::filters::tests::a_bad_replacement_reference_is_reported ... ok
+test runners::filters::tests::a_hash_refuses_a_non_string ... ok
+test runners::filters::tests::a_java_constant_format_cannot_be_an_existing_format ... ok
+test runners::filters::tests::a_list_renders_differently_bare_than_through_string ... ok
+test runners::filters::tests::a_missing_regex_argument_is_reported_by_name ... ok
+test runners::filters::tests::a_null_input_is_answered_before_a_missing_argument ... ok
+test runners::filters::tests::a_null_separator_takes_each_filters_own_fallback ... ok
+test runners::filters::tests::a_pattern_java_rejects_is_rejected_here_too ... ok
+test runners::filters::tests::a_present_but_null_format_is_not_the_default ... ok
+test runners::filters::tests::a_refused_construct_says_so_rather_than_claiming_the_pattern_is_invalid ... ok
+test runners::filters::tests::a_timestamp_filters_first_positional_argument_is_its_zone ... ok
+test runners::env::tests::the_built_in_surface_matches_the_engines ... ok
+test runners::filters::tests::a_wide_year_is_read_back_only_with_its_sign ... ok
+test executor::tests::every_corpus_errors_list_is_on_a_flowable_egret_plans ... ok
+test runners::filters::tests::an_absent_time_zone_is_utc_here_and_the_hosts_zone_in_kestra ... ok
+test runners::filters::tests::abs_reproduces_javas_overflow_at_the_minimum ... ok
+test runners::filters::tests::an_existing_format_parses_adjacent_values_and_resolves_smartly ... ok
+test runners::filters::tests::an_existing_formats_fields_are_range_checked ... ok
+test runners::filters::tests::an_invalid_java_pattern_is_reported_as_invalid ... ok
+test runners::filters::tests::an_optional_section_that_fails_leaves_no_year ... ok
+test runners::filters::tests::an_existing_formats_offset_letters_are_count_specific ... ok
+test runners::filters::tests::arguments_can_be_positional_as_well_as_named ... ok
+test runners::filters::tests::an_unknown_format_name_is_compiled_as_a_pattern ... ok
+test runners::filters::tests::bigdecimal_refuses_to_expand_past_the_output_cap ... ok
+test runners::filters::tests::bigdecimal_renders_in_plain_notation ... ok
+test runners::filters::tests::biginteger_uses_the_same_radix_rules_as_int ... ok
+test runners::filters::tests::chunk_narrows_its_size_to_an_int ... ok
+test runners::filters::tests::chunk_refuses_a_non_positive_size ... ok
+test runners::filters::tests::chunk_rejects_a_non_list ... ok
+test runners::filters::tests::capitalize_title_trim_and_length_follow_javas_rules ... ok
+test runners::filters::tests::class_name_knows_the_two_big_number_classes ... ok
+test runners::filters::tests::create_number_accepts_a_signed_hex_prefix ... ok
+test runners::filters::tests::create_number_checks_hex_before_the_type_suffix ... ok
+test runners::filters::tests::create_number_does_not_lose_a_value_that_underflows ... ok
+test runners::filters::tests::date_add_past_egrets_range_says_so_rather_than_claiming_overflow ... ok
+test runners::filters::tests::date_add_flips_the_era_rather_than_refusing_every_shift ... ok
+test runners::filters::tests::date_add_refuses_a_missing_unit ... ok
+test runners::filters::tests::date_add_refuses_a_unit_that_is_not_a_chrono_unit ... ok
+test runners::filters::tests::date_add_refuses_an_era_rollover_but_not_the_unit ... ok
+test runners::filters::tests::date_add_refuses_an_amount_that_is_not_a_number ... ok
+test runners::filters::tests::date_refuses_an_unknown_time_zone ... ok
+test runners::filters::tests::date_add_reproduces_javas_half_days_arithmetic ... ok
+test runners::filters::tests::date_rejects_an_input_that_is_not_a_string ... ok
+test executor::tests::no_captured_execution_has_a_duplicate_taskrun ... ok
+test runners::filters::tests::date_reproduces_javas_padding_rules ... ok
+test runners::filters::tests::date_refuses_an_unparseable_input ... ok
+test runners::filters::tests::date_reproduces_javas_pattern_syntax_errors ... ok
+test runners::filters::tests::distinct_cannot_have_its_key_forged_by_content ... ok
+test runners::filters::tests::date_reproduces_javas_zone_offset_grammar ... ok
+test runners::filters::tests::date_reproduces_javas_pattern_letter_limits ... ok
+test runners::filters::tests::distinct_rejects_a_non_list ... ok
+test runners::filters::tests::distinct_does_not_conflate_a_number_with_its_text ... ok
+test runners::filters::tests::distinct_compares_maps_without_regard_to_key_order ... ok
+test runners::filters::tests::escape_char_does_not_consult_its_type_without_a_leaf ... ok
+test runners::filters::tests::each_hash_uses_its_own_algorithm ... ok
+test runners::filters::tests::escape_char_refuses_a_null_inside_a_container ... ok
+test runners::filters::tests::indent_is_kestras_and_not_minijinjas ... ok
+test runners::filters::tests::escape_char_refuses_an_unknown_type ... ok
+test runners::filters::tests::indent_refuses_a_negative_amount ... ok
+test runners::filters::tests::indent_narrows_its_amount_to_an_int ... ok
+test runners::filters::tests::indent_reproduces_kestras_own_max_amount ... ok
+test runners::filters::tests::indent_uses_the_detected_line_separator ... ok
+test runners::filters::tests::java_cross_checks_the_fields_it_parses ... ok
+test runners::filters::tests::indent_refuses_to_allocate_past_the_output_cap ... ok
+test runners::filters::tests::jq_cannot_read_the_process_environment ... ok
+test runners::filters::tests::every_deep_jq_source_is_refused_before_the_parser_sees_it ... ok
+test runners::filters::tests::kestra_to_string_writes_javas_spellings_not_minijinjas ... ok
+test runners::filters::tests::line_separator_detects_in_kestras_order ... ok
+test runners::filters::tests::jq_reports_the_input_it_could_not_use ... ok
+test runners::filters::tests::jq_halt_does_not_terminate_the_process ... ok
+test runners::filters::tests::number_decodes_rather_than_parsing ... ok
+test runners::filters::tests::number_int_really_is_thirty_two_bits ... ok
+test runners::filters::tests::number_reads_its_type_argument_strictly ... ok
+test runners::filters::tests::number_rejects_a_non_string ... ok
+test runners::filters::tests::only_a_contiguous_chain_of_time_fields_makes_a_time ... ok
+test runners::filters::tests::a_value_at_the_depth_limit_renders_on_a_tokio_workers_stack ... ok
+test runners::filters::tests::pebble_core_filters_refuse_a_wrong_input_type ... ok
+test executor::tests::every_corpus_retry_is_written_in_literals ... ok
+test runners::filters::tests::no_date_filter_can_be_made_to_allocate_out_of_proportion ... ok
+test runners::filters::tests::rfc_1123_refuses_a_year_it_cannot_print ... ok
+test runners::filters::tests::slugify_decomposes_before_it_strips ... ok
+test runners::filters::tests::smart_exempts_a_zero_clock_hour_but_not_a_thirteenth ... ok
+test runners::filters::tests::sort_compares_integers_exactly ... ok
+test runners::filters::tests::replace_is_pebbles_map_taking_filter_not_minijinjas_pair ... ok
+test runners::filters::tests::narrowing_java_null_is_what_makes_sixteen_more_filters_refuse_a_typo ... ok
+test runners::filters::tests::split_and_slice_refuse_what_java_refuses ... ok
+test runners::filters::tests::string_is_javas_to_string_and_not_minijinjas ... ok
+test runners::filters::tests::task_sixs_seven_names_are_not_minijinja_built_ins ... ok
+test runners::filters::tests::split_slice_and_default_are_pebbles_and_not_minijinjas ... ok
+test runners::filters::tests::the_built_in_filters_no_longer_write_pythons_spelling_of_null ... ok
+test executor::tests::the_two_readings_of_inside_a_loop_differ_by_a_measured_amount ... ok
+test runners::filters::tests::the_format_filter_is_javas_formatter_and_not_minijinjas ... ok
+test runners::filters::tests::the_format_filter_refuses_what_java_refuses_and_what_it_does_not_implement ... ok
+test runners::filters::tests::the_four_legacy_zone_ids_java_rejects_are_denied_here_too ... ok
+test runners::filters::tests::the_collection_kind_gate_refuses_what_java_refuses ... ok
+test runners::filters::tests::the_iso_literals_are_case_insensitive_and_a_pattern_literal_is_not ... ok
+test runners::filters::tests::the_locale_resolved_parse_fields_are_refused_rather_than_guessed ... ok
+test runners::filters::tests::the_null_input_branches_are_not_all_the_same ... ok
+test runners::filters::tests::the_null_literal_and_a_typo_get_different_refusals ... ok
+test runners::filters::tests::the_null_literal_is_exactly_four_spellings ... ok
+test runners::filters::tests::the_collection_pair_fixtures_kestra_column_is_the_harnesss_own_answer ... ok
+test runners::filters::tests::the_host_reading_jq_natives_are_refused_by_name ... ok
+test runners::filters::tests::the_ported_filters_refuse_an_undefined_input ... ok
+test runners::filters::tests::the_return_class_fixtures_kestra_column_is_the_harnesss_own_answer ... ok
+test runners::filters::tests::the_propagation_pair_fixtures_kestra_column_is_the_harnesss_own_answer ... ok
+test runners::filters::tests::the_string_filter_now_tells_the_literal_from_a_typo ... ok
+test runners::filters::tests::the_word_boundary_filters_use_javas_own_tables ... ok
+test runners::filters::tests::the_year_letters_take_three_sign_styles_by_count ... ok
+test runners::filters::tests::title_case_matches_the_jvm_over_every_code_point_it_maps ... ok
+test runners::filters::tests::urldecode_refuses_a_broken_escape ... ok
+test runners::filters::tests::values_rejects_a_non_map ... ok
+test runners::functions::tests::a_calendar_function_names_itself_when_the_date_does_not_parse ... ok
+test runners::functions::tests::a_calendar_function_names_itself_when_the_date_is_missing ... ok
+test runners::functions::tests::a_huge_exponent_is_refused_by_this_crate_now_and_not_by_serde_json ... ok
+test executor::tests::the_depth_bound_is_derived_from_the_deepest_corpus_flow ... ok
+test runners::functions::tests::a_uuid_is_a_version_7_uuid_with_a_millisecond_prefix ... ok
+test runners::functions::tests::an_annotated_value_is_its_own_text_and_its_container_is_a_container ... ok
+test runners::functions::tests::an_empty_yaml_document_is_an_error_not_a_null ... ok
+test runners::filters::tests::the_return_classes_match_the_engine ... ok
+test runners::functions::tests::an_unterminated_ion_comment_is_corrupt_not_an_empty_document ... ok
+test runners::functions::tests::both_readers_are_bounded_by_the_value_depth_limit ... ok
+test runners::functions::tests::a_ksuid_is_27_padded_base62_characters_with_a_time_prefix ... ok
+test runners::functions::tests::env_refuses_a_missing_name_and_a_non_string_one ... ok
+test runners::functions::tests::every_non_integer_ion_number_is_an_f64_and_takes_operators ... ok
+test runners::functions::tests::from_ion_names_the_argument_it_wanted ... ok
+test runners::functions::tests::from_ion_reads_one_value_and_never_looks_at_the_tail ... ok
+test runners::functions::tests::from_ion_refuses_the_text_its_own_writer_produces_for_nothing ... ok
+test runners::functions::tests::from_json_names_the_argument_it_wanted ... ok
+test runners::functions::tests::fromjson_decodes_the_arbitrary_precision_sentinel ... ok
+test runners::functions::tests::hour_of_day_refuses_a_date_with_no_time_where_its_siblings_take_one ... ok
+test runners::functions::tests::is_day_week_in_month_lists_what_it_would_have_accepted ... ok
+test runners::functions::tests::is_last_working_day_names_the_day_it_could_not_read ... ok
+test runners::functions::tests::is_public_holiday_refuses_rather_than_guessing ... ok
+test runners::functions::tests::loop_outputs_has_four_guards_in_this_order ... ok
+test runners::functions::tests::nano_id_refuses_a_length_or_an_alphabet_it_cannot_use ... ok
+test runners::functions::tests::encrypt_and_decrypt_refuse_what_the_jce_refuses ... ok
+test runners::functions::tests::now_compiles_an_unknown_format_name_as_a_pattern ... ok
+test runners::functions::tests::random_int_does_not_panic_on_a_span_wider_than_an_i64 ... ok
+test runners::filters::tests::the_collection_pairs_match_the_engine ... ok
+test runners::functions::tests::random_int_reproduces_upstreams_missing_letter ... ok
+test runners::functions::tests::random_port_is_a_free_port_the_kernel_chose ... ok
+test runners::functions::tests::range_carries_kestras_own_million_element_cap ... ok
+test runners::functions::tests::range_is_kestras_and_not_minijinjas ... ok
+test runners::functions::tests::range_refuses_an_argument_that_is_neither_a_number_nor_one_character ... ok
+test runners::functions::tests::nano_id_uses_kestras_own_64_character_alphabet_and_both_selection_paths ... ok
+test runners::functions::tests::range_refuses_an_increment_that_cannot_advance_it ... ok
+test runners::functions::tests::range_refuses_the_two_shapes_kestras_own_loop_never_leaves ... ok
+test runners::functions::tests::tasks_with_state_refuses_four_shapes_and_each_says_something_different ... ok
+test runners::functions::tests::the_seven_ports_answer_the_way_the_bytecode_does ... ok
+test runners::functions::tests::the_ion_reader_refuses_what_ion_itself_forbids ... ok
+test runners::functions::tests::the_three_round_trips_come_back_unchanged_except_where_upstream_loses_them ... ok
+test runners::functions::tests::yaml_has_no_null_branch_where_from_json_does ... ok
+test runners::functions::tests::yaml_refuses_the_infinity_its_own_filter_writes ... ok
+test runners::ionfmt::tests::ion_escapes_c0_del_and_c1_but_not_nbsp ... ok
+test runners::ionfmt::tests::ion_escapes_the_delimiter_of_the_form_it_is_writing ... ok
+test runners::ionfmt::tests::ion_floats_drop_the_trailing_zero_only_when_there_is_no_exponent ... ok
+test runners::ionfmt::tests::ion_quotes_a_field_name_only_when_it_is_not_an_identifier ... ok
+test runners::javafmt::tests::a_local_time_in_a_dst_gap_moves_forward_by_the_gaps_duration ... ok
+test runners::functions::tests::the_twelve_refusals_name_themselves_and_their_owner ... ok
+test runners::javafmt::tests::quoting_resolves_at_parse_time ... ok
+test runners::javafmt::tests::the_pattern_alphabet_matches_the_engines_own ... ok
+test runners::javafmt::tests::the_refusal_sets_match_the_engines_own_per_side ... ok
+test runners::javafmt::tests::zone_ids_are_javas_five_shapes ... ok
+test runners::javaformat::tests::an_integer_past_i64_still_renders ... ok
+test runners::javaformat::tests::an_undefined_argument_is_refused ... ok
+test runners::javaformat::tests::the_argument_index_names_the_index_it_could_not_find ... ok
+test runners::javaformat::tests::the_boolean_conversion_reads_a_boolean ... ok
+test runners::javaformat::tests::the_date_family_is_parsed_before_it_is_refused ... ok
+test runners::javaformat::tests::the_fill_respects_the_prefix_and_the_parentheses ... ok
+test runners::javaformat::tests::the_flag_grid_accepts_exactly_what_java_accepts ... ok
+test runners::javaformat::tests::width_and_precision_count_utf16_code_units ... ok
+test runners::javare::tests::a_bare_script_name_is_refused_the_way_java_refuses_it ... ok
+test runners::javare::tests::a_catastrophic_java_pattern_is_answered_instead_of_timed_out ... ok
+test runners::javafmt::tests::optional_sections_are_bounded_and_their_matching_end_is_resolved_once ... ok
+test runners::javare::tests::a_group_count_is_javas_group_count ... ok
+test runners::javare::tests::an_end_anchor_refuses_only_the_haystack_the_engines_disagree_about ... ok
+test runners::javare::tests::case_insensitivity_is_ascii_only ... ok
+test runners::javare::tests::class_operators_survive_translation ... ok
+test runners::javare::tests::comments_mode_drops_whitespace_and_comments ... ok
+test runners::javare::tests::java_posix_names_and_categories_translate ... ok
+test runners::javare::tests::multiline_anchors_use_the_crates_line_mode ... ok
+test runners::javare::tests::quoted_literals_are_literal ... ok
+test runners::javare::tests::the_ascii_fold_distributes_over_operands_and_nesting ... ok
+test runners::javare::tests::the_backtracking_constructs_are_refused_by_name ... ok
+test runners::javare::tests::the_comments_flag_changes_what_an_ampersand_run_means ... ok
+test runners::javare::tests::the_dot_excludes_every_java_line_terminator ... ok
+test runners::javare::tests::the_numeric_escapes_denote_the_characters_java_says ... ok
+test runners::javare::tests::a_class_nested_past_the_cap_is_refused_the_way_java_refuses_it ... ok
+test runners::javare::tests::the_predefined_classes_are_ascii_the_way_javas_are ... ok
+test runners::javare::tests::the_regex_fixtures_java_column_is_the_harnesss_own_answer ... ok
+test runners::javare::tests::the_replacement_grammar_is_javas ... ok
+test runners::javare::tests::the_subject_dependent_refusals_name_their_reason ... ok
+test runners::javare::tests::unicode_classes_moves_the_unicode_case_bit_too ... ok
+test runners::javare::tests::vertical_and_horizontal_whitespace_are_javas_sets ... ok
+test runners::javare::tests::word_boundaries_are_ascii ... ok
+test runners::jqsandbox::tests::a_source_at_the_cap_parses_on_the_jq_thread ... ok
+test runners::jqsandbox::tests::a_user_def_is_refused_wherever_it_appears ... ok
+test runners::filters::tests::the_propagation_pairs_match_the_engine ... ok
+test runners::jqsandbox::tests::the_allow_list_covers_every_native_jaq_registers ... ok
+test runners::jqsandbox::tests::the_bounded_definitions_parse ... ok
+test runners::jqsandbox::tests::the_bounded_definitions_still_answer_real_programs ... ok
+test runners::jqsandbox::tests::the_definition_list_is_the_one_this_module_was_written_against ... ok
+test runners::jqsandbox::tests::the_jq_stack_and_the_source_cap_move_together ... ok
+test runners::filters::tests::replace_is_bounded_where_pebbles_own_loop_is_not ... ok
+test runners::jqsandbox::tests::the_literals_in_the_jq_source_are_the_bounds ... ok
+test runners::jqsandbox::tests::the_reserved_prefix_is_refused ... ok
+test runners::jqsandbox::tests::the_source_cap_is_the_stack_divided_by_the_worst_measured_cost ... ok
+test runners::jqsandbox::tests::the_value_depth_guard_measures_depth_and_does_not_recurse ... ok
+test runners::rewrite::tests::a_disqualified_is_suppresses_the_whole_tier20_step ... ok
+test runners::rewrite::tests::a_map_literal_flush_against_the_regions_close_still_rewrites ... ok
+test runners::rewrite::tests::a_plain_comparison_with_no_coalesce_stays_untouched ... ok
+test runners::functions::tests::random_int_is_lower_inclusive_and_upper_exclusive ... ok
+test runners::rewrite::tests::a_string_literal_may_contain_the_regions_close_delimiter ... ok
+test runners::rewrite::tests::a_ternary_argument_after_a_comma_still_resolves ... ok
+test runners::rewrite::tests::a_ternary_inside_an_if_tag_resolves ... ok
+test runners::rewrite::tests::an_operator_inside_a_map_value_still_resolves ... ok
+test runners::rewrite::tests::an_operator_inside_a_string_literal_is_left_alone ... ok
+test runners::rewrite::tests::an_unterminated_string_literal_is_reported_not_silently_rewritten ... ok
+test runners::rewrite::tests::an_unterminated_string_never_closes_before_a_newline_or_eof ... ok
+test runners::rewrite::tests::chained_contains_splits_rightmost_for_left_associativity ... ok
+test runners::rewrite::tests::chained_or_splits_rightmost_for_left_associativity ... ok
+test runners::rewrite::tests::coalesce_and_a_same_tier_comparison_chain_left_to_right ... ok
+test runners::rewrite::tests::coalesce_does_not_swallow_across_and_or_or ... ok
+test runners::rewrite::tests::coalesce_does_not_swallow_across_any_tier30_comparison ... ok
+test runners::rewrite::tests::coalesce_does_not_swallow_across_equals_or_contains ... ok
+test runners::rewrite::tests::coalesce_does_not_swallow_across_is ... ok
+test runners::rewrite::tests::commas_bound_operator_rewrites_inside_a_call ... ok
+test runners::rewrite::tests::commas_bound_operator_rewrites_inside_a_list ... ok
+test runners::rewrite::tests::double_question_mark_becomes_the_null_coalescing_call ... ok
+test runners::rewrite::tests::filter_tag_bodies_are_not_wrapped_in_parens ... ok
+test runners::rewrite::tests::for_tag_bodies_rewrite_only_the_iterable_side ... ok
+test runners::rewrite::tests::for_tag_iterable_ternary_is_wrapped_in_parens ... ok
+test runners::rewrite::tests::if_tag_bodies_rewrite_their_condition ... ok
+test runners::rewrite::tests::is_in_becomes_a_kestra_is_in_call ... ok
+test runners::rewrite::tests::is_never_absorbs_a_following_coalesce ... ok
+test runners::filters::tests::a_nonterminating_jq_program_is_refused_by_a_named_bound ... ok
+test runners::rewrite::tests::map_literals_do_not_confuse_the_ternary ... ok
+test runners::rewrite::tests::nested_ternaries_rewrite_innermost_first ... ok
+test runners::rewrite::tests::nesting_past_the_depth_limit_errors_instead_of_overflowing_the_stack ... ok
+test runners::rewrite::tests::set_tag_bodies_rewrite_only_the_value_side ... ok
+test runners::rewrite::tests::text_outside_an_expression_is_untouched ... ok
+test runners::rewrite::tests::the_longer_operator_wins ... ok
+test runners::rewrite::tests::the_null_literal_becomes_minijinjas_none ... ok
+test runners::rewrite::tests::the_null_rename_does_not_reach_an_attribute_a_string_or_a_longer_name ... ok
+test runners::rewrite::tests::unparenthesized_nested_ternary_keeps_pebbles_grouping ... ok
+test runners::rewrite::tests::whitespace_control_markers_survive_around_a_rewritten_expression ... ok
+test runners::rewrite::tests::whitespace_control_markers_survive_around_a_rewritten_tag ... ok
+test runners::yamlfmt::tests::a_key_that_cannot_be_simple_gets_the_explicit_form ... ok
+test runners::yamlfmt::tests::a_leading_zero_run_is_not_plain ... ok
+test runners::yamlfmt::tests::a_root_empty_string_writes_the_document_marker ... ok
+test runners::yamlfmt::tests::literal_blocks_carry_their_indent_and_chomping_hints ... ok
+test runners::yamlfmt::tests::names_and_values_do_not_share_a_quoting_rule ... ok
+test runners::yamlfmt::tests::nesting_follows_indent_arrays ... ok
+test runners::yamlfmt::tests::the_two_quoting_layers_pick_different_quote_characters ... ok
+test runners::yamlfmt::tests::yaml_keeps_a_null_map_value ... ok
+test spec::parse::tests::a_duplicate_key_at_the_flow_level_is_refused_too ... ok
+test spec::parse::tests::a_duplicate_key_in_a_leafs_plugin_properties_is_refused_with_its_line ... ok
+test spec::parse::tests::the_same_key_in_two_sibling_mappings_is_not_a_duplicate ... ok
+test spec::validate::tests::a_bad_namespace_is_an_error ... ok
+test spec::validate::tests::a_completely_unknown_type_warns_as_unknown_task_type ... ok
+test spec::validate::tests::a_dag_cycle_is_an_error ... ok
+test spec::validate::tests::a_dotted_reference_to_a_dashed_input_is_an_error ... ok
+test spec::validate::tests::a_dotted_reference_to_a_dashed_task_output_is_an_error_in_both_populations ... ok
+test spec::validate::tests::a_fictional_kestra_flow_control_fqcn_warns_even_with_no_table_row ... ok
+test spec::validate::tests::a_flowable_inside_a_working_directory_is_an_error ... ok
+test spec::validate::tests::a_legal_item_type_and_an_item_type_on_another_input_type_are_both_silent ... ok
+test spec::validate::tests::a_legitimate_flow_with_nested_control_flow_produces_no_spurious_errors ... ok
+test spec::validate::tests::a_runnable_that_merely_lives_in_kestras_flow_package_is_allowed ... ok
+test spec::validate::tests::a_schedule_is_silent_when_every_input_can_be_supplied ... ok
+test spec::validate::tests::a_schedule_that_cannot_supply_an_input_without_a_default_is_an_error ... ok
+test spec::validate::tests::a_subflow_naming_itself_is_an_error ... ok
+test spec::validate::tests::a_syntax_error_carries_line_and_column ... ok
+test spec::validate::tests::allow_failure_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::allow_failure_tasks_present_is_silent ... ok
+test spec::validate::tests::an_item_type_an_array_cannot_hold_is_an_error ... ok
+test spec::validate::tests::an_ordinary_leaf_type_does_not_warn_as_unported_control_flow ... ok
+test spec::validate::tests::an_unported_kestra_flowable_inside_a_working_directory_is_an_error_too ... ok
+test spec::validate::tests::an_unregistered_core_alias_also_warns ... ok
+test spec::validate::tests::bracket_notation_and_an_undashed_id_are_both_silent ... ok
+test spec::validate::tests::check_message_absent_is_not_an_error ... ok
+test spec::validate::tests::check_when_absent_is_an_error ... ok
+test spec::validate::tests::check_when_empty_string_is_an_error ... ok
+test spec::validate::tests::check_when_present_is_silent ... ok
+test spec::validate::tests::dag_dependency_naming_a_missing_task_is_an_error ... ok
+test spec::validate::tests::dag_dependency_naming_a_real_task_is_not_an_error ... ok
+test spec::validate::tests::dag_node_task_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::dag_node_task_present_is_silent ... ok
+test spec::validate::tests::dag_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::dag_tasks_present_is_silent ... ok
+test spec::validate::tests::declared_but_unimplemented_features_warn_and_name_their_package ... ok
+test spec::validate::tests::dependency_flow_id_absent_is_an_error ... ok
+test spec::validate::tests::dependency_flow_id_containing_a_slash_is_an_error ... ok
+test spec::validate::tests::dependency_namespace_absent_is_an_error ... ok
+test spec::validate::tests::dependency_namespace_containing_a_slash_is_an_error ... ok
+test spec::validate::tests::dependency_with_a_legitimate_namespace_and_flow_id_is_not_an_error ... ok
+test spec::validate::tests::distinct_input_ids_are_not_an_error ... ok
+test spec::validate::tests::duplicate_input_ids_are_an_error ... ok
+test spec::validate::tests::duplicate_task_ids_are_an_error ... ok
+test spec::validate::tests::duplicate_task_ids_are_found_inside_control_flow ... ok
+test spec::validate::tests::flow_id_containing_a_slash_is_an_error ... ok
+test spec::validate::tests::flow_id_empty_is_an_error ... ok
+test spec::validate::tests::flow_id_valid_is_silent ... ok
+test spec::validate::tests::if_condition_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::if_condition_present_is_silent ... ok
+test spec::validate::tests::if_then_empty_is_an_error ... ok
+test spec::validate::tests::if_then_present_is_silent ... ok
+test spec::validate::tests::loop_concurrency_limit_absent_key_defaults_and_is_silent ... ok
+test spec::validate::tests::loop_concurrency_limit_explicit_null_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::loop_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::loop_tasks_present_is_silent ... ok
+test spec::validate::tests::loop_until_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::loop_until_tasks_present_is_silent ... ok
+test spec::validate::tests::parallel_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::parallel_tasks_present_is_silent ... ok
+test spec::validate::tests::pause_falls_through_to_leaf_and_warns_naming_its_package ... ok
+test spec::validate::tests::quota_missing_fields_are_errors ... ok
+test spec::validate::tests::quota_present_fields_are_silent ... ok
+test spec::validate::tests::registered_leaf_types_and_every_ported_control_flow_type_stay_silent ... ok
+test spec::validate::tests::sequential_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::sequential_tasks_present_is_silent ... ok
+test spec::validate::tests::subflow_flow_id_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::subflow_flow_id_containing_a_slash_is_an_error ... ok
+test spec::validate::tests::subflow_flow_id_present_is_silent ... ok
+test spec::validate::tests::subflow_namespace_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::subflow_namespace_containing_a_slash_is_an_error ... ok
+test spec::validate::tests::subflow_namespace_present_is_silent ... ok
+test spec::validate::tests::subflow_with_a_legitimate_dotted_namespace_and_flow_id_is_not_an_error ... ok
+test spec::validate::tests::switch_with_no_cases_and_no_defaults_is_an_error ... ok
+test spec::validate::tests::switch_with_only_cases_is_not_an_error ... ok
+test spec::validate::tests::switch_with_only_defaults_is_not_an_error ... ok
+test spec::validate::tests::the_not_yet_enforced_list_is_pinned_in_both_directions ... ok
+test spec::validate::tests::the_registry_and_the_control_flow_table_are_disjoint ... ok
+test spec::validate::tests::working_directory_tasks_absent_is_a_semantic_error_not_a_parse_error ... ok
+test spec::validate::tests::working_directory_tasks_present_is_silent ... ok
+test runners::rewrite::tests::a_region_long_enough_to_overflow_the_template_parser_is_refused ... ok
+test worker::cancel::tests::a_handler_is_cancelled_when_its_budget_expires_and_never_otherwise ... ok
+test worker::cancel::tests::an_unregistered_type_refuses_the_kill_and_names_itself ... ok
+test worker::claim::tests::the_create_beside_a_created_sibling_counter_can_fire ... ok
+test worker::handlers::fail::tests::a_falsy_condition_succeeds_and_produces_no_output ... ok
+test worker::handlers::fail::tests::a_truthy_condition_logs_the_error_message_and_fails_with_the_literal ... ok
+test worker::handlers::fail::tests::an_explicitly_null_condition_is_an_absent_one_and_fails ... ok
+test worker::handlers::fail::tests::no_condition_fails_with_the_error_message_and_logs_nothing ... ok
+test worker::handlers::log::tests::a_level_outside_the_five_fails_the_run ... ok
+test worker::handlers::log::tests::a_list_message_logs_every_element_in_order ... ok
+test worker::handlers::log::tests::a_log_writes_its_message_and_produces_no_output ... ok
+test worker::handlers::log::tests::a_message_that_is_not_a_string_fails_the_run ... ok
+test worker::handlers::ret::tests::a_return_produces_value_holding_the_rendered_format ... ok
+test worker::handlers::ret::tests::a_return_with_no_format_succeeds_with_an_empty_output ... ok
+test worker::handlers::ret::tests::an_explicitly_null_format_is_an_absent_one ... ok
+test worker::handlers::ret::tests::an_unrenderable_format_fails_the_run_rather_than_the_worker ... ok
+test worker::handlers::sleep::tests::a_duration_under_one_millisecond_fails_the_run ... ok
+test worker::handlers::sleep::tests::a_missing_duration_fails_the_run ... ok
+test worker::cancel::tests::a_refused_kill_is_reported_and_leaves_the_budgets_own_outcome_alone ... ok
+test worker::handlers::sleep::tests::a_sleep_succeeds_and_produces_no_output ... ok
+test worker::handlers::sleep::tests::an_unparseable_duration_fails_the_run ... ok
+test worker::handlers::sql::tests::a_comparison_against_a_bound_name_takes_the_right_branch ... ok
+test worker::handlers::sql::tests::a_database_that_is_not_a_uuid_fails_the_task_and_runs_nothing ... ok
+test worker::handlers::sql::tests::a_duplicate_column_name_fails_rather_than_dropping_a_value ... ok
+test worker::handlers::sql::tests::a_for_loop_binds_one_value_per_element ... ok
+test worker::handlers::sql::tests::a_list_cannot_be_bound_as_one_value ... ok
+test worker::handlers::sql::tests::a_non_integer_number_binds_as_an_exact_decimal_and_never_as_a_float ... ok
+test worker::handlers::sql::tests::a_truncated_fetch_fails_and_an_untruncated_one_does_not ... ok
+test worker::handlers::sql::tests::a_value_in_sql_is_bound_and_never_written_into_the_text ... ok
+test worker::handlers::sql::tests::an_execution_with_no_principal_refuses_before_the_engine_is_touched ... ok
+test worker::handlers::sql::tests::an_unknown_property_fails_the_task ... ok
+test worker::handlers::sql::tests::cancel_refuses_rather_than_claiming_to_have_stopped_the_statement ... ok
+test worker::handlers::sql::tests::fetch_one_over_no_rows_is_a_size_of_zero_with_no_row_key ... ok
+test worker::handlers::sql::tests::fetch_one_produces_the_first_row_and_a_size_of_one ... ok
+test worker::handlers::sql::tests::fetch_produces_every_row_and_a_size_derived_from_them ... ok
+test worker::handlers::sql::tests::the_default_fetch_runs_the_statement_and_produces_an_empty_map ... ok
+test worker::handlers::sql::tests::the_engine_is_given_the_authors_own_budget_and_the_constant_only_without_one ... ok
+test worker::handlers::sql::tests::the_engines_timeout_message_names_the_budget_the_statement_ran_under ... ok
+test worker::handlers::sql::tests::the_kill_path_reaches_this_refusal_through_the_registry ... ok
+test worker::handlers::sql::tests::the_workspace_and_database_reach_the_port_unchanged ... ok
+test worker::handlers::sql::tests::truncation_does_not_fail_the_two_fetches_that_do_not_claim_all_the_rows ... ok
+test worker::registry::tests::an_unknown_type_is_a_worker_error_naming_the_type ... ok
+test worker::registry::tests::dispatch_reaches_the_handler_that_owns_the_type ... ok
+test worker::registry::tests::the_core_registry_holds_exactly_the_four_kestra_type_ids ... ok
+test worker::render::tests::a_flow_that_declares_no_inputs_gets_what_it_was_posted ... ok
+test worker::render::tests::a_task_that_has_not_terminated_is_in_neither_outputs_nor_tasks ... ok
+test worker::render::tests::an_inputs_declared_type_decides_how_its_value_is_typed ... ok
+test worker::spawn::tests::a_killed_iteration_ends_a_transmit_failed_loop_with_success ... ok
+test worker::spawn::tests::a_spawn_whose_value_is_not_the_value_at_its_index_is_refused ... ok
+test worker::spawn::tests::a_spawns_index_is_its_position_in_the_values ... ok
+test worker::handlers::sleep::tests::a_sleep_actually_waits ... ok
+test worker::spawn::tests::the_continuation_matches_the_three_shapes_the_corpus_measures ... ok
+test worker::timeout::tests::a_budget_that_does_not_render_is_refused_as_a_render_failure ... ok
+test worker::timeout::tests::a_budget_under_a_millisecond_is_refused_and_one_millisecond_is_not ... ok
+test worker::timeout::tests::a_handler_that_finishes_inside_its_budget_keeps_its_own_answer ... ok
+test worker::timeout::tests::a_handler_that_outruns_its_budget_is_dropped_and_the_run_is_failed ... ok
+test worker::timeout::tests::a_literal_budget_is_parsed_as_java_parses_it ... ok
+test worker::timeout::tests::a_minus_outside_a_sign_position_is_not_a_negative_duration ... ok
+test worker::timeout::tests::a_negative_budget_reports_the_positivity_sentence_in_every_spelling_and_case ... ok
+test worker::timeout::tests::a_worker_failure_inside_the_budget_is_still_a_worker_failure ... ok
+test worker::timeout::tests::an_absent_timeout_is_no_budget_at_all ... ok
+test worker::timeout::tests::an_explicitly_positive_budget_is_a_budget ... ok
+test worker::timeout::tests::an_unparseable_budget_names_what_was_written ... ok
+test worker::timeout::tests::no_budget_lets_a_handler_run_as_long_as_it_likes ... ok
+test worker::timeout::tests::the_message_truncates_below_a_millisecond ... ok
+test worker::timeout::tests::the_timeout_message_is_the_artifacts_own ... ok
+test worker::spawn::tests::a_synthesised_sub_flow_reparses_to_the_body_it_was_made_from ... ok
+test runners::jqsandbox::tests::the_jq_surface_matches_the_engine ... ok
+test runners::functions::tests::an_id_is_base62_and_is_not_always_22_characters ... ok
+test runners::rewrite::tests::many_small_regions_are_linear_in_the_templates_length ... ok
+test runners::javare::tests::the_regex_classes_match_the_engine ... ok
+test runners::filters::tests::replace_is_bounded_across_a_whole_render ... ok
+test runners::jqsandbox::tests::every_bounded_definition_actually_stops ... ok
+
+test result: ok. 589 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.80s
+
+     Running tests/executor.rs (target/debug/deps/executor-5061b57c0b045b37)
+
+running 34 tests
+test a_stalled_execution_that_also_matched_would_be_counted ... ok
+test a_stale_baseline_line_fails_and_names_it ... ok
+test a_baselined_id_that_panicked_is_not_reported_as_banked ... ok
+test a_panic_fails_even_when_the_ratchet_is_satisfied ... ok
+test a_regression_outside_the_baseline_fails_and_carries_its_detail ... ok
+test kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line ... ok
+test every_corpus_flow_is_compared_or_excluded_by_name ... ok
+test egret_refuses_every_flow_kestra_refuses ... ok
+test progress_that_is_not_banked_fails_and_names_it ... ok
+test no_corpus_entry_can_exercise_the_egret_sql_handler ... ok
+test step_relation_is_strict_on_both_sides ... ok
+test the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet ... ok
+test the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs ... ok
+test planning_the_loop_removed_forty_spurious_submitted_emissions ... ok
+test the_golden_has_no_relation_for_exactly_these_pairs ... ok
+test the_default_concurrency_limit_is_one_and_the_corpus_can_tell ... ok
+test the_handler_surface_generator_checks_itself_and_its_artifact ... ok
+test the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population ... ok
+test every_sub_execution_egret_runs_is_one_kestra_ran ... ok
+test runtime_over_acceptance_is_registered_and_owned ... ok
+test the_ordered_pairs_inside_spawned_are_reachable_now ... ok
+test every_mismatching_entry_is_attributed_to_the_field_it_differs_on ... ok
+test executor_matches_golden ... ok
+test the_residual_baseline_is_attributed_to_a_construct_or_named ... ok
+test the_state_vocabulary_this_enum_holds_is_derived_from_the_golden ... ok
+test the_truncate_is_confined_to_this_process_own_clone ... ok
+test the_step_bound_dominates_the_widest_golden_entry ... ok
+test the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction ... ok
+test the_skipped_state_comes_from_runif_and_never_from_disabled ... ok
+test a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to ... ok
+test the_sub_executions_are_compared_and_this_is_what_they_cost ... ok
+test what_the_order_restriction_removes_is_derived_and_egret_never_says_after ... ok
+test the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do ... ok
+test no_run_is_ever_created_for_a_task_inside_a_loop ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.13s
+
+     Running tests/oracle.rs (target/debug/deps/oracle-847fe81093a943e7)
+
+running 10 tests
+test a_stale_baseline_line_fails_and_names_it ... ok
+test a_regression_outside_the_baseline_fails_and_carries_its_detail ... ok
+test a_panic_fails_even_when_the_ratchet_is_satisfied ... ok
+test progress_that_is_not_banked_fails_and_names_it ... ok
+test every_runners_module_is_scanned_for_declared_tests ... ok
+test every_error_class_entry_is_paired_with_something_that_can_fail ... ok
+test a_panicking_renderer_is_a_mismatch_in_every_mode ... ok
+test error_class_entries_are_exactly_the_committed_allowlist ... ok
+test corpus_and_golden_describe_the_same_expressions ... ok
+test render_corpus_matches_golden ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s
+
+     Running tests/publish.rs (target/debug/deps/publish-410996686d3ebf2c)
+
+running 13 tests
+test a_subflow_naming_another_workspaces_flow_cannot_be_published ... ok
+test a_subflow_naming_a_nonexistent_flow_fails_the_same_way ... ok
+test a_subflow_namespace_containing_a_slash_cannot_be_published ... ok
+test a_resolvable_flow_publishes_and_freezes_its_references ... ok
+test a_trigger_dependency_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id ... ok
+test a_flow_referencing_another_workspace_cannot_be_published ... ok
+test a_subflow_with_a_legitimate_dotted_namespace_still_publishes ... ok
+test a_subflow_naming_a_flow_in_the_callers_own_workspace_publishes_and_freezes_its_id ... ok
+test a_trigger_dependency_naming_a_nonexistent_flow_fails_the_same_way ... ok
+test a_trigger_dependency_naming_another_workspaces_flow_cannot_be_published ... ok
+test an_unknown_reference_fails_the_same_way_as_a_foreign_one ... ok
+test an_unknown_task_type_cannot_be_published ... ok
+test warnings_do_not_block_publish_but_errors_do ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/repo.rs (target/debug/deps/repo-4d78cb60226e42dd)
+
+running 10 tests
+test the_same_flow_id_is_allowed_in_two_namespaces ... ok
+test list_filters_narrow_and_cannot_cross_a_workspace_boundary ... ok
+test list_versions_and_get_version_are_scoped_to_the_callers_workspace ... ok
+test recreating_a_soft_deleted_flow_is_a_conflict_that_says_so ... ok
+test a_draft_round_trips_and_versions_are_ordered ... ok
+test a_visible_collision_does_not_mention_the_trash ... ok
+test a_duplicate_create_is_a_conflict_not_an_internal_error ... ok
+test workspace_of_answers_with_the_flows_own_workspace ... ok
+test update_onto_an_existing_name_is_a_conflict_not_an_internal_error ... ok
+test concurrent_publishes_do_not_collide_on_a_version_number ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+     Running tests/routes.rs (target/debug/deps/routes-a2a0cb62ce213b6d)
+
+running 17 tests
+test create_refuses_yaml_that_does_not_parse ... ok
+test a_workflow_reader_reaches_the_list_route_while_the_module_is_on ... ok
+test create_refuses_a_folder_of_the_wrong_entity_type ... ok
+test create_refuses_a_nonexistent_folder_id ... ok
+test create_refuses_a_foreign_folder_id ... ok
+test create_accepts_a_legitimate_folder ... ok
+test a_foreign_folder_and_a_nonexistent_one_answer_identically ... ok
+test a_flow_in_another_workspace_is_404_from_every_id_scoped_route ... ok
+test create_returns_201_with_the_validation_report ... ok
+test the_workflows_entitlement_gates_these_routes ... ok
+test read_permission_cannot_create_a_flow ... ok
+test delete_soft_deletes_drops_it_from_the_list_but_not_from_a_direct_get ... ok
+test update_refuses_a_foreign_folder_id ... ok
+test publish_returns_the_version ... ok
+test update_replaces_the_draft ... ok
+test list_filters_narrow_within_the_workspace_and_never_leak_across_it ... ok
+test validate_checks_the_unsaved_body_and_never_persists ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+     Running tests/sql_starrocks_live.rs (target/debug/deps/sql_starrocks_live-d855f1290db11d4b)
+
+running 8 tests
+test the_engine_gate_fails_rather_than_skipping_and_the_opt_out_must_be_typed ... ok
+test the_fetch_spellings_are_the_ones_a_flow_writes ... ok
+test a_connection_from_another_workspace_is_refused ... ok
+test a_bound_value_is_data_to_the_engine_and_not_sql ... ok
+test fetch_one_returns_a_row_the_engine_aggregated ... ok
+test fetch_none_is_an_empty_map_and_the_statement_still_reached_the_engine ... ok
+test an_execution_with_no_flow_has_no_owner_and_the_task_fails ... ok
+test the_output_reaches_postgres_through_the_real_worker ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/worker.rs (target/debug/deps/worker-b0688c48f3527fa6)
+
+running 27 tests
+test a_failure_partway_through_a_tick_leaves_nothing_half_applied ... ok
+test a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index ... ok
+test a_failing_iteration_ends_a_transmit_failed_loop_at_once ... ok
+test a_run_whose_result_committed_is_never_claimed_again ... ok
+test a_nested_loop_spawns_from_inside_a_sub_execution ... ok
+test a_handler_that_cannot_be_stopped_still_fails_on_its_budget_and_says_so ... ok
+test a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone ... ok
+test a_killed_handler_cannot_commit_over_the_worker_that_replaced_it ... ok
+test a_tick_killed_between_the_handler_and_the_commit_applies_nothing ... ok
+test a_transmit_failed_loop_with_several_iterations_in_flight_terminates_once ... ok
+test a_sub_execution_inherits_the_posted_inputs_of_its_parent ... ok
+test a_task_that_produced_no_output_renders_as_an_empty_map_not_an_absent_key ... ok
+test a_truthy_fail_fails_the_execution_through_the_real_handler ... ok
+test a_type_with_no_handler_aborts_the_tick ... ok
+test a_worker_whose_lease_was_reaped_cannot_commit ... ok
+test a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it ... ok
+test an_unlimited_concurrency_limit_spawns_every_value_at_once ... ok
+test reap_reclaims_the_expired_lease_and_leaves_the_live_one ... ok
+test one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs ... FAILED
+test the_claim_takes_runs_in_run_ix_order_whatever_their_physical_order ... ok
+test no_run_for_a_loop_body_task_is_ever_created_in_the_parent ... ok
+test the_default_concurrency_limit_runs_one_iteration_at_a_time ... ok
+test the_render_surface_reaches_inputs_and_outputs_and_still_refuses_labels ... ok
+test the_real_registry_runs_all_four_handlers_end_to_end ... ok
+test the_result_the_successor_and_the_execution_land_together ... ok
+test transmit_failed_false_runs_every_iteration_and_the_loop_succeeds ... ok
+test two_concurrent_claims_partition_the_runnable_set ... ok
+
+failures:
+
+---- one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs stdout ----
+
+thread 'one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs' (103717825) panicked at crates/egret-workflow/tests/worker.rs:2729:5:
+THE RULING. `task1`'s result, `advance()` and `task1`'s successor are          one transaction, so `task2` exists before `task3`'s result is applied          at all. Kestra's worker pool finished both siblings first and its          `created(task2)` is after `ended(task3)`; that divergence is          `valids/dag`, `valids/full` and `valids/parallel-disabled-tasks`, and          W4 Task 4 measured that widening the tick banks all three and refused          it anyway -- see this test's doc for the price. If this assertion is          ever failing, the tick has been widened and the three baseline lines          have to go in the same commit          (task1 8, task2 9, task3 8)
+
+
+failures:
+    one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs
+
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.16s
+
+error: test failed, to rerun pass `-p egret-workflow --test worker`
+   Doc-tests egret_workflow
+
+running 1 test
+test crates/egret-workflow/src/worker/registry.rs - worker::registry::Handlers::with_core_tasks (line 83) ... ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: 1 target failed:
+    `-p egret-workflow --test worker`
+
+
+RUN 3 — THE REAP COUNTER-CONFIGURATIONS, both disciplines
+--------------------------------------------------------
+Fix round 1. The first report's cost 1 was measured in ONE configuration — a
+registry that reaps every live lease from inside the SECOND handler — and that
+is the arrangement most favourable to the shipping tick, because the first
+handler's result has already committed when the lease goes. The review asked for
+the counter-configurations. They are below, one scratch database per row
+(`#[sqlx::test]`), because `claim` and `reap` are GLOBAL: a first attempt ran all
+five configurations against one database and each row claimed the previous row's
+leftovers, which showed up as tick counts (`Ok(3)`, `Ok(4)`) larger than the
+whole flow's runnable set. That instrument defect is recorded because the
+contaminated numbers looked entirely plausible.
+
+The flow is a `Parallel` of two `core.log.Log` leaves, `a` and `b`; six rounds
+of `tick(pool, 8, reg)`; `reap(pool, Duration::ZERO)` from inside the named
+handler.
+
+                              NARROW (shipping)          WIDENED (prototype)
+  configuration               calls   SUCCESS runs       calls   SUCCESS runs
+  --------------------------  ------  -------------      ------  -------------
+  c0  nothing reaps                2      3 of 3              2      3 of 3
+  c1  2nd handler, every call      7      1 of 3             12      0 of 3
+  c2  2nd handler, once            3      3 of 3              4      3 of 3
+  c3  1st handler, every call     12      0 of 3             12      0 of 3
+  c4  1st handler, once            4      3 of 3              4      3 of 3
+
+WHAT THIS SHOWS, INCLUDING AGAINST THE FIRST REPORT
+  - c3 is the finding. The SHIPPING tick live-locks too, with the identical
+    `a, b, a, b, a, b, a, b, a, b, a, b` call log the first report attributed to
+    the widening. An adversary that reaps on every call starves both
+    disciplines; "live-lock" is a property of that adversary, not of the batch.
+  - What the widening actually costs is narrower and is c1 versus c3: the
+    shipping tick is starved by one of the two placements and survives the
+    other; the widened tick is starved by both. Widening does not create the
+    starvation class, it removes the asymmetry that made half of it survivable.
+  - Under a TRANSIENT reap — c2 and c4, and the realistic case, since `reap`
+    fires on a lease that has actually expired rather than on every call — both
+    disciplines recover completely and the widening costs exactly ONE extra
+    handler re-run (c2: 3 -> 4; c4: 4 -> 4, identical).
+  - c0 is the positive control. Two handler calls, three SUCCESS runs, two
+    ticks: without it every row above could be measuring a fixture that never
+    ran.
+
+--- narrow (shipping 87d2792b) ---
+  |
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+test c0_control_nothing_reaps ... CONFIG c0-control
+  reaps from `nobody`, EVERY call
+  ticks         : ["Ok(2)", "Ok(0)"]
+  handler calls : 2 -> ["a", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+test c1_second_handler_reaps_every_round ... CONFIG c1-second-every
+  reaps from `b`, EVERY call
+  ticks         : ["Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)"]
+  handler calls : 7 -> ["a", "b", "b", "b", "b", "b", "b"]
+  final states  : [("p", "RUNNING"), ("a", "SUCCESS"), ("b", "RUNNING")]
+  SUCCESS runs  : 1 of 3
+test c2_second_handler_reaps_once ... CONFIG c2-second-once
+  reaps from `b`, ONCE (round 1 only)
+  ticks         : ["Err(LeaseLost)", "Ok(1)", "Ok(0)"]
+  handler calls : 3 -> ["a", "b", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+test c3_first_handler_reaps_every_round ... CONFIG c3-first-every
+  reaps from `a`, EVERY call
+  ticks         : ["Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)"]
+  handler calls : 12 -> ["a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "a", "b"]
+  final states  : [("p", "RUNNING"), ("a", "RUNNING"), ("b", "RUNNING")]
+  SUCCESS runs  : 0 of 3
+test c4_first_handler_reaps_once ... CONFIG c4-first-once
+  reaps from `a`, ONCE (round 1 only)
+  ticks         : ["Err(LeaseLost)", "Ok(2)", "Ok(0)"]
+  handler calls : 4 -> ["a", "b", "a", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+
+--- widened (mutation applied) ---
+  |
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+test c0_control_nothing_reaps ... CONFIG c0-control
+  reaps from `nobody`, EVERY call
+  ticks         : ["Ok(2)", "Ok(0)"]
+  handler calls : 2 -> ["a", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+test c1_second_handler_reaps_every_round ... CONFIG c1-second-every
+  reaps from `b`, EVERY call
+  ticks         : ["Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)"]
+  handler calls : 12 -> ["a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "a", "b"]
+  final states  : [("p", "RUNNING"), ("a", "RUNNING"), ("b", "RUNNING")]
+  SUCCESS runs  : 0 of 3
+test c2_second_handler_reaps_once ... CONFIG c2-second-once
+  reaps from `b`, ONCE (round 1 only)
+  ticks         : ["Err(LeaseLost)", "Ok(2)", "Ok(0)"]
+  handler calls : 4 -> ["a", "b", "a", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+test c3_first_handler_reaps_every_round ... CONFIG c3-first-every
+  reaps from `a`, EVERY call
+  ticks         : ["Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)", "Err(LeaseLost)"]
+  handler calls : 12 -> ["a", "b", "a", "b", "a", "b", "a", "b", "a", "b", "a", "b"]
+  final states  : [("p", "RUNNING"), ("a", "RUNNING"), ("b", "RUNNING")]
+  SUCCESS runs  : 0 of 3
+test c4_first_handler_reaps_once ... CONFIG c4-first-once
+  reaps from `a`, ONCE (round 1 only)
+  ticks         : ["Err(LeaseLost)", "Ok(2)", "Ok(0)"]
+  handler calls : 4 -> ["a", "b", "a", "b"]
+  final states  : [("p", "SUCCESS"), ("a", "SUCCESS"), ("b", "SUCCESS")]
+  SUCCESS runs  : 3 of 3
+
+
+RUN 4 — THE FENCE HOLE THE WIDENED TICK COULD SHIP, AND NOTHING SEES IT
+----------------------------------------------------------------------
+This is the ruling's PRIMARY cost, and it is a measurement rather than an
+argument. `persist`'s doc records a four-mutation table proving that the two
+lease fences — the `outputs` write's and the state UPDATE's — are ALTERNATIVES,
+each sufficient on its own, so that no single-hunk mutation of either can be
+seen to fail. That table was taken against a transaction that releases exactly
+ONE lease. The widened tick releases n.
+
+The experiment puts a defect in the surviving alternative that can only manifest
+at n > 1, on top of the widening:
+
+  F1  delete the `outputs` fence outright from the widened `apply_outcomes` --
+      which the four-mutation table says is survivable, because `persist`'s
+      fence is the other alternative:
+      -             WHERE id = $2 AND claimed_at = $3",
+      +             WHERE id = $2 AND $3 IS NOT NULL",
+      - and the `if hit.rows_affected() == 0 { LeaseLost }` check with it
+
+  F2  make `persist` fence only the group's FIRST lease. Byte-for-byte
+      equivalent at n == 1; at n > 1 every other member's state write is
+      unfenced, so a reaped worker can commit a terminal over its replacement --
+      W3b's Critical, exactly:
+      -             let lease = release.iter().copied().find(|l| l.run_ix == ix as i32);
+      +             let lease = release.first().copied().filter(|l| l.run_ix == ix as i32);
+
+RESULT: the whole crate is GREEN but for the ordering guard, which fires for the
+ordering and not for the fence.
+
+  lib                 589 passed, 0 failed
+  tests/executor.rs    34 passed, 0 failed
+  tests/oracle.rs      10 / publish.rs 13 / repo.rs 10 / routes.rs 17
+  sql_starrocks_live    8 passed, 0 failed, 0.74s
+  tests/worker.rs      26 passed, 1 FAILED
+                       (one_result_per_transaction_is_the_ruling_..., the
+                        ordering assertion -- the widening is still applied)
+
+So `a_worker_whose_lease_was_reaped_cannot_commit` and
+`a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass with BOTH
+fences effectively gone for every non-first member of a group. They pass because
+they drive `apply_outcome` with a single `Claimed`, which is n == 1, which both
+defects preserve exactly.
+
+That is the cost the ruling rests on. Widening would not merely leave the two
+guards uncovering the new path -- it would leave the four-mutation table
+CERTIFYING a property of a shape the shipped code no longer has, which is the
+same defect the table was written to prevent one level down. A programme whose
+first law is "a guard nobody has seen fail is a guard nobody has seen" cannot buy
+an ordering nicety with two guards that stop being guards.
+
+--- raw ---
+     Running unittests src/lib.rs (target/debug/deps/egret_workflow-1db5efbac7076344)
+test result: ok. 589 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.30s
+     Running tests/executor.rs (target/debug/deps/executor-5061b57c0b045b37)
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.45s
+     Running tests/oracle.rs (target/debug/deps/oracle-847fe81093a943e7)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+     Running tests/publish.rs (target/debug/deps/publish-410996686d3ebf2c)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+     Running tests/repo.rs (target/debug/deps/repo-4d78cb60226e42dd)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+     Running tests/routes.rs (target/debug/deps/routes-a2a0cb62ce213b6d)
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+     Running tests/sql_starrocks_live.rs (target/debug/deps/sql_starrocks_live-d855f1290db11d4b)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+     Running tests/worker.rs (target/debug/deps/worker-b0688c48f3527fa6)
+test one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs ... FAILED
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.66s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+APPENDIX — the counter-configuration probe (tests/w4t4_probe.rs, not shipped)
+----------------------------------------------------------------------------
+Run with: cargo test -p egret-workflow --test w4t4_probe -- --nocapture --test-threads=1
+
+    //! SCRATCH — W4 Task 4 fix round 1. The reap counter-configurations.
+    //! Not shipped; its source and output are preserved in
+    //! `oracle-exec/w4t4-widened-tick.txt`.
+    
+    use std::sync::Mutex;
+    
+    use egret_metastore::Db;
+    use egret_workflow::worker::{claim, reap, start_execution, Outcome, Registry, TaskInput};
+    
+    mod common;
+    
+    fn parallel_two(id: &str) -> String {
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: p\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n      - id: b\n        type: io.kestra.plugin.core.log.Log\n        message: bye\n"
+        )
+    }
+    
+    /// A registry that reaps every live lease from inside ONE named handler,
+    /// either on every call or only on the first.
+    struct Reaper {
+        pool: sqlx::PgPool,
+        from: &'static str,
+        once: bool,
+        fired: Mutex<usize>,
+        seen: Mutex<Vec<String>>,
+    }
+    
+    #[async_trait::async_trait]
+    impl Registry for Reaper {
+        async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+            self.seen.lock().unwrap().push(task.task_id.clone());
+            let should_reap = {
+                let mut fired = self.fired.lock().unwrap();
+                let yes = task.task_id == self.from && (!self.once || *fired == 0);
+                if yes {
+                    *fired += 1;
+                }
+                yes
+            };
+            if should_reap {
+                reap(&self.pool, std::time::Duration::ZERO)
+                    .await
+                    .expect("reap");
+            }
+            Ok(Outcome::success())
+        }
+        async fn cancel(&self, _task: &TaskInput) -> egret_core::Result<()> {
+            Ok(())
+        }
+    }
+    
+    async fn one_config(pool: &sqlx::PgPool, name: &str, from: &'static str, once: bool) {
+        egret_test_db::assert_database_url_is_exported();
+        let db = Db { pool: pool.clone() };
+        let (ws, _user) = common::seed_workspace(&db).await;
+        let ex = start_execution(pool, ws, None, &parallel_two(name), serde_json::json!({}))
+            .await
+            .expect("start execution");
+        let reg = Reaper {
+            pool: pool.clone(),
+            from,
+            once,
+            fired: Mutex::new(0),
+            seen: Mutex::new(Vec::new()),
+        };
+        let mut ticks = Vec::new();
+        for _ in 1..=6 {
+            let r = egret_workflow::worker::tick(pool, 8, &reg).await;
+            ticks.push(match &r {
+                Ok(n) => format!("Ok({n})"),
+                Err(_) => "Err(LeaseLost)".to_string(),
+            });
+            if matches!(r, Ok(0)) {
+                break;
+            }
+        }
+        let states: Vec<(String, String)> = sqlx::query_as(
+            "SELECT task_id, state FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
+        )
+        .bind(ex)
+        .fetch_all(pool)
+        .await
+        .expect("states");
+        let seen = reg.seen.lock().unwrap().clone();
+        println!("CONFIG {name}");
+        println!(
+            "  reaps from `{from}`, {}",
+            if once { "ONCE (round 1 only)" } else { "EVERY call" }
+        );
+        println!("  ticks         : {ticks:?}");
+        println!("  handler calls : {} -> {seen:?}", seen.len());
+        println!("  final states  : {states:?}");
+        println!(
+            "  SUCCESS runs  : {} of 3",
+            states.iter().filter(|(_, s)| s == "SUCCESS").count()
+        );
+        assert!(
+            claim(pool, 8).await.expect("peek").len() <= 8,
+            "unused; keeps `claim` imported"
+        );
+    }
+    
+    /// **The control. Nothing reaps, so the flow must simply finish** — every row
+    /// below is meaningless if this one does not.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn c0_control_nothing_reaps(pool: sqlx::PgPool) {
+        one_config(&pool, "c0-control", "nobody", false).await;
+    }
+    
+    /// The configuration W4 Task 4's first report used, and the one that favours
+    /// the narrow tick most: the reap fires from the SECOND handler, so the first
+    /// handler's result has already committed.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn c1_second_handler_reaps_every_round(pool: sqlx::PgPool) {
+        one_config(&pool, "c1-second-every", "b", false).await;
+    }
+    
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn c2_second_handler_reaps_once(pool: sqlx::PgPool) {
+        one_config(&pool, "c2-second-once", "b", true).await;
+    }
+    
+    /// The mirror image, which the review asked for: the reap fires from the FIRST
+    /// handler, so nothing has committed when the lease goes.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn c3_first_handler_reaps_every_round(pool: sqlx::PgPool) {
+        one_config(&pool, "c3-first-every", "a", false).await;
+    }
+    
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn c4_first_handler_reaps_once(pool: sqlx::PgPool) {
+        one_config(&pool, "c4-first-once", "a", true).await;
+    }

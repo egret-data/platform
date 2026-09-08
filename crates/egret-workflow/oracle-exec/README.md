@@ -186,9 +186,16 @@ flow concurrency, `disabled:`, `ExecutionUpdatableTask` and **`Subflow`** — th
 strand baselined entries with no owner. See *What Task 3 had to change, and what
 it banked*.
 
-Every number below is a number `harvest.py` prints. If this file and
-`runnable.txt` ever disagree, `runnable.txt` is right and this file is stale —
-it has been wrong that way once already.
+Every number **in this harvest section** is a number `harvest.py` prints. If this
+file and `runnable.txt` ever disagree, `runnable.txt` is right and this file is
+stale — it has been wrong that way once already.
+
+*(Scoped by the whole-branch review's Important 3 sweep. It used to say "every
+number **below**", written when this section was the end of the file; six
+sections have been appended under it since, and almost none of their numbers
+comes from `harvest.py`. Same defect as the provenance rule in the coverage
+statement, found by asking formulation 3 of the RULES rather than of the
+figures: a rule that says "below" ages every time somebody appends.)*
 
 ## Requirements
 
@@ -3756,8 +3763,10 @@ run and then not execute it", and it was answered from two directions:
   is this shape: `taskCache` restores outputs *instead of* running the body but
   the run still goes `SUBMITTED RUNNING SUCCESS`, and both it and `timeout:` are
   enforced in the **worker** (`WorkerTaskProcessor.java:225`,
-  `WorkerTaskCallable.java:61`) — the same place `timeout:` already sits in the
-  unclaimed list. `allowFailure`/`allowWarning` change a terminal state, not
+  `WorkerTaskCallable.java:61`). *(The clause that stood here — "the same place
+  `timeout:` already sits in the unclaimed list" — is retired twice over: no row
+  of the unclaimed table was ever `timeout:`, and W4 Task 2 implemented it. See
+  item 13.)* `allowFailure`/`allowWarning` change a terminal state, not
   whether the body runs.
 
 So the surface is `runIf:` alone, and the two independent derivations agree.
@@ -4554,11 +4563,195 @@ something else**: `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`
 and — the finding — `valids/full` are the four entries whose runs, attempts and
 execution history are byte-identical to Kestra's and which differ on the
 happens-before relation ALONE. The cause is this driver's delivery discipline:
-it finishes ONE task run per tick and creates that run's successors in the same
-transaction, where Kestra's worker pool finished two siblings before either
-successor existed. W3b Task 1's Concern 3 said `valids/full`'s recorded
-attribution was wrong and its real cause unknown; this is the cause, and it is
-the same one.
+it applies ONE task run's result per transaction and creates that run's
+successors in the same one, where Kestra's worker pool finished two siblings
+before either successor existed. That discipline is now a ruling with both sides
+measured — see *One result per transaction is a ruling* immediately below. W3b
+Task 1's Concern 3 said `valids/full`'s recorded attribution was wrong and its
+real cause unknown; this is the cause, and it is the same one.
+
+> **W4 Task 4 checked whether widening the tick is what brings the guard back.
+> It is not, and that was measured rather than reasoned about.** The overlap is
+> real — three of the four entries above are the three W3a named — so the
+> hypothesis was worth testing: the trigger W3a wrote down is *"a caller that
+> applies a batch partially"*, and W4's worker is the caller it meant. Under a
+> prototype that applies a whole claim batch's results in one transaction before
+> calling `advance()`, at `BATCH = 32`,
+> `worker::CREATE_BESIDE_A_CREATED_SIBLING` is still **0** and
+> `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction`
+> still passes — while the same run banks three of the four entries. The two
+> things are independent, and the reason is the one this section already gives:
+> the guard's state needs a worker result delivered *between two rounds of one
+> `advance()` cascade*, and `claim::drive` runs that cascade to a fixed point
+> inside one transaction under **either** discipline. Batching results changes
+> what `advance()` is handed at the START of a cascade, not what it sees in the
+> middle of one. The shared entries are a coincidence of which corpus flows have
+> observable sibling order, not a shared mechanism.
+
+### One result per transaction is a ruling — W4 Task 4
+
+W3b handed W4 the question in *What this ratchet does not prove*, item 5. **The
+answer is that the discipline stays**, and the ruling was written down with its
+justification before the ratchet was run under the alternative.
+
+> **Every number in this section names a run that is not reproducible from this
+> checkout**, because the widened tick is a prototype and the shipped tree does
+> not contain it. The raw output of all four runs — the widened ratchet, the
+> whole crate under the mutation, the five reap configurations on both
+> disciplines, and the fence-hole experiment — is **`w4t4-widened-tick.txt`**,
+> beside this file, together with the literal mutation diff and the probe's
+> source. A count written beside a derivation has to be derived; a count written
+> beside a ruling has to be checkable.
+
+#### "One run per tick" is the wrong name for it
+
+`worker::tick` claims `n` runs and finishes `n`. What is one-at-a-time is the
+*transaction*: `apply_outcome` takes one handler result, drives `advance()` to a
+fixed point and commits. The two halves are separable and were measured
+separately, which is the first finding — the constant everybody points at is not
+the lever.
+
+| configuration | `executor_matches_golden` |
+|---|---|
+| shipping — `driver::BATCH = 1`, one result per transaction | 143 mismatching |
+| `BATCH = 32`, one result per transaction | 143 mismatching, `executor.rs` 34/34 |
+| `BATCH = 1`, a whole batch per transaction | 143 mismatching — **forced by construction**: at `BATCH = 1` a group is one run, so the widened apply *is* `apply_outcome`. A consistency check, not an independent measurement |
+| `BATCH = 32`, a whole batch per transaction | **140** — banks `valids/dag`, `valids/full`, `valids/parallel-disabled-tasks`; no regression |
+
+`BATCH` buys nothing on its own because `worker::claim` orders by
+`created_at, execution_id, run_ix` (W3b Task 7's fix), which makes a batch of `n`
+indistinguishable from `n` successive claims of 1, and because the
+happens-before endpoints are `executions.seq`, bumped once per `settle`. The
+entries are bought by applying several results **before** `advance()` is called
+at all.
+
+`valids/if` is the one of the four that does not bank even then; it still differs
+on `order` alone, and nothing here explains why. Its `Parallel` is the corpus's
+only `concurrent: 4` (`every_corpus_concurrent_is_a_literal_integer` derives the
+whole population as `valids/full=3`, `valids/if=4`), so a cap that throttles the
+batch is the obvious suspect — **stated as a suspect, not measured.**
+
+#### The step it costs, on one flow, both ways
+
+Two `Sequential` branches of one `Parallel` — `valids/parallel-disabled-tasks`'s
+shape. One tick finishes `task1` and `task3`.
+
+| | `ended(task1)` | `created(task2)` | `ended(task3)` |
+|---|---|---|---|
+| shipping | 8 | 9 | 11 |
+| a batch per transaction | 8 | 9 | **8** |
+
+The widened row is Kestra's shape exactly: both siblings on one step, both
+successors on the next. `tests/worker.rs`'s
+`one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs`
+asserts the shipping row, and **it is the only test in the crate that can tell
+the two disciplines apart** — measured: under the widened prototype at
+`BATCH = 1`, it is the only failure in the crate and every one of the other
+**707** tests passes, `executor.rs` included (589 lib + 34 executor + 10 oracle
++ 13 publish + 10 repo + 17 routes + 8 sql_starrocks_live + 27 worker = 708,
+less this one). Before this task the ruling had no instrument at all.
+
+#### Why it was refused, and it is not the number
+
+Four costs, all measured on the prototype rather than argued, in the order of
+how much weight the ruling puts on them. **Every run behind them is in
+`w4t4-widened-tick.txt`**, because the widened code is not in this checkout and
+the numbers are otherwise unreproducible from it.
+
+1. **THE ONE THE RULING RESTS ON: two guards would stop being guards, and
+   `persist`'s four-mutation table would start certifying a shape the code no
+   longer has.** That table proves the `outputs` fence and the state fence are
+   ALTERNATIVES, each sufficient alone — measured against a transaction that
+   releases exactly ONE lease. Widened, it releases `n`.
+
+   The experiment (RUN 4) puts a defect in the surviving alternative that can
+   only bite at `n > 1`: delete the `outputs` fence outright, which the table
+   says is survivable, **and** make `persist` fence only the group's FIRST lease
+   — byte-equivalent at `n == 1`, and at `n > 1` a reaped worker can commit a
+   terminal over its replacement, which is W3b's Critical exactly. Result:
+
+   | suite | under the widened tick with both fence defects |
+   |---|---|
+   | lib | 589 passed, 0 failed |
+   | `executor.rs` | 34 passed, 0 failed |
+   | `oracle` / `publish` / `repo` / `routes` | 10 / 13 / 10 / 17, all passing |
+   | `sql_starrocks_live` | 8 passed, 0.74s |
+   | `worker.rs` | 26 passed, **1 failed** — the ordering guard, firing for the ordering |
+
+   So `a_worker_whose_lease_was_reaped_cannot_commit` and
+   `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` pass with
+   both fences effectively gone for every non-first member of a group, because
+   both drive `apply_outcome` with a single `Claimed`. **A programme whose first
+   law is *a guard nobody has seen fail is a guard nobody has seen* cannot buy an
+   ordering nicety with two guards that stop being guards.**
+2. **`working_timeout_s` stops meaning what it says.** A run's lease is held for
+   `input_for` plus its own handler today; batched, for the sum over the batch.
+   The reaper still reclaims exactly what the timeout says — durability property
+   3 survives — but the quantity it bounds changes from one handler to a whole
+   batch, and the operator setting it cannot know the batch size.
+3. **It is the coupling `tick`'s own doc refused once already** — *"One run's
+   failure does not strand the rest of the batch … the first draft did exactly
+   that with `?`"* — this time inside the transaction, where an early return
+   cannot be softened into "carry on with the next one".
+4. **A lost lease costs the whole group rather than the run it named — the
+   weakest of the four, and the first version of this section got it wrong.** A
+   batch is one transaction, so one `WorkerError::LeaseLost` aborts every result
+   in it. That was first measured in a single configuration — a registry reaping
+   from the SECOND handler — and reported as a live-lock belonging to the
+   widening. **It does not belong to the widening.** Five configurations, one
+   scratch database each (RUN 3), six rounds, handler calls / SUCCESS runs:
+
+   | reap | narrow (shipping) | widened |
+   |---|---|---|
+   | none — the control | 2 / 3 | 2 / 3 |
+   | 2nd handler, every call | 7 / 1 | 12 / 0 |
+   | 2nd handler, once | 3 / 3 | 4 / 3 |
+   | **1st handler, every call** | **12 / 0** | **12 / 0** |
+   | 1st handler, once | 4 / 3 | 4 / 3 |
+
+   The shipping tick live-locks too, with the identical
+   `a, b, a, b, a, b, …` call log, when the reap fires from the first handler.
+   An adversary that reaps on every call starves both disciplines. What widening
+   actually costs is the **asymmetry**: this tick survives one of the two
+   placements and the widened one survives neither. Under a transient reap — the
+   realistic case, since `reap` fires on a lease that has actually expired — both
+   recover fully and the widening costs exactly ONE extra handler re-run.
+
+   The row that makes the other four readable is the control: two handler calls,
+   three SUCCESS runs. Without it every row is compatible with a fixture that
+   never ran.
+
+Against that, the four entries differ on the happens-before relation alone —
+every run, attempt and execution state already matches. Buying them by changing
+what a lease means is the trade W3b refused when reversing the claim's tiebreak
+also banked `valids/dag`, and the reason is the same: **choosing the shape of the
+runner by what it banks is how an oracle gets tuned to its own answer.** The
+ruling and its costs were written down before the 140 was known; the number is
+reported as measured and did not change them. What the number *is* changed by:
+`valids/if`'s cause is unknown, so **140 is a lower bound on what the widening
+banks** and the benefit column is biased downward, not upward.
+
+**A fifth thing the widening changes, derived from the code shape rather than
+measured, and it is a BEHAVIOUR change rather than a durability one.** `tick`
+today calls `input_for` and the handler and the commit per run, in that order,
+so the second claimed run's render surface is loaded *after* the first has
+committed and a sibling that writes `{{ outputs.<earlier sibling> }}` resolves
+it. The widened tick runs every `handle_one` before any commit, so no member of
+a batch can see another member's outputs at all. Neither behaviour is Kestra's
+guarantee — a `Parallel` sibling reading a sibling's outputs is a race there too
+— but the widening silently *narrows* what a handler can see, and no test in
+this crate or entry in this corpus would notice.
+
+#### What would reopen it, named rather than left implicit
+
+A design in which a batch's results are applied together **without sharing a
+failure** — a `SAVEPOINT` per run inside the group transaction, so a lost lease
+rolls back one run's writes and not the group's. That removes cost 4 entirely
+and shrinks cost 3. Costs 1 and 2 remain, and **cost 1 is the binding one**: such
+a design has to bring `n`-lease versions of both fence tests and re-derive
+`persist`'s mutation table against the `n`-row shape, and the savepoint boundary
+needs a mutation table of its own. The three entries stay available at that
+price; this ruling does not spend them.
 
 ### The happens-before endpoints are a logical clock now, and they had to be
 
@@ -4673,6 +4866,36 @@ one-direction test and break every deliberate skip.
    (W4 owns the kill path), so adding one to the port would be adding a method
    ahead of its caller twice over. The refusal is what makes W4 fail loudly at
    the one place that has to change.
+
+   > **W4 Task 3 correction.** The kill path exists now
+   > (`worker::cancel`), it fires when a task-level `timeout:` expires, and this
+   > refusal is reached — asserted by
+   > `handlers::sql::tests::the_kill_path_reaches_this_refusal_through_the_registry`.
+   > It still refuses, and the reason moved from "nothing calls it" to where the
+   > cancellation channel actually stops: `Connector::execute` takes a
+   > `CancellationToken` and Trino honours it, but `port_impl::run_bounded`
+   > owns that token privately and `QueryExecPort` exposes no cancel verb across
+   > its 17 implementation sites (16 of them test fakes). The refusal now names
+   > the per-engine cost — Trino
+   > bounds the abandoned statement with the `query_max_run_time` the task
+   > already sent; the StarRocks connector does not read `Limits::timeout` at
+   > all, so nothing bounds it.
+   >
+   > **Fix round 1 — this is a DIVERGENCE, not a gap the artifact shares.** The
+   > first reading stopped at `WorkerJobLifecycle.kill()`, whose default body is
+   > empty. One layer down,
+   > `io.kestra.plugin.jdbc.AbstractJdbcQuery.kill()` calls
+   > `Statement.cancel()` then `close()` on a handle it kept, and both
+   > `plugin-jdbc-trino`'s and `plugin-jdbc-mysql`'s `Query` extend it
+   > (disassembled from `/app/plugins/*.jar` in the pinned image). **Kestra's
+   > own SQL task stops the remote statement; `egret.sql` does not** — a
+   > `timeout: PT10S` on a one-hour StarRocks query runs the full hour here.
+   > What keeps the refusal is cost and scope, not the artifact: the port verb
+   > would buy a true cancel only on Trino, which `query_max_run_time` already
+   > bounds, because on StarRocks the token is honoured only cooperatively
+   > between drained rows and a real cancel needs `KILL QUERY` on a second
+   > connection. `handlers::sql`'s `cancel` doc carries the full disassembly and
+   > the three things an implementer needs.
 2. **No `run_as`.** The statement runs as `TaskInput::principal`, which
    `worker::claim` reads from `workflow.flows.created_by` through
    `executions.flow_id`. That is the rule `egret-automation` already established
@@ -4730,7 +4953,7 @@ identical in a table.
 > ratchet does not prove* inside *The coverage statement*, and where the two
 > disagree that one is right.** Three bullets below are false since W3b Task 5
 > re-pointed the ratchet at the real driver and are annotated in place: the
-> ordered-pair bullet (**354** of the 1104 can fail, not 1104 and not 877), the
+> ordered-pair bullet (**357** of the 1104 can fail, not 1104 and not 877), the
 > sub-execution bullet (`Command::SpawnExecution` has an executor and this
 > oracle drives it), and the render-context bullet (the render tier lives in
 > `worker::render.rs` now, and the driver is not the thing that renders). The
@@ -4774,10 +4997,13 @@ wrote. Beyond that, the specific holes, each with its count:
   about serialisation.
   *(**Wrong, for the second time — see* The coverage statement*.** The first
   correction took 227 off this claim because they were unreachable; W3b Task 7
-  measured that only **354** of the 1104 are pairs a change to which the ratchet
-  reports at all. The other 750 sit on baselined entries, which mismatch whatever
-  the pair says — flipping all 750 leaves the ratchet green and unmoved. That was
-  as true when this sentence was written as it is now.)*
+  measured that only **357** of the 1104 are pairs a change to which the ratchet
+  reports at all. The other 747 sit on baselined entries, which mismatch whatever
+  the pair says — flipping all 747 leaves the ratchet green and unmoved. That was
+  as true when this sentence was written as it is now. The annotation itself said
+  354/750, which is what those two were before the review's fix round banked
+  `valids/replay-loop`; a correction is a sentence like any other and ages like
+  one.)*
   **Since Task 4 the ratchet compares only those**: egret
   produces a relation for every pair, the golden does not, and comparing an
   assertion against an absence was costing `valids/parallel-nested` a bank on 3
@@ -5004,9 +5230,14 @@ wrote. Beyond that, the specific holes, each with its count:
   (`WorkerTaskCallable.java:61` wraps `task.run(runContext)` in
   `callWithTimeout`), and Kestra's own validator refuses it on every
   non-`RunnableTask` (`FlowService.java:574`), with `Pause` the single
-  exception. W4 owns it. The plan's Task 7 step said "`timeout` is a deadline
-  compared against the `now` parameter"; it is not, and no line of Task 7
-  implements one.
+  exception. W4 owns it — **and W4 Task 2 has now taken it**: `worker::timeout`
+  renders the budget per run and enforces it around `Registry::run` in
+  `claim::run_one`, which is where the artifact enforces it. What has NOT
+  changed is this bullet's own subject: `PlanTask::timeout` is still `None` on
+  every task and `advance()` still never reads one, so the field is still dead
+  and still will be. See the coverage statement's item 13. The plan's Task 7
+  step said "`timeout` is a deadline compared against the `now` parameter"; it
+  is not, and no line of Task 7 implements one.
 
   `errors` was a model gap and is closed: W1's `Sequential`, `Parallel`, `If`,
   `Switch` and `Dag` now all carry `errors` (Java declares it on all five —
@@ -5179,16 +5410,58 @@ experiments were **re-run**, not adjusted. Several numbers moved in directions t
 wording did not allow for, and one of them (the ordered pairs) had already been
 found over-claiming by 227 once.
 
+**W4 Task 6 re-derived them a third time**, on this tree, and the ratchet had
+not moved at any point in the package: **143 before Task 1 and 143 at this
+commit**. Nothing here changed because of what W4 shipped — three holes were
+closed and none of them is visible to this corpus, for three *different* reasons
+— so the re-derivation's whole yield is a sweep. It ran **five times**, and each
+pass found what the one before it missed: eight figures in this file and five in
+`runnable.txt`; then a fourteenth **inside the note that retires the other
+thirteen**; then five more in `src/`, `tests/` and `oracle-exec/driver.rs`; then
+two — a fifteenth and its twin — **in this section's own preamble and in
+`runnable.txt` nine lines from a figure the same sweep had already superseded**.
+Four of the five passes were prompted by review rather than by the sweep
+noticing its own gap, and each of the five scoped itself by *surface* when the
+property is about *mechanism*. **The rule that would have caught all seventeen
+is in *The rule this sweep ends with* at the end, and it is the third
+formulation, not the first.** They
+are in *The stale twins W4 retires* at the end, with what each is now. The one
+number that moved in this package's own arithmetic is the count of things this
+statement does not prove: it was thirteen and it is seventeen — and the
+seventeenth is not the last one a reader should look at. **Item 15 is**, which is
+why it is also the sixth fact of the W4 section above: nothing in this workspace
+runs this worker.
+
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
-retires* at the end. Every **count** below is printed by a named test in
-`crates/egret-workflow/tests/executor.rs` on every run, so none of them is a
-number written down beside a derivation. Three things here are not counts and
-say so where they appear: the **630** fed terminals, which is history and whose
-code was deleted with the harness; the provenance, which is a fact about a
-docker tag; and the two **experiments** — flipping ordered pairs and corrupting a
-terminal — which are recorded with their method and their control so they can be
-re-run rather than believed.
+retires* at the end.
+
+**The provenance rule below used to be stated for the whole statement and was
+itself stale — the whole-branch review's Important 3.** It read: *"Every **count**
+below is printed by a named test in `crates/egret-workflow/tests/executor.rs` on
+every run, so none of them is a number written down beside a derivation"*, with
+three named exceptions. That was true when W3b wrote it and **the W4 section
+appended underneath it falsified it**, because W4 added figures that no test
+compares. A stale *rule*, which is why five sweeps for stale *figures* went past
+it: they were looking for numbers that had drifted, and this is a sentence that
+stopped being true without any number changing.
+
+So the rule is restated per family rather than for everything:
+
+| family | compared by a running program? |
+|---|---|
+| the ratchet/corpus **counts** (143, 345, 294, 266, …) | **yes** — a named test in `tests/executor.rs` on every run |
+| the **426** fed terminals | no — history, and its code was deleted with the harness |
+| the **provenance** | no — a fact about a docker tag |
+| the two **experiments** (flipped pairs, corrupted terminal) | no — recorded with method and control so they can be re-run |
+| W4's instrumented **`wake` / `guard`** figures | **no** — measured once, under instrumentation that is not in the tree |
+| W4's prototype **143 → 140** | **no**, and `claim.rs` says so itself: not reproducible from this checkout |
+| W4 Task 5's **29-row mutation table** | **no** — derived by a harness in a scratch directory, not by anything `cargo test` runs |
+
+A figure is safe only if a running program compares it. Everything in rows 2–7
+is a figure a reader must treat as a measurement someone took, not as a fact the
+suite maintains — which is the honest statement, and the one that survives the
+next section being appended.
 
 ### Provenance, stated as narrowly as it is true
 
@@ -5375,15 +5648,25 @@ The run-terminal row is the same 840 the fed table classifies, so the two
 sections are talking about one set of runs. Nothing here is a *new* weakness —
 it is the same one sentence, applied to the fields nobody had applied it to.
 
-Two smaller facts about the population, unchanged and still derived: **13 pairs
-were dropped** by the harvest (`valids/dag` 1, `valids/if` 9,
-`valids/parallel-nested` 3), all of them because the relation flipped between
-rounds; and the restriction removes **87** pairs across 7 entries from egret's
-side for having no counterpart in the golden — 15 under W3a's harness, over
-top-level pairs only. egret's relation domain is measured at
-`{before, overlapping}` over all **778** pairs it produces, sub-executions
-included, so dropping a pair is exactly accepting either value Kestra was seen
-to produce.
+Two smaller facts about the population: **13 pairs were dropped** by the harvest
+(`valids/dag` 1, `valids/if` 9, `valids/parallel-nested` 3), all of them because
+the relation flipped between rounds; and the restriction removes **80** pairs
+across **6** entries from egret's side for having no counterpart in the golden —
+15 under W3a's harness, over top-level pairs only. egret's relation domain is
+measured at `{before, overlapping}` over all **771** pairs it produces,
+sub-executions included, so dropping a pair is exactly accepting either value
+Kestra was seen to produce.
+
+*(**This paragraph said "unchanged and still derived: … 87 pairs across 7
+entries … over all 778 pairs" and both figures were a version behind**, which
+W4 Task 6 found by reading `RESTRICTION_REMOVES` and
+`EGRET_PAIRS_BEFORE_RESTRICTION` — the constants the sentence's own citation
+asserts — rather than the sentence. The review's fix round banked
+`valids/replay-loop` and took one entry and seven pairs out of the projection
+with it; the tables above were re-derived for that bank and this sentence was
+not, because the word "unchanged" is not checked by anything. It is the
+statement's own instance of the shape it retires below: a figure true at a
+different moment, sitting one paragraph from the figures that moved.)*
 
 ### The terminal states this oracle feeds: **426 → 0**
 
@@ -5527,12 +5810,185 @@ more a fed terminal had been hiding, four of which are W2 divergences that only 
 real handler rendering a real property can reach (`errorLogs()`, `render()`,
 `??` over an undefined *root*, and integer division by zero rendering
 `Infinity`), the fifth being a sibling still in flight when its `Parallel` failed
-— nothing calls `TaskHandler::cancel`, and W4 owns the kill path.
+— W4 Task 3 wired `TaskHandler::cancel`, and deliberately not to that seam: the
+kill path fires on a task's own `timeout:` expiring, while a run a **flowable**
+abandoned is `advance()`'s decision and `advance()` has no worker to tell.
 
 `valids/full`'s entry in that list is a correction: it was attributed to
 flow-level `outputs:` and `variables:`, and the flow has **neither** (W3b Task 1
 Concern 3). It differs on the happens-before relation alone, the same cause as
 `valids/dag`, `valids/if` and `valids/parallel-disabled-tasks`.
+
+### W4 — the ratchet did not move once in five tasks, and that is five facts
+
+`143` before W4 Task 1 and `143` at this commit, and every task in between
+measured it and reported no movement. **A number that never moves is the hardest
+thing to read honestly**, because "nothing happened" and "everything that
+happened was invisible here" print identically. This section is what separates
+them, and it is a W4 section rather than a W4 paragraph because the five tasks
+produced **six different facts** and one number:
+
+1. the **retry** hole is hidden by the *harness* — this oracle does the
+   product's job for it;
+2. the **timeout** hole is hidden by the *corpus* — the predicate fires four
+   times and no budget is short enough to expire;
+3. the **kill** hole is hidden by being *downstream of the timeout*, so its
+   predicate is never evaluated at all;
+4. three entries were **bankable and declined**, which is not invisibility;
+5. the **runner** reaches zero entries and rests entirely on its own tests;
+6. and **nothing in this workspace runs this worker at all** — `worker::tick`
+   has no production caller, so `143` is a statement about a state machine and
+   a driver and not about a deployment. That is item 15 below, and it bounds
+   every one of the five above.
+
+Only the first three are "the ratchet cannot see this". The fourth is a
+decision, the fifth is a population that does not exist, and **the sixth is the
+one to read first**: it was the fifteenth of seventeen items in a list six
+hundred lines below this section when W4 Task 6 first wrote it, and a reader who
+reads exactly the section this document points them at would have finished it
+believing `143` bounds a shipping worker.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `ad93ef2d` (W3b, on `main`) | 143 mismatching, 143 baselined, 0 broken | — |
+| Task 1 | 143 | `claim::due_retries` + `claim::wake`, called by `tick` ahead of the claim |
+| Task 2 | 143 | `worker::timeout` — a per-task budget rendered from the frozen source and enforced around `Registry::run` |
+| Task 3 | 143 | `TaskHandler::cancel` wired to the budget's expiry |
+| Task 4 | 143 | nothing: a **ruling** that one handler result stays one transaction |
+| Task 5 | 143 | `worker::commands`, `egret.container`, `egret.script.python` |
+
+Measured before and after on each task, and Task 2's "before" was taken on
+`d7233cf0` — the commit after Task 1 — with the branch stashed and
+`egret_test_template` dropped between the two runs.
+
+**`src/executor/` is byte-identical to the package base**, which is the Global
+Constraint W4 inherited and the reason every number above is about a worker
+rather than about a state machine: all **11** files under
+`crates/egret-workflow/src/executor/` have the same blob hash at `HEAD` as at
+`ad93ef2d`, verified per file rather than by a `git diff` whose empty output
+also means "nothing was checked" (`git diff --stat ad93ef2d HEAD --
+crates/egret-workflow/src/executor/` is empty too, and the file count is 11 on
+both sides, so nothing was added or deleted either). W3b's own diff against
+*its* base was 16 lines in 2 files — see item 12 — so this is a stronger
+statement than the one it inherits, not the same one.
+
+**`baseline.txt` is NOT byte-unchanged since `ad93ef2d`, and a review said it
+was.** The correction is recorded here because the claim was true in substance
+and false as stated, which is what this whole sweep has been about. Verified:
+
+```text
+blob ad93ef2d 4de4d0560c49edd45e07331b7f8e253260a80dee
+blob HEAD     8a40d34f8cc12738a11415a0a4b2dee99a214d8c   ← different
+git diff --stat ad93ef2d HEAD -- oracle-exec/baseline.txt
+  1 file changed, 6 insertions(+), 2 deletions(-)        ← b1a47222, W4 Task 3
+changed lines that are NOT comments                       0
+grep -vc '^\s*#\|^\s*$'  at ad93ef2d 143 · at HEAD 143  ← the ratchet is unaffected
+```
+
+`b1a47222` rewrote a comment from 2 lines to 6. **Every** changed line begins
+with `#`, so the 143 baselined entries are identical on both sides and every
+figure resting on them stands. The right claim is *"143 is unchanged and every
+edit to this file has been to comments"*, which a `git diff` can be asked for —
+not *"the file is byte-unchanged"*, which is simply false and which nobody
+checked because the number it protects was right.
+
+#### The three holes W4 closed, and the three different mechanisms that hide them
+
+Each row's population is derived on every run by the named test; the *reason*
+column is the part that matters, because all three rows end in the same verdict
+and only one of them ends there for the reason a reader would guess.
+
+| hole | the population, derived | is the predicate reached? | why nothing can move |
+|---|---|---|---|
+| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = 14 baselined + 11 matching; of the 14, **4** are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all, leaving **10** the waker could ever have touched | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
+| **`timeout:`** (Task 2) | **5** golden entries declare one. **4** are baselined; the **1** matching is `invalids/duplicate-parallel`, a flow Kestra *refused* — so it has no runs at all, and the reportable half of this population is empty for a reason nothing can change. *(W4's spec §1.1 says **4** for this row and is right over **its** population, the baseline; this table counts the golden. Both now name the population they count over, because a reader holding the two documents open sees a contradiction where there is a scope difference — and this file's whole subject is figures that are true under a scope nobody wrote down.)* | **Yes, exactly four times.** Instrumented `worker::timeout::guard` over all 294 entries: the budget was applied `1s`, `1s`, `250ms`, `3600s` — precisely the four declarations — and **expired 0 times** | **No corpus budget is short enough to fire.** Three of the four sit on a `Pause`, a flowable whose `timeout:` is `advance()`'s and which Kestra's own worker ignores (measured on the artifact: a `Sequential` carrying `timeout: PT1S` around a four-second `Sleep` ran to SUCCESS in 4.2 s); the fourth is an **hour** on a `core.log.Log` |
+| **kill** (Task 3) | **5** baselined ids contain `kill`, and **0** of them declare a `timeout:` anywhere in any of `Flow`'s four task lists | **No, zero times.** `Registry::cancel` hangs off the budget expiring, and the row above is why that never happens | **The five named ids are not this path's population at all**, and their own YAML says what they are: `exit-killed` is `Exit` carrying `state: KILLED`, an author-declared terminal rather than a kill anybody performs; `pause-kill-delay` is a bare `Pause`; `flow-concurrency-queue-killed-after-execution` and `flow-concurrency-parallel-subflow-kill-child` declare `concurrency: {behavior: QUEUE, limit: 1}`; and `flow-concurrency-parallel-subflow-kill` declares two `Subflow`s and no `concurrency:` of its own — it is named for what happens to its child. Four of the five are W8 constructs and the fifth is an output. The one runtime kill this corpus *does* hold — `parallel-fail-with-flowable`'s `Sleep`, abandoned by a failed `Parallel` — is `advance()`'s decision, and `advance()` has no worker to tell |
+
+**Two of these three would be lost by merging them**, which is why the middle
+column exists. Task 1's predicate is evaluated thousands of times and selects
+nothing, because the instrument that makes this oracle fast is doing the
+product's job for it. Task 2's is evaluated exactly as many times as there are
+declarations, and no declaration is small enough to fire. Task 3's is not
+evaluated at all, because it is downstream of Task 2's. *Same verdict, three
+mechanisms* — and only the first is a statement about the harness, only the
+second is a statement about the corpus, and only the third is a statement about
+this branch's own wiring.
+
+**What the ratchet is *not* silent about is retrying itself.** Eleven *matching*
+entries declare a `retry:`, all eleven with the behaviour that writes a
+`not_before`, and a change on a matching entry is one this ratchet reports —
+so `ScheduleRetry`, the `RETRYING` state and `reopen_due` putting a run back are
+covered by 11 entries the baselining argument does not disarm. (Whether each of
+the eleven *reaches* a failure and schedules a delay is not derived here; the
+declaration is.) The hole is the **waker**, not the retry.
+`the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them` prints
+all of it with every total beside its parts — `294 = 25 declaring + 264 not +
+5 this crate refuses at parse`, `25 = 14 + 11`, `14 = 4 + 10` — and it
+exists because the sentence it replaces — *"14 baselined entries declare a
+`retry:` … which is derived rather than assumed"* — was written into this
+statement by W4 Task 1 **with nothing deriving it**. The 14 was right. Nothing
+in this crate counted it until now, and the words "derived rather than assumed"
+are exactly the words that stop a reader checking.
+
+#### Three entries were bankable, and were refused — which is not the same as invisible
+
+Every hole above is something this ratchet *cannot* see. **W4 Task 4's three
+entries are something it can see and was told not to take**, and a coverage
+statement that does not separate those two is worth less than no statement.
+
+`valids/dag`, `valids/full` and `valids/parallel-disabled-tasks` bank under a
+worker that applies a whole claimed batch's results before calling `advance()`:
+**143 → 140, no regression in either direction**, measured on the prototype and
+recorded raw in `w4t4-widened-tick.txt`. The ruling refused it, and **not for
+its yield**. The binding cost is that `persist`'s four-mutation table proves the
+`outputs` fence and the state fence are *alternatives*, each sufficient alone,
+against a transaction that releases exactly **one** lease; widened, it releases
+`n`, and RUN 4 puts a defect in the surviving alternative that only bites at
+`n > 1` and watches the whole crate stay green — `a_worker_whose_lease_was_reaped_cannot_commit`
+and `a_tick_killed_between_the_handler_and_the_commit_applies_nothing` included,
+because both drive `apply_outcome` with a single `Claimed`. So the trade is
+three entries against two durability guards that would stop being guards. See
+*One result per transaction is a ruling — W4 Task 4* for all four costs and the
+step it buys. **The way back is named rather than left open**: a savepoint per
+run inside one transaction would give the interleaving without giving up the
+one-lease-per-commit shape the fence table is measured against. Nobody has built
+it; this file's job is to make sure the 143 is not read as though nothing were
+available.
+
+#### Nothing runs this worker, and that bounds all five facts above
+
+`worker::tick` has **no production caller**. A grep for `tick(`, `reap(` and
+`start_execution(` over every `crates/*/src` finds no call site; the four files
+that call them are `oracle-exec/driver.rs`, `tests/worker.rs`,
+`tests/executor.rs` and `tests/sql_starrocks_live.rs` — and `tests/executor.rs`
+does it through `#[path = "../oracle-exec/driver.rs"] mod driver;`, so the call
+is in the compiled binary rather than in that file's own text. `egret-bin`
+builds a `WorkflowState` — the flow repo and its refs, so flows can be authored,
+published and read over HTTP — and no claim loop.
+
+So the reaper, the lease fence, the waker and the budget have never met an
+operator's `working_timeout_s`. **The three holes above are real defects that
+were really closed**, and every durability property in item 4 is really proved —
+of code that no deployment executes. Item 15 has the full derivation, and
+`worker::claim`'s doc for `wake` now carries it too, because that doc said
+`tick` calling the waker *"is what gives it a production caller"* and that is
+the sentence a reader would quote as evidence the waker is wired. It is wired to
+`tick`; nothing is wired to `tick`.
+
+This is not W4's to fix and it is not a defect in anything W4 shipped. It is the
+scope of the number.
+
+#### The runner reaches zero entries, and its own tests are the whole instrument
+
+W4 Task 5's handlers are further outside this oracle than `egret.sql` is, and
+the count that says so is in item 3b. What stands in for the ratchet there is a
+mutation table of **29 rows — 29 compiled, 29 killed, 0 survivors, 70 killers,
+27 of the 29 killable with no daemon** — derived from a single run of the
+harness against `136309cd` and, after a defect in the *renderer* let a
+non-compiling row ship as `compiles ✓`, computed from the **rendered text**
+rather than from the arithmetic behind it. The two rows that need a daemon are
+the two questions no pure function can answer: *was a process spawned*, and
+*does the daemon agree which container this worker owns*.
 
 ### What this ratchet does **not** prove
 
@@ -5598,6 +6054,103 @@ gate itself is driven in both directions by
 is the one assertion in that file that runs without an engine. See *W3b Task 6 —
 `egret.sql`, and the coverage this ratchet does NOT give it*.
 
+**3b. `egret.container` and `egret.script.python` reach zero corpus entries too,
+and for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
+rather than trusting the brief:
+
+| population | flows naming a script/container/shell/command type | flows naming `core.log.Log` (the control) |
+|---|---|---|
+| the whole corpus — 345 flows | **0** | 108 |
+
+**Derived by `no_corpus_entry_can_exercise_the_egret_sql_handler`**, the same
+test item 3 rests on, which asserts `(345, 0, 0, 108)` — every corpus flow, the
+`egret.*` flows, the script/container/shell/command flows of any vendor, and the
+control — with the total beside the parts. W4 Task 6 moved it there; it was a
+shell pipeline quoted in this section, which is the one thing this statement
+says it never does:
+
+```bash
+# W4 Task 5's original derivation, kept as the record of how the zero was found
+cd crates/egret-workflow/oracle-exec
+find corpus -name '*.yaml' -o -name '*.yml' | wc -l                     # 345
+grep -rhoE 'type:\s*\S+' corpus | sed 's/.*type:[[:space:]]*//' | sort -u \
+  | grep -icE 'script|container|shell|command|docker|bash|python|node'   # 0
+```
+
+**The pipeline and the test count different things and agree**, which is worth
+saying rather than leaving for someone to notice: `sort -u` makes the pipeline's
+zero a count of distinct **types**, and the test's is a count of **flows**. Both
+are zero, and only one of them is asserted on every run. The test's filter also
+carries a positive control of its own — a filter that answers `false` to
+everything produces this table exactly.
+
+The control is there for item 3's reason: a scanner that parsed nothing would
+report zero and look exactly like the truth, and it cannot also report 108 flows
+naming a type it failed to parse. Kestra's own script and container tasks live
+in plugin jars (`/app/plugins/io_kestra_plugin__plugin-script-*.jar`,
+`…plugin-docker…`) that this corpus never reaches, so **the ratchet sitting at
+143 after Task 5 is not evidence about either handler.**
+
+What they rest on instead is `tests/container_docker_live.rs` against a real
+Docker daemon and the unit tests in `worker::commands`,
+`worker::handlers::container` and `worker::handlers::python`. Fix round 1 moved
+the split between the two: `ingest_line` and `ingest_output_file` are pure
+functions now, so the marker cap, the output-file caps, the missing file, the
+directory and the log level are all judged **without a daemon**, and what stays
+in the live suite is what genuinely needs one — *was a process started*, and
+*does the daemon agree which container this worker owns*.
+
+**That suite does not use libtest**, and that is the other half of item 3's
+rule. libtest has no stable way to report a test IGNORED at run time, so every
+self-skipping suite in this workspace counts a test that did not run as
+**passed** — which is exactly what made the `egret.sql` defect above readable
+only from the clock. Measured, on one binary:
+
+```text
+daemon + images:                      15 passed;  0 failed;  0 ignored — 15.21s
+no daemon, no opt-out:                 1 passed; 14 failed;  0 ignored —  0.00s, exit 101
+no daemon, EGRET_ALLOW_DOCKER_SKIP=1:  1 passed;  0 failed; 14 ignored —  0.00s
+daemon up, images not pulled, opt-out: 1 passed;  0 failed; 14 ignored —  0.00s
+```
+
+*(All four rows moved by one, because the suite gained
+`a_symlinked_output_file_cannot_read_the_worker_hosts_files` in Task 5's fix
+round 2 and this table was written before it. The first three were **re-measured
+on this tree** — the "no daemon" half by pointing `DOCKER_HOST` at a socket that
+does not exist, which is the axis the gate reads.*
+
+*The fourth was **derived from `main`**, and W4 Task 6's first attempt at this
+paragraph got it wrong twice over: it left the row at 13 and wrote that the row
+had not been re-measured because emptying this machine's image cache costs more
+than the row is worth. **The figure is not about the image cache.** `main`'s
+`Ok(false)` arm reports `selected.len()` ignored; `selected` is
+`daemon_cases()` — **14** cases — filtered by the CLI filter; and the image axis
+decides only **which verdict** is produced, never how many cases are in it. So
+the row is 14 by reading thirty lines of `container_docker_live.rs`, and the
+"not re-measured" caveat was a category error sitting **two lines under a note
+saying every row moved by one**. It was the fourteenth stale figure, inside the
+correction that retires the other thirteen. A caveat is not a substitute for a
+derivation, and "I did not measure it" is only honest when measuring is what the
+figure needed.)*
+
+The image axis is under the same opt-out as the daemon axis (fix round 1's
+Important 3: it was not, so a machine with Docker running and nothing pulled
+hard-failed through `just check`), and the one test that passes in every row is
+the gate's own, which drives a pure verdict function and needs neither.
+
+Neither handler is in `Handlers::with_core_tasks()` **or** in the ratchet's own
+`oracle-exec/driver.rs` registry, for `egret.sql`'s structural reason plus one
+of their own: a registry that runs arbitrary container images by default is a
+capability decision and not a handler's. A caller wires them in one line.
+
+**Both are in `spec::registry::TASK_TYPES`, and the first version of this
+section was wrong to imply otherwise.** `egret.container` has been there since
+W1; `egret.script.python` was added in fix round 1, because the `egret.python`
+row it first tried to claim is the **notebook-kernel** task (programme spec
+§6.4) and its `notebook` reference is required.
+`worker::handlers::container`'s `the_publish_table_and_these_handlers_agree`
+pins all of that, so this paragraph cannot decay into the last one.
+
 **4. Durability is proved by `tests/worker.rs`'s properties, not by this
 corpus.** There are **five**, and the fifth is the whole-branch review's: *a
 worker whose lease was reaped must not be able to commit.* The first four could
@@ -5606,8 +6159,11 @@ called `apply_outcome` twice with one `Claimed` — and the hole it names needed
 configuration at all: `reap` clears `claimed_at` and leaves `state = 'RUNNING'`,
 which is the claim predicate, so a run is re-claimable while its first handler is
 still in flight, `DEFAULT_WORKING_TIMEOUT` is an hour, `Handlers::with_core_tasks`
-registers `Sleep`, and `duration: PT2H` opens the window. Nothing calls
-`TaskHandler::cancel`. Measured on the shipped code, two terminals landed on one
+registers `Sleep`, and `duration: PT2H` opens the window, with nothing able to
+tell the first handler to stop — W4 Task 3's kill path fires only on a
+task-level budget, inside the worker that owns the run, and `reap` is an
+`UPDATE` run by another process holding no handle to anyone's future. Measured
+on the shipped code, two terminals landed on one
 attempt, the second **wiping `ended_seq` from `Some(4)` to NULL** — the column
 migration 0136 exists to hold and the happens-before endpoint this oracle reads —
 and the execution reached `FAILED` while a successor was `RUNNING` and claimable,
@@ -5627,17 +6183,19 @@ by construction: a re-run that reaches the same terminal state produces an
 **identical trace**, so the only place a duplicate execution is visible is the
 handler's call log. A green ratchet is compatible with running every task twice.
 
-**5. One run per tick is a ruling, not an accident.** Four entries —
-`valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`, `valids/full` —
-reproduce every run, attempt and execution state Kestra recorded and differ on
-the **happens-before relation alone**. This driver finishes one task run per tick
-and creates that run's successors in the same transaction, where Kestra's worker
-pool finished two siblings before either successor existed. Closing it means
-applying several results before calling `advance()`, which changes the
-transaction boundary W3b Task 2 built the durability properties on. **Four
-ordered-pair entries is the wrong price for the durability guarantee**; W4
-introduces a real worker pool and owns the decision. This is also the single
-largest lever left on the ratchet.
+**5. One result per TRANSACTION is a ruling, and W4 Task 4 made it.** Four
+entries — `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks`,
+`valids/full` — reproduce every run, attempt and execution state Kestra recorded
+and differ on the **happens-before relation alone**. `worker::apply_outcome`
+applies one handler result, drives `advance()` to a fixed point and commits,
+where Kestra's worker pool finished two siblings before either successor
+existed. See *One result per transaction is a ruling* below for both sides of
+the measurement, the three entries the alternative banks, and the four costs it
+was refused for — the binding one being that widening would leave two lease-fence
+guards green over a path they do not touch, measured in
+`w4t4-widened-tick.txt` RUN 4. It is still the single largest lever left on the
+ratchet, and it is now a decided one rather than an open one, with a named way
+back in.
 
 **6. 84 of the 294 executions end unfinished**, counted and named by
 `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type
@@ -5720,11 +6278,20 @@ observed flaking*, from a deterministic one-token change — so the claim's orde
 demonstrably what decided those entries' verdicts, and that order is now a total
 one over a unique key.
 
-**The corpus did not move.** Every derived figure in this statement is identical
-either side of the tiebreak — 294/144/144/0, 150 matching, 16/6/19, 35 entries
-with a `spawned`, 565 + 126 pairs, 87 removed, the field breakdown, the residual
-baseline. The order the tiebreak pins is the one an idle machine already
-produced; what changed is that it is now guaranteed rather than observed.
+**The corpus did not move.** Every derived figure this statement carried was
+identical either side of the tiebreak **on the day the experiment was run** —
+294/144/144/0, 150 matching, 16/6/19, 35 entries with a `spawned`, 565 + 126
+pairs, 87 removed, the field breakdown, the residual baseline. The order the
+tiebreak pins is the one an idle machine already produced; what changed is that
+it is now guaranteed rather than observed.
+
+*(Read that list as a record, not as this statement's figures: five of the eight
+have moved since, with `valids/replay-loop`'s bank at the review's fix round —
+143/151, 17/8/16, 80 removed. **The tiebreak experiment has not been re-run**,
+and W4 Task 6 is not claiming it would give the same answer; what it re-derived
+is the figures, not the experiment. A sentence of the form "every figure here is
+identical under X" ages with the figures and not with X, which is why it is now
+dated instead of standing.)*
 
 **And the tiebreak is a choice, which the third row makes visible.** Under
 `run_ix DESC` this oracle banks `valids/dag` — the entry this file has called
@@ -5748,7 +6315,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 | owner | entries | what egret does that Kestra did not |
 |---|---|---|
 | **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
-| **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. Nothing calls `TaskHandler::cancel` |
+| **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
 | **W8** (`sla:`, flow `concurrency:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
 | **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
 
@@ -5756,18 +6323,77 @@ A **stalled** execution is deliberately not in this class: egret doing less than
 Kestra is under-acceptance, which the ratchet already reports as a mismatch and
 item 6 already counts.
 
-**11. A retry with no live sibling never resumes, and `claim.rs` used to say the
-opposite.** Its module doc justified omitting a `not_before` term with *"the
-delay is `advance()`'s to enforce and it already does"*. The first half of that
-paragraph stands — the claim takes only `RUNNING` and a run carrying a
-`not_before` is `RETRYING`, so the term could never fire — but nothing in this
-worker makes the delay elapse. `retry::reopen_due` is `not_before`'s only reader
-and it runs inside a `settle` whose `now` is fixed; `reap` excludes `RETRYING` as
-the claim does; and `resume`, the one entry point that re-reads the clock, has no
-production caller — its only caller is this oracle's `driver::pass_time`, which
-*rewinds* `executions.created_at` because there is no other way to make time
-pass. W4 owns the loop that wakes on a deadline. The sentence is corrected in
-place rather than left reading like a guarantee.
+**11. A retry with no live sibling never resumed, and `claim.rs` used to say the
+opposite — CLOSED by W4 Task 1, and this oracle could see neither the hole nor
+the fix.** As W3b left it: the module doc justified omitting a `not_before` term
+with *"the delay is `advance()`'s to enforce and it already does"*; nothing in
+this worker made the delay elapse; `retry::reopen_due` is `not_before`'s only
+reader and it runs inside a `settle` whose `now` is fixed; `reap` excludes
+`RETRYING` as the claim does; and `resume`, the one entry point that re-reads
+the clock, had no production caller — its only caller was this oracle's
+`driver::pass_time`, which *rewinds* `executions.created_at` because there is no
+other way to make time pass.
+
+W4 Task 1 added `claim::due_retries` and `claim::wake`, and `tick` calls the
+waker ahead of the claim. **The second half of W3b's own correction turned out
+to be false as well**: it said a `not_before` term *"would be a guard nobody
+could ever see fail"*, and the term exists now, in a statement of its own, with
+a test that has seen it fail in both directions
+(`tests/worker.rs::a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`).
+What is true is narrower: the term cannot live on the *claim*, because a
+`RETRYING` run is not runnable until `advance()` puts it back to `CREATED`.
+
+**The ratchet did not move: 143 mismatching before and after, 0 banked, 0
+regressions, over three runs each side.** 14 baselined entries declare a
+`retry:` with a non-zero `interval:`, 10 of them with the only behaviour that
+writes a `not_before` at all, and none of them moved. `wake` was instrumented to
+print every execution it selected and run over the whole 294-entry oracle: it
+fired **zero** times, with `tests/worker.rs` as the positive control for the
+instrument on the same build. The mutation that deletes the `RETRYING` term is
+invisible here for the same reason — under it the whole `tests/executor.rs`
+binary stays green and only `tests/worker.rs` fails. **This is a hole the ratchet
+speaks for in neither direction.**
+
+**Two things W4 Task 6 changed about this paragraph, and it kept the 14.**
+
+*First, it is derived now.* This paragraph said the 14 was *"derived rather than
+assumed"* and **nothing derived it** — no test in this crate counted a `retry:`
+declaration until
+`the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`, which
+now prints the whole split with every total beside its parts. The number was
+right; the citation was the assumption. It also widens the population, because
+the coverage question is not a question about `baseline.txt`: **25** golden
+entries declare a `retry:`, **11 of them matching**, and a change on a matching
+entry is one this ratchet reports. So retrying itself — `ScheduleRetry`, the
+`RETRYING` state, `reopen_due` — is not the hole. **The waker is.**
+
+*Second, the mechanism was stated backwards.* This paragraph said `pass_time`
+*"rewinds `executions.created_at` before any deadline can elapse in wall-clock
+time, so `due_retries`' predicate is never satisfied"*. Rewinding `created_at`
+is what **makes** a deadline elapse, so as written the sentence gives the reason
+the predicate would be satisfied. The true mechanism is one line further on:
+`driver::pass_time` rewinds the column **and then calls `worker::resume`
+itself**, in the same function (`driver.rs`, the `UPDATE` and the `resume`
+immediately under it). So the oracle contains a second waker, and it consumes
+every due retry inside the call that made it due — `tick`'s own `wake` runs on
+every step and never sees a `RETRYING` run past its deadline.
+
+**And `driver.rs` had already documented that**, in the module doc every task in
+this package read before touching the oracle: *"it changes one timestamp and
+**calls the same `resume` any other caller would**"* (`driver.rs`, the numbered
+list, item 2). So the sentence this statement carried — that the oracle's
+intervention is the rewind — did not merely lack a derivation; it contradicted
+the driver's own doc, in the same directory, for a whole package. That is the
+strongest available argument for why this section exists at all: **the fact was
+not missing, it was written down in the file the claim is about, and five tasks
+wrote the opposite anyway.** A claim about a mechanism has to be read off the
+mechanism, and the cheapest place to read it off is the doc of the function
+being described. `due_retries`'
+`SELECT` is therefore *evaluated constantly and selects nothing*, which is a
+different fact from a predicate that is never reached, and item 13 is a third
+thing again. The zero was measured correctly either way; only the explanation
+was wrong, and an explanation is what a reader of a coverage statement carries
+away.
 
 **12. `advance()` is unchanged by the whole of W3b** — and the sentence that
 used to be here overstated it, so it is restated as measured. `git diff --stat
@@ -5783,6 +6409,181 @@ crates/egret-workflow/src/executor/` is empty, checked with `if [ -z "$(…)" ]`
 rather than a bare `&& echo CLEAN`. So every W3a statement about the state
 machine still stands as W3a made it; what changed is the driver in front of it.
 
+**W4 is stronger and the difference is worth stating rather than folding in:
+all 11 files under `src/executor/` are blob-identical at `HEAD` to `ad93ef2d`,
+W4's own base**, so this package's 16-line caveat does not have a W4 twin. Read
+per file, because a `git diff` that prints nothing looks the same whether it
+compared eleven files or none, and the file count is checked on both sides so a
+deletion cannot hide inside an empty diff.
+
+**13. A task-level `timeout:` never reached a handler — CLOSED by W4 Task 2, and
+the ratchet is blind to it for a different reason than item 11.** W3b measured
+that `models::Task`'s deserializer takes `timeout` out of a leaf's `spec` before
+a handler sees it, so `egret.sql` ran under a 300-second constant unrelated to
+what the author wrote and every other handler ran unbounded;
+`executor::plan::PlanTask::timeout` is `None` on every task and `advance()`
+never reads one, so nothing anywhere enforced it. W4 Task 2 adds
+`worker::timeout` — the budget is rendered per tick from the execution's frozen
+`source`, carried on `TaskInput::timeout`, and enforced around `Registry::run`
+in `claim::run_one`, which is where the artifact enforces it
+(`AbstractWorkerCallable.callWithTimeout`). A timed-out run is **FAILED, not
+KILLED**, carrying Kestra's own `Timeout after HH:mm:ss.SSS`; both facts were
+taken from the pinned image twice, by `javap` and by running flows through a
+standalone server.
+
+**The ratchet did not move: 143 mismatching before and after, 0 banked, 0
+regressions, over three runs each side** — the "before" measured on `d7233cf0`
+itself, with the branch stashed and `egret_test_template` dropped between the
+two.
+
+**The "four baselined entries declare a `timeout:`" figure counts declarations,
+not reachable entries, and the reachable population is EMPTY.**
+`tests/executor.rs::the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet`
+derives it on every run and asserts the total beside the parts: **143 baselined
+= 4 declaring a `timeout:` + 139 not**; the four are `valids/full`,
+`valids/pause-errors-finally-after-execution`, `valids/pause-timeout` and
+`valids/pause-timeout-allow-failure`; **three of them declare it on a `Pause`**,
+which is a flowable whose `timeout:` is `advance()`'s and which Kestra's own
+worker ignores (measured: a `Sequential` carrying `timeout: PT1S` around a
+four-second `Sleep` ran to SUCCESS in 4.2 s); and the **one** declaration on a
+type this worker has a handler for is `valids/full`'s `t3` — a `core.log.Log`
+asking for `PT60M`, a budget it cannot outrun.
+
+The same answer arrives from the other side. `worker::timeout::guard` was
+instrumented to print every budget it applied and every one that expired, and
+the whole 294-entry oracle was run on that build: the budget was applied
+**4** times — `1s`, `1s`, `250ms`, `3600s`, i.e. exactly those four
+declarations — and expired **0** times, with
+`tests/worker.rs::a_task_level_timeout_reaches_the_handler_and_the_worker_enforces_it`
+as the positive control for the instrument on the same build (it printed
+`BUDGET-APPLIED 1s`, `BUDGET-EXPIRED 1s`, `BUDGET-APPLIED 30s`). The
+instrumentation was removed and the file re-hashed against its pre-instrumentation
+copy at the destination, not the source.
+
+Two things that run is also evidence for. First, **a `Pause` IS claimed by this
+worker and DOES get a worker budget applied** — `build_plan` plans `Pause`,
+`Subflow`, `WorkingDirectory`, `WaitFor` and `AllowFailure` as opaque
+`TaskKind::Runnable`s, which Kestra's worker never sees. Nothing reaches the
+hazard today (no handler is registered for `Pause`, so `Registry::run` refuses
+before any budget can expire), and it is written down in `worker::timeout`'s
+module doc rather than special-cased, because a special case there would be a
+guard nobody could ever see fail. Second, **this hole is one the ratchet speaks
+for in neither direction**, like item 11 but for a different reason — and the
+difference is the whole reason both items are here. Item 11's predicate runs on
+every tick and *selects nothing*, because the driver's own `pass_time` resumes
+each retry inside the call that makes it due. This one's predicate is *evaluated
+four times*, once per declaration in the corpus, and no corpus budget is short
+enough to fire. Item 14's is *not evaluated at all*, because it is downstream of
+this one. Three holes, three mechanisms; *W4 — the ratchet did not move once in
+five tasks* above puts them in one table for exactly that reason.
+
+A side effect worth recording because it changes what this repository can
+assert: `worker::Outcome::message` is **persisted** now
+(`workflow.task_runs.message`, migration 0137), written by `apply_outcome` in
+the same fenced statement as `outputs`. W3b's own doc said *"Nothing persists it
+yet"*. Nothing in `golden.json` records a failure message, so the ratchet still
+cannot compare one — but a test can now read a run's reason back, which is what
+made the timeout's boundary assertable at all.
+
+**14. The kill path is wired and this oracle has never reached it — CLOSED by
+W4 Task 3, and it is the third mechanism, not a repeat of the other two.**
+`TaskHandler::cancel` is called by `cancel::guarded` when a task-level budget
+expires, which is the artifact's only `kill(null)` site. No budget in this
+corpus expires (item 13), so `Registry::cancel` is reached **zero** times across
+all 294 entries, and the predicate is not merely unsatisfied — it is never
+evaluated.
+
+**The five ids the spec's number came from are not this path's population**, and
+`the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population`
+derives that on every run rather than asserting it: the five baselined ids whose
+name contains `kill` are `valids/exit-killed`,
+`valids/flow-concurrency-parallel-subflow-kill`,
+`…-kill-child`, `valids/flow-concurrency-queue-killed-after-execution` and
+`valids/pause-kill-delay`, and **not one of them declares a `timeout:`** anywhere
+in any of `Flow`'s four task lists — the only thing that reaches this path. What
+they are instead, read off their YAML: one `Exit` with `state: KILLED` (an
+author-declared terminal), one bare `Pause`, two flows declaring
+`concurrency: {behavior: QUEUE, limit: 1}`, and one parent that declares two
+`Subflow`s and is named for the concurrency limit on its *child*. Four W8
+constructs and one output. That test's second leg is the one that
+could actually fail in future: every handler in the driver's own registry must
+answer `Ok(())` to a cancel, read from the registry rather than listed, so a
+fifth handler that refuses one would be caught here instead of turning a
+budget's expiry into a refusal nothing has seen.
+
+The corpus's one *runtime* kill stays where item 10 put it:
+`parallel-fail-with-flowable`'s `Sleep`, still in flight when its sibling failed
+the `Parallel`. That is `advance()` abandoning a run, and `advance()` has no
+worker to tell — a different seam from the budget, deliberately not wired to it.
+
+**15. Nothing in this workspace runs this worker, and that bounds every claim
+above.** *(Also stated as the sixth fact in W4's own section, and deliberately
+in both places: it was only here when this statement was first written, fifteenth
+of seventeen, six hundred lines under the section a reader is pointed at.)*
+
+`worker::tick` has **no production caller**: a grep for `tick(`, `reap(` and
+`start_execution(` over every `crates/*/src` finds no call site at all. Four
+files reach them, all four on the test side — `oracle-exec/driver.rs`,
+`tests/worker.rs`, `tests/executor.rs` and `tests/sql_starrocks_live.rs` — and
+**the scope of that sentence is the compiled binary rather than the file**:
+`tests/executor.rs` contains no such call in its own text and pulls the driver
+in with `#[path = "../oracle-exec/driver.rs"] mod driver;`. In a document whose
+subject is figures that are true under an unstated scope, that distinction is
+not a footnote. `worker::reap` and `worker::start_execution` are in the same
+position. `egret-bin` builds a `WorkflowState` — the flow repo and its refs, so
+that flows can be authored, published and read over HTTP — and no claim loop.
+So the runner this package built is exercised by exactly two things, this oracle
+and this crate's tests, and a deployment runs none of it. **That is not a defect
+and it is not this package's to fix**, but it is the reason a reader must not
+read `143` as *"the worker is fine in production"*: there is no production of it
+yet, and the reaper, the lease fence and the waker have never met an operator's
+`working_timeout_s`.
+
+**16. Two divergences the ratchet cannot hold, both measured on the artifact
+rather than reasoned about.**
+
+*`egret.sql` does not stop the statement it timed out.* `worker::timeout::guard`
+drops the handler's future and reports FAILED with Kestra's own
+`Timeout after HH:mm:ss.SSS`; on StarRocks the query goes on running
+engine-side, because `execution::connector::starrocks`'s `execute` leaves
+`limits.timeout` **unread** — its own doc says so — and the cancellation token
+`run_bounded` builds is private to that function. Kestra's SQL task **does**
+stop it: `AbstractJdbcQuery` overrides `kill()`, which calls `Statement.cancel()`
+then `Statement.close()`. So this is a *measured divergence from the artifact*,
+not parity, and it is a **runtime over-acceptance** of the shape item 10
+registers — egret leaving work running that Kestra killed — which item 10's
+register cannot hold, because that register is derived from the two traces and
+no corpus entry names an `egret.*` type at all. It is recorded here instead,
+with the fix and its price in `worker::handlers::sql`'s doc: a cancel verb on
+`QueryExecPort` (17 implementation sites, 16 of them test fakes), a
+`KILL QUERY` path on a second connection in the StarRocks connector, and a live
+assertion. A `query_timeout` session variable would bound it more cheaply, and
+that connector is **shared with the Data API serving path**, so it is a contract
+change with an owner who is not this package.
+
+*A declared output file can still leave the working directory, inside the
+container.* `egret.container` refuses a symlink at any component of a declared
+path, `lstat` rather than `stat`, so no byte of the **worker host** crosses into
+a task's outputs. What remains is a declared name like `etcdir/passwd` where
+`etcdir` is a link the *container* made: `docker cp` resolves it container-side
+and egret returns the container's own `/etc/passwd`. Kestra returns **no entry
+at all** for that leg (its `MatcherFileVisitor` walk simply does not match the
+name) and an **empty file** for the leaf leg (a tar symlink entry carries no
+content for `Files.copy` to materialise). The two legs differ, an earlier draft
+of this gave one answer for both, and neither leg reaches the host — which is
+why the residual is accepted rather than fixed.
+
+**17. A worker that dies leaves containers and staging directories behind, and
+nothing collects them.** Reproduced, not hypothesised: killing three concurrent
+gates with `pkill -f 'target/debug/deps/'` left **four** `alpine:3.20` containers
+`Exited (0)`, found afterwards by
+`docker ps -a --filter label=egret.io/taskrun-id`, each carrying its run id,
+lease and attempt on its labels. The labels are the whole of the mitigation.
+There is no reaper for them, no `resume:` path, and the staging directory under
+the worker's own tree survives the same way. `reap` reclaims the *lease*, which
+is the row; nothing reclaims the process's leavings. An operator gets a query
+and no collector.
+
 ### The stale twins this statement retires
 
 W3a's README ended up carrying **two true-at-different-moments figures for one
@@ -5793,10 +6594,10 @@ must take from here instead:
 
 | where | what it says | why it is not current |
 |---|---|---|
-| header, Task 6 note | *"41 entries, 142 sub-executions, **33** of the 41 differing on nothing else"* | the field was empty then. **16 match, 6 differ only inside it, 19 on more** |
+| header, Task 6 note | *"41 entries, 142 sub-executions, **33** of the 41 differing on nothing else"* | the field was empty then. **17 match, 8 differ only inside it, 16 on more** (this row said 16/6/19, which was the split before the review's fix round — a stale twin inside the table that retires them; found by W4 Task 6 against `SPAWNED_ENTRIES_THAT_MATCH`) |
 | header, Task 7 note | *"the sub-execution hole is **38** of 41, not 33"* | same quantity, a third moment |
 | *What Task 6 had to change*, the 41 table | *"33 at Task 6, 38 at Task 7, **39** at the final review"* | same quantity, a fourth moment |
-| *What this oracle does not prove*, ordered-pair bullet | *"the kept 1104 … are the whole of what this oracle asserts about serialisation"* | **354** are; already corrected once, by 227, and still too wide by 750 |
+| *What this oracle does not prove*, ordered-pair bullet | *"the kept 1104 … are the whole of what this oracle asserts about serialisation"* | **357** are (354 when this row was written); already corrected once, by 227, and still too wide by 747 |
 | same bullet | *"only **877** … are ever asserted"* | 877 is what the comparison *reads*, not what it can report a change to |
 | same section, sub-execution bullet | *"`Command::SpawnExecution` is emitted; **nothing executes one until W3b/W6**"* | `worker::spawn` executes it and this oracle drives it. W3b Task 4 annotated both occurrences and deliberately left them for this sweep |
 | header, W3b Task 1 note | *"11 of the 150 … agree only because the harness feeds a terminal"* | the feed is gone; all 11 were lost, with five more the feed was hiding |
@@ -5814,10 +6615,172 @@ retired being used again in the same branch:
 | *W3b Task 1*, the regeneration note | *"Task 1's **172** … are in this file's coverage statement"* | that statement carries no `172`, no `171` and no `ceiling` |
 | *What the oracle feeds in*, last paragraph | *"**189** of the **565** fed"* | the table 23 lines above says **575**; 565 is where Task 6 left the bucket |
 | *W3b Task 5*, hole 2 | *"still asserted at 877 + 227 = 1104"* | **written in this branch**, and by a task whose own statement had just retired "asserted" for that population: **357** are reportable |
+| *What this ratchet does not prove*, item 2 and the pairs table | 87 pairs removed across 7 entries, over 778 produced | **80 across 6, over 771** — corrected in place above, because those two are the coverage statement's own and it does not get to keep a record |
 
 And one number this statement itself published wrong: **630** fed terminals,
 where 204 of them are inside sub-executions egret never created and nothing was
-supplied to them. It is **426**, derived above from this file's own table.
+supplied to them. It is **426**, derived above from this file's own table
+(`575 − 189 = 386`, `55 − 15 = 40`, `386 + 40 = 426`) — **and this statement's
+own preamble went on saying 630 for three more commits**, four lines under the
+sentence claiming this section outranks every other. The re-review of W4 Task
+6's second fix round found it, together with its twin in `runnable.txt`.
+
+**Two sites still read 630 and are correct, so a sixth pass does not need to
+touch them**, and the distinction is the whole of the correction: *What the
+oracle feeds in* (whose blockquote already opens *"nothing in this section is
+current"*) and W3b Task 5's before/after table both count the **gross size of
+the two buckets** — 575 `Runnable` + 55 `Loop` — which is 630 and always was.
+**630 is wrong only as a count of terminals *fed***, which is what the preamble
+called it. A quantity with two readings needs the reading named beside the
+number, not the number changed everywhere it appears.
+
+#### The stale twins W4 retires, and the class one correction did not close
+
+W4's five tasks found a stale claims-list apiece — `NOT_YET_ENFORCED` carrying
+two false rows, this file carrying four false *"nothing calls
+`TaskHandler::cancel`"* sentences and a wrong implementation count,
+`worker/commands.rs` carrying four doc comments naming a handler that had been
+renamed, and nine lines across the specs and plan in two languages saying W4
+builds `egret.python` when the programme spec's §6.4 gives that name to the
+notebook `KernelLauncher`. Five separate finds, and each read as though it had
+closed the class. **It had not**, and Task 6's sweep is the evidence: the
+largest group below is one event's — the whole-branch review's fix round banking
+`valids/replay-loop` — whose corrections landed in the tables that were
+re-derived and nowhere else.
+
+| where | what it says | why it is not current |
+|---|---|---|
+| this statement, *The ordered pairs*, last paragraph | *"unchanged and still derived: … the restriction removes **87** pairs across 7 entries … over all **778** pairs"* | **80 across 6, over 771.** Both are asserted by `RESTRICTION_REMOVES` and `EGRET_PAIRS_BEFORE_RESTRICTION`, i.e. by the very test the sentence cites; the word "unchanged" is what nothing checks. **Corrected in place** — this statement does not get to keep a record |
+| this statement, *The stale twins*, the Task 6 note row | *"**16** match, **6** differ only inside it, **19** on more"* | **17 / 8 / 16**, from `SPAWNED_ENTRIES_THAT_MATCH` and its siblings. A stale twin inside the table that retires stale twins. **Corrected in place** |
+| this statement, item 9, *The corpus did not move* | *"Every derived figure in this statement is identical either side of the tiebreak — 294/144/144/0, 150 matching, 16/6/19, … 87 removed"* | four of the eight listed figures are demonstrably not what this statement carries now — `294/143/143/0`, **151** matching, **17/8/16**, **80** removed — and the count is left at "four" rather than raised to a tidier number, because whether the field breakdown and the residual baseline also moved with `valids/replay-loop` was not re-derived here. **Dated in place**: a claim of the form *"every figure here is identical under X"* ages with the figures, and the tiebreak experiment was **not** re-run |
+| this statement, item 3b, the four-row libtest table | `14 passed / 13 failed / 13 ignored` | **15 / 14 / 14** — the suite gained a test in Task 5's fix round 2. Re-measured on this tree for three of the four rows |
+| this statement, item 11 | *"14 baselined entries declare a `retry:` … which is derived rather than assumed"* | the **14 is right**; nothing derived it. `the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them` does now, and it also shows the population the paragraph left out: **25** entries declare one, **11 of them matching** |
+| this statement, item 11 | *"`pass_time` rewinds `created_at` **before** any deadline can elapse … so the predicate is never satisfied"* | rewinding is what **makes** a deadline elapse. The mechanism is that `pass_time` calls `worker::resume` itself; corrected in place |
+| *What this oracle does not prove*, the W3b annotations (2 places) | **354** of the 1104 reportable, the other **750** | **357 / 747**. A correction is a sentence like any other and ages like one |
+| *W3b Task 6*, the *What proves what, kept apart* table | *"the state machine reproduces Kestra on **150** of 294 comparable entries"* | **151.** Left in place — it is a task's own record — but it is listed because that table reads as timeless where the paragraphs around it read as dated, and a claim/instrument table is exactly what a reader quotes |
+| `runnable.txt`, *the denominators, re-derived* | 150 matching / 144 baselined, `127 + 23` and `139 + 5` | **151 / 143**, `128 + 23` and `138 + 5` |
+| `runnable.txt`, *the ordered pairs* | 354 / 750, nested 99 / 128; the flip table's `6 REGRESSIONs`, `40 REGRESSIONs` and `green, 144 mismatching` | **357 / 747**, nested **102 / 125**; **7**, **41**, `green, 143` |
+| `runnable.txt`, the W3b *measured now* table | `16 of the 41 MATCH / 6 / 19` | **17 / 8 / 16** |
+| `runnable.txt`, *the terminal states this oracle FEEDS* | *"leaves the ratchet green at **144**"* | **143** |
+| `runnable.txt`, *entries differing on the happens-before relation ALONE* | *"That is a RULING (see the W3b plan) … and **W4 owns it**"* | W4 **took** it — Task 4 ruled, and the ruling is *one result per transaction*. Three of the four bank under the alternative and were refused for a cost that is not the yield |
+
+**Two more live outside this directory, and they are the same shape one step
+further out.** W4's design spec carries a §1.1 headed *"The '20 baselined
+entries' was a union of three declaration greps"* — and **§2.1, thirty lines
+below it, still said *twelve*.** Correcting a table does not correct the prose
+under it. Worse, **the Vietnamese spec had no §1.1 at all**: the correction was
+written in one language and the reference copy carried the uncorrected claim with
+no marker. Both are fixed at the source, and its kill row is corrected too — it
+said the flow-id matches *"declare no runnable task at all"*, and a `Subflow` is
+planned, opaquely, as a runnable.
+
+**The dispositions differ by file, and deliberately.** The rows in *this
+statement* are corrected **in place**, because this section is not a record —
+it is the thing every other section defers to, and a coverage statement with a
+stale figure in it is worse than one that never carried the figure. The
+`runnable.txt` rows are **superseded by name**, in a `W4` block that this file's
+own convention put there twice already: rewriting a record makes two chances to
+disagree instead of one, and those blocks are headed with the task that measured
+them.
+
+#### The rule this sweep ends with, and the two it had to discard to get there
+
+**Read this first if you are sweeping.** Three formulations were tried, each
+falsified by the pass after it, and only the third survives:
+
+| # | formulation | what falsified it |
+|---|---|---|
+| 1 | *every figure a test asserts was already right, so look where no test asserts* | `tests/executor.rs` carried a **fourth** copy of the flip table in a doc comment, and the assertion **message** under `(622, 125, 747)` read *"flipping all 750 … at 144"*. A message is not asserted by anything; it is prose that happens to live inside an `assert_eq!` |
+| 2 | *a value a test **compares** is safe; prose that merely sits **beside** one is not — being inside a test file buys it nothing* | closer, and still too narrow: **every example in it is adjacent to a derivation**, and the two figures the re-review then found are adjacent to nothing. The `630` at the top of this statement sits beside no test at all, and the `630` in `runnable.txt` sits in a file that runs nothing |
+| **3** | **a figure is safe only if a running program compares it. Every other figure — in any file, at any distance from any derivation — is stale until re-derived.** | nothing yet. Checked backwards against every miss this package produced: the thirteen, the fourteenth inside the note retiring them, the two in the flip-table copy, the fourth pass's five, and the re-review's two. It catches all of them |
+
+Formulations 1 and 2 are recorded rather than deleted because **the way they
+failed is the finding**. Both are *locality* rules — they ask where a figure
+sits. The third is a *provenance* rule: it asks whether anything recomputes the
+figure when the code runs. A locality rule cannot be applied to a file nobody
+has opened, which is exactly where the last two hid.
+
+#### Five passes, and every one scoped by surface when the predicate is about mechanism
+
+This is the structural finding, and it explains the sequence better than any of
+the individual misses. **Five sweeps have now run over this document, and each
+one missed what the next found:**
+
+| pass | scope it chose | what the next pass found |
+|---|---|---|
+| 1 (W3b Task 7) | this README | `runnable.txt`'s copies |
+| 2 (W4 Task 6) | this README + `runnable.txt` | a row **inside its own correction table**, and the specs in two languages |
+| 3 (the review) | the files the task edited | four surfaces it had not read: `src/`, `tests/`, `driver.rs`, the plan |
+| 4 (this task, corrected predicate) | `src/`, `tests/`, `driver.rs` prose | the statement's **own preamble**, and `runnable.txt` nine lines from a figure the same sweep had superseded |
+| 5 (the re-review) | those two | *(nothing yet — and the rule above is what a sixth should use instead of a sixth surface)* |
+
+**Every one of them, the reviews included, scoped by surface — and the predicate
+is about mechanism.** "Sweep this file" is a question about where somebody
+happened to type a number; "is anything recomputing this figure?" is a question
+about the number. The first has to be repeated once per file and is never
+finished; the second is finished when every figure either has a derivation or is
+marked as history. That is why five passes each found the sixth's work, and it
+is the argument for the third formulation over any list of places to look.
+
+#### What the last two passes found
+
+Run under formulation 2, over every doc comment and string literal in `src/`,
+`tests/` and `oracle-exec/driver.rs`, a **fourth** pass found five, in surfaces
+the first three never read; the **fifth** pass — the re-review — then found two
+more that formulation 2 could not have caught, because neither sits beside a
+derivation:
+
+| where | what it said | what it is |
+|---|---|---|
+| `tests/executor.rs`, module header | *"**630** of the golden's 840 run terminals were fed"* | **426.** This statement derived 426 and published 630 as a number *it had itself got wrong* — and the retired figure went on standing in the module doc of the file that holds the derivation |
+| `tests/executor.rs`, `SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED`'s doc | *"these **six** differ inside it"* | **eight** — and the constant `= 8` is the *next line*. The value was compared on every run and was right; the word beside it was not compared by anything |
+| `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | cites `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` | **no test has ever had that name.** A dangling pointer from product source into this test file, i.e. the "worse shape" in a surface the pointer table did not cover |
+| `oracle-exec/driver.rs` and `src/worker/claim.rs`, the `BATCH` tables | *"`executor.rs` at 34/34"* | 35 since this task added a test. Annotated rather than restated: the row's claim is the **143**, and the binary size was never the measurement |
+| `tests/worker.rs`, module header | *"the other **707** tests pass"* | one larger now, for the same reason. The claim is *"the only test that can tell the two disciplines apart"*, which no total carries — so the total is **removed** rather than corrected |
+| **this statement's own preamble**, four lines under *"where this section and anything above it disagree, this section is right"* | *"the **630** fed terminals, which is history"* | **426**, which this statement's own section derives and which *predates this task entirely*. The fifteenth stale figure, in the paragraph that establishes the statement's authority, on the quantity the same commit was re-litigating in `tests/executor.rs` |
+| `runnable.txt`, *the terminal states this oracle FEEDS* | *"630 under W3a's harness — 575 `Runnable` + 55 `Loop`"* | **426.** The sweep opened that section, superseded the `144` **nine lines below this line**, and left it |
+
+Two of the fourth pass's five are this task's own arithmetic ageing by one
+within the same commit, which is the cheapest possible demonstration of the
+rule: **a figure nobody re-derives goes stale, and a figure that is a by-product
+of a claim goes stale fastest.** The `707` row is the only one where the right
+answer was to delete the number rather than update it.
+
+**The last two are the ones that killed formulation 2**, and both are `426`,
+derived from this file's own table: `575 − 189 = 386`, `55 − 15 = 40`,
+`386 + 40 = 426`. Neither sits beside a test. One sits in the paragraph claiming
+this section outranks every other, and the other sits nine lines from a figure
+this same sweep superseded by name. **Proximity was never the property**; being
+recomputed by a running program is.
+
+**The prediction, recorded because it was made before the pass ran and was
+half wrong:** more stale figures would turn up, most likely in `tests/worker.rs`
+or `driver.rs`, and at least one dangling pointer. Both those files did carry
+one — but the two sharpest were in `tests/executor.rs`, the file this task had
+already edited twice, and one of them sits one line above the constant that
+contradicts it.
+
+**The largest group is one event; the rest is one habit.** Nothing in the list
+is a task reporting a number it did not measure — every figure was true when it
+was written. What failed is that a bank re-derives the tables it appears in and
+nothing else: the neighbouring file, the annotation in an older section, the
+paragraph that says *"unchanged"*, the row inside the correction table, the
+other language's copy of the correction. **A correction is not a class-closing
+event.**
+
+And the one part that did not drift is the part this file already knew how to
+do. **Every figure any of the five passes had to fix is one no running program
+recomputes, and every figure a test compares was already right** — 143, 151,
+17/8/16, 80, 771, 565, 126, 35, 84, 461/1807/751/191/53, the residual baseline's
+thirteen rows. **23 corrections — `13 + 1 + 2 + 5 + 2`**: the thirteen this
+task's own table retires, the fourteenth inside the note retiring them, the two
+in `tests/executor.rs`'s copy of the flip table (a doc comment and an assertion
+*message*), the fourth pass's five, and the re-review's two. **Not one of the 23
+landed on a value inside an `assert_eq!`.** That is the case for formulation 3, made by the
+exceptions rather than by restating it: `RESTRICTION_REMOVES` was correct in the
+source and wrong in the prose beside it, in the same commit, for the same
+quantity — and `426` was correct in this section and wrong in its own preamble,
+across all three of this task's commits.
 
 #### Pointers that no longer resolve — thirteen, and this is the worse shape
 
@@ -5847,6 +6810,47 @@ an oversight.** Nine of the thirteen are cited inside a *W3a task's own section*
 describing what that task asserted on the day it ran; renaming them there would
 rewrite a record rather than correct one, and this file has already paid twice
 for having two versions of one sentence. The table above is the single lookup.
+
+**That sentence's scope was this file, and W4 Task 6's fourth sweep pass found
+the same names cited in the crate's own source, where the record argument does
+not apply.** Four sites, and the disposition splits on a constraint rather than
+on a principle:
+
+| site | cites | disposition |
+|---|---|---|
+| `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` — **a name no test has ever had**, and so not even in the thirteen | **fixed**: it is `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction` |
+| `tests/executor.rs`, the field-family list | `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | **fixed** — marked as deleted at the point of use |
+| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only.** Read it as `every_sub_execution_egret_runs_is_one_kestra_ran` — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison now |
+| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **recorded only.** Read it as `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
+| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only**, and it has **no successor**: it was deleted with W3a's harness and its render tier. Rendering lives in `worker::render` and is tested there |
+
+The last three rows are `src/executor/`, which **must stay byte-unchanged**, and
+their successors are named above so that the record is a lookup rather than a
+dead end — the `fixed` rows tell a reader what happened, and a `recorded only`
+row that did not name its successor would be a second dangling pointer standing
+in for the first.
+
+**The reason for not touching them is stronger than "a constraint says so", and
+it is worth stating properly: `src/executor/` byte-unchanged is the calibration
+of this instrument.** Everything in this file rests on `advance()` being
+demonstrably the same function eight packages of oracle work judged; item 12
+exists for no other purpose than to report a `git diff --stat` over that
+directory. One harmless doc-comment edit turns a **one-command machine check**
+into a judgement call — *"the diff is not empty, but only comments changed"* —
+and every future package inherits that judgement call rather than the check. Two
+dangling pointers cost a reader one lookup; a diff that is no longer empty costs
+every later reader the guarantee.
+
+**Named so the defect has an owner rather than a shrug:** they should be fixed
+by **the first package that legitimately opens `src/executor/`**, in the same
+commit that opens it, because that commit already pays the whole cost. By this
+file's own residual-baseline table that is **W8** — `Pause` (12 entries),
+`LoopUntil`/`WaitFor` (9), flow `concurrency:` (7) and `sla:` (5) are all its,
+and all four are flowables that must be ported into `advance()` — unless **W6**
+gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
+`executor/retry.rs`. Whoever it is: the two lines are in `command.rs`'s
+`SpawnExecution` doc and `loop_.rs`'s module doc and `values:` note, and this
+table is the successor list.
 What is **not** left to prose is the table's own accuracy:
 `the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do`
 fails if a retired name comes back as a live test, if a successor named here does

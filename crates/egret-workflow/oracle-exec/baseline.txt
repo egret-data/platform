@@ -156,8 +156,12 @@
 #   run FAILED; minijinja divides as floats and renders `Infinity`, so egret
 #   SUCCEEDS and runs one more task. Also W2, also hidden by the feed.
 #   `parallel-fail-with-flowable` -- Kestra FAILED a `Sleep` that was still in
-#   flight when its sibling failed the `Parallel`. Nothing calls
-#   `TaskHandler::cancel` (W4 owns the kill path), so egret completes it.
+#   flight when its sibling failed the `Parallel`. W4 Task 3 wired
+#   `TaskHandler::cancel`, and deliberately not to this seam: the kill path
+#   fires on a task's own `timeout:` expiring, which is the artifact's only
+#   `kill(null)` site, whereas a run a FLOWABLE abandoned is `advance()`'s
+#   decision and `advance()` has no worker to tell. So egret still completes it,
+#   and this entry does not move.
 #
 # `valids/dag`, `valids/if`, `valids/parallel-disabled-tasks` and `valids/full`
 # are the four entries that now differ on the happens-before relation ALONE --

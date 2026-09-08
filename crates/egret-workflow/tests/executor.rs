@@ -54,9 +54,17 @@
 //! held a four-tier harness that supplied one thing out of `golden.json`: the
 //! last element of the `state` sequence of a run whose `PlanTask` is `Runnable`
 //! — and, from W3a Task 6, of a `Loop` — plus the last of each of that run's
-//! attempts. 630 of the golden's 840 run terminals were fed, the comparison was
-//! circular for exactly that field, and a normalisation bug in it was invisible
-//! in both directions.
+//! attempts. **426** of the golden's 840 run terminals were fed, the comparison
+//! was circular for exactly that field, and a normalisation bug in it was
+//! invisible in both directions.
+//!
+//! *(This said **630** until W4 Task 6's fourth sweep pass. 630 is
+//! `575 fed + 55 spawner`, the whole of those two buckets, and 204 of them are
+//! inside sub-executions egret never created — nothing was supplied to them and
+//! nothing was compared about them. `oracle-exec/README.md`'s coverage
+//! statement derived 426 from this file's own table and listed 630 as a number
+//! it had itself published wrong; the retired figure went on standing here, in
+//! the module doc of the file that holds the derivation.)*
 //!
 //! Nothing on egret's side reads `golden.json` now. [`driver::run`] starts a
 //! real execution with `worker::start_execution`, drives it with
@@ -551,7 +559,14 @@ fn corpus_inputs(corpus_id: &str) -> serde_json::Value {
 /// silently corrected because it is the exact failure this control exists to
 /// catch — a scanner that under-reads looks like a true zero.
 ///
-/// Totals asserted beside the parts, both populations.
+/// **W4 Task 5's population is folded in** rather than left as the shell
+/// pipeline the coverage statement used to quote for it: no corpus flow names a
+/// script, container, shell or command task of *any* vendor either, because
+/// Kestra keeps those in plugin jars this corpus never reaches. The filter that
+/// answers that has a positive control of its own, since a corpus-wide zero
+/// from a predicate that always says `false` is not a measurement.
+///
+/// Totals asserted beside the parts, all three populations.
 #[test]
 fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     fn task_types(source: &str) -> Vec<String> {
@@ -565,14 +580,55 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
             .collect()
     }
 
+    // W4 Task 5's population, folded in here rather than left in a shell
+    // pipeline the coverage statement quoted: Kestra's OWN script, shell and
+    // container tasks. `egret.container` and `egret.script.python` are covered
+    // by the `egret.` prefix below — this is the other half of the sentence,
+    // that no Kestra flow in this corpus runs a process either, because those
+    // plugins live in jars (`plugin-script-*`, `plugin-docker`) the corpus
+    // never reaches. Same control, same reason.
+    fn is_process_task(t: &str) -> bool {
+        let t = t.to_ascii_lowercase();
+        [
+            "script",
+            "container",
+            "shell",
+            "command",
+            "docker",
+            "bash",
+            "python",
+            "node",
+        ]
+        .iter()
+        .any(|needle| t.contains(needle))
+    }
+
+    // The predicate's own positive control, because a corpus-wide zero from a
+    // predicate that answers `false` to everything is not a measurement. The
+    // 108 `Log` flows control the SCANNER; this controls the FILTER, and they
+    // are different instruments — the `egret.` prefix above has the same shape
+    // and the same need, which its `egret.container` row supplies.
+    assert!(
+        is_process_task("io.kestra.plugin.scripts.python.Commands")
+            && is_process_task("io.kestra.plugin.docker.Run")
+            && is_process_task("egret.script.python")
+            && is_process_task("egret.container")
+            && !is_process_task("io.kestra.plugin.core.log.Log"),
+        "the process-task filter must be able to say yes, and must not say it \
+         to the control's own type"
+    );
+
     let corpus: Vec<CorpusEntry> = corpus();
     let mut corpus_total = 0usize;
-    let (mut corpus_egret, mut corpus_log) = (0usize, 0usize);
+    let (mut corpus_egret, mut corpus_log, mut corpus_process) = (0usize, 0usize, 0usize);
     for entry in &corpus {
         corpus_total += 1;
         let types = task_types(&corpus_source(&entry.id));
         if types.iter().any(|t| t.starts_with("egret.")) {
             corpus_egret += 1;
+        }
+        if types.iter().any(|t| is_process_task(t)) {
+            corpus_process += 1;
         }
         if types.iter().any(|t| t == "io.kestra.plugin.core.log.Log") {
             corpus_log += 1;
@@ -593,9 +649,10 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     }
 
     assert_eq!(
-        (corpus_total, corpus_egret, corpus_log),
-        (345, 0, 108),
-        "every corpus flow, how many name an `egret.*` task type, and the control: \
+        (corpus_total, corpus_egret, corpus_process, corpus_log),
+        (345, 0, 0, 108),
+        "every corpus flow, how many name an `egret.*` task type, how many name \
+         a script/container/shell/command type of ANY vendor, and the control: \
          how many name `core.log.Log`"
     );
     assert_eq!(
@@ -667,7 +724,10 @@ async fn egret_side() -> &'static Side {
             .expect("read the current database");
         assert!(
             is_process_clone(&here),
-            "refusing to TRUNCATE {here:?}: this statement is only ever safe against              THIS PROCESS's own `egret_test_db` clone, which is named `egret_t_` plus              the pid as 32 hex digits and is dropped when the process exits. A shared              database would not flake under a concurrent run — it would lose rows that              run had written."
+            "refusing to TRUNCATE {here:?}: this statement is only ever safe against THIS PROCESS's \
+             own `egret_test_db` clone, which is named `egret_t_` plus the pid as 32 hex digits and \
+             is dropped when the process exits. A shared database would not flake under a \
+             concurrent run — it would lose rows that run had written."
         );
         sqlx::query("TRUNCATE workflow.executions CASCADE")
             .execute(&db.pool)
@@ -1405,12 +1465,25 @@ const EGRET_NESTED_PAIRS: usize = 126;
 ///
 /// | flipped | pairs | ratchet |
 /// |---|---|---|
-/// | every **nested** pair — W3a's own experiment | 227 | **FAILS**: 150 mismatching, 6 REGRESSIONs |
-/// | every pair on a **baselined** entry | 750 | green: 144 mismatching, 0 banked |
-/// | every pair on a **matching** entry | 354 | **FAILS**: 184 mismatching, 40 REGRESSIONs |
+/// | every **nested** pair — W3a's own experiment | 227 | **FAILS**: 150 mismatching, 7 REGRESSIONs |
+/// | every pair on a **baselined** entry | 747 | green: 143 mismatching, 0 banked |
+/// | every pair on a **matching** entry | 357 | **FAILS**: 184 mismatching, 41 REGRESSIONs |
 ///
 /// The first row is the one to read against W3a's, which recorded that flipping
 /// all 227 left this crate green.
+///
+/// **This table had a stale twin under it for a whole package, and it was in
+/// this file.** It read 750 / 354 / 144 / 6 / 40 — the values before the
+/// whole-branch review's fix round banked `valids/replay-loop` — fifty lines
+/// above an `assert_eq!` that has been deriving 747 and 357 the whole time.
+/// W4 Task 6's sweep corrected the copy in `oracle-exec/README.md` and listed
+/// the copy in `runnable.txt` as retired, in the same commit that edited **this
+/// file**, and did not check the copy it was editing. The rule that missed it
+/// was *"every figure a test asserts was already right"*: true, and too narrow.
+/// **A value a test compares is safe; prose that merely sits beside one is not,
+/// even inside a test file** — a doc comment and an assertion *message* are
+/// prose, and the message under the `(622, 125, 747)` assertion said *"flipping
+/// all 750 … at 144"* while the tuple beside it said otherwise.
 ///
 /// This test derives the split from `golden.json` and `baseline.txt` alone —
 /// no driver — so it is cheap enough to run everywhere and cannot drift from
@@ -1459,8 +1532,8 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (b_top, b_nested, b_top + b_nested),
         (622, 125, 747),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 750 leaves \
-         the ratchet green and unmoved at 144"
+         entries, which mismatch whatever the pair says. Flipping all 747 leaves \
+         the ratchet green and unmoved at 143"
     );
     assert_eq!(
         (
@@ -1492,8 +1565,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
 /// no driver, so this is cheap and cannot drift from the ratchet's population:
 ///
 /// - **run terminals**, the last state of every run, sub-executions included —
-///   the population `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
-///   used to classify, and the one the fed count is a share of;
+///   the population the deleted `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals`
+///   used to classify (retired with W3a's harness — see the README's pointer
+///   table), and the one the fed count is a share of;
 /// - **run-history tokens**, every state in every one of those runs;
 /// - **sub-executions**, the nodes under `spawned` at any depth;
 /// - **executions**, i.e. the golden `runs` entries plus those sub-executions,
@@ -1745,6 +1819,29 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
          because there were none. Task 6 named spawned executions as the thing \
          that could break it; they do not"
     );
+    // **The entry count too, and W4 Task 6's review is why.** The coverage
+    // statement's sentence is "80 pairs across 6 entries"; the 80 was asserted
+    // here and the 6 was only `println!`ed above, which by that sweep's own
+    // generalisation makes it the figure in that sentence that goes stale
+    // next -- it is prose sitting beside a derivation rather than a value the
+    // derivation compares. Asserted as a pair with the names, because a count
+    // that moves without saying which entry left is the shape `baseline.txt`'s
+    // header keeps getting wrong.
+    assert_eq!(
+        (removed.len(), removed.keys().cloned().collect::<Vec<_>>()),
+        (
+            RESTRICTION_REMOVES_ENTRIES,
+            vec![
+                "valids/all-flowable".to_string(),
+                "valids/dag".to_string(),
+                "valids/if".to_string(),
+                "valids/parallel-nested".to_string(),
+                "valids/restart-child".to_string(),
+                "valids/restart-loop".to_string(),
+            ]
+        ),
+        "the entries the restriction removes a pair from, by name and by count"
+    );
     assert_eq!(
         removed.values().sum::<usize>(),
         RESTRICTION_REMOVES,
@@ -1760,6 +1857,10 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
 }
 
 const RESTRICTION_REMOVES: usize = 80;
+/// How many entries those 80 pairs come from — the other half of the coverage
+/// statement's *"80 pairs across 6 entries"*, which was printed and not
+/// asserted until W4 Task 6.
+const RESTRICTION_REMOVES_ENTRIES: usize = 6;
 const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 771;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
@@ -2557,7 +2658,13 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
 /// successor, and it is a different sentence: egret fills the field now, so
-/// these six differ **inside** it rather than by leaving it empty.
+/// these **eight** differ **inside** it rather than by leaving it empty.
+///
+/// *(The word was "six" and the constant under it was 8, on adjacent lines,
+/// since the whole-branch review's fix round moved `valids/finally-loop` and
+/// `valids/finally-loop-parallel` into this bucket. W4 Task 6's fourth sweep
+/// pass found it. The value was compared on every run and was right; the word
+/// beside it was not compared by anything.)*
 const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 8;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
@@ -2812,7 +2919,8 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     // three are the same class and were named nowhere.
     (
         "valids/all-flowable",
-        "W2: `{{ taskrun.value }}` in a `Loop` body renders where Kestra throws,          so `1-each` succeeds and egret runs 3 iterations and 12 runs where          Kestra ran 1 and 3",
+        "W2: `{{ taskrun.value }}` in a `Loop` body renders where Kestra throws, so `1-each` \
+         succeeds and egret runs 3 iterations and 12 runs where Kestra ran 1 and 3",
     ),
     (
         "valids/disable-flowable",
@@ -2820,24 +2928,32 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     ),
     (
         "valids/restart-child",
-        "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java          throws, so the run SUCCEEDS and egret runs one more task",
+        "W2: `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws, so the run \
+         SUCCEEDS and egret runs one more task",
     ),
     (
         "valids/restart-loop",
-        "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations          where Kestra ran 1",
+        "W2: the same `Infinity`, inside a `Loop`, so egret runs 3 iterations where Kestra ran 1",
     ),
-    // **W4: nothing calls `TaskHandler::cancel`**, so work Kestra stopped runs
-    // to completion here. `baseline.txt` names the first; the kill path is W4's.
+    // **W4 Task 3 wired `TaskHandler::cancel`, and deliberately not to this
+    // seam.** The kill path fires on a task-level `timeout:` expiring, which is
+    // the artifact's only `kill(null)` site
+    // (`AbstractWorkerCallable.callWithTimeout`). A run that a FLOWABLE
+    // abandoned is `advance()`'s decision, and `advance()` has no worker to
+    // tell — so work Kestra stopped still runs to completion here.
+    // `worker::cancel`'s module doc carries the same statement.
     (
         "valids/parallel-fail-with-flowable",
-        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`.          Kestra FAILED it; nothing calls `TaskHandler::cancel`, so egret          completes it",
+        "W4: a `Sleep` still in flight when its sibling failed the `Parallel`. Kestra FAILED it; \
+         the kill path reaches only a task's own expired `timeout:`, so egret completes it",
     ),
     // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
     // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
     // construct, so it runs the tasks.
     (
         "valids/flow-concurrency-sla-assert-cancel",
-        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra          recorded 0 runs; egret runs the first task",
+        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
+         runs the first task",
     ),
     (
         "valids/flow-concurrency-sla-fail-child",
@@ -2851,17 +2967,15 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "valids/sla-max-duration-fail",
         "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
     ),
-    (
-        "valids/sla-subflow",
-        "W8: the same, through a subflow",
-    ),
+    ("valids/sla-subflow", "W8: the same, through a subflow"),
     // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
     // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
     // the first iteration — succeeds here and runs the other two. Named as a
     // cause of the residual baseline's `Loop` row and owned by nobody.
     (
         "valids/loop-outputs-failed-render",
-        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask          .value }}`. Kestra FAILED the loop at iteration 1; egret runs 3",
+        "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask.value }}`. Kestra \
+         FAILED the loop at iteration 1; egret runs 3",
     ),
 ];
 
@@ -3855,8 +3969,8 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "valids/parallel-fail-with-flowable",
-            "a sibling still in flight when its `Parallel` failed; nothing calls \
-             `TaskHandler::cancel` (W4 owns the kill path)",
+            "a sibling still in flight when its `Parallel` failed; the kill path \
+             W4 Task 3 wired reaches only a task's own expired `timeout:`",
         ),
         (
             "valids/retry-success",
@@ -3994,5 +4108,478 @@ fn the_step_bound_dominates_the_widest_golden_entry() {
          two slots per run; {} < {}",
         2 * widest_runs,
         step_bound()
+    );
+}
+
+// --------------------------------------------------------------------------
+// W4 Task 3 — the population the kill path could ever move
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the kill path's ratchet-visible population is
+/// EMPTY, and it is empty three separate ways.**
+///
+/// W4's spec §1.1 arrived at 0 for this third by looking at the five baselined
+/// ids whose NAME contains "kill". That is a grep over identifiers and it is
+/// not a derivation — an entry can be reached by the kill path without saying
+/// "kill" anywhere, and an entry can say "kill" while declaring nothing this
+/// worker runs. So the answer is re-derived here from what the path actually
+/// needs, and each leg alone is sufficient:
+///
+/// 1. **Nothing expires.** `worker::cancel::guarded` calls
+///    `TaskHandler::cancel` from exactly one branch —
+///    `worker::timeout::Guarded::Expired` — so a kill needs a task-level
+///    `timeout:` that runs out.
+///    [`the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet`]
+///    pins the whole of that population: four declarations, three on a `Pause`
+///    (a flowable, whose `timeout:` is `advance()`'s), and the single runnable
+///    one an HOUR on a `core.log.Log`. Instrumented over all 294 entries the
+///    budget was applied 4 times and expired **0**.
+/// 2. **A kill could not be refused even if one fired.** Every type the oracle's
+///    driver registers answers `Ok(())`, asserted below against the driver's own
+///    registry rather than a copied list.
+/// 3. **A kill changes nothing the golden records.** `guarded` has one return
+///    path and it returns the budget's outcome; the refusal goes to `tracing`,
+///    and `golden.json` holds no failure message in any case.
+///
+/// The five "kill"-named ids are still enumerated, because the spec's number
+/// came from them and a reader will look: none of them declares a `timeout:` on
+/// anything, so none is reachable by leg 1 either.
+#[tokio::test]
+async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population() {
+    let baseline = baseline();
+
+    // ---- the ids the spec's number came from --------------------------------
+    let named: Vec<String> = baseline
+        .iter()
+        .filter(|id| id.to_lowercase().contains("kill"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            "valids/exit-killed".to_string(),
+            "valids/flow-concurrency-parallel-subflow-kill".to_string(),
+            "valids/flow-concurrency-parallel-subflow-kill-child".to_string(),
+            "valids/flow-concurrency-queue-killed-after-execution".to_string(),
+            "valids/pause-kill-delay".to_string(),
+        ],
+        "the five baselined ids whose name contains `kill`"
+    );
+
+    // Not one of them declares a `timeout:` anywhere, so leg 1 excludes every
+    // one of them regardless of what they contain.
+    fn any_timeout(task: &egret_workflow::models::Task) -> bool {
+        task.timeout.is_some()
+            || task
+                .children()
+                .into_iter()
+                .chain(task.error_children())
+                .any(any_timeout)
+    }
+    // **All FOUR of `Flow`'s task lists**, not the two the first draft walked.
+    // `models::Flow` has `tasks`, `errors`, `finally_` (`@JsonProperty("finally")`)
+    // and `after_execution` — the fourth being the one `Flow.java:88` has and
+    // the porting brief missed. Walking two of four happened to be sound today,
+    // because `executor::build_plan` names neither `finally_` nor
+    // `after_execution` (grep: no occurrence in `src/executor/plan.rs`), so a
+    // `timeout:` there could not reach a claimable run at all. That is a
+    // property of an unrelated file, though, and this test must not depend on
+    // it silently — so it reads all four and the argument disappears.
+    let with_a_budget: Vec<&String> = named
+        .iter()
+        .filter(|id| {
+            let flow = egret_workflow::spec::parse(&corpus_source(id))
+                .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
+            flow.tasks
+                .iter()
+                .chain(flow.errors.iter())
+                .chain(flow.finally_.iter())
+                .chain(flow.after_execution.iter())
+                .any(any_timeout)
+        })
+        .collect();
+    assert!(
+        with_a_budget.is_empty(),
+        "an id named `kill` that DOES carry a `timeout:` would be reachable by \
+         the kill path and would have to be attributed: {with_a_budget:?}"
+    );
+
+    // ---- leg 2: every handler the ratchet can reach answers `Ok(())` --------
+    //
+    // Read from the driver's own registry, which is what the oracle runs, so a
+    // fifth handler added there is covered without this list being touched.
+    let registry = driver::registry();
+    let types: Vec<String> = registry
+        .type_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !types.is_empty(),
+        "an empty registry would pass leg 2 vacuously"
+    );
+    for ty in &types {
+        let task = egret_workflow::worker::TaskInput {
+            workspace_id: uuid::Uuid::nil(),
+            execution_id: uuid::Uuid::nil(),
+            run_id: uuid::Uuid::nil(),
+            task_id: "t".to_string(),
+            type_id: ty.clone(),
+            value: None,
+            attempt: 1,
+            spec: serde_json::json!({}),
+            render: egret_workflow::runners::RenderContext::new(),
+            timeout: None,
+            principal: None,
+            claimed_at: chrono::DateTime::UNIX_EPOCH,
+        };
+        egret_workflow::worker::Registry::cancel(&registry, &task)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{ty} refuses a kill, so a corpus entry whose budget expired \
+                     could produce a refusal the ratchet has never seen: {e}"
+                )
+            });
+    }
+}
+
+// --------------------------------------------------------------------------
+// W4 Task 2 — the population a worker-enforced `timeout:` could ever move
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the ratchet-visible population of the task-level
+/// `timeout:` hole is EMPTY, and the "four baselined entries" figure counts
+/// declarations rather than reachable entries.**
+///
+/// W4's spec and plan both say *"four baselined entries declare a `timeout:`"*,
+/// which is true and is re-derived here (`143 = 4 + 139`). What that sentence
+/// does not say is that **three of the four are on a `Pause`** — a flowable,
+/// whose `timeout:` is `advance()`'s and which Kestra's worker never sees
+/// (measured on the pinned artifact: a `Sequential` carrying `timeout: PT1S`
+/// around a four-second `Sleep` ran to SUCCESS in 4.2 s) — and that **the one
+/// runnable among them asks for an hour** on a `core.log.Log`, which cannot
+/// outrun it.
+///
+/// So this test is what stops a green ratchet being read as coverage of the
+/// worker's budget: nothing in `baseline.txt` can move because of it, in either
+/// direction, and that is a property of the corpus rather than of the fix.
+/// Instrumenting `worker::timeout::guard` and running the whole 294-entry
+/// oracle agreed from the other side — the budget was applied exactly **4**
+/// times (`1s`, `1s`, `250ms`, `3600s`, i.e. these four declarations) and
+/// **expired 0** times, with `tests/worker.rs`'s own property as the positive
+/// control for the instrument on the same build.
+#[test]
+fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet() {
+    fn walk(task: &egret_workflow::models::Task, out: &mut Vec<(String, String, String)>) {
+        if let Some(t) = &task.timeout {
+            out.push((task.id.clone(), task.r#type.clone(), t.source().to_string()));
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, out);
+        }
+    }
+
+    let baseline = baseline();
+    let mut declaring: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+    let mut without = 0usize;
+    for id in &baseline {
+        let flow = egret_workflow::spec::parse(&corpus_source(id))
+            .unwrap_or_else(|e| panic!("{id} does not parse: {}", e.message));
+        let mut found = Vec::new();
+        // **All four of `Flow`'s task lists.** This walked `tasks:` and
+        // `errors:` only, which was sound today and derived nothing: W4 Task 3
+        // wrote out the argument for reading all four in
+        // `the_kill_path_cannot_move_the_ratchet_…` — `finally:` and
+        // `afterExecution:` are lists `build_plan` does not name, so a
+        // `timeout:` there could not reach a claimable run — and then this test,
+        // written one task earlier, was left depending on that unrelated file.
+        // The count is unchanged at 4, which is the point: a walk that agrees
+        // with the wider one is worth having, and one that only happens to
+        // agree is not.
+        for task in flow
+            .tasks
+            .iter()
+            .chain(flow.errors.iter())
+            .chain(flow.finally_.iter())
+            .chain(flow.after_execution.iter())
+        {
+            walk(task, &mut found);
+        }
+        if found.is_empty() {
+            without += 1;
+        } else {
+            declaring.insert(id.clone(), found);
+        }
+    }
+
+    // The total beside the parts, so neither can drift alone.
+    assert_eq!(
+        declaring.len() + without,
+        baseline.len(),
+        "every baselined entry is either declaring a `timeout:` or not"
+    );
+    assert_eq!(
+        (declaring.len(), without, baseline.len()),
+        (4, 139, 143),
+        "the baselined population that declares a `timeout:`, and the rest: {:#?}",
+        declaring
+    );
+    assert_eq!(
+        declaring.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "valids/full".to_string(),
+            "valids/pause-errors-finally-after-execution".to_string(),
+            "valids/pause-timeout".to_string(),
+            "valids/pause-timeout-allow-failure".to_string(),
+        ],
+        "and they are these four, by name"
+    );
+
+    // **Which of them a WORKER budget could ever apply to**, split by the
+    // declaring task's own `type:` rather than by anything about the entry.
+    let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
+    for tasks in declaring.values() {
+        for (_, ty, _) in tasks {
+            *by_type.entry(ty.clone()).or_default() += 1;
+        }
+    }
+    assert_eq!(
+        by_type,
+        BTreeMap::from([
+            ("io.kestra.plugin.core.flow.Pause".to_string(), 3),
+            ("io.kestra.plugin.core.log.Log".to_string(), 1),
+        ]),
+        "three `Pause`es — a flowable's timeout, which is `advance()`'s and \
+         which Kestra's worker ignores — and one runnable"
+    );
+
+    // The runnable one, and the budget it asks for. `Handlers` is the registry
+    // the shipping worker dispatches on, so "a type this worker can run" is
+    // read from it rather than asserted as a list.
+    let registry = egret_workflow::worker::Handlers::with_core_tasks();
+    let runnable: Vec<(String, String, std::time::Duration)> = declaring
+        .iter()
+        .flat_map(|(id, tasks)| tasks.iter().map(move |t| (id.clone(), t)))
+        .filter(|(_, (_, ty, _))| registry.get(ty).is_some())
+        .map(|(id, (task_id, _, source))| {
+            (
+                id,
+                task_id.clone(),
+                egret_workflow::executor::parse_duration(source)
+                    .expect("every corpus `timeout:` is an ISO-8601 literal"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runnable,
+        vec![(
+            "valids/full".to_string(),
+            "t3".to_string(),
+            std::time::Duration::from_secs(3_600)
+        )],
+        "exactly one baselined `timeout:` is on a task this worker has a \
+         handler for, and it is an HOUR on a `core.log.Log` — a budget that \
+         handler cannot outrun, so the entry cannot move either"
+    );
+}
+
+// --------------------------------------------------------------------------
+// W4 Task 6 — the population `claim::wake` could ever have moved
+// --------------------------------------------------------------------------
+
+/// **Derived, not written down: the retry declarations this oracle carries, and
+/// which of them the waker could ever reach.**
+///
+/// W4's spec and brief said *"twelve baselined entries declare a `retry:`"*;
+/// W4 Task 1 re-derived **14** and could not reconstruct 12 from any grouping.
+/// The coverage statement then quoted the 14 with the words *"which is derived
+/// rather than assumed"* — and **nothing derived it**: no test in this crate
+/// counted a `retry:` declaration until this one. That is the shape this
+/// programme keeps shipping, a number beside a derivation that does not exist,
+/// so the count lives here now and the statement cites it.
+///
+/// Three splits, each with the total asserted beside its parts:
+///
+/// 1. **Over the whole golden**, because the coverage question is not a
+///    question about `baseline.txt`. A change on a *matching* entry is
+///    reportable; a change on a baselined one is not, whatever it says — the
+///    argument *The ordered pairs: kept is not asserted* makes about pairs,
+///    which holds of every field. So the retry population splits into a half
+///    the ratchet speaks for and a half it cannot, and only the second half is
+///    the waker's.
+/// 2. **By `behavior:`**, because `CREATE_NEW_EXECUTION` never writes a
+///    `not_before` at all: `executor::retry::scan`'s `CreateNewExecution` arm
+///    emits `SetRunState`/`SetExecutionState` and no `ScheduleRetry`, so no run
+///    of those entries ever reaches `RETRYING` and no waker could have touched
+///    one. The default is `RETRY_FAILED_TASK` (`RetryBehavior`'s `#[default]`,
+///    from `AbstractRetry`'s own), so this is read from the parsed model rather
+///    than from the presence of the key — seven of the ten never write it.
+/// 3. **Flow-level against task-level**, because `Flow::retry` is the same
+///    `AbstractRetry` type and a walk over `tasks:` alone would miss the five
+///    entries that declare it there.
+///
+/// What the ratchet says about the waker, after all that, is **nothing** — see
+/// the coverage statement's item 11 for the mechanism and its measurement.
+#[test]
+fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
+    use egret_workflow::models::{Retry, RetryBehavior};
+
+    fn behavior(r: &Retry) -> RetryBehavior {
+        match r {
+            Retry::Constant { common, .. }
+            | Retry::Exponential { common, .. }
+            | Retry::Random { common, .. } => common.behavior.clone(),
+        }
+    }
+
+    fn walk(task: &egret_workflow::models::Task, out: &mut Vec<RetryBehavior>) {
+        if let Some(r) = &task.retry {
+            out.push(behavior(r));
+        }
+        for child in task.children().into_iter().chain(task.error_children()) {
+            walk(child, out);
+        }
+    }
+
+    let baseline = baseline();
+    // `declaring[id] = (behaviours, flow_level)`.
+    let mut declaring: BTreeMap<String, (Vec<RetryBehavior>, bool)> = BTreeMap::new();
+    let (mut without, mut unparseable) = (0usize, 0usize);
+    let mut total = 0usize;
+
+    for entry in golden() {
+        total += 1;
+        // A `refused` entry can fail to parse — that is what egret refusing it
+        // sometimes means — and an entry this walk cannot read is counted
+        // rather than skipped, so the instrument's own blind spot is a number
+        // on this page instead of a silent subtraction.
+        let Ok(flow) = egret_workflow::spec::parse(&corpus_source(&entry.id)) else {
+            unparseable += 1;
+            continue;
+        };
+        let mut found: Vec<RetryBehavior> = Vec::new();
+        // **All four of `Flow`'s task lists**, for the reason
+        // `the_kill_path_cannot_move_the_ratchet_…` gives: `finally:` and
+        // `afterExecution:` are lists a two-list walk silently drops.
+        for task in flow
+            .tasks
+            .iter()
+            .chain(flow.errors.iter())
+            .chain(flow.finally_.iter())
+            .chain(flow.after_execution.iter())
+        {
+            walk(task, &mut found);
+        }
+        let flow_level = flow.retry.is_some();
+        if let Some(r) = &flow.retry {
+            found.push(behavior(r));
+        }
+        if found.is_empty() {
+            without += 1;
+        } else {
+            declaring.insert(entry.id.clone(), (found, flow_level));
+        }
+    }
+
+    assert_eq!(
+        (declaring.len(), without, unparseable, total),
+        (25, 264, 5, 294),
+        "every golden entry either declares a `retry:`, does not, or cannot be \
+         parsed at all; the parts and the total: {:#?}",
+        declaring.keys().collect::<Vec<_>>()
+    );
+
+    let (baselined, matching): (Vec<&String>, Vec<&String>) = declaring
+        .keys()
+        .partition(|id| baseline.contains(id.as_str()));
+    assert_eq!(
+        (baselined.len(), matching.len(), declaring.len()),
+        (14, 11, 25),
+        "the split the coverage question turns on: a `retry:` on a MATCHING \
+         entry is one the ratchet would report a change to, and a `retry:` on \
+         a baselined entry is one it would not. matching: {matching:?}"
+    );
+    assert_eq!(
+        baselined.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        vec![
+            "valids/allow-failure-with-retry",
+            "valids/full",
+            "valids/retry-failed-flow-duration",
+            "valids/retry-flowable-parallel",
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+            "valids/retry-subflow",
+            "valids/retry-success",
+            "valids/retry-with-flowable-errors",
+            "valids/subflow-parent-retry",
+            "valids/task-allow-failure-runnable",
+            "valids/task-allow-warning-runnable",
+        ],
+        "the fourteen, by name. W4's spec said twelve"
+    );
+
+    // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
+    // ever writes a `not_before`, so only those entries could ever have stalled
+    // on the missing waker.
+    let mut new_execution: Vec<&str> = Vec::new();
+    let mut failed_task: Vec<&str> = Vec::new();
+    for id in &baselined {
+        let (behaviours, _) = &declaring[*id];
+        match behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            true => new_execution.push(id),
+            false => failed_task.push(id),
+        }
+    }
+    assert_eq!(
+        (new_execution.len(), failed_task.len(), baselined.len()),
+        (4, 10, 14),
+        "four `CREATE_NEW_EXECUTION` entries write no `not_before` at all, so \
+         the waker's whole baselined population is the other ten"
+    );
+    assert_eq!(
+        new_execution,
+        vec![
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+        ],
+        "and they are these four"
+    );
+
+    // **The half the ratchet DOES speak for.** A `retry:` on a matching entry
+    // is one a change to would be reported, so retrying itself — `ScheduleRetry`,
+    // the `RETRYING` state, `reopen_due` putting the run back — is covered here.
+    // The waker is the part that is not, and these two counts are what keep the
+    // two claims apart.
+    let mut matching_failed_task: Vec<&str> = Vec::new();
+    for id in &matching {
+        let (behaviours, _) = &declaring[*id];
+        if !behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            matching_failed_task.push(id);
+        }
+    }
+    assert_eq!(
+        (matching_failed_task.len(), matching.len()),
+        (11, 11),
+        "every matching entry that declares a `retry:` declares the behaviour that writes a \
+         `not_before`, so all eleven are entries whose retry the ratchet would report a change to: \
+         {matching_failed_task:?}"
+    );
+
+    // Flow-level against task-level, over the whole 25: a walk over `tasks:`
+    // alone would have reported a smaller population and looked right.
+    let flow_level: Vec<&String> = declaring
+        .iter()
+        .filter(|(_, (_, at_flow_level))| *at_flow_level)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(
+        flow_level.len(),
+        5,
+        "golden entries whose `retry:` is the FLOW's: {flow_level:?}"
     );
 }

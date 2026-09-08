@@ -44,6 +44,17 @@ pub const TASK_TYPES: &[TaskTypeSpec] = &[
         r#type: "egret.container",
         references: &[],
     },
+    // W4 Task 5, fix round 1. `egret.python` one row above is the
+    // NOTEBOOK-kernel task (programme spec §6.4: "`KernelLauncher`; cần port
+    // `egret-kernel-api` mới"), and its `notebook` reference is required. The
+    // container-backed inline-`script:` handler that task built is a different
+    // task, so it took a different name rather than bending this one; see
+    // `worker::handlers::python`'s module doc. No `RefField`: a script and an
+    // image name are not egret objects, exactly as for `egret.container`.
+    TaskTypeSpec {
+        r#type: "egret.script.python",
+        references: &[],
+    },
     TaskTypeSpec {
         r#type: "egret.dataapi.call",
         references: &[RefField {
