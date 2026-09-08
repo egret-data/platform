@@ -11,13 +11,13 @@
 //!
 //! | egret | Kestra | what it is |
 //! |---|---|---|
-//! | [`TaskHandler`](super::TaskHandler) | `RunnableTask` | one task **type** — `egret.container`, `egret.python` |
+//! | [`TaskHandler`](super::TaskHandler) | `RunnableTask` | one task **type** — `egret.container`, `egret.script.python` |
 //! | [`TaskRunner`] | `io.kestra.core.models.tasks.runners.TaskRunner` | **where** a command runs — a container today, a pod later |
 //! | [`TaskCommands`] | `io.kestra.core.models.tasks.runners.TaskCommands` | **what** to run, as data |
 //!
 //! A handler builds a [`TaskCommands`] and hands it to a [`TaskRunner`]; it
 //! never speaks to a daemon itself. That is the seam Kestra has and it is worth
-//! having for the same reason: `egret.python` and `egret.container` differ only
+//! having for the same reason: `egret.script.python` and `egret.container` differ only
 //! in how they fill the struct, and a Kubernetes runner is a second
 //! implementation rather than a second copy of every handler.
 //!
@@ -38,11 +38,18 @@
 //!    `killable.get().run()` — a per-instance `AtomicReference<Runnable>`. It is
 //!    a **handle**, not an identity, and that difference is this module's
 //!    central hazard: see [`container_name`].
-//! 3. **`TaskCommands`** declares `getContainerImage`, `getLogConsumer`,
-//!    `getInterpreter`, `getBeforeCommands`, `getCommands`, `getEnv`,
-//!    `getWorkingDirectory`, `getOutputDirectory`, `getTimeout`, `getTargetOS`.
-//!    [`TaskCommands`] below is that list minus the parts egret has no seam for,
-//!    each named in its own doc.
+//! 3. **`TaskCommands`** declares **twelve** methods: `getContainerImage`,
+//!    `getLogConsumer`, `getInterpreter`, `getBeforeCommands`, `getCommands`,
+//!    `getAdditionalVars`, `getWorkingDirectory`, `getOutputDirectory`,
+//!    `getEnv`, `getEnableOutputDirectory`, `getTimeout`, `getTargetOS`.
+//!    [`TaskCommands`] below is that list minus the parts egret has no seam
+//!    for, each named in its own doc. Review Minor 5: this list used to give
+//!    ten of the twelve, dropping `getAdditionalVars` and
+//!    `getEnableOutputDirectory` without their absence being stated anywhere —
+//!    `getAdditionalVars` is Kestra's `{{ workingDir }}` / `{{ outputDir }}`
+//!    render vars, which this crate's renderer does not expose to a task, and
+//!    `getEnableOutputDirectory` gates the separate output directory named
+//!    below.
 //! 4. **The argv is `interpreter ++ [ (beforeCommands ++ commands).join(lineSeparator) ]`** —
 //!    `ScriptService.scriptCommands`, which builds `new ArrayList<>(interpreter)`
 //!    and adds ONE element made by `Collectors.joining(targetOS.lineSeparator)`.
@@ -184,7 +191,7 @@ pub struct TaskCommands {
     ///
     /// **Not Kestra's `inputFiles`**, which reads from internal storage and
     /// from namespace files. This carries the one case a handler here has:
-    /// `egret.python` writing the author's `script:` to a `.py` file, exactly
+    /// `egret.script.python` writing the author's `script:` to a `.py` file, exactly
     /// as `io.kestra.plugin.scripts.python.Script` does (measured: it writes a
     /// `.py`, then runs it).
     pub input_files: BTreeMap<String, String>,
@@ -267,7 +274,7 @@ pub struct CommandsResult {
 ///
 /// One implementation today ([`DockerRunner`]); the trait exists because
 /// Kestra's does and for the same reason — a Kubernetes runner is a second
-/// implementation of this and not a second `egret.python`.
+/// implementation of this and not a second `egret.script.python`.
 ///
 /// # `cancel` has no default body, for [`TaskHandler::cancel`]'s reason
 ///
@@ -494,26 +501,57 @@ pub(crate) fn ingest_output_file(
     if let Some(problem) = relative_problem(rel) {
         return Err(problem);
     }
-    let path = staged_root.join(rel);
-    let meta = match std::fs::metadata(&path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // **A declared output that is not there fails the task.** The
-            // alternative is a key missing from `outputs`, which nothing
-            // notices until a later `{{ outputs.x.f }}` fails somewhere else
-            // with a message about the wrong task.
+
+    // **Every component is `lstat`ed and a symlink is refused, leaf or not.**
+    // See [`SYMLINK_REFUSAL`] for what this is defending against and why the
+    // check is here rather than a `canonicalize` that would resolve the very
+    // link it is trying to catch.
+    let mut path = staged_root.to_path_buf();
+    let mut walked = String::new();
+    let mut meta = None;
+    for segment in rel.split('/') {
+        path.push(segment);
+        if !walked.is_empty() {
+            walked.push('/');
+        }
+        walked.push_str(segment);
+
+        // `symlink_metadata` is `lstat`: it describes the entry itself and does
+        // NOT follow it. `metadata` here would stat the TARGET, which for
+        // `leaked.txt -> /etc/passwd` is the worker host's file, and the check
+        // would pass on the very thing it exists to stop.
+        let m = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // **A declared output that is not there fails the task.** The
+                // alternative is a key missing from `outputs`, which nothing
+                // notices until a later `{{ outputs.x.f }}` fails somewhere
+                // else with a message about the wrong task.
+                return Err(format!(
+                    "`outputFiles` declares {rel:?}, which the command did not leave in \
+                     {WORKING_DIR}"
+                ));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "`outputFiles` declares {rel:?}, which could not be read back out of \
+                     {WORKING_DIR}: {e}"
+                ))
+            }
+        };
+        if m.file_type().is_symlink() {
+            let target = std::fs::read_link(&path)
+                .map(|t| t.display().to_string())
+                .unwrap_or_else(|_| "?".to_string());
             return Err(format!(
-                "`outputFiles` declares {rel:?}, which the command did not leave in \
-                 {WORKING_DIR}"
+                "`outputFiles` declares {rel:?}, and {walked:?} is a SYMLINK (to \
+                 {target:?}). {SYMLINK_REFUSAL}"
             ));
         }
-        Err(e) => {
-            return Err(format!(
-                "`outputFiles` declares {rel:?}, which could not be read back out of \
-                 {WORKING_DIR}: {e}"
-            ))
-        }
-    };
+        meta = Some(m);
+    }
+    let meta = meta.expect("`relative_problem` refuses an empty name, so there is a segment");
+
     if meta.is_dir() {
         return Err(format!(
             "`outputFiles` declares {rel:?}, which is a DIRECTORY. An output is JSON \
@@ -619,6 +657,81 @@ const DAEMON_ERROR_MARKERS: [&str; 3] = [
 /// besides: the question it used to answer with a string is now answered by
 /// [`ingest_output_file`] against the filesystem.
 const DAEMON_SOCKET_MARKERS: [&str; 2] = ["docker.sock", "Cannot connect to the Docker daemon"];
+
+/// What a symlink in the staged output tree means, and why it is refused
+/// outright.
+///
+/// # This is a sandbox escape, measured, and fix round 1 made half of it
+///
+/// `docker cp` out of a container **recreates a symlink as a symlink** on the
+/// host — it does not resolve it and it does not materialise its target.
+/// Anything that then opens that path with an ordinary `read`/`stat` is opening
+/// it **on the worker host**, outside the container the author was confined to.
+/// Measured on this machine (daemon 28.4.0), with
+/// `ln -s /etc/passwd leaked.txt` inside an `alpine:3.20` working directory:
+///
+/// ```text
+/// host      /etc/passwd   9344 bytes
+/// alpine    /etc/passwd    702 bytes
+/// staged    leaked.txt    ->/etc/passwd   (lstat: islink=true)
+/// read back                9344 bytes   <- the WORKER HOST's file, as a SUCCESS
+/// ```
+///
+/// Two legs, and they have different histories:
+///
+/// * **the leaf** — a declared name that is itself a symlink. Present since the
+///   handler was written, under both copy strategies;
+/// * **an intermediate component** — `outputFiles: ["etcdir/passwd"]` with
+///   `ln -s /etc etcdir`. **Introduced by fix round 1**, which replaced the
+///   per-file copy with one whole-directory copy: measured, a per-file
+///   `docker cp c:<wd>/etcdir/passwd` resolves `etcdir` *inside the container*
+///   and yields alpine's 702-byte file, while the directory copy brings
+///   `etcdir` over as a host symlink and yields the host's 9344.
+///
+/// # What the artifact does, and why egret cannot just copy it
+///
+/// `Docker.downloadOutputFiles` reads the working directory as a **TAR stream**
+/// (`copyArchiveFromContainerCmd`) and, per entry, calls
+/// `Files.copy(InputStream, Path)` — it materialises the entry's *content* into
+/// a regular file. A tar symlink entry carries no content, so Kestra's host
+/// filesystem never acquires a symlink and never follows one. The protection is
+/// structural rather than a check.
+///
+/// egret uses `docker cp`, which is the same daemon endpoint without the tar
+/// parsing (and without a tar dependency), so it must reach the same end state
+/// by refusing instead: `symlink_metadata` on every component, no symlink
+/// tolerated anywhere in a declared path.
+///
+/// # What is left after the fix, stated rather than found later
+///
+/// The per-file copy resolves an intermediate component **inside the
+/// container**, so `outputFiles: ["etcdir/passwd"]` with `ln -s /etc etcdir`
+/// now returns *alpine's* `/etc/passwd` as a regular file — the container's
+/// own, which the task could have printed anyway. There is no link on the host
+/// and nothing for this guard to see, and it **succeeds**.
+///
+/// That is deliberate and it is not the defect: the boundary that matters is
+/// the worker host, and the task already owns its container. The residual is
+/// that a declared name can still name a file outside the working directory
+/// *within the container*. Kestra's tar-stream copy returns an **empty** file
+/// there instead (a link entry carries no content for `Files.copy` to
+/// materialise), so the two diverge — both inside the sandbox, neither on the
+/// host. `a_symlinked_output_file_cannot_read_the_worker_hosts_files` drives
+/// both legs and asserts the host's file appears on neither.
+///
+/// # Why a refusal rather than "resolve it and check it stays inside"
+///
+/// Because the check would have to resolve the link to test it, and on the host
+/// the resolution **is** the escape — `canonicalize` on `leaked.txt` returns
+/// `/etc/passwd` having already left the staging directory. A containment test
+/// is also the wrong question: the author's link was written inside the
+/// container, where `/etc/passwd` is alpine's; it only became the host's by
+/// being carried out. So the honest answer is that a link cannot be carried out
+/// at all, and the author names the file it points at.
+const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docker cp` \
+     recreates it as a symlink on the WORKER HOST, so reading it would read the host's \
+     file rather than the container's, outside the sandbox the task ran in. Name the \
+     file itself instead";
 
 /// A [`TaskRunner`] over the local Docker daemon, driven through the `docker`
 /// CLI.
@@ -837,19 +950,33 @@ impl DockerRunner {
         // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
         if !commands.input_files.is_empty() {
             let staging = tempdir(task)?;
-            for (rel, contents) in &commands.input_files {
-                check_relative(rel)?;
-                let path = staging.join(rel);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(io_err)?;
+            // **Every path out of here removes the staging directory**, which
+            // review Minor 2 is about: the `?`s inside the loop used to return
+            // ahead of the cleanup, leaving a directory behind that may hold a
+            // partially written copy of the author's rendered `script:`. The
+            // work is a closure so there is one exit and the cleanup cannot be
+            // skipped by adding a branch later.
+            let staged = (|| -> Result<()> {
+                for (rel, contents) in &commands.input_files {
+                    check_relative(rel)?;
+                    let path = staging.join(rel);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(io_err)?;
+                    }
+                    std::fs::write(&path, contents).map_err(io_err)?;
                 }
-                std::fs::write(&path, contents).map_err(io_err)?;
-            }
-            let src = format!("{}/.", staging.display());
-            let dst = format!("{name}:{WORKING_DIR}");
-            let out = self.cli(&["cp", &src, &dst]).await;
+                Ok(())
+            })();
+            let copied = match staged {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    let src = format!("{}/.", staging.display());
+                    let dst = format!("{name}:{WORKING_DIR}");
+                    self.cli(&["cp", &src, &dst]).await
+                }
+            };
             let _ = std::fs::remove_dir_all(&staging);
-            let out = out?;
+            let out = copied?;
             if !out.status.success() {
                 return Err(self.classify("cp", &String::from_utf8_lossy(&out.stderr)));
             }
@@ -941,25 +1068,41 @@ impl DockerRunner {
         Ok(result)
     }
 
-    /// Copy the working directory back **once**, then resolve every declared
-    /// file inside it with [`ingest_output_file`].
+    /// Copy **only the declared files** out, then resolve each one with
+    /// [`ingest_output_file`].
     ///
-    /// # One copy, not one per file, and that is the fix and not an optimisation
+    /// # Fix round 2 moved this back to a per-file copy, and that is the fix
     ///
-    /// It is also what the artifact does: `Docker.run` carries the string
-    /// *"Unable to sync the working directory back from the container; the task
-    /// declares no output files, so continuing without failing the run."*, so
-    /// Kestra syncs the **directory** and decides about individual files
-    /// afterwards. Doing the same means "is the author's file there?" is
-    /// answered by `std::fs::metadata` on egret's own staging copy rather than
-    /// by the wording of a `docker cp` error — which is what Important 5 was
-    /// about, and what made Critical 1 reachable.
+    /// Fix round 1 replaced N per-file copies with one whole-directory copy, on
+    /// the reasoning that it is what `Docker.run` does and that it lets
+    /// [`ingest_output_file`] answer *"is the author's file there?"* from the
+    /// filesystem instead of from a daemon error string. The second half was
+    /// right and is kept. The first half was wrong twice:
     ///
-    /// So the only failure this can attribute to the daemon is the ONE copy,
-    /// and even there the generic `"no such file or directory"` marker is not
-    /// consulted: [`DAEMON_SOCKET_MARKERS`] is the narrower pair, because at
-    /// this call site the generic string is far more likely to be the author's
-    /// container than the socket.
+    /// * **it moved symlink resolution from inside the container to the worker
+    ///   host**, which is [`SYMLINK_REFUSAL`]'s intermediate-component leg — a
+    ///   sandbox escape that per-file copies do not have, because
+    ///   `docker cp c:<wd>/etcdir/passwd` resolves `etcdir` container-side;
+    /// * **it copied the whole working directory regardless of what was
+    ///   declared** — measured, 64 MiB of undeclared scratch in 2.66s. The
+    ///   output caps bound what reaches Postgres; nothing bounded what reached
+    ///   the worker's disk.
+    ///
+    /// And the appeal to the artifact was only half true: `downloadOutputFiles`
+    /// does copy the whole directory, but as a **tar stream it materialises**
+    /// (`Files.copy(InputStream, Path)` per entry), never as a filesystem copy —
+    /// which is exactly why Kestra's host never ends up holding a symlink. The
+    /// shape mattered more than the granularity, and the granularity was the
+    /// part that got copied.
+    ///
+    /// # The daemon-free property is preserved, deliberately
+    ///
+    /// The copy's exit status is **ignored**. A file that did not copy simply is
+    /// not in the staging tree, and `ingest_output_file` says so from
+    /// `symlink_metadata` — so the merge condition still holds: the missing
+    /// file, the directory, the symlink and both caps are all decided with no
+    /// daemon. Only a *daemon that is not answering* is read out of stderr, and
+    /// only through [`DAEMON_SOCKET_MARKERS`].
     ///
     /// `Err` is a **worker** failure and reaches only the daemon case; an
     /// author's problem lands in [`CommandsResult::failure`] with the exit code
@@ -971,27 +1114,38 @@ impl DockerRunner {
         staging: &std::path::Path,
         result: &mut CommandsResult,
     ) -> Result<()> {
-        std::fs::create_dir_all(staging).map_err(io_err)?;
-        let src = format!("{name}:{WORKING_DIR}/.");
-        let dst = staging.display().to_string();
-        let out = self.cli(&["cp", &src, &dst]).await?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if DAEMON_SOCKET_MARKERS.iter().any(|m| stderr.contains(m)) {
-                return Err(Error::Internal(anyhow::anyhow!(
-                    "the Docker daemon could not be reached, so the working directory \
-                     of {name} could not be copied back: {stderr}"
-                )));
-            }
-            result.failure = Some(format!(
-                "the working directory could not be copied back out of the container, \
-                 so `outputFiles:` cannot be answered: {stderr}"
-            ));
-            return Ok(());
-        }
-
         let mut total = 0usize;
         for rel in &commands.output_files {
+            // The name is vetted BEFORE it is interpolated into a `docker cp`
+            // argument, so `..` never reaches the daemon and the staged path
+            // cannot land outside `staging`.
+            if let Some(problem) = relative_problem(rel) {
+                result.failure = Some(problem);
+                return Ok(());
+            }
+            let dst = staging.join(rel);
+            // **Parents are created here, by egret, as real directories.** That
+            // is the other half of the intermediate-component defence: nothing
+            // the container wrote can become a path component of the staged
+            // tree. `ingest_output_file` still `lstat`s every component, so the
+            // guard is one a test can plant a link under and watch fail.
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).map_err(io_err)?;
+            }
+            let src = format!("{name}:{WORKING_DIR}/{rel}");
+            let dst_s = dst.display().to_string();
+            let out = self.cli(&["cp", &src, &dst_s]).await?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                if DAEMON_SOCKET_MARKERS.iter().any(|m| stderr.contains(m)) {
+                    return Err(Error::Internal(anyhow::anyhow!(
+                        "the Docker daemon could not be reached, so {rel:?} could not be \
+                         copied back out of {name}: {stderr}"
+                    )));
+                }
+                // Anything else is left to the filesystem: the file is simply
+                // not staged, and `ingest_output_file` produces the message.
+            }
             if let Err(problem) = ingest_output_file(
                 result,
                 staging,
@@ -1013,12 +1167,32 @@ impl DockerRunner {
 /// Named after the run so two concurrent runs cannot collide, and created under
 /// the process temp dir rather than in the repo.
 fn tempdir(task: &TaskInput) -> Result<std::path::PathBuf> {
+    // **0700 and unpredictable, and review Minor 3 is only half the reason.**
+    // The stated half: this directory holds the author's rendered `script:`,
+    // which may carry whatever a `{{ … }}` resolved to, and 0755 under a
+    // typical umask makes that world-readable on a shared host.
+    //
+    // The half that makes it a correctness issue and not only a disclosure one:
+    // the name used to be a pure function of `(run_id, claimed_at)`, both of
+    // which an author can see, in a world-writable directory. Anyone able to
+    // guess it could pre-create it **as a symlink to a directory** and
+    // `create_dir_all` would happily succeed through it — putting the staging
+    // tree, and every `docker cp` destination under it, somewhere else. A
+    // random component removes the guess and `create_dir` (not `create_dir_all`)
+    // refuses a path that already exists, so a pre-created anything is an error
+    // rather than a silent redirection.
     let dir = std::env::temp_dir().join(format!(
         "egret-workflow-{}-{}",
         task.run_id.simple(),
-        task.claimed_at.timestamp_micros()
+        uuid::Uuid::new_v4().simple()
     ));
-    std::fs::create_dir_all(&dir).map_err(io_err)?;
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir).map_err(io_err)?;
     Ok(dir)
 }
 
@@ -1406,6 +1580,154 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A declared output that is a SYMLINK is refused, not followed.**
+    ///
+    /// Fix round 2's Critical. `docker cp` recreates a symlink as a symlink on
+    /// the worker host, so following it reads the HOST's file — outside the
+    /// container the task was confined to. The reviewer measured it end to end:
+    /// `ln -s /etc/passwd leaked.txt` returned the worker's 9344-byte
+    /// `/etc/passwd` as a **successful** task output, where alpine's own is 702.
+    ///
+    /// This plants a real symlink rather than a regular file, which is the
+    /// review's caveat applied: `ingest_output_file` traded daemon-dependence
+    /// for host-filesystem-dependence, and a test that only ever writes regular
+    /// files cannot see what the filesystem does with a link.
+    #[test]
+    fn a_declared_output_that_is_a_symlink_is_refused_rather_than_followed() {
+        let dir = staging("symlink-leaf");
+        // Something outside the staging tree, with content this test can
+        // recognise: if the guard ever regresses, the assertion below sees the
+        // secret rather than an absence.
+        let outside = dir.parent().expect("a parent").join(format!(
+            "egret-w4t5-secret-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&outside, "SECRET-FROM-OUTSIDE-THE-STAGING-TREE").expect("write");
+        std::os::unix::fs::symlink(&outside, dir.join("leaked.txt")).expect("symlink");
+
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(&mut r, &dir, "leaked.txt", 1_000_000, 1_000_000, &mut total)
+            .expect_err("a symlink must be refused");
+
+        assert!(err.contains("SYMLINK"), "{err}");
+        assert!(
+            err.contains("leaked.txt"),
+            "the declared name must be named: {err}"
+        );
+        assert!(
+            err.contains("WORKER HOST"),
+            "the refusal must say what the hazard is: {err}"
+        );
+        assert!(
+            r.output_files.is_empty(),
+            "nothing may be read out of a symlink"
+        );
+        assert_eq!(
+            total, 0,
+            "and it must not be counted against the caps either"
+        );
+
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An INTERMEDIATE component that is a symlink is refused too.**
+    ///
+    /// The second leg, and the one fix round 1 introduced by copying the whole
+    /// working directory: `outputFiles: ["etcdir/passwd"]` with
+    /// `ln -s /etc etcdir`. A guard that only checked the leaf would pass this,
+    /// which is the shape this programme keeps shipping — so it is asserted
+    /// separately rather than assumed to follow from the leaf case.
+    #[test]
+    fn a_symlinked_intermediate_component_is_refused_as_well_as_a_symlinked_leaf() {
+        let dir = staging("symlink-mid");
+        let outside = dir
+            .parent()
+            .expect("a parent")
+            .join(format!("egret-w4t5-etc-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::fs::write(
+            outside.join("passwd"),
+            "SECRET-VIA-AN-INTERMEDIATE-COMPONENT",
+        )
+        .expect("write");
+        std::os::unix::fs::symlink(&outside, dir.join("etcdir")).expect("symlink");
+
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+        let err = ingest_output_file(
+            &mut r,
+            &dir,
+            "etcdir/passwd",
+            1_000_000,
+            1_000_000,
+            &mut total,
+        )
+        .expect_err("a symlinked path COMPONENT must be refused");
+
+        assert!(err.contains("SYMLINK"), "{err}");
+        assert!(
+            err.contains("\"etcdir\""),
+            "the offending COMPONENT must be named, not just the declared path: {err}"
+        );
+        assert!(r.output_files.is_empty());
+
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Even a symlink that points back INSIDE the staging tree is refused**,
+    /// and a dangling one is refused as a symlink rather than reported missing.
+    ///
+    /// Both directions matter. The first says the rule is "no links", not "no
+    /// links that escape" — a containment test would have to resolve the link
+    /// to judge it, and on the host the resolution IS the escape. The second
+    /// says the refusal is decided by `lstat` and not by whether the target
+    /// happens to exist, so a link planted at a moment when its target is
+    /// absent cannot slip through and be followed later.
+    #[test]
+    fn a_symlink_is_refused_even_pointing_inside_the_tree_or_at_nothing() {
+        let dir = staging("symlink-inside");
+        std::fs::write(dir.join("real.txt"), "legitimate").expect("write");
+        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("alias.txt")).expect("symlink");
+        std::os::unix::fs::symlink(dir.join("gone.txt"), dir.join("dangling.txt"))
+            .expect("symlink");
+
+        let mut r = CommandsResult::default();
+        let mut total = 0usize;
+
+        let err = ingest_output_file(&mut r, &dir, "alias.txt", 1_000_000, 1_000_000, &mut total)
+            .expect_err("a link inside the tree is still a link");
+        assert!(err.contains("SYMLINK"), "{err}");
+
+        let err = ingest_output_file(
+            &mut r,
+            &dir,
+            "dangling.txt",
+            1_000_000,
+            1_000_000,
+            &mut total,
+        )
+        .expect_err("a dangling link is refused as a link");
+        assert!(
+            err.contains("SYMLINK"),
+            "a dangling link must not be reported as a missing file -- `lstat` sees \
+             the link whatever its target does: {err}"
+        );
+
+        // The file the link pointed at is nameable directly, so the refusal is
+        // about the link and not about the content being unreachable.
+        ingest_output_file(&mut r, &dir, "real.txt", 1_000_000, 1_000_000, &mut total)
+            .expect("the real file is a fine output");
+        assert_eq!(
+            r.output_files.get("real.txt").map(String::as_str),
+            Some("legitimate")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A binary artefact cannot be an output, and says why.
     #[test]
     fn a_non_utf8_output_file_fails_the_task_saying_why() {
@@ -1441,6 +1763,94 @@ mod tests {
             assert!(err.contains(needle), "{bad:?} was refused with {err}");
         }
         assert_eq!(total, 0, "a refused name must not have been measured");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Only the DECLARED files are copied out of the container.**
+    ///
+    /// Fix round 2's NEW Important 1: fix round 1 copied the whole working
+    /// directory regardless of what was declared, and the reviewer measured
+    /// 64 MiB of undeclared scratch reaching the worker's disk in 2.66s. The
+    /// output caps bound what reaches Postgres; nothing bounded that.
+    ///
+    /// Asserted on the **argv the runner actually issues**, through the
+    /// `with_binary` seam, so it needs no daemon and cannot pass by the copy
+    /// happening to be small. A run that copied `…/working-dir/.` would put that
+    /// path in the log and fail here.
+    #[tokio::test]
+    async fn only_the_declared_output_files_are_copied_out_of_the_container() {
+        let dir = staging("argv");
+        let log = dir.join("argv.log");
+        let shim = dir.join("docker-shim.sh");
+        // A `docker` that records what it was asked and fakes just enough:
+        // `create` prints an id, `start` prints nothing, `inspect` prints 0,
+        // and `cp` materialises a file at the destination so the pure seam has
+        // something to ingest.
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$@\" >> {log}\n\
+                 case \"$1\" in\n\
+                 \x20 create) echo fake-container-id ;;\n\
+                 \x20 inspect) echo 0 ;;\n\
+                 \x20 cp) case \"$3\" in *?) printf 'staged' > \"$3\" ;; esac ;;\n\
+                 esac\n\
+                 exit 0\n",
+                log = log.display()
+            ),
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let task = leased(1_700_000_000);
+        let out = runner
+            .run(
+                &task,
+                &TaskCommands {
+                    container_image: "alpine:3.20".into(),
+                    commands: vec!["true".into()],
+                    output_files: vec!["wanted.txt".into(), "nested/also.txt".into()],
+                    ..TaskCommands::default()
+                },
+                &super::super::handlers::TracingSink,
+            )
+            .await
+            .expect("the shim is a well-behaved daemon");
+        assert_eq!(out.failure, None, "{out:?}");
+        assert_eq!(out.output_files.len(), 2, "{out:?}");
+
+        let argv = std::fs::read_to_string(&log).expect("the shim logged");
+        let cps: Vec<&str> = argv
+            .lines()
+            .filter(|l| l.starts_with("cp ") && l.contains(':'))
+            .collect();
+        assert_eq!(
+            cps.len(),
+            2,
+            "one copy per DECLARED file, and no others: {argv}"
+        );
+        assert!(
+            cps.iter()
+                .any(|l| l.contains("/egret/working-dir/wanted.txt"))
+                && cps
+                    .iter()
+                    .any(|l| l.contains("/egret/working-dir/nested/also.txt")),
+            "each copy names its declared file: {argv}"
+        );
+        assert!(
+            !argv.contains("/egret/working-dir/."),
+            "the WHOLE working directory must not be copied -- that is what put \
+             64 MiB of undeclared scratch on the worker's disk, and what moved \
+             symlink resolution onto the host: {argv}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

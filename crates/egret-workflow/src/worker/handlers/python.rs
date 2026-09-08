@@ -82,7 +82,7 @@
 //!   which is a supply-chain decision and not a handler's.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egret_core::Result;
 use serde::Deserialize;
@@ -147,6 +147,80 @@ struct Spec {
 
 fn yes() -> bool {
     true
+}
+
+/// The Python names Kestra's `Script` predefines and egret deliberately does
+/// not.
+///
+/// `Script.class` prepends the literal `"true = True\nfalse = False\nnull = None\n"`
+/// so a `{{ … }}` rendering a JSON boolean into Python source still parses.
+/// [This module's doc](self) says why egret does not copy it: three invisible
+/// lines shift every traceback the author reads.
+///
+/// **Review Minor 7 is that the divergence lived only in rustdoc**, so an author
+/// porting a Kestra script got a `NameError` with nothing to connect it to. The
+/// repo has no author-facing workflow task reference to put it in — measured, no
+/// document in `docs/` mentions `outputFiles` or `beforeCommands` at all — so it
+/// is connected at the place the author actually meets it instead:
+/// [`NameHintSink`] watches the script's own stderr for exactly these names and
+/// [`Python::run`] appends the explanation to the failure message.
+const KESTRA_PREDEFINED: [&str; 3] = ["true", "false", "null"];
+
+/// A [`LogSink`] that passes every line through and remembers whether Python
+/// complained about one of [`KESTRA_PREDEFINED`].
+///
+/// A decorator rather than a field on `CommandsResult`, because this is one
+/// handler's authoring hint and not part of what a command produces — the
+/// runner has no business knowing that `null` means something to Python.
+#[derive(Debug)]
+struct NameHintSink {
+    inner: Arc<dyn LogSink>,
+    seen: Mutex<Option<String>>,
+}
+
+impl NameHintSink {
+    fn new(inner: Arc<dyn LogSink>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            seen: Mutex::new(None),
+        })
+    }
+
+    /// The name CPython said was undefined, if it was one of Kestra's three.
+    ///
+    /// Matched on CPython's own wording — `NameError: name 'true' is not
+    /// defined` — rather than on the bare word, so an ordinary log line
+    /// mentioning `null` cannot produce the hint.
+    fn undefined_name(line: &str) -> Option<&'static str> {
+        let rest = line.split("NameError: name '").nth(1)?;
+        let name = rest.split('\'').next()?;
+        KESTRA_PREDEFINED.iter().copied().find(|k| *k == name)
+    }
+
+    fn hint(&self) -> Option<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl LogSink for NameHintSink {
+    fn log(&self, task: &TaskInput, level: super::Level, message: &str) {
+        if let Some(name) = Self::undefined_name(message) {
+            let mut seen = self.seen.lock().unwrap();
+            if seen.is_none() {
+                *seen = Some(format!(
+                    "`{name}` is not a Python name. Kestra's `python.Script` \
+                     silently prepends `true = True`, `false = False` and \
+                     `null = None` to every script; `{TYPE_ID}` deliberately does \
+                     not, because those three invisible lines shift every line \
+                     number in every traceback. If a `{{{{ … }}}}` rendered a JSON \
+                     boolean or null into your source, render it as Python \
+                     (`{{{{ … | lower }}}}` is not enough for `null`) or define \
+                     the names yourself"
+                ));
+            }
+        }
+        self.inner.log(task, level, message);
+    }
 }
 
 /// `egret.script.python`, over a [`TaskRunner`].
@@ -263,8 +337,19 @@ impl TaskHandler for Python {
             output_files,
         };
 
-        match self.runner.run(task, &cmds, self.sink.as_ref()).await {
-            Ok(result) => Ok(outcome_for(TYPE_ID, &result)),
+        // The sink is wrapped for the run so an authoring mistake Kestra hides
+        // is connected to its cause here — see [`NameHintSink`] and review
+        // Minor 7.
+        let watcher = NameHintSink::new(self.sink.clone());
+        match self.runner.run(task, &cmds, watcher.as_ref()).await {
+            Ok(result) => {
+                let mut outcome = outcome_for(TYPE_ID, &result);
+                if let (Some(hint), Some(message)) = (watcher.hint(), outcome.message.as_mut()) {
+                    message.push_str(". ");
+                    message.push_str(&hint);
+                }
+                Ok(outcome)
+            }
             Err(e) => mapped(TYPE_ID, e),
         }
     }
@@ -428,6 +513,69 @@ mod tests {
             out.message
         );
         assert!(spy.seen.lock().unwrap().is_empty());
+    }
+
+    /// **A `NameError` on one of Kestra's three predefined names is explained
+    /// where the author meets it.**
+    ///
+    /// Review Minor 7. Both directions: the hint fires on CPython's own wording
+    /// and nothing else, so an ordinary line mentioning `null` cannot produce
+    /// it.
+    #[tokio::test]
+    async fn a_kestra_predefined_name_error_is_connected_to_its_cause() {
+        use crate::worker::commands::{CommandsResult, TaskCommands, TaskRunner};
+
+        /// A runner that prints the traceback a ported Kestra script produces,
+        /// then fails the way the container would.
+        #[derive(Debug)]
+        struct Traceback(&'static str);
+
+        #[async_trait::async_trait]
+        impl TaskRunner for Traceback {
+            async fn run(
+                &self,
+                task: &TaskInput,
+                _c: &TaskCommands,
+                sink: &dyn LogSink,
+            ) -> Result<CommandsResult> {
+                sink.log(task, super::super::Level::Warn, self.0);
+                Ok(CommandsResult {
+                    exit_code: 1,
+                    stderr_line_count: 1,
+                    ..CommandsResult::default()
+                })
+            }
+            async fn cancel(&self, _task: &TaskInput) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let h = Python::with_runner(Arc::new(Traceback("NameError: name 'null' is not defined")));
+        let out = h
+            .run(&input(TYPE_ID, spec()))
+            .await
+            .expect("no worker error");
+        let msg = out.message.expect("a failed run carries a message");
+        assert!(
+            msg.starts_with("egret.script.python: the command exited with code 1"),
+            "the failure itself still leads: {msg}"
+        );
+        assert!(
+            msg.contains("Kestra's `python.Script` silently prepends"),
+            "and the divergence is explained where the author meets it: {msg}"
+        );
+
+        // A line that merely mentions the word must not trigger it.
+        let h = Python::with_runner(Arc::new(Traceback("loaded null values from the source")));
+        let out = h
+            .run(&input(TYPE_ID, spec()))
+            .await
+            .expect("no worker error");
+        let msg = out.message.expect("a message");
+        assert!(
+            !msg.contains("silently prepends"),
+            "the hint keys on CPython's own NameError wording, not on the word: {msg}"
+        );
     }
 
     /// `cancel` reaches the runner here too — a `Python` holds a container

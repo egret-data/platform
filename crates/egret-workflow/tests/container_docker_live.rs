@@ -711,8 +711,14 @@ async fn the_runner_refuses_an_empty_image_with_the_artifacts_own_message() {
 async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
     let runner = DockerRunner::new();
 
-    // Input files are refused BEFORE a container exists, so this one is an
-    // `Err` with nothing to preserve.
+    // **After `docker create`, not before it** — review Minor 1, which said
+    // this exact sentence was false when it was a test heading, and which I
+    // then reproduced verbatim as this comment. `check_relative` for
+    // `input_files` runs inside `run_created`, i.e. once the container exists;
+    // the refusal is an `Err` because nothing has RUN yet and there is no exit
+    // code or var to preserve, which is a different fact from when it happens.
+    // The container is removed on the way out, which the assertion at the end
+    // of this test is what checks.
     let t = task(container::TYPE_ID, serde_json::json!({}));
     let err = runner
         .run(
@@ -761,6 +767,114 @@ async fn a_path_that_escapes_the_working_directory_is_refused_by_the_runner() {
             "a refused run removes whatever it created"
         );
     }
+}
+
+/// **A symlinked output file cannot read the worker host's files.**
+///
+/// Fix round 2's Critical, driven exactly where the reviewer found it. The
+/// boundary that matters is the **worker host**: the task already owns its
+/// container and can `cat` anything in it, so the defect was never "a file
+/// outside the working directory" — it was *the worker's* file arriving as a
+/// successful task output. Both legs are driven, and they now end differently,
+/// which is the finding this test records:
+///
+/// * **leaf** — `ln -s /etc/passwd leaked.txt`. `docker cp` recreates the link
+///   on the host, so this is the escape, and it is **refused**.
+/// * **intermediate** — `ln -s /etc etcdir`, declared as `etcdir/passwd`. With
+///   the per-file copy restored, `docker cp` resolves `etcdir` **inside the
+///   container**, so what arrives is a regular file holding *alpine's*
+///   `/etc/passwd` — the container's own, which the task could have printed
+///   anyway. No host file, no link on the host, nothing for the guard to see.
+///
+/// So the second leg **succeeds**, and the assertion that matters for it is
+/// that the content is the container's and not the worker's. The two are
+/// distinguishable byte for byte: alpine writes `root:x:0:0`, macOS writes
+/// `root:*:0:0`, and the sizes differed 702 against 9344 on the machine this
+/// was found on.
+///
+/// The residual is stated rather than hidden: a declared name can still reach
+/// outside the working directory *within the container*. Kestra's tar-stream
+/// copy would return an **empty** file there (a link entry carries no content
+/// for `Files.copy` to materialise); egret returns the container's file. Both
+/// are inside the sandbox; neither is the host.
+async fn a_symlinked_output_file_cannot_read_the_worker_hosts_files() {
+    let h = container::Container::new();
+
+    // Whatever the worker host's own passwd file says, no task output may
+    // contain it. Read here so the control is the real file and not a guess
+    // about which OS this is.
+    let host_passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let host_marker = host_passwd
+        .lines()
+        .find(|l| l.starts_with("root:"))
+        .unwrap_or("root:*:0:0")
+        .to_string();
+
+    // ---- leaf: the escape, refused ----
+    let t = task(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "commands": ["ln -s /etc/passwd leaked.txt", "echo '::{\"outputs\":{\"ran\":1}}::'"],
+            "outputFiles": ["leaked.txt"],
+        }),
+    );
+    let out = h
+        .run(&t)
+        .await
+        .expect("a symlink is the author's flow, never a worker failure");
+    let msg = failed(&out);
+    assert!(
+        msg.contains("SYMLINK") && msg.contains("leaked.txt"),
+        "a declared output that is a symlink must be refused, naming it: {msg}"
+    );
+    let o = outputs(&out);
+    assert_eq!(
+        o["outputFiles"],
+        serde_json::json!({}),
+        "nothing may be read through a link: {o}"
+    );
+    assert_eq!(
+        o["vars"],
+        serde_json::json!({"ran": 1}),
+        "the guard must fire on a run that otherwise succeeded: {o}"
+    );
+    assert!(
+        !o.to_string().contains(&host_marker),
+        "the WORKER HOST's passwd file reached the task outputs -- this is the \
+         sandbox escape fix round 2 exists to close"
+    );
+
+    // ---- intermediate: resolved container-side, so it is the container's ----
+    let t = task(
+        container::TYPE_ID,
+        serde_json::json!({
+            "image": SHELL_IMAGE,
+            "commands": ["ln -s /etc etcdir", "echo '::{\"outputs\":{\"ran\":1}}::'"],
+            "outputFiles": ["etcdir/passwd"],
+        }),
+    );
+    let out = h.run(&t).await.expect("no worker failure");
+    let o = outputs(&out);
+    let got = o["outputFiles"]["etcdir/passwd"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !got.is_empty(),
+        "the per-file copy resolves the component inside the container, so this \
+         leg returns the CONTAINER's file: {o}"
+    );
+    assert!(
+        got.contains("root:x:0:0"),
+        "and it must be alpine's, which writes `root:x:0:0`: {got}"
+    );
+    assert!(
+        !got.contains(&host_marker) && !o.to_string().contains(&host_marker),
+        "the worker host's passwd file must not appear on this leg either -- \
+         that is what the whole-directory copy did, and what restoring the \
+         per-file copy undoes"
+    );
 }
 
 /// **An output file over the cap fails the task rather than being truncated**,
@@ -852,6 +966,7 @@ fn daemon_cases() -> Vec<(&'static str, Case)> {
         case!(a_non_zero_exit_fails_the_task_and_set_e_stops_at_the_first_failure),
         case!(a_path_that_escapes_the_working_directory_is_refused_by_the_runner),
         case!(a_reaped_workers_cancel_cannot_reach_its_replacements_container),
+        case!(a_symlinked_output_file_cannot_read_the_worker_hosts_files),
         case!(an_image_that_does_not_exist_fails_the_task_rather_than_the_worker),
         case!(an_output_file_comes_back_and_a_missing_one_fails_without_losing_the_rest),
         case!(an_output_file_over_the_cap_fails_the_task_rather_than_being_truncated),
