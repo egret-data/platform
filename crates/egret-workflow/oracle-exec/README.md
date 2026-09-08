@@ -7590,6 +7590,88 @@ cannot be emitted without a `StartRun` beside it (`apply` records nothing for
 it, so the round would repeat for ever), and no golden entry reaches the
 difference.
 
+## Fix round 1 — the guard that had been seen to fail
+
+**The cycle guard above shipped with a hole, and the review reproduced the same
+SIGABRT it was written for.** It walked `trigger_execution_id` only. A `Loop`
+sub-execution is linked by `parent_execution_id` and its `trigger_execution_id`
+is **NULL** — not by accident but by `workflow_executions_one_link_kind`, the
+constraint W6 Task 2 added to make carrying both unrepresentable. So the walk
+**truncated at every loop boundary**, and a cycle whose every hop crossed one
+was invisible to it:
+
+```text
+t/cyl-a:  loop(values: ["1"]) -> Subflow t/cyl-b
+t/cyl-b:  loop(values: ["1"]) -> Subflow t/cyl-a
+
+fatal runtime error: stack overflow, aborting   (SIGABRT)
+```
+
+Reproduced on this branch before the fix, with the guard shipped and enabled.
+The control is what made the diagnosis certain: with only **one** side looping
+the guard caught it, so the link kind is the whole difference.
+
+**The premise was wrong, not the arithmetic.** It assumed a causal chain is
+walkable by one link kind; 0138 guarantees the opposite — **a child is linked by
+exactly one of two columns, and which one depends on why it exists.** The walk
+now reads `COALESCE(trigger_execution_id, parent_execution_id)`, "whichever link
+this row has", and the `COALESCE` is unambiguous *because* of that same CHECK.
+A subflow child, a `Loop` iteration and a `CREATE_NEW_EXECUTION` replay are all
+one nested `settle` inside the caller's transaction, so all three are one link
+of the thing the guard is about.
+
+`tests/worker.rs`'s `a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too`
+is that reproduction kept as a test, and it asserts the chain **by name and in
+order** — `cyl-a (loop) → cyl-a (loop) → cyl-b (subflow) → cyl-b (loop)`, four
+executions, one refusal — because a bare count would not say the walk crossed
+the loop links at all.
+
+### And a backstop, which the earlier argument said could not exist
+
+The first version shipped **no** depth bound, on the argument that *"a bound
+large enough to be worth having is not one this recursion can survive"* —
+measured, 16 links overflowed. **That argument was made against a guard that
+turned out not to cover the reachable case**, and it generalised a measurement
+about a bound used as THE guard to one used as a backstop. As a backstop the
+number only has to sit between what is real (the corpus's deepest chain is **2
+links**) and what kills a stack (**16**). `MAX_SPAWN_CHAIN = 8` is inside both,
+and `a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing`
+is its positive control — twelve distinct chained flows, so only the bound can
+stop them.
+
+It is also what lets the SIGABRT reproduction live in this suite: a regression
+of the cycle guard now fails an assertion instead of aborting the test binary
+and taking every other test in it along.
+
+**What neither closes, in the words the class deserves: `spawn_one` settles the
+child inside its caller's transaction, so depth in the data is depth on the
+stack.** Every bound here is a number chosen against a stack size this code does
+not control. The real fix is to stop settling the child there — a change to how
+`tick` finds work — and nothing in this package does it.
+
+### A false claim about a defence that does not exist, in two files
+
+`worker::subflow::resolve`'s doc said *"Migration 0138's composite foreign key
+would refuse the resulting child row"* for a cross-workspace resolve. **It would
+not.** The child carries the PARENT's `workspace_id` and the OTHER workspace's
+`flow_id`, so `workflow_executions_trigger_same_workspace` is satisfied, and the
+only constraint on `flow_id` is `executions_flow_id_fkey FOREIGN KEY (flow_id)
+REFERENCES workflow.flows(id)` — **one column, no workspace half**. The branch's
+own mutation proves it: dropping the `workspace_id = $1` predicate makes
+`a_subflow_target_in_another_workspace_does_not_resolve` report
+`(1, Some("SUCCESS"), None)` — the other tenant's flow read AND executed,
+refused by nothing.
+
+**The same sentence was in `tests/worker.rs` as well**, on the very test that is
+the defence, and the sweep found it because it was looked for rather than
+because it was handed over. Both now say what is true: `workspace_id = $1` is
+the only thing standing between an author-typed `(namespace, flowId)` and
+another tenant's flow source, and **nothing in the schema is a second line of
+defence.**
+
+**Ratchet unmoved: 131 before fix round 1 and 131 after**, `baseline.txt`
+byte-unchanged, so the twelve are the same twelve.
+
 ## What this task deliberately did NOT change
 
 - **`read_trace_inner`'s decode**, still `(Uuid, i32, String)` — Task 4's, and

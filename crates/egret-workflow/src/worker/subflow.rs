@@ -79,6 +79,16 @@
 //!   `restartBehavior` are not on `models::Subflow`** (W1's curation), so
 //!   nothing here can honour them. `valids/task-flow-inherited-labels` and
 //!   `valids/subflow-inherited-labels-parent` are the entries that names.
+//!
+//! # A gap that is the ORACLE's and not this worker's
+//!
+//! `oracle-exec/driver.rs`'s `pass_time` walks `parent_execution_id` only, so
+//! the driver's clock never reaches a retry deadline held by a subflow child.
+//! **That is a coverage limit of the harness, not a stall in the product**, and
+//! fix round 1's review is what made the distinction: `claim::due_retries` is a
+//! **global** scan, so a shipping worker wakes such a retry like any other. No
+//! `Subflow` target in the corpus declares a `retry:` in any case, so nothing
+//! reaches even the harness limit.
 
 use egret_core::{Error, Result};
 use serde_json::{json, Value};
@@ -93,8 +103,44 @@ use crate::executor::{
 use crate::models::{Flow, Subflow, Task, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
 
+/// **How far down a chain of child executions this worker will spawn**, and the
+/// second half of the one answer this module gives that is NOT the artifact's.
+///
+/// It is a **backstop**, not the guard. [`chain_refusal`] is the guard: it
+/// refuses a spawn whose target is already somewhere up this execution's own
+/// causal chain, which is what a cycle is. This bounds the case a cycle check
+/// cannot see — a legitimately **acyclic** chain deep enough to exhaust a
+/// stack, because [`spawn_one`] drives the child's first settle inside its
+/// caller's transaction and each link is a nested `settle`.
+///
+/// # Fix round 1 corrected the argument that said this could not exist
+///
+/// The first version of this module shipped a cycle check and **no** bound, on
+/// the argument that *"a depth bound large enough to be worth having is not one
+/// this recursion can survive"* — measured, a 16-link chain overflowed the
+/// stack. **That argument was made against a guard that turned out not to cover
+/// the reachable case**, and it generalised a measurement about a bound used as
+/// THE guard (where it would have to be large) to a bound used as a backstop
+/// (where it does not). As a backstop the number only has to be larger than
+/// anything real and smaller than what kills a stack, and there is room between
+/// those: the corpus's deepest chain is **2 links**.
+///
+/// **8 is four times that**, and it fires long before the 16 that was measured
+/// to abort. `tests/worker.rs`'s
+/// `a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing`
+/// is the positive control and asserts both halves — the chain stops AND the run
+/// that hit the bound says why — because a backstop nobody has seen fire is a
+/// backstop nobody has seen.
+///
+/// # It counts BOTH link kinds, for [`chain_refusal`]'s reason
+///
+/// A `Loop` sub-execution is one nested `settle` exactly as a subflow child is,
+/// so a `Subflow` inside a loop body inside a loop body is three links down
+/// whatever column each hop used.
+pub const MAX_SPAWN_CHAIN: usize = 8;
+
 /// **The one answer this module gives that is NOT the artifact's: a `Subflow`
-/// may not name a flow that is already somewhere up its own trigger chain.**
+/// may not name a flow that is already somewhere up its own causal chain.**
 ///
 /// # Why a guard exists here at all, measured rather than reasoned
 ///
@@ -107,37 +153,58 @@ use crate::runners::{render_str, RenderContext};
 /// egret cannot do that: [`spawn_one`] drives the child's first settle **inside
 /// its caller's transaction** (the same arrangement `spawn::spawn_one` has for
 /// a loop iteration, where a cycle is impossible), so a cycle is unbounded
-/// async recursion. **Measured**: a mutually recursive pair
-/// `t/cyc-a` <-> `t/cyc-b` overflowed the test thread's stack and aborted the
-/// process with SIGABRT — twice, once with a depth bound of 32 and once with
-/// 16, so the crash arrives BEFORE 16 levels and a depth bound large enough to
-/// be worth having is not one this can survive.
+/// async recursion. **Measured**: a mutually recursive pair overflowed the
+/// test thread's stack and aborted the process with SIGABRT.
 ///
-/// # So the guard is a cycle check and not a depth bound
+/// # The walk follows BOTH link columns, and the first version did not
 ///
-/// It refuses at the FIRST repeat, which for A -> B -> A is one child deep —
-/// far below anything that stresses a stack — and it does not depend on how
-/// much stack a caller happens to have. It is exactly `self_dependency`'s rule
-/// one level out.
+/// **This is fix round 1's Critical, and the defect was structural rather than
+/// an oversight.** The first walk followed `trigger_execution_id` only. A
+/// `Loop` sub-execution is linked by `parent_execution_id` and its
+/// `trigger_execution_id` is **NULL** — not by accident but by
+/// `workflow_executions_one_link_kind`, the constraint W6 Task 2 added to make
+/// carrying both unrepresentable. So the walk **truncated at every loop
+/// boundary**, and a cycle whose every hop crossed one was invisible to it:
+/// two flows, each a one-value `Loop` whose body is a `Subflow` naming the
+/// other, still aborted the worker with SIGABRT **with that guard shipped and
+/// enabled**.
 ///
-/// `tests/worker.rs`'s `a_cycle_of_subflows_stops_instead_of_crashing` is the
-/// positive control, because a guard nobody has seen fire is a guard nobody has
-/// seen: it drives that same pair through the real worker and asserts both
-/// halves — the chain stops, and the run that would have closed the cycle FAILS
-/// carrying the reason.
+/// The premise was that a causal chain is walkable by one link kind. 0138
+/// guarantees the opposite: **a child is linked by exactly one of two columns,
+/// and which one depends on why it exists.** So the walk reads
+/// `COALESCE(trigger_execution_id, parent_execution_id)` — "whichever link this
+/// row has" — and the `COALESCE` is unambiguous *because* of that same CHECK,
+/// which is why it is not a choice between two candidates.
 ///
-/// # What this does NOT bound, named rather than left
+/// `tests/worker.rs`'s `a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too`
+/// is the reproduction, kept as the test; `a_cycle_of_subflows_stops_instead_of_crashing`
+/// is the same-link case, and it is the control that made the diagnosis certain
+/// — it was caught by the first guard, so the link kind is what distinguishes
+/// them.
 ///
-/// A legitimately **acyclic** chain 20 flows deep would still recurse 20 levels
-/// and could still exhaust a stack. Nothing in the corpus comes close — the
-/// deepest chain it holds is **2 links, three flows**, re-derived on every run by
-/// `tests/executor.rs`'s
-/// `the_deepest_subflow_chain_in_the_corpus_is_far_inside_the_bound` — and no
-/// number was invented for it here, because the measurement above says any
-/// number worth having is one this recursion cannot survive. The real fix is to
-/// stop settling the child inside its parent's transaction; that is a change to
-/// how `tick` finds work and belongs to whoever needs a deep chain.
-/// One [`Command::SpawnSubflow`], kept as data.
+/// # What it costs, stated as a restriction and not only as a safety net
+///
+/// Kestra runs `A -> B -> A` for ever; egret refuses at the first repeat. The
+/// same rule also refuses a **terminating** mutually recursive workflow — a
+/// fan-out over a tree that revisits a flow at a deeper level — which Kestra
+/// would run correctly. That is a functional restriction, not only a guard.
+/// Nothing in the corpus reaches it (`tests/executor.rs`'s
+/// `the_corpus_subflow_graph_has_no_cycle_and_no_deep_chain`), and refusing is
+/// the lesser wrong while `spawn_one` settles the child inside its caller's
+/// transaction — but a reader deciding whether to relax it should know it costs
+/// behaviour and not only safety.
+///
+/// # What is left, in the words the class deserves
+///
+/// Between this and [`MAX_SPAWN_CHAIN`] the two shapes that can recurse are
+/// both refused. **The thing neither closes is the reason they are needed**:
+/// `spawn_one` settles the child inside its caller's transaction, so depth in
+/// the data is depth on the stack. Until that changes, every bound here is a
+/// number chosen against a stack size this code does not control. The real fix
+/// is to stop settling the child there — a change to how `tick` finds work —
+/// and it belongs to whoever needs a deep chain.
+
+/// One [`Command::SpawnSubflow`], kept as data./// One [`Command::SpawnSubflow`], kept as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Requested {
     pub task: TaskIx,
@@ -259,20 +326,12 @@ async fn spawn_one(
         }
     };
 
-    // Before anything is written: would this close a cycle? See the module's
-    // `chain_holds` -- this is the one answer here that is not the artifact's,
-    // and the reason is a measured stack overflow rather than a preference.
-    if chain_holds(conn, ctx.id, &namespace, &flow_id).await? {
-        return fail_run(
-            conn,
-            ctx,
-            r.run,
-            &format!(
-                "subflow '{namespace}'.'{flow_id}' is already running higher up \
-                 this execution's own chain; starting it would loop"
-            ),
-        )
-        .await;
+    // Before anything is written: would this close a cycle, or go deeper than
+    // this worker will build in one transaction? See [`chain_refusal`] and
+    // [`MAX_SPAWN_CHAIN`] -- the one answer here that is not the artifact's, and
+    // the reason is a measured stack overflow rather than a preference.
+    if let Some(why) = chain_refusal(conn, ctx.id, &namespace, &flow_id).await? {
+        return fail_run(conn, ctx, r.run, &why.message(&namespace, &flow_id)).await;
     }
 
     let Some((child_flow, source)) = resolve(conn, ctx.workspace_id, &namespace, &flow_id).await?
@@ -635,9 +694,26 @@ async fn fail_run(
 /// `a.b/nightly` resolve nondeterministically by `id`. **This caller has the
 /// workspace** — it is on `ExecutionCtx` — so it uses it, and the alternative
 /// is a cross-workspace read of another tenant's flow source through a
-/// `(namespace, flowId)` pair an author can type. Migration 0138's composite
-/// foreign key would refuse the resulting child row, but only after the source
-/// had been read, which is the wrong order to find out.
+/// `(namespace, flowId)` pair an author can type.
+///
+/// **`workspace_id = $1` is the ONLY thing that stops that, and nothing in the
+/// schema is a second line of defence.** This paragraph used to say migration
+/// 0138's composite foreign key would refuse the resulting child row; **it
+/// would not, and the branch's own mutation proves it.** The child a
+/// cross-workspace resolve produces carries the PARENT's `workspace_id` and the
+/// OTHER workspace's `flow_id`, so `workflow_executions_trigger_same_workspace`
+/// is satisfied, and the only constraint on `flow_id` is
+/// `executions_flow_id_fkey FOREIGN KEY (flow_id) REFERENCES
+/// workflow.flows(id)` — **one column, no workspace half** (read off
+/// `\d workflow.executions`). Deleting the predicate makes
+/// `a_subflow_target_in_another_workspace_does_not_resolve` report
+/// `(1, Some("SUCCESS"), None)`: one child execution created and run to
+/// SUCCESS, no constraint anywhere.
+///
+/// It is corrected rather than deleted because the false version is the
+/// sentence a reader would find when deciding whether this predicate is
+/// load-bearing — and this repository has already shipped a cross-workspace
+/// read once, on a column whose guard everyone assumed existed.
 ///
 /// A trashed or disabled flow does not resolve, which is Kestra's own pair of
 /// refusals one step earlier: `if (flow.isDisabled())` and
@@ -662,13 +738,57 @@ async fn resolve(
     Ok(row)
 }
 
-/// Whether `(namespace, flow_id)` is the flow of this execution or of anything
-/// above it on its `trigger_execution_id` chain.
+/// Why a spawn is refused, or `None`.
 ///
-/// The whole of the cycle guard, in one statement. It reads `flow_key` /
-/// `namespace` — the identity pair a `Subflow` names — rather than `flow_id`,
-/// the surrogate key, because two workspaces' rows are different `id`s for the
-/// same name and the name is what an author wrote.
+/// An enum rather than an `Option<String>` so the two messages live beside the
+/// two decisions and `tests/worker.rs` can assert each without a copy of the
+/// wording drifting from the site that produces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The target is already somewhere up this execution's own causal chain.
+    Cycle,
+    /// This execution is already `.0` links down, and one more would exceed
+    /// [`MAX_SPAWN_CHAIN`].
+    TooDeep(usize),
+}
+
+impl Refusal {
+    fn message(self, namespace: &str, flow_id: &str) -> String {
+        match self {
+            Refusal::Cycle => format!(
+                "subflow '{namespace}'.'{flow_id}' is already running higher up \
+                 this execution's own chain; starting it would loop"
+            ),
+            Refusal::TooDeep(links) => format!(
+                "this execution is {links} child execution(s) down a chain and \
+                 {MAX_SPAWN_CHAIN} is as deep as this worker will build in one \
+                 transaction; '{namespace}'.'{flow_id}' is not started"
+            ),
+        }
+    }
+}
+
+/// Walk this execution's causal chain to the top: is `(namespace, flow_id)`
+/// already on it, and how long is it?
+///
+/// # It follows BOTH link columns, and reading only one is the defect fix
+/// round 1 was opened for
+///
+/// `COALESCE(trigger_execution_id, parent_execution_id)` — **"whichever link
+/// this row has"**, and it is a `COALESCE` and not a choice because
+/// `workflow_executions_one_link_kind` makes a row carrying both
+/// unrepresentable. A subflow child carries the first; a `Loop` sub-execution
+/// and a `CREATE_NEW_EXECUTION` replay carry the second. All three are one
+/// nested `settle` inside the caller's transaction, so all three are one link
+/// of the thing this guard is about.
+///
+/// The first version followed `trigger_execution_id` alone and therefore
+/// truncated at every loop boundary — see [`MAX_SPAWN_CHAIN`]'s neighbour above
+/// for the reproduction that shipped past it.
+///
+/// It reads `flow_key` / `namespace` — the identity pair a `Subflow` names —
+/// rather than `flow_id`, the surrogate key, because two workspaces' rows are
+/// different `id`s for the same name and the name is what an author wrote.
 ///
 /// **It starts at this execution itself**, so `A -> A` is caught here as well
 /// as by `spec::validate`'s `self_dependency` — two guards, and the second is
@@ -676,25 +796,29 @@ async fn resolve(
 /// publish, which is what the oracle's driver does.
 ///
 /// The walk terminates whatever the data says: a chain of rows can only run
-/// backwards in time, because a child always names a row that existed before it
-/// was inserted.
-async fn chain_holds(
+/// backwards in time, because a child of either kind always names a row that
+/// existed before it was inserted. That argument is unchanged by widening the
+/// walk, because `parent_execution_id` names an older row for the same reason
+/// `trigger_execution_id` does.
+async fn chain_refusal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     namespace: &str,
     flow_id: &str,
-) -> Result<bool> {
-    let hit: bool = sqlx::query_scalar(
+) -> Result<Option<Refusal>> {
+    let (hit, links): (bool, i64) = sqlx::query_as(
         "WITH RECURSIVE up AS ( \
-             SELECT id, trigger_execution_id, namespace, flow_key \
+             SELECT id, COALESCE(trigger_execution_id, parent_execution_id) AS caused_by, \
+                    namespace, flow_key, 0::bigint AS links \
                FROM workflow.executions WHERE id = $1 \
            UNION ALL \
-             SELECT e.id, e.trigger_execution_id, e.namespace, e.flow_key \
-               FROM workflow.executions e JOIN up ON e.id = up.trigger_execution_id \
+             SELECT e.id, COALESCE(e.trigger_execution_id, e.parent_execution_id), \
+                    e.namespace, e.flow_key, up.links + 1 \
+               FROM workflow.executions e JOIN up ON e.id = up.caused_by \
          ) \
-         SELECT EXISTS ( \
-             SELECT 1 FROM up WHERE namespace = $2 AND flow_key = $3 \
-         )",
+         SELECT COALESCE(bool_or(namespace = $2 AND flow_key = $3), false), \
+                COALESCE(max(links), 0) \
+           FROM up",
     )
     .bind(execution_id)
     .bind(namespace)
@@ -702,7 +826,21 @@ async fn chain_holds(
     .fetch_one(&mut *conn)
     .await
     .map_err(db_err)?;
-    Ok(hit)
+    // `0::bigint` in the anchor rather than a bare `0`: Postgres types the
+    // literal `int4`, `max()` then returns `int4`, and sqlx refuses to decode
+    // that into `i64` -- which it did, loudly, on this test's first run.
+    let links = links.max(0) as usize;
+    // The cycle first: it is the guard, and its message says something a reader
+    // can act on. The depth is the backstop and only speaks when the guard did
+    // not.
+    if hit {
+        return Ok(Some(Refusal::Cycle));
+    }
+    // `links` counts the links ABOVE this execution; the child would add one.
+    if links + 1 > MAX_SPAWN_CHAIN {
+        return Ok(Some(Refusal::TooDeep(links)));
+    }
+    Ok(None)
 }
 
 /// The execution that started this one and the run inside it, or `None` when

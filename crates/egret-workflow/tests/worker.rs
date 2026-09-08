@@ -3693,10 +3693,16 @@ async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_chi
 /// uses it.
 ///
 /// The test is written so that the ONLY difference from the passing case is the
-/// workspace: the same namespace, the same flow id, the same source. An
-/// unscoped resolver reads the other tenant's flow source and executes it, and
-/// migration 0138's composite foreign key would then refuse the child row --
-/// after the source had already been read, which is the wrong order to find out.
+/// workspace: the same namespace, the same flow id, the same source.
+///
+/// **This test IS the defence, because there is no other one.** The doc here
+/// used to add *"and migration 0138's composite foreign key would then refuse
+/// the child row"* — the same false sentence `worker::subflow::resolve` carried,
+/// found by the same sweep and corrected in the same commit. It would not:
+/// `executions_flow_id_fkey` is one column with no workspace half, and dropping
+/// the `workspace_id = $1` predicate makes this test report
+/// `(1, Some("SUCCESS"), None)` — the other tenant's flow read AND executed,
+/// refused by nothing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -4067,5 +4073,203 @@ async fn a_cycle_of_subflows_stops_instead_of_crashing(pool: sqlx::PgPool) {
         "FAILED",
         "and `transmitFailed` carries it back to the root, which is what makes \
          the refusal visible to whoever started the flow"
+    );
+}
+
+/// **A cycle whose every hop crosses a `Loop` boundary.**
+///
+/// The shape the review reproduced with the first cycle guard shipped and
+/// enabled: two flows, each a one-value `Loop` whose body is a `Subflow` naming
+/// the other. It aborted the process with `SIGABRT`.
+///
+/// **Why the first guard missed it, and why the miss was structural.** That
+/// guard walked `trigger_execution_id` only. A `Loop` sub-execution is linked
+/// by `parent_execution_id` and its `trigger_execution_id` is NULL — not by
+/// accident but by `workflow_executions_one_link_kind`, the constraint W6 Task
+/// 2 added to make carrying both unrepresentable. So the walk **truncated at
+/// every loop boundary**, and no single walked segment ever contained a repeat.
+/// The guard's premise was that a causal chain is walkable by one link kind;
+/// migration 0138 guarantees it is not.
+///
+/// The control that makes the diagnosis certain is the sibling test
+/// [`a_cycle_of_subflows_stops_instead_of_crashing`], where neither hop crosses
+/// a loop and the first guard caught it — so what distinguishes them is the
+/// link kind and nothing else.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let a = "id: cyl-a\nnamespace: t\ntasks:\n  - id: each\n    \
+             type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    tasks:\n      \
+             - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+             namespace: t\n        flowId: cyl-b\n";
+    let b = "id: cyl-b\nnamespace: t\ntasks:\n  - id: each\n    \
+             type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    tasks:\n      \
+             - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+             namespace: t\n        flowId: cyl-a\n";
+    file_flow(&db, ws, user, a).await;
+    file_flow(&db, ws, user, b).await;
+
+    let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // **The chain by NAME and in order, not a bare count**, because the count
+    // alone would not say the walk crossed the loop links at all. It is read
+    // through the same `COALESCE(trigger_execution_id, parent_execution_id)`
+    // the guard walks, so a chain this query can order is a chain the guard
+    // could see.
+    let chain: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE down AS ( \
+             SELECT id, flow_key, trigger_execution_id IS NOT NULL AS by_trigger, \
+                    0 AS depth \
+               FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, e.flow_key, e.trigger_execution_id IS NOT NULL, down.depth + 1 \
+               FROM workflow.executions e \
+               JOIN down ON down.id = COALESCE(e.trigger_execution_id, e.parent_execution_id) \
+         ) \
+         SELECT flow_key || (CASE WHEN by_trigger THEN ' (subflow)' ELSE ' (loop)' END) \
+           FROM down ORDER BY depth",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("walk the chain");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r \
+          WHERE r.message IS NOT NULL ORDER BY r.created_at, r.execution_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        (chain, all, refused.len()),
+        (
+            vec![
+                "cyl-a (loop)".to_string(),
+                "cyl-a (loop)".to_string(),
+                "cyl-b (subflow)".to_string(),
+                "cyl-b (loop)".to_string(),
+            ],
+            4,
+            1
+        ),
+        "the whole chain: the root, its LOOP child, the `cyl-b` SUBFLOW child, \
+         and ITS loop child -- and then the spawn back to `cyl-a` is refused. \
+         Note the first row's label is the root's own (it carries neither link); \
+         what matters is that two of the three links are loop links, which is \
+         exactly what the first guard could not see. Four executions and no more"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "subflow 't'.'cyl-a' is already running higher up this execution's \
+                 own chain; starting it would loop"
+            )
+        ),
+        "and the run that would have closed it FAILS carrying the reason"
+    );
+    assert_eq!(
+        run_state(&pool, root, "each").await,
+        Some("FAILED".to_string()),
+        "the refusal reaches the root through the loop's own `transmitFailed`"
+    );
+}
+
+/// **A chain deeper than `MAX_SPAWN_CHAIN` is refused rather than overflowing a
+/// stack.**
+///
+/// The positive control for the backstop beside the cycle guard, and the reason
+/// the SIGABRT reproduction above can live in this suite at all: with a bound in
+/// place a regression of the cycle guard fails an assertion instead of aborting
+/// the test binary, which takes every other test in it with it.
+///
+/// **This is the class fix round 1 said was left open**, and the report's
+/// earlier sentence — *"a depth bound large enough to be worth having is not one
+/// this recursion can survive"* — was a measurement about a bound used as THE
+/// guard generalised to one used as a backstop. As a backstop it only has to sit
+/// between what is real (the corpus's deepest chain is **2 links**) and what
+/// kills a stack (**16 was measured to abort**). 8 is inside both.
+///
+/// The chain is `dep-0 → dep-1 → … → dep-11`, twelve DISTINCT flows, so the
+/// cycle guard has nothing to say about it and only the bound can stop it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let deeper_than_the_bound = egret_workflow::worker::MAX_SPAWN_CHAIN + 4;
+    for i in 0..deeper_than_the_bound {
+        let src = format!(
+            "id: dep-{i}\nnamespace: t\ntasks:\n  - id: sub\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: dep-{}\n",
+            i + 1
+        );
+        file_flow(&db, ws, user, &src).await;
+    }
+    // The last one in the chain names a flow that does not exist, so if the
+    // bound ever stopped firing this test would fail on the count rather than
+    // run away -- and the message would be the unresolvable one, which is a
+    // different assertion failure and not the same as silence.
+    let root_src = "id: dep-0\nnamespace: t\ntasks:\n  - id: sub\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: dep-1\n";
+
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all,
+        egret_workflow::worker::MAX_SPAWN_CHAIN as i64 + 1,
+        "the root plus exactly MAX_SPAWN_CHAIN children, and then it stops"
+    );
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        refused.len(),
+        1,
+        "exactly one run is refused -- the one at the bound: {refused:?}"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "this execution is 8 child execution(s) down a chain and 8 is as \
+                 deep as this worker will build in one transaction; 't'.'dep-9' \
+                 is not started"
+            )
+        ),
+        "and it FAILS carrying the bound and the target it did not start. A \
+         backstop that stopped the recursion and left the run RUNNING would look \
+         identical in the count above"
+    );
+    assert_eq!(
+        run_state(&pool, root, "sub").await,
+        Some("FAILED".to_string()),
+        "and `transmitFailed` carries the refusal all the way back to the root"
     );
 }

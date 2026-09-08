@@ -3073,9 +3073,14 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W2, through a subflow inside a `Loop`: the same `valids/restart-child`, reached from a \
          loop sub-execution, so egret runs 3 sub-executions and 3 runs where Kestra ran 1 and 2",
     ),
-    // The only one of the five whose cause is not already in this list, because
-    // its cause is not a flow anybody runs -- it is a construct nothing in
-    // egret evaluates.
+    // **The only one of the five that is a new INSTANCE and not only a newly
+    // visible one**, which fix round 1's review separated: the other four are
+    // owned by a row already in this list, so the child was over-accepted
+    // before and the parent merely could not reach it. This one has no
+    // pre-existing row -- its cause is a construct nothing in egret evaluates,
+    // and the run that now SUCCEEDs where Kestra FAILED it did not exist while
+    // the parent stalled. No capability was added that fires where Kestra would
+    // not; a run was.
     (
         "valids/subflow-secret-output-parent",
         "unclaimed: the flow-level `outputs:` block is not evaluated anywhere in egret, so a child \
@@ -5004,13 +5009,21 @@ fn no_corpus_subflow_turns_transmit_failed_off() {
 /// **The deepest chain of `Subflow` targets the corpus holds is 2 links — three
 /// flows — and its only cycle is a self-cycle both sides refuse.**
 ///
-/// Both halves matter to `worker::subflow`'s cycle guard, which is the one
-/// answer that module gives that is not the artifact's. The **cycle** half is
-/// the load-bearing one: nothing on either side refuses A -> B -> A, and if the
+/// Both halves matter to `worker::subflow`, which is where the one answer this
+/// package gives that is not the artifact's lives. The **cycle** half is the
+/// load-bearing one: nothing on either side refuses A -> B -> A, and if the
 /// corpus ever grew one the driver would run it — into a recursion that
-/// overflowed a stack when it was measured. The **depth** half bounds the
-/// residual hazard the guard does NOT close: an acyclic chain deep enough to
-/// exhaust a stack anyway.
+/// overflowed a stack when it was measured. The **depth** half says that
+/// `MAX_SPAWN_CHAIN` cannot be reached by anything here.
+///
+/// **This measures the SUBFLOW GRAPH, and that is narrower than what the guard
+/// walks** — the name says so since fix round 1's Minor 3, which pointed out
+/// that the old one (`…_is_far_inside_the_bound`) promised a bound that at the
+/// time did not exist. `chain_refusal` walks the EXECUTION chain, which counts
+/// a `Loop` sub-execution as a link too; this walk cannot see loop nesting at
+/// all. So the 2 below is a lower bound on the real chain, and what says
+/// `MAX_SPAWN_CHAIN` refuses nothing real is the ratchet: 131 with the same
+/// twelve, re-run after the bound went in.
 ///
 /// Walked over `(namespace, flowId)` pairs with a visited set, because the
 /// graph **can** cycle — `spec::validate`'s `self_dependency` refuses only a
@@ -5018,7 +5031,7 @@ fn no_corpus_subflow_turns_transmit_failed_off() {
 /// without one would not terminate, which is the same fact the constant exists
 /// for.
 #[test]
-fn the_deepest_subflow_chain_in_the_corpus_is_far_inside_the_bound() {
+fn the_corpus_subflow_graph_has_no_cycle_and_no_deep_chain() {
     let by_name: BTreeMap<String, String> = corpus()
         .iter()
         .filter_map(|e| {
