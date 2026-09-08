@@ -570,12 +570,25 @@ fn find_task<'a>(flow: &'a Flow, want: &str) -> Option<&'a Task> {
         .find_map(|t| walk(t, want))
 }
 
-/// The parent execution and the loop run inside it, or `None` for a top-level
-/// execution.
+/// The parent execution and the **loop run** inside it, or `None` when there
+/// is no loop run to report back to.
 ///
-/// Migration 0135's CHECK is what makes the pair readable as a pair: the four
-/// loop columns are all set or all null, so a row that names a parent always
-/// names a run and an index too.
+/// **The `zip` is doing real work since migration 0138, and this doc used to
+/// say the opposite.** Under 0135's
+/// `workflow_executions_loop_run_all_or_nothing` the four loop columns were all
+/// set or all null, so a row naming a parent always named a run and an index
+/// too and the pair could never be half-present. 0138 keeps that for a loop
+/// iteration -- `workflow_executions_loop_run_whole_or_absent` still forbids a
+/// parent *and* a run *without* an index -- but deliberately admits one more
+/// shape: **a parent with no loop columns at all**, which is Kestra's
+/// `CREATE_NEW_EXECUTION` replay (W6 Task 4). For that row `parent_run_ix` is
+/// NULL and this function returns `None`, which is the answer it should give:
+/// a replay is a new execution of the same flow, not an iteration a `Loop` run
+/// is waiting on, and [`on_execution_terminal`] has nothing to report to.
+///
+/// A `Subflow` child never reaches here at all -- it is linked by
+/// `trigger_execution_id`, and `workflow_executions_one_link_kind` makes a row
+/// carrying both links unrepresentable.
 async fn parent_of(conn: &mut PgConnection, execution_id: Uuid) -> Result<Option<(Uuid, i32)>> {
     let row = sqlx::query(
         "SELECT parent_execution_id, parent_run_ix FROM workflow.executions WHERE id = $1",

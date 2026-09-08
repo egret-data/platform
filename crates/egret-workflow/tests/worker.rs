@@ -2748,3 +2748,417 @@ async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
         "two siblings finished in one tick must not share a step: the step IS          the happens-before endpoint, and a shared one is exactly what a batched          transaction produces"
     );
 }
+
+// --------------------------------------------------------------------------
+// W6 Task 2: the three kinds of child execution, and the CHECKs that make
+// every other combination unrepresentable
+// --------------------------------------------------------------------------
+
+/// Every column of `workflow.executions` that can link one execution to
+/// another, as one value, so a test can name a combination instead of writing
+/// an INSERT for it.
+///
+/// `Default` is a TOP-LEVEL execution -- no link of either kind -- and each
+/// test sets only the fields whose combination it is about.
+#[derive(Default, Clone, Copy)]
+struct Link {
+    /// Supplied only by the self-link cases, which need to know the id before
+    /// the row exists. `None` lets the column default.
+    id: Option<Uuid>,
+    parent: Option<Uuid>,
+    parent_run_ix: Option<i32>,
+    loop_index: Option<i32>,
+    loop_value: Option<&'static str>,
+    trigger: Option<Uuid>,
+    trigger_run_ix: Option<i32>,
+}
+
+/// Insert one execution with exactly `link`'s columns set, returning the
+/// database's own answer.
+///
+/// **Deliberately not `start_execution`.** The point of these tests is what the
+/// SCHEMA refuses, so the statement has to be able to express the illegal
+/// combinations -- a writer that cannot spell one cannot prove the database
+/// refuses it.
+async fn insert_linked(pool: &sqlx::PgPool, ws: Uuid, link: Link) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (id, workspace_id, namespace, flow_key, source, state, history, \
+            parent_execution_id, parent_run_ix, loop_index, loop_value, \
+            trigger_execution_id, trigger_run_ix) \
+         VALUES (COALESCE($1, gen_random_uuid()), $2, 't', 'f', 'src', \
+                 'CREATED', '[\"CREATED\"]'::jsonb, $3, $4, $5, $6, $7, $8) \
+         RETURNING id",
+    )
+    .bind(link.id)
+    .bind(ws)
+    .bind(link.parent)
+    .bind(link.parent_run_ix)
+    .bind(link.loop_index)
+    .bind(link.loop_value)
+    .bind(link.trigger)
+    .bind(link.trigger_run_ix)
+    .fetch_one(pool)
+    .await
+}
+
+/// The name of the constraint that refused a write.
+///
+/// **The name is the assertion, not the fact that something failed.** A test
+/// that asserted only `is_err()` would keep passing if the CHECK were dropped
+/// and a NOT NULL, a foreign key or a unique index happened to refuse the same
+/// row for a different reason -- and it would keep passing if the constraint
+/// were renamed out from under it, which is the case migration 0138 itself
+/// creates by renaming 0135's.
+fn refusing_constraint(e: &sqlx::Error) -> String {
+    let db = e
+        .as_database_error()
+        .unwrap_or_else(|| panic!("expected a database error, got {e}"));
+    db.constraint()
+        .unwrap_or_else(|| panic!("the database refused the row without naming a constraint: {e}"))
+        .to_string()
+}
+
+/// Seed a workspace and one top-level execution to hang children off.
+async fn seed_root(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+    let (_db, ws) = seed(pool).await;
+    let root = insert_linked(pool, ws, Link::default())
+        .await
+        .expect("a top-level execution has no link of either kind");
+    (ws, root)
+}
+
+/// **All three kinds of child execution are representable, and this is the
+/// positive control for the test below.**
+///
+/// Measured on the pinned artifact (`oracle-exec/traces.json`), Kestra makes
+/// three distinct things and links them two different ways:
+///
+/// | kind | `parentId` | loop index | the link it is found by |
+/// |---|---|---|---|
+/// | loop iteration | set | set | `parent_execution_id` |
+/// | `CREATE_NEW_EXECUTION` replay | set | **absent** | `parent_execution_id` |
+/// | subflow child | **NULL** | absent | `trigger_execution_id` |
+///
+/// Before migration 0138 the middle row was **unrepresentable** -- 0135's
+/// `workflow_executions_loop_run_all_or_nothing` required all four loop
+/// columns or none -- and the bottom row had no column to be written into at
+/// all. A test that only listed refusals could not tell "the CHECK is right"
+/// from "the CHECK forbids everything", so this one exists to be the other
+/// half of that pair.
+///
+/// The fourth row is W6 Task 6's `Flow` trigger, which is caused by an
+/// execution reaching a state and by no particular taskrun: it is here because
+/// the schema must already admit it, not because anything writes it yet.
+#[sqlx::test(migrations = "../../migrations")]
+async fn all_three_kinds_of_child_execution_are_representable(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+
+    for (kind, link) in [
+        (
+            "loop iteration",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        ),
+        (
+            "CREATE_NEW_EXECUTION replay",
+            Link {
+                parent: Some(root),
+                ..Link::default()
+            },
+        ),
+        (
+            "subflow child",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        ),
+        (
+            "flow-trigger-fired execution (W6 Task 6)",
+            Link {
+                trigger: Some(root),
+                ..Link::default()
+            },
+        ),
+    ] {
+        insert_linked(&pool, ws, link)
+            .await
+            .unwrap_or_else(|e| panic!("{kind} must be representable, and was refused: {e}"));
+    }
+}
+
+/// **Every wrong combination is refused, and by the constraint that is named
+/// here.**
+///
+/// This programme's rule is *unrepresentable beats unforgettable*: a writer
+/// that forgets one of these returns 200, it does not fail. Migration 0135's
+/// own comment says the same thing about the constraint 0138 replaces.
+///
+/// **The row that matters most is `both links at once`.**
+/// `oracle-exec/driver.rs` builds the oracle's `spawned` field with
+/// `WHERE parent_execution_id = $1`, and all 41 golden `spawned`-carrying
+/// entries have **zero** `Subflow` children. A subflow child that also carried
+/// a `parent_execution_id` would appear in egret's trace and turn the entries
+/// W6 exists to bank into `spawned` mismatches --
+/// `a_subflow_child_is_invisible_to_the_query_that_builds_spawned` in
+/// `oracle-exec/driver.rs` is the other end of that guarantee.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_wrong_child_link_is_refused_by_a_named_constraint(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    // Chosen by this test rather than by the database, because a self-link has
+    // to be written into the same row it names.
+    let mine = Uuid::new_v4();
+
+    let cases: Vec<(&str, Link, &str)> = vec![
+        (
+            "a loop index with no parent",
+            Link {
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a parent and a run, but no index -- 0135's real target, still refused",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a loop iteration with no value",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a loop iteration that does not say which run spawned it",
+            Link {
+                parent: Some(root),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "BOTH links at once -- a subflow child that would appear in `spawned`",
+            Link {
+                parent: Some(root),
+                trigger: Some(root),
+                ..Link::default()
+            },
+            "workflow_executions_one_link_kind",
+        ),
+        (
+            "a trigger run ordinal into an execution that is not named",
+            Link {
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_trigger_run_needs_its_execution",
+        ),
+        (
+            "an execution that is its own parent",
+            Link {
+                id: Some(mine),
+                parent: Some(mine),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_no_self_link",
+        ),
+        (
+            "an execution that triggered itself",
+            Link {
+                id: Some(mine),
+                trigger: Some(mine),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_no_self_link",
+        ),
+    ];
+
+    for (what, link, constraint) in cases {
+        let err = insert_linked(&pool, ws, link)
+            .await
+            .err()
+            .unwrap_or_else(|| {
+                panic!("the database ACCEPTED {what}, which must be unrepresentable")
+            });
+        assert_eq!(
+            refusing_constraint(&err),
+            constraint,
+            "{what} must be refused by {constraint}"
+        );
+    }
+}
+
+/// **One replay child per parent, and the collision is unrepresentable rather
+/// than merely undetected.**
+///
+/// 0135's argument, restated for a key that can now hold NULLs: two children of
+/// one parent that sort equal make the `spawned` order undetermined, which is
+/// what `oracle-exec/normalise.py` has to BAIL on, because the creation instant
+/// carries no information at all -- every sub-execution of one batch is written
+/// in one transaction and shares `now()`. A replay child's `parent_run_ix` and
+/// `loop_index` are both NULL, so under Postgres's default NULLS DISTINCT rule
+/// any number of them could hang off one parent and tie under
+/// `ORDER BY parent_run_ix, loop_index`. 0138 adds `NULLS NOT DISTINCT`.
+///
+/// **One per parent is the artifact's behaviour, measured.** Over the 710
+/// descendants in `oracle-exec/traces.json`, 40 carry a NULL `loopIndex` (the
+/// four `valids/retry-new-execution-*` flows, two deep, five rounds) and no
+/// parent has more than one of them: Kestra CHAINS a `CREATE_NEW_EXECUTION`
+/// retry rather than fanning it out.
+///
+/// **Both positive controls are here because a unique index is exactly the kind
+/// of guard that is easy to make too strong.** Two loop iterations of one run
+/// are legal, and so are two subflow children of ONE run -- a `Subflow` task may
+/// carry its own `retry:`, and each attempt starts a new child
+/// (`valids/subflow-parent-retry` declares two of them at `maxAttempts: 3`),
+/// which is why `workflow_executions_trigger_idx` is NOT unique.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_parent_may_have_one_replay_child_but_never_two(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+
+    let replay = Link {
+        parent: Some(root),
+        ..Link::default()
+    };
+    insert_linked(&pool, ws, replay)
+        .await
+        .expect("the first replay child");
+    let err = insert_linked(&pool, ws, replay)
+        .await
+        .expect_err("a SECOND replay child of the same parent must be unrepresentable");
+    assert_eq!(
+        refusing_constraint(&err),
+        "workflow_executions_loop_run_idx",
+        "two replay children of one parent tie under `ORDER BY parent_run_ix, \
+         loop_index` and would be ordered by nothing"
+    );
+
+    for index in 0..2 {
+        insert_linked(
+            &pool,
+            ws,
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(index),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("loop iteration {index} of one run must stay legal: {e}"));
+    }
+
+    for attempt in 0..2 {
+        insert_linked(
+            &pool,
+            ws,
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("attempt {attempt} of ONE retried `Subflow` run must stay legal: {e}")
+        });
+    }
+}
+
+/// **A subflow child is not part of its parent's record, and the foreign key
+/// says so.**
+///
+/// 0135 made `parent_execution_id` `ON DELETE CASCADE` because a loop
+/// sub-execution *is* a part of its parent -- it has no flow of its own and no
+/// meaning without the iteration that made it. A subflow child is the opposite:
+/// a full execution of a DIFFERENT flow, with its own row in the executions
+/// list. So `trigger_execution_id` takes no `ON DELETE` action at all, and this
+/// test is what that decision costs and what it buys.
+///
+/// **The cost is a refusal, and the refusal is deliberate.** Nothing in `src/`
+/// deletes an execution row today, so NO ACTION refuses a case that does not
+/// arise rather than guessing at it; `ON DELETE SET NULL` was not available as
+/// an alternative, because it would null the execution and leave
+/// `trigger_run_ix` set, which
+/// `workflow_executions_trigger_run_needs_its_execution` forbids -- the delete
+/// would then fail anyway, with a constraint error naming the wrong thing.
+///
+/// **The workspace cascade is the half that had to be measured**, because a NO
+/// ACTION self-reference could have made deleting a workspace impossible.
+/// It does not: parent and child go in one statement, and the referential check
+/// runs after it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_childs_parent_cannot_be_deleted_alone_but_the_workspace_cascade_takes_both(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    let child = insert_linked(
+        &pool,
+        ws,
+        Link {
+            trigger: Some(root),
+            trigger_run_ix: Some(0),
+            ..Link::default()
+        },
+    )
+    .await
+    .expect("a subflow child");
+
+    let err = sqlx::query("DELETE FROM workflow.executions WHERE id = $1")
+        .bind(root)
+        .execute(&pool)
+        .await
+        .expect_err("deleting an execution a subflow child still names must be refused");
+    assert_eq!(
+        refusing_constraint(&err),
+        "executions_trigger_execution_id_fkey",
+        "the child must outlive nothing here silently: the refusal has to name \
+         the link, not some later CHECK"
+    );
+    let alive: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE id = $1")
+        .bind(child)
+        .fetch_one(&pool)
+        .await
+        .expect("count the child");
+    assert_eq!(alive, 1, "and nothing was deleted");
+
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("deleting the workspace must still cascade through both links");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count what is left");
+    assert_eq!(left, 0, "the cascade removed the parent AND the child");
+}

@@ -1008,6 +1008,25 @@ async fn read_trace_inner(
         }
     }
 
+    // **This query is why `Subflow` gets a column of its own** (W6 Task 2). It
+    // keys on `parent_execution_id`, and all 41 golden `spawned`-carrying
+    // entries have ZERO `Subflow` children -- so a subflow child linked this
+    // way would turn the entries W6 exists to bank into `spawned` mismatches.
+    // Migration 0138 makes that unrepresentable rather than merely
+    // discouraged: `workflow_executions_one_link_kind` forbids a row carrying
+    // both links, and `a_subflow_child_is_invisible_to_the_query_that_builds_spawned`
+    // below drives this function over one and asserts the empty `spawned`.
+    //
+    // **Left unchanged, and W6 Task 4 is the task that has to change it.** The
+    // tuple below is `(Uuid, i32, String)` and not `(Uuid, Option<i32>,
+    // Option<String>)`, which was exactly right while the CHECK made a child
+    // with a parent and no loop index unrepresentable. 0138 makes that child
+    // representable -- it is the `CREATE_NEW_EXECUTION` replay -- and the four
+    // `valids/retry-new-execution-*` entries want `{"parent_run": null,
+    // "value": null}` in `spawned`, which this decode cannot produce and would
+    // fail on. Nothing writes such a row yet, so nothing here is broken today;
+    // widening it belongs to the commit that starts writing one, so that the
+    // entries it moves are attributable to it.
     let children: Vec<(Uuid, i32, String)> = sqlx::query_as(
         "SELECT id, parent_run_ix, loop_value FROM workflow.executions \
           WHERE parent_execution_id = $1 ORDER BY parent_run_ix, loop_index",
@@ -1046,4 +1065,101 @@ fn strings(v: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// --------------------------------------------------------------------------
+// W6 Task 2: the constraint the whole package's banks depend on
+// --------------------------------------------------------------------------
+
+#[cfg(test)]
+mod w6_subflow_link {
+    use super::*;
+
+    /// Insert one execution, optionally linked to `parent` the LOOP way or to
+    /// `trigger` the SUBFLOW way.
+    ///
+    /// Written here rather than driven through `worker::start_execution`
+    /// because nothing spawns a subflow child yet -- W6 Task 3 does -- and the
+    /// property under test is a property of the QUERY, which reads rows and
+    /// does not care who wrote them.
+    async fn child(
+        pool: &PgPool,
+        ws: Uuid,
+        parent: Option<(Uuid, i32, i32, &str)>,
+        trigger: Option<(Uuid, i32)>,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO workflow.executions \
+               (workspace_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value, \
+                trigger_execution_id, trigger_run_ix) \
+             VALUES ($1, 't', 'f', 'src', 'SUCCESS', \
+                     '[\"CREATED\",\"RUNNING\",\"SUCCESS\"]'::jsonb, \
+                     $2, $3, $4, $5, $6, $7) \
+             RETURNING id",
+        )
+        .bind(ws)
+        .bind(parent.map(|p| p.0))
+        .bind(parent.map(|p| p.1))
+        .bind(parent.map(|p| p.2))
+        .bind(parent.map(|p| p.3))
+        .bind(trigger.map(|t| t.0))
+        .bind(trigger.map(|t| t.1))
+        .fetch_one(pool)
+        .await
+        .expect("insert an execution")
+    }
+
+    /// **A subflow child must not appear in `spawned`, and a loop child must.**
+    ///
+    /// This is the single assertion the rest of W6 rests on. [`read_trace`]
+    /// builds `spawned` from `parent_execution_id`; measured over the golden,
+    /// all **41** `spawned`-carrying entries have **zero** `Subflow` children,
+    /// and Kestra's own artifact agrees -- `valids/subflow-parent` ran its
+    /// `Subflow` to SUCCESS in all five rounds and `traces.json` records
+    /// `"descendants": []` for it, because `harvest.py` follows `parentId` and
+    /// Kestra leaves `parentId` NULL for a subflow child.
+    ///
+    /// **The loop child is the positive control and it is not optional.**
+    /// Without it, deleting the whole `spawned` query would leave this test
+    /// green: an empty `spawned` is what a subflow child is supposed to
+    /// produce, so "no children found" cannot be the only thing asserted.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_subflow_child_is_invisible_to_the_query_that_builds_spawned(pool: PgPool) {
+        egret_test_db::assert_database_url_is_exported();
+        let db = Db { pool: pool.clone() };
+        let (ws, _user) = crate::common::seed_workspace(&db).await;
+
+        let root = child(&pool, ws, None, None).await;
+        child(&pool, ws, None, Some((root, 0))).await;
+
+        let trace = read_trace(&pool, root)
+            .await
+            .expect("read the root's trace");
+        assert!(
+            trace.spawned.is_empty(),
+            "a subflow child reached the oracle's `spawned`. It is linked by \
+             `trigger_execution_id`; this query keys on `parent_execution_id`; \
+             the two are kept apart by migration 0138's \
+             `workflow_executions_one_link_kind`. All 41 golden \
+             `spawned`-carrying entries have zero `Subflow` children, so this \
+             turns W6's intended banks into `spawned` mismatches. Got: {:?}",
+            trace.spawned
+        );
+
+        let loop_child = child(&pool, ws, Some((root, 0, 0, "a")), None).await;
+        let trace = read_trace(&pool, root)
+            .await
+            .expect("read the root's trace again");
+        assert_eq!(
+            trace.spawned.len(),
+            1,
+            "the positive control: a LOOP child of the same parent must still \
+             be found by the same query, or the assertion above passes because \
+             the query is broken rather than because the link is right"
+        );
+        assert_eq!(trace.spawned[0].parent_run, Some(0));
+        assert_eq!(trace.spawned[0].value.as_deref(), Some("a"));
+        assert_ne!(loop_child, root, "sanity: the child is a row of its own");
+    }
 }

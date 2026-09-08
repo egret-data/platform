@@ -7260,3 +7260,90 @@ mutation survives — and it belongs to whoever owns `Subflow` resolution. The
 wider arm is kept because this census asks a different question from `publish`
 (*what would a resolver have to reach*), and its redundancy is written down
 here rather than left for a future reader to mistake for strength.
+
+---
+
+# W6 Task 2 — three kinds of child execution, and the CHECK the banks depend on
+
+Migration `0135` gave `workflow.executions` exactly **one** way to be a child:
+`(parent_execution_id, parent_run_ix, loop_index, loop_value)`, all four set or
+all four null. That CHECK was right about the thing it was written for — a child
+that knows its parent but not its index is not orderable, and the ordering is
+the whole of what `spawned` is compared on — and it forbade one more shape by
+accident: **a child with a parent and no loop index at all.**
+
+Kestra makes three different things here, and the distinction is measured on the
+pinned artifact rather than read off a class:
+
+| kind | `parentId` | `loopRun` | the link Kestra can be found by |
+|---|---|---|---|
+| loop iteration | set | set | `parentId` |
+| `CREATE_NEW_EXECUTION` replay | set | **absent** | `parentId` |
+| subflow child | **NULL** | absent | `trigger_execution_id` |
+
+**The replay row.** Over the four `valids/retry-new-execution-*` flows, all
+**eight** descendants in `traces.json` carry a `parentId`, a NULL `loopIndex`, a
+NULL `loopValue` and a NULL `spawnedBy` (which is `harvest.py`'s name for
+`loopRun.taskRunId`). Their golden entries say the same thing from the other
+side: every `spawned` element is `{"parent_run": null, "value": null, …}`.
+
+**The subflow row is measured by a visible absence.** `harvest.py` discovers
+descendants by following `parentId`; `valids/subflow-parent` is a flow whose only
+task is a `Subflow` that Kestra ran to SUCCESS, and its `descendants` is `[]` in
+all five rounds. The child exists. Nothing keyed on `parentId` can see it.
+
+## What migration `0138` adds, and what it refuses
+
+Two columns — `trigger_execution_id` and `trigger_run_ix` — and four
+constraints. The one that matters to this directory is
+**`workflow_executions_one_link_kind`**: a row may carry `parent_execution_id`
+or `trigger_execution_id`, never both. `read_trace_inner` builds `spawned` with
+`WHERE parent_execution_id = $1`, and **all 41 golden `spawned`-carrying entries
+have zero `Subflow` children** — a subflow child linked the other way would
+appear in egret's trace and turn W6's intended banks into `spawned` mismatches.
+`driver::w6_subflow_link::a_subflow_child_is_invisible_to_the_query_that_builds_spawned`
+drives the real `read_trace` over one subflow child and one loop child of the
+same parent and asserts exactly that split; the loop child is there because an
+empty `spawned` is what the test wants to see, so "no children found" cannot be
+the only thing asserted.
+
+The other three: `workflow_executions_loop_run_whole_or_absent` (the loop triple
+is whole or absent, and needs a parent when present — 0135's real target, kept),
+`workflow_executions_trigger_run_needs_its_execution`, and
+`workflow_executions_no_self_link`, which closes a hole 0135 also had: an INSERT
+that supplies its own `id` for `parent_execution_id` satisfies the foreign key,
+because the row exists by the time the constraint is checked.
+
+`workflow_executions_loop_run_idx` is recreated under the same name with
+`NULLS NOT DISTINCT`, so a parent may have **one** replay child and never two —
+two would tie under `ORDER BY parent_run_ix, loop_index` and be ordered by
+nothing, which is the collision `normalise.py` has to BAIL on. One per parent is
+the artifact's own behaviour: of the 710 descendants in `traces.json`, 40 carry
+a NULL `loopIndex` and **no parent has more than one of them**, because Kestra
+chains a `CREATE_NEW_EXECUTION` retry (root → replay → replay) instead of fanning
+it out. The same sweep found **no parent that mixes** a NULL-index child with
+loop children, so nothing yet has to decide where a replay sorts among
+iterations.
+
+The reverse index, `workflow_executions_trigger_idx`, is deliberately **not**
+unique. A `Subflow` task may carry its own `retry:` and each attempt starts a new
+child under the same `(execution, run_ix)`: `valids/subflow-parent-retry`
+declares two such tasks at `maxAttempts: 3`, and `valids/retry-subflow` puts a
+flow-level `retry:` over one. A unique index there would have made the second
+attempt unrepresentable.
+
+## What this task deliberately did NOT change, and what it costs W6 Task 4
+
+`read_trace_inner`'s `spawned` query is **unchanged**, including its decode
+type. It reads `Vec<(Uuid, i32, String)>` — not `Option`s — which was exactly
+right while a child with a parent and no loop index was unrepresentable. It no
+longer is: that child is the replay, and the four `retry-new-execution` entries
+want `{"parent_run": null, "value": null}` in `spawned`, which this decode cannot
+produce and would fail on. **Nothing writes such a row yet, so nothing is broken
+today.** Widening it belongs to the commit that starts writing one, so that the
+entries it moves are attributable to it. The comment above the query says the
+same thing at the site.
+
+**Ratchet: 143 → 143, zero moves.** Nothing in this task writes an execution
+row, so nothing the ratchet compares could move; a step that changed it would
+have been a step nobody asked for.
