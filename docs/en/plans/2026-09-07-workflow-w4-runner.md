@@ -36,7 +36,9 @@ crates/egret-workflow/src/worker/
   commands.rs     TaskCommands: the contract Kestra's TaskRunner takes
   handlers/
     container.rs  egret.container
-    python.rs     egret.python
+    python.rs     egret.script.python  (NOT egret.python: the spec's own type table gives that
+                  name to the notebook KernelLauncher, and TASK_TYPES has held it
+                  since W1 with a required `notebook` ref. Task 5 collided with it.)
 ```
 
 ---
