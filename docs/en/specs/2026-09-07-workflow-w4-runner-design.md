@@ -6,12 +6,12 @@
 
 ## 1. The measurement that reframes this package
 
-The programme spec §9 gives W4 *"`TaskCommands` contract; `egret.container`, `egret.python`; log streaming; output files; cancel/kill"*, in that order — which reads as a package about running containers.
+The programme spec §9 **gave** W4 *"`TaskCommands` contract; `egret.container`, `egret.python`; log streaming; output files; cancel/kill"* — quoted as it stood before this package measured anything; the row has since been corrected, because **`egret.python` was never W4's to build** (§6.4 gives that name to the notebook `KernelLauncher` and `TASK_TYPES` has held it since W1, with a required `notebook` reference). W4's handler is **`egret.script.python`**. In that order — which reads as a package about running containers.
 
 Measured over the corpus before writing any of it:
 
 - **There is not one script, container, shell or command task type anywhere in the 345 flows.** The only non-`core.*` type is `io.kestra.plugin.fs.http.Trigger`, on two entries, and that is W6's.
-- So `egret.container` and `egret.python` reach **zero** corpus entries and **zero** golden entries — exactly like `egret.sql`, whose spec §3.1 recorded the same thing after the fact.
+- So `egret.container` and `egret.script.python` reach **zero** corpus entries and **zero** golden entries — exactly like `egret.sql`, whose spec §3.1 recorded the same thing after the fact.
 - Meanwhile the three holes W3b explicitly handed to W4 touch **20 distinct baselined entries**, with an overlap of one:
 
 | hole W3b handed forward | baselined entries |
@@ -98,6 +98,6 @@ Unchanged, and two of them are load-bearing here:
 - The `RETRYING` waker, and the corrected sentence in `claim.rs`.
 - Task-level `timeout:` reaching the handler, enforced by the worker.
 - The kill path, tripping `egret.sql`'s deliberate refusal.
-- `TaskCommands`, `egret.container`, `egret.python`, with their own tests and a loud failure when the daemon is absent.
+- `TaskCommands`, `egret.container`, `egret.script.python`, with their own tests and a loud failure when the daemon is absent.
 - A ruling on one-run-per-tick with its cost measured.
 - A coverage statement that separates the twenty entries the ratchet can speak for from the runner it cannot.

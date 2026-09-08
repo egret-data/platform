@@ -8,16 +8,20 @@ Phụ thuộc: W3b (executor bền vững) — tiếp theo: W5 (plugin host), W9
 
 ## 1. Phép đo làm đổi hình dạng gói
 
-§9 spec chương trình giao W4: *"hợp đồng `TaskCommands`; `egret.container`,
-`egret.python`; stream log; file output; cancel/kill"* — đọc lên thì đây là một
-gói về chạy container.
+§9 spec chương trình **đã** giao W4: *"hợp đồng `TaskCommands`;
+`egret.container`, `egret.python`; stream log; file output; cancel/kill"* —
+trích nguyên văn như nó đứng TRƯỚC khi gói này đo bất cứ thứ gì; dòng ấy nay đã
+được sửa, vì **`egret.python` chưa bao giờ là việc của W4**: §6.4 giao tên đó cho
+`KernelLauncher` của notebook, và `TASK_TYPES` đã giữ nó từ W1 kèm một tham chiếu
+`notebook` BẮT BUỘC. Handler của W4 là **`egret.script.python`**. Đọc lên thì đây
+là một gói về chạy container.
 
 Đo trên corpus **trước khi viết bất cứ dòng nào**:
 
 - **Không có một task script, container, shell hay command nào trong cả 345
   flow.** Loại duy nhất ngoài `core.*` là `io.kestra.plugin.fs.http.Trigger`,
   trên hai mục, và đó là việc của W6.
-- Nên `egret.container` và `egret.python` chạm **KHÔNG** mục corpus nào và
+- Nên `egret.container` và `egret.script.python` chạm **KHÔNG** mục corpus nào và
   **KHÔNG** mục golden nào — y hệt `egret.sql`, thứ mà spec §3.1 của W3b đã ghi
   lại điều tương tự, nhưng chỉ sau khi đã làm xong.
 - Trong khi đó, **ba cái lỗ W3b chuyển giao thẳng cho W4 chạm tới 20 mục
@@ -134,7 +138,7 @@ Giữ nguyên, và hai điều dưới đây chịu lực ở gói này:
 - Bộ đánh thức `RETRYING`, và câu văn sai trong `claim.rs` được sửa.
 - `timeout:` cấp task tới được handler, do worker cưỡng chế.
 - Đường kill, giẫm lên lời từ chối có chủ ý của `egret.sql`.
-- `TaskCommands`, `egret.container`, `egret.python`, với test riêng và một lỗi
+- `TaskCommands`, `egret.container`, `egret.script.python`, với test riêng và một lỗi
   **ồn ào** khi thiếu daemon.
 - Một phán quyết về một-run-mỗi-tick, kèm giá đã đo.
 - Một tuyên bố độ phủ **tách bạch** hai mươi mục ratchet nói được với bộ chạy mà
