@@ -4886,9 +4886,12 @@ async fn a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_le
 /// which attempt this is, and how much of the chain's clock has run — and the
 /// oracle can only see their consequence.
 ///
-/// `maxAttempts: 2` rather than 3: the chain is then one replay long and the
-/// **second** execution is the one that must refuse, which is the shortest
-/// fixture that has both an end and a middle.
+/// **`maxAttempts: 3`, so the increment is asserted TWICE.** A two-long chain
+/// was the first version and a mutation is why it is not: replacing
+/// `attempt + 1` with `attempt.max(2)` writes the right number for the first
+/// replay and the wrong one for every later replay, and a chain that ends AT
+/// the first replay cannot tell those apart. That mutation SURVIVED the whole
+/// of `--lib` and `--test worker` until this test grew a third link.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -4899,7 +4902,7 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
         &pool,
         ws,
         None,
-        &one_task_replaying("chain", "PT1S", 2),
+        &one_task_replaying("chain", "PT1S", 3),
         serde_json::json!({}),
     )
     .await
@@ -4929,32 +4932,58 @@ async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: s
          less than 1000 ms. It is {offset}"
     );
 
-    // The chain ends here: `attemptNumber >= maxAttempts` is 2 >= 2.
+    // **The SECOND increment, which is the one a saturating `max(2)` gets
+    // wrong**: it writes the right number for the first replay and the wrong
+    // one for every later replay, so a two-long chain cannot see it.
+    drain_with(&pool, &reg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![second],
+        "attempt 2 of 3 is not the last, so its own replay comes due"
+    );
+    let third = replay_of(&pool, second)
+        .await
+        .expect("the second replacement");
+    let (third_attempt, third_offset) = metadata_of(&pool, third).await;
+    assert_eq!(
+        third_attempt, 3,
+        "the second replacement is attempt 3. An increment that saturates at 2 \
+         writes 2 here, `2 >= 3` is false for ever, and the chain never ends -- \
+         which the ratchet sees minutes later as the driver's step bound"
+    );
+    assert!(
+        third_offset >= offset + 1_000,
+        "and the origin offset accumulates: {third_offset} must be at least a \
+         second past the second execution's {offset}"
+    );
+
+    // The chain ends here: `attemptNumber >= maxAttempts` is 3 >= 3.
     drain_with(&pool, &reg).await;
     assert_eq!(
-        execution_history(&pool, second)
+        execution_history(&pool, third)
             .await
             .as_array()
             .and_then(|h| h.last().cloned()),
         Some(serde_json::json!("FAILED")),
-        "attempt 2 of 2 exhausts the policy, so the second execution FAILS \
+        "attempt 3 of 3 exhausts the policy, so the third execution FAILS \
          rather than being RETRIED"
     );
     assert_eq!(
-        not_before_of(&pool, second, "a").await,
+        not_before_of(&pool, third, "a").await,
         None,
-        "and no third delay is scheduled: `next_retry_at` returned None, so \
+        "and no fourth delay is scheduled: `next_retry_at` returned None, so \
          `scan` emitted nothing at all for this run"
     );
     tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
     assert!(
         wake(&pool, 8).await.expect("wake").is_empty(),
-        "nothing is due anywhere: the chain is two executions long"
+        "nothing is due anywhere: the chain is three executions long"
     );
     assert_eq!(
-        replay_of(&pool, second).await,
+        replay_of(&pool, third).await,
         None,
-        "and the second execution has no replacement"
+        "and the third execution has no replacement"
     );
 }
 
