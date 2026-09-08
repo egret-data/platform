@@ -395,15 +395,36 @@ pub trait TaskHandler: Send + Sync {
     /// the attempt open, so A and B share it.
     ///
     /// **The value that does disambiguate is the lease token,
-    /// `task_runs.claimed_at`**, which [`claim::Claimed`](claim) carries and
-    /// which is deliberately **not** on [`TaskInput`] today, because no handler
-    /// uses it and a field with no reader is the shape this package has
-    /// refused ten times. Whoever adds a resource-holding handler must add it
-    /// (or a per-run handle registry owned by the handler) in the same change —
-    /// **not** derive an external name from `run_id` alone. `worker::cancel`'s
-    /// module doc records why the kill path cannot simply be suppressed for a
-    /// lost lease instead: the worker never learns the lease is gone until its
-    /// write is refused, which is after the kill.
+    /// `task_runs.claimed_at`, and it IS on [`TaskInput`] now** — see
+    /// [`TaskInput::claimed_at`]. W4 Task 5 added it, because
+    /// [`handlers::container`] and [`handlers::python`] are the
+    /// resource-holding handlers this section was written for: they name a
+    /// container `egret-run-<run_id>-<lease µs>`
+    /// ([`commands::container_name`]), so a reaped worker A computes a name
+    /// that no longer exists and cannot reach worker B's container.
+    ///
+    /// **This paragraph used to say the field was "deliberately not on
+    /// `TaskInput` today", and the whole-branch review is right that satisfying
+    /// the instruction falsified the instruction.** It is corrected rather than
+    /// deleted, because the hazard it describes is still exactly right and the
+    /// next resource-holding handler still has to obey it — what changed is
+    /// that the disambiguator is now supplied rather than owed.
+    ///
+    /// **The per-run handle registry this used to offer as an alternative is
+    /// NOT one**, and both [`TaskInput::claimed_at`] and
+    /// [`commands::container_name`] carry the argument: keyed by `run_id` it has
+    /// the identical bug (B overwrites A's entry in the same process), keyed by
+    /// `(run_id, claimed_at)` it is the name with more moving parts, and in the
+    /// case the hazard is actually about — A and B in **different processes** —
+    /// a registry cannot see across them while the daemon can.
+    ///
+    /// `worker::cancel`'s module doc records why the kill path cannot simply be
+    /// suppressed for a lost lease instead: the worker never learns the lease is
+    /// gone until its write is refused, which is after the kill.
+    ///
+    /// [`handlers::container`]: handlers::container
+    /// [`handlers::python`]: handlers::python
+    /// [`commands::container_name`]: commands::container_name
     ///
     /// [`reap`]: reap
     async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()>;

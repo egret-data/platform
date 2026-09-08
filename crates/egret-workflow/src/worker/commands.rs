@@ -326,9 +326,9 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
 /// the claim's own `UPDATE … SET claimed_at = now()` wrote and the value every
 /// [`apply_outcome`](super::apply_outcome) write is fenced on. A name built
 /// from `(run_id, claimed_at)` makes A's kill address a container that does not
-/// exist, which the daemon reports as "No such container" and
-/// [`DockerRunner::cancel`] treats as nothing to do — the artifact's own answer
-/// (fact 9: `NotFoundException` is caught and silently ignored).
+/// exist, which `docker rm --force` reports by exiting **0** (measured), so
+/// [`DockerRunner::cancel`] treats it as nothing to do — the artifact's own
+/// answer (fact 9: `NotFoundException` is caught and silently ignored).
 ///
 /// # Why not a handle registry inside the runner
 ///
@@ -932,11 +932,15 @@ impl TaskRunner for DockerRunner {
         if out.status.success() {
             return Ok(());
         }
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        if stderr.contains("No such container") {
-            return Ok(());
-        }
-        Err(self.classify("rm", &stderr))
+        // **There is deliberately no "No such container" branch**, and the
+        // whole-branch review's Minor 2 is why: `docker rm --force` on a name
+        // that does not exist exits **0** (measured, daemon 28.4.0), so that
+        // branch was unreachable — a guard nobody could see fire, which is the
+        // shape this package has refused throughout. The absent container is
+        // therefore handled by the success arm above, which is also the
+        // artifact's answer (`Docker.kill` catches `NotFoundException` and
+        // returns without logging).
+        Err(self.classify("rm", &String::from_utf8_lossy(&out.stderr)))
     }
 }
 
@@ -960,34 +964,24 @@ impl DockerRunner {
         // directory does not have to exist first: measured on this machine's
         // daemon (28.4.0), a copy into `/egret/working-dir` creates it.
         if !commands.input_files.is_empty() {
+            // **[`StagingDir`] removes itself however this scope ends** —
+            // including when `timeout::guard` drops the whole future mid-copy,
+            // which is the path an explicit cleanup could never cover (review
+            // Minor 3). Review Minor 2's `?`-before-cleanup leak is closed by
+            // the same thing, so the closure that used to force a single exit
+            // is gone with it.
             let staging = tempdir(task)?;
-            // **Every path out of here removes the staging directory**, which
-            // review Minor 2 is about: the `?`s inside the loop used to return
-            // ahead of the cleanup, leaving a directory behind that may hold a
-            // partially written copy of the author's rendered `script:`. The
-            // work is a closure so there is one exit and the cleanup cannot be
-            // skipped by adding a branch later.
-            let staged = (|| -> Result<()> {
-                for (rel, contents) in &commands.input_files {
-                    check_relative(rel)?;
-                    let path = staging.join(rel);
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).map_err(io_err)?;
-                    }
-                    std::fs::write(&path, contents).map_err(io_err)?;
+            for (rel, contents) in &commands.input_files {
+                check_relative(rel)?;
+                let path = staging.path().join(rel);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(io_err)?;
                 }
-                Ok(())
-            })();
-            let copied = match staged {
-                Err(e) => Err(e),
-                Ok(()) => {
-                    let src = format!("{}/.", staging.display());
-                    let dst = format!("{name}:{WORKING_DIR}");
-                    self.cli(&["cp", &src, &dst]).await
-                }
-            };
-            let _ = std::fs::remove_dir_all(&staging);
-            let out = copied?;
+                std::fs::write(&path, contents).map_err(io_err)?;
+            }
+            let src = format!("{}/.", staging.path().display());
+            let dst = format!("{name}:{WORKING_DIR}");
+            let out = self.cli(&["cp", &src, &dst]).await?;
             if !out.status.success() {
                 return Err(self.classify("cp", &String::from_utf8_lossy(&out.stderr)));
             }
@@ -1069,11 +1063,8 @@ impl DockerRunner {
         // ---- output files ---------------------------------------------------
         if !commands.output_files.is_empty() && result.failure.is_none() {
             let staging = tempdir(task)?;
-            let collected = self
-                .collect_output_files(name, commands, &staging, &mut result)
-                .await;
-            let _ = std::fs::remove_dir_all(&staging);
-            collected?;
+            self.collect_output_files(name, commands, staging.path(), &mut result)
+                .await?;
         }
 
         Ok(result)
@@ -1232,11 +1223,41 @@ fn stage_destination(
     Ok(dst)
 }
 
+/// A staging directory that removes itself **however** its scope ends —
+/// including when the future holding it is dropped.
+///
+/// The whole-branch review's Minor 3, and it is cross-task in the way that makes
+/// it easy to miss: `worker::timeout::guard` enforces a task-level `timeout:`
+/// by **dropping the future** (Task 2), and the directory is mine (Task 5). An
+/// explicit `remove_dir_all` after the `await` never runs on that path, so a
+/// timed-out `egret.script.python` left `$TMPDIR/egret-workflow-*` behind
+/// holding the author's **rendered `script:`** — which may carry whatever a
+/// `{{ … }}` resolved to, in a directory that outlives the run.
+///
+/// `Drop` is the fix rather than another cleanup call, because the whole point
+/// is that no call site runs: dropping the future drops its locals, and this
+/// runs then. `remove_dir_all`'s result is discarded for the reason every
+/// destructor discards one — there is nobody left to tell, and the run has
+/// already failed on its budget.
+struct StagingDir(std::path::PathBuf);
+
+impl StagingDir {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A private staging directory for one run's file copies.
 ///
 /// Named after the run so two concurrent runs cannot collide, and created under
 /// the process temp dir rather than in the repo.
-fn tempdir(task: &TaskInput) -> Result<std::path::PathBuf> {
+fn tempdir(task: &TaskInput) -> Result<StagingDir> {
     // **0700 and unpredictable, and review Minor 3 is only half the reason.**
     // The stated half: this directory holds the author's rendered `script:`,
     // which may carry whatever a `{{ … }}` resolved to, and 0755 under a
@@ -1257,7 +1278,7 @@ fn tempdir(task: &TaskInput) -> Result<std::path::PathBuf> {
         uuid::Uuid::new_v4().simple()
     ));
     create_private_dir(&dir)?;
-    Ok(dir)
+    Ok(StagingDir(dir))
 }
 
 /// Create one directory, private to this user, refusing a path that is already
@@ -1981,8 +2002,10 @@ mod tests {
     #[test]
     fn the_staging_directory_is_private_and_not_predictable() {
         let task = leased(1_700_000_000);
-        let a = tempdir(&task).expect("staging");
-        let b = tempdir(&task).expect("staging");
+        let a_guard = tempdir(&task).expect("staging");
+        let b_guard = tempdir(&task).expect("staging");
+        let a = a_guard.path().to_path_buf();
+        let b = b_guard.path().to_path_buf();
         assert_ne!(
             a, b,
             "two runs of the SAME task must not agree on the path -- a guessable \
@@ -2137,6 +2160,81 @@ mod tests {
         std::fs::create_dir_all(dir.join("1")).expect("root 1");
         stage_destination(&dir.join("1"), "a/b.txt")
             .expect("a private root cannot be blocked by another declared name");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A dropped future leaves no staging directory behind.**
+    ///
+    /// The whole-branch review's Minor 3, and it is cross-task: `timeout::guard`
+    /// enforces a task-level `timeout:` by **dropping the future** (Task 2), and
+    /// the directory holding the author's rendered `script:` is Task 5's. An
+    /// explicit cleanup after the `await` cannot run on that path, so this
+    /// asserts the property the way the reviewer measured it — by counting
+    /// `$TMPDIR/egret-workflow-*` across the drop.
+    #[tokio::test]
+    async fn a_dropped_run_future_leaves_no_staging_directory_behind() {
+        let dir = staging("drop-leak");
+        let shim = dir.join("docker-shim.sh");
+        // `cp` never returns, so the future is guaranteed to be dropped inside
+        // the window between creating the staging directory and removing it.
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\ncase \"$1\" in\n  create) echo id ;;\n  cp) sleep 300 ;;\n  \
+             inspect) echo 0 ;;\nesac\nexit 0\n",
+        )
+        .expect("write shim");
+        let mut perms = std::fs::metadata(&shim).expect("stat").permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o700);
+        }
+        std::fs::set_permissions(&shim, perms).expect("chmod");
+
+        let count = || {
+            std::fs::read_dir(std::env::temp_dir())
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .starts_with("egret-workflow-")
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        let before = count();
+        let runner = DockerRunner::with_binary(shim.display().to_string());
+        let task = leased(1_700_000_000);
+        let cmds = TaskCommands {
+            container_image: "alpine:3.20".into(),
+            commands: vec!["true".into()],
+            input_files: std::collections::BTreeMap::from([(
+                "main.py".to_string(),
+                "SECRET-RENDERED-SCRIPT".to_string(),
+            )]),
+            ..TaskCommands::default()
+        };
+        let sink = super::super::handlers::TracingSink;
+        let fut = runner.run(&task, &cmds, &sink);
+        // Exactly what `timeout::guard` does to a handler that outruns its
+        // budget: drop the future.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(400), fut)
+                .await
+                .is_err(),
+            "the shim hangs, so the future must still have been running"
+        );
+
+        assert_eq!(
+            count(),
+            before,
+            "dropping the future must not leave a staging directory holding the \
+             author's rendered `script:` -- an explicit cleanup after the `await` \
+             never runs on this path, which is why `StagingDir` uses `Drop`"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

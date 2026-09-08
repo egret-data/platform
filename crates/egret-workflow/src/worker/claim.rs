@@ -531,10 +531,33 @@ pub async fn wake(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>> {
 ///    whose first law is *a guard nobody has seen fail is a guard nobody has
 ///    seen* cannot buy an ordering nicety with two guards that stop being
 ///    guards.
-/// 2. **`working_timeout_s` stops meaning what it says.** Today a run's lease
-///    is held for `input_for` plus its own handler. Batched, it is held for the
-///    sum over the batch, so the reaper's timeout bounds a whole batch rather
-///    than one handler and the operator who sets it cannot know the batch size.
+/// 2. **`working_timeout_s` already does not mean what it says, and this cost
+///    was WRONG about the shipping tick.** The sentence here used to read
+///    *"Today a run's lease is held for `input_for` plus its own handler.
+///    Batched, it is held for the sum over the batch"*, attributing to the
+///    widening a property the tick **already has**. The whole-branch review
+///    caught it and it is right: [`claim`] leases up to `n` rows in **one**
+///    `UPDATE … SET claimed_at = now() … LIMIT $1`, and [`tick`] then walks
+///    them with a sequential `for c in &claimed { run_one(…).await }`. So run
+///    *k*'s lease is taken at the same instant as run 1's and is already held
+///    for the sum of handlers 1..*k*−1 before its own handler is invoked.
+///    Widening changes the transaction, not this.
+///
+///    **What the widening would still cost is a lost lease costing the group**
+///    (cost 4), not this — so this row is now an argument for neither side, and
+///    is kept because it is a real property of the tick that the operator who
+///    sets `working_timeout_s` cannot see.
+///
+///    **And W4 Task 5 made it bite.** `handlers::sql` bounds itself with
+///    `DEFAULT_TIMEOUT` (300s) when the author writes none;
+///    `handlers::container` and `handlers::python` have **no default budget at
+///    all**, so one `egret.container` with no `timeout:` can hold its own lease
+///    — and every later lease in its batch — for longer than
+///    [`DEFAULT_WORKING_TIMEOUT`](super::DEFAULT_WORKING_TIMEOUT). The last
+///    member of a batch can then be **reaped before its handler is invoked**
+///    and run twice. Nothing bounds this today; see
+///    [`handlers::container`](super::handlers::container)'s module doc for the
+///    proposal and why it was not taken in a bookkeeping round.
 /// 3. **It is the coupling this doc's own *One run's failure does not strand
 ///    the rest of the batch* already refused once** — this time inside the
 ///    transaction, where an early return cannot be softened into "carry on".

@@ -131,8 +131,10 @@ test-workflow-starrocks:
     {{ no_db_skip }} DATABASE_URL={{ test_database_url }} EGRET_TEST_STARROCKS_URL=mysql://localhost:9030 \
       cargo test -p egret-workflow --test sql_starrocks_live -- --nocapture
 
-# `egret.container` and `egret.python` against a real Docker daemon — the ONLY instrument
-# either handler has that judges the daemon rather than a fake.
+# `egret.container` and `egret.script.python` against a real Docker daemon — the ONLY
+# instrument either handler has that judges the daemon rather than a fake.
+# (`egret.python` is the NOTEBOOK task in `spec::registry::TASK_TYPES`; the container-backed
+# script handler was renamed away from that name in W4 Task 5 fix round 1.)
 #
 # Both reach ZERO entries of the Kestra execution corpus: 345 flows, none of which declares
 # a script, container, shell or command task type (measured — see that file's module doc for
@@ -153,9 +155,10 @@ test-workflow-docker:
     # `env -u EGRET_ALLOW_DOCKER_SKIP` is fix round 1's reviewer plan item 3, and it is the
     # same rule as `no_db_skip` one axis over: this recipe means "the daemon tests ran", so
     # an opt-out exported in somebody's shell profile must not be able to turn it into a
-    # green that ignored all thirteen. The suite reports `13 ignored` rather than
-    # `13 passed` when it skips, so the two are distinguishable — but a recipe whose whole
-    # point is the daemon should not be leaving that to the reader.
+    # green that ignored all fourteen. The suite reports `14 ignored` rather than
+    # `14 passed` when it skips, so the two are distinguishable — but a recipe whose whole
+    # point is the daemon should not be leaving that to the reader. (The count is derived,
+    # not remembered: 15 cases, of which the pure gate test needs no daemon and runs.)
     {{ no_db_skip }} env -u EGRET_ALLOW_DOCKER_SKIP \
       cargo test -p egret-workflow --test container_docker_live -- --nocapture
 

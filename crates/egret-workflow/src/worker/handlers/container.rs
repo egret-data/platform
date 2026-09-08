@@ -37,6 +37,41 @@
 //! one, so there is no name to match; `egret.sql` set the precedent for egret's
 //! own short spelling and this follows it.
 //!
+//! # This handler has NO default budget, and that is a hazard on the shipping tick
+//!
+//! The whole-branch review's Important 2, verified rather than accepted.
+//! `handlers::sql` falls back to its own `DEFAULT_TIMEOUT` (300s) when the
+//! author writes no `timeout:`; this handler and [`super::python`] fall back to
+//! nothing, so a container runs until it exits.
+//!
+//! That matters because of how the tick leases: `worker::claim` takes up to `n`
+//! rows in **one** `UPDATE … SET claimed_at = now() … LIMIT $1` and
+//! `worker::tick` then runs the handlers **sequentially**. So every lease in a
+//! batch is taken at the same instant, and one unbounded container can hold the
+//! *last* member's lease past
+//! [`DEFAULT_WORKING_TIMEOUT`](crate::worker::DEFAULT_WORKING_TIMEOUT) (one
+//! hour) **before that run's handler is ever invoked** — at which point the
+//! reaper hands it to another worker and it runs twice.
+//!
+//! **Nothing bounds this today.** The proposal, stated rather than taken:
+//!
+//! 1. give these handlers a `DEFAULT_TIMEOUT` the way `handlers::sql` has one,
+//!    enforced *inside* `DockerRunner` around the attach-and-wait and killing
+//!    the container on expiry (the kill path already exists — it is what
+//!    `cancel` does);
+//! 2. and fix the root cause, which is **not** this handler: with 12 bounded
+//!    `egret.sql` runs in one batch the same reap-before-invocation happens at
+//!    exactly the same threshold. Either the claim leases one run at a time,
+//!    or each lease is refreshed immediately before its handler runs, or the
+//!    reaper's timeout is measured per run rather than per batch. That is
+//!    `worker::claim`'s ruling to make, not a handler's.
+//!
+//! It was not implemented here because doing half of a two-part fix in a
+//! bookkeeping round is exactly how the whole-branch Critical came back: fix
+//! round 2 restored an older shape and reintroduced a defect a previous review
+//! had already closed. Bounding this handler alone would leave the batch
+//! property untouched while making it look addressed.
+//!
 //! # `TASK_TYPES` DOES hold it, and the sentence that used to stand here was
 //! # false
 //!
