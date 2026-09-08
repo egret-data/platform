@@ -216,6 +216,47 @@
 # `parallel-nested` out, `dag` and `parallel-fail-with-flowable` in -- which is
 # what says the order was deciding them. Every line here is unchanged by the
 # fix itself.
+#
+# W6 Task 3 (`Subflow`) banked 12, 143 -> 131. Every one declares a `Subflow`
+# and every one stalled at that run before: `build_plan` planned it an opaque
+# `TaskKind::Runnable`, which set `task_runs.type_id`, which made it claimable,
+# and `claim::leaf` then answered `None` because `models::TaskKind` for the same
+# task is not a `Leaf` -- `WorkerError::NotALeaf` aborted the tick. It is a
+# `TaskKind::Executable` now, gets no `type_id`, and `worker::subflow` runs it.
+#
+#   subflow-parent                                the base case
+#   subflow-child                                 the same, one level down
+#   subflow-parent-of-failed                      transmitFailed carries the child's FAILED up
+#   task-flow                                     inputs: THIRD reaches io.kestra.tests/switch and fails it
+#   task-flow-inherited-labels                    the same target with OK -> the DEFAULT case -> SUCCESS
+#   subflow-nullable-input-parent                 an unposted input, absorbed by the child's own `required: false`
+#   subflow-inherited-labels-parent               labels are not on models::Subflow and the parent's trace does not record them
+#   subflow-parent-no-wait                        wait: false -- SUCCESS at spawn, {"state":"CREATED"} as the output
+#   loop-with-subflow                             the only bank carrying a sub-execution: its Loop body IS a Subflow
+#   flow-concurrency-subflow                      concurrency: CANCEL never fires with one execution
+#   flow-concurrency-parallel-subflow-kill        concurrency: QUEUE changes WHEN a child starts, which the parent's trace does not record
+#   flow-concurrency-parallel-subflow-kill-child  the same, one level down
+#
+# The plan's estimate was 9 strict / 11 upper bound and the measurement is 12.
+# The bound was exceeded because "declares X" was read as "blocked by X" for two
+# constructs: three of the four `flow-concurrency-*` entries bank (the fourth is
+# held by `sla:`), and `loop-with-subflow` banks where the `Loop` residue was
+# assumed to hold it.
+#
+# TEN Subflow declarers still hold, and NONE of them is held by `Subflow`:
+# `retry-subflow` and `subflow-parent-retry` on `state::apply` rule 1 (Kestra
+# accumulates a sub-execution's retries INSIDE the parent's attempt);
+# `subflow-secret-output-parent` on the unevaluated flow-level `outputs:`;
+# `task-runif` on `OutputValues` having no handler; `restart-parent` and
+# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
+# `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
+# their children; and the two `task-allow-*-executable-flow` on `WARNING`,
+# which `RunState` cannot hold. The `Subflow` row is therefore REMOVED from the
+# residual-baseline table rather than lowered from 22 to 10 -- the same rule
+# `disabled: true` and `runIf:` were removed under.
+#
+# `loop-with-subflow` is the 18th name in `SPAWNED_ENTRIES_THAT_MATCH_BY_NAME`,
+# which is the list the Task 6 block above is about.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations

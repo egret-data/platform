@@ -93,6 +93,50 @@ use crate::executor::{
 use crate::models::{Flow, Subflow, Task, TaskKind as ModelTaskKind};
 use crate::runners::{render_str, RenderContext};
 
+/// **The one answer this module gives that is NOT the artifact's: a `Subflow`
+/// may not name a flow that is already somewhere up its own trigger chain.**
+///
+/// # Why a guard exists here at all, measured rather than reasoned
+///
+/// `spec::validate`'s `self_dependency` refuses a `Subflow` that names its OWN
+/// flow — `invalids/recursive-flow` is that flow and Kestra refuses it too —
+/// but **neither side refuses A -> B -> A**, and a resolver that looks its
+/// target up by name cannot see a cycle from one flow. Kestra would create
+/// executions for ever, slowly, one message at a time.
+///
+/// egret cannot do that: [`spawn_one`] drives the child's first settle **inside
+/// its caller's transaction** (the same arrangement `spawn::spawn_one` has for
+/// a loop iteration, where a cycle is impossible), so a cycle is unbounded
+/// async recursion. **Measured**: a mutually recursive pair
+/// `t/cyc-a` <-> `t/cyc-b` overflowed the test thread's stack and aborted the
+/// process with SIGABRT — twice, once with a depth bound of 32 and once with
+/// 16, so the crash arrives BEFORE 16 levels and a depth bound large enough to
+/// be worth having is not one this can survive.
+///
+/// # So the guard is a cycle check and not a depth bound
+///
+/// It refuses at the FIRST repeat, which for A -> B -> A is one child deep —
+/// far below anything that stresses a stack — and it does not depend on how
+/// much stack a caller happens to have. It is exactly `self_dependency`'s rule
+/// one level out.
+///
+/// `tests/worker.rs`'s `a_cycle_of_subflows_stops_instead_of_crashing` is the
+/// positive control, because a guard nobody has seen fire is a guard nobody has
+/// seen: it drives that same pair through the real worker and asserts both
+/// halves — the chain stops, and the run that would have closed the cycle FAILS
+/// carrying the reason.
+///
+/// # What this does NOT bound, named rather than left
+///
+/// A legitimately **acyclic** chain 20 flows deep would still recurse 20 levels
+/// and could still exhaust a stack. Nothing in the corpus comes close — the
+/// deepest chain it holds is **2 links, three flows**, re-derived on every run by
+/// `tests/executor.rs`'s
+/// `the_deepest_subflow_chain_in_the_corpus_is_far_inside_the_bound` — and no
+/// number was invented for it here, because the measurement above says any
+/// number worth having is one this recursion cannot survive. The real fix is to
+/// stop settling the child inside its parent's transaction; that is a change to
+/// how `tick` finds work and belongs to whoever needs a deep chain.
 /// One [`Command::SpawnSubflow`], kept as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Requested {
@@ -214,6 +258,22 @@ async fn spawn_one(
             .await;
         }
     };
+
+    // Before anything is written: would this close a cycle? See the module's
+    // `chain_holds` -- this is the one answer here that is not the artifact's,
+    // and the reason is a measured stack overflow rather than a preference.
+    if chain_holds(conn, ctx.id, &namespace, &flow_id).await? {
+        return fail_run(
+            conn,
+            ctx,
+            r.run,
+            &format!(
+                "subflow '{namespace}'.'{flow_id}' is already running higher up \
+                 this execution's own chain; starting it would loop"
+            ),
+        )
+        .await;
+    }
 
     let Some((child_flow, source)) = resolve(conn, ctx.workspace_id, &namespace, &flow_id).await?
     else {
@@ -600,6 +660,49 @@ async fn resolve(
     .await
     .map_err(db_err)?;
     Ok(row)
+}
+
+/// Whether `(namespace, flow_id)` is the flow of this execution or of anything
+/// above it on its `trigger_execution_id` chain.
+///
+/// The whole of the cycle guard, in one statement. It reads `flow_key` /
+/// `namespace` — the identity pair a `Subflow` names — rather than `flow_id`,
+/// the surrogate key, because two workspaces' rows are different `id`s for the
+/// same name and the name is what an author wrote.
+///
+/// **It starts at this execution itself**, so `A -> A` is caught here as well
+/// as by `spec::validate`'s `self_dependency` — two guards, and the second is
+/// the one that holds for a flow started from a source that never went through
+/// publish, which is what the oracle's driver does.
+///
+/// The walk terminates whatever the data says: a chain of rows can only run
+/// backwards in time, because a child always names a row that existed before it
+/// was inserted.
+async fn chain_holds(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    namespace: &str,
+    flow_id: &str,
+) -> Result<bool> {
+    let hit: bool = sqlx::query_scalar(
+        "WITH RECURSIVE up AS ( \
+             SELECT id, trigger_execution_id, namespace, flow_key \
+               FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, e.trigger_execution_id, e.namespace, e.flow_key \
+               FROM workflow.executions e JOIN up ON e.id = up.trigger_execution_id \
+         ) \
+         SELECT EXISTS ( \
+             SELECT 1 FROM up WHERE namespace = $2 AND flow_key = $3 \
+         )",
+    )
+    .bind(execution_id)
+    .bind(namespace)
+    .bind(flow_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(db_err)?;
+    Ok(hit)
 }
 
 /// The execution that started this one and the run inside it, or `None` when

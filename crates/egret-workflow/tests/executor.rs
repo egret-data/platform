@@ -5000,3 +5000,125 @@ fn no_corpus_subflow_turns_transmit_failed_off() {
          `Subflow` tasks between them"
     );
 }
+
+/// **The deepest chain of `Subflow` targets the corpus holds is 2 links — three
+/// flows — and its only cycle is a self-cycle both sides refuse.**
+///
+/// Both halves matter to `worker::subflow`'s cycle guard, which is the one
+/// answer that module gives that is not the artifact's. The **cycle** half is
+/// the load-bearing one: nothing on either side refuses A -> B -> A, and if the
+/// corpus ever grew one the driver would run it — into a recursion that
+/// overflowed a stack when it was measured. The **depth** half bounds the
+/// residual hazard the guard does NOT close: an acyclic chain deep enough to
+/// exhaust a stack anyway.
+///
+/// Walked over `(namespace, flowId)` pairs with a visited set, because the
+/// graph **can** cycle — `spec::validate`'s `self_dependency` refuses only a
+/// flow that names itself, so A → B → A is publishable on both sides. A walk
+/// without one would not terminate, which is the same fact the constant exists
+/// for.
+#[test]
+fn the_deepest_subflow_chain_in_the_corpus_is_far_inside_the_bound() {
+    let by_name: BTreeMap<String, String> = corpus()
+        .iter()
+        .filter_map(|e| {
+            let src = corpus_source(&e.id);
+            egret_workflow::spec::parse(&src).ok().map(|f| {
+                (
+                    format!("{}/{}", f.namespace, f.id),
+                    // The first file to claim a name wins, which is
+                    // `driver::publish_corpus`'s rule and `UNIQUE (workspace_id,
+                    // namespace, flow_id)`'s.
+                    src,
+                )
+            })
+        })
+        .fold(BTreeMap::new(), |mut acc, (k, v)| {
+            acc.entry(k).or_insert(v);
+            acc
+        });
+
+    fn depth(name: &str, by_name: &BTreeMap<String, String>, seen: &mut BTreeSet<String>) -> usize {
+        let Some(src) = by_name.get(name) else {
+            return 0;
+        };
+        if !seen.insert(name.to_string()) {
+            // A cycle. Reported as the bound rather than as infinity: this test
+            // is about how deep a chain the corpus really has, and a cycle in it
+            // would be caught by the assertion below.
+            return usize::MAX;
+        }
+        let mut best = 0;
+        for (_task, sub) in subflow_tasks(src) {
+            let (Some(ns), Some(id)) = (&sub.namespace, &sub.flow_id) else {
+                continue;
+            };
+            let target = format!("{ns}/{id}");
+            if target.contains("{{") {
+                continue;
+            }
+            let d = depth(&target, by_name, seen);
+            best = best.max(if d == usize::MAX { d } else { d + 1 });
+        }
+        seen.remove(name);
+        best
+    }
+
+    let mut deepest = (0usize, String::new());
+    let mut cyclic: BTreeSet<String> = BTreeSet::new();
+    for name in by_name.keys() {
+        let d = depth(name, &by_name, &mut BTreeSet::new());
+        if d == usize::MAX {
+            cyclic.insert(name.clone());
+            continue;
+        }
+        if d > deepest.0 {
+            deepest = (d, name.clone());
+        }
+    }
+
+    // **The corpus holds exactly one cycle and it is a SELF-cycle**, which both
+    // sides already refuse: `spec::validate`'s `self_dependency` is egret's
+    // half, and Kestra's own verdict for the entry is `refused`. A cycle of
+    // length two or more is what nothing refuses, and there is none — if one
+    // ever appears here, the driver will run it, into the recursion that
+    // overflowed a stack when `worker::subflow`'s cycle guard was measured.
+    assert_eq!(
+        cyclic.iter().cloned().collect::<Vec<_>>(),
+        vec!["io.kestra.tests/recursive-flow".to_string()],
+        "every cycle of `Subflow` targets in the corpus"
+    );
+    assert!(
+        egret_workflow::executor::build_plan(&corpus_source("invalids/recursive-flow")).is_err(),
+        "and egret refuses to plan it, so nothing reaches the cycle guard for it"
+    );
+    assert_eq!(
+        subflow_tasks(&corpus_source("invalids/recursive-flow"))
+            .values()
+            .map(|s| format!(
+                "{}/{}",
+                s.namespace.as_deref().unwrap_or(""),
+                s.flow_id.as_deref().unwrap_or("")
+            ))
+            .collect::<Vec<_>>(),
+        vec!["io.kestra.tests/recursive-flow".to_string()],
+        "it is a SELF-cycle -- length one -- which is the case `self_dependency` \
+         catches. The case nothing catches is A -> B -> A, and the corpus has none"
+    );
+
+    assert_eq!(
+        deepest,
+        (
+            2,
+            "io.kestra.tests/flow-concurrency-parallel-subflow-kill".to_string()
+        ),
+        "the deepest chain, counted in LINKS and named so a change says which \
+         flow moved: `flow-concurrency-parallel-subflow-kill -> -child -> \
+         -grandchild` is two links and three flows, and \
+         `io.kestra.tests/subflow-parent -> subflow-child -> \
+         subflow-grand-child` is the other. Two nested settles is nowhere near \
+         what overflowed a stack when the cycle was measured (it did so before \
+         16 links), so nothing in the corpus reaches the hazard \
+         `worker::subflow`'s cycle guard leaves open"
+    );
+}

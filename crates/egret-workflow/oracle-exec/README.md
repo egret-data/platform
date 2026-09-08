@@ -5539,19 +5539,30 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **151** |
-| baselined — egret does not reproduce it yet | **143** |
+| matching | **163** |
+| baselined — egret does not reproduce it yet | **131** |
 
 ```text
-  matching  151 = 128 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 143 = 138 of the 266 `runs` +  5 of the 28 `refused`
+  matching  163 = 140 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 131 = 126 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-143 is simultaneously the mismatching count, the size of `baseline.txt` and the
+131 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
+
+**151 → 163 at W6 Task 3**, and unlike the two movements below it this one is a
+single cause with twelve instances: `Subflow` executes. Every one of the twelve
+declares a `Subflow`, every one of them stalled at that run before
+(`build_plan` planned it an opaque `Runnable`, which gave it a
+`task_runs.type_id`, which made it claimable, and `claim::leaf` then answered
+`None` because `models::TaskKind` for the same task is not a `Leaf` —
+`WorkerError::NotALeaf` aborted the tick), and each is attributed individually in
+`baseline.txt`'s header. **The 28 `refused` entries did not move at all**, which
+is the load-bearing half of the split above: nothing in this task changed what
+egret refuses.
 
 The five `refused` entries on the baselined side are **over-acceptances** —
 flows Kestra refused and egret plans — and they are the whole of egret's measured
@@ -5586,11 +5597,11 @@ name the defect. They stay baselined for `finally:`.
     at the top level                                       877
     inside `spawned`                                       227
 
-  a change to which the ratchet REPORTS                    357
-    at the top level                                       255
+  a change to which the ratchet REPORTS                    360
+    at the top level                                       258
     inside `spawned`                                       102
-  a change to which it does NOT                            747
-    at the top level                                       622
+  a change to which it does NOT                            744
+    at the top level                                       619
     inside `spawned`                                       125
   ----------------------------------------------------------
   TOTAL                                                   1104
@@ -5622,6 +5633,16 @@ verifying its md5 (`5773748d22d521e6a65afc5e2e2663d1`) after every run:
 | every pair on a **baselined** entry | 747 | 90 | green: 143 mismatching, 0 banked |
 | every pair on a **matching** entry | 357 | 41 | **FAILS**: 184 mismatching, **41 REGRESSIONs** |
 
+*(**These three rows are W4-era and are NOT re-run at W6 Task 3.** The
+populations they flip moved with the baseline — 747 → 744 and 357 → 360, and the
+`143 mismatching` in the middle row would read `131` — so the numbers in the
+right-hand column are a record of an experiment on a different tree, not a
+current measurement. They are left as they were run rather than adjusted,
+because an adjusted experimental result is a number no program ever produced;
+the two populations they rest on ARE re-derived above and asserted by
+`kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`. The
+CONCLUSION is unaffected: two thirds of the kept pairs still cannot fail.)*
+
 The first row is the one to read against W3a's, which recorded that flipping all
 227 left this crate **green**. The second is the honest half: two thirds of the
 kept pairs still cannot fail, and the way to make one of them fail is to bank its
@@ -5637,12 +5658,18 @@ somebody measured. The same split over the other families, derived by
 
 | family | on a baselined entry, i.e. un-falsifiable | total |
 |---|---|---|
-| run terminals | **461** | 840 |
-| run-history state tokens | **1807** | 3355 |
-| execution-history state tokens | **751** | 1462 |
-| executions (266 entries + their 142 sub-executions) | **191** | 408 |
-| sub-executions | **53** | 142 |
-| kept ordered pairs | **747** | 1104 |
+| run terminals | **445** | 840 |
+| run-history state tokens | **1759** | 3355 |
+| execution-history state tokens | **709** | 1462 |
+| executions (266 entries + their 142 sub-executions) | **177** | 408 |
+| sub-executions | **51** | 142 |
+| kept ordered pairs | **744** | 1104 |
+
+*(All six fell at W6 Task 3, together, because they are six projections of one
+set — what lives on a baselined entry. The twelve entries banked there carry 16
+run terminals, 48 run-history tokens, 42 execution-history tokens, 14 executions,
+2 sub-executions and 3 ordered pairs between them, and every one of those is
+falsifiable now.)*
 
 The run-terminal row is the same 840 the fed table classifies, so the two
 sections are talking about one set of runs. Nothing here is a *new* weakness —
@@ -5650,12 +5677,21 @@ it is the same one sentence, applied to the fields nobody had applied it to.
 
 Two smaller facts about the population: **13 pairs were dropped** by the harvest
 (`valids/dag` 1, `valids/if` 9, `valids/parallel-nested` 3), all of them because
-the relation flipped between rounds; and the restriction removes **80** pairs
-across **6** entries from egret's side for having no counterpart in the golden —
+the relation flipped between rounds; and the restriction removes **85** pairs
+across **9** entries from egret's side for having no counterpart in the golden —
 15 under W3a's harness, over top-level pairs only. egret's relation domain is
-measured at `{before, overlapping}` over all **771** pairs it produces,
+measured at `{before, overlapping}` over all **791** pairs it produces,
 sub-executions included, so dropping a pair is exactly accepting either value
 Kestra was seen to produce.
+
+*(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
+three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
+and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
+at their `Subflow` run and now run past it into a successor Kestra never
+reached, which is exactly a pair with no counterpart. All three are registered in
+`STILL_OVER_ACCEPTED_AT_RUNTIME` against the child-side over-acceptance that
+causes it. The 771 → 791 is the twelve banked entries' own runs gaining
+endpoints.)*
 
 *(**This paragraph said "unchanged and still derived: … 87 pairs across 7
 entries … over all 778 pairs" and both figures were a version behind**, which
@@ -5733,16 +5769,22 @@ have made the control vacuous in its turn.
   41   golden entries carry a sub-execution
  142   sub-executions they carry between them
 
-  17   of the 41 now MATCH
+  18   of the 41 now MATCH
    8   agree on everything the parent execution holds and differ INSIDE `spawned`
-  16   differ on something else as well
+  15   differ on something else as well
   ---
   41   TOTAL
 ```
 
+*(**17/8/16 through W5; 18/8/15 at W6 Task 3**, and the one that moved is
+`valids/loop-with-subflow` — the only one of the twelve `Subflow` banks that
+carries a sub-execution at all. Its `Loop` body IS a `Subflow`, so the body ran
+and the `Subflow` inside it stalled: the whole entry hung on the one construct
+that task shipped. `SPAWNED_ENTRIES_THAT_MATCH_BY_NAME` asserts the names.)*
+
 Asserted, total beside the parts, by
 `the_sub_executions_are_compared_and_this_is_what_they_cost`, which also asserts
-the seventeen **by name**, because `baseline.txt`'s header attributes them one by
+the eighteen **by name**, because `baseline.txt`'s header attributes them one by
 one and got two of those attributions wrong. Beside it: **35 entries produce a
 `spawned` at all**, where every entry produced an empty one for the whole of W3a
 and W3b Tasks 1–4, and egret produces **126** ordered pairs inside `spawned`
@@ -5766,28 +5808,50 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-143 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+131 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 20 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
-| 22 | `Subflow` | **unclaimed** |
+| 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **unclaimed** |
 | 12 | `Pause` → `PAUSED` | W8 |
 | 10 | `afterExecution:` | **unclaimed** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
-| 7 | flow `concurrency:` → `CANCELLED` | W8 |
+| 6 | flow `concurrency:` → `CANCELLED` | W8 |
 | 5 | `sla:` | W8 |
 | 4 | `CREATE_NEW_EXECUTION`'s replay | W6 |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **29** | **none of the above** | named individually in `UNATTRIBUTED` |
+| **35** | **none of the above** | named individually in `UNATTRIBUTED` |
 
-**The `Loop` row was 37, then 21, and is 20; the label moved with the number.**
+**The `Subflow` row was 22 and is GONE, which is the third time this table has
+lost a row rather than lowered one.** `Subflow` executes since W6 Task 3, so it
+holds nothing — the same rule `disabled: true` and `runIf:` were removed under.
+Twelve of the 22 banked in that commit; four of the remaining ten are absorbed
+by rows that stayed (`flow concurrency:` once, `Loop` once, `AllowFailure`
+twice) and the other six are named one by one in `UNATTRIBUTED`, with the cause
+that actually holds each: two on `state::apply`'s attempt rule
+(`valids/retry-subflow`, `valids/subflow-parent-retry`, where Kestra accumulates
+a sub-execution's retries INSIDE the parent's attempt), two on a child-side
+over-acceptance the parent now transmits (`valids/restart-parent`,
+`valids/sla-parent-flow`), one on the unevaluated flow-level `outputs:`
+(`valids/subflow-secret-output-parent`), and one on `OutputValues` having no
+handler (`valids/task-runif` — whose `Subflow` is the corpus's only unresolvable
+target and is SKIPPED by a falsy `runIf:`, so `Subflow` was never what held it).
+**Lowering the row to 10 instead would have kept six entries attributed to a
+construct that works**, which is the failure mode the rule exists to prevent.
+
+The `flow concurrency:` row is 7 → 6 for the same commit:
+`valids/flow-concurrency-parallel-subflow-kill-child` banked, and its
+`concurrency:` was never a blocker for its own trace — `behavior: QUEUE` changes
+WHEN a child starts and a parent's `taskRunList` does not record that.
+
+**The `Loop` row was 37, then 21, then 20, and is 19; the label moved with the
+number.** The 20 → 19 is `valids/loop-with-subflow` at W6 Task 3.
 It used to mean "a sub-execution egret asks for and cannot run"; W3b executes
 them, so what is left is a sub-execution that runs and diverges. The 21 → 20 is
 `valids/replay-loop`, which the sub-execution `inputs` fix banked. No single package owns
@@ -5803,7 +5867,9 @@ row is an attribution to the thing that *holds* an entry, not to a construct the
 flow happens to declare — the same rule that adds a row when a cause is found,
 run backwards.
 
-**The named remainder went from 13 to 29**, and 16 of the 18 new names are W3b
+**The named remainder went from 13 to 29, and to 35 at W6 Task 3** (the six
+above, moved out of the retired `Subflow` row rather than newly discovered), and
+16 of the 18 names the 13 → 29 added are W3b
 Task 5's: eleven entries whose task type has no handler at all (`OutputValues`
 ×6, `PurgeLogs` ×5, `Assert` ×1 — measured in advance by W3b Task 1) and five
 more a fed terminal had been hiding, four of which are W2 divergences that only a
@@ -6197,12 +6263,24 @@ guards green over a path they do not touch, measured in
 ratchet, and it is now a decided one rather than an open one, with a named way
 back in.
 
-**6. 84 of the 294 executions end unfinished**, counted and named by
-`every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type
-with no handler — or a task the executor plans **opaque**, so the claim takes it
-and `models::TaskKind` has no leaf for it — makes `Registry::run` or
+**6. 84 of the 294 executions end unfinished — 63 since W6 Task 3**, counted and
+named by `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A
+task type with no handler — or a task the executor plans **opaque**, so the claim
+takes it and `models::TaskKind` has no leaf for it — makes `Registry::run` or
 `Claimed::input` refuse, the tick abort for that run and the execution stall,
-which is what the shipping worker does. So the driver returns the partial trace,
+which is what the shipping worker does.
+
+> **The 21 that left are the whole of `Subflow`, and they are the second half of
+> that sentence rather than the first.** Through W5 a `Subflow` was planned an
+> opaque `Runnable`, which set `task_runs.type_id`, which made it claimable —
+> and `claim::leaf` then answered `None`, because `models::TaskKind` for the
+> same task is not a `Leaf`. Every entry holding an executed top-level `Subflow`
+> stalled there. A `TaskKind::Executable` gets no `type_id`, so nothing claims
+> it, and `worker::subflow` terminates it: 12 of the 21 are the entries W6 Task
+> 3 banked, and the other nine still mismatch on something else (five registered
+> in `STILL_OVER_ACCEPTED_AT_RUNTIME`, two on `state::apply`'s attempt rule, two
+> on the missing `WARNING`). The remaining 63 are what the sentence above always
+> meant: a task type with no handler. So the driver returns the partial trace,
 and `Broken` is now reserved for the instrument failing: the step bound, a panic,
 or `WorkerError::Corrupt`, which `driver.rs` used to discard along with every
 other worker error under `Err(_) => continue` and can now be reported. Nothing
@@ -6415,6 +6493,42 @@ W4's own base**, so this package's 16-line caveat does not have a W4 twin. Read
 per file, because a `git diff` that prints nothing looks the same whether it
 compared eleven files or none, and the file count is checked on both sides so a
 deletion cannot hide inside an empty diff.
+
+> **W6 Task 3 ENDS THAT, and this item is now a diff with a reason per file
+> rather than a machine check.** The paragraph above about what that costs
+> (*Pointers that no longer resolve*) is still exactly right, so it is not
+> softened here: item 12 was a one-command check and is a judgement call from
+> this commit on. What replaces it is the per-file diff below, each row saying
+> what the change is FOR, and a single measured claim it all rests on.
+>
+> **The claim:** `flowable::start` emits `SUBMITTED` for every
+> `TaskKind::Runnable`, and **not one of the 24 executed `Subflow` runs in
+> `golden.json` carries it** — derived over the golden on every run by
+> `no_subflow_run_in_the_golden_passes_through_submitted`, and from egret's side
+> by `only_a_runnable_passes_through_submitted`. So `Subflow` planned an opaque
+> `Runnable` — a runnable whose handler spawns and waits, the cheaper answer the
+> plan asked to be tried first — mismatches EVERY entry the package exists to
+> bank, whatever else its handler gets right. It banks nothing. That is the
+> finding; the directory opening is its consequence.
+>
+> `git diff --stat 3539fea2 HEAD -- crates/egret-workflow/src/executor/`:
+>
+> | file | what the change is for |
+> |---|---|
+> | `plan.rs` | the new `TaskKind::Executable` variant, and the `(ModelKind::Subflow, "subflow")` arm that builds one. Kestra's own `ExecutableTask`, and its doc carries the measurement above |
+> | `flowable/mod.rs` | `start` does not emit `SUBMITTED` for it and emits a `Command::SpawnSubflow` beside the `StartRun`; `descend` returns `Waiting` for it, as it does for a `Loop` |
+> | `command.rs` | the `Command::SpawnSubflow` variant — **and the stale pointer this table's own successor list has been holding since W3b** |
+> | `state.rs` | `apply`'s arm for it (a no-op, like `SpawnExecution`), and a second measured counter-example to rule 1 recorded beside the first |
+> | `retry.rs` | `scan` spells Kestra's `RunnableTask \|\| Subflow` instead of half of it — the doc there predicted this exact edit |
+> | `mod.rs` | `#[cfg(test)]` only: the two fixpoint helpers and `only_a_runnable_passes_through_submitted`, which gains an `Executable` arm and `valids/subflow-parent` |
+> | `flowable/loop_.rs` | **nothing new** — the two stale pointers, fixed |
+>
+> Nothing here changes `advance()`'s contract for a kind that already existed:
+> a `Runnable`, a `Sequential`, a `Parallel`, a `Dag`, an `If`, a `Switch` and a
+> `Loop` all take exactly the commands they took before, which is what
+> `only_a_runnable_passes_through_submitted`'s unchanged `flowables >= 8 &&
+> runnables >= 21` and the whole unchanged W1–W5 half of the ratchet assert.
+> `advance()` is still pure over `(plan, state, now)`.
 
 **13. A task-level `timeout:` never reached a handler — CLOSED by W4 Task 2, and
 the ratchet is blind to it for a different reason than item 11.** W3b measured
@@ -6820,15 +6934,17 @@ on a principle:
 |---|---|---|
 | `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` — **a name no test has ever had**, and so not even in the thirteen | **fixed**: it is `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction` |
 | `tests/executor.rs`, the field-family list | `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | **fixed** — marked as deleted at the point of use |
-| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only.** Read it as `every_sub_execution_egret_runs_is_one_kestra_ran` — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison now |
-| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **recorded only.** Read it as `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
-| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only**, and it has **no successor**: it was deleted with W3a's harness and its render tier. Rendering lives in `worker::render` and is tested there |
+| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **fixed at W6 Task 3**, the commit that opened the directory. It names `every_sub_execution_egret_runs_is_one_kestra_ran` now — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison — and the *"Nothing executes this yet"* sentence beside it, false since W3b Task 4, went with it |
+| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **fixed at W6 Task 3.** It names `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
+| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **fixed at W6 Task 3**, and it is the one with **no successor**: it was deleted with W3a's harness and its render tier. The note now says so at the point of use — nothing asserts those two entries' second cause today, and both remain baselined |
 
-The last three rows are `src/executor/`, which **must stay byte-unchanged**, and
-their successors are named above so that the record is a lookup rather than a
-dead end — the `fixed` rows tell a reader what happened, and a `recorded only`
-row that did not name its successor would be a second dangling pointer standing
-in for the first.
+The last three rows are `src/executor/`, which stayed byte-unchanged from W3a
+until **W6 Task 3** and no longer does. Their successors are named above so that
+the record is a lookup rather than a dead end — the `fixed` rows tell a reader
+what happened, and a `recorded only` row that did not name its successor would
+be a second dangling pointer standing in for the first. *(All three read `fixed`
+now; the paragraph is kept as written because the argument below it is why they
+waited, and that argument is still the right one.)*
 
 **The reason for not touching them is stronger than "a constraint says so", and
 it is worth stating properly: `src/executor/` byte-unchanged is the calibration
@@ -6851,6 +6967,26 @@ gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
 `executor/retry.rs`. Whoever it is: the two lines are in `command.rs`'s
 `SpawnExecution` doc and `loop_.rs`'s module doc and `values:` note, and this
 table is the successor list.
+
+> **DONE — W6 Task 3, `9fb5b0fa`, and not through the replay.** The package that
+> opened the directory is W6 and the reason is `Subflow`, not
+> `CREATE_NEW_EXECUTION`: `flowable::start` emits `SUBMITTED` for every
+> `TaskKind::Runnable`, and **not one of the 24 executed `Subflow` runs in
+> `golden.json` carries that state** (derived on every run by
+> `no_subflow_run_in_the_golden_passes_through_submitted`). So a `Subflow` left
+> planned an opaque `Runnable` — the cheaper answer, a runnable whose handler
+> spawns and waits — mismatches every entry the package exists to bank, whatever
+> else its handler gets right. It is a `TaskKind::Executable` now.
+>
+> **All three pointers were fixed in that commit**, which is the condition under
+> which they were left, and the three rows above say `fixed` rather than
+> `recorded only`. The third had no successor and now says so at the point of
+> use rather than only here.
+>
+> The paragraph above this one is still exactly right about what it cost: item
+> 12 is no longer a one-command machine check for this branch, and every later
+> package inherits the judgement call. What replaces it is stated in item 12
+> itself — the diff is reported per file with what each file's change is for.
 What is **not** left to prose is the table's own accuracy:
 `the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do`
 fails if a retired name comes back as a live test, if a successor named here does
@@ -7347,3 +7483,128 @@ same thing at the site.
 **Ratchet: 143 → 143, zero moves.** Nothing in this task writes an execution
 row, so nothing the ratchet compares could move; a step that changed it would
 have been a step nobody asked for.
+
+# W6 Task 3 — `Subflow` executes, and `src/executor/` opens
+
+**Ratchet: 143 → 131.** Twelve entries banked, zero regressions, zero broken,
+zero stale lines. Every one declares a `Subflow`; the attributions are in
+*Matching, baselined, and what each half is made of* above and one by one in
+`baseline.txt`'s header.
+
+## The finding, and why the cheap answer banks nothing
+
+`src/executor/` had been byte-unchanged since W3a across four packages, and
+*Pointers that no longer resolve* named the condition for opening it. **W6 is
+the package**, and the reason is `Subflow` rather than the
+`CREATE_NEW_EXECUTION` replay that section predicted.
+
+`flowable::start` emits **`SUBMITTED`** for every `TaskKind::Runnable`, and it
+is the one state in Kestra's record that separates a task the worker ran from
+one the executor ran. **Not one of the 24 executed `Subflow` runs in
+`golden.json` carries it** — all 24 read `CREATED RUNNING …`, and the one
+skipped run reads `CREATED SKIPPED`. So the cheaper answer the plan asked to be
+tried first — *a `Subflow` left an opaque `Runnable` whose handler spawns and
+waits* — mismatches **every** entry the package exists to bank, whatever else
+its handler gets right.
+
+Derived on every run, from both sides, and from a third that is stronger than
+either:
+
+- `no_subflow_run_in_the_golden_passes_through_submitted` walks the golden
+  (24 executed + 1 skipped, over 22 entries) and asserts the population beside
+  the claim, so a walk that found no `Subflow` run cannot pass vacuously;
+- `only_a_runnable_passes_through_submitted` asserts egret's side on
+  `valids/subflow-parent`;
+- `planning_the_loop_removed_forty_spurious_submitted_emissions` reproduces all
+  four of Task 5's committed `fed`/`flowable`/`unplanned`/`over_fed` figures
+  **only after adding back the 22 runs and the one TYPE W6 removed**, with
+  `!over_fed.contains_key("…flow.Subflow")` asserted so the `+ 1` is checked.
+  **22 of W5's 114 over-submitted runs were `Subflow`s.**
+
+And two mutations make it a fact about the ratchet rather than about a unit
+test: emitting `SUBMITTED` for an `Executable` fails
+`only_a_runnable_passes_through_submitted` with
+`["CREATED","SUBMITTED","RUNNING","SUCCESS"]`, and mapping `Subflow` back to
+`TaskKind::Runnable` — one line in `plan.rs` — returns the ratchet to 143 with
+exactly the twelve banked entries reported as regressions.
+
+## The child, and the link
+
+Measured on the pinned digest by running flows against it, not read off the
+sibling checkout:
+
+| measurement | flow |
+|---|---|
+| the child's `parentId` is **null**, its `trigger` is `{"type": "io.kestra.plugin.core.flow.Subflow", "variables": {"executionId", "taskRunId", "taskId", "namespace", "flowId", "flowRevision"}}`, and `parent_id` finds nothing | `io.kestra.tests/subflow-parent` |
+| `wait: false` does not wait, and the parent records `{"state":"CREATED","executionId":…}` — no `outputs` key | `egret.probe/probe-nowait-parent` |
+| `wait: true` gives `{executionId, state, outputs}` — a successor rendered `eid=… state=SUCCESS o1=hello` | `egret.probe/probe-outputs-parent` |
+| `transmitFailed` is applied ON TOP of the child's own state: run and attempt each `CREATED RUNNING FAILED SUCCESS` | `egret.probe/probe-notransmit-parent` |
+| an unresolvable target publishes with **200** and fails the RUN, with no child | `egret.probe/probe-unresolvable` |
+| a `Subflow` inside a flowable's `errors:` **runs** | `egret.probe/probe-errors-subflow` |
+
+So the link is `trigger_execution_id` / `trigger_run_ix` (migration 0138) and
+never `parent_execution_id` — which is what keeps the child invisible to the
+query that builds `spawned`, where all 41 golden entries have zero `Subflow`
+children. `a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id`
+asserts that query returns empty **first**, before it looks at the trigger
+columns at all, so a child linked the wrong way fails the load-bearing assertion
+rather than a lookup that quietly returns nothing.
+
+**Both wrong links were mutated.** Setting `parent_execution_id` while leaving
+`trigger_run_ix` is refused by the database, by name —
+`workflow_executions_trigger_run_needs_its_execution`, Task 2's guard firing
+live. Setting `parent_execution_id` alone is **representable** (it is the replay
+shape) and is caught by the test:
+`the child is 78ff3430-…, and the `spawned` query must not see it`.
+
+## Resolution: the draft row, and the workspace
+
+Against `workflow.flows.source`, not `flow_versions`: W6 Task 1 measured that
+only **2 of the 20** literal `Subflow` targets reach a live version, so a
+version-based resolver would resolve 2 of 20 and this package would bank
+nothing. It is also what `publish`'s own `FlowRepo::find_by_name` reads, and
+**nothing in `crates/*/src` starts an execution from a version snapshot** —
+there is no product route that starts one at all yet.
+
+**Scoped to `workspace_id`, where `find_by_name` cannot be.** That method's doc
+records why (`WorkflowRefPort::workspace_of` carries no caller-workspace
+parameter); this caller has it on `ExecutionCtx`. Deleting the term makes
+`a_subflow_target_in_another_workspace_does_not_resolve` report
+`(1, SUCCESS, None)` where it wants `(0, FAILED, "unable to find flow …")` —
+another tenant's flow source read and executed.
+
+## The unresolvable target, and the one shape that diverges
+
+`the_only_unresolvable_subflow_target_in_the_corpus_is_skipped` derives over all
+345 corpus flows that `dummy_namespace/dummy_flow` is the only literal target no
+corpus flow holds, and that the run naming it is `["CREATED","SKIPPED"]` — so
+**the ratchet cannot see this decision at all**, and it was measured on the
+artifact instead. egret agrees on all four observable parts: the flow is not
+refused, the run fails, the successor never runs, no child is created.
+
+One shape differs and is pinned in `tests/worker.rs` rather than described: the
+artifact's run reads `["CREATED","FAILED"]` with an attempt of `["FAILED"]` —
+no `RUNNING`, because it never gets as far as building the `SubflowExecution` —
+where egret reads `["CREATED","RUNNING","FAILED"]`. `Command::SpawnSubflow`
+cannot be emitted without a `StartRun` beside it (`apply` records nothing for
+it, so the round would repeat for ever), and no golden entry reaches the
+difference.
+
+## What this task deliberately did NOT change
+
+- **`read_trace_inner`'s decode**, still `(Uuid, i32, String)` — Task 4's, and
+  untouched here for the reason Task 2 gave. A `Subflow` child is invisible to
+  that query by construction, so nothing this task writes can reach it.
+- **The publish-time half of the `errors:` gap.** `publish::resolve_task` still
+  walks `children()` only, so a `Subflow` inside a flowable's `errors:` never
+  has its `flow_ref` filled. The execution-time walk in `worker::subflow` does
+  go through `error_children()` — and unlike the census's wider walk, **it is
+  not redundant**: mutation M2 kills
+  `a_subflow_inside_an_errors_list_is_reached_and_spawned` with
+  `task "handler" is planned Executable but is not a Subflow of the execution's own source`.
+  The gap is written at the point of use rather than only in a report.
+- **`allowFailure` / `allowWarning`**, which `models::Task` does not carry and
+  `RunState` has no `Warning` for. `guess_state` implements only the
+  `transmitFailed` half of `ExecutableUtils.guessState` and says so; the two
+  `task-allow-*-executable-flow` entries are what that costs and both stay
+  baselined.
