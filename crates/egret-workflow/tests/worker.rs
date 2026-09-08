@@ -4446,3 +4446,130 @@ async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool:
          the root"
     );
 }
+
+/// **The other two re-entrant sites: a `Loop`'s next iteration and a
+/// `wait: false` subflow's own completion are frames too.**
+///
+/// # Why this test exists, and it is a mutation result rather than a hunch
+///
+/// The threading fix touched **three** call sites, and the ascent test above
+/// covers exactly one of them. Measured, per site:
+///
+/// | mutation | site | ascent test | descent test |
+/// |---|---|---|---|
+/// | M10a | `subflow::on_child_terminal` (`wait: true`) | KILLED | passes |
+/// | M10b | `subflow::complete` from `spawn_one` (`wait: false`, and every refusal) | **SURVIVED** | passes |
+/// | M10c | `spawn::on_execution_terminal` (a `Loop`'s next iteration) | **SURVIVED** | passes |
+///
+/// Two threaded sites with nothing watching them is the shape the programme's
+/// own rule is about, and the `wait: false` one is not hypothetical — the
+/// reviewer's `wait: false` probe aborted the worker at **eight** levels, two
+/// fewer than the `wait: true` one. This test is the positive control for both.
+///
+/// # The frame arithmetic, which is what the fixture is built from
+///
+/// Every hop below happens inside `start_execution`'s single transaction,
+/// because nothing here ever needs a worker: the loop body and the subflow
+/// target both carry an unrenderable `runIf:` and fail inside their own first
+/// settle.
+///
+/// ```text
+/// settle(root, 0)
+///   each  -> iteration 0 at 1 -> FAILED -> on_execution_terminal(caller 1)
+///                             -> load root at 2 -> start iteration 1 at 3 -> FAILED
+///                             -> on_execution_terminal(caller 3)
+///                             -> load root at 4 -> start iteration 2 at 5 -> FAILED
+///                             -> on_execution_terminal(caller 5)
+///                             -> load root at 6 -> every value terminated -> settle(root, 6)
+///   fire1 -> child at 7 -> FAILED, but `wait: false` -> complete(Nested(6)) -> settle(root, 7)
+///   fire2 -> child at 8 -> FAILED, but `wait: false` -> complete(Nested(7)) -> settle(root, 8)
+///   deep  -> 8 + 1 > MAX_SPAWN_CHAIN  ->  REFUSED
+/// ```
+///
+/// `transmitFailed: false` on the `Loop` is what lets the flow reach `fire1` at
+/// all — every iteration FAILS, and a `transmitFailed` loop would end on the
+/// first one (`valids/loop-failed` against `valids/loop-failed-no-transmit`).
+///
+/// **Each surviving mutation moves the refusal off `deep` in a different
+/// direction**, which is why one test kills both: M10b flattens the two
+/// `wait: false` hops (`deep` reaches `spawn_one` at 2 instead of 8) and M10c
+/// flattens the three loop hops (`deep` reaches it at 2), and in both cases the
+/// child is created and there is no refusal at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // Fails inside its own first settle, with no worker tick -- the same
+    // fixture the `wait: false` positive control and the ascent test use.
+    let instant = "id: asc-leaf\nnamespace: t\ntasks:\n  - id: x\n    \
+                   type: io.kestra.plugin.core.log.Log\n    \
+                   runIf: \"{{ outputs.notexists == 2 }}\"\n    message: hi\n";
+    file_flow(&db, ws, user, instant).await;
+
+    let root_src = "id: mix\nnamespace: t\ntasks:\n  \
+                    - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    \
+                      values: [\"1\", \"2\", \"3\"]\n    transmitFailed: false\n    \
+                      tasks:\n      - id: body\n        \
+                        type: io.kestra.plugin.core.log.Log\n        \
+                        runIf: \"{{ outputs.notexists == 2 }}\"\n        message: hi\n  \
+                    - id: fire1\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n    wait: false\n  \
+                    - id: fire2\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n    wait: false\n  \
+                    - id: deep\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        (
+            run_state(&pool, root, "each").await,
+            run_state(&pool, root, "fire1").await,
+            run_state(&pool, root, "fire2").await,
+            run_state(&pool, root, "deep").await,
+            refused.len(),
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some("SUCCESS".to_string()),
+            Some("SUCCESS".to_string()),
+            Some("FAILED".to_string()),
+            1,
+        ),
+        "the loop and both `wait: false` subflows run; only `deep` is refused. \
+         `deep` SUCCEEDing here means its frames were not counted -- which is \
+         what both surviving mutations produce: {refused:?}"
+    );
+    assert_eq!(
+        refused[0].1.as_deref(),
+        Some(
+            "this execution is 8 child execution(s) down a chain and 8 is as \
+             deep as this worker will build in one transaction; 't'.'asc-leaf' \
+             is not started"
+        ),
+        "and the refusal is the DEPTH one, at exactly 8 -- three loop hops, two \
+         `wait: false` hops, and the two frames each of those costs. A different \
+         number here means the arithmetic in this test's doc is wrong, not that \
+         the bound is"
+    );
+    // Three loop iterations and two `wait: false` children, and NOT a sixth:
+    // the refusal must happen before `deep`'s child row is written.
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all, 6,
+        "the root, three iterations, and two `wait: false` children"
+    );
+}
