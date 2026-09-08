@@ -5872,6 +5872,26 @@ both sides, so nothing was added or deleted either). W3b's own diff against
 *its* base was 16 lines in 2 files — see item 12 — so this is a stronger
 statement than the one it inherits, not the same one.
 
+**`baseline.txt` is NOT byte-unchanged since `ad93ef2d`, and a review said it
+was.** The correction is recorded here because the claim was true in substance
+and false as stated, which is what this whole sweep has been about. Verified:
+
+```text
+blob ad93ef2d 4de4d0560c49edd45e07331b7f8e253260a80dee
+blob HEAD     8a40d34f8cc12738a11415a0a4b2dee99a214d8c   ← different
+git diff --stat ad93ef2d HEAD -- oracle-exec/baseline.txt
+  1 file changed, 6 insertions(+), 2 deletions(-)        ← b1a47222, W4 Task 3
+changed lines that are NOT comments                       0
+grep -vc '^\s*#\|^\s*$'  at ad93ef2d 143 · at HEAD 143  ← the ratchet is unaffected
+```
+
+`b1a47222` rewrote a comment from 2 lines to 6. **Every** changed line begins
+with `#`, so the 143 baselined entries are identical on both sides and every
+figure resting on them stands. The right claim is *"143 is unchanged and every
+edit to this file has been to comments"*, which a `git diff` can be asked for —
+not *"the file is byte-unchanged"*, which is simply false and which nobody
+checked because the number it protects was right.
+
 #### The three holes W4 closed, and the three different mechanisms that hide them
 
 Each row's population is derived on every run by the named test; the *reason*

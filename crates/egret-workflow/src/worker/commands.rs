@@ -287,10 +287,15 @@ pub trait TaskRunner: Send + Sync + std::fmt::Debug {
     /// Run `commands` for `task`, streaming every log line to `sink` as it
     /// arrives.
     ///
-    /// `Err` is a **worker** failure and aborts the tick without moving the
-    /// execution — the daemon is unreachable, egret's own outage. Everything
-    /// the author can act on (a bad image, a command that exited non-zero) is
-    /// `Ok` and the handler decides what it means, exactly as
+    /// `Err` is a **worker** failure — the daemon is unreachable, egret's own
+    /// outage. The run's own outcome is not applied, so it stays `RUNNING` and
+    /// leased until [`reap`](crate::worker::reap) returns it. (`tick` keeps
+    /// `first_err` and carries on with the rest of the batch — see
+    /// `claim::tick`; "aborts the tick" is the loose phrase this crate used and
+    /// it overstates what happens to the other runs.)
+    ///
+    /// Everything the author can act on (a bad image, a command that exited
+    /// non-zero) is `Ok` and the handler decides what it means, exactly as
     /// [`Registry::run`](super::Registry) splits the two.
     async fn run(
         &self,
@@ -736,6 +741,36 @@ const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docke
 /// Both wedge the run `RUNNING` and leased, blaming a daemon that had just
 /// answered three calls in the same run.
 ///
+/// # A THIRD flow, and the measurement that wrongly ruled it out
+///
+/// My taint table recorded `env` as *"not echoed — the failure names the image,
+/// not the env"*. **That row was false**, and how it got there is worth more
+/// than the row: I measured a **well-formed** pair (`--env "docker.sock=1"`)
+/// against a nonexistent image, so docker failed on the *pull* and never had to
+/// parse the env at all. The re-review measured a **malformed** one and the CLI's
+/// own flag parser rejects it, echoing the author's string **twice** in one
+/// line:
+///
+/// ```text
+/// docker create -e "=docker.sock" alpine:3.20 true
+///   invalid argument "=docker.sock" for "-e, --env" flag:
+///     invalid environment variable: =docker.sock      exit 125
+/// ```
+///
+/// `env` is author-supplied and unvalidated (`handlers::container::Spec::env`),
+/// so that is a third tainted flow into the old classification. **I asked a
+/// narrower question than the one the rule needs**: "does this value appear in
+/// stderr?" answered for the input I happened to choose, where the rule needs
+/// "can this value *ever* appear?" — and a single well-formed example cannot
+/// answer that.
+///
+/// **The structural fix closes it anyway, and that is the argument for having
+/// made it structural.** Sanitising the value the reviewer reported would have
+/// left this one live and undiscovered; a classification that reads no stderr at
+/// all is not a list of values to sanitise, so a flow nobody enumerated cannot
+/// defeat it. The enumeration is how you know what you fixed; it is not what
+/// does the fixing.
+///
 /// **Sanitising the one value was rejected.** The suggested one-liner
 /// (`stderr.replace(rel, "")`) fixes `outputFiles` and leaves `image:`, which is
 /// the second flow — and it leaves the *shape*: an author's string being tested
@@ -745,14 +780,25 @@ const SYMLINK_REFUSAL: &str = "A symlink is refused rather than followed: `docke
 /// {{.Server.Version}}`, whose command line and output contain **no author
 /// input of any kind**.
 ///
-/// # Why this diverges from the artifact, deliberately
+/// # Why this diverges from the artifact — narrowed to what was established
 ///
 /// `Docker.isDockerSocketAccessError` *is* a substring test over exactly those
-/// three strings. It is safe there because Kestra applies it to the **client's
-/// own `DockerException`** on the connect path — never to a message built from
-/// the user's declared paths. egret shells out, so the user's string is *in*
-/// the message. Same intent, different plumbing, so the same test is unsafe
-/// here.
+/// three strings, applied to a `Throwable`.
+///
+/// **The claim that used to stand here was too wide.** It said Kestra is safe
+/// because it tests "the client's own `DockerException` … never a message built
+/// from the user's declared paths". That is what I established, and it is true
+/// of the **copy** path only. Re-checked with `javap` on the pinned image, the
+/// one call site sits at bytecode offset **1723** of `Docker.run`, and
+/// **`pullImage` is called at offset 412 of the same method** — inside the same
+/// `catch` — so an exception carrying the author's **`image:`** reaches that
+/// substring test too. Kestra has one of egret's two tainted flows upstream of
+/// where I looked.
+///
+/// So the honest statement is narrower and the conclusion is unchanged: the
+/// artifact's test is unsafe **for any value the user supplies that can reach
+/// the exception message**, egret's shelling out puts more such values there,
+/// and a probe removes the question rather than bounding it.
 ///
 /// The cost is one extra `docker version` on the failure path only.
 ///
@@ -875,6 +921,21 @@ impl DockerRunner {
     /// Neither this command line nor its output contains any author-supplied
     /// value, which is the whole point: see
     /// [`_CLASSIFICATION_IS_A_PROBE_NOT_A_SUBSTRING_TEST`].
+    ///
+    /// # Its cost, stated rather than discovered
+    ///
+    /// This runs **once per failed docker call**, and in
+    /// [`collect_output_files`](DockerRunner::collect_output_files) that loop is
+    /// over `outputFiles`, which the author writes and **nothing caps**. So a
+    /// flow declaring a thousand absent files makes a thousand extra `docker
+    /// version` calls in one run — bounded work per element and no daemon state,
+    /// but not free.
+    ///
+    /// It is left uncapped deliberately: capping the probe means caching "the
+    /// daemon is up" across a loop that can outlive the daemon, which trades a
+    /// known cost for a wrong answer. The list itself is what should be bounded,
+    /// and that is a `spec::validate` rule rather than a runner's — recorded
+    /// here so whoever adds it knows this is one of the reasons.
     async fn daemon_answers(&self) -> bool {
         self.cli(&["version", "--format", "{{.Server.Version}}"])
             .await
@@ -1015,6 +1076,22 @@ impl DockerRunner {
             // Minor 3). Review Minor 2's `?`-before-cleanup leak is closed by
             // the same thing, so the closure that used to force a single exit
             // is gone with it.
+            // # `input_files` KEYS ARE NOT AUTHOR-SUPPLIED TODAY, AND THE NEXT
+            // # HANDLER AUTHOR MUST KEEP IT THAT WAY
+            //
+            // The `create_dir_all(...).map_err(io_err)?` below is the **closed
+            // Critical's exact shape**: an author-derived path handed to the
+            // filesystem, with an `io::Error` becoming `Error::Internal` and
+            // therefore a worker failure. It is unreachable only because **no
+            // handler lets an author name a key**: `handlers::python` writes the
+            // single constant `SCRIPT_FILE` and `handlers::container` passes an
+            // empty map. Nothing in the type system says so — `TaskCommands` is
+            // `pub` and its `input_files` is a plain `BTreeMap`.
+            //
+            // A handler that ever maps an author's value into a key here
+            // reintroduces the Critical in its original form. It should route
+            // through [`stage_destination`], whose `String` error cannot express
+            // a worker failure, exactly as the output path does.
             let staging = tempdir(task)?;
             for (rel, contents) in &commands.input_files {
                 check_relative(rel)?;
@@ -2186,7 +2263,7 @@ mod tests {
             )
             .await
             .expect(
-                "an author declaring a parent and a child must never abort the tick -- \
+                "an author declaring a parent and a child must never wedge the run -- \
                  a worker failure here applies no outcome, so the run stays RUNNING and \
                  leased for an hour, then repeats for ever",
             );
@@ -2324,13 +2401,22 @@ mod tests {
         // `cp` records the staging path it was given and then never returns, so
         // the future is guaranteed to be dropped inside the window between
         // creating that directory and removing it.
+        //
+        // **`exec sleep`, and the word is load-bearing.** `kill_on_drop` reaps
+        // the process this crate spawned — the shim's `/bin/sh` — and a plain
+        // `sleep 300` is that shell's *child*, which survives it and reparents
+        // to init. Measured at the previous HEAD: 0 orphans before the test, 1
+        // after, on every run. `exec` replaces the shell with the sleep so
+        // there is one process and `kill_on_drop` reaches it. The production
+        // path is not affected either way (nothing egret spawns forks a child),
+        // which is why this was the test leaking and not the runner.
         std::fs::write(
             &shim,
             format!(
                 "#!/bin/sh\n\
                  case \"$1\" in\n\
                  \x20 create) echo id ;;\n\
-                 \x20 cp) echo \"$2\" >> {log}; sleep 300 ;;\n\
+                 \x20 cp) echo \"$2\" >> {log}; exec sleep 300 ;;\n\
                  \x20 inspect) echo 0 ;;\n\
                  esac\n\
                  exit 0\n",

@@ -489,7 +489,7 @@ async fn a_directory_named_as_an_output_file_does_not_wedge_the_worker() {
     let out = h
         .run(&t)
         .await
-        .expect("a typo'd `outputFiles` must not abort the tick -- see Critical 1");
+        .expect("a typo'd `outputFiles` must not wedge the run -- see Critical 1");
     let msg = failed(&out);
     assert!(msg.contains("DIRECTORY"), "{msg}");
     assert!(msg.contains("results"), "{msg}");
