@@ -314,27 +314,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    163  reproduced today, and by nothing the driver removes
+    167  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      26  not reproduced today, and nothing found here blocks it
-    105  not reproduced today, and blocked -- by cause below
+    101  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 163 + 26 = **189**
-  CEILING, feed retained = 163 + 0 + 26 = 189
+  CEILING, feed removed  = 167 + 26 = **193**
+  CEILING, feed retained = 167 + 0 + 26 = 193
 
-  Today the ratchet matches 163. The two ceilings are the same
+  Today the ratchet matches 167. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **189 is the bound this package should be held to**, because removing
+  **193 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  189 -- reported as a decision, not as progress.
+  193 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -385,7 +385,6 @@ Two rules, and they are deliberately different:
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
         5  refusal    egret over-accepts it -- W1's validation, not a handler
-        4  construct  CREATE_NEW_EXECUTION retry
         4  construct  io.kestra.plugin.core.execution.Exit
         4  construct  io.kestra.plugin.core.flow.AllowFailure
         4  construct  io.kestra.plugin.core.flow.WorkingDirectory
@@ -396,12 +395,12 @@ Two rules, and they are deliberately different:
         2  handler    io.kestra.plugin.core.storage.Write
         1  handler    io.kestra.plugin.core.kv.Set
     -----
-      105  DISTINCT entries blocked (the rows above overlap)
+      101  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        32  a missing handler
-       87  a construct no W3b task owns
+       83  a construct no W3b task owns
        29  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
@@ -464,7 +463,7 @@ Two rules, and they are deliberately different:
     valids/parallel-disabled-tasks           one `order` pair, same cause
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
 
-    working expectation = 189 - 5 = 184
+    working expectation = 193 - 5 = 188
 
   Two of them deserve a sentence each:
 

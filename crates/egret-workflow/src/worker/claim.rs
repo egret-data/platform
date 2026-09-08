@@ -66,13 +66,14 @@ use uuid::Uuid;
 
 use super::cancel;
 use super::render::{self, Pass, Surface};
+use super::replay;
 use super::spawn::{self, Requested};
 use super::subflow;
 use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunIx, RunState, TaskKind,
-    TaskRun, Tick,
+    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, RunIx,
+    RunState, TaskKind, TaskRun, Tick,
 };
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -340,19 +341,48 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
-/// The executions holding a `RETRYING` run whose retry delay has elapsed.
+/// The executions holding a run whose retry delay has elapsed — a `RETRYING`
+/// one waiting to be reopened, or a `RETRIED` one whose **replay** has not been
+/// started yet.
 ///
-/// **The `RETRYING` term is the whole predicate's point** and it is not a
-/// tidiness: `advance()` never CLEARS a `not_before` — `executor::apply`'s
+/// **The state term is the whole predicate's point** and it is not a tidiness:
+/// `advance()` never CLEARS a `not_before` — `executor::apply`'s
 /// `ScheduleRetry` arm writes one and nothing writes `None` back — so a run
 /// that has been retried and has since succeeded still carries the deadline
-/// its retry wrote, for ever. Without the state term this statement would name
-/// every finished execution whose retry deadline is in the past, on every
+/// its retry wrote, for ever. Without it this statement would name every
+/// finished execution whose retry deadline is in the past, on every
 /// tick, and each would take the execution's row lock and a settle that writes
 /// nothing but a new `executions.seq`. Driven by
 /// `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`,
 /// whose last assertion is exactly that: nothing is `RETRYING` any more, the
 /// deadline is still there and still past, and the waker must name nobody.
+///
+/// # The `RETRIED` arm needs two more terms, for the same reason
+///
+/// W6 Task 4. A `CREATE_NEW_EXECUTION` retry leaves the run **`RETRIED`** —
+/// terminal — with a deadline, and `reopen_due` will never touch it: what is
+/// due is a whole new execution, which [`super::replay::spawn_due`] starts from
+/// the settle this waker's `resume` produces. `RETRIED` alone would be the
+/// unbounded case the paragraph above describes, because nothing ever moves a
+/// `RETRIED` run either — so the arm carries both conditions that decide
+/// whether a replay is still to come, and each closes a different endless case:
+///
+/// - **no replay child yet** — otherwise every finished chain is named for
+///   ever, once per tick, for a deadline that has already been acted on;
+/// - **`e.parent_run_ix IS NULL`** — otherwise a `Loop` sub-execution whose
+///   body carries such a retry is named for ever, because `spawn_due` refuses
+///   that one permanently (the artifact cannot replay a loop iteration either;
+///   see that function's doc) and no child will ever appear to stop it.
+///
+/// These are not one fence shared with `spawn_due`: this one bounds the
+/// **waker's** work, and `spawn_due`'s decides the **spawn**, which is also
+/// reached from a `resume` this predicate never saw — the oracle's driver takes
+/// exactly that path. Under both sits migration 0138's
+/// `workflow_executions_loop_run_idx` with `NULLS NOT DISTINCT`, which makes a
+/// second replay unrepresentable rather than merely unasked-for.
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists` and
+/// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
+/// drive the two.
 ///
 /// **The clock is [`load_with`]'s, spelled the same way**, so an execution
 /// named here is one `retry::reopen_due` will actually reopen — see the module
@@ -374,7 +404,12 @@ pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> 
         "SELECT r.execution_id \
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
-          WHERE r.state = 'RETRYING' \
+          WHERE (r.state = 'RETRYING' \
+                 OR (r.state = 'RETRIED' \
+                     AND e.parent_run_ix IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
+                                      WHERE c.parent_execution_id = e.id \
+                                        AND c.parent_run_ix IS NULL))) \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
@@ -900,6 +935,15 @@ pub(super) async fn settle(
     // the row: a nested settle that terminated the execution has ALREADY told
     // its parent, and firing again from here would report one terminal twice.
     subflow::spawn_all(conn, ctx, &surface, state, &subflows).await?;
+    // **The execution-delay loop, and it is a different loop in the artifact
+    // too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution `RETRIED` and
+    // leaves an `ExecutionDelay` behind (`retry::scan`'s `ScheduleRetry`); the
+    // replacement execution is started later, by whoever notices the deadline.
+    // Here that is every `settle`, because `resume` -- from `worker::wake` in
+    // production and from `pass_time` in the oracle's driver -- is the settle a
+    // due deadline produces. It reads `state`, so the round that scheduled the
+    // delay can see it too, and refuses on `not_before > now`.
+    replay::spawn_due(conn, ctx, state, now).await?;
 
     let was = before.history.last().copied();
     let is = state.history.last().copied();
@@ -1148,10 +1192,12 @@ pub(super) async fn load_with(
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
     let row = sqlx::query(if lock == Lock::Yes {
         "SELECT source, history, workspace_id, flow_id, seq, \
+                attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
            FROM workflow.executions WHERE id = $1 FOR UPDATE"
     } else {
         "SELECT source, history, workspace_id, flow_id, seq, \
+                attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
            FROM workflow.executions WHERE id = $1"
     })
@@ -1221,6 +1267,27 @@ pub(super) async fn load_with(
     let state = ExecutionState {
         runs,
         history: parse_states(execution_id, &history)?,
+        // Kestra's `Execution.metadata` (migration 0139). `now` is deliberately
+        // NOT shifted by the offset: every other `Tick` in this execution --
+        // `TaskRun::not_before`, `Attempt::started_at` -- is measured from THIS
+        // execution's `created_at`, and so is `oracle-exec/driver.rs`'s
+        // `pass_time`, which computes a shortfall against the same column. A
+        // clock shifted here would be read unshifted there and the driver would
+        // travel a chain's whole accumulated time on every hop. The offset is
+        // carried where its one reader is -- `retry::next_retry_at`'s
+        // `CREATE_NEW_EXECUTION` origin -- as a negative tick.
+        metadata: ExecutionMeta {
+            attempt: u32::try_from(row.get::<i32, _>("attempt_number")).map_err(|_| {
+                worker_err(WorkerError::Corrupt(
+                    execution_id,
+                    format!(
+                        "negative attempt_number {}",
+                        row.get::<i32, _>("attempt_number")
+                    ),
+                ))
+            })?,
+            origin: Tick(-row.get::<i64, _>("origin_offset_ms")),
+        },
     };
     Ok((ctx, state, Tick(now_ms)))
 }
@@ -1687,6 +1754,7 @@ mod tests {
                 run(Some(0), RunState::Created),
             ],
             history: vec![RunState::Running],
+            metadata: crate::executor::ExecutionMeta::default(),
         };
         let before = CREATE_BESIDE_A_CREATED_SIBLING.load(std::sync::atomic::Ordering::Relaxed);
         // A sibling of run 1 being created while run 1 is still CREATED: the

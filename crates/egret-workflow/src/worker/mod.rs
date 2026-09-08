@@ -77,6 +77,7 @@ pub mod handlers;
 mod reaper;
 mod registry;
 mod render;
+mod replay;
 mod spawn;
 mod subflow;
 mod timeout;

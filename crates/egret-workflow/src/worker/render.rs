@@ -196,10 +196,40 @@ impl Surface {
         // reachable only THROUGH that link, so nothing above it may contribute
         // either.
         //
-        // `root` deliberately keeps walking the whole chain. It feeds
-        // `labels.system.correlationId`, no golden entry pairs a replay with a
-        // `correlationId` read, and narrowing it would be an unmeasured change
-        // to an observable value -- W6 Task 4 owns that question.
+        // **The `levels` walk below is NOT sticky, and W6 Task 4 measured that
+        // it cannot reach a non-loop link at all.** A level is pushed only when
+        // the row below the link carries `(loop_index, loop_value,
+        // parent_run_ix)`, so a replay contributes none of its own; the only
+        // way one could cross a replay link is a replay whose PARENT is a loop
+        // iteration, and `worker::replay::spawn_due` refuses to create that row
+        // -- because the artifact refuses it too, throwing
+        // `Can't find taskrun with taskrunId <the LOOP run's>` out of
+        // `markWithTaskRunAs(..., markParents = true)` and ending the iteration
+        // FAILED with no child. So the state this walk is unguarded against is
+        // one no writer can produce, which is why it is left as it is rather
+        // than given a second flag nothing could make fire.
+        //
+        // **`root` deliberately keeps walking the whole chain, and W6 Task 4
+        // measured that this is right rather than merely unmeasured.** It feeds
+        // `labels.system.correlationId`, and on the pinned artifact
+        // (`egret.probe4/replay-correlation`: a flow-level
+        // `CREATE_NEW_EXECUTION` retry over a `Log` of
+        // `{{ labels.system.correlationId }}` and a `Fail`) the replay's label
+        // is the ORIGINAL execution's id while `{{ execution.id }}` is its own:
+        //
+        //     root  cid=3nY5p1H9MmhpWnq4hZsVOD eid=3nY5p1H9MmhpWnq4hZsVOD
+        //     replay cid=3nY5p1H9MmhpWnq4hZsVOD eid=5cNdx41IqqhyGSExZsuGLu
+        //
+        // The mechanism agrees: `ExecutionService.replay` copies the parent's
+        // labels (adding `system.replay`), and `Execution.java:213` fills a
+        // `correlationId` in only when one is ABSENT. So a replay inherits, a
+        // sticky `root` would not, and stopping this walk at the same link
+        // `inheriting` stops at would be the divergence.
+        //
+        // No golden entry pairs a replay with a `correlationId` read, so the
+        // oracle cannot tell either way; the probe is the instrument, and
+        // `a_replay_inherits_the_correlation_id_of_the_execution_it_replaces`
+        // in `tests/worker.rs` is what keeps it from drifting.
         let mut inheriting = true;
         // Nearest ancestor first, so a nearer scope wins where two ancestors
         // ran a task of the same id. The chain is a DAG by construction --
@@ -590,6 +620,7 @@ mod tests {
         let state = ExecutionState {
             runs: vec![run(0, RunState::Success), run(1, RunState::Running)],
             history: vec![RunState::Running],
+            metadata: crate::executor::ExecutionMeta::default(),
         };
         let surface = Surface {
             inputs: json!({}),

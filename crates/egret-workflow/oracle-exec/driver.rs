@@ -1017,17 +1017,30 @@ async fn read_trace_inner(
     // both links, and `a_subflow_child_is_invisible_to_the_query_that_builds_spawned`
     // below drives this function over one and asserts the empty `spawned`.
     //
-    // **Left unchanged, and W6 Task 4 is the task that has to change it.** The
-    // tuple below is `(Uuid, i32, String)` and not `(Uuid, Option<i32>,
-    // Option<String>)`, which was exactly right while the CHECK made a child
-    // with a parent and no loop index unrepresentable. 0138 makes that child
-    // representable -- it is the `CREATE_NEW_EXECUTION` replay -- and the four
-    // `valids/retry-new-execution-*` entries want `{"parent_run": null,
-    // "value": null}` in `spawned`, which this decode cannot produce and would
-    // fail on. Nothing writes such a row yet, so nothing here is broken today;
-    // widening it belongs to the commit that starts writing one, so that the
-    // entries it moves are attributable to it.
-    let children: Vec<(Uuid, i32, String)> = sqlx::query_as(
+    // **Widened by W6 Task 4, which is the commit that starts writing the row
+    // it could not decode.** The tuple was `(Uuid, i32, String)`, which was
+    // exactly right while 0135's CHECK made a child with a parent and no loop
+    // index unrepresentable. 0138 made that child representable and
+    // `worker::replay` now creates it: the `CREATE_NEW_EXECUTION` replay, whose
+    // `parent_run_ix`, `loop_index` and `loop_value` are all NULL and whose
+    // four golden entries want `{"parent_run": null, "value": null}` in
+    // `spawned`. Decoding a NULL into `i32` is a `ColumnDecode` error, so the
+    // narrow tuple would have turned all four into `Broken` -- the verdict
+    // `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`
+    // asserts at 0 -- rather than into a mismatch.
+    //
+    // **`ORDER BY parent_run_ix, loop_index` is unchanged, and the NULLs are
+    // measured rather than sorted by accident.** Postgres puts NULLs LAST in an
+    // ascending order, so a replay would sort after every loop child of the
+    // same parent. Nothing can observe that: over the 710 descendants in
+    // `traces.json`, 40 carry a NULL `loopIndex`, **no parent carries more than
+    // one of them, and no parent mixes one with a loop child** -- and on
+    // egret's side the same holds by construction, because
+    // `worker::replay::spawn_due` refuses to replay a `Loop` sub-execution at
+    // all (the artifact cannot do it either; see that function's doc) and
+    // migration 0138's `NULLS NOT DISTINCT` unique index admits one replay per
+    // parent.
+    let children: Vec<(Uuid, Option<i32>, Option<String>)> = sqlx::query_as(
         "SELECT id, parent_run_ix, loop_value FROM workflow.executions \
           WHERE parent_execution_id = $1 ORDER BY parent_run_ix, loop_index",
     )
@@ -1040,8 +1053,8 @@ async fn read_trace_inner(
             Box::pin(read_trace_inner(
                 pool,
                 child,
-                Some(run_ix.max(0) as usize),
-                Some(loop_value),
+                run_ix.map(|ix| ix.max(0) as usize),
+                loop_value,
             ))
             .await?,
         );

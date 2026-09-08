@@ -4573,3 +4573,579 @@ async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPoo
         "the root, three iterations, and two `wait: false` children"
     );
 }
+
+// ---------------------------------------------------------------------------
+// W6 Task 4: the `CREATE_NEW_EXECUTION` replay, at the seams the oracle cannot
+// reach
+// ---------------------------------------------------------------------------
+
+/// A flow whose only task always fails, carrying a `CREATE_NEW_EXECUTION`
+/// retry.
+///
+/// `maxAttempts` is a parameter because the two things worth driving here are
+/// *the chain stops* and *the chain continues*, and one flow that did both
+/// would be two tests wearing one fixture.
+fn one_task_replaying(id: &str, interval: &str, max_attempts: u32) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    retry:\n      behavior: CREATE_NEW_EXECUTION\n\
+         \x20     type: constant\n      interval: {interval}\n      maxAttempts: {max_attempts}\n"
+    )
+}
+
+/// The same policy on a task inside a one-value `Loop`.
+///
+/// The body is what fails, so the retry is decided inside the **sub-execution**
+/// — which is the row `worker::replay::spawn_due` refuses, because the artifact
+/// refuses it too.
+fn loop_body_replaying(id: &str, interval: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n\
+         \x20   values: [\"v1\"]\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n\
+         \x20       message: hi\n        retry:\n          behavior: CREATE_NEW_EXECUTION\n\
+         \x20         type: constant\n          interval: {interval}\n          maxAttempts: 3\n"
+    )
+}
+
+/// A [`Registry`] that fails every attempt of every run.
+///
+/// `FailsOnce` cannot be reused: a `CREATE_NEW_EXECUTION` chain gives every
+/// execution a FRESH run whose `attempt` is 1, so "fail the first attempt"
+/// would fail every one of them anyway and the name would be a lie about what
+/// the fixture does.
+#[derive(Default)]
+struct AlwaysFails {
+    seen: Mutex<Vec<String>>,
+}
+
+impl AlwaysFails {
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for AlwaysFails {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen.lock().unwrap().push(task.task_id.clone());
+        Ok(Outcome::failed_with("this fixture always fails"))
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "a handler that returned its own failure must not be killed: {}",
+            task.task_id
+        );
+    }
+}
+
+/// The replay hanging off an execution, if there is one: a child linked by
+/// `parent_execution_id` with **no** loop index.
+async fn replay_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
+    )
+    .bind(execution)
+    .fetch_optional(pool)
+    .await
+    .expect("read the replay")
+}
+
+/// `(attempt_number, origin_offset_ms)` — Kestra's `ExecutionMetadata`,
+/// migration 0139.
+async fn metadata_of(pool: &sqlx::PgPool, execution: Uuid) -> (i32, i64) {
+    sqlx::query_as("SELECT attempt_number, origin_offset_ms FROM workflow.executions WHERE id = $1")
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the metadata")
+}
+
+/// **The waker's `RETRIED` arm: a due replay is woken, one still waiting is
+/// left alone, and once the replacement exists the waker stops naming it.**
+///
+/// This is the shipping worker's half of the replay and **the oracle cannot see
+/// any of it**: `oracle-exec/driver.rs` makes the delay elapse by rewinding
+/// `executions.created_at` and calling `worker::resume` itself, so a
+/// `due_retries` that named nobody would leave the ratchet at 131 and this
+/// suite is the only instrument that would say why.
+///
+/// **Nothing here rewinds anything** — the delay elapses in real time, exactly
+/// as `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+/// does for the other behaviour.
+///
+/// Three directions, because a predicate that named everything would pass the
+/// first alone:
+///
+/// 1. the execution whose delay has elapsed is named, **by id**;
+/// 2. the one whose `PT30S` interval has not is not;
+/// 3. and after the replay exists, the first is named no more — which is the
+///    term that keeps a finished chain from being relocked and re-settled on
+///    every tick for ever, since nothing ever clears a `not_before`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let due = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("due", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start due");
+    let waiting = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("waiting", "PT30S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start waiting");
+
+    assert_eq!(
+        drain_with(&pool, &reg).await,
+        2,
+        "both first attempts must have run: {:?}",
+        reg.seen()
+    );
+    for (label, execution, interval_ms) in [("due", due, 1_000), ("waiting", waiting, 30_000)] {
+        assert_eq!(
+            run_state(&pool, execution, "a").await.as_deref(),
+            Some("RETRIED"),
+            "a CREATE_NEW_EXECUTION retry marks the run RETRIED, not RETRYING \
+             -- the {label} run: {}",
+            stuck(&pool, execution, "a").await
+        );
+        let deadline = not_before_of(&pool, execution, "a")
+            .await
+            .expect("the replay's ExecutionDelay was scheduled");
+        assert!(
+            deadline >= interval_ms,
+            "the {label} run's deadline must be at least its own interval past \
+             the execution's origin: {}",
+            stuck(&pool, execution, "a").await
+        );
+        assert_eq!(
+            replay_of(&pool, execution).await,
+            None,
+            "no replay may exist before its delay has elapsed ({label})"
+        );
+    }
+
+    // The delay passes in REAL time.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![due],
+        "the waker must name the execution whose replay came due and no other. \
+         due={due} (interval PT1S, elapsed); waiting={waiting} (interval PT30S, \
+         not elapsed). It named {woken:?}"
+    );
+    let child = replay_of(&pool, due)
+        .await
+        .expect("the wake must have created the replacement execution");
+    assert_eq!(
+        replay_of(&pool, waiting).await,
+        None,
+        "and the execution the waker did not name must have no replay"
+    );
+    assert_eq!(
+        metadata_of(&pool, child).await.0,
+        2,
+        "the replacement is attempt 2 of the chain"
+    );
+
+    // Direction 3: the deadline is still there and still past, and the child
+    // now exists.
+    let again = wake(&pool, 8).await.expect("wake again");
+    assert!(
+        !again.contains(&due),
+        "the waker named {due} again after its replay existed. Nothing clears \
+         a `not_before`, so without the `NOT EXISTS` term this execution is \
+         relocked and re-settled on every tick for ever. It named {again:?}"
+    );
+}
+
+/// **A replay is refused inside a `Loop` sub-execution and taken at the top
+/// level** — the same flow shape either side of the one difference.
+///
+/// The refusal is the artifact's own behaviour, measured on the pinned digest
+/// (`egret.probe4/replay-in-loop2`): Kestra throws `Can't find taskrun with
+/// taskrunId <the LOOP run's>` out of `markWithTaskRunAs(…, markParents =
+/// true)`, whose walk leaves the sub-execution, and the iteration ends FAILED
+/// with no child. Creating one here would be over-acceptance the oracle cannot
+/// see — no corpus flow puts a `CREATE_NEW_EXECUTION` retry inside a `Loop`.
+///
+/// **Both directions, in one test, because a `spawn_due` that refused
+/// everything would pass either alone.** The control is the top-level
+/// execution: same policy, same interval, same handler, and it must get its
+/// replacement.
+///
+/// It also asserts the waker's own term: the loop sub-execution is one
+/// `due_retries` must never name, because no child will ever appear to stop it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let looped = start_execution(
+        &pool,
+        ws,
+        None,
+        &loop_body_replaying("looped", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the loop flow");
+    let top = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("top", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the top-level flow");
+    drain_with(&pool, &reg).await;
+
+    let iteration: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NOT NULL",
+    )
+    .bind(looped)
+    .fetch_one(&pool)
+    .await
+    .expect("the loop spawned its one iteration");
+    assert_eq!(
+        run_state(&pool, iteration, "a").await.as_deref(),
+        Some("RETRIED"),
+        "the body run inside the iteration is RETRIED, so the only thing \
+         between it and a replay is `spawn_due`'s refusal: {}",
+        stuck(&pool, iteration, "a").await
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    // The waker's term first: it must not name the iteration at all.
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert!(
+        !woken.contains(&iteration),
+        "the waker named the loop iteration {iteration}. Its replay is refused \
+         permanently, so no child will ever appear to stop it being named -- \
+         this is the arm that would relock and re-settle it for ever. Named: \
+         {woken:?}"
+    );
+
+    // And directly, which is the path the oracle's driver takes and the waker's
+    // predicate never sees.
+    egret_workflow::worker::resume(&pool, iteration)
+        .await
+        .expect("resume the iteration");
+    assert_eq!(
+        replay_of(&pool, iteration).await,
+        None,
+        "a `Loop` iteration must not be replayed even when `resume` is called \
+         on it directly: the artifact cannot do it and the child would be an \
+         orphan -- `spawn::on_execution_terminal` reports a terminal only \
+         through a `parent_run_ix`, which a replay does not have"
+    );
+
+    // The control: the same policy, not in a loop.
+    assert!(
+        woken.contains(&top),
+        "the top-level execution's replay is due and the waker must name it, \
+         or the refusal above is being made by something that refuses \
+         everything. Named: {woken:?}"
+    );
+    let child = replay_of(&pool, top)
+        .await
+        .expect("the top-level execution must get its replacement");
+    assert_eq!(
+        metadata_of(&pool, child).await.0,
+        2,
+        "and it is attempt 2 of that chain"
+    );
+}
+
+/// **The metadata accumulates up a chain, and `maxAttempts` is what ends it.**
+///
+/// `ExecutionMetadata.nextAttempt()` increments `attemptNumber` and leaves
+/// `originalCreatedDate` alone; migration 0139 stores the second as an offset,
+/// so "leaves it alone" is "grows by the elapsed time of the execution that
+/// spawned it". Both are asserted because they answer different questions —
+/// which attempt this is, and how much of the chain's clock has run — and the
+/// oracle can only see their consequence.
+///
+/// `maxAttempts: 2` rather than 3: the chain is then one replay long and the
+/// **second** execution is the one that must refuse, which is the shortest
+/// fixture that has both an end and a middle.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("chain", "PT1S", 2),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the chain");
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        metadata_of(&pool, root).await,
+        (1, 0),
+        "the original execution is attempt 1 and its own creation is the origin"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![root],
+        "the root's replay is due"
+    );
+    let second = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    let (attempt, offset) = metadata_of(&pool, second).await;
+    assert_eq!(attempt, 2, "the replacement is attempt 2");
+    assert!(
+        offset >= 1_000,
+        "the offset is how much of the ORIGINAL's clock had run when this one \
+         was created, and the retry was a whole PT1S away, so it cannot be \
+         less than 1000 ms. It is {offset}"
+    );
+
+    // The chain ends here: `attemptNumber >= maxAttempts` is 2 >= 2.
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        execution_history(&pool, second)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("FAILED")),
+        "attempt 2 of 2 exhausts the policy, so the second execution FAILS \
+         rather than being RETRIED"
+    );
+    assert_eq!(
+        not_before_of(&pool, second, "a").await,
+        None,
+        "and no third delay is scheduled: `next_retry_at` returned None, so \
+         `scan` emitted nothing at all for this run"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert!(
+        wake(&pool, 8).await.expect("wake").is_empty(),
+        "nothing is due anywhere: the chain is two executions long"
+    );
+    assert_eq!(
+        replay_of(&pool, second).await,
+        None,
+        "and the second execution has no replacement"
+    );
+}
+
+/// **A replay is never started from a nested `settle`, and the very next
+/// `resume` starts it** — the third of `worker::replay`'s refusals, with the
+/// shape that reaches it.
+///
+/// # Why this bound exists, and why it is not a number
+///
+/// `subflow::spawn_one` drives a child's first settle **inside its caller's
+/// transaction**, so a chain of executions is a chain of stack frames — the
+/// recursion `subflow::MAX_SPAWN_CHAIN` was measured to abort the process
+/// under. A replay reached from inside such a settle would extend that
+/// recursion with a chain nothing else bounds: `interval: PT0S` makes the
+/// deadline due at the instant it is written, and a flow that reaches `FAILED`
+/// **without a worker** — an unresolvable `Subflow` target is the reachable
+/// example, measured on the artifact — closes the loop entirely inside one
+/// transaction.
+///
+/// The answer is structural rather than numeric, and it is the artifact's own:
+/// its replay comes off the **execution-delay loop**, a different loop from the
+/// executor cycle (`DefaultExecutor.java:508`), one execution per delivery.
+/// egret's equivalent of "a different loop" is `claim::Stack::Fresh` — a settle
+/// with nothing of this crate's below it — so `spawn_due` refuses at any depth
+/// above 0 and leaves the deadline where it is.
+///
+/// # Both directions, from one execution
+///
+/// The refusal and the taking are asserted on the **same** execution `mid`,
+/// seconds apart, with nothing between them but who called `settle`: first
+/// nested inside its parent's spawn, then from `worker::resume` at the bottom
+/// of a fresh stack. A test that only drove the second could not tell this
+/// bound from no bound at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_is_not_started_from_a_nested_settle_and_the_next_resume_starts_it(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // `mid` fails inside its own first settle -- its `Subflow` target does not
+    // resolve, which `a_subflow_target_that_does_not_resolve_fails_the_run_and_
+    // creates_no_child` pins -- and its flow-level retry is due at once.
+    let mid = "id: mid\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+               type: constant\n  interval: PT0S\n  maxAttempts: 3\ntasks:\n  - id: sub\n    \
+               type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+               flowId: nobody-holds-this\n";
+    file_flow(&db, ws, user, mid).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "mid", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the parent");
+
+    let child = children_by_trigger(&pool, parent).await;
+    assert_eq!(
+        child.len(),
+        1,
+        "the parent's `Subflow` resolved and started `mid`: {child:?}"
+    );
+    let mid_id = child[0].0;
+    assert_eq!(
+        execution_history(&pool, mid_id)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("RETRIED")),
+        "`mid` reached FAILED inside its parent's transaction and its \
+         `CREATE_NEW_EXECUTION` retry took it to RETRIED there -- if it did \
+         not, this test is no longer driving the nested case at all"
+    );
+    let deadline = not_before_of(&pool, mid_id, "sub")
+        .await
+        .expect("the replay's delay was scheduled");
+    assert_eq!(
+        deadline, 0,
+        "`interval: PT0S` at the instant of the failure: the deadline is due \
+         the moment it is written, so nothing but the depth refuses this spawn"
+    );
+
+    // Direction 1: refused, inside the parent's settle.
+    assert_eq!(
+        replay_of(&pool, mid_id).await,
+        None,
+        "a replay was started from a NESTED settle. `spawn_due` runs at the end \
+         of every settle and this one is inside `subflow::spawn_one`'s -- the \
+         recursion `subflow::MAX_SPAWN_CHAIN` exists to bound"
+    );
+
+    // Direction 2: the same execution, the same due deadline, from a fresh
+    // stack.
+    egret_workflow::worker::resume(&pool, mid_id)
+        .await
+        .expect("resume mid");
+    let replay = replay_of(&pool, mid_id)
+        .await
+        .expect("the resume must start the replacement: nothing else changed");
+    assert_eq!(
+        metadata_of(&pool, replay).await.0,
+        2,
+        "and it is attempt 2 of the chain"
+    );
+    // One per resume, not a chain built in this transaction: the replay's own
+    // settle is nested inside this one and refuses in turn.
+    assert_eq!(
+        replay_of(&pool, replay).await,
+        None,
+        "the replacement's OWN replay must wait for its own fresh stack, or the \
+         bound is not bounding: with `PT0S` and `maxAttempts: 3` an unbounded \
+         version builds the whole chain inside one transaction"
+    );
+}
+
+/// **A replay inherits the `correlationId` of the execution it replaces**, and
+/// its own `{{ execution.id }}` is still its own.
+///
+/// `render::Surface::load` walks `parent_execution_id` to the top of the chain
+/// for `root`, which feeds `labels.system.correlationId`, and it does **not**
+/// stop that walk where the `inheriting` flag stops the outputs walk. W6 Task 3
+/// left that difference open for Task 4 to measure rather than choose, and the
+/// measurement is on the pinned artifact — `egret.probe4/replay-correlation`, a
+/// flow-level `CREATE_NEW_EXECUTION` retry over a `Log` of
+/// `{{ labels.system.correlationId }}`:
+///
+/// ```text
+/// root   cid=3nY5p1H9MmhpWnq4hZsVOD eid=3nY5p1H9MmhpWnq4hZsVOD
+/// replay cid=3nY5p1H9MmhpWnq4hZsVOD eid=5cNdx41IqqhyGSExZsuGLu
+/// ```
+///
+/// `ExecutionService.replay` copies the parent's labels, and
+/// `Execution.java:213` fills a `correlationId` in only when one is ABSENT — so
+/// the label survives the whole chain. **No golden entry pairs a replay with a
+/// `correlationId` read**, so the ratchet is silent about this and the probe
+/// plus this test are the only instruments.
+///
+/// The condition of an `If` is the observation point because `advance()` stores
+/// the render in `task_runs.rendered`, which is a column a test can read
+/// without a handler in the middle.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let source = "id: cid\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+                  type: constant\n  interval: PT1S\n  maxAttempts: 2\ntasks:\n  - id: cond\n    \
+                  type: io.kestra.plugin.core.flow.If\n    \
+                  condition: \"{{ labels.system.correlationId }}\"\n    then:\n      - id: a\n        \
+                  type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    drain_with(&pool, &reg).await;
+
+    async fn rendered(pool: &sqlx::PgPool, execution: Uuid) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT rendered FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'cond'",
+        )
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the rendered condition")
+    }
+    assert_eq!(
+        rendered(&pool, root).await,
+        Some(root.to_string()),
+        "a top-level execution IS its own correlation root"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![root]);
+    let replay = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    drain_with(&pool, &reg).await;
+
+    assert_ne!(replay, root, "the replay is a different execution");
+    assert_eq!(
+        rendered(&pool, replay).await,
+        Some(root.to_string()),
+        "the replay's `labels.system.correlationId` must be the ORIGINAL \
+         execution's id -- `Surface::load`'s `root` walks the whole \
+         `parent_execution_id` chain, deliberately, and a sticky version of \
+         that walk (the one `inheriting` uses for outputs) would answer {replay} \
+         here and diverge from the artifact"
+    );
+}

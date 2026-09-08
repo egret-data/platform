@@ -27,12 +27,76 @@ pub type RunIx = usize;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Tick(pub i64);
 
+/// Kestra's `ExecutionMetadata` — the two facts about an execution that are
+/// **not** facts about its runs, and that a `CREATE_NEW_EXECUTION` retry is the
+/// only reader of.
+///
+/// `core/src/main/java/io/kestra/core/models/executions/ExecutionMetadata.java`
+/// carries exactly `attemptNumber` (defaulting to 1) and `originalCreatedDate`,
+/// and `ExecutionMetadata.nextAttempt()` is the whole of how a replay derives
+/// the child's: `attemptNumber + 1`, the original date untouched.
+///
+/// # Why this is on [`ExecutionState`] and not on the caller
+///
+/// **It is what makes the replay chain terminate**, and until W6 Task 4 nothing
+/// in this module could see it. [`retry::next_retry_at`](super::retry) reads
+/// `(1, Tick(0))` for `CREATE_NEW_EXECUTION` — "this execution IS the first
+/// attempt, and `Tick`'s origin is its own creation" — which is true of the
+/// first execution and false of every replay, so `maxAttempts` never bites and
+/// `maxDuration` never accumulates. The caller cannot repair that after the
+/// fact: the golden's third execution ends `["CREATED","RUNNING","FAILED"]`
+/// with **no** `RETRIED`, and whether `RETRIED` is emitted is [`advance`]'s
+/// output, not the caller's. So the input widens; `advance` stays pure over
+/// `(plan, state, now)`.
+///
+/// [`advance`]: super::advance
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutionMeta {
+    /// `execution.getMetadata().getAttemptNumber()` — **1** for an execution
+    /// nobody has replayed, `N` for the `N-1`th replay of one.
+    ///
+    /// It counts EXECUTIONS of a `CREATE_NEW_EXECUTION` chain. The other
+    /// attempt count in this module, [`TaskRun::attempts`], counts a
+    /// `RETRY_FAILED_TASK`'s attempts inside ONE execution. They are the two
+    /// clocks `retry`'s header table separates and they are never the same
+    /// number: all four `retry-new-execution-*` entries end each execution with
+    /// exactly one attempt on the only run they have.
+    pub attempt: u32,
+    /// `execution.getMetadata().getOriginalCreatedDate()`, in this execution's
+    /// own [`Tick`] space — so **`Tick(0)` for an original and a NEGATIVE tick
+    /// for a replay**, the instant its chain began measured backwards from its
+    /// own creation.
+    ///
+    /// A `Tick` rather than a duration because that is what it is compared
+    /// against: `nextDate.isAfter(originalCreatedDate.plus(maxDuration))` is
+    /// `next.0 > origin.0 + maxDuration` here, and both sides have to be in one
+    /// clock. `Tick`'s doc says the origin is *the execution's creation*, which
+    /// stays exactly true — this is where the ORIGINAL execution's creation
+    /// falls on that scale.
+    pub origin: Tick,
+}
+
+impl Default for ExecutionMeta {
+    /// An execution nobody replayed: attempt 1, and its own creation is the
+    /// origin. Kestra's `@Builder.Default attemptNumber = 1` plus an
+    /// `originalCreatedDate` that is the execution's own `createdDate`.
+    fn default() -> Self {
+        Self {
+            attempt: 1,
+            origin: Tick(0),
+        }
+    }
+}
+
 /// The snapshot [`advance`](super::advance) reads. Owned by the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionState {
     /// CREATION order — the oracle compares this order.
     pub runs: Vec<TaskRun>,
     pub history: Vec<RunState>,
+    /// Kestra's `Execution.metadata`. Defaulted for every execution that is not
+    /// a `CREATE_NEW_EXECUTION` replay, which is all of them until one exists.
+    pub metadata: ExecutionMeta,
 }
 
 impl ExecutionState {
@@ -41,6 +105,7 @@ impl ExecutionState {
         Self {
             runs: Vec::new(),
             history: vec![RunState::Created],
+            metadata: ExecutionMeta::default(),
         }
     }
 }

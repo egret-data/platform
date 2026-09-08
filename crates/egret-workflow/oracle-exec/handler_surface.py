@@ -711,9 +711,10 @@ def check_inputs(flows, kinds, golden, baseline):
     runs = [e for e in golden if e["verdict"] == "runs"]
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
-    # 143 through W5; 131 since W6 Task 3 banked the 12 `Subflow` entries.
-    if len(baseline) != 131:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 131; the split "
+    # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
+    # since W6 Task 4 banked the four `retry-new-execution-*` replays.
+    if len(baseline) != 127:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 127; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1347,8 +1348,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 131",
-         "not 131",
+    case("baseline.txt is no longer 127",
+         "not 127",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

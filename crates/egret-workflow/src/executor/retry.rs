@@ -222,10 +222,23 @@ pub(super) fn next_retry_at(
         // `this.attemptNumber()`, and `attempts.getFirst().getState().minDate()`.
         RetryBehavior::RetryFailedTask => (attempts, task_run.started_at()?),
         // `execution.getMetadata().getAttemptNumber()`, and
-        // `getOriginalCreatedDate()`. This execution IS the first attempt, so
-        // its metadata attempt number is 1 -- and `Tick`'s origin is the
-        // execution's creation, so the origin is `Tick(0)`.
-        RetryBehavior::CreateNewExecution => (1, Tick(0)),
+        // `getOriginalCreatedDate()`.
+        //
+        // **This read was `(1, Tick(0))` until W6 Task 4, and both halves were
+        // right about the FIRST execution and wrong about every replay.** The
+        // comment said "this execution IS the first attempt, so its metadata
+        // attempt number is 1 -- and `Tick`'s origin is the execution's
+        // creation, so the origin is `Tick(0)`", which held for exactly as
+        // long as no replay existed. A replay is attempt 2, 3, ... of the same
+        // chain, and the instant its `maxDuration` is measured from is the
+        // ORIGINAL execution's creation, which on its own clock is a negative
+        // `Tick`. With the constants in place `1 >= max_attempts` is never
+        // true and `next.0 > 0 + max_duration` is never true either, so a
+        // chain started here would never end: `retry-new-execution-*` would
+        // spawn replays until the driver's step bound, not the three
+        // executions the golden holds. [`ExecutionMeta`] is where the caller
+        // puts the two facts.
+        RetryBehavior::CreateNewExecution => (state.metadata.attempt, state.metadata.origin),
     };
 
     if policy.max_attempts.is_some_and(|max| count >= max) {
@@ -353,11 +366,28 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
             // `true` is `markParents`, so every ancestor run takes `RETRIED`
             // too, and so does the execution. `RETRIED` is terminal
             // (`State.java`'s `isTerminated()` lists it), so this execution
-            // ends here and Kestra starts a *replay*: a whole new execution,
-            // which egret's `Command` set has no way to ask for and which
-            // `ExecutionState` has no field for. That hole is the same one
-            // Task 6's `SpawnExecution` left, and it is what keeps all four
-            // `retry-new-execution-*` entries baselined.
+            // ends here and Kestra starts a *replay*: a whole new execution.
+            //
+            // # The `ScheduleRetry` is the artifact's `ExecutionDelay`, and it
+            // used to be missing
+            //
+            // Both arms of `ExecutorService.java:600-609` build the SAME
+            // `ExecutionDelay`, `.taskRunId(taskRun.getId()).date(nextRetryDate)`,
+            // and differ only in its `delayType`: `RESTART_FAILED_TASK` for one
+            // and **`RESTART_FAILED_FLOW`** for this one, which
+            // `DefaultExecutor`'s execution-delay loop turns into
+            // `executionService.replay(...)`. So the delay hangs on THIS run in
+            // the artifact too, and this arm emitting none was a divergence
+            // rather than a simplification -- one that left the replay with no
+            // instant to happen at, so `worker::replay` would have started the
+            // next execution the moment this one failed and `maxDuration`
+            // would have measured nothing.
+            //
+            // Nothing reopens the run it names: `reopen_due` takes only
+            // `Retrying` runs and this one is `Retried`, which is terminal. It
+            // is read by `worker::claim::due_retries` and
+            // `worker::replay::spawn_due`, exactly as the artifact reads it
+            // from a different loop.
             RetryBehavior::CreateNewExecution => {
                 let mut cmds = Vec::new();
                 let mut ix = Some(run);
@@ -370,6 +400,10 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
                 }
                 cmds.push(Command::SetExecutionState {
                     state: RunState::Retried,
+                });
+                cmds.push(Command::ScheduleRetry {
+                    run,
+                    not_before: at,
                 });
                 cmds
             }

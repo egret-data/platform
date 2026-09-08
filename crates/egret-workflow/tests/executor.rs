@@ -1333,6 +1333,149 @@ async fn executor_matches_golden() {
     assert!(failures.is_empty(), "{failures}");
 }
 
+// --------------------------------------------------------------------------
+// W6 Task 4: one test per entry the replay banks
+// --------------------------------------------------------------------------
+
+/// The chain a `CREATE_NEW_EXECUTION` retry produces, asserted **shape first**
+/// so a failure says which link broke.
+///
+/// `executor_matches_golden` already compares these four entries whole; it
+/// reports `expected … / actual …` over an entire nested trace, which for a
+/// three-execution chain is a paragraph a reader has to diff by eye. These
+/// assert the three facts the chain turns on, in order — the number of links,
+/// the key each link carries, and where the chain STOPS — and only then fall
+/// back to the whole-trace equality that the ratchet itself asserts.
+///
+/// **The last of the three is the one that needed W6 Task 4's migration.** A
+/// chain that never stops is what egret would produce with the metadata
+/// missing: `next_retry_at` read `(1, Tick(0))` for this behaviour, so
+/// `maxAttempts` compared 1 against 3 for ever and `maxDuration` measured from
+/// each execution's own creation, which never accumulates.
+async fn a_replay_chain_of_three(id: &str, policy: &str) {
+    let side = egret_side().await;
+    assert!(
+        !baseline().contains(id),
+        "{id} is still in baseline.txt; this test asserts what it banks"
+    );
+    let entry = golden()
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("{id} is in the golden"));
+    let expected = Trace::from(&entry);
+    let Outcome::Trace(actual) = evaluate(side, &entry) else {
+        panic!("{id}: the driver did not produce a trace");
+    };
+    let mut actual = actual.clone();
+    actual.restrict_order_to(&expected);
+
+    // Link 1: this execution ends RETRIED and carries exactly one child.
+    let mut node = &actual;
+    let mut depth = 0usize;
+    while let Some(child) = node.spawned.first() {
+        assert_eq!(
+            node.execution.last().map(String::as_str),
+            Some("RETRIED"),
+            "{id} ({policy}): an execution that starts a replay must end              RETRIED, and this one at depth {depth} did not: {:?}",
+            node.execution
+        );
+        assert_eq!(
+            node.spawned.len(),
+            1,
+            "{id} ({policy}): a `CREATE_NEW_EXECUTION` retry chains one \
+             replacement at a time -- the artifact never fans one out (0 of \
+             the 40 NULL-`loopIndex` descendants in `traces.json` shares a \
+             parent with another). Depth {depth} has {}",
+            node.spawned.len()
+        );
+        assert_eq!(
+            (child.parent_run, child.value.as_deref()),
+            (None, None),
+            "{id} ({policy}): a replay carries neither a parent run nor a loop \
+             value -- that combination is what migration 0138 made \
+             representable and what `read_trace_inner`'s decode had to widen \
+             for. Depth {depth}"
+        );
+        node = child;
+        depth += 1;
+    }
+
+    // Link 2: where it stops.
+    assert_eq!(
+        depth, 2,
+        "{id} ({policy}): the chain is three executions -- the original and \
+         two replays. {depth} replay(s) is a policy that stopped at the wrong \
+         attempt, and an unbounded one is the driver's step bound rather than \
+         this assertion"
+    );
+    assert_eq!(
+        node.execution.last().map(String::as_str),
+        Some("FAILED"),
+        "{id} ({policy}): the LAST execution of the chain exhausts the policy, \
+         so it ends FAILED with no RETRIED and no child. This is the assertion \
+         the metadata exists for: {:?}",
+        node.execution
+    );
+
+    // And the whole trace, which is what the ratchet compares.
+    assert_eq!(
+        actual,
+        expected,
+        "{id} ({policy}): the chain shape is right and something else \
+         differs.\n  expected {}\n  actual   {}",
+        expected.display(),
+        actual.display()
+    );
+}
+
+/// `maxAttempts: 3` on the FLOW — `ExecutionService.nextRetryDate(retry,
+/// execution)`, which reads `execution.getMetadata().getAttemptNumber()`.
+#[tokio::test]
+async fn valids_retry_new_execution_flow_attempts() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-flow-attempts",
+        "flow-level, maxAttempts: 3, interval: PT1S",
+    )
+    .await;
+}
+
+/// `maxDuration: PT6S` on the FLOW, with `interval: PT2S` — the other guard in
+/// the same method, measured from `getOriginalCreatedDate()`.
+///
+/// **This is the entry that says the offset accumulates.** Three executions at
+/// two-second intervals put the fourth retry's date past the original creation
+/// plus six seconds; an origin that reset each time would put it at two.
+#[tokio::test]
+async fn valids_retry_new_execution_flow_duration() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-flow-duration",
+        "flow-level, maxDuration: PT6S, interval: PT2S",
+    )
+    .await;
+}
+
+/// `maxAttempts: 3` on the TASK — a different Kestra method
+/// (`TaskRun.nextRetryDate(retry, execution)`, `TaskRun.java:310`) reading the
+/// same two metadata fields, which is why the corpus carries both.
+#[tokio::test]
+async fn valids_retry_new_execution_task_attempts() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-task-attempts",
+        "task-level, maxAttempts: 3, interval: PT1S",
+    )
+    .await;
+}
+
+/// `maxDuration: PT6S` on the TASK, with `interval: PT2S`.
+#[tokio::test]
+async fn valids_retry_new_execution_task_duration() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-task-duration",
+        "task-level, maxDuration: PT6S, interval: PT2S",
+    )
+    .await;
+}
+
 /// The whole population of ordered pairs the golden declines to assert — 13,
 /// across three flows.
 #[test]
@@ -1442,7 +1585,7 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
     );
 }
 
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 35;
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
 // +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
@@ -1736,8 +1879,36 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
 fn is_stalled(execution: &[String]) -> bool {
     !execution
         .last()
-        .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()))
+        .is_some_and(|s| TERMINAL.contains(&s.as_str()))
 }
+
+/// The states this classifier reads as "the execution ended".
+///
+/// **`RETRIED` was missing and its absence was a defect, not a conservatism** —
+/// W6 Task 4. `RunState::Retried`'s own doc says *"terminal"*, Kestra's
+/// `State.isTerminated()` lists it, `worker::claim::settle` dispatches on
+/// `is_terminal()` and therefore reports a `RETRIED` execution to its parent,
+/// and `worker::spawn::terminated_count` counts one — so every other reader of
+/// the word in this repository already agreed, and this one list did not. It
+/// put the four `retry-new-execution-*` root executions into
+/// [`ENTRIES_LEFT_UNFINISHED`], whose assertion says every member is *a task
+/// type this worker has no handler for*: those four declare only
+/// `io.kestra.plugin.core.execution.Fail`, which **has** a handler, and they
+/// ran it.
+///
+/// It is spelled as a list beside the classifier rather than inline so that
+/// this doc has somewhere to live and so the positive control
+/// ([`a_stalled_execution_that_also_matched_would_be_counted`]) iterates the
+/// same list the classifier reads — a control that hard-coded its own copy
+/// could pass while the classifier used a different one.
+///
+/// `SKIPPED`, `CANCELLED` and `RESUBMITTED` are in Kestra's list and not here.
+/// [`the_terminal_list_covers_every_execution_terminal_the_golden_holds`]
+/// derives why, and it corrected the first answer this doc gave: `SKIPPED` and
+/// `RESUBMITTED` end no golden EXECUTION history, and **`CANCELLED` ends
+/// three** — but this classifier reads EGRET's traces and `RunState` has no
+/// `Cancelled`, so all three would be arms nothing could take.
+const TERMINAL: &[&str] = &["SUCCESS", "FAILED", "KILLED", "WARNING", "RETRIED"];
 
 /// **The positive control for `matched_while_stalled`.**
 ///
@@ -1749,12 +1920,30 @@ fn is_stalled(execution: &[String]) -> bool {
 #[test]
 fn a_stalled_execution_that_also_matched_would_be_counted() {
     let ended = |s: &str| vec!["CREATED".to_string(), "RUNNING".to_string(), s.to_string()];
-    for terminal in ["SUCCESS", "FAILED", "KILLED", "WARNING"] {
+    for terminal in TERMINAL {
         assert!(
             !is_stalled(&ended(terminal)),
             "{terminal} is a terminal state and must not count as stalled"
         );
     }
+    assert!(
+        TERMINAL.contains(&"RETRIED"),
+        "the arm W6 Task 4 added, asserted by name: a `CREATE_NEW_EXECUTION` \
+         retry ends its execution RETRIED and starts a replacement, which is \
+         the opposite of stalling. Iterating TERMINAL above cannot say this on \
+         its own -- an empty list would pass that loop"
+    );
+    assert!(
+        is_stalled(&[
+            "CREATED".to_string(),
+            "RUNNING".to_string(),
+            "RETRYING".to_string()
+        ]),
+        "RETRYING is the OTHER retry behaviour and is NOT terminal: the run is \
+         waiting for its next attempt inside this execution. This is the \
+         two-sided half of the RETRIED arm -- a classifier that took any state \
+         starting `RETR` would pass every other assertion here"
+    );
     assert!(
         is_stalled(&["CREATED".to_string(), "RUNNING".to_string()]),
         "an execution still RUNNING is stalled -- this is the arm that would be \
@@ -1768,6 +1957,83 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
     );
 }
 
+/// **What [`TERMINAL`] leaves out, derived from the golden rather than from
+/// Kestra's enum — and the derivation corrected the first answer.**
+///
+/// Kestra's `State.isTerminated()` also lists `SKIPPED`, `CANCELLED` and
+/// `RESUBMITTED`. This test was written asserting that none of the three ever
+/// ends an EXECUTION history in this golden, and **`CANCELLED` does**: three
+/// entries end in it (`valids/exit-cancelled`,
+/// `valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`),
+/// which is exactly the kind of remembered fact this programme keeps getting
+/// wrong and the reason the population is derived here instead.
+///
+/// **It is still not in [`TERMINAL`], and now for a measured reason rather than
+/// a mistaken one.** [`is_stalled`] classifies EGRET's traces, never the
+/// golden's, and `RunState` has no `Cancelled` — so no execution this driver
+/// produces can end there, and an arm for it would be one nothing could take.
+/// That is asserted below rather than asserted about: if `RunState` ever gains
+/// the variant, this test fails and `TERMINAL` has to grow with it.
+#[test]
+fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
+    fn walk(node: &Trace, out: &mut BTreeSet<String>) {
+        if let Some(last) = node.execution.last() {
+            out.insert(last.clone());
+        }
+        for sub in &node.spawned {
+            walk(sub, out);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        walk(&Trace::from(entry), &mut seen);
+    }
+    println!("execution terminals in the golden: {seen:?}");
+    assert_eq!(
+        seen,
+        BTreeSet::from([
+            "CANCELLED".to_string(),
+            "FAILED".to_string(),
+            "KILLED".to_string(),
+            "RETRIED".to_string(),
+            "SUCCESS".to_string(),
+            "WARNING".to_string(),
+        ]),
+        "every state a golden EXECUTION history ends in. `RETRIED` is in it, \
+         which is what makes `is_stalled`'s omission of it a defect rather \
+         than an unused arm"
+    );
+    // `CANCELLED` is the one this classifier does not carry, and the reason is
+    // a property of the OTHER side of the comparison.
+    assert!(
+        !RunState::ALL.iter().any(|s| s.wire() == "CANCELLED"),
+        "`RunState` gained a CANCELLED: egret can now end an execution there, \
+         so `TERMINAL` has to carry it or `is_stalled` will call three W8 \
+         entries stalled. Until then the arm is unreachable and is left out"
+    );
+    for state in seen.iter().filter(|s| s.as_str() != "CANCELLED") {
+        assert!(
+            TERMINAL.contains(&state.as_str()),
+            "{state} ends a golden execution, egret can produce it, and \
+             `is_stalled` would call it stalled"
+        );
+    }
+    for state in TERMINAL {
+        assert!(
+            seen.contains(*state),
+            "{state} is in TERMINAL and ends no golden execution: an arm \
+             nothing can take"
+        );
+    }
+    for unused in ["SKIPPED", "RESUBMITTED"] {
+        assert!(
+            !seen.contains(unused),
+            "{unused} is terminal in Kestra's enum; if the golden now ends an \
+             execution in it, TERMINAL has to grow and this list has to say so"
+        );
+    }
+}
+
 /// The counts above, named so the coverage statement and this file cannot
 /// disagree about them.
 // **All five fell when W6 Task 3 banked 12 entries**, and they fell together
@@ -1776,11 +2042,19 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
 // run terminals, 2 sub-executions (`valids/loop-with-subflow`'s), 14 executions
 // (12 entries + those 2), 48 run-history tokens and 42 execution-history tokens
 // between them, and every one of those is falsifiable now instead of held.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 445;
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 51;
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 177;
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1759;
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 709;
+//
+// **All five fell again at W6 Task 4, by the same arithmetic over 4 entries**:
+// 12 run terminals, 8 sub-executions (two replays each), 12 executions (4
+// entries + those 8), 56 run-history tokens and 44 execution-history tokens.
+// The shape of a `retry-new-execution-*` entry is what makes those numbers
+// bigger per entry than Task 3's: three executions of one flow, each with one
+// run, and the run histories are five states long
+// (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 433;
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 165;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1703;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 665;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2463,12 +2737,35 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     assert_eq!(
         unfinished.len(),
         ENTRIES_LEFT_UNFINISHED,
-        "how many executions the driver leaves mid-flight. Every one is a task \
-         type this worker has no handler for -- `Registry::run` refuses it, the \
-         tick aborts for that run, and the execution stalls exactly as the \
-         shipping worker would. Named and counted so the population cannot grow \
-         in silence: {unfinished:?}"
+        "how many executions the driver leaves mid-flight. Every one holds a \
+         task type this worker has no handler for -- `Registry::run` refuses \
+         it, the tick aborts for that run, and the execution stalls exactly as \
+         the shipping worker would. **That sentence read `Every one IS a task \
+         type ...` and was false for four of them until W6 Task 4**: the \
+         `retry-new-execution-*` entries declare only \
+         `io.kestra.plugin.core.execution.Fail`, which has a handler and ran, \
+         and they were counted because `is_stalled` did not list `RETRIED` -- a \
+         classifier artefact rather than a stall. See [`TERMINAL`]. Named and \
+         counted so the population cannot grow in silence: {unfinished:?}"
     );
+    // **The correction, asserted rather than described.** A message that
+    // *says* the four are gone is prose; this is the check. It also names the
+    // second half of the claim -- that every remaining member really does hold
+    // an unhandled type -- for the one family it was measurably wrong about.
+    for id in [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-flow-duration",
+        "valids/retry-new-execution-task-attempts",
+        "valids/retry-new-execution-task-duration",
+    ] {
+        assert!(
+            !unfinished.contains(&id.to_string()),
+            "{id} declares only `core.execution.Fail`, which HAS a handler. It \
+             ends `RETRIED`, which is terminal, and it now spawns the replay \
+             that follows it -- it cannot be an execution left mid-flight. \
+             Present in: {unfinished:?}"
+        );
+    }
 }
 
 /// The numbers above, as named constants so this report and the task's own
@@ -2480,10 +2777,24 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 const MISMATCH_ON_EXECUTION: usize = 90;
 const MISMATCH_ON_RUNS: usize = 112;
 const MISMATCH_ON_ORDER: usize = 72;
-const MISMATCH_ON_SPAWNED: usize = 19;
-const MISMATCHING_RUNS_ENTRIES: usize = 126;
-/// **84 through W5; 63 since W6 Task 3, and the 21 that left are the whole of
-/// `Subflow`.**
+const MISMATCH_ON_SPAWNED: usize = 15;
+const MISMATCHING_RUNS_ENTRIES: usize = 122;
+/// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
+/// classifier.**
+///
+/// # The four W6 Task 4 removed were never stalled, and the count said they were
+///
+/// This constant's assertion says every member is *a task type this worker has
+/// no handler for*. The four `retry-new-execution-*` entries declare only
+/// `io.kestra.plugin.core.execution.Fail`, which **has** a handler and ran to a
+/// `FAILED` outcome; what put them here was [`is_stalled`] omitting `RETRIED`
+/// from its terminal list — see [`TERMINAL`]. So this is a **classifier
+/// artefact leaving the population**, not four executions that started
+/// finishing: the count would have fallen to 59 with `RETRIED` added and no
+/// replay implemented at all, and the entries would still not have matched.
+/// The bank is a separate measurement in the ratchet.
+///
+/// # 21 left at Task 3 and they were the whole of `Subflow`
 ///
 /// Through W5 a `Subflow` was planned an opaque `TaskKind::Runnable`, which set
 /// `task_runs.type_id`, which made it claimable -- and `claim::leaf` then
@@ -2498,7 +2809,7 @@ const MISMATCHING_RUNS_ENTRIES: usize = 126;
 /// held by `state::apply`'s attempt rule (`valids/retry-subflow`,
 /// `valids/subflow-parent-retry`) and two by the missing `WARNING`
 /// (`valids/task-allow-{failure,warning}-executable-flow`).
-const ENTRIES_LEFT_UNFINISHED: usize = 63;
+const ENTRIES_LEFT_UNFINISHED: usize = 59;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -2684,7 +2995,7 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 18;
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 22;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
 /// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
@@ -2712,19 +3023,37 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     // entry hung on the one construct this task shipped.
     "valids/loop-with-subflow",
     "valids/replay-loop",
+    // W6 Task 4, and they are the only four names here that are NOT a `Loop`.
+    // Their sub-execution is the replacement a `CREATE_NEW_EXECUTION` retry
+    // starts -- a third kind of child, linked by `parent_execution_id` with no
+    // loop index at all (migrations 0138 and 0139) -- so each carries a chain
+    // of two: `RETRIED` -> `RETRIED` -> `FAILED`.
+    "valids/retry-new-execution-flow-attempts",
+    "valids/retry-new-execution-flow-duration",
+    "valids/retry-new-execution-task-attempts",
+    "valids/retry-new-execution-task-duration",
     "valids/switch-in-concurrent-loop",
 ];
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
 /// successor, and it is a different sentence: egret fills the field now, so
-/// these **eight** differ **inside** it rather than by leaving it empty.
+/// these **four** differ **inside** it rather than by leaving it empty.
 ///
 /// *(The word was "six" and the constant under it was 8, on adjacent lines,
 /// since the whole-branch review's fix round moved `valids/finally-loop` and
 /// `valids/finally-loop-parallel` into this bucket. W4 Task 6's fourth sweep
 /// pass found it. The value was compared on every run and was right; the word
-/// beside it was not compared by anything.)*
-const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 8;
+/// beside it was not compared by anything. W6 Task 4 wrote the word and the
+/// value in one edit, from the same measurement.)*
+///
+/// **8 until W6 Task 4, and the four that left are the four it banked.** They
+/// were in this bucket for the strongest possible version of "differs inside
+/// `spawned`": everything the parent execution holds agreed and the child was
+/// **absent**, because nothing created a replay. The remaining four are
+/// `invalids/loop-switch-failed`, `valids/finally-loop`,
+/// `valids/finally-loop-parallel` and `valids/retry-flowable-parallel` -- all
+/// `Loop`s, none a replay -- and the test prints the list on every run.
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 4;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -3091,8 +3420,12 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     ),
 ];
 
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 28;
-const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 13;
+// W6 Task 4: +4 identical / -4 differing, and they are the four
+// `retry-new-execution-*` entries. Their key is `(None, None)` -- a replay
+// carries neither a parent run nor a loop index -- and egret produced an EMPTY
+// key list for each until `worker::replay` created the execution.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 32;
+const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 9;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
 /// measurement that separates it from `Parallel::concurrent`'s default of 0.
@@ -4009,7 +4342,21 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `ExecutionUpdatableTask`, `finally:`, `Subflow` and `WorkingDirectory`
         // are the five, and every one of them is unclaimed or opaque today.
         ("sla:", 5, &["\nsla:"]),
-        ("CREATE_NEW_EXECUTION retry", 4, &["CREATE_NEW_EXECUTION"]),
+        // **The `CREATE_NEW_EXECUTION retry` row was here with 4 and is
+        // removed by W6 Task 4**, under the same rule that removed
+        // `disabled: true` and `runIf:`: the construct is implemented
+        // (`worker::replay`), all four entries are banked, and the needle
+        // `"CREATE_NEW_EXECUTION"` now matches **no baselined entry at all**.
+        //
+        // That last clause is measured rather than assumed, and the assumption
+        // it replaces was written down first: a draft of this comment kept the
+        // row at 0 "because `valids/retry-flowable-parallel` is the fifth flow
+        // declaring `CREATE_NEW_EXECUTION` and deleting the row would orphan
+        // it". **It declares no such thing** -- its `retry:` is a bare
+        // `type: constant` on a `Loop`, so its behaviour is the default
+        // `RETRY_FAILED_TASK`, and it is held by the `Loop` row. Only four
+        // corpus flows in 345 write the word, and they are the four this task
+        // banked.
         (
             "WorkingDirectory",
             4,
@@ -4516,10 +4863,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (4, 127, 131),
+        (4, 123, 127),
         "the baselined population that declares a `timeout:`, and the rest. It \
-         was (4, 139, 143) through W5: W6 Task 3 banked 12, and not one of the \
-         12 declares a `timeout:` anywhere, so the numerator did not move: {:#?}",
+         was (4, 139, 143) through W5: W6 Task 3 banked 12 and W6 Task 4 banked \
+         4, and not one of the 16 declares a `timeout:` anywhere, so the \
+         numerator has not moved through either: {:#?}",
         declaring
     );
     assert_eq!(
@@ -4605,19 +4953,36 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
 ///    which holds of every field. So the retry population splits into a half
 ///    the ratchet speaks for and a half it cannot, and only the second half is
 ///    the waker's.
-/// 2. **By `behavior:`**, because `CREATE_NEW_EXECUTION` never writes a
-///    `not_before` at all: `executor::retry::scan`'s `CreateNewExecution` arm
-///    emits `SetRunState`/`SetExecutionState` and no `ScheduleRetry`, so no run
-///    of those entries ever reaches `RETRYING` and no waker could have touched
-///    one. The default is `RETRY_FAILED_TASK` (`RetryBehavior`'s `#[default]`,
-///    from `AbstractRetry`'s own), so this is read from the parsed model rather
-///    than from the presence of the key — seven of the ten never write it.
+/// 2. **By `behavior:`**, because the two behaviours reach the waker
+///    differently. **This item read *"`CREATE_NEW_EXECUTION` never writes a
+///    `not_before` at all … no waker could have touched one"*, and W6 Task 4
+///    made both halves false in the commit that could have left them
+///    standing.** That arm now emits the `ScheduleRetry` the artifact's own
+///    `ExecutionDelay` is (`ExecutorService.java:600-609` builds one for both
+///    behaviours and differs only in its `delayType`), the run it names goes
+///    `RETRIED` rather than `RETRYING`, and `claim::due_retries` has a second
+///    arm for exactly that state — which is how the replacement execution
+///    knows when to start. The default is `RETRY_FAILED_TASK`
+///    (`RetryBehavior`'s `#[default]`, from `AbstractRetry`'s own), so this is
+///    read from the parsed model rather than from the presence of the key.
 /// 3. **Flow-level against task-level**, because `Flow::retry` is the same
 ///    `AbstractRetry` type and a walk over `tasks:` alone would miss the five
 ///    entries that declare it there.
 ///
 /// What the ratchet says about the waker, after all that, is **nothing** — see
-/// the coverage statement's item 11 for the mechanism and its measurement.
+/// the coverage statement's item 11 for the mechanism and its measurement. That
+/// is unchanged by W6 Task 4 and is worth saying twice, because the four
+/// entries it banked DO now depend on a due deadline being noticed: the oracle
+/// notices it with `driver::pass_time`, which rewinds `executions.created_at`
+/// and calls `worker::resume` itself, and never through `worker::wake`. The
+/// waker's own arm is driven by `tests/worker.rs`'s
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists`, in
+/// real time, which is the only instrument that covers it.
+///
+/// **The name still holds and is worth re-reading rather than assuming**: it
+/// is about the BASELINED population, and the waker reaches none of that —
+/// after Task 4 those ten are all `RETRY_FAILED_TASK`, and the ratchet does not
+/// exercise the waker for either behaviour.
 #[test]
 fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     use egret_workflow::models::{Retry, RetryBehavior};
@@ -4692,7 +5057,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         .partition(|id| baseline.contains(id.as_str()));
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
-        (14, 11, 25),
+        (10, 15, 25),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -4704,10 +5069,6 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/full",
             "valids/retry-failed-flow-duration",
             "valids/retry-flowable-parallel",
-            "valids/retry-new-execution-flow-attempts",
-            "valids/retry-new-execution-flow-duration",
-            "valids/retry-new-execution-task-attempts",
-            "valids/retry-new-execution-task-duration",
             "valids/retry-subflow",
             "valids/retry-success",
             "valids/retry-with-flowable-errors",
@@ -4715,7 +5076,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/task-allow-failure-runnable",
             "valids/task-allow-warning-runnable",
         ],
-        "the fourteen, by name. W4's spec said twelve"
+        "the ten, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
+         and W6 Task 4 banked the four `retry-new-execution-*` entries out of \
+         the list -- which is the whole of the difference between fourteen and \
+         ten"
     );
 
     // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
@@ -4732,19 +5096,11 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (4, 10, 14),
-        "four `CREATE_NEW_EXECUTION` entries write no `not_before` at all, so \
-         the waker's whole baselined population is the other ten"
-    );
-    assert_eq!(
-        new_execution,
-        vec![
-            "valids/retry-new-execution-flow-attempts",
-            "valids/retry-new-execution-flow-duration",
-            "valids/retry-new-execution-task-attempts",
-            "valids/retry-new-execution-task-duration",
-        ],
-        "and they are these four"
+        (0, 10, 10),
+        "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
+         because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
+         assertion under this used to name them; the successor is the matching \
+         side below, which is where they went: {new_execution:?}"
     );
 
     // **The half the ratchet DOES speak for.** A `retry:` on a matching entry
@@ -4753,18 +5109,38 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     // The waker is the part that is not, and these two counts are what keep the
     // two claims apart.
     let mut matching_failed_task: Vec<&str> = Vec::new();
+    let mut matching_new_execution: Vec<&str> = Vec::new();
     for id in &matching {
         let (behaviours, _) = &declaring[*id];
-        if !behaviours.contains(&RetryBehavior::CreateNewExecution) {
-            matching_failed_task.push(id);
+        match behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            true => matching_new_execution.push(id),
+            false => matching_failed_task.push(id),
         }
     }
     assert_eq!(
-        (matching_failed_task.len(), matching.len()),
-        (11, 11),
-        "every matching entry that declares a `retry:` declares the behaviour that writes a \
-         `not_before`, so all eleven are entries whose retry the ratchet would report a change to: \
-         {matching_failed_task:?}"
+        (
+            matching_failed_task.len(),
+            matching_new_execution.len(),
+            matching.len()
+        ),
+        (11, 4, 15),
+        "the matching half, split the same way. It was (11, 0, 11): every \
+         matching entry declared the behaviour that writes a `not_before`, and \
+         W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \
+         is the FIRST time the ratchet speaks for that behaviour at all. \
+         failed_task: {matching_failed_task:?}; new_execution: \
+         {matching_new_execution:?}"
+    );
+    assert_eq!(
+        matching_new_execution,
+        vec![
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+        ],
+        "and they are these four, by name -- the entries whose whole replay \
+         chain the ratchet would now report a change to"
     );
 
     // Flow-level against task-level, over the whole 25: a walk over `tasks:`
