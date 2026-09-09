@@ -5419,7 +5419,7 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
 ///
 /// For a shape **no corpus flow reaches** — derived, not remembered: over
 /// `oracle-exec/corpus/`, 345 flows, 4 writing `CREATE_NEW_EXECUTION` and none
-/// of those declaring a `Loop`; 25 declaring a `Subflow` across 20 distinct
+/// of those declaring a `Loop`; 25 declaring a `Subflow` across 20 literal
 /// `flowId` targets; intersection with the four is empty.
 ///
 /// # A person decided this, and the decision is registered
@@ -5607,7 +5607,7 @@ tasks:
     // a `Sleep PT8S` -- a legal publishable flow -- and Kestra's parent
     // EXECUTION ends **FAILED** in 21 of 22 runs across three compose
     // projects: the `sub` stamp lands 17.4 to 45.9 ms BEFORE the parent's own
-    // terminal (7 observations), i.e. while it is still RUNNING. So the
+    // terminal (8 observations), i.e. while it is still RUNNING. So the
     // divergence can be the FLOW'S OWN VERDICT, not a run state after the flow
     // is over. The 22nd run delivered no stamp at all and ended SUCCESS; it is
     // recorded in item 16 as a counterexample to "the rule always fires",

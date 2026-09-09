@@ -6903,7 +6903,8 @@ writes in *both* orderings anyway: `sub` in the first, `after` in the second.)
 
 **Zero corpus population, derived rather than remembered:** over `corpus/`,
 **345 flows, 4 writing `CREATE_NEW_EXECUTION` and none of those declaring a
-`Loop`; 25 declaring a `Subflow` across 20 distinct `flowId` targets;
+`Loop`; 25 declaring a `Subflow` across 20 literal `flowId` targets (a 21st
+string is an unrendered `{{ }}` template, counted by `driver::target_census`);
 intersection with the four = zero.** The ratchet is silent either way, which is
 why this is registered rather than baselined.
 
