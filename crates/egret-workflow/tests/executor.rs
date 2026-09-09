@@ -2691,61 +2691,20 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         unfinished.len()
     );
 
-    assert_eq!(
-        (execution, runs, order, spawned, refused, broken, total),
-        (
-            MISMATCH_ON_EXECUTION,
-            MISMATCH_ON_RUNS,
-            MISMATCH_ON_ORDER,
-            MISMATCH_ON_SPAWNED,
-            0,
-            0,
-            MISMATCHING_RUNS_ENTRIES
-        ),
-        "the field breakdown. `refused` and `broken` are both 0 and that is the \
-         load-bearing half: a `refused` here would be egret refusing a flow \
-         Kestra ran, and a `broken` would be the DRIVER failing rather than the \
-         flow diverging"
-    );
-    assert_eq!(
-        order_only,
-        [
-            "valids/dag",
-            "valids/full",
-            "valids/if",
-            "valids/parallel-disabled-tasks"
-        ],
-        "the entries whose runs, attempts and execution history are \
-         byte-identical to Kestra's and which differ on the happens-before \
-         relation ALONE. Three of the four are exactly the ones W3a's Task 1 \
-         named as carrying `an order pair a clockless machine cannot reach`. \
-         **The fourth is the finding**: W3b Task 1's Concern 3 said \
-         `valids/full`'s attribution -- flow-level `outputs:` and `variables:` \
-         -- was WRONG (the flow has neither) and its real cause unknown. This \
-         is the cause, and it is the same one, so the entry belongs with the \
-         other three rather than in a list of its own"
-    );
-    assert!(
-        matched_while_stalled.is_empty(),
-        "an execution that STALLED and nevertheless matched the golden is the \
-         over-acceptance this count is written about, and it is the one case \
-         the count could not see: the collection used to run after the \
-         `continue`, so a matching entry was excluded by construction. It is \
-         empty today and the intersection is asserted rather than assumed: \
-         {matched_while_stalled:?}"
-    );
     // **The other half of the message, DERIVED over the whole remaining
     // population rather than trusted.** The four `retry-new-execution-*`
     // entries are the four this claim was measurably false for; it was false
     // for them, unchecked, for five packages, so the sentence gets a running
     // program now.
     //
-    // **It runs BEFORE the count and before the by-name loop, on purpose.**
-    // Behind either of those it is unreachable: dropping `RETRIED` from
-    // `TERMINAL` puts the four back into `unfinished`, and the count would fire
-    // first, so a derivation that could not fail would look exactly like one
-    // that holds. Measured in this position: that one-line mutation now fails
-    // HERE, naming all four.
+    // **It runs before every assertion in this test, on purpose, and the
+    // position was arrived at by measurement rather than by taste.** Dropping
+    // `RETRIED` from `TERMINAL` is the one-line mutation that puts the four
+    // back into `unfinished` and so drives this check. Behind the count, the
+    // by-name loop, OR the `matched_while_stalled` assertion it never runs at
+    // all under that mutation -- each of those fires first, and a derivation
+    // that cannot fail looks exactly like one that holds. Placed here, that
+    // mutation fails HERE, naming all four. Both positions were run.
     //
     // The predicate is the message's own: the entry must hold a
     // [`TaskKind::Runnable`] whose `type_id` the DRIVER's registry has no
@@ -2814,13 +2773,56 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     }
 
     assert_eq!(
+        (execution, runs, order, spawned, refused, broken, total),
+        (
+            MISMATCH_ON_EXECUTION,
+            MISMATCH_ON_RUNS,
+            MISMATCH_ON_ORDER,
+            MISMATCH_ON_SPAWNED,
+            0,
+            0,
+            MISMATCHING_RUNS_ENTRIES
+        ),
+        "the field breakdown. `refused` and `broken` are both 0 and that is the \
+         load-bearing half: a `refused` here would be egret refusing a flow \
+         Kestra ran, and a `broken` would be the DRIVER failing rather than the \
+         flow diverging"
+    );
+    assert_eq!(
+        order_only,
+        [
+            "valids/dag",
+            "valids/full",
+            "valids/if",
+            "valids/parallel-disabled-tasks"
+        ],
+        "the entries whose runs, attempts and execution history are \
+         byte-identical to Kestra's and which differ on the happens-before \
+         relation ALONE. Three of the four are exactly the ones W3a's Task 1 \
+         named as carrying `an order pair a clockless machine cannot reach`. \
+         **The fourth is the finding**: W3b Task 1's Concern 3 said \
+         `valids/full`'s attribution -- flow-level `outputs:` and `variables:` \
+         -- was WRONG (the flow has neither) and its real cause unknown. This \
+         is the cause, and it is the same one, so the entry belongs with the \
+         other three rather than in a list of its own"
+    );
+    assert!(
+        matched_while_stalled.is_empty(),
+        "an execution that STALLED and nevertheless matched the golden is the \
+         over-acceptance this count is written about, and it is the one case \
+         the count could not see: the collection used to run after the \
+         `continue`, so a matching entry was excluded by construction. It is \
+         empty today and the intersection is asserted rather than assumed: \
+         {matched_while_stalled:?}"
+    );
+    assert_eq!(
         unfinished.len(),
         ENTRIES_LEFT_UNFINISHED,
         "how many executions the driver leaves mid-flight. Every one holds a \
          task type this worker has no handler for -- `Registry::run` refuses \
          it, the tick aborts for that run, and the execution stalls exactly as \
-         the shipping worker would. **That sentence is DERIVED just above**, \
-         over this same population and the driver's own registry, rather than \
+         the shipping worker would. **That sentence is DERIVED above**, over \
+         this same population and the driver's own registry, rather than \
          asserted: it was false for four entries for five packages before \
          anybody checked it. **That sentence read `Every one IS a task \
          type ...` and was false for four of them until W6 Task 4**: the \
