@@ -5352,10 +5352,28 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
 ///
 /// So following the artifact costs a relaxed CHECK whose stated purpose is
 /// protecting all 41 golden `spawned` entries, a weakened terminal guard, and a
-/// post-terminal write path — for a shape **no corpus flow reaches** (no
-/// `Subflow` targets any of the four retry flows). It is recorded rather than
-/// repaired, and the assertion below now says so instead of claiming Kestra
-/// agrees.
+/// post-terminal write path — for a shape **no corpus flow reaches**. That last
+/// is derived, not remembered: over `oracle-exec/corpus/`, 345 flows, 4 writing
+/// `CREATE_NEW_EXECUTION` and none of those declaring a `Loop`; 25 declaring a
+/// `Subflow` across 20 distinct `flowId` targets; intersection with the four is
+/// empty.
+///
+/// # A person decided this, and the decision is registered
+///
+/// **Ruled by the controller (W6 Task 4, fix round 2): the divergence stands,
+/// deliberately.** The reasoning is on the record in
+/// `oracle-exec/README.md`'s coverage statement, **item 16**, which is where
+/// this package registers divergences the ratchet cannot hold — with the
+/// measurement, the three costs, and the ruling attributed. The load-bearing
+/// half of it: **faithfulness to an upstream RACE is not the same as
+/// faithfulness to upstream BEHAVIOUR**, and reproducing a write that lands
+/// 1.134 s after the execution ended would mean giving egret a path that
+/// writes to a terminal execution — undoing a durability property W3b
+/// established and W4 spent a package defending.
+///
+/// So a reader who reaches the assertions below is not looking at a test that
+/// lapsed. The values are egret's, they are correct, and each message carries
+/// Kestra's value beside them.
 ///
 /// **It is the same FAILED→SUCCESS direction as this task's first Critical, and
 /// it is named as such rather than minimised.** What differs is the blast
@@ -5421,9 +5439,10 @@ tasks:
          the replacement's failure onto this run through the trigger block \
          `Execution.childExecution()` copied, ~31 ms after the replacement \
          failed and ~1.1 s after the parent execution had already ended \
-         SUCCESS. This is a recorded DIVERGENCE, not agreement: see this \
-         test's doc for the three things egret would have to give up to \
-         reproduce it, none of which any corpus flow can see"
+         SUCCESS. This is a recorded DIVERGENCE, not agreement, and a RULED \
+         one: `oracle-exec/README.md`'s coverage statement, item 16, carries \
+         the measurement, the three things egret would have to give up, and \
+         the controller's ruling that it stands"
     );
     assert_eq!(
         run_history(&pool, parent, "sub").await,

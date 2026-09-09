@@ -6705,7 +6705,7 @@ read `143` as *"the worker is fine in production"*: there is no production of it
 yet, and the reaper, the lease fence and the waker have never met an operator's
 `working_timeout_s`.
 
-**16. Two divergences the ratchet cannot hold, both measured on the artifact
+**16. Three divergences the ratchet cannot hold, each measured on the artifact
 rather than reasoned about.**
 
 *`egret.sql` does not stop the statement it timed out.* `worker::timeout::guard`
@@ -6738,6 +6738,63 @@ name) and an **empty file** for the leaf leg (a tar symlink entry carries no
 content for `Files.copy` to materialise). The two legs differ, an earlier draft
 of this gave one answer for both, and neither leg reaches the host — which is
 why the residual is accepted rather than fixed.
+
+*A replay of a `Subflow` child never tells the parent, and Kestra's tells it
+1.1 s after the parent has finished.* W6 Task 4, fix round 2. Measured on the
+pinned digest twice, with `tests/worker.rs`'s own fixture shape (compose project
+`t4r2kestra`, namespace `t4r2.probe`, torn down `-v`):
+
+```text
+parent      SUCCESS   ["CREATED","RUNNING","SUCCESS"]
+  run sub   FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
+  run after SUCCESS
+child       RETRIED   trigger.taskRunId = the parent's `sub` run
+replacement FAILED    parentId = the child, trigger = BYTE-IDENTICAL to the child's
+```
+
+`Execution.childExecution()` copies `this.trigger` verbatim
+(`Execution.java:405-431`, the field at `:422`), so the replacement is still
+addressed to the parent's `sub` taskrun; Kestra stamps that run **`FAILED`**
+**30.8 ms after the replacement's own `FAILED`** and **1.134 s after the parent
+execution had already ended `SUCCESS`**. egret's `sub` run stops at `SUCCESS` —
+it reaches Kestra's fourth history entry and does not write the fifth.
+
+**Every EXECUTION-level answer agrees** (parent `SUCCESS`, child `RETRIED`,
+replacement `FAILED`, successor run), and the corpus intersection is empty:
+re-derived over `corpus/`, **345 flows, 4 writing `CREATE_NEW_EXECUTION` and
+none of those declaring a `Loop`; 25 declaring a `Subflow` across 20 distinct
+`flowId` targets; intersection with the four = zero**. So the ratchet is silent
+either way, which is why this is registered rather than baselined.
+
+**Following the artifact costs three things, and they are why it is not
+followed:**
+
+1. **A relaxed CHECK.** The replay must carry `parent_execution_id` — the column
+   `driver::read_trace_inner` builds `spawned` from, and what all four banked
+   entries compare — while 0138's `workflow_executions_one_link_kind`
+   (`parent_execution_id IS NULL OR trigger_execution_id IS NULL`) makes
+   carrying both **unrepresentable**. Kestra carries both. That CHECK is the one
+   0138's own header calls *"the one the package's banks depend on"*.
+2. **A weakened guard.** `subflow::on_child_terminal` returns early on a parent
+   run that is already terminal — load-bearing for `transmitFailed` and
+   `wait: false`.
+3. **A post-terminal write path.** Kestra's stamp lands on an execution that
+   ended 1.134 s earlier. egret has no path that writes to a terminal execution
+   at all, and adding one would undermine a durability property W3b established
+   and W4 spent a package defending.
+
+**Ruled by the controller, W6 Task 4 fix round 2, and recorded as a decision
+rather than an omission:** the divergence stands. The reasoning on the record is
+that the three costs are not payable for zero corpus population; that the third
+is the worst, because **faithfulness to an upstream RACE is not the same as
+faithfulness to upstream BEHAVIOUR** and this programme's fidelity rule was
+written for the second; and that every execution-level answer already agrees. It
+is asserted as a divergence — never as parity — by
+`a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`, whose
+messages carry Kestra's value beside egret's. **The test that used to stand here
+claimed the opposite** (*"which is what Kestra does too — measured"*), which is
+the shape a wrong claim takes: it does not merely miss a divergence, it defends
+one.
 
 **17. A worker that dies leaves containers and staging directories behind, and
 nothing collects them.** Reproduced, not hypothesised: killing three concurrent
