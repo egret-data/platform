@@ -15,6 +15,7 @@
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
 //! - `worker`    — W4 (claim loops, handlers, reaper)
+//! - `trigger`   — W6 (the schedule trigger, backfill, and the injected clock)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -32,6 +33,11 @@ pub mod repo;
 pub mod routes;
 pub mod runners;
 pub mod spec;
+// W6 Task 5: the schedule trigger and its backfill. `pub` because the routes
+// that create a backfill and the loop that drives the clock both live outside
+// this module -- and because NOTHING in `oracle-exec/` can reach it, so its own
+// tests are the whole instrument (see the module doc).
+pub mod trigger;
 // W3b Task 2: the claim loop and the reaper -- the FIRST real caller of
 // `advance()`. `pub` for the same reason `executor` is: `tests/worker.rs` is an
 // integration test and sees only the public API.
