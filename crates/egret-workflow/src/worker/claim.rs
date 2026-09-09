@@ -955,6 +955,15 @@ pub(super) async fn settle(
             // `workflow_executions_one_link_kind` makes it impossible for both
             // to find something -- so the pair is a dispatch, not two chances
             // to report the same terminal.
+            //
+            // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds anything**,
+            // and that is why egret's answer for a replayed `Subflow` child is
+            // invariant rather than timing-dependent: `trigger_of` zips two
+            // NULL trigger columns, and `parent_of` zips a set
+            // `parent_execution_id` with a NULL `parent_run_ix`, which
+            // `workflow_executions_loop_run_whole_or_absent` keeps NULL for a
+            // row with no loop index. Registered as a divergence in
+            // `oracle-exec/README.md`'s coverage statement, item 16.
             subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
         }
     }

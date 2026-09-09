@@ -23,21 +23,34 @@
 //! # The three kinds are exclusive here and are NOT in the artifact
 //!
 //! **A replay of a `Subflow` child is BOTH in Kestra**, and that is measured
-//! rather than inferred (fix round 2, pinned digest, `t4r2.probe`, two runs):
-//! `Execution.childExecution()` copies `this.trigger` verbatim
-//! (`Execution.java:422`), so the replacement carries the *parent's*
-//! `executionId` and the parent's `sub` `taskRunId` alongside its own
-//! `parentId`. Kestra then stamps that parent run **`FAILED`** when the
-//! replacement fails — ~1.1 s after the parent execution had already ended
-//! `SUCCESS`.
+//! rather than inferred (pinned digest, fix rounds 2-3 and re-reviews 2-3, four
+//! compose projects, 38 runs): `Execution.childExecution()` copies
+//! `this.trigger` verbatim (`Execution.java:422`), so the replacement carries
+//! the *parent's* `executionId` and the parent's `sub` `taskRunId` alongside
+//! its own `parentId`. Kestra then stamps that parent run **`FAILED`** when the
+//! replacement fails.
 //!
-//! egret cannot: 0138's `workflow_executions_one_link_kind` is
-//! `parent_execution_id IS NULL OR trigger_execution_id IS NULL`, and this
-//! module needs the first, because it is the column
-//! `driver::read_trace_inner` builds `spawned` from. So egret's replacement
-//! reports to nobody and the parent's run stops at `SUCCESS`. Every
-//! EXECUTION-level answer still agrees with the artifact, no corpus flow
-//! reaches the shape, and the divergence is asserted as one by
+//! egret's replacement reports to nobody, so the parent's `sub` run stops at
+//! `SUCCESS` — and **the size of that divergence depends on the successor, not
+//! on this module**. With a successor that finishes first the parent EXECUTION
+//! still agrees (16 of 16 runs); with one that outlives the replay — a
+//! `Sleep PT8S`, a legal publishable flow — Kestra's parent EXECUTION ends
+//! `FAILED` where egret answers `SUCCESS` (21 of 22 runs), which is a
+//! divergence in the flow's own verdict. An earlier version of this doc said
+//! *"every EXECUTION-level answer still agrees with the artifact"* and quoted
+//! `~1.1 s` as the gap; both were properties of one fixture's trivial
+//! successor.
+//!
+//! **What stops egret is not one thing and the register says which.** 0138's
+//! `workflow_executions_one_link_kind` forbids this module's
+//! `parent_execution_id` beside a trigger link — but the address is derivable
+//! without storing it, one hop up `parent_execution_id` onto the child, whose
+//! own trigger columns are the pair Kestra copied; what actually drops the
+//! report is `subflow::on_child_terminal`'s already-terminal guard, which no
+//! test in this tree has been shown to observe. No corpus flow reaches the
+//! shape. The measurement, the costs and the controller's ruling are in
+//! `oracle-exec/README.md`'s coverage statement item 16, and the divergence is
+//! asserted as one by
 //! `a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`
 //! rather than described here and defended there.
 //!

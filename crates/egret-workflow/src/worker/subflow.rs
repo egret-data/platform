@@ -568,13 +568,38 @@ async fn on_child_terminal_inner(
             ),
         )));
     }
-    // **Already decided, and both halves of that are load-bearing.** A
-    // `Subflow` run whose task carries a `retry:` starts a SECOND child under
-    // the same `(execution, run_ix)` — which is why migration 0138's reverse
-    // index is deliberately not unique — so the first child's late terminal
-    // must not re-terminate a run the second attempt has since moved. And a
-    // run this module has already terminated for `wait: false` must not be
-    // terminated again by the child finishing later.
+    // **Already decided — and "load-bearing" is what this comment used to
+    // claim, which W6 Task 4 fix round 4 downgraded to what is actually
+    // known.** The shape it is written for: a `Subflow` run whose task carries
+    // a `retry:` starts a SECOND child under the same `(execution, run_ix)` —
+    // which is why migration 0138's reverse index is deliberately not unique —
+    // so the first child's late terminal must not re-terminate a run the
+    // second attempt has since moved.
+    //
+    // **Nothing in this tree observes it, and it was never measured.** Mutating
+    // the condition so it can never fire leaves 53 worker tests, 45 executor
+    // tests and the oracle ratchet's 294 / 127 / 127 / 0 byte-identical, and
+    // the two corpus flows named for the shape — `valids/subflow-parent-retry`
+    // and `valids/retry-subflow` — are both baselined, so the ratchet is blind
+    // to them by construction. It has also never been established that egret
+    // can produce the delivery order the shape needs: `on_child_terminal` runs
+    // synchronously inside the child's own settle, so a "late" first terminal
+    // has no demonstrated path here.
+    //
+    // **The `wait: false` half of the older claim was redundant.** That comment
+    // also said a run terminated for `wait: false` must not be terminated again
+    // by the child finishing later — but the `if !sub.wait` return below sits
+    // AFTER this guard, so removing this one changes a `wait: false` run's
+    // outcome only where `spec::parse` or `subflow_of` fails on the parent's
+    // own source, turning a silent `Ok(())` into an error.
+    //
+    // **It is also what would drop the report if egret ever followed Kestra on
+    // a replayed `Subflow` child**, whose parent run is terminal by the time
+    // the replacement fails. Kestra has no equivalent:
+    // `Execution.hasTaskRunJoinable` permits terminal→terminal when the history
+    // grows. That divergence, and this guard as the only cost that survives
+    // it, are registered in `oracle-exec/README.md`'s coverage statement,
+    // item 16.
     if state.runs[run]
         .history
         .last()
