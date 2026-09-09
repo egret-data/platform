@@ -1279,8 +1279,20 @@ mod tests {
     /// `02:00` answers the *next* day forward and the *previous* day back.
     #[test]
     fn next_and_last_match_the_artifact() {
-        // (cron, with_seconds, zone, from, next, last)
-        let table: &[(&str, bool, &str, &str, Option<&str>, Option<&str>)] = &[
+        /// (cron, with_seconds, zone, from, expected next, expected last).
+        ///
+        /// Named because clippy calls the bare tuple complex, and it is right:
+        /// six positional fields is exactly where a row gets transposed.
+        type Row = (
+            &'static str,
+            bool,
+            &'static str,
+            &'static str,
+            Option<&'static str>,
+            Option<&'static str>,
+        );
+
+        let table: &[Row] = &[
             (
                 "0 2 * * *",
                 false,
