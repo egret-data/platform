@@ -2734,46 +2734,18 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
          empty today and the intersection is asserted rather than assumed: \
          {matched_while_stalled:?}"
     );
-    assert_eq!(
-        unfinished.len(),
-        ENTRIES_LEFT_UNFINISHED,
-        "how many executions the driver leaves mid-flight. Every one holds a \
-         task type this worker has no handler for -- `Registry::run` refuses \
-         it, the tick aborts for that run, and the execution stalls exactly as \
-         the shipping worker would. **That sentence is DERIVED below**, over \
-         this same population and the driver's own registry, rather than \
-         asserted: it was false for four entries for five packages before \
-         anybody checked it. **That sentence read `Every one IS a task \
-         type ...` and was false for four of them until W6 Task 4**: the \
-         `retry-new-execution-*` entries declare only \
-         `io.kestra.plugin.core.execution.Fail`, which has a handler and ran, \
-         and they were counted because `is_stalled` did not list `RETRIED` -- a \
-         classifier artefact rather than a stall. See [`TERMINAL`]. Named and \
-         counted so the population cannot grow in silence: {unfinished:?}"
-    );
-    // **The correction, asserted rather than described.** A message that
-    // *says* the four are gone is prose; this is the check. It also names the
-    // second half of the claim -- that every remaining member really does hold
-    // an unhandled type -- for the one family it was measurably wrong about.
-    for id in [
-        "valids/retry-new-execution-flow-attempts",
-        "valids/retry-new-execution-flow-duration",
-        "valids/retry-new-execution-task-attempts",
-        "valids/retry-new-execution-task-duration",
-    ] {
-        assert!(
-            !unfinished.contains(&id.to_string()),
-            "{id} declares only `core.execution.Fail`, which HAS a handler. It \
-             ends `RETRIED`, which is terminal, and it now spawns the replay \
-             that follows it -- it cannot be an execution left mid-flight. \
-             Present in: {unfinished:?}"
-        );
-    }
-
-    // **And the other half of the message, DERIVED over the whole remaining
-    // population rather than trusted.** The four above are the four this claim
-    // was measurably false for; it was false for them, unchecked, for five
-    // packages, so the sentence gets a running program now.
+    // **The other half of the message, DERIVED over the whole remaining
+    // population rather than trusted.** The four `retry-new-execution-*`
+    // entries are the four this claim was measurably false for; it was false
+    // for them, unchecked, for five packages, so the sentence gets a running
+    // program now.
+    //
+    // **It runs BEFORE the count and before the by-name loop, on purpose.**
+    // Behind either of those it is unreachable: dropping `RETRIED` from
+    // `TERMINAL` puts the four back into `unfinished`, and the count would fire
+    // first, so a derivation that could not fail would look exactly like one
+    // that holds. Measured in this position: that one-line mutation now fails
+    // HERE, naming all four.
     //
     // The predicate is the message's own: the entry must hold a
     // [`TaskKind::Runnable`] whose `type_id` the DRIVER's registry has no
@@ -2812,7 +2784,7 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     );
     // The control: the claim is not vacuous, because the driver's registry is
     // not empty and the four it was wrong about would have failed the check
-    // above.
+    // above -- which is measured rather than reasoned, see the comment above.
     assert_eq!(
         driver::registry().type_ids(),
         [
@@ -2838,6 +2810,40 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
             "{id} declares only handled runnable types, so had it still been in \
              `unfinished` the derivation above would have named it. That is \
              what makes the derivation an instrument rather than a formality"
+        );
+    }
+
+    assert_eq!(
+        unfinished.len(),
+        ENTRIES_LEFT_UNFINISHED,
+        "how many executions the driver leaves mid-flight. Every one holds a \
+         task type this worker has no handler for -- `Registry::run` refuses \
+         it, the tick aborts for that run, and the execution stalls exactly as \
+         the shipping worker would. **That sentence is DERIVED just above**, \
+         over this same population and the driver's own registry, rather than \
+         asserted: it was false for four entries for five packages before \
+         anybody checked it. **That sentence read `Every one IS a task \
+         type ...` and was false for four of them until W6 Task 4**: the \
+         `retry-new-execution-*` entries declare only \
+         `io.kestra.plugin.core.execution.Fail`, which has a handler and ran, \
+         and they were counted because `is_stalled` did not list `RETRIED` -- a \
+         classifier artefact rather than a stall. See [`TERMINAL`]. Named and \
+         counted so the population cannot grow in silence: {unfinished:?}"
+    );
+    // **The correction, asserted rather than described.** A message that
+    // *says* the four are gone is prose; this is the check.
+    for id in [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-flow-duration",
+        "valids/retry-new-execution-task-attempts",
+        "valids/retry-new-execution-task-duration",
+    ] {
+        assert!(
+            !unfinished.contains(&id.to_string()),
+            "{id} declares only `core.execution.Fail`, which HAS a handler. It \
+             ends `RETRIED`, which is terminal, and it now spawns the replay \
+             that follows it -- it cannot be an execution left mid-flight. \
+             Present in: {unfinished:?}"
         );
     }
 }
