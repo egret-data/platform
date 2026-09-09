@@ -917,22 +917,48 @@ impl ScheduleTrigger {
         now: DateTime<Utc>,
     ) -> Option<ScheduleDates> {
         let delay = self.late_maximum_delay?;
-        let out = output.as_ref()?;
-        let _ = out;
 
         // The artifact bounds this walk at now() +/- 10 years, on the OUTPUT's
-        // year rather than on an iteration count.
+        // year rather than on an iteration count -- and that bound is the ONLY
+        // one it has.
         loop {
             let current = output.as_ref()?;
             let year = current.date.year();
             if year >= now.year() + 10 || year <= now.year() - 10 {
                 return output;
             }
-            if current.date + delay < now {
-                let next = current.next?;
-                output = self.schedule_dates(next);
-            } else {
+            if current.date + delay >= now {
                 return output;
+            }
+
+            let standing = current.date;
+            let next = current.next?;
+            let advanced = self.schedule_dates(next);
+
+            // PROGRESS GUARD, and it is not in the artifact.
+            //
+            // Kestra's `handleMaxDelay` is a `while` over the output's YEAR: if
+            // the walk ever produced a date that did not move, the year would
+            // not move either and the loop would spin for ever. Upstream that
+            // cannot happen, because cron-utils' `nextExecution` is strictly
+            // after its argument -- so the bound is sound only as a consequence
+            // of a property of a different class.
+            //
+            // This guard makes the termination local instead. It is
+            // UNREACHABLE through this crate's public API, because
+            // `Cron::next_after` is strict for the same reason; its one
+            // demonstration is mutation **M2**, which relaxes `next_after` to
+            // `>=` and, before this guard existed, turned the whole test suite
+            // into a hang that had to be killed by hand -- a mutation that
+            // hangs is indistinguishable from a mutation nothing detects.
+            //
+            // Refusing (`None`) rather than returning the standing date is the
+            // safe direction: a schedule that cannot make progress produces no
+            // execution, instead of firing a tick the artifact would have
+            // walked past.
+            match advanced {
+                Some(a) if a.date > standing => output = Some(a),
+                _ => return None,
             }
         }
     }
