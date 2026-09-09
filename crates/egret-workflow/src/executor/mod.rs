@@ -3810,7 +3810,7 @@ mod tests {
     /// **The last assertion used to read `now == Tick(0)`, under "no
     /// `ScheduleRetry`: the delay belongs to the replay, not to this run", and
     /// W6 Task 4 measured that the artifact says the opposite.** Both arms of
-    /// `ExecutorService.java:600` build one `ExecutionDelay` on THIS taskrun at
+    /// `ExecutorService.java:603-608` build one `ExecutionDelay` on THIS taskrun at
     /// `nextRetryDate`; only its `delayType` differs. The delay is how the
     /// replay knows when to happen, and `maxDuration` is measured against the
     /// instant it names, so a `CREATE_NEW_EXECUTION` arm that emitted none left

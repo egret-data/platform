@@ -371,7 +371,7 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
             // # The `ScheduleRetry` is the artifact's `ExecutionDelay`, and it
             // used to be missing
             //
-            // Both arms of `ExecutorService.java:600-609` build the SAME
+            // Both arms of `ExecutorService.java:603-608` build the SAME
             // `ExecutionDelay`, `.taskRunId(taskRun.getId()).date(nextRetryDate)`,
             // and differ only in its `delayType`: `RESTART_FAILED_TASK` for one
             // and **`RESTART_FAILED_FLOW`** for this one, which

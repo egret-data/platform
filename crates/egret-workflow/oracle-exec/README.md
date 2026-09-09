@@ -7894,7 +7894,7 @@ still pure over `(plan, state, now)`: no I/O, no clock, and one more field on
 the snapshot it is handed.
 
 The output changes too, by one existing command. Both arms of
-`ExecutorService.java:600-609` build the **same** `ExecutionDelay`,
+`ExecutorService.java:603-608` build the **same** `ExecutionDelay`,
 `.taskRunId(taskRun.getId()).date(nextRetryDate)`, and differ only in its
 `delayType` — `RESTART_FAILED_TASK` against `RESTART_FAILED_FLOW`. egret's
 `CREATE_NEW_EXECUTION` arm emitted none, under a test asserting `now == Tick(0)`
@@ -7977,6 +7977,41 @@ travel a chain's whole accumulated time on every hop.
    numeric and it is the artifact's own: its replay comes off the
    **execution-delay loop**, a different loop from the executor cycle
    (`DefaultExecutor.java:508`), one execution per delivery.
+
+## A replay of a `Subflow` child: four answers agree, the parent's RUN does not
+
+Measured on the pinned digest in fix round 2 (own compose project `t4r2kestra`,
+namespace `t4r2.probe`, egret's own fixture shape, two runs, torn down `-v`),
+because fix round 1 asserted the opposite of this with the words *"which is what
+Kestra does too — measured"*:
+
+```text
+parent      SUCCESS   ["CREATED","RUNNING","SUCCESS"]
+  run sub   FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
+  run after SUCCESS
+child       RETRIED   trigger.taskRunId = the parent's `sub` run
+replacement FAILED    parentId = the child, trigger = BYTE-IDENTICAL to the child's
+```
+
+`Execution.childExecution()` copies `this.trigger` verbatim
+(`Execution.java:405-431`, the field at `:422`), so the replacement is still
+addressed to the parent's `sub` taskrun — and Kestra stamps that run **FAILED**
+~31 ms after the replacement fails and ~1.1 s after the parent execution has
+already ended `SUCCESS`. The parent's own state never moves.
+
+**Every execution-level answer agrees with egret** — parent `SUCCESS`, child
+`RETRIED`, replacement `FAILED`, successor run — so Task 4's Concern 3 stands:
+replaying here is the artifact's behaviour and refusing it would be
+under-acceptance. **The `sub` RUN diverges**, and structurally rather than by
+choice: the replay must carry `parent_execution_id` (it is what the oracle's
+`spawned` is built from, and what all four banked entries compare), 0138's
+`workflow_executions_one_link_kind` makes carrying both links unrepresentable,
+`subflow::on_child_terminal` returns early on an already-terminal parent run, and
+egret has no path that mutates a terminated execution's runs at all. No corpus
+flow reaches the shape — no `Subflow` targets any of the four retry flows — so
+the ratchet is silent either way, and
+`a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent` is the
+instrument, asserting the divergence as one.
 
 ## Two questions W6 Task 3 left open, both measured on the artifact
 

@@ -5297,29 +5297,74 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
     );
 }
 
-/// **A `Subflow` child IS replayed, its parent is told nothing, and both of
-/// those are what the artifact does** — W6 Task 4, fix round 1.
+/// **A `Subflow` child IS replayed; the four execution-level answers agree with
+/// the artifact, and the parent's `sub` RUN does not** — W6 Task 4, fix round 2.
 ///
-/// The task's Concern 3 said this in prose and nothing on egret's side pinned
-/// it, so a later change that refused a replay under a `trigger_execution_id`
-/// link would have broken no test. Given that the same package's Critical was a
-/// cross-link conclusion nobody asserted, prose is not enough here.
+/// # This test asserted the opposite of the artifact, and that was worse than
+/// asserting nothing
 ///
-/// **Kestra, pinned digest** (`rev4.probe/replay-subflow-parent` → a child
-/// carrying a `CREATE_NEW_EXECUTION` retry): the parent ends **`SUCCESS`**, the
-/// child ends `RETRIED`, and the replacement (`parentId` = the child) ends
-/// `FAILED` and reports to nobody. So refusing the replay here would be
-/// **under**-acceptance — the opposite of the `Loop` case, where creating one
-/// would be over-acceptance, and the two are told apart by a column rather than
-/// by a preference: `parent_run_ix`.
+/// Fix round 1 wrote it with the message *"which is what Kestra does too —
+/// measured"* on the one line where Kestra does something else. A wrong claim
+/// does not merely fail to catch a divergence: it **defends** it, and the next
+/// reader takes the assertion for the measurement. Both halves are now measured
+/// here, on the pinned digest, twice, with this file's own fixture shape
+/// (compose project `t4r2kestra`, namespace `t4r2.probe`, torn down `-v`).
 ///
-/// Three claims, and each fails on its own against a different wrong
-/// implementation: a `spawn_due` that keyed on "has a parent" would refuse this
-/// one; a `subflow::on_child_terminal` that read `RETRIED` as a failure would
-/// fail the parent; and a replacement linked by `trigger_execution_id` would
-/// report a second terminal to a run that already has one.
+/// ```text
+/// parent      6Mma…  SUCCESS   ["CREATED","RUNNING","SUCCESS"]
+///   run sub          FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
+///   run after        SUCCESS
+/// child       3vcz…  RETRIED   trigger.taskRunId = the parent's `sub` run
+/// replacement kPXx…  FAILED    parentId = the child,
+///                              trigger  = BYTE-IDENTICAL to the child's
+/// ```
+///
+/// Two facts the round-1 version got wrong:
+///
+/// 1. **The replacement is NOT untriggered.** `Execution.childExecution()`
+///    copies `this.trigger` verbatim (`Execution.java:405-431`, the field at
+///    :422), so the replacement carries the *parent's* `executionId` and the
+///    *parent's* `sub` `taskRunId`, exactly as the child does.
+/// 2. **The parent's `sub` run therefore ends `FAILED`**, stamped ~31 ms after
+///    the replacement's own `FAILED` and **~1.1 s after the parent execution had
+///    already ended `SUCCESS`** — a post-terminal annotation onto a run whose
+///    history already holds `SUCCESS`. The parent's execution state does not
+///    move, and `after` had already run.
+///
+/// # What agrees, and what egret cannot represent
+///
+/// Every **execution-level** answer agrees: parent `SUCCESS`, child `RETRIED`,
+/// replacement `FAILED`, successor run. Concern 3's verdict stands — replaying
+/// here is the artifact's behaviour and refusing it would be under-acceptance.
+///
+/// The `sub` RUN is a divergence, and it is **structural rather than chosen**:
+///
+/// * the replay must carry `parent_execution_id` — that is what puts it in the
+///   oracle's `spawned`, which is what all four banked entries compare — and
+///   0138's `workflow_executions_one_link_kind` CHECK
+///   (`parent_execution_id IS NULL OR trigger_execution_id IS NULL`) makes
+///   carrying both **unrepresentable**. Kestra carries both;
+/// * even with the trigger copied, `subflow::on_child_terminal` returns early on
+///   a parent run that is already terminal ("Already decided"), which is
+///   measured behaviour for `transmitFailed` and `wait: false`;
+/// * and egret has no path at all that mutates a run of an execution that has
+///   already terminated.
+///
+/// So following the artifact costs a relaxed CHECK whose stated purpose is
+/// protecting all 41 golden `spawned` entries, a weakened terminal guard, and a
+/// post-terminal write path — for a shape **no corpus flow reaches** (no
+/// `Subflow` targets any of the four retry flows). It is recorded rather than
+/// repaired, and the assertion below now says so instead of claiming Kestra
+/// agrees.
+///
+/// **It is the same FAILED→SUCCESS direction as this task's first Critical, and
+/// it is named as such rather than minimised.** What differs is the blast
+/// radius: there the whole flow reported SUCCESS where Kestra reported FAILED;
+/// here every execution in the chain agrees with the artifact, and the stamp
+/// Kestra makes lands after its own flow has finished and changes nothing
+/// downstream.
 #[sqlx::test(migrations = "../../migrations")]
-async fn a_subflow_child_is_replayed_and_its_parent_is_never_told(pool: sqlx::PgPool) {
+async fn a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -5360,14 +5405,33 @@ tasks:
         (None, "RETRIED"),
         "the child is linked by the trigger columns only, and its own terminal \
          is RETRIED -- the state a CREATE_NEW_EXECUTION retry ends an execution \
-         in"
+         in. Kestra's child ends RETRIED too (measured)"
     );
+    // **THE DIVERGENCE, asserted as one.** Kestra's `sub` run ends `FAILED`
+    // (`["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]`, measured twice on
+    // the pinned digest). egret's ends `SUCCESS` and stops there, because the
+    // replacement it would have to hear from cannot carry a trigger link (0138)
+    // and the run is already terminal by then anyway. Round 1 asserted this
+    // value with the words "which is what Kestra does too -- measured", which
+    // was false and defended the gap.
     assert_eq!(
         run_state(&pool, parent, "sub").await.as_deref(),
         Some("SUCCESS"),
-        "and the parent's `sub` run SUCCEEDS on it, which is what Kestra does \
-         too -- measured, not inherited: a parent that failed here would be \
-         under-acceptance"
+        "egret's `sub` run ends SUCCESS. **Kestra's ends FAILED** -- it stamps \
+         the replacement's failure onto this run through the trigger block \
+         `Execution.childExecution()` copied, ~31 ms after the replacement \
+         failed and ~1.1 s after the parent execution had already ended \
+         SUCCESS. This is a recorded DIVERGENCE, not agreement: see this \
+         test's doc for the three things egret would have to give up to \
+         reproduce it, none of which any corpus flow can see"
+    );
+    assert_eq!(
+        run_history(&pool, parent, "sub").await,
+        serde_json::json!(["CREATED", "RUNNING", "RETRIED", "SUCCESS"]),
+        "and the whole history, not just its last state, so the divergence is \
+         pinned at the exact point it starts: egret reaches Kestra's fourth \
+         entry and stops. Kestra appends a fifth, FAILED, after the execution \
+         holding this run has terminated"
     );
     assert_eq!(
         run_state(&pool, parent, "after").await.as_deref(),
@@ -5409,10 +5473,17 @@ tasks:
     assert_eq!(
         (trigger, trigger_run),
         (None, None),
-        "the replacement is a REPLAY, not a subflow child: it is linked by \
-         `parent_execution_id` alone, so `subflow::on_child_terminal` -- which \
-         reads `trigger_execution_id` -- can never reach the parent with it. \
-         That is the half of Concern 3 nothing pinned"
+        "egret's replacement carries NO trigger link, so \
+         `subflow::on_child_terminal` -- which reads `trigger_execution_id` -- \
+         can never reach the parent with it. **Kestra's replacement carries the \
+         child's trigger block verbatim** (`Execution.childExecution()` copies \
+         `this.trigger`, `Execution.java:422`), naming the parent execution and \
+         the parent's `sub` taskrun. egret cannot: 0138's \
+         `workflow_executions_one_link_kind` makes `parent_execution_id` and \
+         `trigger_execution_id` mutually exclusive, and the replay needs the \
+         first, because that is the column the oracle's `spawned` is built from \
+         and all four banked entries compare. The value here is egret's, and \
+         the divergence is the point of the message"
     );
 
     // The replacement runs and ends, and the parent must not move.
@@ -5426,10 +5497,10 @@ tasks:
     assert_eq!(
         execution_history(&pool, parent).await,
         serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
-        "and the parent is untouched by it: it was told about the child that \
-         RETRIED and it is told nothing about the one that replaced it. This is \
-         the assertion that would fail if the replacement were ever linked back \
-         through the trigger columns"
+        "and the parent EXECUTION is untouched by it -- which is what Kestra \
+         does too, measured: its parent's histories end at SUCCESS and the \
+         later FAILED lands on the `sub` RUN alone. So the execution-level \
+         answers agree on all four rows of this chain; only the run diverges"
     );
 }
 

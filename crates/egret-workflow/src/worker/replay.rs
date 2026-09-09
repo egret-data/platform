@@ -20,6 +20,27 @@
 //! `workflow_executions_metadata_belongs_to_a_replay` are the two CHECKs that
 //! keep the three kinds from blurring into each other.
 //!
+//! # The three kinds are exclusive here and are NOT in the artifact
+//!
+//! **A replay of a `Subflow` child is BOTH in Kestra**, and that is measured
+//! rather than inferred (fix round 2, pinned digest, `t4r2.probe`, two runs):
+//! `Execution.childExecution()` copies `this.trigger` verbatim
+//! (`Execution.java:422`), so the replacement carries the *parent's*
+//! `executionId` and the parent's `sub` `taskRunId` alongside its own
+//! `parentId`. Kestra then stamps that parent run **`FAILED`** when the
+//! replacement fails — ~1.1 s after the parent execution had already ended
+//! `SUCCESS`.
+//!
+//! egret cannot: 0138's `workflow_executions_one_link_kind` is
+//! `parent_execution_id IS NULL OR trigger_execution_id IS NULL`, and this
+//! module needs the first, because it is the column
+//! `driver::read_trace_inner` builds `spawned` from. So egret's replacement
+//! reports to nobody and the parent's run stops at `SUCCESS`. Every
+//! EXECUTION-level answer still agrees with the artifact, no corpus flow
+//! reaches the shape, and the divergence is asserted as one by
+//! `a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`
+//! rather than described here and defended there.
+//!
 //! **A replay DOES belong in the oracle's `spawned`, and a `Subflow` child does
 //! not.** `oracle-exec/driver.rs`'s `read_trace_inner` builds that field with
 //! `WHERE parent_execution_id = $1`, and all four golden entries hold
@@ -34,7 +55,7 @@
 //! execution. What it can do — and what [`retry::scan`](crate::executor) now
 //! does — is end this execution `RETRIED` and write the artifact's own
 //! `ExecutionDelay` on the run that failed
-//! (`ExecutorService.java:600-609`: both retry behaviours build the same delay,
+//! (`ExecutorService.java:603-608`: both retry behaviours build the same delay,
 //! `.taskRunId(taskRun.getId()).date(nextRetryDate)`, and differ only in
 //! `delayType`). This module is the other half of `DefaultExecutor`'s
 //! **execution-delay loop**, which is a different loop from the executor cycle

@@ -890,11 +890,37 @@ mod tests {
         assert_eq!(
             decide(true, RunState::Retried, 1, 1, 1),
             Next::Terminate(RunState::Success),
-            "the control for the substitution: WITHOUT it the raw RETRIED \
+            "the inversion itself, at the fixture's own shape: a raw RETRIED \
              falls through to `terminated == total` and the loop SUCCEEDS. \
-             Putting RETRIED into `terminated_in_error` instead reaches \
-             `Terminate(SUCCESS)` through the ternary, which is why the fix is \
-             a substitution and not a predicate"
+             **This line does NOT discriminate** -- at (1,1,1) the rejected \
+             alternative answers SUCCESS too, by the ternary instead of by the \
+             fall-through -- and it used to claim it did. The line below is the \
+             one that chooses"
+        );
+        // **The control, at the input where the three implementations differ.**
+        // (1,1,1) cannot tell them apart because two of the three answer
+        // SUCCESS by different routes; a three-value loop can, because the
+        // fall-through goes somewhere else entirely.
+        assert_eq!(
+            decide(true, RunState::Retried, 1, 1, 3),
+            Next::Start(1),
+            "as shipped, RETRIED is not `terminated_in_error`, so one \
+             terminated iteration of three starts the next one. **This is what \
+             excludes putting RETRIED into `terminated_in_error`**: that \
+             alternative answers `Terminate(SUCCESS)` here, through \
+             `terminateLoop`'s `state == FAILED ? stateFailure : SUCCESS` \
+             ternary -- which is the SAME wrong answer as the fall-through and \
+             is why the fix is a substitution rather than a predicate. The \
+             ternary's own arm is pinned next door by \
+             `a_killed_iteration_ends_a_transmit_failed_loop_with_success`, at \
+             this same shape"
+        );
+        assert_eq!(
+            decide(true, as_the_loop_reads_it(RunState::Retried), 1, 1, 3),
+            Next::Terminate(RunState::Failed),
+            "and the substitution answers FAILED at that shape too -- ending a \
+             `transmitFailed` loop on the first failure with two values never \
+             started, which is `valids/loop-failed`'s measured shape"
         );
     }
 
