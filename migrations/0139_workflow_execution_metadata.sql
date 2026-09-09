@@ -40,24 +40,62 @@
 -- four golden entries end their chain at the THIRD execution, which is
 -- `FAILED` and spawns nothing.
 --
--- # `origin_offset_ms` is a SNAPSHOT, and it cannot be derived
+-- # `origin_offset_ms` CAN be derived. It is stored for four other reasons
 --
 -- Kestra stores an absolute instant. This stores the same fact relatively:
 -- **how many milliseconds of the ORIGINAL execution's clock had already
 -- elapsed when this execution was created.** `0` for every execution that is
 -- not a replay, which is all of them until W6 Task 4.
 --
--- It is a stored snapshot rather than `own.created_at - original.created_at`
--- computed on read, and the reason is the differential oracle's own clock.
+-- **This header said "it cannot be derived" and that was false.** What was
+-- actually disproved is the narrower claim below -- that the TWO-ENDPOINT
+-- subtraction `own.created_at - original.created_at` is wrong under the
+-- driver's rewind -- and the stronger sentence was written from it. A "cannot"
+-- in a migration is read as a measurement by everyone who comes after, so what
+-- was measured is what it now says. Measured, W6 Task 4 fix round 1, on a real
+-- three-long chain:
+--
+--     root:   attempt=1 offset=0     hop_from_parent=None
+--     second: attempt=2 offset=1355  hop_from_parent=1355
+--     third:  attempt=3 offset=2712  hop_from_parent=1357   (1355 + 1357)
+--
+-- The column is EXACTLY the recursive per-hop sum of
+-- `child.created_at - parent.created_at`, to the millisecond, and it is exact
+-- by construction rather than by luck: `claim::load_with` computes `now_ms` as
+-- `EXTRACT(EPOCH FROM (now() - created_at))`, the child row is INSERTed in the
+-- same transaction with `created_at DEFAULT now()`, and `now()` in Postgres is
+-- TRANSACTION time. A recursive CTE at read time reproduces it. It stays exact
+-- under the oracle's driver too: `pass_time`'s predicate is
+-- `not_before_ms > elapsed`, so an execution is rewound only while its own
+-- deadline is still ahead -- that is, before its replay row exists -- and no
+-- ancestor is rewound after its child has been written.
+--
+-- What IS wrong, and is the measurement the first version generalised from:
+-- the two-endpoint subtraction between the last link and the first.
 -- `oracle-exec/driver.rs`'s `pass_time` makes time pass by moving an
 -- execution's `created_at` BACKWARDS by the shortfall to its next deadline --
 -- that is the whole of its intervention. A chain of replays therefore
--- accumulates simulated time *inside* each link, and a subtraction taken at
--- read time between the last link and the first cannot see any of it: it would
--- read ~2 s of a chain that has simulated ~4 s, and the third execution would
--- schedule a fourth. Adding the parent's elapsed AT THE INSTANT THE CHILD IS
--- CREATED puts the whole accumulation in the row, where a later rewind of an
--- ancestor's `created_at` cannot reach it.
+-- accumulates simulated time *inside* each link, and a subtraction that reads
+-- only the two ends cannot see any of it: it would read ~2 s of a chain that
+-- has simulated ~4 s, and the third execution would schedule a fourth. The
+-- per-hop sum can; the difference of the endpoints cannot.
+--
+-- So the column earns its place on four grounds, none of which is
+-- impossibility:
+--
+--   1. **Fidelity.** Kestra stores the same fact
+--      (`ExecutionMetadata.originalCreatedDate`). Storing it is what the
+--      artifact does, not an invention of this port.
+--   2. **Cost.** `claim::load_with` is on the hot path of every settle. Reading
+--      a column is O(1); a recursive CTE up the `parent_execution_id` chain is
+--      not, and it would run for every execution to serve four flows.
+--   3. **Durability.** It is immune to ANY later rewrite of an ancestor's
+--      `created_at`. The derivation is only accidentally safe from that: a
+--      second `not_before` on some other run of an ancestor would have
+--      `pass_time` rewind a row whose child already exists, and the hop sum
+--      would move under it.
+--   4. **Constrainability.** A stored column can be, and is, constrained by the
+--      CHECKs below. A derived expression cannot be.
 --
 -- `bigint`, and no upper bound: it is `Tick`'s own type
 -- (`executor::state::Tick(pub i64)`), so a value this column can hold is a
@@ -69,8 +107,9 @@ ALTER TABLE workflow.executions
   -- which counts a `RETRY_FAILED_TASK`'s attempts INSIDE one execution -- the
   -- two clocks `executor/retry.rs`'s header table separates.
   ADD COLUMN attempt_number   integer NOT NULL DEFAULT 1,
-  -- `execution.getMetadata().getOriginalCreatedDate()`, as an offset. See
-  -- above for why it is not derived.
+  -- `execution.getMetadata().getOriginalCreatedDate()`, as an offset. It is
+  -- derivable as the recursive per-hop sum; see above for the four reasons it
+  -- is stored anyway.
   ADD COLUMN origin_offset_ms bigint  NOT NULL DEFAULT 0;
 
 ALTER TABLE workflow.executions

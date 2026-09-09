@@ -129,10 +129,6 @@ pub(super) async fn spawn_due(
     state: &ExecutionState,
     now: Tick,
 ) -> Result<()> {
-    // This execution has not been retried into a new one.
-    if state.history.last() != Some(&RunState::Retried) {
-        return Ok(());
-    }
     // The run supplies the INSTANT and nothing else: `DefaultExecutor`'s
     // delay loop calls `executionService.replay(execution, flow, null, null,
     // empty)` -- a null `taskRunId` -- so the replay is of the whole flow and
@@ -274,6 +270,30 @@ pub(super) async fn spawn_due(
 }
 
 /// The `RETRIED` run whose `ExecutionDelay` has come due, if there is one.
+///
+/// # This is also what says the EXECUTION was retried, and that used to be a
+/// second guard
+///
+/// `spawn_due` opened with `if state.history.last() != Some(&RunState::Retried)
+/// { return Ok(()) }`. It was **measured redundant** rather than assumed so:
+/// mutated to `if false`, `--lib` (636), `--test worker` (52) and
+/// `--test executor` (45, ratchet included and unmoved at 127) were all green,
+/// which is the shape this programme rules indistinguishable from a guard that
+/// is merely weak — so the difference had to be established, and it is this.
+///
+/// A run reaches the filter below only if its own history ends `RETRIED` **and**
+/// it carries a deadline, and exactly one thing in the crate writes that pair:
+/// `retry::scan`'s `CREATE_NEW_EXECUTION` arm, which emits
+/// `SetExecutionState { Retried }` in the SAME command list — asserted, on the
+/// same fixture, by `executor::tests::create_new_execution_ends_the_execution_retried`
+/// (run history, execution history and `not_before` all in one test). The other
+/// behaviour leaves the run `RETRYING`, which this filter never selects, and
+/// `RETRIED` is terminal, so `advance()` returns nothing for such an execution
+/// and no second deadline can appear on it.
+///
+/// So the condition was folded into the one place it is derivable from, where
+/// deleting the fact **does** kill a test, instead of standing as a line no
+/// mutation could reach. (`next_retry_at`'s `NonZeroU32` is the precedent.)
 ///
 /// **At most one can exist**, and it is by construction rather than by luck:
 /// `retry::scan` returns on the first eligible run, its `CREATE_NEW_EXECUTION`

@@ -2740,7 +2740,10 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         "how many executions the driver leaves mid-flight. Every one holds a \
          task type this worker has no handler for -- `Registry::run` refuses \
          it, the tick aborts for that run, and the execution stalls exactly as \
-         the shipping worker would. **That sentence read `Every one IS a task \
+         the shipping worker would. **That sentence is DERIVED below**, over \
+         this same population and the driver's own registry, rather than \
+         asserted: it was false for four entries for five packages before \
+         anybody checked it. **That sentence read `Every one IS a task \
          type ...` and was false for four of them until W6 Task 4**: the \
          `retry-new-execution-*` entries declare only \
          `io.kestra.plugin.core.execution.Fail`, which has a handler and ran, \
@@ -2764,6 +2767,77 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
              ends `RETRIED`, which is terminal, and it now spawns the replay \
              that follows it -- it cannot be an execution left mid-flight. \
              Present in: {unfinished:?}"
+        );
+    }
+
+    // **And the other half of the message, DERIVED over the whole remaining
+    // population rather than trusted.** The four above are the four this claim
+    // was measurably false for; it was false for them, unchecked, for five
+    // packages, so the sentence gets a running program now.
+    //
+    // The predicate is the message's own: the entry must hold a
+    // [`TaskKind::Runnable`] whose `type_id` the DRIVER's registry has no
+    // handler for. `Runnable` and not any kind, or the claim would be vacuous
+    // -- every flow with a `Sequential` holds a type the registry does not
+    // serve, and flowables are `advance()`'s work, not a handler's.
+    let handled: BTreeSet<String> = driver::registry()
+        .type_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let mut stalled_without_an_unhandled_type: Vec<(String, Vec<String>)> = Vec::new();
+    for id in &unfinished {
+        let plan = build_plan(&corpus_source(id))
+            .unwrap_or_else(|e| panic!("{id} is in the runs population, so it plans: {e}"));
+        let leaves: Vec<String> = plan
+            .tasks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TaskKind::Runnable { type_id } => Some(type_id.clone()),
+                _ => None,
+            })
+            .collect();
+        if leaves.iter().all(|t| handled.contains(t)) {
+            stalled_without_an_unhandled_type.push((id.clone(), leaves));
+        }
+    }
+    assert!(
+        stalled_without_an_unhandled_type.is_empty(),
+        "these entries are counted as left mid-flight and every runnable type \
+         they declare HAS a handler, so the reason this count gives for them is \
+         not their reason. That was true of the four `retry-new-execution-*` \
+         entries for five packages -- the message asserted it and nothing \
+         derived it -- and the fix was a classifier change, not a handler. \
+         {stalled_without_an_unhandled_type:?}"
+    );
+    // The control: the claim is not vacuous, because the driver's registry is
+    // not empty and the four it was wrong about would have failed the check
+    // above.
+    assert_eq!(
+        driver::registry().type_ids(),
+        [
+            "io.kestra.plugin.core.debug.Return",
+            "io.kestra.plugin.core.execution.Fail",
+            "io.kestra.plugin.core.flow.Sleep",
+            "io.kestra.plugin.core.log.Log",
+        ],
+        "the four handlers the driver runs. If this list ever grew to cover \
+         everything the corpus declares, the derivation above would pass \
+         because nothing stalls rather than because the reason holds"
+    );
+    for id in [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-task-duration",
+    ] {
+        let plan = build_plan(&corpus_source(id)).expect("it plans");
+        assert!(
+            plan.tasks.iter().all(|t| match &t.kind {
+                TaskKind::Runnable { type_id } => handled.contains(type_id),
+                _ => true,
+            }),
+            "{id} declares only handled runnable types, so had it still been in \
+             `unfinished` the derivation above would have named it. That is \
+             what makes the derivation an instrument rather than a formality"
         );
     }
 }

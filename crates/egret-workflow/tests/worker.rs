@@ -5297,6 +5297,142 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
     );
 }
 
+/// **A `Subflow` child IS replayed, its parent is told nothing, and both of
+/// those are what the artifact does** — W6 Task 4, fix round 1.
+///
+/// The task's Concern 3 said this in prose and nothing on egret's side pinned
+/// it, so a later change that refused a replay under a `trigger_execution_id`
+/// link would have broken no test. Given that the same package's Critical was a
+/// cross-link conclusion nobody asserted, prose is not enough here.
+///
+/// **Kestra, pinned digest** (`rev4.probe/replay-subflow-parent` → a child
+/// carrying a `CREATE_NEW_EXECUTION` retry): the parent ends **`SUCCESS`**, the
+/// child ends `RETRIED`, and the replacement (`parentId` = the child) ends
+/// `FAILED` and reports to nobody. So refusing the replay here would be
+/// **under**-acceptance — the opposite of the `Loop` case, where creating one
+/// would be over-acceptance, and the two are told apart by a column rather than
+/// by a preference: `parent_run_ix`.
+///
+/// Three claims, and each fails on its own against a different wrong
+/// implementation: a `spawn_due` that keyed on "has a parent" would refuse this
+/// one; a `subflow::on_child_terminal` that read `RETRIED` as a failure would
+/// fail the parent; and a replacement linked by `trigger_execution_id` would
+/// report a second terminal to a run that already has one.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_is_replayed_and_its_parent_is_never_told(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // The target flow fails for real -- `core.execution.Fail` has a handler in
+    // `with_core_tasks` -- and carries the flow's retry, so the retry is
+    // decided inside the CHILD execution.
+    let child_source = "\
+id: child
+namespace: t
+tasks:
+  - id: boom
+    type: io.kestra.plugin.core.execution.Fail
+    retry:
+      behavior: CREATE_NEW_EXECUTION
+      type: constant
+      interval: PT1S
+      maxAttempts: 2
+";
+    file_flow(&db, ws, user, child_source).await;
+
+    let reg = Handlers::with_core_tasks();
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the parent");
+    settle_everything(&pool, &reg).await;
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "exactly one subflow child: {kids:?}");
+    let (child, _, parent_link, _, child_state) = kids[0].clone();
+    assert_eq!(
+        (parent_link, child_state.as_str()),
+        (None, "RETRIED"),
+        "the child is linked by the trigger columns only, and its own terminal \
+         is RETRIED -- the state a CREATE_NEW_EXECUTION retry ends an execution \
+         in"
+    );
+    assert_eq!(
+        run_state(&pool, parent, "sub").await.as_deref(),
+        Some("SUCCESS"),
+        "and the parent's `sub` run SUCCEEDS on it, which is what Kestra does \
+         too -- measured, not inherited: a parent that failed here would be \
+         under-acceptance"
+    );
+    assert_eq!(
+        run_state(&pool, parent, "after").await.as_deref(),
+        Some("SUCCESS"),
+        "so the successor runs and the parent really did proceed"
+    );
+    assert_eq!(
+        replay_of(&pool, child).await,
+        None,
+        "no replacement before the delay has elapsed"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![child],
+        "the waker names the subflow child, and nothing else. A `spawn_due` \
+         keyed on `has a parent` rather than on `parent_run_ix` would refuse \
+         this replay, which is UNDER-acceptance: Kestra replays here, because \
+         the retried run's parents are all local to the child execution and \
+         nothing throws. Named: {woken:?}"
+    );
+    let replacement = replay_of(&pool, child)
+        .await
+        .expect("the subflow child gets its replacement");
+    assert_eq!(
+        metadata_of(&pool, replacement).await.0,
+        2,
+        "attempt 2 of the chain"
+    );
+    let (trigger, trigger_run): (Option<Uuid>, Option<i32>) = sqlx::query_as(
+        "SELECT trigger_execution_id, trigger_run_ix FROM workflow.executions WHERE id = $1",
+    )
+    .bind(replacement)
+    .fetch_one(&pool)
+    .await
+    .expect("read the replacement\'s trigger columns");
+    assert_eq!(
+        (trigger, trigger_run),
+        (None, None),
+        "the replacement is a REPLAY, not a subflow child: it is linked by \
+         `parent_execution_id` alone, so `subflow::on_child_terminal` -- which \
+         reads `trigger_execution_id` -- can never reach the parent with it. \
+         That is the half of Concern 3 nothing pinned"
+    );
+
+    // The replacement runs and ends, and the parent must not move.
+    settle_everything(&pool, &reg).await;
+    assert_eq!(
+        execution_history(&pool, replacement).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "attempt 2 of 2 has no third attempt to schedule, so the chain ends \
+         FAILED"
+    );
+    assert_eq!(
+        execution_history(&pool, parent).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "and the parent is untouched by it: it was told about the child that \
+         RETRIED and it is told nothing about the one that replaced it. This is \
+         the assertion that would fail if the replacement were ever linked back \
+         through the trigger columns"
+    );
+}
+
 /// **Migration 0139's CHECK: the replay metadata is unrepresentable on a row
 /// that is not a replay.**
 ///

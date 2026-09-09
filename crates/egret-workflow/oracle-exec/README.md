@@ -7903,21 +7903,33 @@ run"*. The artifact says the opposite, and the delay is the whole of what
 `maxDuration` is measured against; without it the replay would start the instant
 the execution failed.
 
-## `origin_offset_ms` is a snapshot, and the oracle's own clock is why
+## `origin_offset_ms` can be derived, and is stored for four other reasons
 
 Kestra stores an absolute `originalCreatedDate`. 0139 stores the same fact
 relatively — how many milliseconds of the ORIGINAL execution's clock had already
-elapsed when this one was created — and it is a **stored snapshot** rather than
-`own.created_at - original.created_at` computed on read.
+elapsed when this one was created.
 
-The reason is `driver::pass_time`. It makes time pass by moving an execution's
-`created_at` **backwards** by the shortfall to its next deadline; that is its
-whole intervention. A chain of replays therefore accumulates simulated time
-*inside each link*, and a subtraction taken at read time between the last link
-and the first cannot see any of it — it would read ~2 s of a chain that has
-simulated ~4 s, and the third execution would schedule a fourth. Adding the
-parent's elapsed **at the instant the child is created** puts the accumulation in
-the row, where a later rewind of an ancestor cannot reach it.
+**This section, and 0139's header, said it "cannot be derived". That was false**
+and the fix round measured it: the column is exactly the recursive per-hop sum of
+`child.created_at − parent.created_at`, to the millisecond
+(`offset(second) = 1355 = hop(1355)`, `offset(third) = 2712 = 1355 + 1357`),
+exact because a same-transaction `now()` is. What was actually disproved is only
+the **two-endpoint** subtraction `own.created_at - original.created_at` computed
+on read, and the stronger sentence was generalised from it.
+
+The two-endpoint version fails because of `driver::pass_time`. It makes time pass
+by moving an execution's `created_at` **backwards** by the shortfall to its next
+deadline; that is its whole intervention. A chain of replays therefore
+accumulates simulated time *inside each link*, and a subtraction taken between
+the last link and the first cannot see any of it — it would read ~2 s of a chain
+that has simulated ~4 s, and the third execution would schedule a fourth. The
+per-hop sum can see it; the difference of the endpoints cannot.
+
+The column earns its place on four grounds instead: Kestra stores the same fact,
+so storing it is fidelity; `claim::load_with` is on every settle's hot path and
+O(1) beats a recursive CTE; it is immune to *any* later rewrite of an ancestor's
+`created_at`, which the derivation is only accidentally safe from; and it can be,
+and is, CHECK-constrained, which an expression cannot be.
 
 The clock is deliberately **not** shifted by the offset in `claim::load_with`:
 every other `Tick` in an execution — `TaskRun::not_before`, `Attempt::started_at`
@@ -7940,6 +7952,23 @@ travel a chain's whole accumulated time on every hop.
    Kestra cannot replay a loop iteration, and creating one here would be
    over-acceptance the oracle cannot see — no corpus flow puts such a retry
    inside a `Loop`, measured over all 345.
+   **The refusal is not the whole of what the artifact does there, and the
+   other half was a silent inversion.** With the iteration `RETRIED` and no
+   child, `spawn::decide` fell through to `terminated == total` and the loop run
+   ended **SUCCESS** — so the whole flow reported SUCCESS where Kestra reports
+   FAILED on both the loop run and the root (`rev4.probe/replay-in-loop`,
+   measured on both sides in the fix round). Kestra's throw aborts the retry
+   marking and fails the ITERATION execution, after which everything is the
+   ordinary `transmitFailed` path with a FAILED child; egret reproduces the
+   parent's half of that with `spawn::as_the_loop_reads_it`, one substitution at
+   the point the parent reads the child's terminal. It is deliberately not
+   `terminated_in_error(RETRIED)`, which reaches `terminateLoop`'s
+   `state == FAILED ? stateFailure : SUCCESS` ternary and ends the loop SUCCESS
+   again. The iteration's OWN terminal is still `RETRIED` where Kestra's is
+   `FAILED`: that half needs a field `advance()` does not have, and it is
+   asserted as it stands so it cannot drift unrecorded. **The ratchet does not
+   move either way** — 127 before and after — because no corpus flow reaches it,
+   which is exactly why it had to be fixed rather than baselined.
 3. **Not from a nested `settle`.** `interval: PT0S` over a flow that reaches
    `FAILED` inside one settle — an unresolvable `Subflow` target is the
    reachable example — would otherwise recurse `settle → spawn → settle` inside
