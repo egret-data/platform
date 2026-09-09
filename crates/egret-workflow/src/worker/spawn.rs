@@ -480,7 +480,7 @@ async fn on_execution_terminal_inner(
 
     let terminal = match decide(
         transmit_failed(&ctx, task)?,
-        child_state,
+        as_the_loop_reads_it(child_state),
         started,
         terminated,
         values.len(),
@@ -544,6 +544,56 @@ fn transmit_failed(ctx: &claim::ExecutionCtx, task: TaskIx) -> Result<bool> {
 /// (`State.java:296`), of which [`RunState`] has the first two.
 fn terminated_in_error(state: RunState) -> bool {
     matches!(state, RunState::Failed | RunState::Killed)
+}
+
+/// **The state the loop run reads for an iteration that ended `RETRIED`, and
+/// the reason it is not `RETRIED`** — W6 Task 4, fix round 1.
+///
+/// A `CREATE_NEW_EXECUTION` retry inside a `Loop` body ends the *iteration*
+/// execution `RETRIED` on egret's side. Kestra never reports that state to a
+/// parent, and the measurement of what it does instead is on the pinned digest
+/// (`rev4.probe/replay-in-loop`, a one-value `Loop` whose body's only task is a
+/// `Fail` with `behavior: CREATE_NEW_EXECUTION`):
+///
+/// ```text
+/// exec 4hsgGQXsbKwevjszb3RKKN  parentId=None   state=FAILED  run l     = FAILED
+/// exec 1EM1lBJxgIfaFxh0dSBAVR  parentId=4hsg…  state=FAILED  run inner = FAILED
+/// WARN … Flow failed from executor … 'Can't find taskrun with taskrunId
+///   '3mXFFNkYdF9Xo5nc0VvOdy' on execution '1EM1lBJxgIfaFxh0dSBAVR''
+/// ```
+///
+/// The id it cannot find is the **`Loop` run's**, which lives in the parent:
+/// `markWithTaskRunAs(…, RETRIED, markParents = true)` walks the failing run's
+/// parent chain and that chain leaves the sub-execution. The throw aborts the
+/// retry marking, `handleFailedExecutionFromExecutor` fails **that execution**,
+/// and everything after it is the ordinary loop path with a `FAILED` child —
+/// which is why the iteration ends `FAILED` with its body run `FAILED`, and why
+/// the root ends `FAILED` through nothing more exotic than `transmitFailed`.
+///
+/// So this is not a special case bolted onto [`decide`]: it is the one
+/// substitution that puts the parent back on the path the artifact takes. It is
+/// deliberately **not** `terminated_in_error(Retried)`, which would have sent
+/// `decide` down `terminateLoop`'s `state == FAILED ? stateFailure : SUCCESS`
+/// ternary and ended the loop `SUCCESS` again — the same wrong answer by a
+/// different route.
+///
+/// # What it does NOT fix, and why that half is not one predicate
+///
+/// The iteration's own terminal stays `RETRIED` where Kestra's is `FAILED`, and
+/// its body run stays `RETRIED` where Kestra's is `FAILED`. That half is
+/// `advance()`'s, which is pure over `(plan, state, now)` and cannot see which
+/// link kind carried the execution it is driving — it would need a third
+/// metadata field, for a case no corpus flow reaches. This half needs nothing
+/// new: the caller is [`on_execution_terminal`], which is holding the link.
+///
+/// The inversion this repairs was **SUCCESS where Kestra says FAILED** — a
+/// silent over-acceptance the oracle cannot catch, because no corpus flow puts
+/// a `CREATE_NEW_EXECUTION` retry inside a `Loop` (measured over all 345).
+fn as_the_loop_reads_it(child: RunState) -> RunState {
+    match child {
+        RunState::Retried => RunState::Failed,
+        other => other,
+    }
 }
 
 /// The flow a sub-execution runs: the parent flow with the `Loop`'s body in
@@ -796,6 +846,56 @@ mod tests {
         assert!(!terminated_in_error(RunState::Skipped));
         assert!(terminated_in_error(RunState::Failed));
         assert!(terminated_in_error(RunState::Killed));
+    }
+
+    /// **A `RETRIED` iteration fails its loop, and every other terminal is
+    /// passed through untouched** — W6 Task 4, fix round 1.
+    ///
+    /// Two-sided by construction: the `RETRIED` row is the substitution and the
+    /// loop over [`RunState::ALL`] is the control, so a
+    /// `as_the_loop_reads_it` that answered `FAILED` for everything fails here
+    /// rather than passing on the one row that matters.
+    ///
+    /// The third assertion is the one that says WHY the obvious one-predicate
+    /// fix is not this one: adding `RETRIED` to [`terminated_in_error`] sends
+    /// `decide` into `terminateLoop`'s ternary, whose non-`FAILED` arm is
+    /// `SUCCESS` — the same inversion by a different route.
+    #[test]
+    fn a_retried_iteration_is_read_by_its_loop_as_a_failure() {
+        assert_eq!(
+            as_the_loop_reads_it(RunState::Retried),
+            RunState::Failed,
+            "Kestra's executor fails the iteration execution outright rather \
+             than reporting RETRIED to the loop -- measured on the pinned \
+             digest, see this function's doc"
+        );
+        for state in RunState::ALL.iter().copied() {
+            if state == RunState::Retried {
+                continue;
+            }
+            assert_eq!(
+                as_the_loop_reads_it(state),
+                state,
+                "{state:?} must reach the loop unchanged; only RETRIED is a \
+                 state the artifact never reports to a parent"
+            );
+        }
+        assert_eq!(
+            decide(true, as_the_loop_reads_it(RunState::Retried), 1, 1, 1),
+            Next::Terminate(RunState::Failed),
+            "so the one-value loop whose body was retried into a new execution \
+             ends FAILED, and its root with it -- egret reported SUCCESS here \
+             until this substitution"
+        );
+        assert_eq!(
+            decide(true, RunState::Retried, 1, 1, 1),
+            Next::Terminate(RunState::Success),
+            "the control for the substitution: WITHOUT it the raw RETRIED \
+             falls through to `terminated == total` and the loop SUCCEEDS. \
+             Putting RETRIED into `terminated_in_error` instead reaches \
+             `Terminate(SUCCESS)` through the ternary, which is why the fix is \
+             a substitution and not a predicate"
+        );
     }
 
     /// Every corpus flow that holds a `Loop` — the sub-flow this module

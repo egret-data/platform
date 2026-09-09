@@ -4790,6 +4790,19 @@ async fn a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists(pool
 ///
 /// It also asserts the waker's own term: the loop sub-execution is one
 /// `due_retries` must never name, because no child will ever appear to stop it.
+///
+/// # It runs in BOTH directions, and the second one was added by a fix round
+///
+/// Everything the first version asserted was on the way **down** — that the
+/// iteration's run is `RETRIED`, that no replay is created, that the waker does
+/// not name it. The defect was on the way **up**: the loop run read a `RETRIED`
+/// iteration as one that had terminated without error and the whole flow
+/// reported `SUCCESS` where Kestra reports `FAILED`. A test that builds exactly
+/// the right fixture and only ever walks one direction through it is the third
+/// instance of that shape in this package. So this one now asserts the loop
+/// run, the root's history, **and** the one thing that is still divergent (the
+/// iteration's own terminal), which is what keeps the remaining gap from
+/// drifting unrecorded.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level(
     pool: sqlx::PgPool,
@@ -4832,6 +4845,47 @@ async fn a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_le
         "the body run inside the iteration is RETRIED, so the only thing \
          between it and a replay is `spawn_due`'s refusal: {}",
         stuck(&pool, iteration, "a").await
+    );
+
+    // **The ASCENT, and it is the half a fix round had to add.** Everything
+    // above this walks DOWN into the sub-execution; the defect was on the way
+    // back up, where the loop run reads what the iteration terminated as. Egret
+    // reported SUCCESS here — `spawn::decide` fell through to
+    // `terminated == total` because `RETRIED` is not `terminated_in_error` —
+    // while Kestra reports FAILED on both rows, measured on the pinned digest:
+    //
+    // ```text
+    // exec 4hsg…  parentId=None   state=FAILED  run l     = FAILED
+    // exec 1EM1…  parentId=4hsg…  state=FAILED  run inner = FAILED
+    // ```
+    assert_eq!(
+        run_state(&pool, looped, "l").await.as_deref(),
+        Some("FAILED"),
+        "the loop run whose one iteration was retried into a replay Kestra \
+         cannot create must FAIL. It read SUCCESS until `as_the_loop_reads_it` \
+         -- a silent FAILED->SUCCESS inversion on a publishable flow that the \
+         oracle cannot see, because no corpus flow puts a CREATE_NEW_EXECUTION \
+         retry inside a Loop: {}",
+        stuck(&pool, looped, "l").await
+    );
+    assert_eq!(
+        execution_history(&pool, looped).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "and the root execution with it -- Kestra's root ends FAILED. This is \
+         the assertion the first round stopped one line short of"
+    );
+    // The half that is NOT fixed, asserted so it cannot drift unrecorded: the
+    // iteration's OWN terminal is still `RETRIED` where Kestra's is `FAILED`,
+    // because `advance()` is pure over `(plan, state, now)` and cannot see
+    // which link kind carried the execution it is driving.
+    assert_eq!(
+        execution_history(&pool, iteration).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED", "RETRIED"]),
+        "the iteration execution itself is the remaining divergence: it FAILS \
+         and is then marked RETRIED, where Kestra's stops at FAILED. It is recorded rather than repaired: fixing it needs a third \
+         metadata field on `ExecutionState` for a case no corpus flow reaches, \
+         and it is invisible to the parent now that the loop reads it as a \
+         failure"
     );
 
     tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;

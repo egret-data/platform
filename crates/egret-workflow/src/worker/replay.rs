@@ -98,7 +98,17 @@ use crate::executor::{ExecutionState, RunIx, RunState, Tick};
 /// body is a *synthesised flow* whose runs have no parent outside the
 /// sub-execution — a divergence that predates this module and is not one this
 /// module can repair, since `advance()` cannot see which link kind carried the
-/// execution it is driving. What it must not do is add the execution the
+/// execution it is driving.
+///
+/// **The half of that divergence the PARENT could see is repaired**, and it was
+/// worse than the half that remains: with the iteration `RETRIED` and no child,
+/// `spawn::decide` counted it as an iteration that terminated without error and
+/// the whole flow reported `SUCCESS` where Kestra reports `FAILED` on both the
+/// loop run and the root. See
+/// [`spawn::as_the_loop_reads_it`](super::spawn) — the throw quoted above
+/// aborts Kestra's retry marking and fails the *iteration execution*, so
+/// everything after it there is the ordinary `transmitFailed` path with a
+/// `FAILED` child. What this module must not do is add the execution the
 /// artifact does not create: that is over-acceptance, it would be invisible to
 /// the oracle (no corpus flow puts a `CREATE_NEW_EXECUTION` retry inside a
 /// `Loop` — measured over all 345), and the child would be an orphan anyway,
