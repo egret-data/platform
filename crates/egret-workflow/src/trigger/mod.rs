@@ -338,6 +338,14 @@ pub fn tick(
     }
 }
 
+/// What a drained run leaves behind: the final state, the executions it asked
+/// for, and every named reason a pass produced none.
+///
+/// A named tuple rather than three loose returns because a caller that dropped
+/// the `SkipReason`s would turn every refusal into silence, which is the exact
+/// failure `TickOutcome::Skipped`'s doc warns about.
+pub type DrainedRun = (TriggerState, Vec<ScheduledExecution>, Vec<SkipReason>);
+
 /// Ticks until the trigger is no longer due, collecting what it fired.
 ///
 /// The scheduling loop applies **one** tick per pass — `TriggerScheduler`'s own
@@ -352,7 +360,7 @@ pub fn run_until_idle(
     inputs: &BTreeMap<String, serde_json::Value>,
     clock: &dyn Clock,
     max_passes: usize,
-) -> (TriggerState, Vec<ScheduledExecution>, Vec<SkipReason>) {
+) -> DrainedRun {
     let mut state = state.clone();
     let mut fired = Vec::new();
     let mut skipped = Vec::new();
