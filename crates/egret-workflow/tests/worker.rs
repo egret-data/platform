@@ -5325,62 +5325,91 @@ async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
 ///    copies `this.trigger` verbatim (`Execution.java:405-431`, the field at
 ///    :422), so the replacement carries the *parent's* `executionId` and the
 ///    *parent's* `sub` `taskRunId`, exactly as the child does.
-/// 2. **The parent's `sub` run therefore ends `FAILED`**, stamped ~31 ms after
-///    the replacement's own `FAILED` and **~1.1 s after the parent execution had
-///    already ended `SUCCESS`** — a post-terminal annotation onto a run whose
-///    history already holds `SUCCESS`. The parent's execution state does not
-///    move, and `after` had already run.
+/// 2. **The parent's `sub` run therefore ends `FAILED`**, stamped ~13-33 ms
+///    after the replacement's own `FAILED`.
+///
+/// # What the FIXTURE was holding fixed, and the third correction it hid
+///
+/// Rounds 1 and 2 read the trace above as *"the stamp lands after the parent
+/// has finished, so it changes nothing"*. **That framing was an artifact of
+/// this fixture's trivial successor, not of Kestra's design.** Change one thing
+/// the fixture holds fixed — the successor, from `Log` to `Sleep PT8S`, still a
+/// legal publishable flow — and measure again. Both orderings, measured twice
+/// each on the pinned digest in fix round 3:
+///
+/// ```text
+/// successor `Log`      parent EXEC SUCCESS   stamp lands +562 ms / +407 ms AFTER the parent ended
+/// successor `Sleep`    parent EXEC FAILED    stamp lands  -23 ms /  -46 ms BEFORE it, parent still RUNNING
+/// ```
+///
+/// It is **one deterministic rule** — report the replacement's terminal through
+/// the copied trigger — whose observable consequence depends only on whether the
+/// parent is still alive to receive it. At the second ordering the write is
+/// ordinary, the parent is live, and **the flow's own verdict differs**: Kestra
+/// `FAILED`, egret `SUCCESS`. (In that run Kestra's `after` then completed
+/// `SUCCESS` 6.264 s *after* the execution had been declared `FAILED`.)
+///
+/// **egret's answer is the same at both orderings, by construction**, and the
+/// assertion that says so is the `(trigger, trigger_run) == (None, None)` one
+/// below: with no trigger link on the replacement, `subflow::on_child_terminal`
+/// is never invoked for it, so there is no stamp to be early or late. That is
+/// why this test does not need a second fixture to cover the second ordering —
+/// but it is also why the divergence is bigger than rounds 1-2 said.
 ///
 /// # What agrees, and what egret cannot represent
 ///
-/// Every **execution-level** answer agrees: parent `SUCCESS`, child `RETRIED`,
-/// replacement `FAILED`, successor run. Concern 3's verdict stands — replaying
-/// here is the artifact's behaviour and refusing it would be under-acceptance.
+/// The child (`RETRIED`), the replacement (`FAILED`) and the fact that a replay
+/// happens at all agree. Concern 3's verdict stands — replaying here is the
+/// artifact's behaviour and refusing it would be under-acceptance. **What
+/// diverges is the parent: its `sub` run always, and its EXECUTION whenever a
+/// successor outlives the replay.**
 ///
-/// The `sub` RUN is a divergence, and it is **structural rather than chosen**:
+/// It is **structural rather than chosen**:
 ///
 /// * the replay must carry `parent_execution_id` — that is what puts it in the
 ///   oracle's `spawned`, which is what all four banked entries compare — and
 ///   0138's `workflow_executions_one_link_kind` CHECK
 ///   (`parent_execution_id IS NULL OR trigger_execution_id IS NULL`) makes
 ///   carrying both **unrepresentable**. Kestra carries both;
-/// * even with the trigger copied, `subflow::on_child_terminal` returns early on
-///   a parent run that is already terminal ("Already decided"), which is
-///   measured behaviour for `transmitFailed` and `wait: false`;
-/// * and egret has no path at all that mutates a run of an execution that has
-///   already terminated.
+/// * and even with the trigger copied, `subflow::on_child_terminal` returns
+///   early on a parent run that is already terminal ("Already decided"), which
+///   is measured behaviour for `transmitFailed` and `wait: false`.
 ///
-/// So following the artifact costs a relaxed CHECK whose stated purpose is
-/// protecting all 41 golden `spawned` entries, a weakened terminal guard, and a
-/// post-terminal write path — for a shape **no corpus flow reaches**. That last
-/// is derived, not remembered: over `oracle-exec/corpus/`, 345 flows, 4 writing
-/// `CREATE_NEW_EXECUTION` and none of those declaring a `Loop`; 25 declaring a
-/// `Subflow` across 20 distinct `flowId` targets; intersection with the four is
-/// empty.
+/// **A third cost was claimed in round 2 and is withdrawn.** It read *"egret
+/// would need a path that writes to a terminal execution"*. At the ordering
+/// that matters the parent is **live**, so the write is an ordinary one and
+/// W3b's durability property is not in play. The CHECK is what stops egret
+/// here; the fidelity rule does not excuse it.
+///
+/// For a shape **no corpus flow reaches** — derived, not remembered: over
+/// `oracle-exec/corpus/`, 345 flows, 4 writing `CREATE_NEW_EXECUTION` and none
+/// of those declaring a `Loop`; 25 declaring a `Subflow` across 20 distinct
+/// `flowId` targets; intersection with the four is empty.
 ///
 /// # A person decided this, and the decision is registered
 ///
-/// **Ruled by the controller (W6 Task 4, fix round 2): the divergence stands,
-/// deliberately.** The reasoning is on the record in
+/// **Ruled by the controller (W6 Task 4, fix rounds 2 and 3): the divergence
+/// stands, deliberately** — on 0138's CHECK and the empty corpus population,
+/// which are sufficient on their own. The reasoning, the corrected size, and
+/// the two grounds the controller withdrew (the third cost, and a "race"
+/// framing that was never a race) are on the record in
 /// `oracle-exec/README.md`'s coverage statement, **item 16**, which is where
-/// this package registers divergences the ratchet cannot hold — with the
-/// measurement, the three costs, and the ruling attributed. The load-bearing
-/// half of it: **faithfulness to an upstream RACE is not the same as
-/// faithfulness to upstream BEHAVIOUR**, and reproducing a write that lands
-/// 1.134 s after the execution ended would mean giving egret a path that
-/// writes to a terminal execution — undoing a durability property W3b
-/// established and W4 spent a package defending.
+/// this package registers divergences the ratchet cannot hold.
+///
+/// **It is parked, not hidden.** The third derived shape in
+/// `tests/executor.rs`'s `STILL_OVER_ACCEPTED_AT_RUNTIME` — a run Kestra
+/// stopped that egret completed — is exactly this divergence's shape, so the
+/// moment any corpus flow reaches it the suite fails as an *unregistered*
+/// runtime over-acceptance rather than passing quietly.
 ///
 /// So a reader who reaches the assertions below is not looking at a test that
 /// lapsed. The values are egret's, they are correct, and each message carries
 /// Kestra's value beside them.
 ///
 /// **It is the same FAILED→SUCCESS direction as this task's first Critical, and
-/// it is named as such rather than minimised.** What differs is the blast
-/// radius: there the whole flow reported SUCCESS where Kestra reported FAILED;
-/// here every execution in the chain agrees with the artifact, and the stamp
-/// Kestra makes lands after its own flow has finished and changes nothing
-/// downstream.
+/// at the second ordering it is the same SIZE too** — the flow's own verdict.
+/// Rounds 1 and 2 said otherwise; that sentence is corrected here rather than
+/// left standing.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -5437,9 +5466,11 @@ tasks:
         Some("SUCCESS"),
         "egret's `sub` run ends SUCCESS. **Kestra's ends FAILED** -- it stamps \
          the replacement's failure onto this run through the trigger block \
-         `Execution.childExecution()` copied, ~31 ms after the replacement \
-         failed and ~1.1 s after the parent execution had already ended \
-         SUCCESS. This is a recorded DIVERGENCE, not agreement, and a RULED \
+         `Execution.childExecution()` copied, 13-33 ms after the replacement \
+         failed (five runs). WHEN it lands relative to the parent's own \
+         terminal depends on the successor and nothing else -- after it here, \
+         BEFORE it with a `Sleep PT8S`, where Kestra's parent then ends \
+         FAILED. This is a recorded DIVERGENCE, not agreement, and a RULED \
          one: `oracle-exec/README.md`'s coverage statement, item 16, carries \
          the measurement, the three things egret would have to give up, and \
          the controller's ruling that it stands"
@@ -5513,13 +5544,29 @@ tasks:
         "attempt 2 of 2 has no third attempt to schedule, so the chain ends \
          FAILED"
     );
+    // **This message claimed parity and was WRONG -- fix round 3, and it is the
+    // SECOND time this task shipped that construction in an assertion.** It
+    // read: "which is what Kestra does too, measured: its parent's histories
+    // end at SUCCESS". That is true only of THIS fixture, whose successor is a
+    // `Log` that finishes before the replacement does. Change the successor to
+    // a `Sleep PT8S` -- a legal publishable flow -- and Kestra's parent
+    // EXECUTION ends **FAILED** (measured twice: the `sub` stamp lands 23.0 ms
+    // and 45.5 ms BEFORE the parent's own terminal, i.e. while it is still
+    // RUNNING). So the divergence can be the FLOW'S OWN VERDICT, not a run
+    // state after the flow is over.
     assert_eq!(
         execution_history(&pool, parent).await,
         serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
-        "and the parent EXECUTION is untouched by it -- which is what Kestra \
-         does too, measured: its parent's histories end at SUCCESS and the \
-         later FAILED lands on the `sub` RUN alone. So the execution-level \
-         answers agree on all four rows of this chain; only the run diverges"
+        "egret's parent EXECUTION ends SUCCESS. **So does Kestra's ONLY \
+         because this fixture's successor is trivial.** With a successor that \
+         outlives the replay (`Sleep PT8S`, measured twice on the pinned \
+         digest) the stamp lands while the parent is still RUNNING and \
+         Kestra's parent ends **FAILED** -- egret still answers SUCCESS, \
+         because its replacement carries no trigger link at all and so no \
+         stamp is ever delivered, at any ordering. That makes this a \
+         divergence in the FLOW'S OWN VERDICT, the same class as this task's \
+         first Critical, and it is registered and ruled: \
+         `oracle-exec/README.md` coverage statement, item 16"
     );
 }
 

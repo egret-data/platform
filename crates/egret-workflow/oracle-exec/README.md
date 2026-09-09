@@ -6739,62 +6739,93 @@ content for `Files.copy` to materialise). The two legs differ, an earlier draft
 of this gave one answer for both, and neither leg reaches the host — which is
 why the residual is accepted rather than fixed.
 
-*A replay of a `Subflow` child never tells the parent, and Kestra's tells it
-1.1 s after the parent has finished.* W6 Task 4, fix round 2. Measured on the
-pinned digest twice, with `tests/worker.rs`'s own fixture shape (compose project
-`t4r2kestra`, namespace `t4r2.probe`, torn down `-v`):
-
-```text
-parent      SUCCESS   ["CREATED","RUNNING","SUCCESS"]
-  run sub   FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
-  run after SUCCESS
-child       RETRIED   trigger.taskRunId = the parent's `sub` run
-replacement FAILED    parentId = the child, trigger = BYTE-IDENTICAL to the child's
-```
+*A replay of a `Subflow` child never tells the parent; Kestra's does, and at
+one ordering that changes the parent flow's own verdict.* W6 Task 4, fix rounds
+2-3. Measured on the pinned digest, **six runs across three compose projects**,
+with `tests/worker.rs`'s own fixture shape.
 
 `Execution.childExecution()` copies `this.trigger` verbatim
 (`Execution.java:405-431`, the field at `:422`), so the replacement is still
-addressed to the parent's `sub` taskrun; Kestra stamps that run **`FAILED`**
-**30.8 ms after the replacement's own `FAILED`** and **1.134 s after the parent
-execution had already ended `SUCCESS`**. egret's `sub` run stops at `SUCCESS` —
-it reaches Kestra's fourth history entry and does not write the fifth.
+addressed to the parent's `sub` taskrun and Kestra reports its terminal there.
+egret's replacement carries no trigger link at all — 0138's
+`workflow_executions_one_link_kind` forbids it alongside the
+`parent_execution_id` the replay needs — so **no stamp is ever delivered, at any
+ordering**.
 
-**Every EXECUTION-level answer agrees** (parent `SUCCESS`, child `RETRIED`,
-replacement `FAILED`, successor run), and the corpus intersection is empty:
-re-derived over `corpus/`, **345 flows, 4 writing `CREATE_NEW_EXECUTION` and
-none of those declaring a `Loop`; 25 declaring a `Subflow` across 20 distinct
-`flowId` targets; intersection with the four = zero**. So the ratchet is silent
-either way, which is why this is registered rather than baselined.
+**The size of the divergence depends on one thing: whether the parent is still
+alive when the stamp lands.** Rounds 1-2 measured only the first ordering and
+generalised from it; the third round changed the one thing the fixture held
+fixed — the successor — and measured again.
 
-**Following the artifact costs three things, and they are why it is not
-followed:**
+| successor | parent EXECUTION | `sub` run | stamp vs the parent's own terminal |
+|---|---|---|---|
+| `Log` (finishes first) | Kestra `SUCCESS` = egret `SUCCESS` | Kestra `FAILED`, egret `SUCCESS` | **after**: +1134 / +676 / +637 / +562 / +407 ms |
+| `Sleep PT8S` (outlives the replay) | **Kestra `FAILED`, egret `SUCCESS`** | Kestra `FAILED`, egret `SUCCESS` | **before**: −23 / −46 ms, parent still `RUNNING` |
 
-1. **A relaxed CHECK.** The replay must carry `parent_execution_id` — the column
-   `driver::read_trace_inner` builds `spawned` from, and what all four banked
-   entries compare — while 0138's `workflow_executions_one_link_kind`
+The stamp follows the replacement's own terminal by **13-33 ms** in every run.
+**The ordering is robust; the magnitude is not** — the "after" gap varies about
+three-fold across five runs, so it is quoted as a range and no single figure
+should be cited. At the second ordering Kestra's `after` went on to complete
+`SUCCESS` **6.264 s after its execution had already been declared `FAILED`**.
+
+**So this can be a divergence in the FLOW'S OWN VERDICT** — the same class, and
+at that ordering the same size, as the Critical this task opened with. The
+`sub` run diverges always; the execution diverges whenever a successor outlives
+the replay. Earlier drafts of this entry said *"every EXECUTION-level answer
+agrees"*; that was true of one fixture and is corrected here.
+
+It is **one deterministic rule**, not a race: report the replacement's terminal
+through the copied trigger. Only its observable consequence depends on the
+parent's liveness, which is faithfulness to *behaviour* in exactly the sense the
+fidelity rule covers. **The fidelity rule does not excuse egret here; the CHECK
+does.**
+
+**What following it would cost — two things, not three:**
+
+1. **A relaxed CHECK, and this one is sufficient on its own.** The replay must
+   carry `parent_execution_id` — the column `driver::read_trace_inner` builds
+   `spawned` from, and what all four banked entries compare — while
+   `workflow_executions_one_link_kind`
    (`parent_execution_id IS NULL OR trigger_execution_id IS NULL`) makes
-   carrying both **unrepresentable**. Kestra carries both. That CHECK is the one
-   0138's own header calls *"the one the package's banks depend on"*.
+   carrying both unrepresentable. 0138's own header calls it *"the one the
+   package's banks depend on"*, and twelve of this package's sixteen banks rest
+   on a `Subflow` child never surfacing in `spawned`.
 2. **A weakened guard.** `subflow::on_child_terminal` returns early on a parent
    run that is already terminal — load-bearing for `transmitFailed` and
    `wait: false`.
-3. **A post-terminal write path.** Kestra's stamp lands on an execution that
-   ended 1.134 s earlier. egret has no path that writes to a terminal execution
-   at all, and adding one would undermine a durability property W3b established
-   and W4 spent a package defending.
 
-**Ruled by the controller, W6 Task 4 fix round 2, and recorded as a decision
-rather than an omission:** the divergence stands. The reasoning on the record is
-that the three costs are not payable for zero corpus population; that the third
-is the worst, because **faithfulness to an upstream RACE is not the same as
-faithfulness to upstream BEHAVIOUR** and this programme's fidelity rule was
-written for the second; and that every execution-level answer already agrees. It
-is asserted as a divergence — never as parity — by
+**A third cost was claimed in round 2 and is WITHDRAWN in round 3:** *"egret
+would need a path that writes to a terminal execution."* It does not exist at
+the ordering that matters — the parent is live, the write is ordinary, and
+W3b's durability property is not in play. (Kestra performs post-terminal run
+writes in *both* orderings anyway: `sub` in the first, `after` in the second.)
+
+**Zero corpus population, derived rather than remembered:** over `corpus/`,
+**345 flows, 4 writing `CREATE_NEW_EXECUTION` and none of those declaring a
+`Loop`; 25 declaring a `Subflow` across 20 distinct `flowId` targets;
+intersection with the four = zero.** The ratchet is silent either way, which is
+why this is registered rather than baselined.
+
+**Parked, not hidden.** The third derived shape in `tests/executor.rs`'s
+`STILL_OVER_ACCEPTED_AT_RUNTIME` — a run Kestra stopped that egret completed —
+is exactly this divergence's shape. The moment any corpus flow reaches it, that
+test fails as an *unregistered* runtime over-acceptance rather than passing
+quietly. That is what makes shipping it defensible.
+
+**Ruled by the controller (fix rounds 2-3), recorded as a decision rather than
+an omission:** the divergence stands, on ground 1 and the empty corpus
+population, which are sufficient without the two grounds round 2 leaned on and
+round 3 withdrew. It is asserted as a divergence — never as parity — by
 `a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`, whose
-messages carry Kestra's value beside egret's. **The test that used to stand here
-claimed the opposite** (*"which is what Kestra does too — measured"*), which is
-the shape a wrong claim takes: it does not merely miss a divergence, it defends
-one.
+messages carry Kestra's value beside egret's.
+
+**Two assertions in this task claimed parity here and were wrong**, one per
+round, in nearly the same words (*"which is what Kestra does too — measured"*).
+The lesson is worth more than either correction: **a measurement's framing can
+be an artifact of the fixture's incidental choices, and the way to find that is
+to change one thing the fixture holds fixed and measure again.** Both defects
+were found that way, by a reader who asked what the fixture was holding fixed —
+not by re-reading the claim.
 
 **17. A worker that dies leaves containers and staging directories behind, and
 nothing collects them.** Reproduced, not hypothesised: killing three concurrent
