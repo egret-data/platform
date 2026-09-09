@@ -367,3 +367,653 @@ pub fn run_until_idle(
     }
     (state, fired, skipped)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        run_until_idle, Clock, ScheduleTrigger, SkipReason, SystemClock, TestClock, TickOutcome,
+        TriggerState,
+    };
+    use crate::models::Trigger;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn at(iso: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(iso)
+            .unwrap_or_else(|e| panic!("bad fixture instant {iso:?}: {e}"))
+            .with_timezone(&Utc)
+    }
+
+    fn sched(cron: &str) -> ScheduleTrigger {
+        let yaml =
+            format!("id: nightly\ntype: core.schedule\ncron: \"{cron}\"\ntimezone: \"UTC\"\n");
+        let trigger: Trigger = serde_norway::from_str(&yaml).unwrap();
+        ScheduleTrigger::resolve(&trigger).unwrap()
+    }
+
+    fn no_inputs() -> BTreeMap<String, serde_json::Value> {
+        BTreeMap::new()
+    }
+
+    fn state_at(trigger: &ScheduleTrigger, clock: &TestClock) -> TriggerState {
+        TriggerState::initialise(trigger, "company.team", "nightly_flow", clock)
+    }
+
+    // ---------------------------------------------------------------------
+    // The clock
+    // ---------------------------------------------------------------------
+
+    /// **The only reader of the wall clock under `src/trigger/` is
+    /// [`SystemClock::now`].**
+    ///
+    /// A running check rather than a convention, because a convention is what a
+    /// future edit does not read. It scans the *non-test* half of every file in
+    /// the module tree — a scheduler that read `Utc::now()` anywhere in `tick`
+    /// or `Schedule` would be untestable and would fail at midnight, and this
+    /// workspace has lost whole gate runs to exactly that
+    /// (`egret-query/tests/connector_trino_pool.rs` carries three wall-clock
+    /// assertions).
+    ///
+    /// The split is asserted as well as used: if `#[cfg(test)]` ever stops
+    /// being the marker, this test fails rather than silently scanning nothing.
+    #[test]
+    fn no_wall_clock_in_the_trigger_path() {
+        const FORBIDDEN: &[&str] = &[
+            "Utc::now",
+            "Local::now",
+            "SystemTime::now",
+            "Instant::now",
+            "OffsetDateTime::now",
+        ];
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/trigger");
+        let mut files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+            .collect();
+        files.sort();
+
+        assert!(
+            files.len() >= 2,
+            "expected at least mod.rs and schedule.rs under {}, found {files:?}",
+            dir.display()
+        );
+
+        let mut markers_seen = 0usize;
+        let mut total_hits: Vec<(String, &str)> = Vec::new();
+
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read source");
+            assert!(
+                source.len() > 500,
+                "{} is suspiciously short -- did the scan read the right file?",
+                path.display()
+            );
+
+            // Everything before the test module. A file with no test module is
+            // scanned whole, which is the conservative direction.
+            let shipping = match source.find("#[cfg(test)]") {
+                Some(i) => {
+                    markers_seen += 1;
+                    &source[..i]
+                }
+                None => &source[..],
+            };
+            assert!(
+                !shipping.is_empty(),
+                "{}: the shipping slice is empty",
+                path.display()
+            );
+
+            let name = path
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .into_owned();
+            for needle in FORBIDDEN {
+                for _ in 0..shipping.matches(needle).count() {
+                    total_hits.push((name.clone(), needle));
+                }
+            }
+        }
+
+        assert!(
+            markers_seen >= 1,
+            "no `#[cfg(test)]` marker found in any file -- the split this check \
+             depends on has moved, so the check was measuring nothing"
+        );
+
+        // Exactly one, and it is `SystemClock::now`.
+        assert_eq!(
+            total_hits,
+            vec![("mod.rs".to_string(), "Utc::now")],
+            "the ONLY wall-clock read under src/trigger/ may be SystemClock::now"
+        );
+    }
+
+    /// The injected clock, and nothing else, decides whether a trigger is due.
+    ///
+    /// Two ticks with the clock unchanged, and the second is `NotDue`. Then the
+    /// clock moves and the same state fires. Nothing about the trigger or the
+    /// state changed between the two.
+    #[test]
+    fn the_clock_is_the_only_thing_that_makes_a_trigger_due() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let state = state_at(&trigger, &clock);
+        assert_eq!(
+            state.next_evaluation_date,
+            Some(at("2026-06-16T02:00:00Z")),
+            "a new schedule is due at its NEXT tick, not now"
+        );
+
+        let first = super::tick(&trigger, &state, &no_inputs(), &clock);
+        assert_eq!(first.outcome, TickOutcome::NotDue);
+        assert_eq!(first.state, state, "a not-due tick must not mutate state");
+
+        clock.set(at("2026-06-16T02:00:00Z"));
+        let second = super::tick(&trigger, &state, &no_inputs(), &clock);
+        match &second.outcome {
+            TickOutcome::Fired(execution) => {
+                assert_eq!(execution.scheduled_date, at("2026-06-16T02:00:00Z"));
+            }
+            other => panic!("expected the same state to fire once the clock moved, got {other:?}"),
+        }
+    }
+
+    /// A clock that goes **backwards** does not resurrect a consumed tick.
+    ///
+    /// Nothing in the corpus produces this, and that is the point: a replica
+    /// whose clock is behind is a real thing, and a scheduler that has never
+    /// been asked what it does about one has an answer nobody has read.
+    #[test]
+    fn a_clock_that_moves_backwards_does_not_replay_a_consumed_tick() {
+        let clock = TestClock::new(at("2026-06-16T02:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+
+        let fired = super::tick(&trigger, &state, &no_inputs(), &clock);
+        assert!(matches!(fired.outcome, TickOutcome::Fired(_)));
+        let after = fired.state;
+        assert_eq!(after.next_evaluation_date, Some(at("2026-06-17T02:00:00Z")));
+
+        clock.set(at("2026-06-15T00:00:00Z"));
+        let again = super::tick(&trigger, &after, &no_inputs(), &clock);
+        assert_eq!(
+            again.outcome,
+            TickOutcome::NotDue,
+            "moving the clock back must not re-fire an already-consumed tick"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Once, and only once
+    // ---------------------------------------------------------------------
+
+    /// A tick fires **once and only once**: over a run long enough to cover
+    /// many ticks, no scheduled date appears twice and none is missing.
+    ///
+    /// Asserted on the set *and* the sequence — a duplicate that happened to
+    /// keep the count right would pass a length check alone.
+    #[test]
+    fn a_tick_fires_once_and_only_once() {
+        let clock = TestClock::new(at("2026-06-15T00:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+
+        let mut fired = Vec::new();
+        // Ten days, ticked four times a day -- so every tick is offered to the
+        // scheduler several times over, which is what a real loop does.
+        for step in 0..40 {
+            clock.set(at("2026-06-15T00:00:00Z") + Duration::hours(6 * step));
+            let t = super::tick(&trigger, &state, &no_inputs(), &clock);
+            state = t.state;
+            if let TickOutcome::Fired(execution) = t.outcome {
+                fired.push(execution.scheduled_date);
+            }
+        }
+
+        // The run starts at 06-15T00:00 and the first tick due is 06-15T02:00,
+        // not 06-16 -- `initialise` takes the NEXT cron tick, and 02:00 that
+        // same day is still ahead of midnight. Forty passes six hours apart
+        // reach 06-24T18:00, so 06-24T02:00 is the last one that can fire.
+        let expected: Vec<DateTime<Utc>> = (15..=24)
+            .map(|day| at(&format!("2026-06-{day:02}T02:00:00Z")))
+            .collect();
+        assert_eq!(fired, expected, "each tick exactly once, in order");
+
+        let unique: BTreeSet<_> = fired.iter().collect();
+        assert_eq!(unique.len(), fired.len(), "no date fired twice");
+    }
+
+    // ---------------------------------------------------------------------
+    // A missed window
+    // ---------------------------------------------------------------------
+
+    /// A schedule five days behind **replays its backlog one tick per pass**,
+    /// in order, and then stops — it does not jump to now and it does not fire
+    /// them all in one pass.
+    #[test]
+    fn a_missed_window_replays_one_tick_per_pass() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        // The trigger last ran on the 10th and the scheduler was down since.
+        state.next_evaluation_date = Some(at("2026-06-10T02:00:00Z"));
+
+        // One pass at a time, so "one per pass" is measured rather than assumed.
+        let mut per_pass = Vec::new();
+        for _ in 0..3 {
+            let t = super::tick(&trigger, &state, &no_inputs(), &clock);
+            state = t.state;
+            match t.outcome {
+                TickOutcome::Fired(e) => per_pass.push(e.scheduled_date),
+                other => panic!("expected a fire, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            per_pass,
+            vec![
+                at("2026-06-10T02:00:00Z"),
+                at("2026-06-11T02:00:00Z"),
+                at("2026-06-12T02:00:00Z"),
+            ],
+            "the backlog is replayed in order, one per pass"
+        );
+
+        // Drained, the run stops at the first tick that is still in the future.
+        let (state, rest, skipped) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 100);
+        assert_eq!(
+            rest.iter().map(|e| e.scheduled_date).collect::<Vec<_>>(),
+            vec![
+                at("2026-06-13T02:00:00Z"),
+                at("2026-06-14T02:00:00Z"),
+                at("2026-06-15T02:00:00Z"),
+            ]
+        );
+        assert!(skipped.is_empty(), "nothing was skipped: {skipped:?}");
+        assert_eq!(
+            state.next_evaluation_date,
+            Some(at("2026-06-16T02:00:00Z")),
+            "and it comes to rest on the next live tick"
+        );
+    }
+
+    /// The same fixture with `lateMaximumDelay` set **drops** the backlog
+    /// instead of replaying it.
+    ///
+    /// The pair is the point: `a_missed_window_replays_one_tick_per_pass` alone
+    /// cannot distinguish "replays the backlog" from "has no delay handling at
+    /// all", and this alone cannot distinguish "applies the delay" from "always
+    /// jumps to now".
+    #[test]
+    fn late_maximum_delay_drops_the_backlog_the_same_fixture_replays() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *").with_late_maximum_delay(Some(Duration::hours(1)));
+        let mut state = state_at(&trigger, &clock);
+        state.next_evaluation_date = Some(at("2026-06-10T02:00:00Z"));
+
+        let (state, fired, _) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 100);
+        assert_eq!(
+            fired.iter().map(|e| e.scheduled_date).collect::<Vec<_>>(),
+            vec![at("2026-06-10T02:00:00Z")],
+            "the tick that was already due still fires; the rest of the backlog does not"
+        );
+        assert_eq!(
+            state.next_evaluation_date,
+            Some(at("2026-06-16T02:00:00Z")),
+            "and the next evaluation date skips the five missed days"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Backfill
+    // ---------------------------------------------------------------------
+
+    /// A backfill over a past window produces the executions the artifact
+    /// produces, **in the order it produces them**, and then clears itself.
+    ///
+    /// The window is `[2026-06-01T00:00Z, 2026-06-05T00:00Z]` on `0 2 * * *`,
+    /// and the artifact's own `nextEvaluationDate` answers say it yields
+    /// `06-01T02:00`, `06-02T02:00`, `06-03T02:00`, `06-04T02:00` — with
+    /// `06-05T02:00` excluded because it is after `end`.
+    #[test]
+    fn a_backfill_produces_the_windows_executions_in_order() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T00:00:00Z"),
+            Some(at("2026-06-05T00:00:00Z")),
+            &clock,
+        );
+        // Attaching moved `current_date` off `start` and onto the window's
+        // first tick. Without that the first date is lost to eval's
+        // `current < date` guard.
+        let attached = state.backfill.as_ref().expect("backfill attached");
+        assert_eq!(attached.current_date, at("2026-06-01T02:00:00Z"));
+        assert_eq!(attached.end, at("2026-06-05T00:00:00Z"));
+        assert_eq!(state.next_evaluation_date, Some(at("2026-06-01T02:00:00Z")));
+
+        let (state, fired, skipped) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 100);
+
+        assert_eq!(
+            fired.iter().map(|e| e.scheduled_date).collect::<Vec<_>>(),
+            vec![
+                at("2026-06-01T02:00:00Z"),
+                at("2026-06-02T02:00:00Z"),
+                at("2026-06-03T02:00:00Z"),
+                at("2026-06-04T02:00:00Z"),
+            ],
+            "the window's four ticks, in order, and NOT 06-05 which is after `end`"
+        );
+        assert!(skipped.is_empty(), "nothing was skipped: {skipped:?}");
+        assert!(
+            fired.iter().all(|e| e.from_backfill),
+            "every one of them is attributed to the backfill"
+        );
+        assert!(
+            state.backfill.is_none(),
+            "the window clears itself once its next date passes `end`"
+        );
+        assert_eq!(
+            state.next_evaluation_date,
+            Some(at("2026-06-16T02:00:00Z")),
+            "and the schedule returns to the live clock"
+        );
+    }
+
+    /// An **open-ended** backfill takes `end = now`, so it drains up to the
+    /// clock and stops there rather than running for ever.
+    #[test]
+    fn an_open_ended_backfill_ends_at_the_clock() {
+        let clock = TestClock::new(at("2026-06-04T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+
+        state.attach_backfill(&trigger, at("2026-06-01T00:00:00Z"), None, &clock);
+        assert_eq!(
+            state.backfill.as_ref().expect("attached").end,
+            at("2026-06-04T12:00:00Z"),
+            "an absent `end` becomes now"
+        );
+
+        let (state, fired, _) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 100);
+        assert_eq!(
+            fired.iter().map(|e| e.scheduled_date).collect::<Vec<_>>(),
+            vec![
+                at("2026-06-01T02:00:00Z"),
+                at("2026-06-02T02:00:00Z"),
+                at("2026-06-03T02:00:00Z"),
+                at("2026-06-04T02:00:00Z"),
+            ]
+        );
+        assert!(state.backfill.is_none());
+    }
+
+    /// A **paused** backfill fires nothing and advances nothing — it stays
+    /// exactly where it was, for ever, which is the artifact's behaviour
+    /// (`getBackFillForNextEvaluationDate` returns the window untouched when
+    /// `paused`, and `eval` returns empty).
+    ///
+    /// Asserted as "the state after 20 passes is byte-identical to the state
+    /// before", which a scheduler that merely fired nothing while quietly
+    /// draining the window would fail.
+    #[test]
+    fn a_paused_backfill_fires_nothing_and_advances_nothing() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T00:00:00Z"),
+            Some(at("2026-06-05T00:00:00Z")),
+            &clock,
+        );
+        if let Some(bf) = state.backfill.as_mut() {
+            bf.paused = true;
+        }
+        let before = state.clone();
+
+        let (after, fired, skipped) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 20);
+
+        assert!(fired.is_empty(), "a paused backfill fires nothing");
+        assert_eq!(
+            skipped,
+            vec![SkipReason::BackfillPaused; 20],
+            "every pass is refused for the same, named reason"
+        );
+        assert_eq!(
+            after.backfill, before.backfill,
+            "and the WINDOW does not move while paused -- `current_date` is what a \
+             resumed backfill would restart from"
+        );
+
+        // `next_evaluation_date` is a DIFFERENT field, and it does move --
+        // exactly once -- which is the artifact's behaviour rather than a
+        // defect. Measured on the image's own bytecode, not on the checkout:
+        // `Schedule.getPaused` is read inside `eval` and NOWHERE else, so
+        // `nextEvaluationDate` never consults it and advances to the tick after
+        // `currentDate`; and `TriggerState.getBackFillForNextEvaluationDate`
+        // jumps straight to `areturn` on the paused branch, so `currentDate`
+        // never follows it. The pair is a fixed point one tick ahead of the
+        // pinned window, and asserting "unchanged" here would have been wrong
+        // about the artifact in a way no other test would catch.
+        let first = super::tick(&trigger, &before, &no_inputs(), &clock);
+        assert_eq!(
+            first.state.next_evaluation_date,
+            Some(at("2026-06-02T02:00:00Z")),
+            "one tick past the pinned current_date"
+        );
+        let mut settled = first.state;
+        for pass in 0..10 {
+            let t = super::tick(&trigger, &settled, &no_inputs(), &clock);
+            assert_eq!(
+                t.state.next_evaluation_date,
+                Some(at("2026-06-02T02:00:00Z")),
+                "pass {pass}: a paused backfill must reach a FIXED POINT, not creep"
+            );
+            settled = t.state;
+        }
+        assert_eq!(
+            settled.backfill.as_ref().map(|b| b.current_date),
+            Some(at("2026-06-01T02:00:00Z")),
+            "and eleven passes later the window is still exactly where it paused"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Disabled
+    // ---------------------------------------------------------------------
+
+    /// A disabled trigger consumes its slot without firing.
+    ///
+    /// Consuming the slot is the part worth pinning: re-enabling a trigger
+    /// after an outage must not replay the outage.
+    #[test]
+    fn a_disabled_trigger_consumes_its_slot_without_firing() {
+        let clock = TestClock::new(at("2026-06-16T02:00:00Z"));
+        let yaml = "id: nightly\ntype: core.schedule\ncron: \"0 2 * * *\"\ntimezone: \"UTC\"\ndisabled: true\n";
+        let parsed: Trigger = serde_norway::from_str(yaml).unwrap();
+        let trigger = ScheduleTrigger::resolve(&parsed).unwrap();
+        assert!(trigger.is_disabled());
+
+        let mut state = state_at(&trigger, &clock);
+        state.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+
+        let t = super::tick(&trigger, &state, &no_inputs(), &clock);
+        assert_eq!(t.outcome, TickOutcome::Skipped(SkipReason::Disabled));
+        assert_eq!(
+            t.state.next_evaluation_date,
+            Some(at("2026-06-17T02:00:00Z")),
+            "the slot is consumed, so re-enabling does not replay the outage"
+        );
+
+        // The two-sided half: the identical fixture WITHOUT `disabled` fires.
+        let enabled = sched("0 2 * * *");
+        let t = super::tick(
+            &enabled,
+            &trigger_state_for(&enabled, &clock),
+            &no_inputs(),
+            &clock,
+        );
+        assert!(
+            matches!(t.outcome, TickOutcome::Fired(_)),
+            "the same fixture without `disabled` must fire, or the assertion above \
+             is measuring something other than `disabled`"
+        );
+    }
+
+    fn trigger_state_for(trigger: &ScheduleTrigger, clock: &TestClock) -> TriggerState {
+        let mut state = state_at(trigger, clock);
+        state.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+        state
+    }
+
+    // ---------------------------------------------------------------------
+    // The control
+    // ---------------------------------------------------------------------
+
+    /// **The control that matters: a scheduler that reports a completed tick
+    /// without creating an execution.**
+    ///
+    /// This is the shape of the bug, and it is worth naming precisely because
+    /// it does not look like a crash. `tick` always advances the state — that
+    /// is the artifact's behaviour — so a tick that reports `Skipped` has
+    /// *consumed its slot* and will never be retried. A scheduler that
+    /// advanced the state and silently produced nothing would look, from
+    /// outside, exactly like a scheduler with nothing to do: the loop keeps
+    /// running, no error is logged, no execution is ever created, and the
+    /// oracle cannot see it because no trigger-fired execution reaches the
+    /// golden at all.
+    ///
+    /// So the assertion is deliberately three-sided:
+    ///
+    /// 1. a due tick with nothing wrong **fires**, and the outcome carries a
+    ///    real execution whose date is the date that was due;
+    /// 2. the state advanced past it, so the slot really was consumed —
+    ///    otherwise "fired" and "will fire again" would be indistinguishable;
+    /// 3. and a tick that legitimately produces nothing reports a **named**
+    ///    reason, so "no execution" is never a silent state.
+    ///
+    /// Without (3), an implementation that returned `Skipped` for everything
+    /// would pass (1) only by luck; without (1), one that returned `Skipped`
+    /// for everything would pass trivially.
+    #[test]
+    fn a_scheduler_that_reports_success_without_an_execution_is_caught() {
+        let clock = TestClock::new(at("2026-06-16T02:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+
+        let t = super::tick(&trigger, &state, &no_inputs(), &clock);
+
+        // (1) it fired, and the execution is real and is FOR the due date.
+        let execution = match &t.outcome {
+            TickOutcome::Fired(execution) => execution,
+            other => panic!(
+                "a due tick with nothing wrong reported {other:?} and created NO execution -- \
+                 the slot was consumed and the run is silently lost"
+            ),
+        };
+        assert_eq!(execution.scheduled_date, at("2026-06-16T02:00:00Z"));
+        assert_eq!(execution.namespace, "company.team");
+        assert_eq!(execution.flow_id, "nightly_flow");
+        assert_eq!(execution.trigger_id, "nightly");
+        assert!(!execution.from_backfill);
+        assert_eq!(execution.next_date, Some(at("2026-06-17T02:00:00Z")));
+        assert_eq!(execution.previous_date, Some(at("2026-06-15T02:00:00Z")));
+
+        // (2) the slot really was consumed.
+        assert_eq!(
+            t.state.next_evaluation_date,
+            Some(at("2026-06-17T02:00:00Z")),
+            "a tick that fired must also advance, or `fired` and `will fire again` \
+             are indistinguishable"
+        );
+        assert_eq!(t.state.evaluated_at, Some(at("2026-06-16T02:00:00Z")));
+
+        // (3) and every no-execution outcome is NAMED. A future tick is the
+        // cheapest one to reach, and it must arrive as `Skipped(InTheFuture)`
+        // rather than as a `Fired` with nothing in it or a bare `NotDue`.
+        let mut ahead = state.clone();
+        ahead.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+        clock.set(at("2026-06-16T02:00:00Z") - Duration::days(1));
+        let early = super::tick(&trigger, &ahead, &no_inputs(), &clock);
+        assert_eq!(early.outcome, TickOutcome::NotDue);
+
+        let never = sched("0 0 30 2 *");
+        let mut impossible = state.clone();
+        impossible.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
+        clock.set(at("2026-06-16T02:00:00Z"));
+        let t = super::tick(&never, &impossible, &no_inputs(), &clock);
+        assert_eq!(
+            t.outcome,
+            TickOutcome::Skipped(SkipReason::NoSuchInstant),
+            "a tick that produces nothing must say WHY, not report success"
+        );
+    }
+
+    /// `run_until_idle`'s `max_passes` is a hard stop, not a comment.
+    ///
+    /// A paused backfill is the case that would otherwise spin for ever, and a
+    /// test that hangs reports nothing at all.
+    #[test]
+    fn run_until_idle_stops_at_max_passes_rather_than_spinning() {
+        let clock = TestClock::new(at("2026-06-15T12:00:00Z"));
+        let trigger = sched("0 2 * * *");
+        let mut state = state_at(&trigger, &clock);
+        state.attach_backfill(
+            &trigger,
+            at("2026-06-01T00:00:00Z"),
+            Some(at("2026-06-05T00:00:00Z")),
+            &clock,
+        );
+        if let Some(bf) = state.backfill.as_mut() {
+            bf.paused = true;
+        }
+
+        let (_, fired, skipped) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 5);
+        assert!(fired.is_empty());
+        assert_eq!(skipped.len(), 5, "exactly max_passes, then it gives up");
+    }
+
+    /// The shipping clock reads the real one. Asserted loosely on purpose —
+    /// a tight assertion here would be the wall-clock test this module exists
+    /// to avoid — but asserted, because an unread `SystemClock` is an
+    /// untested one.
+    #[test]
+    fn the_system_clock_reads_the_real_clock() {
+        let before = Utc::now();
+        let read = SystemClock.now();
+        let after = Utc::now();
+        assert!(
+            read >= before && read <= after,
+            "SystemClock must return an instant between two real readings"
+        );
+    }
+
+    /// `TestClock` moves when it is told to and not otherwise.
+    #[test]
+    fn the_test_clock_only_moves_when_told() {
+        let clock = TestClock::new(Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap());
+        assert_eq!(clock.now(), at("2026-06-15T12:00:00Z"));
+        assert_eq!(
+            clock.now(),
+            at("2026-06-15T12:00:00Z"),
+            "reading twice does not advance it"
+        );
+        clock.advance(Duration::hours(2));
+        assert_eq!(clock.now(), at("2026-06-15T14:00:00Z"));
+        clock.set(at("2020-01-01T00:00:00Z"));
+        assert_eq!(
+            clock.now(),
+            at("2020-01-01T00:00:00Z"),
+            "and it can go backwards"
+        );
+    }
+}

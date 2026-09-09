@@ -48,8 +48,12 @@
 //! more-permissive parser would **fire where Kestra would not**:
 //!
 //! - `@reboot` → `Nickname @reboot not supported!`
-//! - `@DAILY`, `@Daily` → `contains 1 parts but we expect one of [5]`
-//!   (nicknames are case-sensitive lowercase)
+//! - `@DAILY`, `@Daily`, `@nope`, `@secondly`, `@every` →
+//!   `contains 1 parts but we expect one of [5]` — nicknames are
+//!   case-sensitive lowercase, and an **unrecognised** `@…` is not a nickname
+//!   error at all: it falls through to the field count. `@reboot` is the one
+//!   token cron-utils recognises but this definition does not enable, which is
+//!   why it alone answers `Nickname @reboot not supported!`
 //! - `?` in either day field → `Invalid expression: ?`
 //! - `W` (`15W`, `LW`) → `Invalid chars … W`
 //! - `#` (`1#1`) → `Invalid expression: 1#1`
@@ -343,22 +347,35 @@ impl Cron {
             return Err(CronError::Empty);
         }
 
-        if let Some(rest) = trimmed.strip_prefix('@') {
-            // Nicknames are matched case-sensitively: measured, `@DAILY` is not
-            // recognised as a nickname at all and then fails the field count as
-            // a one-token expression.
-            let expanded = match rest {
-                "yearly" | "annually" => "0 0 1 1 *",
-                "monthly" => "0 0 1 * *",
-                "weekly" => "0 0 * * 0",
-                "daily" | "midnight" => "0 0 * * *",
-                "hourly" => "0 * * * *",
-                _ => return Err(CronError::UnsupportedNickname(trimmed.to_string())),
-            };
-            // The expansion is always five fields, whatever `with_seconds`
-            // says -- measured: `@daily` parses with `withSeconds: true` and
-            // still fires at midnight, not at every second of it.
-            return Self::parse_fields(expanded, false);
+        // cron-utils RECOGNISES a fixed set of nickname spellings, and only
+        // some of them are enabled by this definition. Measured, and the
+        // distinction is visible in the error text:
+        //
+        //   @reboot            -> "Nickname @reboot not supported!"   (recognised, not enabled)
+        //   @secondly, @minutely, @every, @YEARLY, @nope, @
+        //                      -> "contains 1 parts but we expect one of [5]"
+        //                                                             (not recognised at all)
+        //   @daily extra       -> "contains 2 parts ..."              (whitespace, so not one token)
+        //
+        // So an unrecognised `@...` is NOT a nickname error -- it falls through
+        // to the field count, and a one-token expression fails it.
+        if !trimmed.contains(char::is_whitespace) {
+            if let Some(rest) = trimmed.strip_prefix('@') {
+                match rest {
+                    // The expansion is always five fields, whatever
+                    // `with_seconds` says -- measured: `@daily` parses with
+                    // `withSeconds: true` and still fires at midnight, not at
+                    // every second of it.
+                    "yearly" | "annually" => return Self::parse_fields("0 0 1 1 *", false),
+                    "monthly" => return Self::parse_fields("0 0 1 * *", false),
+                    "weekly" => return Self::parse_fields("0 0 * * 0", false),
+                    "daily" | "midnight" => return Self::parse_fields("0 0 * * *", false),
+                    "hourly" => return Self::parse_fields("0 * * * *", false),
+                    "reboot" => return Err(CronError::UnsupportedNickname(trimmed.to_string())),
+                    // Everything else falls through, deliberately.
+                    _ => {}
+                }
+            }
         }
 
         Self::parse_fields(trimmed, with_seconds)
@@ -1066,5 +1083,1006 @@ impl Backfill {
             current_date: start,
             paused: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cron, CronError, Field, ScheduleError, ScheduleTrigger, SkipReason};
+    use crate::models::Trigger;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
+    use chrono_tz::Tz;
+    use std::str::FromStr;
+
+    /// The clock every measurement in this file was taken against.
+    ///
+    /// A constant, not `Utc::now()`: a scheduler is nothing but a clock, and a
+    /// test that reads the wall clock is a test that passes at 11:59 and fails
+    /// at midnight. `egret-query/tests/connector_trino_pool.rs` carries three
+    /// of those.
+    fn probe_clock() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap()
+    }
+
+    fn at(iso: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(iso)
+            .unwrap_or_else(|e| panic!("bad fixture instant {iso:?}: {e}"))
+            .with_timezone(&Utc)
+    }
+
+    fn tz(name: &str) -> Tz {
+        Tz::from_str(name).unwrap_or_else(|_| panic!("bad fixture zone {name:?}"))
+    }
+
+    /// Builds a `ScheduleTrigger` through the **model**, i.e. the same YAML path
+    /// a published flow takes, rather than through a private constructor -- so
+    /// a model change that stopped feeding the scheduler shows up here.
+    fn sched(cron: &str, with_seconds: bool, timezone: Option<&str>) -> ScheduleTrigger {
+        let mut yaml = format!("id: t\ntype: core.schedule\ncron: \"{cron}\"\n");
+        if with_seconds {
+            yaml.push_str("withSeconds: true\n");
+        }
+        if let Some(zone) = timezone {
+            yaml.push_str(&format!("timezone: \"{zone}\"\n"));
+        }
+        let trigger: Trigger = serde_norway::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("fixture yaml did not parse: {e}\n{yaml}"));
+        ScheduleTrigger::resolve(&trigger)
+            .unwrap_or_else(|e| panic!("fixture did not resolve: {e}\n{yaml}"))
+    }
+
+    // ---------------------------------------------------------------------
+    // 1. The dialect
+    // ---------------------------------------------------------------------
+
+    /// Every row is an answer the pinned artifact actually gave
+    /// (`scratchpad/w6t5/probe-out.json`, `probe4-out.json`, `probe5-out.json`).
+    ///
+    /// The refusals are the half that matters. **Over-acceptance must not
+    /// ship**: a cron this parser accepts and Kestra rejects is a trigger that
+    /// fires where Kestra would not, and the oracle cannot catch it -- so each
+    /// refusal is asserted by its typed variant, not merely as "some error".
+    #[test]
+    fn the_dialect_is_the_artifacts_dialect() {
+        #[derive(Debug)]
+        enum Want {
+            Ok,
+            Nickname,
+            FieldCount(usize, usize),
+            Unsupported,
+            OutOfRange,
+            BadRange,
+            ZeroStep,
+            Empty,
+            Malformed,
+        }
+        use Want::*;
+
+        // (expression, with_seconds, expected)
+        let table: &[(&str, bool, Want)] = &[
+            // --- accepted, measured ---
+            ("0 2 * * *", false, Ok),
+            ("*/15 * * * *", false, Ok),
+            ("@daily", false, Ok),
+            ("@hourly", false, Ok),
+            ("@weekly", false, Ok),
+            ("@monthly", false, Ok),
+            ("@yearly", false, Ok),
+            ("@annually", false, Ok),
+            ("@midnight", false, Ok),
+            ("0 0 * * 7", false, Ok),
+            ("0 0 * * 0", false, Ok),
+            ("0 0 L * *", false, Ok),
+            ("0 0 L-3 * *", false, Ok),
+            ("0 0 * * MON", false, Ok),
+            ("0 0 * * mon-fri", false, Ok),
+            ("0 0 1 JAN *", false, Ok),
+            ("0 0 * jan-dec *", false, Ok),
+            ("0-59/15 * * * *", false, Ok),
+            ("0,30 * * * *", false, Ok),
+            ("0 0 1-5 * *", false, Ok),
+            ("0 0 * * 1,3,5", false, Ok),
+            ("0 0 L * 1", false, Ok),
+            ("0-0 * * * *", false, Ok),
+            ("0 0 * * SAT-SUN", false, Ok),
+            ("0 0 * * 1-7", false, Ok),
+            (" 0 2 * * * ", false, Ok),
+            ("0  2 * * *", false, Ok),
+            ("0\t2 * * *", false, Ok),
+            ("0 0 0 * * *", true, Ok),
+            ("*/5 * * * * *", true, Ok),
+            // A nickname parses under EITHER parser -- the expansion happens
+            // before the field count is checked.
+            ("@daily", true, Ok),
+            ("@hourly", true, Ok),
+            // --- refused, measured ---
+            ("@reboot", false, Nickname),
+            ("@every 5m", false, FieldCount(2, 5)),
+            ("@daily extra", false, FieldCount(2, 5)),
+            ("@DAILY", false, FieldCount(1, 5)),
+            ("@Daily", false, FieldCount(1, 5)),
+            ("@YEARLY", false, FieldCount(1, 5)),
+            ("@secondly", false, FieldCount(1, 5)),
+            ("@minutely", false, FieldCount(1, 5)),
+            ("@every", false, FieldCount(1, 5)),
+            ("@nope", false, FieldCount(1, 5)),
+            ("@", false, FieldCount(1, 5)),
+            ("0 0 * * 8", false, OutOfRange),
+            ("0 0 * * 5L", false, Unsupported),
+            ("0 0 * * L", false, Unsupported),
+            ("0 0 * * 1#1", false, Unsupported),
+            ("0 0 ? * 1", false, Unsupported),
+            ("0 0 1 * ?", false, Unsupported),
+            ("0 0 15W * *", false, Unsupported),
+            ("0 0 LW * *", false, Unsupported),
+            ("5-1 * * * *", false, BadRange),
+            ("0 0 * * 6-0", false, BadRange),
+            ("0 0 * * 7-1", false, BadRange),
+            ("0 0 * * SUN-SAT", false, BadRange),
+            ("0 0 0 * * *", false, FieldCount(6, 5)),
+            ("* * * * * *", false, FieldCount(6, 5)),
+            ("* * * *", false, FieldCount(4, 5)),
+            ("0 0 * * *", true, FieldCount(5, 6)),
+            ("0 0 * * 7", true, FieldCount(5, 6)),
+            ("60 * * * *", false, OutOfRange),
+            ("0 24 * * *", false, OutOfRange),
+            ("0 0 32 * *", false, OutOfRange),
+            ("0 0 * 13 *", false, OutOfRange),
+            ("*/0 * * * *", false, ZeroStep),
+            ("", false, Empty),
+            ("H 0 * * *", false, Malformed),
+        ];
+
+        for (expr, with_seconds, want) in table {
+            let got = Cron::parse(expr, *with_seconds);
+            let label = format!("{expr:?} (withSeconds: {with_seconds})");
+            match (want, &got) {
+                (Ok, Result::Ok(_)) => {}
+                (Nickname, Err(CronError::UnsupportedNickname(_))) => {}
+                (FieldCount(g, w), Err(CronError::WrongFieldCount { got: gg, want: ww })) => {
+                    assert_eq!((gg, ww), (g, w), "{label}: wrong field-count numbers");
+                }
+                (Unsupported, Err(CronError::UnsupportedSyntax { .. })) => {}
+                (OutOfRange, Err(CronError::OutOfRange { .. })) => {}
+                (BadRange, Err(CronError::InvalidRange { .. })) => {}
+                (ZeroStep, Err(CronError::ZeroStep { .. })) => {}
+                (Empty, Err(CronError::Empty)) => {}
+                (Malformed, Err(CronError::Malformed { .. })) => {}
+                _ => panic!("{label}: expected {want:?}, got {got:?}"),
+            }
+        }
+    }
+
+    /// `H 0 * * *` is Jenkins' hashed-minute syntax and is the one refusal in
+    /// the table above that is a plain `Malformed` -- pinned separately so a
+    /// parser that started accepting it (and firing at an arbitrary minute)
+    /// cannot hide inside the big table's `_ =>` arm.
+    #[test]
+    fn jenkins_hashed_syntax_is_not_this_dialect() {
+        assert!(matches!(
+            Cron::parse("H 0 * * *", false),
+            Err(CronError::Malformed {
+                field: Field::Minute,
+                ..
+            })
+        ));
+    }
+
+    // ---------------------------------------------------------------------
+    // 2. next / last
+    // ---------------------------------------------------------------------
+
+    /// The artifact's own `nextExecution` / `lastExecution` answers, verbatim
+    /// from `probe-out.json` and `probe2-out.json`.
+    ///
+    /// Both primitives are **strict**: `0 2 * * *` asked from exactly
+    /// `02:00` answers the *next* day forward and the *previous* day back.
+    #[test]
+    fn next_and_last_match_the_artifact() {
+        // (cron, with_seconds, zone, from, next, last)
+        let table: &[(&str, bool, &str, &str, Option<&str>, Option<&str>)] = &[
+            (
+                "0 2 * * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T02:00:00Z"),
+                Some("2026-06-15T02:00:00Z"),
+            ),
+            (
+                "0 2 * * *",
+                false,
+                "UTC",
+                "2026-06-15T02:00:00Z",
+                Some("2026-06-16T02:00:00Z"),
+                Some("2026-06-14T02:00:00Z"),
+            ),
+            (
+                "0 2 * * *",
+                false,
+                "UTC",
+                "2026-06-15T01:59:59Z",
+                Some("2026-06-15T02:00:00Z"),
+                Some("2026-06-14T02:00:00Z"),
+            ),
+            // The zone decides the calendar the expression is read in.
+            (
+                "0 2 * * *",
+                false,
+                "Asia/Tokyo",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-15T17:00:00Z"),
+                Some("2026-06-14T17:00:00Z"),
+            ),
+            (
+                "0 2 * * *",
+                false,
+                "America/New_York",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T06:00:00Z"),
+                Some("2026-06-15T06:00:00Z"),
+            ),
+            (
+                "*/15 * * * *",
+                false,
+                "UTC",
+                "2026-06-15T12:07:30Z",
+                Some("2026-06-15T12:15:00Z"),
+                Some("2026-06-15T12:00:00Z"),
+            ),
+            (
+                "*/15 * * * *",
+                false,
+                "UTC",
+                "2026-06-15T12:15:00Z",
+                Some("2026-06-15T12:30:00Z"),
+                Some("2026-06-15T12:00:00Z"),
+            ),
+            (
+                "@daily",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "@hourly",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-15T13:00:00Z"),
+                Some("2026-06-15T11:00:00Z"),
+            ),
+            (
+                "@weekly",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-21T00:00:00Z"),
+                Some("2026-06-14T00:00:00Z"),
+            ),
+            (
+                "@monthly",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-07-01T00:00:00Z"),
+                Some("2026-06-01T00:00:00Z"),
+            ),
+            (
+                "@yearly",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2027-01-01T00:00:00Z"),
+                Some("2026-01-01T00:00:00Z"),
+            ),
+            // 0 and 7 are both Sunday.
+            (
+                "0 0 * * 7",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-21T00:00:00Z"),
+                Some("2026-06-14T00:00:00Z"),
+            ),
+            (
+                "0 0 * * 0",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-21T00:00:00Z"),
+                Some("2026-06-14T00:00:00Z"),
+            ),
+            // `L`, in a short month and in a leap February.
+            (
+                "0 0 L * *",
+                false,
+                "UTC",
+                "2026-02-10T00:00:00Z",
+                Some("2026-02-28T00:00:00Z"),
+                Some("2026-01-31T00:00:00Z"),
+            ),
+            (
+                "0 0 L * *",
+                false,
+                "UTC",
+                "2028-02-10T00:00:00Z",
+                Some("2028-02-29T00:00:00Z"),
+                Some("2028-01-31T00:00:00Z"),
+            ),
+            (
+                "0 0 L-3 * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-27T00:00:00Z"),
+                Some("2026-05-28T00:00:00Z"),
+            ),
+            // A four-year gap, forwards and backwards.
+            (
+                "0 0 29 2 *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2028-02-29T00:00:00Z"),
+                Some("2024-02-29T00:00:00Z"),
+            ),
+            // Day-of-month OR day-of-week, and what counts as restricted.
+            (
+                "0 0 1 * 1",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-22T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 */2 * 1",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-17T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 1-31 * 1",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 * * 1",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-22T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 1 * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-07-01T00:00:00Z"),
+                Some("2026-06-01T00:00:00Z"),
+            ),
+            (
+                "0 0 L * 1",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-22T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            // Steps with a non-zero base, and a step that does not divide the
+            // range.
+            (
+                "*/7 * * * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-15T12:07:00Z"),
+                Some("2026-06-15T11:56:00Z"),
+            ),
+            (
+                "5/10 * * * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-15T12:05:00Z"),
+                Some("2026-06-15T11:55:00Z"),
+            ),
+            // Names, and a range whose end is SUN = 7.
+            (
+                "0 0 * * SUN",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-21T00:00:00Z"),
+                Some("2026-06-14T00:00:00Z"),
+            ),
+            (
+                "0 0 * * SAT-SUN",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-20T00:00:00Z"),
+                Some("2026-06-14T00:00:00Z"),
+            ),
+            (
+                "0 0 * * 1-5",
+                false,
+                "UTC",
+                "2026-06-13T12:00:00Z",
+                Some("2026-06-15T00:00:00Z"),
+                Some("2026-06-12T00:00:00Z"),
+            ),
+            // Seconds precision.
+            (
+                "*/5 * * * * *",
+                true,
+                "UTC",
+                "2026-06-15T12:00:02Z",
+                Some("2026-06-15T12:00:05Z"),
+                Some("2026-06-15T12:00:00Z"),
+            ),
+            // An expression that can never match answers nothing, in BOTH
+            // directions -- the artifact's `Optional.empty()`.
+            (
+                "0 0 30 2 *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                None,
+                None,
+            ),
+            (
+                "0 0 31 4 *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                None,
+                None,
+            ),
+        ];
+
+        for (expr, with_seconds, zone, from, want_next, want_last) in table {
+            let cron = Cron::parse(expr, *with_seconds)
+                .unwrap_or_else(|e| panic!("{expr:?} did not parse: {e}"));
+            let zone = tz(zone);
+            let from_dt = at(from).with_timezone(&zone);
+            let label = format!("{expr:?} in {zone} from {from}");
+
+            let got_next = cron.next_after(from_dt).map(|d| d.with_timezone(&Utc));
+            assert_eq!(
+                got_next,
+                want_next.map(at),
+                "{label}: next_after disagrees with the artifact"
+            );
+
+            let got_last = cron.last_before(from_dt).map(|d| d.with_timezone(&Utc));
+            assert_eq!(
+                got_last,
+                want_last.map(at),
+                "{label}: last_before disagrees with the artifact"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 3. DST — the two readings a UTC-only fixture cannot make
+    // ---------------------------------------------------------------------
+
+    /// Across a **spring-forward gap** the missing local ticks are skipped
+    /// outright, not shifted to the next existing minute.
+    ///
+    /// `Europe/Paris` skips 02:00–02:59 local on 2026-03-29, so a `*/30`
+    /// schedule walks `01:30+01:00` straight to `03:00+02:00`, and a daily
+    /// `0 2 * * *` misses the 29th entirely.
+    #[test]
+    fn a_spring_forward_gap_skips_its_ticks_rather_than_shifting_them() {
+        let paris = tz("Europe/Paris");
+
+        let every_30 = Cron::parse("*/30 * * * *", false).unwrap();
+        let walk = walk_forward(
+            &every_30,
+            at("2026-03-29T00:00:00Z").with_timezone(&paris),
+            3,
+        );
+        assert_eq!(
+            walk,
+            vec![
+                at("2026-03-29T00:30:00Z"), // 01:30+01:00
+                at("2026-03-29T01:00:00Z"), // 03:00+02:00 -- 02:00 and 02:30 never happen
+                at("2026-03-29T01:30:00Z"), // 03:30+02:00
+            ],
+            "the gap's local ticks must not fire at all"
+        );
+
+        let daily = Cron::parse("0 2 * * *", false).unwrap();
+        let walk = walk_forward(&daily, at("2026-03-27T01:00:00Z").with_timezone(&paris), 3);
+        assert_eq!(
+            walk,
+            vec![
+                at("2026-03-28T01:00:00Z"), // 02:00+01:00
+                at("2026-03-30T00:00:00Z"), // 02:00+02:00 -- the 29th is MISSING
+                at("2026-03-31T00:00:00Z"),
+            ],
+            "a daily 02:00 schedule must lose the day whose 02:00 does not exist"
+        );
+    }
+
+    /// Across a **fall-back** the repeated local hour fires **twice**, and the
+    /// order is by instant rather than by local clock reading.
+    ///
+    /// This is the reading that decides the implementation: local-clock order
+    /// would give `02:00+02:00, 02:00+01:00, 02:30+02:00, 02:30+01:00`, and
+    /// the artifact gives `02:00+02:00, 02:30+02:00, 02:00+01:00,
+    /// 02:30+01:00`. A fixture that never crossed a fall-back hour cannot tell
+    /// the two apart.
+    #[test]
+    fn a_fall_back_hour_fires_twice_in_instant_order() {
+        let paris = tz("Europe/Paris");
+        let every_30 = Cron::parse("*/30 * * * *", false).unwrap();
+
+        let walk = walk_forward(
+            &every_30,
+            at("2026-10-24T22:30:00Z").with_timezone(&paris), // 00:30+02:00
+            8,
+        );
+        assert_eq!(
+            walk,
+            vec![
+                at("2026-10-24T23:00:00Z"), // 01:00+02:00
+                at("2026-10-24T23:30:00Z"), // 01:30+02:00
+                at("2026-10-25T00:00:00Z"), // 02:00+02:00   <- first pass
+                at("2026-10-25T00:30:00Z"), // 02:30+02:00
+                at("2026-10-25T01:00:00Z"), // 02:00+01:00   <- second pass
+                at("2026-10-25T01:30:00Z"), // 02:30+01:00
+                at("2026-10-25T02:00:00Z"), // 03:00+01:00
+                at("2026-10-25T02:30:00Z"), // 03:30+01:00
+            ],
+            "the repeated hour must fire twice, ordered by instant"
+        );
+
+        // And backwards through the same hour.
+        let back = walk_backward(
+            &every_30,
+            at("2026-10-25T02:00:00Z").with_timezone(&paris),
+            4,
+        );
+        assert_eq!(
+            back,
+            vec![
+                at("2026-10-25T01:30:00Z"),
+                at("2026-10-25T01:00:00Z"),
+                at("2026-10-25T00:30:00Z"),
+                at("2026-10-25T00:00:00Z"),
+            ],
+            "last_before must walk the repeated hour in reverse instant order"
+        );
+    }
+
+    fn walk_forward(cron: &Cron, from: DateTime<Tz>, steps: usize) -> Vec<DateTime<Utc>> {
+        let mut out = Vec::new();
+        let mut cur = from;
+        for _ in 0..steps {
+            match cron.next_after(cur) {
+                Some(next) => {
+                    out.push(next.with_timezone(&Utc));
+                    cur = next;
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    fn walk_backward(cron: &Cron, from: DateTime<Tz>, steps: usize) -> Vec<DateTime<Utc>> {
+        let mut out = Vec::new();
+        let mut cur = from;
+        for _ in 0..steps {
+            match cron.last_before(cur) {
+                Some(prev) => {
+                    out.push(prev.with_timezone(&Utc));
+                    cur = prev;
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    // ---------------------------------------------------------------------
+    // 4. scheduleDates — the minus-one-second
+    // ---------------------------------------------------------------------
+
+    /// `Schedule.scheduleDates` asks for the next execution after
+    /// `date.minus(1s)`, so a tick evaluated on **its own instant selects
+    /// itself** rather than the following one.
+    ///
+    /// Without the `-1s` every schedule would fire one period late for ever,
+    /// and no other test in this file would notice: `next_after` alone is
+    /// strictly-after and correct.
+    #[test]
+    fn schedule_dates_selects_the_tick_it_stands_on() {
+        // (cron, from, date, next, previous) -- probe-out.json's sd_* columns.
+        let table: &[(&str, &str, &str, &str, &str)] = &[
+            (
+                "@hourly",
+                "2026-06-15T12:00:00Z",
+                "2026-06-15T12:00:00Z", // itself, NOT 13:00
+                "2026-06-15T13:00:00Z",
+                "2026-06-15T11:00:00Z",
+            ),
+            (
+                "*/15 * * * *",
+                "2026-06-15T12:15:00Z",
+                "2026-06-15T12:15:00Z", // itself
+                "2026-06-15T12:30:00Z",
+                "2026-06-15T12:00:00Z",
+            ),
+            (
+                "*/15 * * * *",
+                "2026-06-15T12:07:30Z",
+                "2026-06-15T12:15:00Z", // between ticks: the NEXT one
+                "2026-06-15T12:30:00Z",
+                "2026-06-15T12:00:00Z",
+            ),
+            (
+                "0 2 * * *",
+                "2026-06-15T12:00:00Z",
+                "2026-06-16T02:00:00Z",
+                "2026-06-17T02:00:00Z",
+                "2026-06-15T02:00:00Z",
+            ),
+        ];
+
+        for (expr, from, date, next, previous) in table {
+            let trigger = sched(expr, false, Some("UTC"));
+            let got = trigger
+                .schedule_dates(at(from))
+                .unwrap_or_else(|| panic!("{expr:?} from {from}: no dates at all"));
+            assert_eq!(got.date, at(date), "{expr:?} from {from}: date");
+            assert_eq!(got.next, Some(at(next)), "{expr:?} from {from}: next");
+            assert_eq!(
+                got.previous,
+                Some(at(previous)),
+                "{expr:?} from {from}: previous"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // 5. The late / missed-tick rule
+    // ---------------------------------------------------------------------
+
+    /// `probe-out.json`'s `next_evaluation_date` block, verbatim.
+    ///
+    /// The two rows that carry the whole rule are the third and fourth: five
+    /// days behind, a schedule with **no** `lateMaximumDelay` answers the next
+    /// **missed** tick (`06-11`), and the same schedule **with** `PT1H` answers
+    /// the next **live** tick (`06-16`). A test that only had one of them could
+    /// not tell "replays the backlog" from "drops it".
+    #[test]
+    fn the_missed_tick_rule_matches_the_artifact() {
+        let now = probe_clock();
+
+        // (last date, late maximum delay, expected)
+        let table: &[(Option<&str>, Option<i64>, &str)] = &[
+            (None, None, "2026-06-16T02:00:00Z"),
+            (Some("2026-06-15T02:00:00Z"), None, "2026-06-16T02:00:00Z"),
+            // five days behind, no delay: the NEXT MISSED tick
+            (Some("2026-06-10T02:00:00Z"), None, "2026-06-11T02:00:00Z"),
+            // five days behind, PT1H: the backlog is dropped
+            (
+                Some("2026-06-10T02:00:00Z"),
+                Some(3600),
+                "2026-06-16T02:00:00Z",
+            ),
+            (
+                Some("2026-06-15T02:00:00Z"),
+                Some(3600),
+                "2026-06-16T02:00:00Z",
+            ),
+        ];
+
+        for (last, delay, want) in table {
+            let trigger = sched("0 2 * * *", false, Some("UTC"))
+                .with_late_maximum_delay(delay.map(Duration::seconds));
+            let got = trigger.next_evaluation_date(last.map(at), None, now);
+            assert_eq!(
+                got,
+                Some(at(want)),
+                "last={last:?} delay={delay:?}: disagrees with the artifact"
+            );
+        }
+    }
+
+    /// `handleMaxDelay` walks forward to the first tick still inside its delay,
+    /// measured directly on the private method.
+    #[test]
+    fn late_maximum_delay_walks_to_the_first_tick_still_in_time() {
+        let now = probe_clock();
+
+        // `*/15` with PT10M from 10:00 stops at 12:00 -- the tick whose
+        // date + 10m has NOT yet passed 12:00. One tick earlier (11:45) would
+        // already be late.
+        let trigger = sched("*/15 * * * *", false, Some("UTC"))
+            .with_late_maximum_delay(Some(Duration::minutes(10)));
+        assert_eq!(
+            trigger.next_evaluation_date(Some(at("2026-06-15T10:00:00Z")), None, now),
+            Some(at("2026-06-15T12:00:00Z"))
+        );
+
+        // And with no delay at all the same fixture replays 10:15 -- the pair
+        // that shows the delay is doing the work, not the clock.
+        let no_delay = sched("*/15 * * * *", false, Some("UTC"));
+        assert_eq!(
+            no_delay.next_evaluation_date(Some(at("2026-06-15T10:00:00Z")), None, now),
+            Some(at("2026-06-15T10:15:00Z"))
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 6. Backfill
+    // ---------------------------------------------------------------------
+
+    /// `probe-out.json`'s backfill rows: a running window computes from
+    /// `currentDate`, and returns to the **live clock** the moment the answer
+    /// passes `end`.
+    #[test]
+    fn a_backfill_window_ends_by_returning_to_the_live_clock() {
+        let now = probe_clock();
+        let trigger = sched("0 2 * * *", false, Some("UTC"));
+
+        let window = |current: &str| super::Backfill {
+            start: at("2026-06-01T00:00:00Z"),
+            end: at("2026-06-05T00:00:00Z"),
+            current_date: at(current),
+            paused: false,
+        };
+
+        assert_eq!(
+            trigger.next_evaluation_date(None, Some(&window("2026-06-01T00:00:00Z")), now),
+            Some(at("2026-06-01T02:00:00Z")),
+            "inside the window, the next tick after currentDate"
+        );
+        assert_eq!(
+            trigger.next_evaluation_date(None, Some(&window("2026-06-04T02:00:00Z")), now),
+            Some(at("2026-06-16T02:00:00Z")),
+            "the 06-05T02:00 tick is after `end`, so the schedule returns to now"
+        );
+        assert_eq!(
+            trigger.next_evaluation_date(None, Some(&window("2026-06-05T02:00:00Z")), now),
+            Some(at("2026-06-16T02:00:00Z")),
+            "a currentDate already past `end` is the same answer"
+        );
+    }
+
+    /// `lateMaximumDelay` is skipped while a backfill is running — the
+    /// `backfill == null` half of `nextEvaluationDate`'s guard.
+    ///
+    /// This is a **two-sided** pair on purpose. The `with` row alone would pass
+    /// against an implementation that ignored `lateMaximumDelay` entirely, and
+    /// `the_missed_tick_rule_matches_the_artifact` alone would pass against one
+    /// that applied it unconditionally. Only the two together pin the guard.
+    #[test]
+    fn a_running_backfill_ignores_late_maximum_delay() {
+        let now = probe_clock();
+        let window = super::Backfill {
+            start: at("2026-06-01T00:00:00Z"),
+            end: at("2026-06-05T00:00:00Z"),
+            current_date: at("2026-06-01T00:00:00Z"),
+            paused: false,
+        };
+
+        let without = sched("0 2 * * *", false, Some("UTC"));
+        let with = without
+            .clone()
+            .with_late_maximum_delay(Some(Duration::hours(1)));
+
+        assert_eq!(
+            without.next_evaluation_date(None, Some(&window), now),
+            Some(at("2026-06-01T02:00:00Z"))
+        );
+        assert_eq!(
+            with.next_evaluation_date(None, Some(&window), now),
+            Some(at("2026-06-01T02:00:00Z")),
+            "a running backfill must not have its window skipped by lateMaximumDelay"
+        );
+
+        // The same delay DOES bite when no backfill is attached -- otherwise
+        // the assertion above would hold for a build that dropped the field.
+        assert_eq!(
+            with.next_evaluation_date(Some(at("2026-06-01T02:00:00Z")), None, now),
+            Some(at("2026-06-16T02:00:00Z")),
+            "outside a backfill the same delay must skip the backlog"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 7. eval's four refusals
+    // ---------------------------------------------------------------------
+
+    /// Each of `eval`'s refusals, and for each one an adjacent case that
+    /// **does** fire — a guard nobody has seen fail is a guard nobody has seen.
+    #[test]
+    fn eval_refuses_exactly_where_the_artifact_refuses() {
+        let now = probe_clock();
+        let trigger = sched("0 2 * * *", false, Some("UTC"));
+
+        // Fires: the tick is in the past and there is no backfill.
+        assert!(trigger.eval(at("2026-06-15T02:00:00Z"), None, now).is_ok());
+
+        // Refuses: a tick more than one second in the future.
+        assert_eq!(
+            trigger.eval(at("2026-06-16T02:00:00Z"), None, now),
+            Err(SkipReason::InTheFuture)
+        );
+
+        // The boundary is `now + 1s`, STRICTLY greater. A minute-granularity
+        // cron cannot land on it, so a second-granularity one is used.
+        let per_second = sched("* * * * * *", true, Some("UTC"));
+        assert!(
+            per_second
+                .eval(now + Duration::seconds(1), None, now)
+                .is_ok(),
+            "a tick exactly one second ahead still fires"
+        );
+        assert_eq!(
+            per_second.eval(now + Duration::seconds(2), None, now),
+            Err(SkipReason::InTheFuture),
+            "two seconds ahead does not"
+        );
+
+        // Refuses: a paused backfill.
+        let paused = super::Backfill {
+            start: at("2026-06-01T00:00:00Z"),
+            end: at("2026-06-05T00:00:00Z"),
+            current_date: at("2026-06-01T02:00:00Z"),
+            paused: true,
+        };
+        assert_eq!(
+            trigger.eval(at("2026-06-01T02:00:00Z"), Some(&paused), now),
+            Err(SkipReason::BackfillPaused)
+        );
+        // ... and the same window unpaused fires.
+        let running = super::Backfill {
+            paused: false,
+            ..paused.clone()
+        };
+        assert!(trigger
+            .eval(at("2026-06-01T02:00:00Z"), Some(&running), now)
+            .is_ok());
+
+        // Refuses: a backfill whose currentDate has not reached its tick.
+        //
+        // This is the guard that makes `attach_backfill`'s immediate
+        // recomputation load-bearing: a window left sitting on `start` loses
+        // its first date.
+        let not_reached = super::Backfill {
+            current_date: at("2026-06-01T00:00:00Z"),
+            ..running.clone()
+        };
+        assert_eq!(
+            trigger.eval(at("2026-06-01T00:00:00Z"), Some(&not_reached), now),
+            Err(SkipReason::BackfillNotReached)
+        );
+
+        // Refuses: an expression that selects no instant at all.
+        let never = sched("0 0 30 2 *", false, Some("UTC"));
+        assert_eq!(
+            never.eval(at("2026-06-15T02:00:00Z"), None, now),
+            Err(SkipReason::NoSuchInstant)
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // 8. Refusals at resolve time — over-acceptance must not ship
+    // ---------------------------------------------------------------------
+
+    /// A `when` expression filters candidate ticks in Kestra
+    /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
+    /// `RunContext` this seam does not have, so a schedule that carried one and
+    /// fired anyway would **fire where Kestra would not** — and the oracle
+    /// cannot catch that. It is refused.
+    ///
+    /// The two-sided half: `when` absent, and the literal default `"true"`,
+    /// must both resolve — `hasWhenCondition()` is
+    /// `getWhen() != null && !"true".equals(getWhen())`, so a refusal on
+    /// `"true"` would refuse every trigger the model gives a default to.
+    #[test]
+    fn a_when_condition_is_refused_but_the_default_true_is_not() {
+        let with_when: Trigger = serde_norway::from_str(
+            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"{{ trigger.date | date('E') == 'MON' }}\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            ScheduleTrigger::resolve(&with_when),
+            Err(ScheduleError::UnsupportedWhenCondition(_))
+        ));
+
+        let explicit_true: Trigger = serde_norway::from_str(
+            "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nwhen: \"true\"\n",
+        )
+        .unwrap();
+        assert!(
+            ScheduleTrigger::resolve(&explicit_true).is_ok(),
+            "the literal default `true` is NOT a condition"
+        );
+
+        let absent: Trigger =
+            serde_norway::from_str("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n").unwrap();
+        assert!(ScheduleTrigger::resolve(&absent).is_ok());
+    }
+
+    /// `Schedule.cron` is `@NotNull` in Java; W1 modelled it `Option` because
+    /// bean validation is not parsing, and left the check owing. This is it.
+    #[test]
+    fn a_schedule_without_a_cron_is_refused() {
+        let no_cron: Trigger = serde_norway::from_str("id: t\ntype: core.schedule\n").unwrap();
+        assert_eq!(
+            ScheduleTrigger::resolve(&no_cron),
+            Err(ScheduleError::MissingCron)
+        );
+    }
+
+    /// An absent `timezone` is UTC, because the pinned image's own
+    /// `/etc/timezone` is `Etc/UTC` — not because UTC is a convenient default.
+    ///
+    /// Paired with an explicit zone so the assertion depends on the field: a
+    /// build that ignored `timezone` altogether would pass the first half and
+    /// fail the second.
+    #[test]
+    fn an_absent_timezone_is_utc_and_an_explicit_one_is_honoured() {
+        assert_eq!(sched("0 2 * * *", false, None).timezone(), Tz::UTC);
+        assert_eq!(
+            sched("0 2 * * *", false, Some("Asia/Tokyo")).timezone(),
+            tz("Asia/Tokyo")
+        );
+
+        let now = probe_clock();
+        assert_eq!(
+            sched("0 2 * * *", false, None).next_evaluation_date(None, None, now),
+            Some(at("2026-06-16T02:00:00Z"))
+        );
+        assert_eq!(
+            sched("0 2 * * *", false, Some("Asia/Tokyo")).next_evaluation_date(None, None, now),
+            Some(at("2026-06-15T17:00:00Z")),
+            "Tokyo's 02:00 is 17:00Z the previous day"
+        );
+    }
+
+    /// `ZoneId.of` accepts fixed offsets that `chrono-tz` does not. Egret
+    /// **refuses** rather than silently coercing to UTC — under-acceptance, in
+    /// the safe direction, and recorded rather than hidden.
+    #[test]
+    fn a_zone_chrono_tz_cannot_resolve_is_refused_not_coerced() {
+        for zone in ["GMT+02:00", "UTC+2", "Mars/Olympus"] {
+            let yaml =
+                format!("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\ntimezone: \"{zone}\"\n");
+            let trigger: Trigger = serde_norway::from_str(&yaml).unwrap();
+            assert_eq!(
+                ScheduleTrigger::resolve(&trigger),
+                Err(ScheduleError::UnknownTimezone(zone.to_string())),
+                "{zone} must be refused, never coerced to UTC"
+            );
+        }
+    }
+
+    /// A non-`Schedule` trigger is not silently treated as one.
+    #[test]
+    fn a_webhook_is_not_a_schedule() {
+        let webhook: Trigger =
+            serde_norway::from_str("id: t\ntype: core.webhook\nkey: abc\n").unwrap();
+        assert_eq!(
+            ScheduleTrigger::resolve(&webhook),
+            Err(ScheduleError::NotASchedule)
+        );
     }
 }
