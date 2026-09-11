@@ -105,7 +105,19 @@
 //! sentence was false even though every case under it was true, because the
 //! fixture that produced it held one thing fixed: **none of its names
 //! contained a `W` or an `L`.**
-//! - a reversed range (`5-1`, `6-0`, `7-1`, `SUN-SAT`) → `Invalid range!`
+//! - a reversed range (`5-1`, `6-0`, `7-1`, `SUN-SAT`) → refused in every
+//!   field, but by **three different messages**, because a range is only
+//!   range-checked once both of its ends parse: `5-1` and `7-1` are
+//!   `Invalid range!` wherever their endpoints parse; `6-0` is
+//!   `Value 0 not in range [1, 31]` in day-of-month and `[1, 12]` in month;
+//!   `SUN-SAT` is `Invalid chars …` in the **other four** fields — the three
+//!   that have no names AND month, whose names are `JAN`–`DEC`, so `SUN` is
+//!   not one of them — and `Invalid range! [7,6]` only in day-of-week. (This
+//!   bullet said
+//!   "→ `Invalid range!`" until fix round 4: the claim was corrected at
+//!   `parse_field`'s range arm in round 3 and the copy up here was left
+//!   behind, which is the same way copies 3–6 of the "only a bare `*`" claim
+//!   survived. No verdict moves — egret refuses all twenty combinations.)
 //! - a step outside its **own field's** range → `Period N not in range
 //!   [min, max]`: `*/60` in minutes, `*/24` in hours, `*/32` in day-of-month,
 //!   `*/13` in month, `*/8` and `5/10` in day-of-week — and `*/0`, measured
@@ -115,8 +127,10 @@
 //!   with `withSeconds: true` → `contains N parts but we expect one of [M]`
 //!
 //! Measured acceptances: `L`, `L-n` and `nL` in day-of-month (`L-3` on a
-//! 30-day month is the 27th; `5L` is just `L`, the number range-checked and
-//! discarded), `0-0`, `5/10` in day-of-month, `*/7` in day-of-week, month and
+//! 30-day month is the 27th; a **sole** `5L` is just `L`, the number
+//! range-checked and discarded — but in a comma list it is the reverse, the
+//! number survives as a plain day and the last-day meaning is dropped, see
+//! `parse_day_of_month`), `0-0`, `5/10` in day-of-month, `*/7` in day-of-week, month and
 //! day names in either case (`MON`, `mon-fri`, `jan-dec`), `1-7` (every day,
 //! because 7 maps to 0), `SAT-SUN` (so `SUN` is **7**, not 0, before the
 //! mapping), and whitespace around and between fields.
@@ -304,9 +318,12 @@ pub enum CronError {
     /// name used in a field that has none (`0 0 JUL * *`); a long name
     /// (`MONDAY`); and anything else unrecognised, `H` included.
     ///
-    /// `5L` is on that list for **day-of-week only**: in day-of-month the
-    /// artifact accepts it and fires the last day of the month, and until fix
-    /// round 3 this crate refused it — see `parse_day_of_month`. The earlier
+    /// `5L` is on that list for **day-of-week only** — in a list there too
+    /// (`5L,1` and `1,5L` are both `Invalid chars … L`, measured). In
+    /// day-of-month the artifact accepts it: as the sole term it fires the
+    /// last day of the month, and in a comma list it is the plain day 5. Until
+    /// fix round 3 this crate refused it outright, and until fix round 4 it
+    /// dropped the list form — see `parse_day_of_month`. The earlier
     /// wording said "`W` and `L` in a token that is neither a number nor a
     /// name (`5L`, …)", which named a field-independent class off day-of-week
     /// examples.
@@ -866,20 +883,39 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
                 last_offsets.insert(off);
             }
         } else if let Some(nth) = upper.strip_suffix('L').filter(|n| !n.is_empty()) {
-            // `nL` in DAY-OF-MONTH is accepted and means exactly `L`: the
-            // number is range-checked and then ignored. Measured (fix round
-            // 3), from 2026-06-15:
+            // `nL` in DAY-OF-MONTH is accepted, and **which of its two
+            // halves survives depends on whether it is the field's sole
+            // term**. Measured on the artifact over 34 expressions x 6 clocks
+            // (fix round 4; fix round 3 had the sole-term half right and the
+            // list half exactly backwards):
             //
-            //   `5L`, `1L`, `15L`, `31L`, `5l`  -> 2026-06-30, the last day
-            //   `0L`, `32L`  -> `Value N not in range [1, 31]`
-            //   `L5`, `5LW`, `5L-1`             -> refused
-            //   `5L,1`                          -> 2026-07-01: dropped from a
-            //                                      list, like every other `L`
+            //   SOLE TERM -- the number is range-checked and then DISCARDED,
+            //   and the term means the last day:
+            //     `5L`, `1L`, `15L`, `31L`, `5l` -> 06-30, 07-31, 08-31
+            //     `0L`, `32L`                    -> `Value N not in range [1, 31]`
+            //     `L5`, `5LW`, `5L-1`            -> refused
             //
-            // egret refused all five accepted spellings, which is the mild
-            // direction -- but it is still a divergence, and the sweep found
-            // it because the file names `5L` while calling it unsupported
-            // syntax. That claim was true of DAY-OF-WEEK only.
+            //   IN A COMMA LIST -- the LAST-DAY meaning is discarded and the
+            //   NUMBER survives, as a plain day. This is the opposite of
+            //   what a bare `L` or an `L-n` does in a list (those are dropped
+            //   whole), and the previous two sentences here said so in the
+            //   measured voice while asserting the reverse:
+            //     `20L,1`  from 06-15 -> 06-20, 07-01, 07-20   (not 07-01 first)
+            //     `5L,1`   from 06-02 -> 06-05, 07-01, 07-05
+            //     `20L,25L` from 06-26 -> 07-20, 07-25, 08-20  (never 06-30)
+            //     `L,5L`   from 06-15 -> 07-05, 08-05, 09-05   (`L` dropped,
+            //                                                   `5L` is day 5)
+            //     `31L,1`  from 06-15 -> 07-01, 07-31, 08-01   (31 is a PLAIN
+            //               day: June has none, so June is skipped -- the
+            //               number is not clamped to the month's last day)
+            //     `29L,1`  from 01-20 -> 01-29, 02-01, 03-01   (no 02-29)
+            //   The range check still runs on the list form (`0L,1` and
+            //   `32L,1` are refused), so it stays above this branch.
+            //
+            // Reproduced rather than tidied, like the `L`-in-a-list defect
+            // above: cron-utils builds an `And` of `On` expressions for a
+            // comma field and reads the nominal value off each `On`, ignoring
+            // the special character it carries.
             let nth: u32 = nth.parse().map_err(|_| CronError::UnsupportedSyntax {
                 field: Field::DayOfMonth,
                 token: part.to_string(),
@@ -894,6 +930,8 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
             }
             if term_count == 1 {
                 last_offsets.insert(0);
+            } else {
+                values.insert(nth);
             }
         } else {
             let (vals, _) = parse_field(part, Field::DayOfMonth)?;
@@ -901,23 +939,23 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
         }
     }
 
-    // Unreachable as written: `restricted` is false only for the whole-token
-    // spellings `*` and `*/1`, and both of those produce a full value set, so
-    // this arm needs `values` to be empty at the same time -- which cannot
-    // happen. It is kept rather than deleted because the *other* half of the
-    // condition is load-bearing in the opposite direction: a bare `L` leaves
-    // `values` empty legitimately, and dropping `!restricted` would refuse it.
+    // THERE IS NO `!restricted && values.is_empty()` GUARD HERE, AND THAT IS
+    // A MEASUREMENT.
     //
-    // (This comment has carried the "only a bare `*`" claim twice. Fix round 2
-    // corrected it to "`*` or `*/1`" and still pointed at `part_restricted`,
-    // which fix round 3 stopped consulting -- restrictedness is now read off
-    // the whole token, exactly as cron-utils reads it.)
-    if !restricted && values.is_empty() {
-        return Err(CronError::Malformed {
-            field: Field::DayOfMonth,
-            token: token.to_string(),
-        });
-    }
+    // Fix round 3 kept one and argued that half of it was load-bearing. Both
+    // halves were checked in fix round 4: deleting the whole condition leaves
+    // 54/54 `trigger::` tests green, so nothing depends on it in either
+    // direction -- the conjunction is never evaluated to `true`, because
+    // `restricted` is false only for the whole-token spellings `*` and `*/1`
+    // and both of those fill `values`. The retention argument was about a
+    // DIFFERENT guard, the one you get by dropping `!restricted`, which would
+    // indeed refuse a bare `L`.
+    //
+    // `values` being empty is legitimate and must stay legitimate: `L`, `L-n`
+    // and a sole `nL` all put their day in `last_offsets` and nothing in
+    // `values`. A guard nobody has seen fail is a guard nobody has seen, so
+    // this one is gone rather than kept with a justification for a condition
+    // it does not have -- the same disposition as the `?`/`#` fence (F1).
     Ok((values, restricted, last_offsets))
 }
 
@@ -1020,8 +1058,12 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
             // `6-0` answers `Value 0 not in range [1, 31]` in day-of-month and
             // `[1, 12]` in month -- the zero is out of range before the
             // reversal is looked at -- and `SUN-SAT` answers `Invalid chars in
-            // expression!` in all three fields that have no names. Only in
-            // day-of-week are all four `Invalid range!`. egret refuses every
+            // expression!` in the other FOUR fields: the three that have no
+            // names and month, whose names are `JAN`-`DEC`, so `SUN` is not
+            // one of them either. ("the three fields that have no names" is
+            // what round 3 wrote and what the re-review endorsed; fix round 4
+            // re-measured all twenty combinations and month is a fourth.)
+            // Only in day-of-week are all four `Invalid range!`. egret refuses every
             // one of them, in every field, so no verdict moves; the class
             // claim was still wider than its examples.
             if lo > hi {
@@ -2951,20 +2993,33 @@ mod tests {
         }
     }
 
-    /// `nL` in **day-of-month** is accepted and means exactly `L`.
+    /// `nL` in **day-of-month** means `L` alone and a plain day in a list.
     ///
     /// The file called `5L` unsupported syntax, which is true of day-of-week
     /// and false of day-of-month — the artifact accepts `0 0 5L * *` and fires
-    /// it on the last day of the month. The number is range-checked to 1..=31
-    /// and then discarded.
+    /// it on the last day of the month, the number range-checked to 1..=31 and
+    /// then discarded.
+    ///
+    /// **The two halves are opposites, and the second one is here because the
+    /// first version of this test could not tell it from its negation.** In a
+    /// comma list the artifact keeps the NUMBER and drops the last-day
+    /// meaning. Fix round 3 asserted the reverse and pinned it with
+    /// `0 0 5L,1 * *` from 06-15, which answers 2026-07-01 under both rules;
+    /// a reviewer implemented the artifact's rule as a mutation and this
+    /// suite stayed green. The list rows below name the competing rule each
+    /// one refutes — that is the only thing that makes them rows rather than
+    /// decoration, and it is the seventh instance in this task of a fixture
+    /// answering the question it was built for and staying silent about the
+    /// one that was then generalised from it.
     #[test]
-    fn an_n_l_day_of_month_term_means_l_with_the_number_discarded() {
-        let next = |expr: &str| -> String {
+    fn an_n_l_day_of_month_term_is_l_alone_and_a_plain_day_in_a_list() {
+        let next_from = |expr: &str, from: &str| -> String {
             let cron = Cron::parse(expr, false).unwrap_or_else(|e| panic!("{expr:?}: {e}"));
-            cron.next_after(at("2026-06-15T12:00:00Z").with_timezone(&tz("UTC")))
+            cron.next_after(at(from).with_timezone(&tz("UTC")))
                 .map(|d| d.with_timezone(&Utc).date_naive().to_string())
                 .unwrap_or_else(|| "never".into())
         };
+        let next = |expr: &str| next_from(expr, "2026-06-15T12:00:00Z");
 
         // The number is discarded, so every accepted spelling answers what a
         // bare `L` answers -- which is the control row.
@@ -2991,8 +3046,53 @@ mod tests {
         for expr in ["0 0 L5 * *", "0 0 5LW * *", "0 0 5L-1 * *", "0 0 * * 5L"] {
             assert!(Cron::parse(expr, false).is_err(), "{expr}");
         }
-        // An `nL` term in a list is dropped like every other `L` term.
-        assert_eq!(next("0 0 5L,1 * *"), "2026-07-01");
+        // IN A LIST THE NUMBER SURVIVES AND THE LAST-DAY MEANING IS DROPPED
+        // -- the exact opposite of the sole-term rule above.
+        //
+        // Fix round 3 wrote "an `nL` term in a list is dropped like every
+        // other `L` term" here, in the measured voice, and pinned it with
+        // `5L,1` from 06-15 -> 2026-07-01. That row answers 07-01 under BOTH
+        // rules, so it discriminated nothing: a reviewer implemented the
+        // artifact's rule as a mutation and the whole `trigger::` suite
+        // stayed green. Naming the competing rules FIRST and picking a row
+        // that kills each is what this block is for -- the six rows below
+        // were measured on the pinned artifact (fix round 4), and each is
+        // annotated with the rule it refutes and what that rule would answer.
+        //
+        // "an `nL` in a list is dropped, like `L`"         -> 07-01 / never
+        assert_eq!(next("0 0 20L,1 * *"), "2026-06-20");
+        // the same rule, from a clock where 07-01 cannot be reached by
+        // accident: this is the row `5L,1` could not be
+        assert_eq!(
+            next_from("0 0 5L,1 * *", "2026-06-02T12:00:00Z"),
+            "2026-06-05"
+        );
+        // "the number AND the last day", and "a list `nL` still means `L`",
+        // both of which would answer 2026-06-30 from this clock
+        assert_eq!(
+            next_from("0 0 20L,25L * *", "2026-06-26T12:00:00Z"),
+            "2026-07-20"
+        );
+        // "every `L`-form in a list survives" -> 2026-06-30; a bare `L` in a
+        // list is still dropped whole, so only the 5 remains
+        assert_eq!(next("0 0 L,5L * *"), "2026-07-05");
+        // "the number, clamped to the month's last day" -> 2026-06-30. It is
+        // a PLAIN day: June has no 31st, so June is skipped entirely.
+        assert_eq!(next("0 0 31L,1 * *"), "2026-07-01");
+        // the sole-term control above ("0 0 5L * *" -> 2026-06-30) is the row
+        // that kills "the number always wins", which would answer 2026-07-05.
+        //
+        // The range check still runs on the list form.
+        for expr in ["0 0 0L,1 * *", "0 0 32L,1 * *"] {
+            assert!(
+                matches!(Cron::parse(expr, false), Err(CronError::OutOfRange { .. })),
+                "{expr}"
+            );
+        }
+        // And day-of-week is untouched by all of this, in a list too.
+        for expr in ["0 0 * * 5L,1", "0 0 * * 1,5L"] {
+            assert!(Cron::parse(expr, false).is_err(), "{expr}");
+        }
     }
 
     /// An `L` term in a comma list is **dropped**, and this reproduces an
