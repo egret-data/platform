@@ -723,8 +723,12 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
         }
     }
 
-    // A day-of-month of exactly `*` is the only unrestricted spelling, and
-    // `parse_field` has already told us so through `part_restricted`.
+    // A day-of-month of exactly `*` -- or `*/1`, which selects the same set --
+    // is unrestricted, and `parse_field` has already told us so through
+    // `part_restricted`. (This comment said "`*` is the only unrestricted
+    // spelling" until fix round 2 measured `*/1`; it was a second copy of the
+    // same wrong claim, in a different function, and the audit is what found
+    // it.)
     if !restricted && values.is_empty() {
         return Err(CronError::Malformed {
             field: Field::DayOfMonth,
@@ -1071,7 +1075,8 @@ impl ScheduleTrigger {
 
     /// Sets `lateMaximumDelay` directly, bypassing `resolve`'s refusal.
     ///
-    /// **Test-only in practice, and deliberately not reachable from YAML.** The
+    /// **Not reachable from YAML, and since fix round 2 not reachable from
+    /// outside this crate either — by construction, not by convention.** The
     /// model now carries the key (so it round-trips and so `resolve` can see
     /// it) but not a parsed duration, so `resolve` refuses any `Schedule` that
     /// declares it rather than scheduling as though it were absent. This
