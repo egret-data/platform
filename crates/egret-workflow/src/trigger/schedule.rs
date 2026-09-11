@@ -273,10 +273,19 @@ pub enum CronError {
     /// `?` and `#` anywhere; `W` and `L` in a token that is neither a number
     /// nor a name (`5L`, `1W`, `15W`, a bare `L` in day-of-week); a name used
     /// in a field that has none (`0 0 JUL * *`); a long name (`MONDAY`); and
-    /// anything else unrecognised, `H` included. The artifact answers all of
-    /// these with one message class, `Invalid chars in expression!`, which is
-    /// why they share one variant — see `the_dialect_is_the_artifacts_dialect`
-    /// on which half of that mapping is measured and which half is egret's.
+    /// anything else unrecognised, `H` included.
+    ///
+    /// **The artifact answers these with TWO message classes, not one**, and
+    /// fix round 2 corrected a sentence that said otherwise:
+    ///
+    /// - `Invalid chars in expression! Expression: X Invalid chars: Y` —
+    ///   `5L`, `1W`, `15W`, `LW`, `H`, `JUL`/`WED` in day-of-month, `MONDAY`;
+    /// - `Invalid expression: X` — **`?` and `#`** (`0 0 ? * 1`,
+    ///   `0 0 * * 1#1`, `0 0 * * FRI#2`).
+    ///
+    /// They still share one variant here, because what this crate needs to
+    /// distinguish is accept from refuse, not one of Kestra's message strings
+    /// from another. That is a CHOICE, and it is listed as one in §0.
     UnsupportedSyntax { field: Field, token: String },
     /// Measured: `Value {value} not in range [{min}, {max}]`.
     OutOfRange {
@@ -290,11 +299,26 @@ pub enum CronError {
     InvalidRange { field: Field, from: u32, to: u32 },
     /// Measured: `Period 0 not in range [0, 59]`.
     ZeroStep { field: Field },
-    /// A **structural** fault, as opposed to an unrecognised token: an empty
-    /// comma term, a step that is not a number, an `L-` with a non-numeric
-    /// tail. Measured: the artifact complains about these in a different
-    /// message class from `Invalid chars` — `For input string: "X"`,
-    /// `Missing steps for expression: 5/`, `Trailing commas not permitted!`.
+    /// A **structural** fault: an empty comma term, a step that is not a
+    /// number, an `L-` with a non-numeric tail, a range missing an end.
+    ///
+    /// **This variant does NOT mirror a class of the artifact's, and fix
+    /// round 2 removed a sentence claiming it did.** Measured, the artifact
+    /// splits these five across FOUR classes, two of which are the same
+    /// `Invalid chars` that [`CronError::UnsupportedSyntax`] also covers:
+    ///
+    /// | expression | the artifact's answer |
+    /// |---|---|
+    /// | `*/x * * * *` | `For input string: "X"` |
+    /// | `5/ * * * *` | `Missing steps for expression: 5/` |
+    /// | `0 0 L- * *` | `Missing values for range: L-` |
+    /// | `0 0 * * ,` | `Invalid field value! Trailing commas not permitted!` |
+    /// | `0,,2 * * * *` | **`Invalid chars in expression!`** |
+    /// | `0 0 L-x * *` | **`Invalid chars in expression!`** |
+    ///
+    /// So egret's two variants **cross-cut** Kestra's classes rather than
+    /// reproduce them. The measured fact is the refusal; the variant is
+    /// egret's, and §0 lists it as chosen.
     Malformed { field: Field, token: String },
 }
 
@@ -856,14 +880,17 @@ fn parse_value(token: &str, field: Field) -> Result<u32, CronError> {
             // reported as unsupported syntax rather than `Malformed` because
             // that is the complaint the artifact itself makes about them.
             //
-            // One taxonomy, no special case: the artifact makes the SAME
-            // complaint about every one of these -- `Invalid chars in
-            // expression!` -- for `5L`, `1W`, `JUL`-in-day-of-month, `MONDAY`
-            // and even `H` in the minute field. An earlier draft of this arm
-            // split them by whether the token contained a `W` or an `L`, which
-            // was a distinction this parser invented and the artifact does not
-            // make. `Malformed` is left for STRUCTURAL problems -- an empty
-            // part, a non-numeric step, an `L-` with a non-numeric tail.
+            // One variant, no special case. An earlier draft of this arm
+            // split these by whether the token contained a `W` or an `L`,
+            // which was a distinction this parser invented; `5L`, `1W`,
+            // `JUL`-in-day-of-month, `MONDAY` and `H` in the minute field all
+            // answer `Invalid chars in expression!` on the artifact.
+            //
+            // What the draft's REPLACEMENT sentence then got wrong -- fix
+            // round 2 -- was generalising that to "the artifact makes the same
+            // complaint about every one of these": `?` and `#` answer
+            // `Invalid expression:` instead, and two of `Malformed`'s own
+            // cases answer `Invalid chars`. See `CronError::Malformed`.
             None => {
                 return Err(CronError::UnsupportedSyntax {
                     field,
@@ -1029,8 +1056,15 @@ impl ScheduleTrigger {
     /// `the_missed_tick_rule_matches_the_artifact`. When someone parses
     /// `java.time.Duration` properly, `from_schedule` should use it and this
     /// can stay as it is.
+    ///
+    /// **`pub(crate)`, and that is the whole point.** Fix round 1 wrote that
+    /// "no YAML can reach it" — true, but while this was `pub` it was
+    /// *discipline*, not construction: any caller outside the crate could set
+    /// a delay `resolve` refuses, which is exactly the over-acceptance the
+    /// refusal exists to close. Unrepresentable beats unforgettable, which is
+    /// the same argument that chose refuse-over-parse in the first place.
     #[must_use]
-    pub fn with_late_maximum_delay(mut self, delay: Option<Duration>) -> Self {
+    pub(crate) fn with_late_maximum_delay(mut self, delay: Option<Duration>) -> Self {
         self.late_maximum_delay = delay;
         self
     }
@@ -1457,8 +1491,12 @@ mod tests {
             ("*/0 * * * *", false, ZeroStep),
             ("", false, Empty),
             ("H 0 * * *", false, Unsupported),
-            // --- structural faults: refused, and the artifact's complaint is
-            // a DIFFERENT one from `Invalid chars` (probe 10) ---
+            // --- structural faults, all refused (probe 10). NOTE the last
+            // two: they answer `Invalid chars`, the SAME class the
+            // `Unsupported` rows above get. An earlier header here claimed
+            // every row in this group got a different class, while quoting the
+            // counter-examples three lines below it. egret's variant is its
+            // own; only the refusal is measured. ---
             ("*/x * * * *", false, Malformed), // `For input string: "X"`
             ("5/ * * * *", false, Malformed),  // `Missing steps for expression: 5/`
             ("0,,2 * * * *", false, Malformed), // `Invalid chars ... Expression: `

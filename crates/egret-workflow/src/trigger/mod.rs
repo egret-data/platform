@@ -1005,9 +1005,14 @@ mod tests {
     /// without creating an execution.**
     ///
     /// This is the shape of the bug, and it is worth naming precisely because
-    /// it does not look like a crash. `tick` always advances the state — that
-    /// is the artifact's behaviour — so a tick that reports `Skipped` has
-    /// *consumed its slot* and will never be retried. A scheduler that
+    /// it does not look like a crash. A tick that reaches evaluation at all
+    /// advances the state — that is the artifact's behaviour — so a tick that
+    /// reports `Skipped` has
+    /// *consumed its slot* and will never be retried. (Fix round 1 created
+    /// the one exception, and this sentence used to read "`tick` always
+    /// advances the state": a trigger that is not schedulable at all never
+    /// reaches evaluation and returns [`TickOutcome::NotSchedulable`] with the
+    /// state untouched.) A scheduler that
     /// advanced the state and silently produced nothing would look, from
     /// outside, exactly like a scheduler with nothing to do: the loop keeps
     /// running, no error is logged, no execution is ever created, and the
