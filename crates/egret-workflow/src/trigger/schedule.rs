@@ -26,6 +26,42 @@
 //! not an assumption — the image's own labels say `revision=169ca7f2…`, which
 //! the checkout does not contain, so the two were not assumed equal.
 //!
+//! ## 0. Measured, derived, or chosen — and this section exists because the
+//! difference was invisible
+//!
+//! Fix round 1 found three defects that shared one cause: **decisions I made
+//! were written in the same measured-sounding voice as the ones I measured**,
+//! inside a file whose whole warrant is the heading above. So every claim in
+//! this module now has to be one of three things, and the ones that are not
+//! measured have to say so.
+//!
+//! - **Measured** — a running program on the pinned artifact answered it, and
+//!   the class and method are named.
+//! - **Derived** — it follows from something measured, and the derivation is
+//!   written down. A derivation can be wrong, so these are not measurements.
+//! - **Chosen** — nobody measured it; it is egret's decision. These are listed
+//!   here by name, so the list can be audited rather than discovered.
+//!
+//! **The chosen decisions in this file:**
+//!
+//! 1. `SEARCH_DAYS = 366 * 20`. The eight-year worst case is derived; the
+//!    number 20 is picked. The artifact's own bound was never measured.
+//! 2. `CronError` and `SkipReason` being typed enums at all, and which
+//!    refusals map to `UnsupportedSyntax` versus `Malformed`. The artifact's
+//!    accept/refuse verdicts are measured; this taxonomy is not its taxonomy.
+//! 3. Refusing a timezone `chrono-tz` cannot resolve
+//!    (`ScheduleError::UnknownTimezone`) rather than coercing it.
+//! 4. Refusing a `when` condition (`UnsupportedWhenCondition`).
+//! 5. Refusing a declared `lateMaximumDelay`
+//!    (`UnsupportedLateMaximumDelay`) instead of parsing the duration.
+//! 6. The progress guard in `handle_max_delay`, which the artifact does not
+//!    have — and which no test covers; see its own comment.
+//! 7. Returning `None` rather than the standing date when that guard fires.
+//! 8. Carrying `ScheduledExecution`'s three instants plus a zone instead of
+//!    formatted `trigger.*` strings, because the format was never measured.
+//!
+//! Everything else in this file is measured or derived, and says which.
+//!
 //! ## 1. The cron dialect — `Schedule.<clinit>`
 //!
 //! `CRON_DEFINITION_BUILDER` is built field by field in the static
@@ -58,6 +94,17 @@
 //! - `W` (`15W`, `LW`) → `Invalid chars … W`
 //! - `#` (`1#1`) → `Invalid expression: 1#1`
 //! - `L` in **day-of-week** (`5L`, `L`) → `Invalid chars … L`
+//!
+//! **`W` and `L` are letters before they are special characters, and fix
+//! round 1 exists because this section's first draft did not say so.** The
+//! refusal list above is measured and correct, and a parser that turned it
+//! into "refuse any token containing `W` or `L`" — which is what this file
+//! did — refuses `0 0 * * WED`, `0 0 * JUL *`, `MON,WED,FRI`, `MON-WED` and
+//! `JAN-JUL`, every one of which the artifact **accepts** (measured:
+//! `0 0 * * WED` → 2026-06-17, `0 0 * JUL *` → 2026-07-01). The general
+//! sentence was false even though every case under it was true, because the
+//! fixture that produced it held one thing fixed: **none of its names
+//! contained a `W` or an `L`.**
 //! - a reversed range (`5-1`, `6-0`, `7-1`, `SUN-SAT`) → `Invalid range!`
 //! - `*/0` → `Period 0 not in range [0, 59]`
 //! - a **6-field** expression with `withSeconds: false`, and a **5-field** one
@@ -221,8 +268,15 @@ pub enum CronError {
     /// Measured: `Nickname @reboot not supported!`, and every other `@…` that
     /// is not one of the seven.
     UnsupportedNickname(String),
-    /// A character this dialect does not define — `?`, `W`, `#`, or `L`
-    /// outside day-of-month.
+    /// A token this dialect does not define.
+    ///
+    /// `?` and `#` anywhere; `W` and `L` in a token that is neither a number
+    /// nor a name (`5L`, `1W`, `15W`, a bare `L` in day-of-week); a name used
+    /// in a field that has none (`0 0 JUL * *`); a long name (`MONDAY`); and
+    /// anything else unrecognised, `H` included. The artifact answers all of
+    /// these with one message class, `Invalid chars in expression!`, which is
+    /// why they share one variant — see `the_dialect_is_the_artifacts_dialect`
+    /// on which half of that mapping is measured and which half is egret's.
     UnsupportedSyntax { field: Field, token: String },
     /// Measured: `Value {value} not in range [{min}, {max}]`.
     OutOfRange {
@@ -236,7 +290,11 @@ pub enum CronError {
     InvalidRange { field: Field, from: u32, to: u32 },
     /// Measured: `Period 0 not in range [0, 59]`.
     ZeroStep { field: Field },
-    /// A token that is none of the above shapes.
+    /// A **structural** fault, as opposed to an unrecognised token: an empty
+    /// comma term, a step that is not a number, an `L-` with a non-numeric
+    /// tail. Measured: the artifact complains about these in a different
+    /// message class from `Invalid chars` — `For input string: "X"`,
+    /// `Missing steps for expression: 5/`, `Trailing commas not permitted!`.
     Malformed { field: Field, token: String },
 }
 
@@ -314,6 +372,11 @@ struct DayOfMonth {
     values: BTreeSet<u32>,
     /// Offsets from the last day of the month: `L` is `0`, `L-3` is `3`.
     /// Measured: `0 0 L-3 * *` fires on the 27th of a 30-day month.
+    ///
+    /// **Empty whenever the day-of-month field has more than one comma term**,
+    /// because the artifact drops `L` terms from a list — see
+    /// `parse_day_of_month`. `L-n` is range-checked to 1..=31 there, so this
+    /// set can hold 31, which `date_matches` then never satisfies.
     last_offsets: BTreeSet<u32>,
 }
 
@@ -945,17 +1008,27 @@ impl ScheduleTrigger {
             trigger_id: trigger_id.to_string(),
             cron,
             timezone,
-            // `lateMaximumDelay` is a `java.time.Duration` W1 dropped from the
-            // model for want of a parser. It is carried here so the rule can be
-            // tested and so a future model field has somewhere to land; nothing
-            // in the corpus sets it (§5).
+            // Always `None` on this path, and that is now a CONSEQUENCE
+            // rather than an omission: `resolve` has already refused any
+            // `Schedule` that declares `lateMaximumDelay`, because this crate
+            // models the key but not the duration inside it. The only way to
+            // set it is `with_late_maximum_delay`, which the tests use to pin
+            // the measured rule.
             late_maximum_delay: None,
             disabled,
         })
     }
 
-    /// Overrides `lateMaximumDelay`. Separate from `resolve` because the model
-    /// does not carry the field yet — see `from_schedule`.
+    /// Sets `lateMaximumDelay` directly, bypassing `resolve`'s refusal.
+    ///
+    /// **Test-only in practice, and deliberately not reachable from YAML.** The
+    /// model now carries the key (so it round-trips and so `resolve` can see
+    /// it) but not a parsed duration, so `resolve` refuses any `Schedule` that
+    /// declares it rather than scheduling as though it were absent. This
+    /// constructor is how the measured rule is still exercised — see
+    /// `the_missed_tick_rule_matches_the_artifact`. When someone parses
+    /// `java.time.Duration` properly, `from_schedule` should use it and this
+    /// can stay as it is.
     #[must_use]
     pub fn with_late_maximum_delay(mut self, delay: Option<Duration>) -> Self {
         self.late_maximum_delay = delay;

@@ -24,6 +24,34 @@
 //! be missing and nothing to skip; every test in this module tree runs on every
 //! `cargo test`, or the build fails.
 //!
+//! # Measured, derived, or chosen
+//!
+//! `schedule.rs`'s §0 explains why this split is written down; the same rule
+//! binds here. **The chosen decisions in this file:**
+//!
+//! 1. [`Clock`] being a parameter rather than Kestra's process-wide singleton.
+//!    That `SchedulerClock` exists and is replaceable is measured; dropping
+//!    the singleton is a decision.
+//! 2. [`TestClock`] shipping in `src/` rather than in a test module, and
+//!    allowing the clock to move **backwards**.
+//! 3. The [`TickOutcome`] shape — three variants, and in particular
+//!    [`TickOutcome::NotSchedulable`] being distinct from
+//!    [`TickOutcome::Skipped`]. The *behaviour* each describes is measured;
+//!    splitting them into two variants is egret's API decision.
+//! 4. [`TriggerState`] dropping `vnode`, `workerId`, `dispatchEpoch`,
+//!    `locked`, `executionId`, `lastEventId` and `stopAfter`.
+//! 5. [`run_until_idle`] existing at all, and its `max_passes` hard stop.
+//! 6. `DrainedRun` being a named triple.
+//! 7. `tests::no_wall_clock_in_the_trigger_path` as a policy, and the list of
+//!    spellings it forbids.
+//! 8. `tick`'s purity over `(trigger, state, now)` — this is the programme's
+//!    own constraint, mirroring `executor::advance()`, not Kestra's shape.
+//!
+//! One **derived** claim is worth naming because it reads like a measurement
+//! and is not: `a_clock_that_moves_backwards_does_not_replay_a_consumed_tick`
+//! is derived from the due predicate (`now < due_at`), not observed on the
+//! artifact. Nothing was ever run with a clock moving backwards.
+//!
 //! # The clock is injected, and that is not a style preference
 //!
 //! A scheduler is nothing but a clock. This workspace has lost whole gate runs
@@ -87,8 +115,11 @@ impl Clock for SystemClock {
 
 /// A clock a test drives.
 ///
-/// Ships in `src/` rather than in a test module because the trigger routes
-/// will want it too, and because Kestra ships its own for the same reason.
+/// **Chosen, not measured.** It ships in `src/` rather than in a test module
+/// on the expectation that the trigger routes will want it, and that
+/// expectation is a guess about code nobody has written. What *is* measured is
+/// only that Kestra ships `SchedulerClock` in `core/src/main` rather than in
+/// its tests.
 #[derive(Debug)]
 pub struct TestClock {
     now: std::sync::Mutex<DateTime<Utc>>,
@@ -104,6 +135,10 @@ impl TestClock {
     /// Moves the clock to `at`. Moving it **backwards** is allowed on purpose:
     /// a scheduler that only ever sees time increase has never been asked what
     /// it does when a replica's clock is behind.
+    ///
+    /// **Chosen.** Nothing was run against the artifact with a clock going
+    /// backwards; what egret does about it is derived from its own due
+    /// predicate rather than copied from Kestra.
     pub fn set(&self, at: DateTime<Utc>) {
         *self.now.lock().expect("test clock poisoned") = at;
     }
@@ -583,9 +618,12 @@ mod tests {
 
     /// A clock that goes **backwards** does not resurrect a consumed tick.
     ///
-    /// Nothing in the corpus produces this, and that is the point: a replica
-    /// whose clock is behind is a real thing, and a scheduler that has never
-    /// been asked what it does about one has an answer nobody has read.
+    /// **DERIVED, not measured.** It follows from `tick`'s due predicate —
+    /// `now < due_at` is false in both directions — and nothing was ever run
+    /// against the artifact with a clock moving backwards. Worth pinning
+    /// anyway, because a replica whose clock is behind is a real thing and a
+    /// scheduler that has never been asked what it does about one has an
+    /// answer nobody has read. But it is not evidence about Kestra.
     #[test]
     fn a_clock_that_moves_backwards_does_not_replay_a_consumed_tick() {
         let clock = TestClock::new(at("2026-06-16T02:00:00Z"));
