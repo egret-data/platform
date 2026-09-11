@@ -265,8 +265,16 @@ pub enum CronError {
     Empty,
     /// Measured: `Cron expression contains {got} parts but we expect one of [{want}]`.
     WrongFieldCount { got: usize, want: usize },
-    /// Measured: `Nickname @reboot not supported!`, and every other `@…` that
-    /// is not one of the seven.
+    /// Measured: `Nickname @reboot not supported!`.
+    ///
+    /// **`@reboot` is the only token that reaches this variant**, and fix
+    /// round 2 deleted "and every other `@…` that is not one of the seven",
+    /// which was false of both the artifact and the code beneath it.
+    /// `@secondly`, `@minutely`, `@every`, `@YEARLY`, `@nope` and a bare `@`
+    /// are not recognised as nicknames at all: they fall through to the field
+    /// count and answer `contains 1 parts but we expect one of [5]`, so they
+    /// arrive as [`CronError::WrongFieldCount`]. `@reboot` is the one spelling
+    /// cron-utils recognises and this definition does not enable.
     UnsupportedNickname(String),
     /// A token this dialect does not define.
     ///
@@ -450,9 +458,13 @@ impl Cron {
             if let Some(rest) = trimmed.strip_prefix('@') {
                 match rest {
                     // The expansion is always five fields, whatever
-                    // `with_seconds` says -- measured: `@daily` parses with
-                    // `withSeconds: true` and still fires at midnight, not at
-                    // every second of it.
+                    // `with_seconds` says. Fix round 1 asserted that for all
+                    // seven nicknames having measured **two**; fix round 2
+                    // measured all seven under BOTH parsers (probe 11) and
+                    // every one answers identically with `withSeconds` on and
+                    // off -- @yearly/@annually 2027-01-01, @monthly
+                    // 2026-07-01, @weekly 2026-06-21, @daily/@midnight
+                    // 2026-06-16, @hourly 2026-06-15T13:00.
                     "yearly" | "annually" => return Self::parse_fields("0 0 1 1 *", false),
                     "monthly" => return Self::parse_fields("0 0 1 * *", false),
                     "weekly" => return Self::parse_fields("0 0 * * 0", false),
@@ -741,28 +753,23 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
             });
         }
 
-        // `?` and `#` cannot occur inside any name this dialect defines, so they
-        // are refused here, on the whole part, before anything else is tried.
-        // Measured: `?` answers `Invalid expression: ?` and `FRI#2` answers
-        // `Invalid expression: FRI#2`.
+        // THERE IS NO `?`/`#` FENCE HERE, AND THAT IS A MEASUREMENT.
         //
-        // **`W` and `L` are deliberately NOT refused here**, and fix round 1
-        // exists because they used to be. They are special characters only in
-        // day-of-month; in the two fields that have names they are ordinary
-        // letters -- `WED` contains a `W` and `JUL` contains an `L`. A scan for
-        // those two characters *before* names are resolved refuses
+        // Fix round 1 put one here and documented it as load-bearing. Fix round
+        // 2 mutated it away (`F1-question-hash-fence-removed`) and **no test
+        // died**: `parse_value`'s final arm already refuses `?`, `1#1` and
+        // `FRI#2` as `UnsupportedSyntax` on the same field, because they are
+        // neither a number nor a name. A guard nobody has seen fail is a guard
+        // nobody has seen, so the redundant one is gone rather than left with a
+        // comment claiming work it was not doing.
+        //
+        // What must NOT come back is a scan for `W` and `L` here. They are
+        // special characters only in day-of-month; in the two fields that have
+        // names they are ordinary letters -- `WED` contains a `W`, `JUL`
+        // contains an `L`. Scanning for them *before* names resolve refuses
         // `0 0 * * WED`, `0 0 * JUL *`, `MON,WED,FRI`, `MON-WED` and
-        // `JAN-JUL`, every one of which the artifact ACCEPTS (measured:
-        // `0 0 * * WED` fires 2026-06-17, `0 0 * JUL *` fires 2026-07-01), and
-        // it made this file's own `"WED" => Some(3)` and `"JUL" => Some(7)`
-        // arms unreachable. The check now lives in `parse_value`, which runs
-        // *after* a name has had its chance.
-        if part.contains('?') || part.contains('#') {
-            return Err(CronError::UnsupportedSyntax {
-                field,
-                token: part.to_string(),
-            });
-        }
+        // `JAN-JUL`, every one of which the artifact ACCEPTS (`0 0 * * WED`
+        // fires 2026-06-17, `0 0 * JUL *` fires 2026-07-01). That was C1.
 
         let (spec, step) = match part.split_once('/') {
             Some((spec, step)) => {
@@ -801,9 +808,25 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
             (v, hi, false)
         };
 
-        // A bare `*` is the only spelling that leaves the field unrestricted:
-        // `*/2` carries a step and IS restricted (measured, §2).
-        if !is_star || step.is_some() {
+        // Which spellings leave a field UNRESTRICTED, measured exhaustively in
+        // fix round 2 (probes 12 and 13) by OR-ing each day-of-month spelling
+        // against a restricted day-of-week and seeing whether it contributed:
+        //
+        //   *        UNRESTRICTED        1-31     restricted
+        //   */1      UNRESTRICTED        1-31/1   restricted
+        //   */2      restricted          1/1      restricted
+        //   */3      restricted          1-31/2   restricted
+        //   */30     restricted          1-30     restricted
+        //   */31     restricted
+        //
+        // **`*/1` is unrestricted**, and this line used to make it restricted --
+        // `0 0 */1 * 1` then fired on 2026-06-16 where the artifact fires only
+        // on Mondays (2026-06-22). Over-acceptance, in the direction the oracle
+        // cannot catch, found by re-checking a class claim rather than by a
+        // test. A step of 1 over the whole range is the same set as `*`, and
+        // cron-utils collapses it; a step of 30 or 31 does not collapse, even
+        // though it selects a set no month can distinguish from {1}.
+        if !is_star || step.is_some_and(|n| n != 1) {
             restricted = true;
         }
 
@@ -2393,6 +2416,71 @@ mod tests {
         let absent: Trigger =
             serde_norway::from_str("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n").unwrap();
         assert!(ScheduleTrigger::resolve(&absent).is_ok());
+    }
+
+    /// Which day-of-month spellings leave the field **unrestricted** — and one
+    /// fixture that cannot tell, which is the point of having two.
+    ///
+    /// The day-of-month/day-of-week rule is OR only when *both* are
+    /// restricted, so OR-ing a spelling against a restricted day-of-week and
+    /// watching whether it contributes is a direct read of its restrictedness.
+    ///
+    /// **`*/1` is unrestricted**, and fix round 2 found this crate had it
+    /// backwards: `0 0 */1 * 1` fired on the Tuesday where the artifact fires
+    /// only on Mondays. A step of 1 over the whole range is the same set as
+    /// `*`, and cron-utils collapses it.
+    ///
+    /// **`*/30` and `*/31` are restricted** — and the first fixture below
+    /// says 2026-06-22 for them, which is *also* what unrestricted would say,
+    /// because `{1, 31}` has no member between 06-15 and the next Monday.
+    /// A verdict read off that fixture alone would have been a coin flip
+    /// dressed as a measurement, so the second fixture exists to separate them.
+    #[test]
+    fn only_star_and_star_slash_one_leave_a_field_unrestricted() {
+        let next = |expr: &str, from: &str| -> String {
+            let cron = Cron::parse(expr, false).unwrap_or_else(|e| panic!("{expr:?}: {e}"));
+            cron.next_after(at(from).with_timezone(&tz("UTC")))
+                .map(|d| d.with_timezone(&Utc).date_naive().to_string())
+                .unwrap_or_else(|| "never".into())
+        };
+
+        // Fixture 1 — day-of-week = Monday, clock 2026-06-15T12:00Z (a Monday).
+        // UNRESTRICTED answers 2026-06-22 (Mondays only); restricted answers
+        // earlier, because the day-of-month set contributes a nearer day.
+        for (dom, want) in [
+            ("*", "2026-06-22"),   // unrestricted
+            ("*/1", "2026-06-22"), // unrestricted -- THE FIX
+            ("*/2", "2026-06-17"),
+            ("*/3", "2026-06-16"),
+            ("1-31", "2026-06-16"),
+            ("1-31/1", "2026-06-16"),
+            ("1/1", "2026-06-16"),
+            ("1-31/2", "2026-06-17"),
+            ("1-30", "2026-06-16"),
+            // These two agree with the unrestricted answer here WITHOUT being
+            // unrestricted. Kept deliberately, as the negative control for
+            // fixture 2.
+            ("*/30", "2026-06-22"),
+            ("*/31", "2026-06-22"),
+        ] {
+            let expr = format!("0 0 {dom} * 1");
+            assert_eq!(next(&expr, "2026-06-15T12:00:00Z"), want, "{expr}");
+        }
+
+        // Fixture 2 — day-of-week = Sunday, clock 2026-06-29T12:00Z. Now the
+        // next Sunday (07-05) is LATER than the next member of `{1, 31}`
+        // (07-01), so restricted and unrestricted give different answers.
+        for (dom, want) in [
+            ("*", "2026-07-05"),    // unrestricted
+            ("*/1", "2026-07-05"),  // unrestricted -- THE FIX, discriminated twice
+            ("*/30", "2026-07-01"), // restricted after all
+            ("*/31", "2026-07-01"), // restricted after all
+            ("*/2", "2026-07-01"),
+            ("1-31", "2026-06-30"),
+        ] {
+            let expr = format!("0 0 {dom} * 0");
+            assert_eq!(next(&expr, "2026-06-29T12:00:00Z"), want, "{expr}");
+        }
     }
 
     /// An `L` term in a comma list is **dropped**, and this reproduces an
