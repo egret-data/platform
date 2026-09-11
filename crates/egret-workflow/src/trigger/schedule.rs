@@ -552,30 +552,71 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
     let mut last_offsets = BTreeSet::new();
     let mut restricted = false;
 
+    // How many comma-separated terms the field has. It decides whether an `L`
+    // term counts at all -- see the `l_terms_are_dropped` note below.
+    let term_count = token.split(',').count();
+
     for part in token.split(',') {
         let part = part.trim();
         let upper = part.to_ascii_uppercase();
         if upper == "L" {
             restricted = true;
-            last_offsets.insert(0);
+            // MEASURED UPSTREAM DEFECT, reproduced rather than tidied.
+            //
+            // An `L` term takes effect only when it is the field's SOLE term.
+            // In a comma list cron-utils drops every `L`-form term and keeps
+            // only the plain ones. Measured on the artifact, walking five
+            // executions from 2026-06-01:
+            //
+            //   `L`          -> 06-30, 07-31, 08-31, 09-30, 10-31
+            //   `L,1`, `1,L` -> 07-01, 08-01, 09-01, 10-01, 11-01  (L dropped)
+            //   `L,15`,`15,L`-> 06-15, 07-15, 08-15, 09-15, 10-15  (L dropped)
+            //   `2,L`        -> 06-02, 07-02, 08-02, 09-02, 10-02  (L dropped)
+            //   `L-1,15`     -> 06-15, 07-15, ...                  (L-1 dropped)
+            //   `L,L-1`      -> NOTHING AT ALL, in either direction
+            //
+            // Reproducing it is the fidelity rule ("reproduce observable
+            // behaviour, including upstream defects"), and here it is also the
+            // safe direction twice over: a union would fire on 06-30 for
+            // `L,1`, which is precisely the over-acceptance the oracle cannot
+            // catch.
+            if term_count == 1 {
+                last_offsets.insert(0);
+            }
         } else if let Some(off) = upper.strip_prefix("L-") {
             restricted = true;
             let off: u32 = off.parse().map_err(|_| CronError::Malformed {
                 field: Field::DayOfMonth,
                 token: part.to_string(),
             })?;
-            // `L-31` would name a day before the 1st; the artifact's range is
-            // 1..=31 and an offset of 31 can never select a day, so refuse it
-            // rather than build a set that silently matches nothing.
-            if off > 30 {
+            // MEASURED, and fix round 1 corrected both ends of it. The
+            // artifact range-checks the number after `L-` against the
+            // day-of-month field's own 1..=31:
+            //
+            //   `L-0`   -> refused, `Value 0 not in range [1, 31]`
+            //   `L-1`   -> 2026-06-29   (June has 30 days)
+            //   `L-30`  -> 2026-07-01
+            //   `L-31`  -> PARSES, and then never matches anything
+            //   `L-32`  -> refused, `Value 32 not in range [1, 31]`
+            //   `L-100` -> refused, `Value 100 not in range [1, 31]`
+            //
+            // The first draft allowed 0 and refused 31, i.e. it was wrong at
+            // BOTH ends: it fired on the last day for `L-0` where the artifact
+            // refuses the expression outright, and it refused `L-31`, which
+            // the artifact accepts as an expression that simply never fires.
+            // `L-31` needs no special case here -- `last_day - 31` underflows,
+            // `checked_sub` yields `None`, and the day never matches.
+            if !(1..=31).contains(&off) {
                 return Err(CronError::OutOfRange {
                     field: Field::DayOfMonth,
                     value: i64::from(off),
-                    min: 0,
-                    max: 30,
+                    min: 1,
+                    max: 31,
                 });
             }
-            last_offsets.insert(off);
+            if term_count == 1 {
+                last_offsets.insert(off);
+            }
         } else {
             let (vals, part_restricted) = parse_field(part, Field::DayOfMonth)?;
             restricted |= part_restricted;
@@ -613,14 +654,23 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
             });
         }
 
-        // Refuse the characters this dialect does not define, by name, so the
-        // error says which one rather than "malformed". These are the four
-        // over-acceptances a permissive parser would ship (§1).
-        if let Some(bad) = part
-            .chars()
-            .find(|c| matches!(c, '?' | 'W' | 'w' | '#' | 'L' | 'l'))
-        {
-            let _ = bad;
+        // `?` and `#` cannot occur inside any name this dialect defines, so they
+        // are refused here, on the whole part, before anything else is tried.
+        // Measured: `?` answers `Invalid expression: ?` and `FRI#2` answers
+        // `Invalid expression: FRI#2`.
+        //
+        // **`W` and `L` are deliberately NOT refused here**, and fix round 1
+        // exists because they used to be. They are special characters only in
+        // day-of-month; in the two fields that have names they are ordinary
+        // letters -- `WED` contains a `W` and `JUL` contains an `L`. A scan for
+        // those two characters *before* names are resolved refuses
+        // `0 0 * * WED`, `0 0 * JUL *`, `MON,WED,FRI`, `MON-WED` and
+        // `JAN-JUL`, every one of which the artifact ACCEPTS (measured:
+        // `0 0 * * WED` fires 2026-06-17, `0 0 * JUL *` fires 2026-07-01), and
+        // it made this file's own `"WED" => Some(3)` and `"JUL" => Some(7)`
+        // arms unreachable. The check now lives in `parse_value`, which runs
+        // *after* a name has had its chance.
+        if part.contains('?') || part.contains('#') {
             return Err(CronError::UnsupportedSyntax {
                 field,
                 token: part.to_string(),
@@ -730,8 +780,29 @@ fn parse_value(token: &str, field: Field) -> Result<u32, CronError> {
         };
         match named {
             Some(n) => n,
+            // Not a number and not a name. NOW `W` and `L` mean what the
+            // dialect says they mean -- a special character it does not define
+            // outside day-of-month -- so `5L`, `1W`, `15W` and a bare `L` in
+            // day-of-week land here and are refused as unsupported syntax,
+            // while `WED` and `JUL` never reach this arm at all.
+            //
+            // A three-letter name used in the WRONG field (`0 0 JUL * *`,
+            // `0 0 WED * *`) also lands here, and the artifact refuses it too
+            // -- measured, `Invalid chars in expression! Expression: JUL
+            // Invalid chars: JUL`. So does a long name (`MONDAY`). They are
+            // reported as unsupported syntax rather than `Malformed` because
+            // that is the complaint the artifact itself makes about them.
+            //
+            // One taxonomy, no special case: the artifact makes the SAME
+            // complaint about every one of these -- `Invalid chars in
+            // expression!` -- for `5L`, `1W`, `JUL`-in-day-of-month, `MONDAY`
+            // and even `H` in the minute field. An earlier draft of this arm
+            // split them by whether the token contained a `W` or an `L`, which
+            // was a distinction this parser invented and the artifact does not
+            // make. `Malformed` is left for STRUCTURAL problems -- an empty
+            // part, a non-numeric step, an `L-` with a non-numeric tail.
             None => {
-                return Err(CronError::Malformed {
+                return Err(CronError::UnsupportedSyntax {
                     field,
                     token: token.to_string(),
                 })
@@ -776,6 +847,15 @@ pub enum ScheduleError {
     /// declines to schedule rather than scheduling in the wrong zone — and it
     /// is recorded rather than hidden.
     UnknownTimezone(String),
+    /// `Schedule.lateMaximumDelay` changes which tick fires (see §5) and this
+    /// crate's model carries it only as an uninterpreted value, because
+    /// reproducing `java.time.Duration.parse` is a measurement this package
+    /// has not made. Scheduling anyway would replay a backlog the artifact
+    /// throws away -- measured: five days behind, `0 2 * * *` answers
+    /// `2026-06-11T02:00Z` without the delay and `2026-06-16T02:00Z` with
+    /// `PT1H`. So a `Schedule` that declares it is refused rather than
+    /// silently scheduled without it.
+    UnsupportedLateMaximumDelay(String),
     /// `Schedule` supports a `when` expression that filters candidate ticks
     /// (`Schedule.findNextDateMatchingConditions`). Rendering it needs a
     /// `RunContext` this seam does not have, and a schedule that ignored it
@@ -791,6 +871,9 @@ impl fmt::Display for ScheduleError {
             Self::MissingCron => write!(f, "core.schedule requires a `cron`"),
             Self::Cron(e) => write!(f, "invalid cron: {e}"),
             Self::UnknownTimezone(tz) => write!(f, "unknown timezone {tz:?}"),
+            Self::UnsupportedLateMaximumDelay(d) => {
+                write!(f, "core.schedule `lateMaximumDelay` is not supported: {d}")
+            }
             Self::UnsupportedWhenCondition(w) => {
                 write!(
                     f,
@@ -840,6 +923,12 @@ impl ScheduleTrigger {
         schedule: &Schedule,
         disabled: bool,
     ) -> Result<Self, ScheduleError> {
+        if let Some(delay) = &schedule.late_maximum_delay {
+            return Err(ScheduleError::UnsupportedLateMaximumDelay(
+                delay.to_string(),
+            ));
+        }
+
         let cron = schedule.cron.as_deref().ok_or(ScheduleError::MissingCron)?;
         let cron = Cron::parse(cron, schedule.with_seconds).map_err(ScheduleError::Cron)?;
 
@@ -1211,6 +1300,34 @@ mod tests {
             ("0 0 L * 1", false, Ok),
             ("0-0 * * * *", false, Ok),
             ("0 0 * * SAT-SUN", false, Ok),
+            // --- fix round 1, C1: names, which the first draft REFUSED ---
+            ("0 0 * * WED", false, Ok),
+            ("0 0 * * wed", false, Ok),
+            ("0 0 * * Wed", false, Ok),
+            ("0 0 * * MON,WED,FRI", false, Ok),
+            ("0 0 * * MON-WED", false, Ok),
+            ("0 0 * * THU-SAT", false, Ok),
+            ("0 0 * JUL *", false, Ok),
+            ("0 0 * jul *", false, Ok),
+            ("0 0 * JAN-JUL *", false, Ok),
+            ("0 0 * JAN,JUL *", false, Ok),
+            ("0 0 * NOV *", false, Ok),
+            ("0 0 * DEC *", false, Ok),
+            ("0 0 * MAR-MAY *", false, Ok),
+            // --- fix round 1, I2: both ends of the `L-n` range ---
+            ("0 0 L-1 * *", false, Ok),
+            ("0 0 L-30 * *", false, Ok),
+            ("0 0 L-31 * *", false, Ok),
+            ("0 0 L-01 * *", false, Ok),
+            ("0 0 L-0 * *", false, OutOfRange),
+            ("0 0 L-32 * *", false, OutOfRange),
+            ("0 0 L-100 * *", false, OutOfRange),
+            // A name in a field that has none, and a long name: both refused.
+            ("0 0 JUL * *", false, Unsupported),
+            ("0 0 WED * *", false, Unsupported),
+            ("0 0 * * MONDAY", false, Unsupported),
+            ("0 0 * * 1W", false, Unsupported),
+            ("0 0 * * FRI#2", false, Unsupported),
             ("0 0 * * 1-7", false, Ok),
             (" 0 2 * * * ", false, Ok),
             ("0  2 * * *", false, Ok),
@@ -1256,7 +1373,7 @@ mod tests {
             ("0 0 * 13 *", false, OutOfRange),
             ("*/0 * * * *", false, ZeroStep),
             ("", false, Empty),
-            ("H 0 * * *", false, Malformed),
+            ("H 0 * * *", false, Unsupported),
         ];
 
         for (expr, with_seconds, want) in table {
@@ -1279,15 +1396,20 @@ mod tests {
         }
     }
 
-    /// `H 0 * * *` is Jenkins' hashed-minute syntax and is the one refusal in
-    /// the table above that is a plain `Malformed` -- pinned separately so a
+    /// `H 0 * * *` is Jenkins' hashed-minute syntax -- pinned separately so a
     /// parser that started accepting it (and firing at an arbitrary minute)
     /// cannot hide inside the big table's `_ =>` arm.
+    ///
+    /// It is `UnsupportedSyntax`, not `Malformed`, and fix round 1 changed
+    /// that: the artifact makes the *same* complaint about `H` that it makes
+    /// about `5L` and `MONDAY` -- `Invalid chars in expression! Expression: H
+    /// Invalid chars: H` -- so splitting them apart was a distinction this
+    /// parser invented.
     #[test]
     fn jenkins_hashed_syntax_is_not_this_dialect() {
         assert!(matches!(
             Cron::parse("H 0 * * *", false),
-            Err(CronError::Malformed {
+            Err(CronError::UnsupportedSyntax {
                 field: Field::Minute,
                 ..
             })
@@ -1567,6 +1689,92 @@ mod tests {
                 "2026-06-15T12:00:02Z",
                 Some("2026-06-15T12:00:05Z"),
                 Some("2026-06-15T12:00:00Z"),
+            ),
+            // --- fix round 1, C1: the names the first draft could not parse ---
+            (
+                "0 0 * * WED",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-17T00:00:00Z"),
+                Some("2026-06-10T00:00:00Z"),
+            ),
+            (
+                "0 0 * * MON-WED",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 * * MON,WED,FRI",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-17T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            (
+                "0 0 * JUL *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-07-01T00:00:00Z"),
+                Some("2025-07-31T00:00:00Z"),
+            ),
+            (
+                "0 0 * JAN-JUL *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-16T00:00:00Z"),
+                Some("2026-06-15T00:00:00Z"),
+            ),
+            // --- fix round 1, I2: `L-31` parses and then never matches ---
+            (
+                "0 0 L-31 * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                None,
+                None,
+            ),
+            (
+                "0 0 L-30 * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-07-01T00:00:00Z"),
+                // May has 31 days, so `L-30` is the 1st of May; June has 30,
+                // so June has no `L-30` at all. I GUESSED 2026-06-01 here and
+                // the artifact said 2026-05-01 -- probe 9 was written because
+                // of this line.
+                Some("2026-05-01T00:00:00Z"),
+            ),
+            (
+                "0 0 L-1 * *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-29T00:00:00Z"),
+                Some("2026-05-30T00:00:00Z"),
+            ),
+            (
+                "0 0 * * THU-SAT",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2026-06-18T00:00:00Z"),
+                Some("2026-06-13T00:00:00Z"),
+            ),
+            (
+                "0 0 * MAR-MAY *",
+                false,
+                "UTC",
+                "2026-06-15T12:00:00Z",
+                Some("2027-03-01T00:00:00Z"),
+                Some("2026-05-31T00:00:00Z"),
             ),
             // An expression that can never match answers nothing, in BOTH
             // directions -- the artifact's `Optional.empty()`.
@@ -2057,6 +2265,134 @@ mod tests {
         let absent: Trigger =
             serde_norway::from_str("id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n").unwrap();
         assert!(ScheduleTrigger::resolve(&absent).is_ok());
+    }
+
+    /// An `L` term in a comma list is **dropped**, and this reproduces an
+    /// upstream defect rather than tidying it away.
+    ///
+    /// Measured by walking five executions from 2026-06-01 on the artifact
+    /// (probe 7). A union — the obvious implementation, and the one the first
+    /// round shipped — fires on 06-30 for `L,1`, where the artifact does not:
+    /// that is over-acceptance, and the oracle cannot catch it.
+    ///
+    /// The fixture deliberately varies what the first round held fixed: `L`
+    /// alone, `L` first, `L` last, `L-n` in a list, and a list of nothing but
+    /// `L` terms.
+    #[test]
+    fn an_l_term_in_a_comma_list_is_dropped_as_the_artifact_drops_it() {
+        let walk_dom = |expr: &str| -> Vec<String> {
+            let cron = Cron::parse(expr, false).unwrap_or_else(|e| panic!("{expr:?}: {e}"));
+            let zone = tz("UTC");
+            let mut out = Vec::new();
+            let mut cur = at("2026-06-01T00:00:00Z").with_timezone(&zone);
+            for _ in 0..5 {
+                match cron.next_after(cur) {
+                    Some(next) => {
+                        out.push(next.with_timezone(&Utc).date_naive().to_string());
+                        cur = next;
+                    }
+                    None => break,
+                }
+            }
+            out
+        };
+
+        // Sole term: `L` means the last day, as it always has.
+        assert_eq!(
+            walk_dom("0 0 L * *"),
+            [
+                "2026-06-30",
+                "2026-07-31",
+                "2026-08-31",
+                "2026-09-30",
+                "2026-10-31"
+            ],
+        );
+
+        // In a list, the `L` term vanishes -- in either position.
+        for expr in ["0 0 L,1 * *", "0 0 1,L * *"] {
+            assert_eq!(
+                walk_dom(expr),
+                [
+                    "2026-07-01",
+                    "2026-08-01",
+                    "2026-09-01",
+                    "2026-10-01",
+                    "2026-11-01"
+                ],
+                "{expr}: the L term must be dropped, not unioned"
+            );
+        }
+        for expr in [
+            "0 0 L,15 * *",
+            "0 0 15,L * *",
+            "0 0 L-1,15 * *",
+            "0 0 15,L-1 * *",
+        ] {
+            assert_eq!(
+                walk_dom(expr),
+                [
+                    "2026-06-15",
+                    "2026-07-15",
+                    "2026-08-15",
+                    "2026-09-15",
+                    "2026-10-15"
+                ],
+                "{expr}: the L term must be dropped, not unioned"
+            );
+        }
+        assert_eq!(
+            walk_dom("0 0 2,L * *"),
+            [
+                "2026-06-02",
+                "2026-07-02",
+                "2026-08-02",
+                "2026-09-02",
+                "2026-10-02"
+            ],
+        );
+
+        // And a list of NOTHING BUT `L` terms selects no day at all.
+        assert!(
+            walk_dom("0 0 L,L-1 * *").is_empty(),
+            "`L,L-1` fires nothing on the artifact, in either direction"
+        );
+    }
+
+    /// `lateMaximumDelay` changes which tick fires, this crate does not model
+    /// the duration, and so a `Schedule` that declares it is **refused**.
+    ///
+    /// Before fix round 1 the key parsed, resolved, and was silently dropped:
+    /// the model has no `deny_unknown_fields`, so a flow asking for the
+    /// artifact's skip-the-backlog behaviour got the replay-it behaviour
+    /// instead, and lost the key on re-serialisation too.
+    #[test]
+    fn a_schedule_declaring_late_maximum_delay_is_refused_not_silently_dropped() {
+        let yaml = "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\nlateMaximumDelay: PT1H\n";
+        let trigger: Trigger = serde_norway::from_str(yaml).unwrap();
+
+        // It reaches the model rather than being discarded on the way in --
+        // which is the half that makes the refusal possible at all.
+        match &trigger.kind {
+            crate::models::TriggerKind::Schedule(s) => assert!(
+                s.late_maximum_delay.is_some(),
+                "the key must survive parsing, or nothing downstream can see it"
+            ),
+            other => panic!("expected a Schedule, got {other:?}"),
+        }
+
+        assert!(
+            matches!(
+                ScheduleTrigger::resolve(&trigger),
+                Err(ScheduleError::UnsupportedLateMaximumDelay(_))
+            ),
+            "a declared lateMaximumDelay must refuse, never schedule without it"
+        );
+
+        // Two-sided: the identical flow WITHOUT the key resolves.
+        let without = "id: t\ntype: core.schedule\ncron: \"0 2 * * *\"\n";
+        let trigger: Trigger = serde_norway::from_str(without).unwrap();
+        assert!(ScheduleTrigger::resolve(&trigger).is_ok());
     }
 
     /// `Schedule.cron` is `@NotNull` in Java; W1 modelled it `Option` because

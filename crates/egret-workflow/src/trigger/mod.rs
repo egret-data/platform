@@ -246,13 +246,45 @@ pub enum TickOutcome {
     /// The trigger was due and was evaluated, and the evaluation produced no
     /// execution.
     ///
-    /// The state still advanced — that is Kestra's behaviour and it is what
+    /// **The state advanced.** That is the artifact's behaviour and it is what
     /// makes this variant dangerous: a tick that reports `Skipped` has
     /// consumed its slot and will not be retried. Reaching it for the wrong
     /// reason is silent data loss, which is why every construction of it names
-    /// a [`SkipReason`] and why `a_scheduler_that_reports_success_without_an_execution_is_caught`
+    /// a [`SkipReason`] and why
+    /// `a_scheduler_that_reports_success_without_an_execution_is_caught`
     /// exists.
     Skipped(SkipReason),
+    /// The trigger was never eligible to be looked at, so **nothing moved** —
+    /// the returned state is byte-identical to the one passed in.
+    ///
+    /// Distinct from [`TickOutcome::Skipped`] because the difference is the
+    /// whole point: `Skipped` consumes the slot, this does not.
+    ///
+    /// Measured on the artifact, in
+    /// `io.kestra.scheduler.internals.DefaultSchedulableTriggerFetcher#getSchedulableTriggers`
+    /// — the candidate list is filtered by `TriggerState.isDisabled()` before
+    /// anything else, and the per-trigger lambda then does
+    ///
+    /// ```text
+    /// 138: invokevirtual FlowWithSource.isDisabled:()Z
+    /// 141: ifne  166
+    /// 146: invokevirtual Optional.isEmpty:()Z
+    /// 149: ifne  166
+    /// 160: invokevirtual AbstractTrigger.isDisabled:()Z
+    /// 163: ifeq  168
+    /// 166: aconst_null
+    /// 167: areturn
+    /// ```
+    ///
+    /// so a disabled trigger returns **null at offset 166, before a
+    /// `ConditionContext` is even built** and long before
+    /// `TriggerScheduler.evaluate` is reached. It is dropped from the list the
+    /// scheduler iterates. Its `nextEvaluationDate` is therefore **never
+    /// recomputed: the state is frozen**, and what to do about the missed
+    /// window is decided later and elsewhere, by
+    /// `TriggerEventHandler.updateForReEnabledTrigger` reading
+    /// `recoverMissedSchedules`.
+    NotSchedulable(SkipReason),
     /// The trigger was due and produced an execution.
     Fired(Box<ScheduledExecution>),
 }
@@ -291,6 +323,10 @@ pub fn tick(
         };
     }
 
+    // Kept so the disabled branch below can return the state EXACTLY as it
+    // arrived; `state` itself is about to be mutated.
+    let state_before = state.clone();
+
     // `triggerState.evaluatedAt(clock, triggerState.getNextEvaluationDate())`
     // -- the date being processed, and the one `eval` is asked about.
     state.evaluated_at = Some(due_at);
@@ -299,14 +335,23 @@ pub fn tick(
     // advances it. Cloned, not borrowed, because the update below moves it.
     let context_backfill = state.backfill.clone();
 
-    // A disabled trigger is not evaluated at all, but its slot is still
-    // consumed -- otherwise re-enabling it would replay the whole outage.
+    // A disabled trigger is never fetched, so NOTHING about it moves.
+    //
+    // Fix round 1 reversed this. The first draft advanced the state and said,
+    // in a comment and in a test name, that consuming the slot was fidelity --
+    // "otherwise re-enabling it would replay the whole outage". That was a
+    // policy I reasoned my way to, written in the same voice as the measured
+    // rules around it; the artifact does the opposite, and it assigns the
+    // re-enable decision to a different seam entirely
+    // (`updateForReEnabledTrigger` + `recoverMissedSchedules`). See
+    // `TickOutcome::NotSchedulable` for the bytecode.
+    //
+    // The state is returned untouched -- `evaluated_at` included, which is why
+    // this returns before it is set.
     if trigger.is_disabled() {
-        let next = trigger.next_evaluation_date(Some(context_date), context_backfill.as_ref(), now);
-        state.update_for_next_evaluation_date(next);
         return Tick {
-            state,
-            outcome: TickOutcome::Skipped(SkipReason::Disabled),
+            state: state_before,
+            outcome: TickOutcome::NotSchedulable(SkipReason::Disabled),
         };
     }
 
@@ -368,7 +413,13 @@ pub fn run_until_idle(
         let t = tick(trigger, &state, inputs, clock);
         state = t.state;
         match t.outcome {
+            // NotDue and NotSchedulable both leave the state untouched, so
+            // another pass would return the identical answer for ever.
             TickOutcome::NotDue => return (state, fired, skipped),
+            TickOutcome::NotSchedulable(reason) => {
+                skipped.push(reason);
+                return (state, fired, skipped);
+            }
             TickOutcome::Skipped(reason) => skipped.push(reason),
             TickOutcome::Fired(execution) => fired.push(*execution),
         }
@@ -838,12 +889,24 @@ mod tests {
     // Disabled
     // ---------------------------------------------------------------------
 
-    /// A disabled trigger consumes its slot without firing.
+    /// A disabled trigger is **frozen**: nothing fires and nothing moves.
     ///
-    /// Consuming the slot is the part worth pinning: re-enabling a trigger
-    /// after an outage must not replay the outage.
+    /// This test asserted the exact opposite in the first round -- that the
+    /// slot was consumed, "so re-enabling does not replay the outage" -- and
+    /// said so as though it were fidelity. It was not measured; it was
+    /// reasoned. Measured on the artifact, a disabled trigger is dropped by
+    /// `DefaultSchedulableTriggerFetcher#getSchedulableTriggers` **before a
+    /// `ConditionContext` is built** (`aconst_null; areturn` at offset 166), so
+    /// it is never evaluated and its `nextEvaluationDate` is never recomputed.
+    /// What to do about the missed window is decided later and elsewhere, by
+    /// `TriggerEventHandler.updateForReEnabledTrigger` reading
+    /// `recoverMissedSchedules` -- a seam this package does not implement.
+    ///
+    /// The assertion is on the WHOLE state, byte for byte, rather than on
+    /// `next_evaluation_date` alone: a freeze that leaked into `evaluated_at`
+    /// or into the backfill window would pass a narrower check.
     #[test]
-    fn a_disabled_trigger_consumes_its_slot_without_firing() {
+    fn a_disabled_trigger_is_frozen_not_consumed() {
         let clock = TestClock::new(at("2026-06-16T02:00:00Z"));
         let yaml = "id: nightly\ntype: core.schedule\ncron: \"0 2 * * *\"\ntimezone: \"UTC\"\ndisabled: true\n";
         let parsed: Trigger = serde_norway::from_str(yaml).unwrap();
@@ -853,26 +916,40 @@ mod tests {
         let mut state = state_at(&trigger, &clock);
         state.next_evaluation_date = Some(at("2026-06-16T02:00:00Z"));
 
+        let before = state.clone();
         let t = super::tick(&trigger, &state, &no_inputs(), &clock);
-        assert_eq!(t.outcome, TickOutcome::Skipped(SkipReason::Disabled));
+        assert_eq!(t.outcome, TickOutcome::NotSchedulable(SkipReason::Disabled));
         assert_eq!(
-            t.state.next_evaluation_date,
-            Some(at("2026-06-17T02:00:00Z")),
-            "the slot is consumed, so re-enabling does not replay the outage"
+            t.state, before,
+            "a disabled trigger is never fetched, so NOTHING about it moves -- \
+             not its next evaluation date, not `evaluated_at`, not its backfill"
         );
 
-        // The two-sided half: the identical fixture WITHOUT `disabled` fires.
-        let enabled = sched("0 2 * * *");
-        let t = super::tick(
-            &enabled,
-            &trigger_state_for(&enabled, &clock),
-            &no_inputs(),
-            &clock,
+        // And it stays frozen however many passes go by, which is the property
+        // that makes the re-enable seam's job well defined.
+        let (after, fired, skipped) = run_until_idle(&trigger, &state, &no_inputs(), &clock, 20);
+        assert!(fired.is_empty());
+        assert_eq!(
+            skipped,
+            vec![SkipReason::Disabled],
+            "one report, then it stops -- nothing moved, so another pass could \
+             only repeat itself"
         );
+        assert_eq!(after, before, "twenty passes later, still byte-identical");
+
+        // The two-sided half: the identical fixture WITHOUT `disabled` fires AND
+        // advances -- so the assertion above is measuring `disabled` and not
+        // some accident that freezes every trigger.
+        let enabled = sched("0 2 * * *");
+        let enabled_state = trigger_state_for(&enabled, &clock);
+        let t = super::tick(&enabled, &enabled_state, &no_inputs(), &clock);
         assert!(
             matches!(t.outcome, TickOutcome::Fired(_)),
-            "the same fixture without `disabled` must fire, or the assertion above \
-             is measuring something other than `disabled`"
+            "the same fixture without `disabled` must fire"
+        );
+        assert_ne!(
+            t.state, enabled_state,
+            "and it must MOVE, or `frozen` above says nothing"
         );
     }
 
