@@ -1075,8 +1075,15 @@ impl ScheduleTrigger {
 
     /// Sets `lateMaximumDelay` directly, bypassing `resolve`'s refusal.
     ///
-    /// **Not reachable from YAML, and since fix round 2 not reachable from
-    /// outside this crate either — by construction, not by convention.** The
+    /// **Not reachable from YAML, and since fix round 2 not reachable from a
+    /// shipping build at all — by construction, not by convention.**
+    ///
+    /// It is `#[cfg(test)] pub(crate)`. Narrowing it from `pub` made clippy
+    /// report it unused in the lib target, which was the honest signal: every
+    /// one of its six call sites is in a `#[cfg(test)]` module. So rather than
+    /// silence that with an `allow`, the method now does not exist outside a
+    /// test build. That is strictly stronger than `pub(crate)` and is what
+    /// "test-only" should always have meant here. The
     /// model now carries the key (so it round-trips and so `resolve` can see
     /// it) but not a parsed duration, so `resolve` refuses any `Schedule` that
     /// declares it rather than scheduling as though it were absent. This
@@ -1091,6 +1098,7 @@ impl ScheduleTrigger {
     /// a delay `resolve` refuses, which is exactly the over-acceptance the
     /// refusal exists to close. Unrepresentable beats unforgettable, which is
     /// the same argument that chose refuse-over-parse in the first place.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_late_maximum_delay(mut self, delay: Option<Duration>) -> Self {
         self.late_maximum_delay = delay;
