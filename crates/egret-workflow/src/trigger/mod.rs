@@ -55,8 +55,11 @@
 //! # The clock is injected, and that is not a style preference
 //!
 //! A scheduler is nothing but a clock. This workspace has lost whole gate runs
-//! to wall-clock assertions — `egret-query/tests/connector_trino_pool.rs`
-//! carries three — and Kestra itself does not read the wall clock from its
+//! to wall-clock assertions — `egret-query/tests/connector_trino_pool.rs` once
+//! carried three, and cost **four** gate runs re-read as regressions before
+//! they were rewritten to record the wait the policy *asks* for; it carries
+//! **none** today, and this sentence said "carries three" in the present tense
+//! until fix round 3 grepped it — and Kestra itself does not read the wall clock from its
 //! trigger path either: `SchedulerClock` is a singleton `java.time.Clock` its
 //! own tests replace with `Clock.fixed`. [`Clock`] is that, and
 //! [`no_wall_clock_in_the_trigger_path`] is a running check that the only
@@ -505,8 +508,9 @@ mod tests {
     /// the module tree — a scheduler that read `Utc::now()` anywhere in `tick`
     /// or `Schedule` would be untestable and would fail at midnight, and this
     /// workspace has lost whole gate runs to exactly that
-    /// (`egret-query/tests/connector_trino_pool.rs` carries three wall-clock
-    /// assertions).
+    /// (`egret-query/tests/connector_trino_pool.rs` once carried three, at a
+    /// cost of four gate runs; it carries none now — measured by grep, fix
+    /// round 3).
     ///
     /// The split is asserted as well as used: if `#[cfg(test)]` ever stops
     /// being the marker, this test fails rather than silently scanning nothing.
@@ -1008,11 +1012,13 @@ mod tests {
     /// it does not look like a crash. A tick that reaches evaluation at all
     /// advances the state — that is the artifact's behaviour — so a tick that
     /// reports `Skipped` has
-    /// *consumed its slot* and will never be retried. (Fix round 1 created
-    /// the one exception, and this sentence used to read "`tick` always
-    /// advances the state": a trigger that is not schedulable at all never
-    /// reaches evaluation and returns [`TickOutcome::NotSchedulable`] with the
-    /// state untouched.) A scheduler that
+    /// *consumed its slot* and will never be retried. (There are **two**
+    /// exits that never reach evaluation and so leave the state untouched:
+    /// [`TickOutcome::NotDue`], which predates fix round 1, and
+    /// [`TickOutcome::NotSchedulable`], which fix round 1 added. This sentence
+    /// used to read "`tick` always advances the state"; fix round 2 corrected
+    /// it and named one of the two exceptions as "the one exception", which
+    /// fix round 3 corrected in turn.) A scheduler that
     /// advanced the state and silently produced nothing would look, from
     /// outside, exactly like a scheduler with nothing to do: the loop keeps
     /// running, no error is logged, no execution is ever created, and the

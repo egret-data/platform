@@ -106,15 +106,29 @@
 //! fixture that produced it held one thing fixed: **none of its names
 //! contained a `W` or an `L`.**
 //! - a reversed range (`5-1`, `6-0`, `7-1`, `SUN-SAT`) → `Invalid range!`
-//! - `*/0` → `Period 0 not in range [0, 59]`
+//! - a step outside its **own field's** range → `Period N not in range
+//!   [min, max]`: `*/60` in minutes, `*/24` in hours, `*/32` in day-of-month,
+//!   `*/13` in month, `*/8` and `5/10` in day-of-week — and `*/0`, measured
+//!   in all five fields, including minutes, hours and day-of-week, whose
+//!   message prints a range that contains the zero it is refusing
 //! - a **6-field** expression with `withSeconds: false`, and a **5-field** one
 //!   with `withSeconds: true` → `contains N parts but we expect one of [M]`
 //!
-//! Measured acceptances: `L` and `L-n` in day-of-month (`L-3` on a 30-day
-//! month is the 27th), `0-0`, `5/10`, `*/7`, month and day names in either
-//! case (`MON`, `mon-fri`, `jan-dec`), `1-7` (every day, because 7 maps to 0),
-//! `SAT-SUN` (so `SUN` is **7**, not 0, before the mapping), and leading,
-//! trailing, repeated or tab whitespace between fields.
+//! Measured acceptances: `L`, `L-n` and `nL` in day-of-month (`L-3` on a
+//! 30-day month is the 27th; `5L` is just `L`, the number range-checked and
+//! discarded), `0-0`, `5/10` in day-of-month, `*/7` in day-of-week, month and
+//! day names in either case (`MON`, `mon-fri`, `jan-dec`), `1-7` (every day,
+//! because 7 maps to 0), `SAT-SUN` (so `SUN` is **7**, not 0, before the
+//! mapping), and whitespace around and between fields.
+//!
+//! **Whitespace is two different sets, and neither is Rust's.** Fields are
+//! separated by Java regex `\s` — `[ \t\n\x0B\f\r]`, ASCII only — while the
+//! ends of the expression are trimmed by `String.trim()`, every char
+//! `<= U+0020`. So U+001C…U+001F are trimmed but never split on, and U+0085,
+//! U+00A0, U+1680, U+2000, U+2028, U+2029, U+202F, U+205F and U+3000 are
+//! neither, i.e. `0 0 * * *\u{a0}` is **refused**. And the nickname switch runs
+//! **before** any of that, on the raw string, so `"@daily "` is not a nickname
+//! at all. See `normalise`.
 //!
 //! ## 2. Day-of-month vs day-of-week — OR, and what counts as restricted
 //!
@@ -126,8 +140,15 @@
 //!   **stepped** field counts as restricted.
 //! - `0 0 1-31 * 1` → **2026-06-16**, day 16, a Tuesday. So an explicit range
 //!   covering everything also counts as restricted.
-//! - `0 0 * * 1` → **2026-06-22**; `0 0 1 * *` → **2026-07-01**. A bare `*`
-//!   is unrestricted, and the other field alone decides.
+//! - `0 0 * * 1` → **2026-06-22**; `0 0 1 * *` → **2026-07-01**. `*` is
+//!   unrestricted, and the other field alone decides.
+//! - `0 0 */1 * 1` → **2026-06-22**: `*/1` is unrestricted too, and it is the
+//!   **only** other spelling that is. The rule is cron-utils'
+//!   `"*".equals(spec.trim()) && "1".equals(stepToken)` — on the step's
+//!   spelling, so `*/01`, `*/001`, `*/0001` and `*/+1` are all **restricted**
+//!   (→ 2026-06-16) despite selecting the same set — and it is a property of
+//!   the whole field, so `*,*`, `*,*/1`, `*/1,*` and `*/1,*/1` are `And`,
+//!   hence restricted too (→ 2026-06-16). See `field_is_unrestricted`.
 //!
 //! ## 3. The timezone rule — `Schedule.convertDateTime`
 //!
@@ -278,18 +299,31 @@ pub enum CronError {
     UnsupportedNickname(String),
     /// A token this dialect does not define.
     ///
-    /// `?` and `#` anywhere; `W` and `L` in a token that is neither a number
-    /// nor a name (`5L`, `1W`, `15W`, a bare `L` in day-of-week); a name used
-    /// in a field that has none (`0 0 JUL * *`); a long name (`MONDAY`); and
-    /// anything else unrecognised, `H` included.
+    /// `?` and `#` anywhere; `W` in a token that is neither a number nor a
+    /// name (`1W`, `15W`, `LW`); `L` in **day-of-week** (`5L`, a bare `L`); a
+    /// name used in a field that has none (`0 0 JUL * *`); a long name
+    /// (`MONDAY`); and anything else unrecognised, `H` included.
     ///
-    /// **The artifact answers these with TWO message classes, not one**, and
-    /// fix round 2 corrected a sentence that said otherwise:
+    /// `5L` is on that list for **day-of-week only**: in day-of-month the
+    /// artifact accepts it and fires the last day of the month, and until fix
+    /// round 3 this crate refused it — see `parse_day_of_month`. The earlier
+    /// wording said "`W` and `L` in a token that is neither a number nor a
+    /// name (`5L`, …)", which named a field-independent class off day-of-week
+    /// examples.
+    ///
+    /// **The artifact answers these with THREE message classes, not one and
+    /// not two**, and the position inside the token is what selects between
+    /// them (measured, fix round 3):
     ///
     /// - `Invalid chars in expression! Expression: X Invalid chars: Y` —
-    ///   `5L`, `1W`, `15W`, `LW`, `H`, `JUL`/`WED` in day-of-month, `MONDAY`;
-    /// - `Invalid expression: X` — **`?` and `#`** (`0 0 ? * 1`,
-    ///   `0 0 * * 1#1`, `0 0 * * FRI#2`).
+    ///   `1W`, `15W`, `LW`, `H`, `JUL`/`WED` in day-of-month, `MONDAY`, `5L`
+    ///   in day-of-week, and `?`/`#` **inside a range** (`1-?`, `?-1`, `1-#`,
+    ///   `#-1`, and `?/1`);
+    /// - `Invalid expression: X` — `?` or `#` as a whole term or a comma term
+    ///   (`0 0 ? * 1`, `0 0 *,? * *`, `0 0 * * 1#1`, `0 0 * * FRI#2`,
+    ///   `0 0 1,# * *`, `0 0 *#1 * *`);
+    /// - `For input string: "X"` — `?` or `#` in the **step** (`*/?`, `*/2#3`,
+    ///   `*/1#2`).
     ///
     /// They still share one variant here, because what this crate needs to
     /// distinguish is accept from refuse, not one of Kestra's message strings
@@ -305,8 +339,16 @@ pub enum CronError {
     /// Measured: `Invalid range! [{from},{to}]` — this dialect has
     /// `withStrictRange()` on every field, so ranges never wrap.
     InvalidRange { field: Field, from: u32, to: u32 },
-    /// Measured: `Period 0 not in range [0, 59]`.
-    ZeroStep { field: Field },
+    /// Measured: `Period {step} not in range [{min}, {max}]`, where the bounds
+    /// are the **field's own** — `*/60` in minutes, `*/24` in hours, `*/32` in
+    /// day-of-month, `*/13` in month and `*/8` in day-of-week are all refused.
+    ///
+    /// Zero is refused in all five fields — measured, not inferred from three
+    /// of them — including minutes, hours and day-of-week, whose message
+    /// prints `[0, …]` while refusing the zero inside it. So the accepted
+    /// interval is `1..=max`, not the one the text names. Fix round 3 widened
+    /// this from a zero-only check.
+    StepOutOfRange { field: Field, step: u32 },
     /// A **structural** fault: an empty comma term, a step that is not a
     /// number, an `L-` with a non-numeric tail, a range missing an end.
     ///
@@ -351,7 +393,10 @@ impl fmt::Display for CronError {
             Self::InvalidRange { field, from, to } => {
                 write!(f, "{field}: invalid range! [{from},{to}]")
             }
-            Self::ZeroStep { field } => write!(f, "{field}: period 0 is not a valid step"),
+            Self::StepOutOfRange { field, step } => {
+                let (min, max) = field.range();
+                write!(f, "{field}: period {step} not in range [{min}, {max}]")
+            }
             Self::Malformed { field, token } => write!(f, "{field}: invalid expression {token:?}"),
         }
     }
@@ -422,9 +467,10 @@ pub struct Cron {
     months: BTreeSet<u32>,
     /// Already mapped: 7 has become 0, so this set is 0 (Sunday) through 6.
     days_of_week: BTreeSet<u32>,
-    /// Whether the day-of-month field was something other than a bare `*`.
+    /// Whether the day-of-month field was something other than `*` or `*/1`
+    /// — see [`field_is_unrestricted`].
     dom_restricted: bool,
-    /// Whether the day-of-week field was something other than a bare `*`.
+    /// Whether the day-of-week field was something other than `*` or `*/1`.
     dow_restricted: bool,
 }
 
@@ -437,25 +483,46 @@ impl Cron {
     /// (measured, §1). A nickname is accepted under either, because the
     /// artifact expands it before counting fields.
     pub fn parse(expr: &str, with_seconds: bool) -> Result<Self, CronError> {
-        let trimmed = expr.trim();
-        if trimmed.is_empty() {
+        // `CronParser.parse`, read off the artifact's own bytecode rather than
+        // inferred from examples (fix round 3):
+        //
+        //   String replaced = expression.replaceAll("\\s+", " ").trim();
+        //   if (isEmpty(replaced)) throw "Empty expression!";
+        //   if (expression.startsWith("@")) { switch (expression) { ... } }   // <- RAW
+        //   ... split `replaced` into fields ...
+        //
+        // Two things follow that this crate had wrong, and both are measured
+        // below rather than argued.
+        let normalised = normalise(expr);
+        if normalised.is_empty() {
             return Err(CronError::Empty);
         }
 
-        // cron-utils RECOGNISES a fixed set of nickname spellings, and only
-        // some of them are enabled by this definition. Measured, and the
-        // distinction is visible in the error text:
+        // (1) The nickname switch runs on the **raw** expression (`aload_1` at
+        // offsets 44 and 72), NOT on the trimmed one, and it is an exact
+        // `String.equals`. So a recognised nickname with ANY padding is not a
+        // nickname: it falls through to the field count and fails it.
+        // Measured -- 15 paddings (`" "`, `"\t"`, `"\n"`, `"\r"`, `"\u{0b}"`,
+        // `"\u{0c}"`, `"\u{1c}"`, `"\u{a0}"` and repeats, leading and
+        // trailing) on all seven enabled nicknames: **105 rows, all 105
+        // refused** with `contains 1 parts but we expect one of [5]`. This
+        // crate trimmed first and scheduled **91** of them; the 14 it already
+        // refused are the U+001C paddings, which Rust's `trim` leaves alone
+        // too.
+        //
+        // The exact match also subsumes the whitespace guard that used to be
+        // here: `@daily extra` simply does not equal `@daily`.
         //
         //   @reboot            -> "Nickname @reboot not supported!"   (recognised, not enabled)
         //   @secondly, @minutely, @every, @YEARLY, @nope, @
         //                      -> "contains 1 parts but we expect one of [5]"
         //                                                             (not recognised at all)
-        //   @daily extra       -> "contains 2 parts ..."              (whitespace, so not one token)
+        //   @daily extra       -> "contains 2 parts ..."
         //
         // So an unrecognised `@...` is NOT a nickname error -- it falls through
         // to the field count, and a one-token expression fails it.
-        if !trimmed.contains(char::is_whitespace) {
-            if let Some(rest) = trimmed.strip_prefix('@') {
+        {
+            if let Some(rest) = expr.strip_prefix('@') {
                 match rest {
                     // The expansion is always five fields, whatever
                     // `with_seconds` says. Fix round 1 asserted that for all
@@ -470,20 +537,22 @@ impl Cron {
                     "weekly" => return Self::parse_fields("0 0 * * 0", false),
                     "daily" | "midnight" => return Self::parse_fields("0 0 * * *", false),
                     "hourly" => return Self::parse_fields("0 * * * *", false),
-                    "reboot" => return Err(CronError::UnsupportedNickname(trimmed.to_string())),
+                    "reboot" => return Err(CronError::UnsupportedNickname(expr.to_string())),
                     // Everything else falls through, deliberately.
                     _ => {}
                 }
             }
         }
 
-        Self::parse_fields(trimmed, with_seconds)
+        Self::parse_fields(&normalised, with_seconds)
     }
 
     fn parse_fields(expr: &str, with_seconds: bool) -> Result<Self, CronError> {
-        // Measured: leading, trailing, repeated and tab whitespace are all
-        // accepted, so the split is on whitespace runs.
-        let parts: Vec<&str> = expr.split_whitespace().collect();
+        // `expr` has already been through `normalise`, so every separator is a
+        // single space and there are none at the ends. Splitting on `' '` is
+        // then exactly the artifact's own split, including the cases where it
+        // does NOT split -- see `normalise`.
+        let parts: Vec<&str> = expr.split(' ').collect();
         let want = if with_seconds { 6 } else { 5 };
         if parts.len() != want {
             return Err(CronError::WrongFieldCount {
@@ -529,8 +598,9 @@ impl Cron {
     /// Does this expression's **date** part select `date`?
     ///
     /// The day-of-month / day-of-week rule, measured in §2: both restricted
-    /// means either may match; otherwise the unrestricted one is `*`, whose
-    /// value set holds every day, so the plain conjunction is the same answer.
+    /// means either may match; otherwise the unrestricted one is `*` or `*/1`
+    /// (see [`field_is_unrestricted`]), whose value set holds every day either
+    /// way, so the plain conjunction is the same answer.
     fn date_matches(&self, date: NaiveDate) -> bool {
         if !self.months.contains(&date.month()) {
             return false;
@@ -643,23 +713,103 @@ fn last_day_of_month(date: NaiveDate) -> u32 {
         .map_or(28, |d| d.day())
 }
 
+/// `expression.replaceAll("\\s+", " ").trim()`, with Java's definitions of
+/// both, because Rust's are a different set **in both directions**.
+///
+/// Java's regex `\s` is `[ \t\n\x0B\f\r]` -- ASCII only -- while
+/// `String.trim()` removes every char `<= U+0020`. Rust's `str::trim` and
+/// `split_whitespace` use the Unicode `White_Space` property instead. Measured
+/// on the artifact, one character at a time, in three positions each
+/// (fix round 3, probe FR3C):
+///
+/// | chars | splits fields? | trimmed at the ends? | Rust agrees? |
+/// |---|---|---|---|
+/// | `\t \n \x0B \f \r` and space | yes | yes | yes |
+/// | U+001C…U+001F | **no** (`0 0 *\u{1c}* *` is "4 parts") | **yes** | no -- Rust trims neither |
+/// | U+0085, U+00A0, U+1680, U+2000, U+2028, U+2029, U+202F, U+205F, U+3000 | **no** | **no** (`0 0 * * *\u{a0}` is `Invalid chars`) | no -- Rust does both |
+///
+/// Using Rust's set made `"0 0 * * *\u{a0}"` and `"0 0 *\u{a0}* *"` fire where
+/// the artifact refuses them: over-acceptance, the direction the oracle cannot
+/// catch.
+fn normalise(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let mut in_run = false;
+    for c in expr.chars() {
+        if is_java_regex_space(c) {
+            if !in_run {
+                out.push(' ');
+            }
+            in_run = true;
+        } else {
+            out.push(c);
+            in_run = false;
+        }
+    }
+    // `String.trim()`: every char <= U+0020, which is a SUPERSET of the split
+    // set (U+001C..=U+001F are trimmed but never split on).
+    out.trim_matches(|c: char| c <= '\u{20}').to_string()
+}
+
+/// Java regex `\s` with no `UNICODE_CHARACTER_CLASS` flag: `[ \t\n\x0B\f\r]`.
+fn is_java_regex_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\u{0b}' | '\u{0c}' | '\r')
+}
+
+/// Is this whole field token the one cron-utils turns into `Always` — the
+/// thing egret calls **unrestricted**?
+///
+/// `FieldParser.asteriskOrempty`, read off the bytecode (fix round 3):
+///
+/// ```text
+/// if ("*".equals(spec.trim()) && "1".equals(stepToken)) return noSpecialCharsNorStar(spec);
+/// //                             ^^^^^^^^^^^^^^^^^^^^ String.equals on the TOKEN
+/// ```
+///
+/// So the rule is on the step's **spelling**, not its value, and it is a
+/// whole-field property, not a per-term one. Measured, in **both** day fields
+/// (`Cron.retrieve(f).getExpression()` plus two discriminating fixtures):
+///
+/// ```text
+/// *          Always   <- unrestricted     */01     Every   <- restricted
+/// */1        Always   <- unrestricted     */001    Every
+/// */2        Every                        */0001   Every
+/// */30       Every                        */+1     Every
+/// 1-31       Between                      *,*      And     <- restricted
+/// 1-31/1     Every                        */1,*/1  And     <- restricted
+/// ```
+///
+/// Fix round 2 read this off one fixture that varied only the step's *value*
+/// and wrote `step != 1`, which broke `*/01`, `*/001`, `*/+1` and `*/0001`
+/// (they select every day, so they are the same SET as `*`, and cron-utils
+/// still does not collapse them). Fix round 3 then had to vary the second
+/// thing that fixture held fixed -- the number of comma terms -- and found
+/// `*,*`, `*,*/1`, `*/1,*` and `*/1,*/1`, which are `And`, hence restricted,
+/// and which every earlier rule got wrong in the same direction.
+fn field_is_unrestricted(token: &str) -> bool {
+    match token.split_once('/') {
+        None => token == "*",
+        Some((spec, step)) => spec == "*" && step == "1",
+    }
+}
+
 /// Day-of-month is parsed on its own because it is the only field with `L`.
 ///
 /// Returns `(values, restricted, last_offsets)`.
 fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>), CronError> {
     let mut values = BTreeSet::new();
     let mut last_offsets = BTreeSet::new();
-    let mut restricted = false;
+    // Whole-token property, exactly as in `parse_field`: an `L`, an `L-n`, an
+    // `nL` and any comma at all are all `Every`/`On`/`And`, never `Always`.
+    let restricted = !field_is_unrestricted(token);
 
     // How many comma-separated terms the field has. It decides whether an `L`
     // term counts at all -- see the `l_terms_are_dropped` note below.
     let term_count = token.split(',').count();
 
     for part in token.split(',') {
-        let part = part.trim();
+        // No `part.trim()` -- see `parse_field`.
         let upper = part.to_ascii_uppercase();
         if upper == "L" {
-            restricted = true;
             // MEASURED UPSTREAM DEFECT, reproduced rather than tidied.
             //
             // An `L` term takes effect only when it is the field's SOLE term.
@@ -683,7 +833,6 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
                 last_offsets.insert(0);
             }
         } else if let Some(off) = upper.strip_prefix("L-") {
-            restricted = true;
             let off: u32 = off.parse().map_err(|_| CronError::Malformed {
                 field: Field::DayOfMonth,
                 token: part.to_string(),
@@ -716,19 +865,53 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
             if term_count == 1 {
                 last_offsets.insert(off);
             }
+        } else if let Some(nth) = upper.strip_suffix('L').filter(|n| !n.is_empty()) {
+            // `nL` in DAY-OF-MONTH is accepted and means exactly `L`: the
+            // number is range-checked and then ignored. Measured (fix round
+            // 3), from 2026-06-15:
+            //
+            //   `5L`, `1L`, `15L`, `31L`, `5l`  -> 2026-06-30, the last day
+            //   `0L`, `32L`  -> `Value N not in range [1, 31]`
+            //   `L5`, `5LW`, `5L-1`             -> refused
+            //   `5L,1`                          -> 2026-07-01: dropped from a
+            //                                      list, like every other `L`
+            //
+            // egret refused all five accepted spellings, which is the mild
+            // direction -- but it is still a divergence, and the sweep found
+            // it because the file names `5L` while calling it unsupported
+            // syntax. That claim was true of DAY-OF-WEEK only.
+            let nth: u32 = nth.parse().map_err(|_| CronError::UnsupportedSyntax {
+                field: Field::DayOfMonth,
+                token: part.to_string(),
+            })?;
+            if !(1..=31).contains(&nth) {
+                return Err(CronError::OutOfRange {
+                    field: Field::DayOfMonth,
+                    value: i64::from(nth),
+                    min: 1,
+                    max: 31,
+                });
+            }
+            if term_count == 1 {
+                last_offsets.insert(0);
+            }
         } else {
-            let (vals, part_restricted) = parse_field(part, Field::DayOfMonth)?;
-            restricted |= part_restricted;
+            let (vals, _) = parse_field(part, Field::DayOfMonth)?;
             values.extend(vals);
         }
     }
 
-    // A day-of-month of exactly `*` -- or `*/1`, which selects the same set --
-    // is unrestricted, and `parse_field` has already told us so through
-    // `part_restricted`. (This comment said "`*` is the only unrestricted
-    // spelling" until fix round 2 measured `*/1`; it was a second copy of the
-    // same wrong claim, in a different function, and the audit is what found
-    // it.)
+    // Unreachable as written: `restricted` is false only for the whole-token
+    // spellings `*` and `*/1`, and both of those produce a full value set, so
+    // this arm needs `values` to be empty at the same time -- which cannot
+    // happen. It is kept rather than deleted because the *other* half of the
+    // condition is load-bearing in the opposite direction: a bare `L` leaves
+    // `values` empty legitimately, and dropping `!restricted` would refuse it.
+    //
+    // (This comment has carried the "only a bare `*`" claim twice. Fix round 2
+    // corrected it to "`*` or `*/1`" and still pointed at `part_restricted`,
+    // which fix round 3 stopped consulting -- restrictedness is now read off
+    // the whole token, exactly as cron-utils reads it.)
     if !restricted && values.is_empty() {
         return Err(CronError::Malformed {
             field: Field::DayOfMonth,
@@ -740,16 +923,31 @@ fn parse_day_of_month(token: &str) -> Result<(BTreeSet<u32>, bool, BTreeSet<u32>
 
 /// Parses one comma-separated cron field.
 ///
-/// Returns `(values, restricted)`, where `restricted` is false only for a bare
-/// `*` — measured in §2 as the thing that decides the day-of-month /
-/// day-of-week rule, and measured to be **false for `*/2` and for `1-31`**.
+/// Returns `(values, restricted)`. `restricted` is the negation of
+/// [`field_is_unrestricted`] — **false for exactly two whole-field spellings,
+/// `*` and `*/1`** — and it is what decides the day-of-month / day-of-week
+/// rule in §2. It is measured **true** for `*/2`, `*/01`, `1-31`, `1-31/1`,
+/// `*,*` and `*/1,*/1`.
+///
+/// (This sentence has been wrong twice. Fix round 2 left it reading
+/// "false only for a bare `*` … and false for `*/2` and for `1-31`", which
+/// both missed `*/1` and inverted its own measurement. Fix round 3's audit
+/// had flagged the row and the round did not act on it, which is why the
+/// sweep is now a program — see the report.)
 fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronError> {
     let (min, max) = field.range();
     let mut values = BTreeSet::new();
-    let mut restricted = false;
+    // Restrictedness is a property of the WHOLE field token, not of its terms
+    // -- see `field_is_unrestricted`.
+    let restricted = !field_is_unrestricted(token);
 
     for part in token.split(',') {
-        let part = part.trim();
+        // No `part.trim()`. A field token can hold no character the artifact
+        // trims: the separators are exactly `is_java_regex_space`, and every
+        // other trimmable char (U+001C..=U+001F) is refused outright inside a
+        // field -- measured, `0 0 *\u{1c} * *` and `0 0 *\u{1c}/1 * *` are both
+        // `Invalid chars in expression!`. Trimming with Rust's Unicode set
+        // additionally ate U+00A0, which the artifact also refuses.
         if part.is_empty() {
             return Err(CronError::Malformed {
                 field,
@@ -781,21 +979,51 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
                     field,
                     token: part.to_string(),
                 })?;
-                if step == 0 {
-                    return Err(CronError::ZeroStep { field });
+                // The step is range-checked against the FIELD'S OWN range,
+                // and this crate checked only for zero until fix round 3's
+                // sweep put every token the file names to the artifact:
+                //
+                //   */59 minute  OK      */60 minute  Period 60 not in range [0, 59]
+                //   */23 hour    OK      */24 hour    Period 24 not in range [0, 23]
+                //   */31 dom     OK      */32 dom     Period 32 not in range [1, 31]
+                //   */12 month   OK      */13 month   Period 13 not in range [1, 12]
+                //   */7  dow     OK      */8  dow     Period 8 not in range [0, 7]
+                //   5/10 dow     Period 10 not in range [0, 7]
+                //
+                // **22 distinct expressions** across the sweep's corpora,
+                // every one ACCEPTED here and fired -- `0 */30 * * *` is a
+                // plausible thing to write, and Kestra refuses it. Zero is
+                // refused in all five fields (measured in each, including
+                // minutes, hours and day-of-week, whose message prints a
+                // `[0, ...]` that contains the value it rejects), so the bound
+                // is `1 <= step <= max`, not the interval the text prints.
+                if step == 0 || step > max {
+                    return Err(CronError::StepOutOfRange { field, step });
                 }
                 (spec, Some(step))
             }
             None => (part, None),
         };
 
-        let (from, to, is_star) = if spec == "*" {
-            (min, max, true)
+        let (from, to) = if spec == "*" {
+            (min, max)
         } else if let Some((lo, hi)) = spec.split_once('-') {
             let lo = parse_value(lo, field)?;
             let hi = parse_value(hi, field)?;
-            // `withStrictRange()` on every field: measured, `5-1`, `6-0`,
-            // `7-1` and `SUN-SAT` are all `Invalid range!`.
+            // `withStrictRange()` on every field: measured, `5-1` and `7-1`
+            // answer `Invalid range!` in every field that accepts their
+            // endpoints.
+            //
+            // The class stops there, and fix round 3's sweep is what found the
+            // edge: the SAME four expressions reach three different messages,
+            // because a range is only range-checked once both ends parse.
+            // `6-0` answers `Value 0 not in range [1, 31]` in day-of-month and
+            // `[1, 12]` in month -- the zero is out of range before the
+            // reversal is looked at -- and `SUN-SAT` answers `Invalid chars in
+            // expression!` in all three fields that have no names. Only in
+            // day-of-week are all four `Invalid range!`. egret refuses every
+            // one of them, in every field, so no verdict moves; the class
+            // claim was still wider than its examples.
             if lo > hi {
                 return Err(CronError::InvalidRange {
                     field,
@@ -803,36 +1031,14 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
                     to: hi,
                 });
             }
-            (lo, hi, false)
+            (lo, hi)
         } else {
             let v = parse_value(spec, field)?;
             // `5/10` means 5, 15, 25 … up to the field maximum -- measured.
             // A bare `5` is just 5.
             let hi = if step.is_some() { max } else { v };
-            (v, hi, false)
+            (v, hi)
         };
-
-        // Which spellings leave a field UNRESTRICTED, measured exhaustively in
-        // fix round 2 (probes 12 and 13) by OR-ing each day-of-month spelling
-        // against a restricted day-of-week and seeing whether it contributed:
-        //
-        //   *        UNRESTRICTED        1-31     restricted
-        //   */1      UNRESTRICTED        1-31/1   restricted
-        //   */2      restricted          1/1      restricted
-        //   */3      restricted          1-31/2   restricted
-        //   */30     restricted          1-30     restricted
-        //   */31     restricted
-        //
-        // **`*/1` is unrestricted**, and this line used to make it restricted --
-        // `0 0 */1 * 1` then fired on 2026-06-16 where the artifact fires only
-        // on Mondays (2026-06-22). Over-acceptance, in the direction the oracle
-        // cannot catch, found by re-checking a class claim rather than by a
-        // test. A step of 1 over the whole range is the same set as `*`, and
-        // cron-utils collapses it; a step of 30 or 31 does not collapse, even
-        // though it selects a set no month can distinguish from {1}.
-        if !is_star || step.is_some_and(|n| n != 1) {
-            restricted = true;
-        }
 
         let step = step.unwrap_or(1);
         let mut v = from;
@@ -853,7 +1059,7 @@ fn parse_field(token: &str, field: Field) -> Result<(BTreeSet<u32>, bool), CronE
 
 /// One numeric or named value, range-checked against the field's own bounds.
 fn parse_value(token: &str, field: Field) -> Result<u32, CronError> {
-    let token = token.trim();
+    // No `token.trim()` -- see `parse_field`.
     let (min, max) = field.range();
 
     let value = if let Ok(n) = token.parse::<i64>() {
@@ -896,9 +1102,13 @@ fn parse_value(token: &str, field: Field) -> Result<u32, CronError> {
             Some(n) => n,
             // Not a number and not a name. NOW `W` and `L` mean what the
             // dialect says they mean -- a special character it does not define
-            // outside day-of-month -- so `5L`, `1W`, `15W` and a bare `L` in
-            // day-of-week land here and are refused as unsupported syntax,
-            // while `WED` and `JUL` never reach this arm at all.
+            // outside day-of-month -- so `1W`, `15W`, and `5L` and a bare `L`
+            // **in day-of-week**, land here and are refused as unsupported
+            // syntax, while `WED` and `JUL` never reach this arm at all.
+            //
+            // `5L` is field-scoped as of fix round 3: in DAY-OF-MONTH it never
+            // reaches `parse_field` at all, because `parse_day_of_month`
+            // handles it -- the artifact accepts it there.
             //
             // A three-letter name used in the WRONG field (`0 0 JUL * *`,
             // `0 0 WED * *`) also lands here, and the artifact refuses it too
@@ -916,8 +1126,11 @@ fn parse_value(token: &str, field: Field) -> Result<u32, CronError> {
             // What the draft's REPLACEMENT sentence then got wrong -- fix
             // round 2 -- was generalising that to "the artifact makes the same
             // complaint about every one of these": `?` and `#` answer
-            // `Invalid expression:` instead, and two of `Malformed`'s own
-            // cases answer `Invalid chars`. See `CronError::Malformed`.
+            // `Invalid expression:` or `For input string:` instead, depending
+            // on where in the token they sit, and two of `Malformed`'s own
+            // cases answer `Invalid chars`. See `CronError::UnsupportedSyntax`
+            // for the three-class table and `CronError::Malformed` for the
+            // cross-cut.
             None => {
                 return Err(CronError::UnsupportedSyntax {
                     field,
@@ -1080,7 +1293,7 @@ impl ScheduleTrigger {
     ///
     /// It is `#[cfg(test)] pub(crate)`. Narrowing it from `pub` made clippy
     /// report it unused in the lib target, which was the honest signal: every
-    /// one of its six call sites is in a `#[cfg(test)]` module. So rather than
+    /// one of its four call sites is in a `#[cfg(test)]` module. So rather than
     /// silence that with an `allow`, the method now does not exist outside a
     /// test build. That is strictly stronger than `pub(crate)` and is what
     /// "test-only" should always have meant here. The
@@ -1356,8 +1569,8 @@ mod tests {
     ///
     /// A constant, not `Utc::now()`: a scheduler is nothing but a clock, and a
     /// test that reads the wall clock is a test that passes at 11:59 and fails
-    /// at midnight. `egret-query/tests/connector_trino_pool.rs` carries three
-    /// of those.
+    /// at midnight. `egret-query/tests/connector_trino_pool.rs` once carried
+    /// three of those and spent four gate runs on them; it has none now.
     fn probe_clock() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap()
     }
@@ -1400,7 +1613,8 @@ mod tests {
     /// **The `Want` variant is NOT measured — it is egret's own taxonomy**, and
     /// saying so is the point. Kestra reports most refusals through one
     /// message class (`Invalid chars in expression!`), which is why fix round 1
-    /// collapsed `H`, `5L`, `MONDAY` and `JUL`-in-day-of-month into a single
+    /// collapsed `H`, `5L`-in-day-of-week, `MONDAY` and `JUL`-in-day-of-month
+    /// into a single
     /// `UnsupportedSyntax`: the earlier split between them was a distinction
     /// this parser invented. `Malformed` is kept for the structural faults the
     /// artifact *does* complain about differently (`Missing steps for
@@ -1420,7 +1634,7 @@ mod tests {
             Unsupported,
             OutOfRange,
             BadRange,
-            ZeroStep,
+            StepOutOfRange,
             Empty,
             Malformed,
         }
@@ -1524,7 +1738,7 @@ mod tests {
             ("0 24 * * *", false, OutOfRange),
             ("0 0 32 * *", false, OutOfRange),
             ("0 0 * 13 *", false, OutOfRange),
-            ("*/0 * * * *", false, ZeroStep),
+            ("*/0 * * * *", false, StepOutOfRange),
             ("", false, Empty),
             ("H 0 * * *", false, Unsupported),
             // --- structural faults, all refused (probe 10). NOTE the last
@@ -1552,7 +1766,7 @@ mod tests {
                 (Unsupported, Err(CronError::UnsupportedSyntax { .. })) => {}
                 (OutOfRange, Err(CronError::OutOfRange { .. })) => {}
                 (BadRange, Err(CronError::InvalidRange { .. })) => {}
-                (ZeroStep, Err(CronError::ZeroStep { .. })) => {}
+                (StepOutOfRange, Err(CronError::StepOutOfRange { .. })) => {}
                 (Empty, Err(CronError::Empty)) => {}
                 (Malformed, Err(CronError::Malformed { .. })) => {}
                 _ => panic!("{label}: expected {want:?}, got {got:?}"),
@@ -1566,7 +1780,8 @@ mod tests {
     ///
     /// It is `UnsupportedSyntax`, not `Malformed`, and fix round 1 changed
     /// that: the artifact makes the *same* complaint about `H` that it makes
-    /// about `5L` and `MONDAY` -- `Invalid chars in expression! Expression: H
+    /// about `5L` **in day-of-week** and `MONDAY` -- `Invalid chars in
+    /// expression! Expression: H
     /// Invalid chars: H` -- so splitting them apart was a distinction this
     /// parser invented.
     #[test]
@@ -2431,23 +2646,42 @@ mod tests {
         assert!(ScheduleTrigger::resolve(&absent).is_ok());
     }
 
-    /// Which day-of-month spellings leave the field **unrestricted** — and one
-    /// fixture that cannot tell, which is the point of having two.
+    /// Which spellings leave a day field **unrestricted** — in both day
+    /// fields, from two clocks, and with one fixture that cannot tell, which
+    /// is the point of having four.
     ///
     /// The day-of-month/day-of-week rule is OR only when *both* are
-    /// restricted, so OR-ing a spelling against a restricted day-of-week and
+    /// restricted, so OR-ing a spelling against a restricted partner field and
     /// watching whether it contributes is a direct read of its restrictedness.
     ///
-    /// **`*/1` is unrestricted**, and fix round 2 found this crate had it
-    /// backwards: `0 0 */1 * 1` fired on the Tuesday where the artifact fires
-    /// only on Mondays. A step of 1 over the whole range is the same set as
-    /// `*`, and cron-utils collapses it.
+    /// **Exactly two spellings are unrestricted, `*` and `*/1`**, and that is
+    /// not a reading — it is the complement enumerated over every token this
+    /// file names. Fixture 1 alone reports **24** of them as unrestricted;
+    /// fixtures 2 and 3 each report **two**. That gap is the whole lesson.
+    ///
+    /// The rule is cron-utils' `"1".equals(stepToken)` — a `String.equals` on
+    /// the step's **spelling** — and it is a property of the whole field.
+    /// Fix round 2 wrote it as a property of the step's *value* ("a step of 1
+    /// over the whole range is the same set as `*`, and cron-utils collapses
+    /// it"), which is a true sentence about sets and a false rule: `*/01`,
+    /// `*/001`, `*/0001` and `*/+1` select that same set and are **not**
+    /// collapsed. Fix round 3 then varied the one thing the corrected fixture
+    /// still held fixed — the number of comma terms — and `*,*`, `*,*/1`,
+    /// `*/1,*` and `*/1,*/1` turned out to be `And`, hence restricted.
     ///
     /// **`*/30` and `*/31` are restricted** — and the first fixture below
     /// says 2026-06-22 for them, which is *also* what unrestricted would say,
     /// because `{1, 31}` has no member between 06-15 and the next Monday.
     /// A verdict read off that fixture alone would have been a coin flip
     /// dressed as a measurement, so the second fixture exists to separate them.
+    ///
+    /// One caveat the re-review raised and this comment owes: egret models
+    /// "unrestricted" as the OR-versus-AND switch **only** and keeps the
+    /// field's value set either way, while cron-utils' `Always` also widens
+    /// the set to every day. The two models agree on every row here because
+    /// `*` and `*/1` already hold every day; they would not agree if the flag
+    /// were flipped on a narrow set, which is why mutation G3 fails at `*/30`
+    /// with a date neither column names.
     #[test]
     fn only_star_and_star_slash_one_leave_a_field_unrestricted() {
         let next = |expr: &str, from: &str| -> String {
@@ -2463,6 +2697,22 @@ mod tests {
         for (dom, want) in [
             ("*", "2026-06-22"),   // unrestricted
             ("*/1", "2026-06-22"), // unrestricted -- THE FIX
+            // Fix round 3: a step that MEANS one but is not SPELLED `1`. The
+            // artifact's rule is `"1".equals(stepToken)`, so all four of these
+            // are `Every`, hence restricted -- and fix round 2's
+            // `step != 1` had them unrestricted.
+            ("*/01", "2026-06-16"),
+            ("*/001", "2026-06-16"),
+            ("*/0001", "2026-06-16"),
+            ("*/+1", "2026-06-16"),
+            // Fix round 3: a comma list of nothing but unrestricted terms is
+            // `And`, never `Always`. Every rule this file has had -- including
+            // the one before `*/1` was ever noticed -- got these wrong.
+            ("*,*", "2026-06-16"),
+            ("*,*/1", "2026-06-16"),
+            ("*/1,*", "2026-06-16"),
+            ("*/1,*/1", "2026-06-16"),
+            ("*,*,*", "2026-06-16"),
             ("*/2", "2026-06-17"),
             ("*/3", "2026-06-16"),
             ("1-31", "2026-06-16"),
@@ -2490,10 +2740,259 @@ mod tests {
             ("*/31", "2026-07-01"), // restricted after all
             ("*/2", "2026-07-01"),
             ("1-31", "2026-06-30"),
+            // Fix round 3: the four spellings fix round 2 broke, and the five
+            // it never varied.
+            ("*/01", "2026-06-30"),
+            ("*/001", "2026-06-30"),
+            ("*/0001", "2026-06-30"),
+            ("*/+1", "2026-06-30"),
+            ("*,*", "2026-06-30"),
+            ("*,*/1", "2026-06-30"),
+            ("*/1,*", "2026-06-30"),
+            ("*/1,*/1", "2026-06-30"),
+            ("*,*,*", "2026-06-30"),
         ] {
             let expr = format!("0 0 {dom} * 0");
             assert_eq!(next(&expr, "2026-06-29T12:00:00Z"), want, "{expr}");
         }
+
+        // Fixture 3 -- the DAY-OF-WEEK field, which no fixture exercised at
+        // all before fix round 3, against a restricted day-of-month of `1`.
+        // UNRESTRICTED answers 2026-07-01 (the next 1st); restricted answers
+        // earlier, because the day-of-week set then contributes.
+        for (dow, want) in [
+            ("*", "2026-07-01"),   // unrestricted
+            ("*/1", "2026-07-01"), // unrestricted
+            ("*/01", "2026-06-16"),
+            ("*/001", "2026-06-16"),
+            ("*/0001", "2026-06-16"),
+            ("*/+1", "2026-06-16"),
+            ("*/2", "2026-06-16"),
+            ("1/1", "2026-06-16"),
+            ("*,*", "2026-06-16"),
+            ("*,*/1", "2026-06-16"),
+            ("*/1,*", "2026-06-16"),
+            ("*/1,*/1", "2026-06-16"),
+            ("*,*,*", "2026-06-16"),
+            // `*/7` is the narrow restricted set -- {0}, Sunday -- so this row
+            // is not satisfiable by "restricted happens to mean every day".
+            ("*/7", "2026-06-21"),
+        ] {
+            let expr = format!("0 0 1 * {dow}");
+            assert_eq!(next(&expr, "2026-06-15T12:00:00Z"), want, "{expr}");
+        }
+
+        // Fixture 4 -- day-of-week again, from the second clock, so that the
+        // unrestricted answer (07-01) and the every-day restricted answer
+        // (06-30) are a different pair of dates from fixture 3's.
+        for (dow, want) in [
+            ("*", "2026-07-01"),
+            ("*/1", "2026-07-01"),
+            ("*/01", "2026-06-30"),
+            ("*/+1", "2026-06-30"),
+            ("*/2", "2026-06-30"),
+            ("*,*", "2026-06-30"),
+            ("*/1,*/1", "2026-06-30"),
+        ] {
+            let expr = format!("0 0 1 * {dow}");
+            assert_eq!(next(&expr, "2026-06-29T12:00:00Z"), want, "{expr}");
+        }
+    }
+
+    /// Padding makes a nickname stop being one — and leaves a five-field
+    /// expression alone.
+    ///
+    /// `CronParser.parse` runs its nickname switch on the **raw** expression
+    /// (`aload_1`, exact `String.equals`) and only afterwards splits the
+    /// normalised one into fields. This crate trimmed first, so padded
+    /// spellings of every enabled nickname were scheduled where Kestra refuses
+    /// the flow outright. **15 paddings x 7 nicknames = 105 rows measured on
+    /// the artifact, all 105 refused** with `contains 1 parts but we expect
+    /// one of [5]`; **91 of them fired here** — the other 14 are the two
+    /// U+001C paddings, which Rust's `trim` does not eat either, so those
+    /// already agreed by accident.
+    ///
+    /// The pair is two-sided on purpose: the same paddings on `0 0 * * *` are
+    /// **accepted**, so a fix that simply refused whitespace would fail here.
+    #[test]
+    fn padding_unmakes_a_nickname_but_not_a_five_field_expression() {
+        let nicknames = [
+            "@yearly",
+            "@annually",
+            "@monthly",
+            "@weekly",
+            "@daily",
+            "@midnight",
+            "@hourly",
+        ];
+        // Every character the artifact was measured on, in both positions:
+        // the six it splits on, one it trims but never splits on, and one it
+        // does neither to.
+        let pads = [
+            " ", "\t", "\n", "\r", "\u{0b}", "\u{0c}", "\u{1c}", "\u{a0}",
+        ];
+
+        for nick in nicknames {
+            assert!(Cron::parse(nick, false).is_ok(), "{nick} bare");
+            for pad in pads {
+                for expr in [format!("{nick}{pad}"), format!("{pad}{nick}")] {
+                    match Cron::parse(&expr, false) {
+                        Err(CronError::WrongFieldCount { got: 1, want: 5 }) => {}
+                        other => panic!("{expr:?}: expected 1-part field count, got {other:?}"),
+                    }
+                }
+            }
+        }
+
+        // `@reboot` is recognised-but-not-enabled only when it is spelled
+        // exactly; padded, it never reaches the switch at all.
+        assert!(matches!(
+            Cron::parse("@reboot", false),
+            Err(CronError::UnsupportedNickname(_))
+        ));
+        assert!(matches!(
+            Cron::parse("@reboot ", false),
+            Err(CronError::WrongFieldCount { got: 1, want: 5 })
+        ));
+        // And the exact match is what makes the old whitespace guard needless.
+        assert!(matches!(
+            Cron::parse("@daily extra", false),
+            Err(CronError::WrongFieldCount { got: 2, want: 5 })
+        ));
+
+        // The other side: five-field expressions tolerate the artifact's own
+        // whitespace, including U+001C..=U+001F, which `String.trim()` removes
+        // and Java's `\s` does not split on.
+        let fires = |expr: &str| {
+            let cron = Cron::parse(expr, false).unwrap_or_else(|e| panic!("{expr:?}: {e}"));
+            cron.next_after(at("2026-06-15T12:00:00Z").with_timezone(&tz("UTC")))
+                .map(|d| d.with_timezone(&Utc).date_naive().to_string())
+                .unwrap_or_else(|| "never".into())
+        };
+        for expr in [
+            "0 0 * * *",
+            " 0 0 * * * ",
+            "\t0 0 * * *\t",
+            "0 0 * * *\n",
+            "0  0  *  *  *",
+            "0\t0\t*\t*\t*",
+            "\u{1c}0 0 * * *",
+            "0 0 * * *\u{1c}",
+        ] {
+            assert_eq!(fires(expr), "2026-06-16", "{expr:?}");
+        }
+
+        // U+00A0 is whitespace to Rust and **not** to the artifact, which is
+        // why `normalise` cannot be `str::trim`/`split_whitespace`. Measured:
+        // `Invalid chars` at the ends, "4 parts" in the middle.
+        assert!(Cron::parse("0 0 * * *\u{a0}", false).is_err());
+        assert!(Cron::parse("\u{a0}0 0 * * *", false).is_err());
+        assert!(matches!(
+            Cron::parse("0 0 *\u{a0}* *", false),
+            Err(CronError::WrongFieldCount { got: 4, want: 5 })
+        ));
+
+        // `Empty expression!` is decided on the NORMALISED string, so a
+        // U+001C-only expression is empty and a U+00A0-only one is one field.
+        for blank in ["", " ", "  ", "\t", "\n", "\u{1c}"] {
+            assert!(
+                matches!(Cron::parse(blank, false), Err(CronError::Empty)),
+                "{blank:?}"
+            );
+        }
+        assert!(matches!(
+            Cron::parse("\u{a0}", false),
+            Err(CronError::WrongFieldCount { got: 1, want: 5 })
+        ));
+    }
+
+    /// A step is range-checked against its **own field's** range.
+    ///
+    /// This crate checked only for zero, so `0 */30 * * *` — a plausible thing
+    /// to write, and one Kestra refuses — was accepted and scheduled hourly.
+    /// Twenty-two such expressions were found by putting every token this file
+    /// names to the artifact rather than by reading (fix round 3).
+    ///
+    /// Each field appears as an accept/refuse **pair** straddling its own
+    /// bound, so a rule that refused the wrong constant fails here.
+    #[test]
+    fn a_step_is_range_checked_against_its_own_fields_range() {
+        for (expr, accepted) in [
+            ("*/59 * * * *", true),
+            ("*/60 * * * *", false),
+            ("0 */23 * * *", true),
+            ("0 */24 * * *", false),
+            ("0 0 */31 * *", true),
+            ("0 0 */32 * *", false),
+            ("0 0 * */12 *", true),
+            ("0 0 * */13 *", false),
+            ("0 0 * * */7", true),
+            ("0 0 * * */8", false),
+            // A step on a value, not on `*`, is checked the same way.
+            ("0 0 5/31 * *", true),
+            ("0 0 5/32 * *", false),
+            ("0 0 * * 1/7", true),
+            ("0 0 * * 1/8", false),
+            ("0 0 * * 5/10", false),
+            // Zero is refused in all five fields, including minutes, hours
+            // and day-of-week, whose message prints a range containing it.
+            ("*/0 * * * *", false),
+            ("0 0 * */0 *", false),
+            ("0 0 * * */0", false),
+        ] {
+            let got = Cron::parse(expr, false);
+            assert_eq!(got.is_ok(), accepted, "{expr}: {got:?}");
+            if !accepted {
+                assert!(
+                    matches!(got, Err(CronError::StepOutOfRange { .. })),
+                    "{expr}: wrong refusal {got:?}"
+                );
+            }
+        }
+    }
+
+    /// `nL` in **day-of-month** is accepted and means exactly `L`.
+    ///
+    /// The file called `5L` unsupported syntax, which is true of day-of-week
+    /// and false of day-of-month — the artifact accepts `0 0 5L * *` and fires
+    /// it on the last day of the month. The number is range-checked to 1..=31
+    /// and then discarded.
+    #[test]
+    fn an_n_l_day_of_month_term_means_l_with_the_number_discarded() {
+        let next = |expr: &str| -> String {
+            let cron = Cron::parse(expr, false).unwrap_or_else(|e| panic!("{expr:?}: {e}"));
+            cron.next_after(at("2026-06-15T12:00:00Z").with_timezone(&tz("UTC")))
+                .map(|d| d.with_timezone(&Utc).date_naive().to_string())
+                .unwrap_or_else(|| "never".into())
+        };
+
+        // The number is discarded, so every accepted spelling answers what a
+        // bare `L` answers -- which is the control row.
+        for expr in [
+            "0 0 L * *",
+            "0 0 5L * *",
+            "0 0 1L * *",
+            "0 0 15L * *",
+            "0 0 31L * *",
+            "0 0 5l * *",
+        ] {
+            assert_eq!(next(expr), "2026-06-30", "{expr}");
+        }
+        // It is NOT `L-n`: that one does use the number.
+        assert_eq!(next("0 0 L-1 * *"), "2026-06-29");
+        // Range-checked before being discarded.
+        for expr in ["0 0 0L * *", "0 0 32L * *"] {
+            assert!(
+                matches!(Cron::parse(expr, false), Err(CronError::OutOfRange { .. })),
+                "{expr}"
+            );
+        }
+        // And still refused everywhere the artifact refuses it.
+        for expr in ["0 0 L5 * *", "0 0 5LW * *", "0 0 5L-1 * *", "0 0 * * 5L"] {
+            assert!(Cron::parse(expr, false).is_err(), "{expr}");
+        }
+        // An `nL` term in a list is dropped like every other `L` term.
+        assert_eq!(next("0 0 5L,1 * *"), "2026-07-01");
     }
 
     /// An `L` term in a comma list is **dropped**, and this reproduces an
