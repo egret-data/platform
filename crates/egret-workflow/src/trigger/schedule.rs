@@ -1250,13 +1250,23 @@ mod tests {
     // 1. The dialect
     // ---------------------------------------------------------------------
 
-    /// Every row is an answer the pinned artifact actually gave
-    /// (`scratchpad/w6t5/probe-out.json`, `probe4-out.json`, `probe5-out.json`).
+    /// Every row's **accept-or-refuse verdict** is an answer the pinned
+    /// artifact actually gave (probes 1, 4, 5, 6, 8 and 10 in
+    /// `scratchpad/w6t5/`). That half is measured.
+    ///
+    /// **The `Want` variant is NOT measured — it is egret's own taxonomy**, and
+    /// saying so is the point. Kestra reports most refusals through one
+    /// message class (`Invalid chars in expression!`), which is why fix round 1
+    /// collapsed `H`, `5L`, `MONDAY` and `JUL`-in-day-of-month into a single
+    /// `UnsupportedSyntax`: the earlier split between them was a distinction
+    /// this parser invented. `Malformed` is kept for the structural faults the
+    /// artifact *does* complain about differently (`Missing steps for
+    /// expression`, `For input string`, `Trailing commas not permitted`), so
+    /// the two variants correspond to something rather than to nothing.
     ///
     /// The refusals are the half that matters. **Over-acceptance must not
     /// ship**: a cron this parser accepts and Kestra rejects is a trigger that
-    /// fires where Kestra would not, and the oracle cannot catch it -- so each
-    /// refusal is asserted by its typed variant, not merely as "some error".
+    /// fires where Kestra would not, and the oracle cannot catch it.
     #[test]
     fn the_dialect_is_the_artifacts_dialect() {
         #[derive(Debug)]
@@ -1374,6 +1384,13 @@ mod tests {
             ("*/0 * * * *", false, ZeroStep),
             ("", false, Empty),
             ("H 0 * * *", false, Unsupported),
+            // --- structural faults: refused, and the artifact's complaint is
+            // a DIFFERENT one from `Invalid chars` (probe 10) ---
+            ("*/x * * * *", false, Malformed), // `For input string: "X"`
+            ("5/ * * * *", false, Malformed),  // `Missing steps for expression: 5/`
+            ("0,,2 * * * *", false, Malformed), // `Invalid chars ... Expression: `
+            ("0 0 L-x * *", false, Malformed), // `Invalid chars ... Expression: X`
+            ("0 0 * * ,", false, Malformed),   // `Trailing commas not permitted!`
         ];
 
         for (expr, with_seconds, want) in table {
