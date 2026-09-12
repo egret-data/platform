@@ -12,7 +12,7 @@
 //! execution, and the reason is structural rather than accidental:
 //! `harvest.py`'s settle walks `parent_id`, and Kestra leaves that column
 //! **NULL** for anything a `Schedule` creates — and for anything a `Flow`
-//! trigger creates, which [`flow`] measured directly over 211 trigger-fired
+//! trigger creates, which [`flow`] measured directly over **210** trigger-fired
 //! executions. Seven of the 345 corpus flows
 //! declare a cron and one of those is baselined; **zero are reachable**. The
 //! flow trigger's own population is seventeen flows, **zero** baselined.

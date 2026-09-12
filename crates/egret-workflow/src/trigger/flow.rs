@@ -107,15 +107,25 @@
 //! c3    7VUqNzQzzGwXDsQhEdl9rz  1abGJbHjAdjdnbVDfyVPAO  (c2)  3v0vVBSXCK2kdCSP7zYW56
 //! ```
 //!
-//! **The link is the immediate cause; the correlationId is the root.** So
-//! "`system.correlationId` = the source execution's id" is true of every
-//! top-level source and false of the class — which is why it is recorded here
-//! as a four-row table rather than as a sentence. See
-//! [`FiredExecution::correlation_id`].
+//! **The mechanism: the link is the immediate cause, and the correlationId is
+//! whatever the source's own `system.correlationId` label held — copied
+//! verbatim, never computed.** That sentence is exact. The convenient gloss
+//! *"the correlationId is the root"* is **not**: it describes what the copying
+//! produces in a chain Kestra started, and nothing more.
+//!
+//! Fix round 2, and the third time this one claim has been sharpened by a
+//! deeper fixture: a root started with an explicit
+//! `system.correlationId: ZZZTESTROOT` hands **`ZZZTESTROOT`** to all three
+//! children — a value that is not an execution id at all. So "the root's id" is
+//! true of machine-generated chains and false of the class, exactly as
+//! "`system.correlationId` = the source execution's id" was true of top-level
+//! sources and false of the class. Each correction came from someone building
+//! the row the previous fixture did not contain; **keep the mechanism, distrust
+//! every gloss over it.** See [`FiredExecution::correlation_id`].
 //!
 //! egret does not have this column. `render.rs` walks `parent_execution_id`
 //! only, so the seam that wires this module will render the child's own id
-//! where Kestra renders the root's. **That is a forward-looking gap with an
+//! where Kestra renders **the label the source carried**. **That is a forward-looking gap with an
 //! owner (the wiring seam), not a defect in this file** — but the sentence that
 //! claimed otherwise was a completeness claim nothing supported, which is why
 //! it is written down here rather than quietly corrected.
@@ -581,9 +591,17 @@ pub struct FiredExecution {
     pub namespace: String,
     pub flow_id: String,
     pub trigger_id: String,
-    /// **`workflow.executions.trigger_execution_id` (migration 0138), and the
-    /// only link this execution has.** Kestra's
-    /// `Execution.trigger.variables.executionId`.
+    /// **`workflow.executions.trigger_execution_id` (migration 0138) — the
+    /// only link in the SCHEMA, and not the only reference on the artifact.**
+    /// Kestra's `Execution.trigger.variables.executionId`, which names the
+    /// **immediate** cause.
+    ///
+    /// The unqualified form of this sentence — *"the only link this execution
+    /// has"* — shipped in the first draft and is false: the child also carries
+    /// a `system.correlationId` label, which egret does not model. See this
+    /// module's doc and [`Self::correlation_id`]. Fix round 2 removed this
+    /// copy; fix round 1 had corrected only the one in the module doc, which is
+    /// how a corrected claim survives in a second place.
     pub trigger_execution_id: Uuid,
     /// `metadata.executionDepth` for the new row: the source's depth plus one.
     pub execution_depth: u32,
@@ -609,18 +627,23 @@ impl FiredExecution {
     ///
     /// **This is NOT `trigger_execution_id`, and the difference only shows in a
     /// chain.** `Flow.evaluate` copies the *source's own* `system.correlationId`
-    /// label across verbatim (`lambda$evaluate$2`), so the child inherits the
-    /// **root** of the chain rather than its immediate cause. Probe round 1
-    /// could not tell the two apart — all fourteen of its sources were
-    /// top-level, where they coincide. A four-deep chain (fix round 1) does:
-    /// `c1`/`c2`/`c3` each carry `trigger.variables.executionId` = their
-    /// immediate cause and `system.correlationId` = **`c0`**.
+    /// label across verbatim (`lambda$evaluate$2`), so the child inherits
+    /// **whatever the source carried** rather than its immediate cause's id.
+    /// Probe round 1 could not tell the two apart — all fourteen of its sources
+    /// were top-level, where they coincide. A four-deep chain (fix round 1)
+    /// does: `c1`/`c2`/`c3` each carry `trigger.variables.executionId` = their
+    /// immediate cause and `system.correlationId` = `c0`.
+    ///
+    /// **And "= the root's id" is itself a gloss** (fix round 2): a root
+    /// started with an explicit `system.correlationId: ZZZTESTROOT` gives all
+    /// three children `ZZZTESTROOT`, which is not an execution id. The label is
+    /// copied, not derived — that is the whole rule.
     ///
     /// It returns `None` because **egret has no such column**; the value is the
     /// source's label, which this seam is not given. The wiring seam owns it,
     /// and until it does, egret's `render.rs` (which walks
     /// `parent_execution_id` only) will render the child's own id where Kestra
-    /// renders the root's.
+    /// renders **the label the source carried**.
     pub const fn correlation_id(&self) -> Option<Uuid> {
         None
     }
@@ -812,6 +835,169 @@ mod tests {
             Outcome::Fired(e) => *e,
             Outcome::Refused(r) => panic!("expected a fire, refused {r:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // A SECOND fixture, disjoint in every field.
+    //
+    // Fix round 2. Everything above this comment was built from one listener,
+    // one flow and one source, so every value `evaluate` carries from an input
+    // to an output had exactly one witness -- and a field whose fixture
+    // supplies one value cannot distinguish "computed" from "constant".
+    // Measured before the fix: replacing `trigger_execution_id: source.id`,
+    // `namespace`, `flow_id`, `trigger_id`, `inputs`, `when_source`,
+    // `resolve`'s `trigger_id`, and the `source.namespace`/`source.flow_id`
+    // comparison operands with the literal these fixtures happen to supply left
+    // **all 693 lib tests passing** -- nine survivors out of thirteen probes,
+    // with four deliberate controls dying, so the sweep discriminated.
+    //
+    // These three share NO string, uuid, state or id with the first set.
+    // ---------------------------------------------------------------------
+
+    fn other_src_id() -> Uuid {
+        Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap()
+    }
+
+    /// The second listener: different id, states, `when`, inputs and labels.
+    fn other_listener() -> WindowFreeFlowTrigger {
+        WindowFreeFlowTrigger::resolve(&trigger(
+            "id: relay\ntype: io.kestra.plugin.core.trigger.Flow\n\
+             states: [WARNING]\nwhen: \"{{ alpha != beta }}\"\n\
+             inputs:\n  alpha: \"A\"\n\
+             labels:\n  tier: gold\n",
+        ))
+        .expect("second listener resolves")
+    }
+
+    fn other_listening() -> ListeningFlow {
+        ListeningFlow {
+            workspace_id: other_ws(),
+            namespace: "z9.listen".into(),
+            flow_id: "relay-flow".into(),
+            disabled: false,
+            draft: false,
+        }
+    }
+
+    fn other_source() -> SourceExecution {
+        SourceExecution {
+            id: other_src_id(),
+            workspace_id: other_ws(),
+            namespace: "z9.probe".into(),
+            flow_id: "emitter".into(),
+            state: State::Warning,
+            kind: None,
+            execution_depth: Some(4),
+        }
+    }
+
+    /// **Every field of the fired execution tracks its input, and no field is a
+    /// constant that the fixtures happened to agree with.**
+    ///
+    /// Fix round 2, and the general form of the `max_depth` lesson: *a
+    /// two-sided pair on a comparison says nothing about where its operand came
+    /// from* — and neither does a single-valued fixture say anything about
+    /// where a **carried** value came from. `the_fired_execution_carries_the_trigger_link_and_no_parent`
+    /// was written to pin "the fact the whole package's link design rests on"
+    /// and it **passed with the implementation of every field it checked
+    /// replaced by a literal**, because `src_id()`, `"t6.listen"`, `"listener"`
+    /// and `"listen"` were the only values any test ever supplied.
+    ///
+    /// Two disjoint triples, asserted **pairwise different** first — a row that
+    /// silently agreed with the other would re-open the hole this closes — and
+    /// then each field asserted against its own triple.
+    #[test]
+    fn every_carried_field_tracks_its_input_rather_than_a_fixture_constant() {
+        let (l1, f1, s1) = (plain(), listening(), source(State::Success));
+        let (l2, f2, s2) = (other_listener(), other_listening(), other_source());
+
+        // The fixtures really are disjoint. Without this, a later edit that
+        // made them coincide would turn the assertions below back into
+        // tautologies without failing anything.
+        assert_ne!(f1.namespace, f2.namespace);
+        assert_ne!(f1.flow_id, f2.flow_id);
+        assert_ne!(l1.trigger_id, l2.trigger_id);
+        assert_ne!(s1.id, s2.id);
+        assert_ne!(s1.workspace_id, s2.workspace_id);
+        assert_ne!(f1.workspace_id, f2.workspace_id);
+        assert_ne!(s1.namespace, s2.namespace);
+        assert_ne!(s1.flow_id, s2.flow_id);
+        assert_ne!(s1.state, s2.state);
+        assert_ne!(s1.execution_depth, s2.execution_depth);
+        assert_ne!(l1.inputs, l2.inputs);
+        assert_ne!(l1.labels, l2.labels);
+        assert_ne!(l1.when_source(), l2.when_source());
+
+        let e1 = fired(run(&l1, &f1, &s1));
+        let e2 = fired(run(&l2, &f2, &s2));
+
+        // The LISTENING flow's identity, not the source's and not a constant.
+        assert_eq!(
+            (e1.namespace.as_str(), e1.flow_id.as_str()),
+            ("t6.listen", "listener")
+        );
+        assert_eq!(
+            (e2.namespace.as_str(), e2.flow_id.as_str()),
+            ("z9.listen", "relay-flow")
+        );
+
+        // The TRIGGER's id.
+        assert_eq!(e1.trigger_id, "listen");
+        assert_eq!(e2.trigger_id, "relay");
+
+        // **The link.** Two sources, two ids, each carried to its own child.
+        assert_eq!(e1.trigger_execution_id, s1.id);
+        assert_eq!(e2.trigger_execution_id, s2.id);
+        assert_ne!(e1.trigger_execution_id, e2.trigger_execution_id);
+        assert_eq!(e1.parent_execution_id(), None);
+        assert_eq!(e2.parent_execution_id(), None);
+        assert_eq!(e2.trigger_run_ix(), None);
+
+        // Depth follows its own source.
+        assert_eq!(e1.execution_depth, 1);
+        assert_eq!(e2.execution_depth, 5);
+
+        // Inputs and labels, including the EMPTY declaration -- the row that
+        // was missing, and the one a "carry the declaring fixture's map"
+        // implementation survives without.
+        assert!(e1.inputs.is_empty());
+        assert!(e1.labels.is_empty());
+        assert_eq!(e2.inputs.get("alpha").and_then(|v| v.as_str()), Some("A"));
+        assert_eq!(e2.inputs.len(), 1);
+        assert_eq!(e2.labels.len(), 1);
+        assert_eq!(e2.labels[0].key, "tier");
+        assert_eq!(e2.labels[0].value, "gold");
+    }
+
+    /// `when_source()` returns the expression the flow declared, verbatim.
+    ///
+    /// Fix round 2. Round 1 only ever asserted `Some("true")` and `None`, so
+    /// `resolve` could have mapped **every** declared `when` to `"true"` and no
+    /// test would have noticed — measured: that mutation survived all 693. It
+    /// matters because the caller renders exactly this string: collapsing it to
+    /// `"true"` would evaluate a condition the author did not write, and fire
+    /// where Kestra would not.
+    #[test]
+    fn the_when_source_is_the_declared_expression_and_not_the_default() {
+        for (yaml, expected) in [
+            (
+                "when: \"{{ labels.source == 'a' }}\"",
+                Some("{{ labels.source == 'a' }}"),
+            ),
+            ("when: \"false\"", Some("false")),
+            ("when: \"true\"", Some("true")),
+            ("when: null", None),
+        ] {
+            let l = WindowFreeFlowTrigger::resolve(&trigger(&format!(
+                "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n{yaml}\n"
+            )))
+            .unwrap();
+            assert_eq!(l.when_source(), expected, "{yaml}");
+        }
+        // The absent key takes Kestra's default, which is the one value that
+        // could hide a collapse-to-"true" -- asserted last, and beside the
+        // rows that make it non-vacuous.
+        assert_eq!(plain().when_source(), Some("true"));
     }
 
     // ---------------------------------------------------------------------
@@ -1147,37 +1333,50 @@ mod tests {
     /// | same flowId only | different | same | `r2.b/twin` fired 3× off `r2.a/twin` |
     #[test]
     fn a_flow_trigger_does_not_fire_on_its_own_flows_execution() {
-        let l = plain();
-        let s = source(State::Success);
+        // Fix round 2: run the three rows against TWO disjoint sources. With
+        // one source, `source.namespace` and `source.flow_id` could each be
+        // replaced by the fixture's literal and every row still passed --
+        // measured, both mutations survived all 693 lib tests. The comparison
+        // was two-sided; its operands were not.
+        for (l, s) in [
+            (plain(), source(State::Success)),
+            (other_listener(), other_source()),
+        ] {
+            let ctx = format!("{}/{}", s.namespace, s.flow_id);
 
-        let same_pair = ListeningFlow {
-            workspace_id: s.workspace_id,
-            namespace: s.namespace.clone(),
-            flow_id: s.flow_id.clone(),
-            disabled: false,
-            draft: false,
-        };
-        assert_eq!(refusal(run(&l, &same_pair, &s)), Refusal::SameFlow);
+            let same_pair = ListeningFlow {
+                workspace_id: s.workspace_id,
+                namespace: s.namespace.clone(),
+                flow_id: s.flow_id.clone(),
+                disabled: false,
+                draft: false,
+            };
+            assert_eq!(
+                refusal(run(&l, &same_pair, &s)),
+                Refusal::SameFlow,
+                "{ctx}: a flow trigger must not fire on its own flow"
+            );
 
-        let same_namespace = ListeningFlow {
-            namespace: s.namespace.clone(),
-            flow_id: "a-different-flow".into(),
-            ..same_pair.clone()
-        };
-        assert!(
-            matches!(run(&l, &same_namespace, &s), Outcome::Fired(_)),
-            "same namespace, different id: Kestra compares the pair"
-        );
+            let same_namespace = ListeningFlow {
+                namespace: s.namespace.clone(),
+                flow_id: "a-different-flow".into(),
+                ..same_pair.clone()
+            };
+            assert!(
+                matches!(run(&l, &same_namespace, &s), Outcome::Fired(_)),
+                "{ctx}: same namespace, different id: Kestra compares the pair"
+            );
 
-        let same_flow_id = ListeningFlow {
-            namespace: "a.different.namespace".into(),
-            flow_id: s.flow_id.clone(),
-            ..same_pair.clone()
-        };
-        assert!(
-            matches!(run(&l, &same_flow_id, &s), Outcome::Fired(_)),
-            "same id, different namespace: Kestra compares the pair"
-        );
+            let same_flow_id = ListeningFlow {
+                namespace: "a.different.namespace".into(),
+                flow_id: s.flow_id.clone(),
+                ..same_pair.clone()
+            };
+            assert!(
+                matches!(run(&l, &same_flow_id, &s), Outcome::Fired(_)),
+                "{ctx}: same id, different namespace: Kestra compares the pair"
+            );
+        }
     }
 
     /// A disabled trigger and a disabled flow each refuse, and each has its own
