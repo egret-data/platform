@@ -1638,3 +1638,73 @@ async fn an_unparseable_flow_answers_the_same_404() {
         "nothing new started"
     );
 }
+
+/// The bulkhead gates the **handler**, not only the semaphore.
+///
+/// Fix round 1's sweep, mutation M24: deleting
+/// `guard.bulkhead.try_acquire()...?` from `handle` left every test in this
+/// crate green, because the only bulkhead test drove the semaphore directly.
+/// That is a claim surviving its implementation being removed.
+///
+/// A guard with **zero** permits makes the bound reachable without any
+/// concurrency at all, which is what lets this be deterministic rather than a
+/// race.
+#[tokio::test]
+async fn the_bulkhead_gates_the_handler() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+
+    let closed = common::webhook_app_with_guard(
+        &db,
+        std::sync::Arc::new(egret_workflow::WebhookGuard::new(0)),
+    )
+    .await;
+    let res = common::anon(
+        &closed,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a bulkhead with no permits must refuse before the handler does any work"
+    );
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+
+    // The control: the same request against a guard with one permit fires.
+    // Without it this test passes against a route that refuses everything.
+    let open = common::webhook_app_with_guard(
+        &db,
+        std::sync::Arc::new(egret_workflow::WebhookGuard::new(1)),
+    )
+    .await;
+    let res = common::anon(
+        &open,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+
+    // And the permit COMES BACK: a second request through the same one-permit
+    // router succeeds, so the refusal above is about permits in flight rather
+    // than a permit spent for ever.
+    let res = common::anon(
+        &open,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 2);
+}

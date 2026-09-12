@@ -341,6 +341,25 @@ pub struct WebhookApp {
 }
 
 pub async fn webhook_app(db: &Db) -> WebhookApp {
+    webhook_app_with_guard(
+        db,
+        std::sync::Arc::new(egret_workflow::WebhookGuard::new(
+            egret_workflow::WEBHOOK_MAX_CONCURRENCY,
+        )),
+    )
+    .await
+}
+
+/// [`webhook_app`] with the guard supplied, so a test can drive a bound it
+/// genuinely exceeds.
+///
+/// Fix round 1's sweep: without this the bulkhead had a unit test of the
+/// SEMAPHORE and nothing reaching the handler's use of it — deleting the
+/// `try_acquire` from `handle` passed the whole suite.
+pub async fn webhook_app_with_guard(
+    db: &Db,
+    guard: std::sync::Arc<egret_workflow::WebhookGuard>,
+) -> WebhookApp {
     let sessions = egret_auth::session::SessionService::new(
         db.clone(),
         chrono::Duration::hours(24),
@@ -367,7 +386,10 @@ pub async fn webhook_app(db: &Db) -> WebhookApp {
     };
     WebhookApp {
         router: axum::Router::new()
-            .nest("/workflows/v1", egret_workflow::webhook_router())
+            .nest(
+                "/workflows/v1",
+                egret_workflow::webhook_router_with_guard(guard),
+            )
             .with_state(state),
     }
 }
