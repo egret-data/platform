@@ -612,7 +612,7 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
 ///   decides to stop, not SIGKILL. Kubernetes' default grace period is **30 s**,
 ///   which is *below* the request deadline: leaving it at the default would have
 ///   made this whole drain unreachable, so `backend-deployment.yaml` sets 65 and
-///   `drain_deadline_fits_inside_the_pods_termination_grace_period` pins the two
+///   `the_drain_deadline_fits_inside_the_pods_termination_grace_period` pins the two
 ///   together.
 ///
 /// # Why the drain matters more here than the numbers suggest

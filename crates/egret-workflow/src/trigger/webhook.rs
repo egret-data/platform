@@ -706,7 +706,8 @@ fn is_multipart(content_type: Option<&str>) -> bool {
 /// 1. **Can an input reach the object?** No, and that is this type: the name is
 ///    not bound. It is a property of the environment, not of any check.
 /// 2. **Should an input that mentions `trigger` be accepted at all?** No, and
-///    that is [`references_trigger`], asked **before** the render.
+///    that is [`crate::runners::render_str_guarded`] with
+///    [`FORBIDDEN_INPUT_ROOTS`], asked **before** every pass of the render.
 ///
 /// Keeping them apart is fix round 2's Important 1. Closing (1) alone left
 /// `{{ [trigger] }}`, `{{ trigger ?? 'x' }}`, `{{ trigger | default('x') }}`
@@ -720,7 +721,8 @@ fn is_multipart(content_type: Option<&str>) -> bool {
 /// until fix round 2's claim 15. **That approach was tried and rejected** — it
 /// misclassifies `{{ trigger.body }}`, because a sentinel object has no `body`
 /// member either — and no sentinel has ever existed in this file. The
-/// discriminator is [`references_trigger`], which reads minijinja's AST.
+/// discriminator is [`crate::runners::render_str_guarded`], which reads
+/// minijinja's AST — see [`FORBIDDEN_INPUT_ROOTS`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputContext {
     pub flow_id: String,
@@ -1801,7 +1803,8 @@ triggers:
     /// fixture is templates rather than numbers.
     ///
     /// The test this replaces was called
-    /// `non_string_input_values_are_not_rendered` and its "list" row was
+    /// non_string_input_values_are_not_rendered (deleted; named here as history,
+    /// not as a citation) and its "list" row was
     /// `l: [1, 2]` — two numbers, never a template — so it asserted the
     /// doc's false sentence against a fixture that could not have
     /// contradicted it. That is this branch's recurring shape one more time,

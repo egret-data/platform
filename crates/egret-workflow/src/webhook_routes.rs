@@ -21,7 +21,7 @@
 //!
 //! **That spelling is a signal to a reader here, not a mechanism**, and fix
 //! round 1's sweep is what made the difference matter: `egret-server`'s
-//! `feature_route_coverage` suite reads the **OpenAPI document**, and this route
+//! `tests/feature_route_coverage.rs` suite reads the **OpenAPI document**, and this route
 //! contributes nothing to it (see "no OpenAPI document" below), so neither
 //! spelling would be seen by that suite either way. For `egret-dataapi`'s
 //! serving router — which *does* publish a document — the spelling really is
@@ -255,11 +255,13 @@ pub const MAX_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
 /// before it can be refused — it renders every candidate key with Pebble — and
 /// because it is reachable without a credential. Chosen, not measured.
 ///
-/// The semaphore is built **once per router**, in [`webhook_router`]. A caller
-/// that builds a router per request gets a fresh semaphore per request, which
-/// is a limit nobody can reach — the mistake `egret-dataapi`'s
-/// `serving_bulkhead` doc warns about, repeated here because this module has
-/// its own constructor.
+/// The semaphore is built **once per router**: [`WebhookGuard::new`] is the one
+/// place it is constructed, and [`webhook_router`] calls it once. A caller that
+/// builds a router per request gets a fresh semaphore per request, which is a
+/// limit nobody can reach — the mistake `egret-dataapi`'s `serving_bulkhead`
+/// doc warns about, repeated here because this module has its own constructor.
+/// [`webhook_router_with_guard`] exists so a caller whose router outlives its
+/// requests can supply one.
 pub const WEBHOOK_MAX_CONCURRENCY: usize = 16;
 
 /// How many attempts one `(workspace, namespace, flow)` may make per
