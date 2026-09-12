@@ -1230,14 +1230,15 @@ mod tests {
                 jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", spelling);
                 // Whatever figment does with these, it must not be a silent
                 // `false` that reads as "the operator did not ask".
-                let got = Config::figment().extract::<Config>();
-                match got {
-                    Ok(c) => assert!(
+                // Accepted -> must be ON. Refused at boot is also fine: an
+                // operator who asked for the surface and was told no at least
+                // knows. A silent `false` is the only wrong answer.
+                if let Ok(c) = Config::figment().extract::<Config>() {
+                    assert!(
                         c.workflow.webhooks_enabled,
                         "`{spelling}` parsed to false -- an operator who asked for the \
                          surface would not get it and nothing would say so"
-                    ),
-                    Err(_) => {}
+                    );
                 }
                 Ok(())
             });
