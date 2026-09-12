@@ -419,9 +419,14 @@ fn not_found() -> Error {
 /// `trigger`, `outputs`, `labels`, `state` and `url` (measured on the wire).
 /// Dropped here, each with a reason: `flowRevision` (egret has no revision),
 /// `outputs` (the `returnOutputs` streaming path, not implemented), `labels`
-/// (`system.from`/`system.correlationId` are Kestra's execution-label scheme,
-/// which egret does not have) and `url` (needs the configured public base URL,
-/// which this crate does not read).
+/// (there is no `labels` COLUMN on an egret execution — the flow's own
+/// `labels:` block plus the one synthesised `system.correlationId` are built
+/// per render by `worker::render::Surface::load`, which this response cannot
+/// reach; `system.from` is not synthesised anywhere. *This sentence said
+/// "Kestra's execution-label scheme, which egret does not have", and
+/// `{{ labels.system.correlationId }}` renders in egret — W6 Task 8*) and
+/// `url` (needs the configured public base URL, which this crate does not
+/// read).
 #[derive(Debug, Serialize)]
 pub struct WebhookResponse {
     /// egret's workspace id — Kestra's `tenantId`.

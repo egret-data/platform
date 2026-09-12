@@ -5892,7 +5892,7 @@ async fn a_max_duration_chain_stops_when_the_original_clock_runs_out(pool: sqlx:
 ///
 /// A one-execution fixture cannot see the defect: **every** implementation of
 /// `root` returns the same value for a top-level execution, which is exactly
-/// how `the_correlation_id_divergence_has_no_corpus_population` came to assert
+/// how `the_seeded_correlation_id_divergence_has_no_corpus_population` came to assert
 /// that the two corpus readers "agree with the artifact" while comparing them
 /// only as roots. So:
 ///

@@ -6175,16 +6175,25 @@ risk this section exists for sharper rather than smaller.** W4's problem was
 that a number which never moves reads as "nothing happened"; W6's is the
 opposite — **sixteen banked entries can make four triggers look measured when
 none of them is.** And it really is half by volume, not a figure of speech:
-**12,274 of the 23,267 lines this package added under `crates/`** are
-`src/trigger/`, `src/webhook_routes.rs` and the two webhook route suites —
-**53%** of the package, judged by nothing in this file. *(`git diff --numstat
-cc4ad991 HEAD`, added lines; a line count is a crude measure of anything, and it
-is used here only to say that the uncovered half is not a corner.)*
+**12,274 of the 23,267 lines this package had added under `crates/` at
+`b4e1c368`** are `src/trigger/`, `src/webhook_routes.rs` and the two webhook
+route suites — **53%** of the package, judged by nothing in this file.
+*(`git diff --numstat cc4ad991 b4e1c368 -- crates/`, added lines. **The
+denominator is dated on purpose**: written as `cc4ad991..HEAD` it counted the
+file it lives in, so every later edit to this README falsified it — the
+whole-branch review caught it one commit after it was written, at 23,273. A
+figure that counts its own file is a shape "hunt the number whose checker is
+elsewhere" does not cover, and it is the only one this sweep created rather than
+found. The numerator is exact and does not move:
+`src/trigger/*` 8,770 + `webhook_routes.rs` 1,210 + `tests/webhook_route.rs`
+1,899 + `egret-server/tests/workflow_webhook_mount.rs` 395. A line count is a
+crude measure of anything and is used here only to say that the uncovered half
+is not a corner.)*
 
 Every figure in this section is either derived by a named test on every run or
 labelled as a measurement someone took. The derivations are
 `the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none` and
-`the_correlation_id_divergence_has_no_corpus_population` in
+`the_seeded_correlation_id_divergence_has_no_corpus_population` in
 `tests/executor.rs`; both were **validated by injecting a known defect before
 their zeros were believed** (five defects, each killed on 3 of 3 runs, against a
 3-of-3 control on the unmutated binary — and the first form of one of them
@@ -6371,7 +6380,80 @@ one:
 | **`FlowRepo::find_by_name` is still unscoped**, and **two** modules now route around it | the flow-repo owner; a `workspace_id` parameter is the fix, and the routing-around is the evidence it is needed |
 | **the dead log-scrape arm of `descendants()`** — left in place deliberately, with the measurement at the site | the package that makes triggers measurable: it has to open `descendants()` anyway to union `trigger_execution_id` |
 | **`plan::MAX_TASK_DEPTH = 48` sits above a cliff bracketed at 42-survives / 47-aborts**, because `spawn_one` settles a child **inside its caller's transaction**, so depth in the data is depth on the stack. Kestra has **no** semantic bound to port: 12, 47 and **100** nested one-value `Loop`s all run to SUCCESS on the artifact, and its only refusal is the YAML reader's Jackson limit, bisected to 498-publishes / 499-`422` | whoever stops `settle` driving a child's first settle inside its caller's transaction. Until then, moving that one W3a constant **below** the cliff converts a process abort into a plan-time refusal |
-| **the `correlationId` divergence** — Kestra copies the cause's `system.correlationId` **label** verbatim and egret derives the chain root's **id**, so a seeded root diverges | the wiring seam, `trigger::flow::FiredExecution::correlation_id`. `the_correlation_id_divergence_has_no_corpus_population` is why it is recorded and not banked: 22 corpus flows declare labels, **3** declare a `system.*` one, **none** declares `system.correlationId`, and the only **2** flows whose text names `correlationId` read it |
+| **the SEEDED `correlationId` divergence** — Kestra copies the cause's `system.correlationId` **label** verbatim and egret derives the chain root's **id**, so a root that declares one diverges | the wiring seam, `trigger::flow::FiredExecution::correlation_id`. `the_seeded_correlation_id_divergence_has_no_corpus_population` is why it is recorded and not banked: 22 corpus flows declare labels, **3** declare a `system.*` one, **none** declares `system.correlationId`, and the only **2** flows whose text names `correlationId` read it. **This row said more than that until the whole-branch review**, and the part it covered up was a defect rather than a divergence: the walk that produces the id stopped at a subflow link and answered the child's own id. Fixed, measured on the artifact, and instrumented — see below |
+
+#### What the whole-branch review found, and why nothing in this section could
+
+This section was written, reviewed and committed before the whole-branch review
+ran, and the review found a **Critical in the one place this section had just
+declared measured**. It belongs here rather than in a task report, because the
+mechanism is the coverage statement's own subject.
+
+**`Surface::load`'s `root` walked `parent_execution_id` alone.** It feeds
+`labels.system.correlationId`. Migration `0138` — the migration this package
+added — gives a subflow child `trigger_execution_id` with
+`parent_execution_id` **NULL**, so the walk stopped at the first subflow link
+and answered the child's **own** id. **That is `subflow::chain_holds`'s W6 Task
+3 Critical, one module over, never swept for**: a guard whose premise is *"the
+chain is walkable by one column"* against a migration that makes a child carry
+exactly one of two. Task 3 fixed it where it was found.
+
+**Three artefacts said the opposite and two of them called it measured** —
+`render.rs`'s own comment (*"agrees with the artifact on every machine-generated
+chain"*: a subflow chain is machine-generated), this file's W6 Task 4 section
+(*"`root` deliberately keeps walking the whole chain, and W6 Task 4 measured
+that this is right"*: Task 4 measured the **replay** link, and "the whole chain"
+was true of the parent chain and read as true of the causal chain), and the
+owner row above, which registered the divergence as reachable only by a
+**seeded** label and named an **unwired** seam as its owner while the wired path
+shipped it.
+
+**The corpus reaches it.** `valids/subflow-grand-child` logs
+`{{labels.system.correlationId}}` and is the target of `valids/subflow-child`,
+which is **one of the twelve entries this section credits**; the same shape holds
+for `valids/follow-dependencies-partial-{parent,child}`. The ratchet cannot see
+it: the golden records **states**, and a `Log` renders either value without
+failing. So this is the third kind of blindness in this very section — *the
+predicate is evaluated and its output is not compared* — reached not by a
+trigger but by a banked entry.
+
+**Measured on the artifact rather than argued**, once the review had found it —
+the corpus's own chain, renamed into a probe namespace on the pinned digest, read
+out of Kestra's Postgres:
+
+```text
+flow              id                      parentId  trigger.…executionId     system.correlationId
+corr-parent       2cvzjgi7mY6lDfaQxiNa0x  null      (started by hand)        2cvzjgi7mY6lDfaQxiNa0x
+corr-child        8yWnkcC1oAvHsunjmTG1Q   null      2cvzjgi7mY6lDfaQxiNa0x   2cvzjgi7mY6lDfaQxiNa0x
+corr-grand-child  2Cr8T9lsAM5icJ7KT5NEna  null      8yWnkcC1oAvHsunjmTG1Q    2cvzjgi7mY6lDfaQxiNa0x
+```
+
+The label is the **root's** id two links down, `parentId` is NULL at every hop,
+and the cause is `trigger.variables.executionId`. Fixed: `Link::cause()` is
+`parent.or(trigger)`, unambiguous because `one_link_kind` makes them exclusive.
+The ratchet was re-read after the fix — **127, 0 broken** — which is what the
+paragraph above predicts and not what it assumes.
+
+**And the test that was supposed to cover this could not**, which is the part
+worth carrying forward. `the_seeded_correlation_id_divergence_has_no_corpus_population`
+(then named without `seeded`) asserts that both label-reading entries are
+matching — and the oracle drives both **only as root executions**, where every
+implementation of the walk returns the same value. *A fixture answers the
+question you built it for and stays silent about the one you then generalise
+to*, for the eighth time in this package, in the test written to state the
+boundary. The walk's instrument is now
+`a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`, which drives
+**two** subflow links (one cannot tell "the root" from "the immediate cause"),
+keeps a loop child as the other-link control, and keeps a standalone execution
+as the control that says the label renders at all.
+
+**The widened walk needed a guard, and the guard has been seen to fail.**
+`loop -> subflow child` is writable now, and without gating the `levels`/`item`
+push on the same `inheriting` flag that child resolves `{{ item.value }}` off
+its **caller's** iteration: measured, `LOOPVAL`, SUCCESS, killed 3 of 3 runs by
+the mutation that removes the gate. It closes the asymmetry W6 Task 2's
+re-review recorded as N-2 — `item` crossing a non-loop link while `outputs`
+stopped.
 
 #### The figures W6 retires above this section, and what each is now
 
@@ -8606,6 +8688,19 @@ Task 3 added `Surface::load`'s sticky `inheriting` flag and deliberately left
 two neighbours for this task to **measure rather than choose**.
 
 **`root` / `correlationId` walks the whole chain, and that is right.**
+
+> **CORRECTION, W6 Task 8's whole-branch review.** *"The whole chain"* was true
+> of the **parent** chain and read as true of the **causal** chain, and the walk
+> followed `parent_execution_id` alone — so it stopped dead at a subflow child,
+> whose `parent_execution_id` is NULL by `0138`'s `one_link_kind`, and answered
+> the child's **own** id. The measurement below is sound and settles the
+> **replay** link only; the subflow link was never measured until the review
+> forced it. Both are now measured and one walk serves both — see the W6
+> section of *The coverage statement*, and `Link::cause` in
+> `src/worker/render.rs`. This is the third artefact of this package to state
+> the un-measured half as measured, and the only reason it was catchable is that
+> the two link kinds were named apart in `0138`.
+
 `egret.probe4/replay-correlation` — a flow-level `CREATE_NEW_EXECUTION` retry
 over a `Log` of `{{ labels.system.correlationId }}` and a `Fail`:
 
@@ -8629,6 +8724,16 @@ replay link is a replay whose PARENT is a loop iteration — refusal 2 above, th
 one the artifact refuses too. So the state the walk is unguarded against is one
 no writer can produce, and it is left as it is rather than given a second flag
 nothing could make fire.
+
+> **CORRECTION, W6 Task 8.** That held only while the walk followed one column.
+> Widening `root` to the causal chain makes `loop -> subflow child`
+> **reachable**, and the push is now gated on the same `inheriting` flag. It is
+> a no-op on every row that existed before — and it is not a flag nothing can
+> make fire: **measured**, with the gate removed the child of a `Subflow` inside
+> a one-value `Loop` renders `{{ item.value }}` as `LOOPVAL`, its CALLER's
+> iteration value, and SUCCEEDS. That is `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`'s
+> fourth part, killed 3 of 3 runs by mutation `M2`. It also closes the
+> asymmetry W6 Task 2's re-review recorded as N-2.
 
 ## The classifier, corrected: `ENTRIES_LEFT_UNFINISHED` 63 → 59
 

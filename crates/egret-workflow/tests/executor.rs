@@ -742,10 +742,13 @@ fn declares_type(source: &str, ty: &str) -> bool {
 ///    `parent_id` from one root, so a schedule-fired execution is not a
 ///    descendant of anything the harness posted and cannot be attributed to an
 ///    entry at all.
-/// 3. **flow trigger** — fires, and the execution carries
-///    `trigger_execution_id`, a column **no arm of `descendants()` reads**. Same
-///    verdict as (2), different mechanism: here the link exists and is not
-///    walked; there there is no link to walk.
+/// 3. **flow trigger** — fires, and the execution records its cause in
+///    `trigger.variables.executionId` (egret's `trigger_execution_id` column
+///    stands in for that field; the artifact-side name is the JSON path, and
+///    whether Kestra generates a COLUMN for it is unmeasured — `parent_id` is
+///    generated and this oracle has never named a second). **No arm of
+///    `descendants()` reads it.** Same verdict as (2), different mechanism:
+///    here the link exists and is not walked; there there is no link to walk.
 /// 4. **backfill** — no population. **Zero** live declarations in 345 flows;
 ///    the only two occurrences are commented out, and they are named here so
 ///    the zero is a measurement and not a scanner that reads nothing.
@@ -1136,8 +1139,8 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     );
 }
 
-/// **The `correlationId` divergence `worker::render`'s comment records has no
-/// corpus population**, and every figure in that comment is compared here
+/// **The SEEDED `correlationId` divergence has no corpus population**, and
+/// every figure `worker::render`'s comment states about it is compared here
 /// rather than stated.
 ///
 /// Kestra copies the cause's `system.correlationId` **label** verbatim and fills
@@ -1152,6 +1155,22 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
 /// why the gap is recorded against the wiring seam
 /// (`trigger::flow::FiredExecution::correlation_id`) rather than banked or
 /// fixed: **the ratchet cannot move either way on it.**
+///
+/// # What this test CANNOT check, and it is why the name gained a word
+///
+/// It was `the_correlation_id_divergence_…`, and under that name it read as
+/// covering the value `Surface::load` computes. **It does not, and the
+/// whole-branch review found a live defect behind exactly that reading**: the
+/// `root` walk followed `parent_execution_id` alone and answered a subflow
+/// child its OWN id, two corpus flows reach it, and one of them is the target
+/// of a banked entry. The assertion below that both readers are *matching*
+/// golden entries cannot see that, and the reason is the shape this branch
+/// keeps meeting: **both are compared only as ROOT executions**, where every
+/// implementation of the walk returns the same value. The walk's instrument is
+/// `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item` in
+/// `tests/worker.rs`, which drives two subflow links and carries a loop control;
+/// this test is about the **label the flow declares**, and that is all its name
+/// now claims.
 ///
 /// # This census is TEXTUAL, and the first version was not — which is the finding
 ///
@@ -1171,7 +1190,7 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
 /// IS model-based and is sound for a reason it asserts rather than assumes:
 /// none of the four unparsed flows declares a `triggers:` block.
 #[test]
-fn the_correlation_id_divergence_has_no_corpus_population() {
+fn the_seeded_correlation_id_divergence_has_no_corpus_population() {
     let mut declaring_labels = 0usize;
     let mut system_declarations: Vec<String> = Vec::new();
     let mut correlation_lines: Vec<(String, String)> = Vec::new();
@@ -1249,9 +1268,14 @@ fn the_correlation_id_divergence_has_no_corpus_population() {
     for id in &readers {
         assert!(
             ids.contains(id) && !baselined.contains(id),
-            "{id} reads the label and must be a MATCHING golden entry, or the \
-             claim that egret's value agrees with the artifact's on every chain \
-             this oracle can reach is not being checked by anything"
+            "{id} reads the label and must be a MATCHING golden entry -- which \
+             says exactly one thing, and the message here used to say more: the \
+             oracle drives both of these flows as ROOT executions, where every \
+             implementation of `Surface::load`'s walk answers the same value. \
+             So this pins that the label RENDERS and the entry reproduces, and \
+             it is silent about the walk. Reaching the walk needs a chain, which \
+             `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item` \
+             drives"
         );
     }
 

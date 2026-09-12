@@ -184,27 +184,45 @@ impl Surface {
         // The derivation is in `crate::trigger::flow`'s module doc, and
         // `trigger::flow::FiredExecution::correlation_id` owns the gap.
         //
-        // `root` below is the chain root's **id**, computed by walking
-        // `parent_execution_id`. That agrees with the artifact on every
-        // machine-generated chain and diverges on a seeded one, where the
-        // artifact answers the seeded label. **Nothing in this oracle can
-        // reach the divergence** and that is derived rather than assumed:
-        // three corpus flows declare a `system.*` label at all
-        // (`invalids/system-labels` twice, `valids/minimal` once) and **none of
-        // the three is `system.correlationId`**, while the only two flows whose
-        // text names `correlationId` read it and seed nothing — see
-        // `the_correlation_id_divergence_has_no_corpus_population` in
-        // `tests/executor.rs`, which compares all three figures. Related, same
-        // mechanism, same population of zero: the unconditional
+        // `root` below is the **causal** chain's root id, computed by walking
+        // whichever link each row carries (see `Link::cause`). **That sentence
+        // read "walking `parent_execution_id`" until W6 Task 8's whole-branch
+        // review, and the claim attached to it — "agrees with the artifact on
+        // every machine-generated chain" — was FALSE**: a subflow chain is
+        // machine-generated, and the walk stopped at the first subflow child,
+        // whose `parent_execution_id` is NULL. See the `root` paragraph below
+        // for the artifact measurement that settled it.
+        //
+        // **What remains is the seeded case, and nothing in this oracle can
+        // reach it** — derived rather than assumed: three corpus flows declare
+        // a `system.*` label at all (`invalids/system-labels` twice,
+        // `valids/minimal` once) and **none of the three is
+        // `system.correlationId`**, while the only two flows whose text names
+        // `correlationId` read it and seed nothing. See
+        // `the_seeded_correlation_id_divergence_has_no_corpus_population` in
+        // `tests/executor.rs`, which compares all three figures — and note what
+        // it cannot do: both readers are compared by the oracle **only as root
+        // executions**, where every implementation of this walk agrees, which
+        // is how the walk defect above survived a test that named this exact
+        // subject. The instrument for the walk is
+        // `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`.
+        //
+        // Related, same mechanism, same population of zero: the unconditional
         // `labels.insert("system", …)` below **shadows** a declared `system.*`
         // label, so `valids/minimal`'s `system.readOnly` would not render — it
-        // matches because the flow never reads it.
+        // matches because the flow never reads it. And `system.from`, which the
+        // artifact also sets (measured: `[{"key": "system.from", "value":
+        // "api"}, {"key": "system.correlationId", …}]` on every execution of
+        // the probe chain), is not supplied here at all.
         //
-        // Measured from the two entries that read the label
-        // (`valids/follow-dependencies-partial-child` and
-        // `valids/subflow-grand-child`, both `{{ labels.system.correlationId }}`
-        // in a `Log`, both SUCCESS in the golden). No other system label is
-        // supplied, so an expression over one still fails.
+        // Measured from the two entries that read the label:
+        // `valids/follow-dependencies-partial-child`
+        // (`{{ labels.system.correlationId }}`) and
+        // `valids/subflow-grand-child` (`{{labels.system.correlationId}}`, **no
+        // spaces** — the two spellings are why the test that counts them scans
+        // for the path and not for a phrase), both in a `Log`, both SUCCESS in
+        // the golden. No other system label is supplied, so an expression over
+        // one still fails.
         let mut labels = serde_json::Map::new();
         if let Some(f) = &flow {
             for label in &f.labels {
