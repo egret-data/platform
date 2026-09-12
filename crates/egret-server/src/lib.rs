@@ -106,6 +106,22 @@ impl AppState {
         self.dataapi = Some(dataapi);
         self
     }
+
+    /// Attach the workflow seam to an otherwise-empty test state.
+    ///
+    /// Exists for the same reason [`Self::with_dataapi`] does, and against the
+    /// same class of bug: [`Self::without_db`] leaves `workflow: None`, so
+    /// `build_router(without_db())` mounts neither the management group nor the
+    /// webhook group, and no test had ever built the composed router with the
+    /// **anonymous webhook surface** merged. That surface is the one whose
+    /// layering can be wrong in a way its own suite cannot see — it must land
+    /// OUTSIDE the CSRF layer, and `egret-workflow`'s `tests/webhook_route.rs`
+    /// mounts `webhook_router()` directly, so it passes whether or not
+    /// `build_router` wraps it.
+    pub fn with_workflow(mut self, workflow: egret_workflow::WorkflowState) -> Self {
+        self.workflow = Some(workflow);
+        self
+    }
 }
 
 /// The aggregated OpenAPI 3.1 document for the whole API (E0·P4).
