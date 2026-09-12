@@ -212,9 +212,17 @@ pub struct PlanTask {
     /// it would conclude the `If`/`Switch`/`Dag` arms do not exist.
     ///
     /// **The types that really are left out are `Loop` and every opaque one,
-    /// and only one of those is a gap.** `AllowFailure`, `Pause` and
-    /// `WorkingDirectory` are planned [`TaskKind::Runnable`], so their children
-    /// get no run and a field on them would indeed be unreadable. **`Loop` is
+    /// and only one of those is a gap.** `AllowFailure`, `LoopUntil` (and its
+    /// alias `WaitFor`), `Pause` and `WorkingDirectory` are planned
+    /// [`TaskKind::Runnable`], so their children
+    /// get no run and a field on them would indeed be unreadable.
+    /// **This sentence omitted `LoopUntil`**, which is opaque for the same
+    /// reason as the other two typed ones and stalls nine baselined entries;
+    /// W8 Task 1 swept every list in this crate that claims to enumerate the
+    /// opaque types against `every_other_flowable_stays_opaque`, which is the
+    /// derivation. **Eight lists, and six disagreed**: three omit `LoopUntil`
+    /// and three still name `Subflow`, which stopped being opaque at W6 Task 3.
+    /// Only `worker::timeout`'s module doc had it right. **`Loop` is
     /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
     /// `errors` field, so **four** corpus flows' lists are invisible here:
     /// `valids/all-flowable`, `valids/finally-loop`,
@@ -661,12 +669,27 @@ const SUBFLOW_TYPE: &str = "subflow";
 /// [`TaskKind::Runnable`], which produces a visibly wrong trace — the parent is
 /// there and its children are not — and so stays honestly baselined.
 ///
-/// That opacity is applied to `AllowFailure` and `WorkingDirectory` too, even
-/// though both `extend Sequential` in Java and would "work" if mapped to
+/// That opacity is applied to `AllowFailure`, `WorkingDirectory` and
+/// `LoopUntil` (alias `WaitFor`) too, even
+/// though each would "work" if mapped to
 /// [`TaskKind::Sequential`]. `AllowFailure` turns a child's failure into
 /// `WARNING`, which `RunState` cannot hold; `WorkingDirectory` hands its whole
-/// subtree to one worker. Mapping either would trade a visible mismatch for a
+/// subtree to one worker; `LoopUntil` runs its `tasks:` **repeatedly** until a
+/// condition holds, and a `Sequential` would run them exactly once and record
+/// none of the `PAUSED`/`RUNNING` cycles the golden holds. Mapping any of them
+/// would trade a visible mismatch for a
 /// plausible-looking wrong trace, which is the worse of the two.
+///
+/// **Those three are the whole of it, and they are exactly the typed
+/// `models::TaskKind` variants this `match` has no arm for** — a fourth kind of
+/// opacity exists below them, where a flowable Kestra has and `kind_for` does
+/// not reaches `ModelKind::Leaf` with its children inside an opaque `spec`.
+/// `Pause` is the one such type with baselined entries. `Subflow` used to be in
+/// this list and left it at W6 Task 3: it is a [`TaskKind::Executable`] now,
+/// which is a different thing from opaque — the executor runs it itself. The
+/// enumeration is derived by
+/// `executor::tests::every_other_flowable_stays_opaque`; this prose agrees with
+/// that test and not the other way round.
 pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let flow = crate::spec::parse(source).map_err(|e| PlanError {
         message: match (e.line, e.column) {

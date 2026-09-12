@@ -7183,8 +7183,12 @@ copy at the destination, not the source.
 
 Two things that run is also evidence for. First, **a `Pause` IS claimed by this
 worker and DOES get a worker budget applied** — `build_plan` plans `Pause`,
-`Subflow`, `WorkingDirectory`, `WaitFor` and `AllowFailure` as opaque
-`TaskKind::Runnable`s, which Kestra's worker never sees. Nothing reaches the
+`WorkingDirectory`, `WaitFor`/`LoopUntil` and `AllowFailure` as opaque
+`TaskKind::Runnable`s, which Kestra's worker never sees. (This sentence named
+`Subflow` as a fifth; W6 Task 3 made it a `TaskKind::Executable`, whose
+`type_id` is never written, so it is not claimable at all. Corrected by W8 Task
+1's sweep of every list enumerating the opaque types — eight of them, six
+wrong.) Nothing reaches the
 hazard today (no handler is registered for `Pause`, so `Registry::run` refuses
 before any budget can expire), and it is written down in `worker::timeout`'s
 module doc rather than special-cased, because a special case there would be a

@@ -2881,6 +2881,16 @@ mod tests {
     /// that mapped them would trade a visible mismatch for a plausible-looking
     /// wrong trace.
     ///
+    /// **This doc named those two and the loop below has always driven four**,
+    /// which is the doc-contradicted-by-its-own-test shape. The four rows are
+    /// three `models::TaskKind` variants (`WaitFor` and `LoopUntil` are one),
+    /// and they are **exactly** the typed variants `build_plan`'s `match` has
+    /// no arm for — which is what makes this test the enumeration every prose
+    /// list of the opaque types is checked against. `Subflow` was a fifth until
+    /// W6 Task 3 gave it [`TaskKind::Executable`]; a type that reaches
+    /// `ModelKind::Leaf` instead (`Pause`) is opaque for a different reason and
+    /// is not this test's subject.
+    ///
     /// The `Sequential` row is the control: the same YAML, one word different,
     /// comes out the other way. Without it this test would pass against a
     /// builder that flattened nothing at all.

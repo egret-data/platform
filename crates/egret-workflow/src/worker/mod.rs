@@ -511,11 +511,22 @@ pub enum WorkerError {
     /// comment said the arm was unreachable — *"the claim never takes one
     /// (`type_id IS NOT NULL`), so reaching that arm is a corruption rather
     /// than a case"* — and that is false of shipped code: `build_plan` plans
-    /// `Subflow`, `WorkingDirectory` and `WaitFor` as **opaque `Runnable`s**,
+    /// `AllowFailure`, `WorkingDirectory`, `WaitFor`/`LoopUntil` and `Pause` as
+    /// **opaque `Runnable`s**,
     /// which sets `type_id`, while `models::TaskKind` for the same task is not
-    /// `Leaf`. Measured on the corpus, 40-odd comparable entries reach it, and
+    /// a `Leaf` this worker has a handler for. Measured on the corpus, 40-odd
+    /// comparable entries reached it, and
     /// every one of them is a construct nothing in W3b implements rather than a
     /// row that has gone wrong.
+    ///
+    /// **That list named `Subflow` first until W8 Task 1's sweep, and it had
+    /// been false since W6 Task 3.** The staleness mattered more than a name
+    /// usually does, because this list *is* the argument that the arm is
+    /// reachable: `Subflow` is [`crate::executor::TaskKind::Executable`] now,
+    /// `claim`'s insert writes `type_id` only for a `Runnable`, and its
+    /// `WHERE type_id IS NOT NULL` therefore never takes one. The arm survives
+    /// on the four constructs above; the 40-odd was measured with `Subflow` in
+    /// the set and is not re-derived here.
     ///
     /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
     /// that run, the execution stalls, and the differential oracle's driver
