@@ -3161,7 +3161,11 @@ tests, the position `egret.sql` and the four trigger words already occupy.
 table is what found them** — the same method Task 3 used for `Subflow` and Task
 6 for `LoopUntil`. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives the whole table from the baselined flows' own YAML and then asserts, by
-name, the **13** entries that declare none of these constructs. `afterExecution:`
+name, the entries that declare none of these constructs — **13 when this
+paragraph was written, 36 today** (the arc 13 → 29 → 35 → 36 is narrated under
+the residual-baseline table below, and only the derivation is authoritative; W8
+Task 1's sweep found this number stale, as it found the same count stale in
+`tests/executor.rs`'s own comment). `afterExecution:`
 and `sla:` were both in that remainder, and neither appeared anywhere in this
 file or in the plan. The test is what stops the next one arriving silently: a
 new baselined entry belonging to no owner fails it.
