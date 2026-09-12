@@ -94,45 +94,192 @@
 //! `Error` variant that maps to 422 and inventing one for this seam would be a
 //! cross-crate change for one endpoint.
 //!
+//! # Which source a webhook runs, and the deferral that has now arrived
+//!
+//! **The DRAFT row's `workflow.flows.source`**, not a `flow_versions` snapshot.
+//! `worker::subflow::resolve`'s doc explicitly reserved that decision for
+//! "whoever adds a product route that starts an execution"; this is that route,
+//! and the decision plus its three reasons and its one real cost are written
+//! down **in both files**, because a parent and its child must not disagree
+//! about which version of the world they are in. See that function's doc for
+//! the measured figure behind reason 2 (16 of 345 corpus flows reach a live
+//! version).
+//!
+//! The cost, restated here so a reader of this file does not have to find it:
+//! **an author editing a draft changes what a live webhook URL runs, with no
+//! publish step in between.**
+//!
 //! # What is deliberately not here
 //!
-//! * **No rate limit.** `egret-dataapi`'s serving path carries a bulkhead and a
-//!   token bucket; this does not, and a body cap is the only bound it has. An
-//!   anonymous caller that knows a valid key can start executions as fast as it
-//!   can post. That is a real exposure, it is stated rather than discovered, and
-//!   it is the first thing to add if this surface is ever exposed publicly.
-//!   Kestra has no limiter here either.
 //! * **No `wait:`.** See [`crate::trigger::webhook`]'s "knowingly narrower"
-//!   list. A flow declaring it is refused by name rather than answered with a
-//!   response shape it did not ask for.
+//!   list. A flow declaring it — or `returnOutputs`, `responseContentType` or
+//!   `responseCode` — is refused **by name**, one `if` per field, rather than
+//!   answered with a response shape it did not ask for. That is fix round 1's
+//!   Important 3: the first version refused only `wait` and silently ignored the
+//!   other three.
 //! * **No OpenAPI document.** The management router's `openapi()` covers the
 //!   session-authenticated seam; this one is machine-facing and anonymous, like
 //!   `catalog_engine`'s mount, which also carries none.
+//!
+//! # The bounds, and what they are NOT
+//!
+//! Fix round 1, Important 6. The first version had one bound — the body cap —
+//! and justified the absence of the rest as "parity with Kestra". That does not
+//! transfer: Kestra's webhook lives behind a single tenant's own deployment,
+//! and this one is a path-scoped surface shared by every workspace in a
+//! multi-tenant install, where one caller's flood is another tenant's outage.
+//! So there are three, and each is stated with what it does not do:
+//!
+//! 1. **The body cap** ([`MAX_WEBHOOK_BODY_BYTES`]), enforced by a layer before
+//!    the handler.
+//! 2. **A bulkhead** ([`WEBHOOK_MAX_CONCURRENCY`]) — a semaphore built ONCE per
+//!    router, so at most that many webhook requests are in flight at a time and
+//!    the rest are refused rather than queued. It bounds the damage a flood does
+//!    to the *rest of the process*; it does not bound the flood.
+//! 3. **A per-target attempt limiter** ([`WEBHOOK_ATTEMPTS_PER_WINDOW`] in
+//!    [`WEBHOOK_ATTEMPT_WINDOW`]), keyed on `(workspace, namespace, flow)` and
+//!    counting **every** attempt, matched or not. This is what bounds key
+//!    guessing: a key is the whole credential, and without it an attacker gets
+//!    as many guesses per second as egret can serve 404s.
+//!
+//! **What they are not.** Both limiters are **in-process**, so an install with
+//! N replicas allows N times the stated rate, and both reset when the process
+//! does. A shared-store limiter (the token bucket `egret-dataapi` uses) is the
+//! honest version and is not built here. The keying is on the *target*, not the
+//! source address, so one flow's attackers and its legitimate callers share a
+//! budget — deliberate, because an attacker chooses its source address and does
+//! not choose the target. Neither of these is a claim that the surface is safe
+//! to expose to the open internet; the security review's verdict stands, and
+//! these bound the blast radius rather than remove it.
 
 use axum::body::Bytes;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, Method};
 use axum::routing::post;
 use axum::{Json, Router};
 use egret_core::{Error, Result as EgretResult};
 use serde::Serialize;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::routes::WorkflowState;
 use crate::trigger::webhook::{
-    build_output, find, inputs_reference_the_trigger_root, render_inputs, ExecutionTrigger,
-    KeyContext, Unsupported, WebhookRequest,
+    build_output, find, render_inputs, ExecutionTrigger, InputContext, KeyContext, Unsupported,
+    WebhookRequest,
 };
 
 /// The largest webhook body this surface accepts, in bytes.
 ///
-/// The only bound on an anonymous endpoint that writes to the database, so it
-/// is deliberately small: the body is held whole in memory, parsed as JSON and
-/// then written into a `jsonb` column, and every one of those steps is paid for
-/// by egret rather than by the caller. 1 MiB is `egret-dataapi`'s serving cap
-/// (`guard::SERVING_MAX_BODY_BYTES`) and there is no reason for this seam to be
-/// more generous than the one that requires a token.
-pub const MAX_WEBHOOK_BODY_BYTES: usize = 1024 * 1024;
+/// **Chosen, and the number is pinned by
+/// `tests::the_body_cap_is_this_number_and_not_another`** -- a test that only
+/// sends `cap + 1` and `cap` passes at any value, which is what the first
+/// version of it did (fix round 1, Important 2: raised 64x, still green).
+///
+/// # The comparison this doc used to make was wrong
+///
+/// It said "1 MiB is `egret-dataapi`'s serving cap and there is no reason for
+/// this seam to be more generous than the one that requires a token".
+/// `SERVING_MAX_BODY_BYTES` is **64 KiB**, so that sentence was false twice
+/// over: the figure was wrong by 16x, and the conclusion it drew was the
+/// opposite of what its own premise implied -- the anonymous seam was the more
+/// generous one.
+///
+/// # Why 256 KiB rather than 64 KiB
+///
+/// The two surfaces differ in what legitimate traffic looks like.
+/// `SERVING_MAX_BODY_BYTES`'s own doc says its bound is generous "since
+/// legitimate is zero" -- a Data API request body carries parameters, not
+/// payload. A webhook body **is** the payload: it is the message the caller
+/// came to deliver, it becomes `trigger.body`, and a GitHub push event alone is
+/// routinely tens of kilobytes. 64 KiB would refuse real traffic.
+///
+/// 256 KiB is four times that and still small enough that the per-request cost
+/// egret bears -- hold the bytes, parse them as JSON, write them into a `jsonb`
+/// column -- is bounded well under a megabyte. It is a **choice**, not a
+/// measurement, and it is the largest single input an unauthenticated caller
+/// can make this process allocate.
+pub const MAX_WEBHOOK_BODY_BYTES: usize = 256 * 1024;
+
+/// How many webhook requests may be in flight at once, per process.
+///
+/// `egret-dataapi`'s `SERVING_MAX_CONCURRENCY` is 64 for a surface that runs a
+/// query; this is smaller because a webhook request does strictly more work
+/// before it can be refused — it renders every candidate key with Pebble — and
+/// because it is reachable without a credential. Chosen, not measured.
+///
+/// The semaphore is built **once per router**, in [`webhook_router`]. A caller
+/// that builds a router per request gets a fresh semaphore per request, which
+/// is a limit nobody can reach — the mistake `egret-dataapi`'s
+/// `serving_bulkhead` doc warns about, repeated here because this module has
+/// its own constructor.
+pub const WEBHOOK_MAX_CONCURRENCY: usize = 16;
+
+/// How many attempts one `(workspace, namespace, flow)` may make per
+/// [`WEBHOOK_ATTEMPT_WINDOW`].
+///
+/// It counts **every** attempt, matched or refused, because the thing being
+/// bounded is key *guessing* and a guess is a refusal. Chosen: 60 per minute is
+/// far above any real webhook's rate and far below anything useful for brute
+/// force — a 16-character key drawn from 62 symbols is ~10^28 guesses, and at
+/// this rate the search takes longer than the universe has existed either way,
+/// so the number is about bounding COST, not about making the search
+/// infeasible.
+pub const WEBHOOK_ATTEMPTS_PER_WINDOW: u32 = 60;
+
+/// The attempt limiter's fixed window.
+pub const WEBHOOK_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
+
+/// The two in-process bounds, built once per router.
+///
+/// **Fixed window, not a token bucket**, and the difference is admitted rather
+/// than hidden: a fixed window lets 2x the rate through across a boundary. A
+/// bucket needs either a shared store (which this crate does not depend on) or
+/// per-key state with eviction; the window's state is one entry per
+/// `(workspace, namespace, flow)` that has been called, swept whenever the map
+/// grows past [`Self::SWEEP_AT`].
+#[derive(Debug)]
+pub struct WebhookGuard {
+    bulkhead: Semaphore,
+    attempts: Mutex<HashMap<(String, String, String), (Instant, u32)>>,
+}
+
+impl WebhookGuard {
+    /// Sweep expired windows when the map reaches this size.
+    ///
+    /// Without it the map is an unbounded allocation an anonymous caller
+    /// controls the key of: every distinct `(ws, namespace, flow)` in a URL
+    /// makes an entry, and none of the three has to name anything real.
+    const SWEEP_AT: usize = 4096;
+
+    #[must_use]
+    pub fn new(permits: usize) -> Self {
+        Self {
+            bulkhead: Semaphore::new(permits),
+            attempts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Record one attempt against `key`. `false` means the window is exhausted.
+    ///
+    /// `now` is a parameter so the test drives it rather than sleeping — this
+    /// workspace has lost whole gate runs to wall-clock assertions.
+    pub fn admit_attempt(&self, key: (String, String, String), now: Instant) -> bool {
+        let mut map = self.attempts.lock().expect("webhook attempt map poisoned");
+        if map.len() >= Self::SWEEP_AT {
+            map.retain(|_, (started, _)| now.duration_since(*started) < WEBHOOK_ATTEMPT_WINDOW);
+        }
+        let entry = map.entry(key).or_insert((now, 0));
+        if now.duration_since(entry.0) >= WEBHOOK_ATTEMPT_WINDOW {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= WEBHOOK_ATTEMPTS_PER_WINDOW
+    }
+}
 
 /// The single "no" this surface gives to anyone who has not produced the key.
 ///
@@ -179,11 +326,21 @@ pub struct WebhookResponse {
 ///
 /// All three methods share one handler, as Kestra's five do.
 pub fn webhook_router() -> Router<WorkflowState> {
+    webhook_router_with_guard(Arc::new(WebhookGuard::new(WEBHOOK_MAX_CONCURRENCY)))
+}
+
+/// [`webhook_router`] with its guard **supplied**, so a test can drive a bound
+/// it genuinely exceeds instead of asserting that a layer was installed.
+///
+/// The guard is the one of the bounds whose meaning depends on the router
+/// outliving the request; see [`WEBHOOK_MAX_CONCURRENCY`].
+pub fn webhook_router_with_guard(guard: Arc<WebhookGuard>) -> Router<WorkflowState> {
     Router::new()
         .route(
             "/{ws}/executions/webhook/{namespace}/{flow}/{key}",
             post(handle).put(handle).get(handle),
         )
+        .layer(axum::Extension(guard))
         .layer(DefaultBodyLimit::max(MAX_WEBHOOK_BODY_BYTES))
 }
 
@@ -192,11 +349,34 @@ pub fn webhook_router() -> Router<WorkflowState> {
 /// [`crate::trigger::webhook::build_output`]).
 async fn handle(
     State(st): State<WorkflowState>,
+    axum::Extension(guard): axum::Extension<Arc<WebhookGuard>>,
+    method: Method,
     Path((workspace, namespace, flow, key)): Path<(String, String, String, String)>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
 ) -> EgretResult<Json<WebhookResponse>> {
+    // --- 0. the two bounds, before anything that costs -----------------------
+    //
+    // The attempt limiter is keyed on the THREE path segments that name a
+    // target, and NOT on the key -- keying on the key would give an attacker a
+    // fresh budget per guess, which is the opposite of a limiter.
+    //
+    // It runs before the bulkhead permit is taken, so a flood is refused
+    // without occupying one; and both run before the first database call, so a
+    // refusal costs no query. A refused attempt is still COUNTED, which is the
+    // whole point.
+    if !guard.admit_attempt(
+        (workspace.clone(), namespace.clone(), flow.clone()),
+        Instant::now(),
+    ) {
+        return Err(Error::TooManyRequests);
+    }
+    let _permit = guard
+        .bulkhead
+        .try_acquire()
+        .map_err(|_| Error::TooManyRequests)?;
+
     // --- 1. the workspace, from the path and from nowhere else ---------------
     //
     // `status == "active"` is checked here rather than left to a later query:
@@ -255,18 +435,55 @@ async fn handle(
             trigger.id
         )));
     }
-    if state == "disabled" {
+    // **Both ways a flow can be switched off, and the YAML one was missing.**
+    //
+    // Fix round 1, Critical 1. egret has two: the `state` column, which the
+    // management UI writes, and the YAML's own `disabled: true`, which is
+    // Kestra's `Flow.isDisabled()` and therefore the one the artifact answers
+    // 409 for. The first version of this handler read only the column, so a
+    // flow whose source said `disabled: true` FIRED -- over-acceptance, the one
+    // direction the oracle cannot catch. `trigger::flow::evaluate` was already
+    // checking `flow.disabled` for the same field; this seam was not.
+    //
+    // `parsed.draft` is deliberately NOT checked: measured on the artifact, a
+    // `draft: true` flow answers **200** through the webhook route.
+    if parsed.disabled || state == "disabled" {
         return Err(Error::Conflict(
             "Cannot execute flow: flow is disabled.".into(),
         ));
     }
-    if webhook.wait {
-        return Err(Error::Conflict(Unsupported::Wait.message(&trigger.id)));
+    // Declarations this port parses and cannot honour. **Refused by name**, one
+    // `if` per field, rather than accepted and ignored.
+    //
+    // Fix round 1, Important 3: `returnOutputs`, `responseContentType` and
+    // `responseCode` were parsed into `models::Webhook` and then silently
+    // dropped, which is the `lateMaximumDelay` shape -- a field an author can
+    // write, that validates, and that changes nothing. Only `wait` was refused.
+    for unsupported in [
+        webhook.wait.then_some(Unsupported::Wait),
+        webhook.return_outputs.then_some(Unsupported::ReturnOutputs),
+        webhook
+            .response_content_type
+            .is_some()
+            .then_some(Unsupported::ResponseContentType),
+        webhook
+            .response_code
+            .is_some()
+            .then_some(Unsupported::ResponseCode),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        return Err(Error::Conflict(unsupported.message(&trigger.id)));
     }
 
     // --- 5. what the flow will see -------------------------------------------
     let req = WebhookRequest {
-        method: "POST".into(),
+        // Fix round 1: this was hard-coded `"POST"`, so a GET and a PUT both
+        // recorded themselves as a POST. Nothing reads it today -- Kestra's
+        // `Webhook.Output` has no method field either -- which is exactly why a
+        // wrong value could sit there unnoticed.
+        method: method.as_str().to_ascii_uppercase(),
         query: parse_query(query.as_deref()),
         headers: collect_headers(&headers),
         content_type: headers
@@ -278,18 +495,21 @@ async fn handle(
     let output = build_output(&req, webhook.fetch_type, None)
         .map_err(|u| Error::Conflict(u.message(&trigger.id)))?;
 
-    // `inputs:` that read `trigger.*` cannot be honoured, and the refusal names
-    // that rather than letting the renderer blame the author's template -- see
-    // `trigger::webhook::render_inputs`.
-    if inputs_reference_the_trigger_root(webhook) {
-        return Err(Error::Conflict(format!(
-            "webhook trigger '{}' declares inputs that read `trigger.*`, which egret cannot \
-             render yet -- the trigger context is stored on the execution but is not published \
-             into the render surface",
-            trigger.id
-        )));
-    }
-    let inputs = render_inputs(trigger, webhook, &kcx).map_err(Error::InvalidInput)?;
+    // `inputs:` render against a context that binds **no** `trigger` at all, so
+    // the key comparison's private object is unreachable rather than merely
+    // un-asked-for. See `trigger::webhook::InputContext` for why the previous
+    // substring scan was not a guard.
+    //
+    // Two refusals, two statuses: a capability gap egret owes (409, named) and
+    // an author's broken template (400).
+    let inputs = render_inputs(webhook, &InputContext::of(&kcx)).map_err(|r| match r {
+        crate::trigger::webhook::InputRefusal::NeedsTriggerContext { .. } => {
+            Error::Conflict(r.message(&trigger.id))
+        }
+        crate::trigger::webhook::InputRefusal::Unrenderable { .. } => {
+            Error::InvalidInput(r.message(&trigger.id))
+        }
+    })?;
 
     // --- 6. start it ---------------------------------------------------------
     let record = ExecutionTrigger {
@@ -356,14 +576,22 @@ fn percent_decode(s: &str) -> String {
                 out.push(b' ');
                 i += 1;
             }
+            // **Byte arithmetic, never string slicing.**
+            //
+            // Fix round 1, Important 4: this read `&s[i + 1..i + 3]`, which
+            // PANICS when those offsets are not char boundaries -- `?a=%1é` was
+            // enough, and it unwound the connection task on an anonymous public
+            // endpoint. The doc immediately above promises "lossy rather than
+            // failing"; slicing a `str` by byte offset cannot keep that promise,
+            // so the two hex digits are decoded from the bytes directly.
             b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    Ok(b) => {
-                        out.push(b);
+                match (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => {
+                        out.push(hi << 4 | lo);
                         i += 3;
                     }
-                    // A stray `%` is a literal `%`, not an error.
-                    Err(_) => {
+                    // A malformed escape is a literal `%`, not an error.
+                    _ => {
                         out.push(b'%');
                         i += 1;
                     }
@@ -378,15 +606,40 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Request headers as `(lowercase-name, value)` in wire order.
+/// One hex digit, or `None`.
+///
+/// Written out rather than reached for through `u8::from_str_radix`, because
+/// that function takes a `&str` and getting one out of a `&[u8]` at an
+/// arbitrary offset is exactly the slicing that panicked.
+#[must_use]
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Request headers as `(lowercase-name, value)`.
 ///
 /// Kestra's are `java.net.http.HttpHeaders.map()`, which is already a
 /// multimap; the grouping into lists happens in
 /// [`crate::trigger::webhook::build_output`] so that headers and query
 /// parameters go through one code path.
 ///
+/// **The iteration order is `HeaderMap`'s, which is unspecified.** This doc used
+/// to say "in wire order" (fix round 1's sweep); `HeaderMap::iter` makes no such
+/// guarantee, and nothing here can restore it. It matters only for a header sent
+/// twice with different values, whose two values may therefore be grouped in
+/// either order. Recorded rather than claimed away -- `parse_query` DOES
+/// preserve order, because a query string is one string this function reads left
+/// to right, and that difference between the two is real.
+///
 /// A header whose value is not valid UTF-8 is **dropped**, not lossily decoded:
 /// it would otherwise reach a flow as a string the caller never sent.
+/// `tests::a_non_utf8_header_is_dropped_rather_than_mangled` is the test, which
+/// the first version of this claim did not have.
 fn collect_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
@@ -444,6 +697,97 @@ mod tests {
         );
     }
 
+    /// **The cap is pinned to a number, not to itself.**
+    ///
+    /// Fix round 1, Important 2: the only test of the cap sent `cap + 1` and
+    /// `cap`, so raising the constant 64x left it green. A bound nothing
+    /// compares to a literal is a bound that can move silently.
+    #[test]
+    fn the_body_cap_is_this_number_and_not_another() {
+        assert_eq!(MAX_WEBHOOK_BODY_BYTES, 256 * 1024);
+        // And the comparison the doc makes, asserted rather than remembered --
+        // the first version of that doc got this figure wrong by 16x.
+        assert_eq!(
+            MAX_WEBHOOK_BODY_BYTES as u64,
+            4 * egret_dataapi_guard_cap(),
+            "the doc says this seam is four times `SERVING_MAX_BODY_BYTES`; if that constant \
+             moves, this is what says so"
+        );
+    }
+
+    /// `egret-dataapi`'s `SERVING_MAX_BODY_BYTES`, restated so the assertion
+    /// above compares to something real.
+    ///
+    /// It is a literal rather than a dependency edge on purpose: this crate must
+    /// not depend on `egret-dataapi` (the whole point of the port-trait
+    /// convention), so the figure is copied and the copy is dated. Read off
+    /// `crates/egret-dataapi/src/serving/guard.rs:214` on 2026-09-12:
+    /// `pub const SERVING_MAX_BODY_BYTES: u64 = 64 * 1024;`
+    fn egret_dataapi_guard_cap() -> u64 {
+        64 * 1024
+    }
+
+    /// A header whose value is not valid UTF-8 is dropped, not mangled.
+    ///
+    /// The claim existed in `collect_headers`' doc from the first commit and
+    /// **had no test** — fix round 1's sweep. It would survive the
+    /// implementation being `filter_map(|(k, v)| Some((k, lossy(v))))`.
+    #[test]
+    fn a_non_utf8_header_is_dropped_rather_than_mangled() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            "x-binary",
+            axum::http::HeaderValue::from_bytes(&[0xff, 0xfe]).expect("a header value of bytes"),
+        );
+        let got = collect_headers(&headers);
+        assert!(
+            got.iter()
+                .any(|(k, v)| k == "content-type" && v == "application/json"),
+            "the control: a valid header IS kept"
+        );
+        assert!(
+            !got.iter().any(|(k, _)| k == "x-binary"),
+            "a non-UTF-8 value must be dropped, not lossily decoded: {got:?}"
+        );
+    }
+
+    /// **Important 4's regression test.** `%` followed by bytes that are not a
+    /// char boundary must not panic.
+    ///
+    /// The old body sliced `&s[i + 1..i + 3]`, which panics whenever those
+    /// offsets fall inside a multi-byte character. On an anonymous endpoint
+    /// that unwinds the connection task, so it is a denial of service reachable
+    /// with one query string.
+    #[test]
+    fn a_percent_escape_across_a_char_boundary_does_not_panic() {
+        // The exact shape the review reported.
+        assert_eq!(parse_query(Some("a=%1é")).len(), 1);
+        // And a sweep of the neighbourhood, every one of which used to be a
+        // slice across a boundary.
+        for raw in [
+            "a=%1é",
+            "a=%éé",
+            "a=é%1",
+            "a=%1\u{1F600}",
+            "a=%\u{1F600}1",
+            "a=%",
+            "a=%1",
+            "a=%%",
+            "a=%zz",
+            "k%é=v",
+        ] {
+            let out = parse_query(Some(raw));
+            assert!(!out.is_empty(), "{raw} produced nothing");
+        }
+        // The control: decoding still works, so the assertions above are not
+        // satisfied by a function that gave up on `%`.
+        assert_eq!(parse_query(Some("a=%20b")), vec![("a".into(), " b".into())]);
+    }
+
     #[test]
     fn percent_and_plus_decoding() {
         assert_eq!(percent_decode("a%20b"), "a b");
@@ -455,6 +799,110 @@ mod tests {
         // The control: decoding must actually be happening, or every assertion
         // above is satisfied by returning the input.
         assert_ne!(percent_decode("a%20b"), "a%20b");
+    }
+
+    /// The attempt window admits exactly [`WEBHOOK_ATTEMPTS_PER_WINDOW`] and
+    /// then refuses, per key, and the clock is a parameter rather than a sleep.
+    #[test]
+    fn the_attempt_window_admits_its_quota_and_then_refuses() {
+        let g = WebhookGuard::new(1);
+        let key = || ("ws".to_string(), "ns".to_string(), "flow".to_string());
+        let t0 = Instant::now();
+
+        for i in 1..=WEBHOOK_ATTEMPTS_PER_WINDOW {
+            assert!(g.admit_attempt(key(), t0), "attempt {i} of the quota");
+        }
+        assert!(
+            !g.admit_attempt(key(), t0),
+            "the one past the quota must be refused"
+        );
+
+        // A DIFFERENT target has its own budget -- without this row the
+        // assertion above is satisfied by a limiter that refuses everything
+        // after N globally.
+        assert!(g.admit_attempt(("ws".into(), "ns".into(), "other-flow".into()), t0));
+        assert!(g.admit_attempt(("other-ws".into(), "ns".into(), "flow".into()), t0));
+
+        // The window rolls.
+        assert!(
+            g.admit_attempt(key(), t0 + WEBHOOK_ATTEMPT_WINDOW),
+            "a new window starts fresh"
+        );
+        // And not a moment early: at the last instant INSIDE the window the
+        // key is still exhausted, which is what makes the row above about the
+        // window rather than about any elapsed time at all.
+        let g2 = WebhookGuard::new(1);
+        for _ in 0..WEBHOOK_ATTEMPTS_PER_WINDOW {
+            assert!(g2.admit_attempt(key(), t0));
+        }
+        assert!(!g2.admit_attempt(
+            key(),
+            t0 + WEBHOOK_ATTEMPT_WINDOW - Duration::from_millis(1)
+        ));
+    }
+
+    /// A refused attempt is still COUNTED. That is the whole point: a key guess
+    /// is a refusal, so a limiter that only counted successes would bound
+    /// nothing.
+    ///
+    /// Asserted at the guard rather than through the route, because the route
+    /// cannot distinguish "counted" from "not counted" until the quota is
+    /// reached, and reaching it through HTTP costs 60 requests.
+    #[test]
+    fn the_limiter_counts_the_attempt_not_the_outcome() {
+        let g = WebhookGuard::new(1);
+        let key = || ("ws".to_string(), "ns".to_string(), "flow".to_string());
+        let t0 = Instant::now();
+        // `admit_attempt` has no outcome parameter at all, which is the
+        // strongest form of this: there is nothing it could branch on.
+        for _ in 0..WEBHOOK_ATTEMPTS_PER_WINDOW {
+            g.admit_attempt(key(), t0);
+        }
+        assert!(!g.admit_attempt(key(), t0));
+    }
+
+    /// The map is swept, so an anonymous caller cannot grow it without bound by
+    /// naming targets that do not exist.
+    #[test]
+    fn the_attempt_map_is_swept_rather_than_grown_for_ever() {
+        let g = WebhookGuard::new(1);
+        let t0 = Instant::now();
+        for i in 0..WebhookGuard::SWEEP_AT {
+            g.admit_attempt(("ws".into(), "ns".into(), format!("flow-{i}")), t0);
+        }
+        assert_eq!(
+            g.attempts.lock().unwrap().len(),
+            WebhookGuard::SWEEP_AT,
+            "nothing expires while the clock stands still"
+        );
+        // One more, a window later: the sweep fires and drops the expired ones.
+        g.admit_attempt(
+            ("ws".into(), "ns".into(), "late".into()),
+            t0 + WEBHOOK_ATTEMPT_WINDOW,
+        );
+        assert_eq!(
+            g.attempts.lock().unwrap().len(),
+            1,
+            "the sweep must drop every expired window, keeping only the new one"
+        );
+    }
+
+    /// The bulkhead holds its permit for the span of a request and releases it
+    /// on drop.
+    #[test]
+    fn the_bulkhead_refuses_past_its_permits() {
+        let g = WebhookGuard::new(2);
+        let a = g.bulkhead.try_acquire().expect("first permit");
+        let _b = g.bulkhead.try_acquire().expect("second permit");
+        assert!(
+            g.bulkhead.try_acquire().is_err(),
+            "a third must be refused, not queued"
+        );
+        drop(a);
+        assert!(
+            g.bulkhead.try_acquire().is_ok(),
+            "and the permit comes back when the request ends"
+        );
     }
 
     /// The three absences share one message, and this is the assertion that

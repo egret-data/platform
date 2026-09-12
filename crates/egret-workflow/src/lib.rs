@@ -54,7 +54,11 @@ pub use refs::WorkflowRefs;
 pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
-pub use webhook_routes::{webhook_router, WebhookResponse, MAX_WEBHOOK_BODY_BYTES};
+pub use webhook_routes::{
+    webhook_router, webhook_router_with_guard, WebhookGuard, WebhookResponse,
+    MAX_WEBHOOK_BODY_BYTES, WEBHOOK_ATTEMPTS_PER_WINDOW, WEBHOOK_ATTEMPT_WINDOW,
+    WEBHOOK_MAX_CONCURRENCY,
+};
 // Task 6: `RefKind` moved to `egret-workflow-api` so `WorkflowRefPort` (also
 // re-exported here) can name it without this crate's engine dependencies.
 // Re-exported at the crate root -- not just via `spec::registry::RefKind` --

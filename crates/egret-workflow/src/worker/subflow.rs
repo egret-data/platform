@@ -776,11 +776,40 @@ async fn fail_run(
 /// It is also the consistent choice today rather than merely the possible one:
 /// `FlowRepo::find_by_name`, which is what `publish` resolves a
 /// `RefKind::Subflow` through, reads the same table and never consults
-/// `live_version_id`, and **nothing in `crates/*/src` starts an execution from
-/// a version snapshot** — there is no product route that starts one at all yet.
+/// `live_version_id`.
+///
+/// # The deferral this paragraph used to end on has been settled
+///
+/// It used to say "**nothing in `crates/*/src` starts an execution from a
+/// version snapshot** — there is no product route that starts one at all yet.
 /// Whoever adds one has to decide which source an execution runs *and* revisit
-/// this in the same change, so that a parent and its child cannot disagree
-/// about which version of the world they are in.
+/// this in the same change."
+///
+/// **W6 Task 7 is that route** (`crate::webhook_routes`), and this is the
+/// revisit. The decision, taken there and recorded here so the two cannot
+/// drift: **a webhook executes the DRAFT row's `source`, exactly as this
+/// resolver does.** Three reasons, in order of weight:
+///
+/// 1. **A parent and its child must not disagree about which version of the
+///    world they are in** — the sentence this paragraph already carried, and
+///    now the binding one. A webhook-started flow whose task is a `Subflow`
+///    would otherwise run a published parent against a draft child.
+/// 2. **A version-snapshot resolver would reach almost nothing.** W6 Task 1
+///    filed the whole corpus through the product's own create-then-publish path
+///    and measured **16 of 345** flows reaching a live version, because publish
+///    step 4 asks `registry::known_type` about `io.kestra.plugin.core.*` leaves
+///    egret has not ported. `driver::target_census` asserts those figures on
+///    every run.
+/// 3. Kestra's own `findByIdForExecution` reads the flow repository, not a
+///    version archive; its `revision` parameter is a separate opt-in that
+///    egret's model has no field for at all.
+///
+/// **What it costs, stated rather than discovered**: an author editing a draft
+/// changes what a live webhook URL runs, with no publish step in between. That
+/// is a real operational hazard and it is the reason this is written down in
+/// two files. The fix, when someone wants it, is a `flow_versions`-backed
+/// execution path — and it has to arrive HERE and in `webhook_routes` together,
+/// for reason 1.
 ///
 /// **2. It is scoped to `workspace_id`, and `FlowRepo::find_by_name` is not.**
 /// That method's own doc records why it cannot be: `WorkflowRefPort::workspace_of`

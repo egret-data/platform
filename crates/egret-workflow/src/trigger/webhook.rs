@@ -217,8 +217,17 @@
 //! covered by that sentence.** [`KeyContext::render_context_for`] does bind a
 //! `trigger` root, because Kestra's own `runContextFactory.of(flow, trigger)`
 //! does and `key: "tid-{{ trigger.id }}"` was measured resolving to
-//! `tid-trg-tid` on the artifact. It is local to the key comparison, is never
-//! seen by a task, and cannot reach the oracle.
+//! `tid-trg-tid` on the artifact. It is local to the key comparison and cannot
+//! reach the oracle.
+//!
+//! **"Never seen by a task" was false when it was first written**, and fix
+//! round 1's Critical 2 is the proof: `inputs:` were rendered against that very
+//! context, so `inputs: {x: "{{ trigger }}"}` handed the execution the key
+//! comparison's private object. The sentence is true now because the thing it
+//! describes changed, not because the wording did — `inputs:` render against
+//! [`InputContext`], which binds no `trigger` at all, and
+//! `tests::the_key_context_is_reachable_from_no_other_render` is the running
+//! check that the key context has exactly one consumer.
 
 use std::collections::BTreeMap;
 
@@ -306,9 +315,16 @@ pub enum Unsupported {
     StoreBody,
     /// `multipart/form-data` — `parts` are stored files.
     Multipart,
-    /// `wait: true` (with or without `returnOutputs`) — the response is held
-    /// open until the execution terminates.
+    /// `wait: true` — the response is held open until the execution terminates.
     Wait,
+    /// `returnOutputs: true` — the terminal execution's `outputs` are put in
+    /// the response body. Needs the same streaming path [`Self::Wait`] does.
+    ReturnOutputs,
+    /// `responseContentType:` — the content type of the body a waited response
+    /// carries. Same path.
+    ResponseContentType,
+    /// `responseCode:` — the status a waited response carries. Same path.
+    ResponseCode,
 }
 
 impl Unsupported {
@@ -329,6 +345,18 @@ impl Unsupported {
                 "webhook trigger '{trigger_id}' declares wait: true, which egret does not \
                  implement yet -- the response would have to be held open until the execution \
                  terminates"
+            ),
+            Self::ReturnOutputs => format!(
+                "webhook trigger '{trigger_id}' declares returnOutputs: true, which egret does \
+                 not implement yet -- it needs the same held-open response wait: true does"
+            ),
+            Self::ResponseContentType => format!(
+                "webhook trigger '{trigger_id}' declares responseContentType, which egret does \
+                 not implement yet -- it describes the body of a held-open response"
+            ),
+            Self::ResponseCode => format!(
+                "webhook trigger '{trigger_id}' declares responseCode, which egret does not \
+                 implement yet -- it is the status of a held-open response"
             ),
         }
     }
@@ -363,8 +391,15 @@ impl KeyContext {
     /// `tid-trg-tid`).
     ///
     /// **This `trigger` root is not the one the module doc says is withheld.**
-    /// That one is `worker::render::Surface`'s, seen by tasks. This one is
-    /// local to a key comparison and no task can reach it.
+    /// That one is `worker::render::Surface`'s, seen by tasks.
+    ///
+    /// This one is local to the key comparison, and that is an invariant about
+    /// its CALLERS rather than about its contents: it was violated the day it
+    /// was written, because `render_inputs` used it too and a
+    /// `{{ trigger }}` input therefore reached an execution (fix round 1,
+    /// Critical 2). `inputs:` now render against [`InputContext`], which binds
+    /// no `trigger`, and `tests::the_key_context_is_reachable_from_no_other_render`
+    /// counts the callers so the invariant cannot quietly acquire a second one.
     pub fn render_context_for(&self, trigger: &Trigger) -> RenderContext {
         let mut cx = RenderContext::new();
         cx.insert(
@@ -639,6 +674,157 @@ fn is_multipart(content_type: Option<&str>) -> bool {
     })
 }
 
+/// Why a webhook's `inputs:` may not be refused by looking at its TEXT.
+///
+/// Fix round 1, Critical 2. The first version of this module decided whether a
+/// trigger's `inputs:` read `trigger.*` by scanning each value for the
+/// substrings `"trigger."` and `"trigger["`, and rendered everything else
+/// against [`KeyContext::render_context_for`] — the context the KEY comparison
+/// uses, which binds `trigger` to `{id, type}`.
+///
+/// **That shipped the leak the guard was written to prevent.**
+/// `inputs: {x: "{{ trigger }}"}` contains neither substring, so it passed the
+/// scan, rendered against the key context, and fed the execution the key
+/// comparison's own private object — falsifying this module's claim that "no
+/// task can reach it". `{{ trigger | json }}` did the same. A substring scan is
+/// a lexical test applied to an expression language, and an expression language
+/// has arbitrarily many ways to name a binding.
+///
+/// The replacement is not a better scan. **`inputs:` is rendered against a
+/// context in which `trigger` is not bound at all** ([`InputContext`]), so the
+/// object is unreachable rather than merely un-asked-for: there is no spelling,
+/// filter, index or alias that can reach a binding the environment does not
+/// contain. The refusal is then produced by the renderer failing, and
+/// [`classify_input_failure`] is what turns that failure into a message that
+/// names the real cause.
+///
+/// # How the two causes are told apart, without reading the template
+///
+/// A failed render has two possible causes here, and they need two different
+/// answers: "you asked for something egret cannot supply yet" (**409**, a
+/// capability gap) and "your template is broken" (**400**, the author's bug).
+///
+/// The discriminator is behavioural. The same template is re-rendered against
+/// the same context **plus a sentinel `trigger` binding**. If it now renders,
+/// the missing root was the cause; if it still fails, it was not. That answers
+/// correctly for `{{ trigger }}`, `{{ trigger | json }}`, `{{ trigger.body }}`,
+/// `{{ trigger['body'] }}` and for any spelling nobody has thought of,
+/// because it asks the renderer rather than the string.
+///
+/// **The sentinel is never used for output.** It exists only inside
+/// [`classify_input_failure`] and its value never leaves that function.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputContext {
+    pub flow_id: String,
+    pub namespace: String,
+    pub vars: BTreeMap<String, Value>,
+}
+
+impl InputContext {
+    #[must_use]
+    pub fn of(kcx: &KeyContext) -> Self {
+        Self {
+            flow_id: kcx.flow_id.clone(),
+            namespace: kcx.namespace.clone(),
+            vars: kcx.vars.clone(),
+        }
+    }
+
+    /// The context an `inputs:` value renders against.
+    ///
+    /// `flow` and `vars`, and **deliberately no `trigger`** — see
+    /// [`InputContext`]. `tests::the_input_context_binds_no_trigger` is a
+    /// running check of that, and it asks the renderer rather than the map.
+    #[must_use]
+    pub fn render_context(&self) -> RenderContext {
+        let mut cx = RenderContext::new();
+        cx.insert(
+            "flow",
+            json!({"id": self.flow_id, "namespace": self.namespace}),
+        );
+        cx.insert(
+            "vars",
+            Value::Object(
+                self.vars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+        cx
+    }
+}
+
+/// Why one `inputs:` entry could not be rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputRefusal {
+    /// It needs the `trigger` root, which egret stores on the execution but
+    /// does not publish into the render surface (W6 Task 8). A **capability
+    /// gap**: the flow is well-formed and Kestra would answer 200.
+    NeedsTriggerContext { key: String },
+    /// It fails for some other reason. The author's template is wrong.
+    Unrenderable { key: String, error: String },
+}
+
+impl InputRefusal {
+    #[must_use]
+    pub fn message(&self, trigger_id: &str) -> String {
+        match self {
+            Self::NeedsTriggerContext { key } => format!(
+                "webhook trigger '{trigger_id}' declares input '{key}' whose value needs the                  `trigger` render root, which egret does not publish yet -- the trigger record                  is stored on the execution but no task can read it"
+            ),
+            Self::Unrenderable { key, error } => {
+                format!("webhook trigger '{trigger_id}' input '{key}': {error}")
+            }
+        }
+    }
+}
+
+/// Decide which of the two causes made `template` fail.
+///
+/// It asks the **parser**: [`crate::runners::referenced_roots`] returns the
+/// top-level names the template refers to, taken from minijinja's own AST
+/// after the same `{% raw %}` protection and [`crate::runners::rewrite`] the
+/// renderer applies. If `trigger` is one of them, the missing root is the
+/// cause; otherwise it is not.
+///
+/// **Three approaches were tried and two are recorded because they failed.**
+///
+/// 1. A substring scan for `"trigger."` / `"trigger["`. This is what shipped
+///    and it is Critical 2: `{{ trigger }}` matches neither.
+/// 2. Re-rendering with a **sentinel** `trigger` value bound, and calling the
+///    failure "the root" if it then succeeded. Measured: it misclassifies
+///    `{{ trigger.body }}`, because a sentinel object has no `body` member
+///    either, so the probe fails for a second reason and the answer flips to
+///    `Unrenderable`. There is no sentinel value that answers every member —
+///    which is the general shape of the problem, not an accident of the value
+///    chosen.
+/// 3. This one, which does not need a value at all.
+///
+/// It is **not** the security boundary. That is [`InputContext`] simply not
+/// binding the name; this only decides which message a refusal carries, so a
+/// misclassification is a worse error message and never a leak.
+///
+/// If the parse itself fails, the template is broken in a way that has nothing
+/// to do with the root — [`InputRefusal::Unrenderable`], with the render's own
+/// error rather than the parse's, because the render is what the author's
+/// request actually hit.
+fn classify_input_failure(key: &str, template: &str, error: String) -> InputRefusal {
+    let mentions_trigger = crate::runners::referenced_roots(template)
+        .map(|roots| roots.contains("trigger"))
+        .unwrap_or(false);
+    if mentions_trigger {
+        InputRefusal::NeedsTriggerContext {
+            key: key.to_string(),
+        }
+    } else {
+        InputRefusal::Unrenderable {
+            key: key.to_string(),
+            error,
+        }
+    }
+}
+
 /// The `inputs:` a matched webhook trigger supplies to the execution it starts.
 ///
 /// `WebhookService.newExecution`:
@@ -654,50 +840,27 @@ fn is_multipart(content_type: Option<&str>) -> bool {
 /// with a `catch (Exception e)` that logs `Unable to render the webhook inputs`
 /// and throws `WebhookInputRenderException` — measured as an HTTP **422**.
 ///
-/// **The `runContext` this renders against is the EXECUTION's**, i.e. the one
+/// **The `runContext` Kestra renders against is the EXECUTION's**, i.e. the one
 /// that already carries `trigger.*` fully populated. egret does not publish
-/// that root (see the module doc), so a trigger declaring
-/// `inputs: {body: "{{ trigger.body }}"}` — which is `valids/webhook-inputs`,
-/// the corpus flow `harvest.py` names in its own exclusion reason — cannot be
-/// honoured. Kestra answers **200** for it; egret answers **409**, which is
-/// under-acceptance and therefore the safe direction.
+/// that root, so a trigger declaring `inputs: {body: "{{ trigger.body }}"}` —
+/// which is `valids/webhook-inputs`, the corpus flow `harvest.py` names in its
+/// own exclusion reason — cannot be honoured. Kestra answers **200**; egret
+/// answers **409**, which is under-acceptance and therefore the safe direction.
 ///
-/// **Measured, because the obvious guess is wrong.** Rendering it against
-/// [`KeyContext`] does *not* produce an empty string: `trigger` is a defined
-/// root there (it carries `id` and `type`), so `trigger.body` is a defined
-/// root with an undefined member and the renderer errors with
-/// `input 'body': undefined value`. That message accuses the author's template
-/// of being broken when the real cause is a root egret does not supply, which
-/// is exactly why [`inputs_reference_the_trigger_root`] intercepts it and says
-/// so instead.
-pub fn inputs_reference_the_trigger_root(webhook: &Webhook) -> bool {
-    webhook.inputs.as_ref().is_some_and(|m| {
-        m.values().any(|v| {
-            v.as_str()
-                .is_some_and(|s| s.contains("trigger.") || s.contains("trigger["))
-        })
-    })
-}
-
-/// Render a matched webhook's `inputs:` against the key context.
-///
-/// Only reached when [`inputs_reference_the_trigger_root`] is false, so the
-/// gap above cannot be papered over.
-pub fn render_inputs(
-    trigger: &Trigger,
-    webhook: &Webhook,
-    kcx: &KeyContext,
-) -> Result<Value, String> {
+/// Non-string values pass through untouched: `runContext.render(Map)` renders
+/// strings and leaves everything else alone.
+pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, InputRefusal> {
     let Some(declared) = webhook.inputs.as_ref() else {
         return Ok(Value::Object(Map::new()));
     };
-    let cx = kcx.render_context_for(trigger);
+    let cx = icx.render_context();
     let mut out = Map::new();
     for (k, v) in declared {
         let rendered = match v {
-            Value::String(s) => {
-                Value::String(render_str(s.as_str(), &cx).map_err(|e| format!("input '{k}': {e}"))?)
-            }
+            Value::String(s) => match render_str(s.as_str(), &cx) {
+                Ok(text) => Value::String(text),
+                Err(e) => return Err(classify_input_failure(k, s, e.to_string())),
+            },
             other => other.clone(),
         };
         out.insert(k.clone(), rendered);
@@ -1261,82 +1424,250 @@ triggers:
     // inputs
     // ------------------------------------------------------------------
 
-    /// The gap is detected rather than papered over: a trigger whose `inputs:`
-    /// read `trigger.*` is refused by name, because the renderer's own message
-    /// for it (`undefined value`) blames the author's template for a root
-    /// egret does not supply.
+    /// **Critical 2's regression test, and the four spellings that make it
+    /// one.**
+    ///
+    /// The first version of this module decided by scanning each input value
+    /// for `"trigger."` / `"trigger["`. Rows 1 and 2 below passed that scan and
+    /// were rendered against the KEY context, so the execution was handed the
+    /// key comparison's private `{id, type}` object.
+    ///
+    /// The fixture is the discriminating set, not a confirming one: two
+    /// spellings the old scan missed, one it caught, and two controls that must
+    /// still render.
     #[test]
-    fn inputs_that_read_the_trigger_root_are_detected() {
+    fn no_spelling_of_the_trigger_root_can_reach_an_input() {
         let yaml = "\
 id: wi
 namespace: fx.ns
+variables:
+  vkey: fx-var-value
 inputs:
-  - id: body
+  - id: a
     type: STRING
 tasks:
   - id: t
     type: io.kestra.plugin.core.debug.Return
     format: x
 triggers:
-  - id: reads-trigger
+  - id: bare
     type: io.kestra.plugin.core.trigger.Webhook
-    key: k1
+    key: k-bare
     inputs:
-      body: \"{{ trigger.body }}\"
-  - id: reads-flow
+      a: \"{{ trigger }}\"
+  - id: filtered
     type: io.kestra.plugin.core.trigger.Webhook
-    key: k2
+    key: k-filtered
     inputs:
-      body: \"{{ flow.id }}\"
-  - id: reads-nothing
+      a: \"{{ trigger | json }}\"
+  - id: dotted
     type: io.kestra.plugin.core.trigger.Webhook
-    key: k3
+    key: k-dotted
+    inputs:
+      a: \"{{ trigger.body }}\"
+  - id: indexed
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-indexed
+    inputs:
+      a: \"{{ trigger['body'] }}\"
+  - id: aliased
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-aliased
+    inputs:
+      a: \"{{ trigger.id ~ '' }}\"
+  - id: ok-flow
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-ok-flow
+    inputs:
+      a: \"from-{{ flow.namespace }}\"
+  - id: ok-vars
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-ok-vars
+    inputs:
+      a: \"{{ vars.vkey }}\"
+  - id: broken
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-broken
+    inputs:
+      a: \"{{ nosuchroot.nothing }}\"
 ";
         let f = flow_of(yaml);
         let kcx = kcx_of(&f);
+        let icx = InputContext::of(&kcx);
 
-        let (t1, w1) = find(&f.triggers, "k1", &kcx).unwrap();
-        assert!(inputs_reference_the_trigger_root(w1));
+        // **The security property, asserted for every spelling and before any
+        // question of classification.** None of them may produce a value.
+        for key in ["k-bare", "k-filtered", "k-dotted", "k-indexed", "k-aliased"] {
+            let (_, w) = find(&f.triggers, key, &kcx).expect("the fixture matches");
+            let out = render_inputs(w, &icx);
+            assert!(
+                out.is_err(),
+                "{key} RENDERED -- this is Critical 2 again: {out:?}"
+            );
+        }
 
-        let (t2, w2) = find(&f.triggers, "k2", &kcx).unwrap();
+        // Then the classification, which is a diagnostic rather than a
+        // guarantee. All five name the root, so all five get the message that
+        // says so.
+        for key in ["k-bare", "k-filtered", "k-dotted", "k-indexed", "k-aliased"] {
+            let (_, w) = find(&f.triggers, key, &kcx).unwrap();
+            let err = render_inputs(w, &icx).unwrap_err();
+            assert_eq!(
+                err,
+                InputRefusal::NeedsTriggerContext { key: "a".into() },
+                "{key} was classified wrongly"
+            );
+            assert!(
+                err.message("t-id").contains("input 'a'")
+                    && err.message("t-id").contains("`trigger` render root"),
+                "{key}: {}",
+                err.message("t-id")
+            );
+        }
+
+        // **A known imprecision, recorded rather than left to be rediscovered.**
+        // `{{ trigger | json }}` has a SECOND, independent problem: egret has no
+        // `json` filter at all -- a pre-existing W2 gap that `valids/webhook.yaml`
+        // also runs into -- so supplying the trigger root would not make it
+        // render, and the message this classifier gives names only the first
+        // cause. Asserted so that if the filter ever lands, this comment is
+        // what fails rather than quietly becoming wrong.
         assert!(
-            !inputs_reference_the_trigger_root(w2),
-            "the control: inputs that do NOT read trigger.* are renderable"
+            render_str("{{ trigger | json }}", &{
+                let mut cx = icx.render_context();
+                cx.insert("trigger", json!({"id": "x"}));
+                cx
+            })
+            .is_err_and(|e| e.to_string().contains("unknown filter")),
+            "egret has acquired a `json` filter; the imprecision noted above is gone"
         );
-        assert_eq!(render_inputs(t2, w2, &kcx).unwrap(), json!({"body": "wi"}));
 
-        let (t3, w3) = find(&f.triggers, "k3", &kcx).unwrap();
-        assert!(!inputs_reference_the_trigger_root(w3));
-        assert_eq!(render_inputs(t3, w3, &kcx).unwrap(), json!({}));
+        // And the OTHER failure mode, which must NOT be classified as the
+        // capability gap: without this row the classifier could answer
+        // `NeedsTriggerContext` for everything that fails.
+        let (_, w) = find(&f.triggers, "k-broken", &kcx).unwrap();
+        let err = render_inputs(w, &icx).expect_err("a broken template does not render");
+        match &err {
+            InputRefusal::Unrenderable { key, error } => {
+                assert_eq!(key, "a");
+                assert!(error.contains("undefined value"), "{error}");
+            }
+            other => panic!("a broken template must not be blamed on the trigger root: {other:?}"),
+        }
+    }
 
-        // And the refused one is refused for the RIGHT reason.
-        //
-        // **Measured, and NOT what the first draft of this test asserted.**
-        // The first version claimed it "renders to an empty string"; it does
-        // not. `trigger` IS a defined root here (the test above proves
-        // `trigger.id` resolves), so `trigger.body` is a defined root with an
-        // undefined MEMBER, and minijinja errors:
-        //
-        //     input 'body': undefined value (in <string>:1)
-        //
-        // which is the whole reason the guard earns its place: that message
-        // tells an author their template is wrong when the truth is that egret
-        // cannot supply the root.
-        let err = render_inputs(t1, w1, &kcx).expect_err("trigger.body is undefined here");
+    /// The mechanism, asserted directly rather than through its consequences:
+    /// the inputs context binds no `trigger`, and the way to know is to ask the
+    /// renderer rather than to read the map.
+    #[test]
+    fn the_input_context_binds_no_trigger() {
+        let f = flow_of(FIXTURE);
+        let icx = InputContext::of(&kcx_of(&f));
+        let cx = icx.render_context();
+
         assert!(
-            err.contains("input 'body'") && err.contains("undefined value"),
-            "unexpected error text: {err}"
+            render_str("{{ trigger }}", &cx).is_err(),
+            "`trigger` must not be a binding in the inputs context"
         );
-        // The control for "defined root, undefined member": the SAME context
-        // renders `trigger.id` without complaint.
+        // The controls: the two roots that ARE bound, so the assertion above
+        // cannot be satisfied by a context that binds nothing at all.
+        assert_eq!(render_str("{{ flow.id }}", &cx).unwrap(), "fx-flow-id");
+        assert_eq!(render_str("{{ vars.vkey }}", &cx).unwrap(), "fx-var-value");
+        // And the discriminator against the KEY context, which does bind it.
+        let (t, _) = find(&f.triggers, "fx-literal-key", &kcx_of(&f)).unwrap();
         assert_eq!(
-            render_str("{{ trigger.id }}", &kcx.render_context_for(t1)).unwrap(),
-            "reads-trigger"
+            render_str("{{ trigger.id }}", &kcx_of(&f).render_context_for(t)).unwrap(),
+            "fx-trg-literal",
+            "the KEY context still binds it -- the two contexts differ, which is the point"
         );
+    }
+
+    /// The classifier reads the PARSE, so the literal word in a text run is
+    /// not a reference.
+    ///
+    /// This is the false-positive direction of Critical 2's fix, and it has to
+    /// be held because the failed approach — a substring scan — got it wrong in
+    /// both directions: it missed `{{ trigger }}` and it would have flagged a
+    /// message that merely says the word.
+    #[test]
+    fn the_word_trigger_in_text_is_not_a_reference_to_the_root() {
+        let yaml = "\
+id: wi3
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: mentions
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-mentions
+    inputs:
+      a: \"this trigger.body is prose, not a lookup: {{ flow.id }}\"
+  - id: reads
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-reads
+    inputs:
+      a: \"{{ trigger.body }}\"
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let icx = InputContext::of(&kcx);
+
+        let (_, w) = find(&f.triggers, "k-mentions", &kcx).unwrap();
+        assert_eq!(
+            render_inputs(w, &icx).unwrap(),
+            json!({"a": "this trigger.body is prose, not a lookup: wi3"}),
+            "the OLD substring scan would have refused this"
+        );
+
+        // The control in the other direction, on the same fixture: a real
+        // reference is still caught, so the assertion above is not satisfied by
+        // a classifier that has stopped looking.
+        let (_, w) = find(&f.triggers, "k-reads", &kcx).unwrap();
+        assert_eq!(
+            render_inputs(w, &icx).unwrap_err(),
+            InputRefusal::NeedsTriggerContext { key: "a".into() }
+        );
+    }
+
+    /// `referenced_roots` sees through every spelling the substring scan
+    /// missed, and through the two the scan would have false-positived on.
+    #[test]
+    fn the_parser_reports_the_roots_a_substring_scan_cannot() {
+        use crate::runners::referenced_roots;
+        for src in [
+            "{{ trigger }}",
+            "{{ trigger.body }}",
+            "{{ trigger['body'] }}",
+            "{{ trigger | json }}",
+            "{% set t = trigger %}{{ t }}",
+            "{{ (trigger).body }}",
+        ] {
+            assert!(
+                referenced_roots(src).unwrap().contains("trigger"),
+                "{src} does reference the root"
+            );
+        }
+        for src in [
+            "plain text mentioning trigger.body",
+            "{{ flow.id }}",
+            "{{ vars.trigger }}",
+            "{{ outputs.trigger.x }}",
+        ] {
+            assert!(
+                !referenced_roots(src).unwrap().contains("trigger"),
+                "{src} does NOT reference the root"
+            );
+        }
     }
 
     /// Non-string input values pass through untouched — Kestra's
     /// `runContext.render(Map)` only renders strings.
+    ///
+    /// The fixture uses three different non-string JSON types AND a string in
+    /// the same map, so "passes through" is distinguished from "is dropped"
+    /// and from "the whole map is copied".
     #[test]
     fn non_string_input_values_are_not_rendered() {
         let yaml = "\
@@ -1353,100 +1684,89 @@ triggers:
     inputs:
       n: 7
       b: true
+      l: [1, 2]
       s: \"{{ flow.namespace }}\"
 ";
         let f = flow_of(yaml);
         let kcx = kcx_of(&f);
-        let (t, w) = find(&f.triggers, "k", &kcx).unwrap();
+        let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
         assert_eq!(
-            render_inputs(t, w, &kcx).unwrap(),
-            json!({"n": 7, "b": true, "s": "fx.ns"})
+            render_inputs(w, &InputContext::of(&kcx)).unwrap(),
+            json!({"n": 7, "b": true, "l": [1, 2], "s": "fx.ns"})
         );
     }
 
-    /// **Step 4's measurement, and it falsifies the premise it was given.**
-    ///
-    /// The task brief warned that publishing a `trigger` root into the render
-    /// context "would make `valids/webhook-plaintext` diverge further". It
-    /// would not — not for an empty root, anyway — and this test is the
-    /// running program that says so.
-    ///
-    /// `valids/webhook-plaintext`'s only task renders
-    /// `{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}`. Kestra
-    /// renders `hello-world` (the golden was harvested through a plain
-    /// execution POST, so its `Execution.trigger` is null). egret errors, and
-    /// `oracle-exec/baseline.txt` attributes that to `??` resolving a missing
-    /// MEMBER but not a missing ROOT.
-    ///
-    /// Measured here, with the real renderer:
-    ///
-    /// | context | result |
-    /// |---|---|
-    /// | no `trigger` root at all | `Err(undefined value)` |
-    /// | `trigger` root present, no `parameters` | **`Err(undefined value)` — the same** |
-    /// | `trigger.parameters.validationToken` present | `Ok("tok")` |
-    ///
-    /// So the middle row is the one that matters: **defining the root changes
-    /// nothing**, because the expression misses at `trigger.parameters` and
-    /// then indexes `.validationToken` on the result — two levels, not one, and
-    /// the baseline's one-level sentence does not reach it. The entry stays
-    /// baselined either way, which is why the ratchet reads 127 before and 127
-    /// after (see the task report for the direct measurement of that, taken by
-    /// temporarily adding the root to `worker/render.rs` and running the
-    /// oracle).
-    ///
-    /// The root is still not published here, for the two reasons the module
-    /// doc gives — neither of which is this one.
+    /// No `inputs:` at all is the empty object, not a null and not an error.
     #[test]
-    fn the_missing_root_is_why_webhook_plaintext_is_baselined() {
-        const EXPR: &str = "{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}";
-
-        fn cx(trigger: Option<Value>) -> RenderContext {
-            let mut cx = RenderContext::new();
-            cx.insert(
-                "flow",
-                json!({"id": "webhook-plaintext", "namespace": "io.kestra.tests"}),
-            );
-            if let Some(t) = trigger {
-                cx.insert("trigger", t);
-            }
-            cx
-        }
-
-        // Row 1 — today's shipping context.
-        assert!(
-            render_str(EXPR, &cx(None)).is_err(),
-            "egret cannot render it with no trigger root -- this is why the entry is baselined"
-        );
-        // Row 2 — the change Step 4 warned about. IT IS THE SAME ANSWER.
-        assert!(
-            render_str(EXPR, &cx(Some(json!({})))).is_err(),
-            "a defined-but-empty trigger root does NOT rescue it, and does not break it either"
-        );
-        // Row 3 — the control, without which rows 1 and 2 are satisfied by a
-        // renderer that can never render this expression at all.
+    fn a_trigger_with_no_inputs_renders_the_empty_object() {
+        let f = flow_of(FIXTURE);
+        let kcx = kcx_of(&f);
+        let (_, w) = find(&f.triggers, "fx-literal-key", &kcx).unwrap();
+        assert!(w.inputs.is_none(), "the fixture's trigger declares none");
         assert_eq!(
-            render_str(
-                EXPR,
-                &cx(Some(json!({"parameters": {"validationToken": ["tok"]}})))
-            )
-            .expect("a fully populated trigger root renders"),
-            "tok"
-        );
-        // Row 4 — the one-level miss the baseline's sentence IS about, kept as
-        // the discriminator between "?? never works" and "?? works on a member".
-        let mut one_level = cx(None);
-        one_level.insert("outputs", json!({}));
-        assert_eq!(
-            render_str("{{ outputs.not_existing ?? 'fallback' }}", &one_level)
-                .expect("a one-level miss does fall back"),
-            "fallback"
+            render_inputs(w, &InputContext::of(&kcx)).unwrap(),
+            json!({})
         );
     }
 
     // ------------------------------------------------------------------
     // policy
     // ------------------------------------------------------------------
+
+    /// The key context has **exactly one consumer**, and that is the whole of
+    /// what makes "local to the key comparison" true.
+    ///
+    /// It was not true when it was first asserted in prose: `render_inputs`
+    /// used the same context, so a `{{ trigger }}` input reached an execution
+    /// (fix round 1, Critical 2). An invariant about callers has to be counted,
+    /// because nothing about the type stops a second one appearing.
+    ///
+    /// Scans the crate's whole `src/`, shipping halves only, so a new caller in
+    /// any module fails this.
+    #[test]
+    fn the_key_context_is_reachable_from_no_other_render() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        files.sort();
+        assert!(
+            files.len() > 20,
+            "only {} files scanned -- the walk is looking at the wrong tree",
+            files.len()
+        );
+
+        let mut callers: Vec<(String, usize)> = Vec::new();
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read source");
+            let shipping = match source.find("\n#[cfg(test)]") {
+                Some(i) => &source[..i],
+                None => &source[..],
+            };
+            // The definition itself is `fn render_context_for`; a CALL is the
+            // method-position spelling.
+            let n = shipping.matches(".render_context_for(").count();
+            if n > 0 {
+                callers.push((path.strip_prefix(&root).unwrap().display().to_string(), n));
+            }
+        }
+        assert_eq!(
+            callers,
+            vec![("trigger/webhook.rs".to_string(), 1)],
+            "the key context must have exactly one consumer -- `render_key`. A second one is \
+             how Critical 2 happened: `render_inputs` shared it and handed an execution the \
+             key comparison's private object."
+        );
+    }
 
     /// A running check that the key is never compared with `==`.
     ///

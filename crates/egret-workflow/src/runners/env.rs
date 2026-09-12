@@ -1897,6 +1897,39 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     })
 }
 
+/// The top-level names a template refers to, as the PARSER sees them.
+///
+/// W6 Task 7 fix round 1, Critical 2. The webhook route has to tell "this
+/// input needs a render root egret does not publish" apart from "this input is
+/// broken", and the first version of that decision was a substring scan for
+/// `"trigger."` — which `{{ trigger }}` walks straight past. A substring scan
+/// is a lexical test applied to an expression language and there are
+/// arbitrarily many ways to name a binding.
+///
+/// This asks the same parser that renders. It runs the identical front half of
+/// [`render_once`] — protect the `{% raw %}` regions, then [`rewrite`] — so a
+/// template whose roots this reports is a template the renderer would see the
+/// same way, and then returns minijinja's `undeclared_variables(false)`: the
+/// **top-level** names, so `trigger.body`, `trigger['body']`,
+/// `trigger | json` and `{% set t = trigger %}` all report `trigger`, while
+/// the literal word in a text run reports nothing.
+///
+/// `nested = false` on purpose. `true` would also report `body` for
+/// `trigger.body`, which is noise for the one question this is asked.
+///
+/// It is **not** the security boundary — that is the render context simply not
+/// binding the name (see `trigger::webhook::InputContext`). This only decides
+/// which message a refusal carries.
+pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<String>, RenderError> {
+    let (protected, _replacers) = replace_raw_tags(template);
+    let rewritten = rewrite(&protected)?;
+    let env = environment();
+    let tmpl = env
+        .template_from_str(&rewritten)
+        .map_err(|e| RenderError::Template(e.to_string()))?;
+    Ok(tmpl.undeclared_variables(false).into_iter().collect())
+}
+
 /// The render loop, on the thread [`render_str`] gave it.
 fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
     let mut env = environment();
