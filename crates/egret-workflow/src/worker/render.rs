@@ -114,12 +114,41 @@ pub(super) struct Surface {
     ids: std::collections::BTreeMap<usize, Uuid>,
 }
 
+/// One row's links upward, as `Surface::load`'s walk reads them.
+///
+/// A named struct rather than the four-wide tuple it replaced, because migration
+/// `0138` gives a row **two** possible causes and the walk has to say which one
+/// it is following. `workflow_executions_one_link_kind` makes them mutually
+/// exclusive, which is what makes [`Link::cause`] unambiguous — the same
+/// guarantee `worker::subflow::chain_holds`'s `COALESCE` rests on, and this is
+/// the second consumer to be corrected for the same reason.
+struct Link {
+    loop_index: Option<i32>,
+    loop_value: Option<String>,
+    /// A loop iteration's or a `CREATE_NEW_EXECUTION` replay's parent.
+    parent: Option<Uuid>,
+    parent_run_ix: Option<i32>,
+    /// A subflow child's caller. Never set together with [`Link::parent`].
+    trigger: Option<Uuid>,
+}
+
+impl Link {
+    /// The execution that caused this one, **whichever link it carries**.
+    ///
+    /// `None` for a top-level execution. Not an `or_else` over two independent
+    /// possibilities: the CHECK makes at most one of the two present, so this
+    /// is a single value read out of two columns.
+    fn cause(&self) -> Option<Uuid> {
+        self.parent.or(self.trigger)
+    }
+}
+
 impl Surface {
     /// Read everything the renders of one `settle` will need.
     pub(super) async fn load(conn: &mut PgConnection, ctx: &ExecutionCtx) -> Result<Self> {
         let row = sqlx::query(
             "SELECT inputs, state, created_at, loop_index, loop_value, \
-                    parent_execution_id, parent_run_ix \
+                    parent_execution_id, parent_run_ix, trigger_execution_id \
                FROM workflow.executions WHERE id = $1",
         )
         .bind(ctx.id)
@@ -200,13 +229,14 @@ impl Surface {
         // iteration, then its parent's, and so on. `valids/loop-nested` is
         // three deep and reads `{{ item.parents[1].value }}`.
         let mut levels: Vec<Value> = Vec::new();
-        let mut here: (Option<i32>, Option<String>, Option<Uuid>, Option<i32>) = (
-            row.get("loop_index"),
-            row.get("loop_value"),
-            row.get("parent_execution_id"),
-            row.get("parent_run_ix"),
-        );
-        let mut ancestor: Option<Uuid> = here.2;
+        let mut here = Link {
+            loop_index: row.get("loop_index"),
+            loop_value: row.get("loop_value"),
+            parent: row.get("parent_execution_id"),
+            parent_run_ix: row.get("parent_run_ix"),
+            trigger: row.get("trigger_execution_id"),
+        };
+        let mut ancestor: Option<Uuid> = here.cause();
         // **Whether the chain walked so far is loops all the way up.**
         //
         // Until migration 0138 this could not be false: 0135's CHECK made a
@@ -226,40 +256,81 @@ impl Surface {
         // reachable only THROUGH that link, so nothing above it may contribute
         // either.
         //
-        // **The `levels` walk below is NOT sticky, and W6 Task 4 measured that
-        // it cannot reach a non-loop link at all.** A level is pushed only when
-        // the row below the link carries `(loop_index, loop_value,
-        // parent_run_ix)`, so a replay contributes none of its own; the only
-        // way one could cross a replay link is a replay whose PARENT is a loop
-        // iteration, and `worker::replay::spawn_due` refuses to create that row
-        // -- because the artifact refuses it too, throwing
+        // **The `levels`/`item` walk is gated on this same flag, since W6 Task
+        // 8.** A level is pushed only when the row below the link carries
+        // `(loop_index, loop_value, parent_run_ix)`, so a replay or a subflow
+        // child contributes none of its own -- but the walk now crosses a
+        // SUBFLOW link (below), which makes `loop -> subflow child` writable,
+        // and without the gate that child would resolve `{{ item.value }}` off
+        // the loop iteration that spawned its PARENT. A subflow child is a
+        // separate execution whose values arrive as `inputs:`; nothing of the
+        // caller's iteration reaches it. The gate is a no-op on every row that
+        // existed before: a replay's only writable shape is a replay of a
+        // top-level execution (`worker::replay::spawn_due` refuses a replay
+        // under a `Loop`, because the artifact refuses it too, throwing
         // `Can't find taskrun with taskrunId <the LOOP run's>` out of
-        // `markWithTaskRunAs(..., markParents = true)` and ending the iteration
-        // FAILED with no child. So the state this walk is unguarded against is
-        // one no writer can produce, which is why it is left as it is rather
-        // than given a second flag nothing could make fire.
+        // `markWithTaskRunAs(..., markParents = true)`), so the flag was still
+        // true at every push this code has ever made. It also closes the
+        // asymmetry W6 Task 2's re-review recorded as N-2, where `item` crossed
+        // a non-loop link while `outputs` stopped.
         //
-        // **`root` deliberately keeps walking the whole chain, and W6 Task 4
-        // measured that this is right rather than merely unmeasured.** It feeds
-        // `labels.system.correlationId`, and on the pinned artifact
-        // (`egret.probe4/replay-correlation`: a flow-level
-        // `CREATE_NEW_EXECUTION` retry over a `Log` of
-        // `{{ labels.system.correlationId }}` and a `Fail`) the replay's label
-        // is the ORIGINAL execution's id while `{{ execution.id }}` is its own:
+        // **`root` walks the whole CAUSAL chain -- whichever link each row
+        // carries -- and that is a W6 Task 8 fix, not the original.** It feeds
+        // `labels.system.correlationId`.
+        //
+        // It walked `parent_execution_id` ALONE, which is the same defect W6
+        // Task 3's fix round 1 found in `subflow::chain_holds` and did not sweep
+        // for: `workflow_executions_one_link_kind` makes a child carry exactly
+        // ONE of two links, so a walk keyed on one column stops dead at a
+        // subflow child -- and `root` then answered the child's OWN id. Three
+        // artefacts of this package said the opposite and called it measured;
+        // the whole-branch review found it, and the Kestra half was then
+        // measured on the pinned digest rather than argued.
+        //
+        // **Measured**, `t8.probe/corr-parent -> corr-child -> corr-grand-child`
+        // (the corpus's own `subflow-parent -> subflow-child ->
+        // subflow-grand-child` shape, renamed), read out of Kestra's Postgres:
+        //
+        //     flow              id                      parentId  trigger.…executionId  system.correlationId
+        //     corr-parent       2cvzjgi7mY6lDfaQxiNa0x  null      (started by hand)     2cvzjgi7mY6lDfaQxiNa0x
+        //     corr-child        8yWnkcC1oAvHsunjmTG1Q   null      2cvzjgi7mY6lDfaQxiNa0x  2cvzjgi7mY6lDfaQxiNa0x
+        //     corr-grand-child  2Cr8T9lsAM5icJ7KT5NEna  null      8yWnkcC1oAvHsunjmTG1Q    2cvzjgi7mY6lDfaQxiNa0x
+        //
+        // So the label is the ROOT's id two links down, `parentId` is NULL at
+        // every hop, and the cause is `trigger.variables.executionId` -- the
+        // same shape `crate::trigger::flow`'s module doc measured for a flow
+        // trigger. The corpus reaches this: `valids/subflow-grand-child` logs
+        // `{{labels.system.correlationId}}` and is the target of
+        // `valids/subflow-child`, which is one of the twelve entries W6 banked.
+        // The ratchet cannot see it -- the golden records states, and a `Log`
+        // renders either value without failing.
+        //
+        // A replay still inherits for the reason W6 Task 4 measured
+        // (`egret.probe4/replay-correlation`: the replay's label is the
+        // ORIGINAL execution's id while `{{ execution.id }}` is its own):
         //
         //     root  cid=3nY5p1H9MmhpWnq4hZsVOD eid=3nY5p1H9MmhpWnq4hZsVOD
         //     replay cid=3nY5p1H9MmhpWnq4hZsVOD eid=5cNdx41IqqhyGSExZsuGLu
         //
-        // The mechanism agrees: `ExecutionService.replay` copies the parent's
-        // labels (adding `system.replay`), and `Execution.java:213` fills a
-        // `correlationId` in only when one is ABSENT. So a replay inherits, a
-        // sticky `root` would not, and stopping this walk at the same link
-        // `inheriting` stops at would be the divergence.
+        // The mechanism agrees for both kinds of child, which is why one walk
+        // serves both: `ExecutionService.replay` and `Flow.evaluate` copy the
+        // cause's labels, and `Execution.java:213` fills a `correlationId` in
+        // only when one is ABSENT. The gloss is still only a gloss -- see the
+        // `labels` comment above for the seeded root that hands a non-id string
+        // down a whole chain.
         //
-        // No golden entry pairs a replay with a `correlationId` read, so the
-        // oracle cannot tell either way; the probe is the instrument, and
+        // No golden entry can report either way, so
         // `a_replay_inherits_the_correlation_id_of_the_execution_it_replaces`
-        // in `tests/worker.rs` is what keeps it from drifting.
+        // and `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`
+        // in `tests/worker.rs` are the instruments, and the second one carries
+        // the loop and standalone controls that tell "the walk works" from "the
+        // walk stops one hop early".
+        //
+        // The chain stays a DAG: `parent_execution_id` and
+        // `trigger_execution_id` both name a row that existed before this one
+        // and `workflow_executions_no_self_link` refuses the degenerate case,
+        // so there is still no depth bound here, for the reason
+        // `flowable::descend` gives for not having one either.
         let mut inheriting = true;
         // Nearest ancestor first, so a nearer scope wins where two ancestors
         // ran a task of the same id. The chain is a DAG by construction --
@@ -268,8 +339,15 @@ impl Surface {
         // `flowable::descend` gives for not having one either.
         while let Some(id) = ancestor {
             // This level's `item`, built while the parent that holds its
-            // resolved `values:` is the row being read.
-            if let (Some(index), Some(value), Some(run_ix)) = (here.0, here.1.clone(), here.3) {
+            // resolved `values:` is the row being read. Gated on `inheriting`
+            // for the reason above: the walk crosses a subflow link now, and
+            // nothing of the caller's iteration may reach a subflow child.
+            if let (true, Some(index), Some(value), Some(run_ix)) = (
+                inheriting,
+                here.loop_index,
+                here.loop_value.clone(),
+                here.parent_run_ix,
+            ) {
                 let rendered: Option<String> = sqlx::query_scalar(
                     "SELECT rendered FROM workflow.task_runs \
                       WHERE execution_id = $1 AND run_ix = $2",
@@ -302,9 +380,9 @@ impl Surface {
                         }),
                 }));
             }
-            // `here.0` is the loop index of the row BELOW `id`, i.e. of the
-            // link about to be traversed.
-            inheriting = inheriting && here.0.is_some();
+            // `here.loop_index` is the loop index of the row BELOW `id`, i.e.
+            // of the link about to be traversed.
+            inheriting = inheriting && here.loop_index.is_some();
             if inheriting {
                 let rows = sqlx::query(
                     "SELECT task_id, outputs, state FROM workflow.task_runs \
@@ -328,20 +406,22 @@ impl Surface {
             }
             root = id;
             let up = sqlx::query(
-                "SELECT loop_index, loop_value, parent_execution_id, parent_run_ix \
+                "SELECT loop_index, loop_value, parent_execution_id, parent_run_ix, \
+                        trigger_execution_id \
                    FROM workflow.executions WHERE id = $1",
             )
             .bind(id)
             .fetch_one(&mut *conn)
             .await
             .map_err(db_err)?;
-            here = (
-                up.get("loop_index"),
-                up.get("loop_value"),
-                up.get("parent_execution_id"),
-                up.get("parent_run_ix"),
-            );
-            ancestor = here.2;
+            here = Link {
+                loop_index: up.get("loop_index"),
+                loop_value: up.get("loop_value"),
+                parent: up.get("parent_execution_id"),
+                parent_run_ix: up.get("parent_run_ix"),
+                trigger: up.get("trigger_execution_id"),
+            };
+            ancestor = here.cause();
         }
 
         // `item` is this execution's own level, with the enclosing loops

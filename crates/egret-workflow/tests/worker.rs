@@ -5860,3 +5860,217 @@ async fn a_max_duration_chain_stops_when_the_original_clock_runs_out(pool: sqlx:
         "and no third execution"
     );
 }
+
+/// **A subflow grandchild's `labels.system.correlationId` is the ROOT's id, and
+/// it inherits no `item` from the loop that spawned its parent.**
+///
+/// The whole-branch review of W6 found `Surface::load`'s `root` walking
+/// `parent_execution_id` **alone**, which is `subflow::chain_holds`'s W6 Task 3
+/// defect one module over and never swept for: migration `0138`'s
+/// `workflow_executions_one_link_kind` makes a subflow child carry
+/// `trigger_execution_id` with `parent_execution_id` **NULL**, so the walk
+/// stopped dead at the first subflow link and `correlationId` was the child's
+/// **own** id.
+///
+/// # The artifact half, measured rather than argued
+///
+/// `t8.probe/corr-parent -> corr-child -> corr-grand-child` on the pinned digest
+/// — the corpus's own `subflow-parent -> subflow-child -> subflow-grand-child`
+/// shape, renamed — read out of Kestra's Postgres:
+///
+/// ```text
+/// flow              id                      parentId  trigger.…executionId     system.correlationId
+/// corr-parent       2cvzjgi7mY6lDfaQxiNa0x  null      (started by hand)        2cvzjgi7mY6lDfaQxiNa0x
+/// corr-child        8yWnkcC1oAvHsunjmTG1Q   null      2cvzjgi7mY6lDfaQxiNa0x   2cvzjgi7mY6lDfaQxiNa0x
+/// corr-grand-child  2Cr8T9lsAM5icJ7KT5NEna  null      8yWnkcC1oAvHsunjmTG1Q    2cvzjgi7mY6lDfaQxiNa0x
+/// ```
+///
+/// The label is the **root's** id two links down, `parentId` is NULL at every
+/// hop, and the cause is `trigger.variables.executionId`.
+///
+/// # Why this test needs four parts
+///
+/// A one-execution fixture cannot see the defect: **every** implementation of
+/// `root` returns the same value for a top-level execution, which is exactly
+/// how `the_correlation_id_divergence_has_no_corpus_population` came to assert
+/// that the two corpus readers "agree with the artifact" while comparing them
+/// only as roots. So:
+///
+/// 1. **standalone** — the instrument's own control: the label renders at all,
+///    and a root IS its own correlation id;
+/// 2. **two subflow links** — the assertion this test exists for. Two, not one:
+///    a walk that took the immediate cause instead of the top of the chain
+///    agrees with the correct one at a single link;
+/// 3. **a loop child** — the `parent_execution_id` half, which must keep
+///    working: a fix that swapped one column for the other instead of taking
+///    whichever is set would break this row and nothing else;
+/// 4. **`item` does not cross a subflow link** — the guard the widened walk
+///    needs. The walk reaches `loop -> subflow child` now, and without the gate
+///    that child would resolve `{{ item.value }}` off its caller's iteration.
+///
+/// The corpus reaches part 2 and the ratchet cannot: `valids/subflow-grand-child`
+/// logs `{{labels.system.correlationId}}` and is the target of
+/// `valids/subflow-child`, one of the twelve entries W6 banked — and the golden
+/// records states, so a `Log` renders either value without failing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let reg = Handlers::with_core_tasks();
+
+    // An `If`'s condition is the observation point: `advance()` stores the
+    // render in `task_runs.rendered`, so no handler stands between the surface
+    // and the assertion.
+    fn reader(id: &str, expr: &str) -> String {
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: cond\n    \
+             type: io.kestra.plugin.core.flow.If\n    condition: \"{expr}\"\n    then:\n      \
+             - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+        )
+    }
+    async fn rendered_of(pool: &sqlx::PgPool, execution: Uuid, task: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+        )
+        .bind(execution)
+        .bind(task)
+        .fetch_optional(pool)
+        .await
+        .expect("read the rendered condition")
+        .flatten()
+    }
+
+    let gc = reader("gc", "{{ labels.system.correlationId }}");
+
+    // 1. The standalone control.
+    let solo = start_execution(&pool, ws, None, &gc, serde_json::json!({}))
+        .await
+        .expect("start the standalone");
+    settle_everything(&pool, &reg).await;
+    assert_eq!(
+        rendered_of(&pool, solo, "cond").await,
+        Some(solo.to_string()),
+        "the control: a top-level execution IS its own correlation root, and the \
+         label renders at all. Every implementation of the walk agrees here, \
+         which is why the rest of this test exists"
+    );
+
+    // 2. Two subflow links: parent -> mid -> gc.
+    file_flow(&db, ws, user, &gc).await;
+    file_flow(&db, ws, user, &subflow_parent("mid", "gc", "")).await;
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "mid", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the chain");
+    settle_everything(&pool, &reg).await;
+    let mid = children_by_trigger(&pool, root);
+    let mid = mid.await;
+    assert_eq!(
+        mid.len(),
+        1,
+        "the parent spawned exactly one child, or the chain this test needs does \
+         not exist: {mid:?}"
+    );
+    let mid_id = mid[0].0;
+    let grand = children_by_trigger(&pool, mid_id).await;
+    assert_eq!(
+        grand.len(),
+        1,
+        "and the child spawned the grandchild -- TWO links, which is the whole \
+         point: {grand:?}"
+    );
+    let grand_id = grand[0].0;
+    assert_eq!(
+        (grand[0].2, grand[0].3.as_str()),
+        (None, "gc"),
+        "the grandchild carries no `parent_execution_id` (0138's \
+         `one_link_kind`) and runs the target flow, so the walk that has to \
+         reach the root has two `trigger_execution_id` hops to make"
+    );
+    assert_eq!(
+        rendered_of(&pool, grand_id, "cond").await,
+        Some(root.to_string()),
+        "**the assertion this test exists for**: two subflow links down, the \
+         label is still the ROOT's id -- measured on the artifact, where \
+         `corr-grand-child` carries `corr-parent`'s id. A walk keyed on \
+         `parent_execution_id` alone answers {grand_id} (its own id, because \
+         that column is NULL); a walk that took the immediate cause answers \
+         {mid_id}"
+    );
+    assert_eq!(
+        rendered_of(&pool, mid_id, "cond").await,
+        None,
+        "and `mid` has no `cond` run at all -- it is the `subflow_parent` \
+         fixture, not the reader. If this ever renders, the ids above are not \
+         the executions this test thinks they are"
+    );
+
+    // 3. The loop control: the `parent_execution_id` half still works.
+    let loopy = "id: loopy\nnamespace: t\ntasks:\n  - id: each\n    \
+                 type: io.kestra.plugin.core.flow.Loop\n    values: '[\"v1\"]'\n    tasks:\n      \
+                 - id: cond\n        type: io.kestra.plugin.core.flow.If\n        \
+                 condition: \"{{ labels.system.correlationId }}\"\n        then:\n          \
+                 - id: a\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n";
+    let lroot = start_execution(&pool, ws, None, loopy, serde_json::json!({}))
+        .await
+        .expect("start the loop");
+    settle_everything(&pool, &reg).await;
+    let kids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(lroot)
+            .fetch_all(&pool)
+            .await
+            .expect("read the loop's sub-executions");
+    assert_eq!(kids.len(), 1, "one value, one sub-execution: {kids:?}");
+    assert_eq!(
+        rendered_of(&pool, kids[0], "cond").await,
+        Some(lroot.to_string()),
+        "the OTHER link kind, and it must keep working: a fix that swapped \
+         `parent_execution_id` for `trigger_execution_id` rather than taking \
+         whichever is set would break this row alone"
+    );
+
+    // 4. `item` does not cross a subflow link.
+    file_flow(&db, ws, user, &reader("gcitem", "{{ item.value }}")).await;
+    let li = "id: li\nnamespace: t\ntasks:\n  - id: each\n    \
+              type: io.kestra.plugin.core.flow.Loop\n    values: '[\"LOOPVAL\"]'\n    tasks:\n      \
+              - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+              namespace: t\n        flowId: gcitem\n";
+    start_execution(&pool, ws, None, li, serde_json::json!({}))
+        .await
+        .expect("start the loop-over-subflow");
+    settle_everything(&pool, &reg).await;
+    let leaked: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM workflow.executions WHERE flow_key = 'gcitem' \
+          ORDER BY created_at, id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the item-reading children");
+    assert_eq!(
+        leaked.len(),
+        1,
+        "one iteration, one subflow child: {leaked:?}"
+    );
+    assert_eq!(
+        (
+            rendered_of(&pool, leaked[0].0, "cond").await,
+            leaked[0].1.as_str()
+        ),
+        (None, "FAILED"),
+        "a subflow child has no `item`: the render fails and nothing is stored. \
+         Without the `inheriting` gate on the `levels` push, the widened walk \
+         would hand this child `LOOPVAL` off the iteration that spawned its \
+         CALLER -- a value from another execution's scope, rendered silently. \
+         (egret's side is what is asserted here; the artifact's answer to a \
+         subflow child reading `{{ item.value }}` is unmeasured, and the \
+         alternative is certainly wrong either way, since a subflow child's \
+         values arrive as `inputs:`)"
+    );
+}
