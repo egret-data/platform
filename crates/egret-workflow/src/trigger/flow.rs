@@ -5,8 +5,23 @@
 // kestra: core/src/main/java/io/kestra/core/services/FlowService.java
 // kestra: core/src/main/java/io/kestra/core/utils/TruthUtils.java
 
-//! The **flow trigger** — `io.kestra.plugin.core.trigger.Flow`: a flow that
+//! The **flow trigger's window-free arm** —
+//! `io.kestra.plugin.core.trigger.Flow` with **no `dependsOn`**: a flow that
 //! starts because *another* execution reached a state.
+//!
+//! # This is not "the flow trigger", and the name says so
+//!
+//! Kestra splits the plugin in two on `ListUtils.isEmpty(getDependsOn())`, and
+//! the two arms are each other's negation — `computeExecutionsFromFlowTriggerConditions`
+//! decides from **one execution**, `computeExecutionsFromFlowTriggerDependsOn`
+//! accumulates a **`MultipleConditionWindow`** across many. This module is the
+//! first arm only, which is why the type is called
+//! [`WindowFreeFlowTrigger`] rather than anything that reads like the whole
+//! plugin: the limitation is then repeated at every call site instead of
+//! living in a doc nobody re-reads. **Twenty of the corpus's twenty-one
+//! declarations take the arm this module does not implement**, and
+//! `tests::the_corpus_flow_triggers_split_twenty_to_one` is the acceptance
+//! criterion that fails the day the window lands.
 //!
 //! # The ratchet did not move, and could not have
 //!
@@ -27,11 +42,28 @@
 //! **A `Flow`-fired execution carries `trigger_execution_id` and `parentId`
 //! NULL.** Measured on the pinned artifact
 //! (`kestra/kestra@sha256:28f59bf1…`), not inherited from migration `0138`'s
-//! comment: across **three independent probe rounds** — 14 trigger-fired
-//! executions in round 1, 189 in the depth chain, 8 in round 2, **211 in
-//! total** — every single one came back with `parentId` absent/`null` and with
-//! `trigger.variables.executionId` naming the execution that caused it. One
-//! example verbatim, `t6.listen/l-success` fired by `t6.probe/prod-ok`:
+//! comment:
+//!
+//! | round | executions | manual | trigger-fired | `parentId` |
+//! |---|---|---|---|---|
+//! | probe round 1 (18 listener flows) | 19 | 5 | 14 | `null` × 14 |
+//! | probe round 2 (twin / self / disabled flow) | 9 | 2 | 7 | `null` × 7 |
+//! | depth chains (three runs: →`d16`, →`d70`, →`d100`) | 189 | 3 | 186 | `null` × 186 |
+//! | fix round 1 correlation chain (`c0`→`c3`) | 4 | 1 | 3 | `null` × 3 |
+//! | **total** | **221** | **11** | **210** | **`null` × 210** |
+//!
+//! Every one of the 210 came back with `parentId` absent/`null` and with
+//! `trigger.variables.executionId` naming the execution that caused it.
+//!
+//! The depth row's arithmetic closes against the per-flow counts rather than
+//! being asserted: 17 + 71 + 101 = 189, and `d0` is the only flow that appears
+//! in all three runs. **Fix round 1 corrected this from "211"** — two loose
+//! figures that happened to nearly cancel: the depth chains' 189 counted the
+//! three manual `d0` starts as trigger-fired, and round 2's 8 was eyeballed
+//! where it should have been 7. Same rule as the corpus count below, caught the
+//! same way and one round later.
+//!
+//! One example verbatim, `t6.listen/l-success` fired by `t6.probe/prod-ok`:
 //!
 //! ```text
 //! "parentId": null,
@@ -48,6 +80,45 @@
 //! zero `Subflow` children, and `workflow_executions_one_link_kind` (0138)
 //! makes exactly one link kind representable per row. A flow trigger linked the
 //! other way would turn Task 3's twelve banks into `spawned` mismatches.
+//!
+//! ## `trigger_execution_id` is the only link in the SCHEMA, not the only
+//! ## reference on the artifact
+//!
+//! Fix round 1: an earlier draft of this file said `trigger_execution_id` was
+//! *"the only link this execution has"*, and that is false of Kestra. The child
+//! also carries a **`system.correlationId` label**, present on **14 of 14**
+//! fired executions in probe round 1 and equal to the source's id in all
+//! fourteen.
+//!
+//! **What that measurement cannot tell you, and this is the trap it walks
+//! into:** every source in round 1 was top-level, so "the source's id" and "the
+//! source's own `system.correlationId`" coincide on all fourteen rows. The
+//! bytecode separates them — `lambda$evaluate$2` filters the *source's* label
+//! list for `system.correlationId` and copies that **label** across verbatim.
+//!
+//! Settled live in fix round 1 with a four-deep chain, and the two really do
+//! diverge:
+//!
+//! ```text
+//! flow  execution id            trigger.…executionId          system.correlationId
+//! c0    3v0vVBSXCK2kdCSP7zYW56  (started by hand)             3v0vVBSXCK2kdCSP7zYW56
+//! c1    nQM2V2qD4oPnsVEIU0riz   3v0vVBSXCK2kdCSP7zYW56  (c0)  3v0vVBSXCK2kdCSP7zYW56
+//! c2    1abGJbHjAdjdnbVDfyVPAO  nQM2V2qD4oPnsVEIU0riz   (c1)  3v0vVBSXCK2kdCSP7zYW56
+//! c3    7VUqNzQzzGwXDsQhEdl9rz  1abGJbHjAdjdnbVDfyVPAO  (c2)  3v0vVBSXCK2kdCSP7zYW56
+//! ```
+//!
+//! **The link is the immediate cause; the correlationId is the root.** So
+//! "`system.correlationId` = the source execution's id" is true of every
+//! top-level source and false of the class — which is why it is recorded here
+//! as a four-row table rather than as a sentence. See
+//! [`FiredExecution::correlation_id`].
+//!
+//! egret does not have this column. `render.rs` walks `parent_execution_id`
+//! only, so the seam that wires this module will render the child's own id
+//! where Kestra renders the root's. **That is a forward-looking gap with an
+//! owner (the wiring seam), not a defect in this file** — but the sentence that
+//! claimed otherwise was a completeness claim nothing supported, which is why
+//! it is written down here rather than quietly corrected.
 //!
 //! # The filter, in the artifact's own order
 //!
@@ -68,8 +139,10 @@
 //! 170: conditionService.isValid(trigger, flow, runContext)   -- the `when`
 //! ```
 //!
-//! [`evaluate`] is that list, in that order, with one check moved to the front
-//! (see [`Refusal::EntryState`]) and two that cannot arise here dropped:
+//! [`evaluate`] is that list, in that order, with **two egret-own refusals in
+//! front of it** — [`Refusal::DifferentWorkspace`] and [`Refusal::EntryState`],
+//! both narrowings, both of which Kestra performs upstream rather than in this
+//! filter — and two checks that cannot arise here dropped:
 //! `FlowWithException` has no egret equivalent, and a trigger reaching
 //! [`evaluate`] is by construction one the flow declares.
 //!
@@ -78,7 +151,7 @@
 //! The oracle cannot see a trigger that fires where Kestra would not. Three
 //! things are therefore refused rather than guessed:
 //!
-//! 1. **`dependsOn` is refused at [`FlowListener::resolve`]**
+//! 1. **`dependsOn` is refused at [`WindowFreeFlowTrigger::resolve`]**
 //!    ([`FlowTriggerError::UnsupportedDependsOn`]). Kestra routes a trigger
 //!    with a non-empty `dependsOn` down a *different* method
 //!    (`computeExecutionsFromFlowTriggerDependsOn`) which evaluates a
@@ -105,12 +178,35 @@
 //!    *does* declare a `when` is refused
 //!    ([`Refusal::WhenNotRendered`]) rather than accepted.
 //!
+//! # `window:` is NOT refused, and the analogy that says it should be fails
+//!
+//! Fix round 1 considered refusing a declared `window:` by analogy with Task
+//! 5's `lateMaximumDelay` — a modelled-away field that silently changed the
+//! behaviour of the path that task implemented. **Measured, the analogy does
+//! not hold, and the difference is the whole of it:**
+//!
+//! | | `lateMaximumDelay` (Task 5) | `window` (here) |
+//! |---|---|---|
+//! | consumed on the arm that ships? | **yes** — `Schedule.eval`'s own path | **no** |
+//! | semantic call sites | `Schedule.nextEvaluationDate` / `eval` | **none** |
+//!
+//! All **four** `getWindow()` call sites inside `Flow` are Lombok-generated —
+//! `toString` (offset 26), `equals` (187, 193) and `hashCode` (114) — plus the
+//! getter's own declaration. Jar-wide, only `TimeWindow` and
+//! `TimeWindowValidator` name it, and the value reaches `MultipleCondition`
+//! solely through `dependsOnAsMultipleCondition()`, i.e. **only on the arm
+//! [`WindowFreeFlowTrigger::resolve`] already refuses**. So a `window:` on a
+//! trigger this module accepts is inert on the artifact too, and refusing it
+//! would refuse a flow Kestra runs — over-*refusal* manufactured out of a
+//! near-miss analogy. Recorded because this is the kind of suggestion that gets
+//! re-proposed.
+//!
 //! # Measured, derived, or chosen
 //!
 //! Every general sentence in this file is one of the three, and the chosen ones
 //! say so. **The chosen decisions:**
 //!
-//! 1. The name [`FlowListener`] — `models::FlowTrigger` already holds the wire
+//! 1. The name [`WindowFreeFlowTrigger`] — `models::FlowTrigger` already holds the wire
 //!    name, and two `FlowTrigger`s in one crate is a footgun.
 //! 2. [`evaluate`] being pure over `(listener, flow, source, when, max_depth)`,
 //!    mirroring [`super::tick`] and `executor::advance()`. Kestra's shape is a
@@ -129,6 +225,18 @@
 //!    call [`super::ScheduledExecution`] made.
 //! 7. `max_depth` being a parameter with [`DEFAULT_MAX_EXECUTION_DEPTH`] beside
 //!    it rather than a hard-coded constant.
+//! 8. [`Refusal::DifferentWorkspace`] — **egret's, not Kestra's.** Kestra's
+//!    candidate list is already tenant-scoped before `computeFlowTriggers` sees
+//!    it (`withFlowTriggersOnly` reads one tenant's repository), so the artifact
+//!    has no such check to copy. This repository has shipped the other answer
+//!    once already — five id columns that named a row in another workspace, one
+//!    of which (`chart_id`) allowed a cross-workspace read — and 0138's
+//!    composite foreign keys exist because of it. A `(namespace, flowId)` pair
+//!    with no workspace is that same shape, so the identity pair carries one
+//!    and a mismatch refuses.
+//! 9. [`FiredExecution::labels`] carrying the trigger's declared `labels:`
+//!    **unrendered**, rather than dropping them as the first draft did. See
+//!    that field.
 //!
 //! Two claims that read like measurements and are **derived**:
 //! `Refusal::FlowDraft` and `Refusal::NotNormalKind` come from the bytecode
@@ -165,7 +273,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::executor::is_truthy;
-use crate::models::{ExecutionKind, State, Trigger, TriggerKind};
+use crate::models::{ExecutionKind, Label, State, Trigger, TriggerKind};
 
 /// `kestra.execution.depth.max-depth`.
 ///
@@ -178,7 +286,7 @@ use crate::models::{ExecutionKind, State, Trigger, TriggerKind};
 /// **`d101` was never created** — nor were `d102`…`d105`.
 pub const DEFAULT_MAX_EXECUTION_DEPTH: u32 = 100;
 
-/// Why a `Trigger` could not be resolved into a [`FlowListener`].
+/// Why a `Trigger` could not be resolved into a [`WindowFreeFlowTrigger`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowTriggerError {
     /// Not an `io.kestra.plugin.core.trigger.Flow` at all.
@@ -207,12 +315,13 @@ impl std::error::Error for FlowTriggerError {}
 /// A `io.kestra.plugin.core.trigger.Flow` resolved far enough to be evaluated
 /// against another execution.
 ///
-/// **Named `FlowListener` rather than `FlowTrigger`, and that is chosen:**
+/// **Named `WindowFreeFlowTrigger` rather than `FlowTrigger`, and that is chosen:**
 /// [`crate::models::FlowTrigger`] already carries the wire identity, and one
 /// crate holding two types called `FlowTrigger` is a mistake waiting for its
 /// first `use`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowListener {
+// No `Eq`: this holds `models::Label`, which derives `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFreeFlowTrigger {
     pub trigger_id: String,
     /// `Flow.states`, defaulted by `models::FlowTrigger`'s
     /// `default_flow_trigger_states()` to `terminatedTypes() + [PAUSED]`.
@@ -232,9 +341,29 @@ pub struct FlowListener {
     /// (`Flow.evaluate`'s catch block, offsets 435-488). Nothing here can do
     /// that without the render surface, so nothing here tries.
     inputs: BTreeMap<String, serde_json::Value>,
+    /// `AbstractTrigger.labels`, **unrendered**.
+    ///
+    /// **Fix round 1: the first draft dropped this field on the floor**, which
+    /// is the `lateMaximumDelay` failure with a new name — `models::Trigger`
+    /// *models* `labels`, so a flow declaring them parsed, resolved and fired
+    /// without them and nothing said so. `Flow.evaluate` calls
+    /// `LabelService.fromTrigger(runContext, this, Map.of("trigger", vars))`,
+    /// which iterates `trigger.getLabels()` minus the `system.` ones, **renders
+    /// each value** through the run context, drops the ones that render to
+    /// null, and attaches the rest to the execution it creates. The rendering
+    /// is the caller's for the same reason `when` and `inputs` are; carrying
+    /// them verbatim is what keeps the seam able to do it at all.
+    ///
+    /// **Measured, not merely read off the bytecode:** the fix-round-1 chain
+    /// declared a label whose value was an expression over the trigger context
+    /// on each of `c1`/`c2`/`c3`, and the fired executions came back carrying
+    /// `declared: c1-c0`, `declared: c2-c1`, `declared: c3-c2`. So the values
+    /// are real, they render against the **source's** context exactly as `when`
+    /// does, and a dropped `labels:` loses them from the execution.
+    labels: Vec<Label>,
 }
 
-impl FlowListener {
+impl WindowFreeFlowTrigger {
     /// Resolves a parsed `Trigger`, or says why it cannot be evaluated.
     pub fn resolve(trigger: &Trigger) -> Result<Self, FlowTriggerError> {
         let TriggerKind::Flow(spec) = &trigger.kind else {
@@ -262,6 +391,7 @@ impl FlowListener {
                 .as_ref()
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
+            labels: trigger.labels.clone(),
         })
     }
 
@@ -285,6 +415,10 @@ impl FlowListener {
 /// The flow that DECLARES the trigger — the one that would start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListeningFlow {
+    /// **Not Kestra's**, and see [`Refusal::DifferentWorkspace`]: a
+    /// `(namespace, flowId)` pair with no workspace is the shape this
+    /// repository has already leaked through once.
+    pub workspace_id: Uuid,
     pub namespace: String,
     pub flow_id: String,
     /// `Flow.isDisabled()`. **Measured:** a listener flow carrying
@@ -301,6 +435,9 @@ pub struct ListeningFlow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceExecution {
     pub id: Uuid,
+    /// The workspace the source execution belongs to. See
+    /// [`Refusal::DifferentWorkspace`].
+    pub workspace_id: Uuid,
     pub namespace: String,
     pub flow_id: String,
     /// The transition being evaluated, i.e. `execution.getState().getCurrent()`
@@ -317,7 +454,7 @@ pub struct SourceExecution {
     pub execution_depth: Option<u32>,
 }
 
-/// What the caller did with [`FlowListener::when_source`].
+/// What the caller did with [`WindowFreeFlowTrigger::when_source`].
 ///
 /// Three variants because `ConditionService.isNotValid` has three outcomes and
 /// they are not interchangeable: a rendered string is tested, a render failure
@@ -340,6 +477,21 @@ pub enum WhenVerdict {
 /// returns an empty list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
+    /// The listening flow and the source execution are in different
+    /// workspaces.
+    ///
+    /// **Chosen, egret's own, and first — Kestra has no such check because it
+    /// never needs one.** `DefaultExecutor` feeds `computeFlowTriggers` from
+    /// `withFlowTriggersOnly(…)` over one tenant's flow repository, so a
+    /// cross-tenant pair is already unrepresentable by the time the filter
+    /// runs. egret's caller has no such guarantee yet, and this repository has
+    /// paid for the optimistic answer once: five id columns that could name a
+    /// row in another workspace, one of which allowed a cross-workspace read.
+    /// Migration 0138's foreign keys are composite `(id, workspace_id)` for
+    /// exactly that reason, so a writer that ignored this would be refused by
+    /// the database — but only *after* this function had said `Fired`, which is
+    /// the wrong place to find out.
+    DifferentWorkspace,
     /// The transition offered is `CREATED`.
     ///
     /// **Chosen, and it is a narrowing.** Kestra never asks the filter about an
@@ -413,14 +565,17 @@ pub enum Refusal {
 }
 
 /// The outcome of one `(trigger, execution)` pair.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `Eq`: `FiredExecution` holds `models::Label`. See there.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     Fired(Box<FiredExecution>),
     Refused(Refusal),
 }
 
 /// The execution a fired flow trigger asks for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `Eq`: `models::Label` derives `PartialEq` only, and a `FiredExecution`
+// carries the trigger's declared labels.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FiredExecution {
     /// The LISTENING flow — the one that runs.
     pub namespace: String,
@@ -432,8 +587,11 @@ pub struct FiredExecution {
     pub trigger_execution_id: Uuid,
     /// `metadata.executionDepth` for the new row: the source's depth plus one.
     pub execution_depth: u32,
-    /// `Flow.inputs`, **unrendered** — see [`FlowListener::inputs`].
+    /// `Flow.inputs`, **unrendered** — see [`WindowFreeFlowTrigger::inputs`].
     pub inputs: BTreeMap<String, serde_json::Value>,
+    /// The trigger's declared `labels:`, **unrendered** — see
+    /// [`WindowFreeFlowTrigger::labels`].
+    pub labels: Vec<Label>,
 }
 
 impl FiredExecution {
@@ -444,6 +602,26 @@ impl FiredExecution {
     /// appear in egret's trace where the golden has nothing.
     /// `workflow_executions_one_link_kind` refuses the row that sets both.
     pub const fn parent_execution_id(&self) -> Option<Uuid> {
+        None
+    }
+
+    /// The `system.correlationId` label Kestra attaches to the child.
+    ///
+    /// **This is NOT `trigger_execution_id`, and the difference only shows in a
+    /// chain.** `Flow.evaluate` copies the *source's own* `system.correlationId`
+    /// label across verbatim (`lambda$evaluate$2`), so the child inherits the
+    /// **root** of the chain rather than its immediate cause. Probe round 1
+    /// could not tell the two apart — all fourteen of its sources were
+    /// top-level, where they coincide. A four-deep chain (fix round 1) does:
+    /// `c1`/`c2`/`c3` each carry `trigger.variables.executionId` = their
+    /// immediate cause and `system.correlationId` = **`c0`**.
+    ///
+    /// It returns `None` because **egret has no such column**; the value is the
+    /// source's label, which this seam is not given. The wiring seam owns it,
+    /// and until it does, egret's `render.rs` (which walks
+    /// `parent_execution_id` only) will render the child's own id where Kestra
+    /// renders the root's.
+    pub const fn correlation_id(&self) -> Option<Uuid> {
         None
     }
 
@@ -466,12 +644,18 @@ impl FiredExecution {
 /// matters because the [`Refusal`] returned is the *first* reason, not an
 /// arbitrary one.
 pub fn evaluate(
-    listener: &FlowListener,
+    listener: &WindowFreeFlowTrigger,
     flow: &ListeningFlow,
     source: &SourceExecution,
     when: &WhenVerdict,
     max_depth: u32,
 ) -> Outcome {
+    // egret's own, and in front of the artifact's list because Kestra achieves
+    // it upstream: its candidate flows come from one tenant's repository.
+    if flow.workspace_id != source.workspace_id {
+        return Outcome::Refused(Refusal::DifferentWorkspace);
+    }
+
     // Moved to the front, and it is a REFUSAL Kestra performs by never asking.
     // See `Refusal::EntryState`.
     if source.state == State::Created {
@@ -545,25 +729,34 @@ pub fn evaluate(
         trigger_execution_id: source.id,
         execution_depth: depth,
         inputs: listener.inputs.clone(),
+        labels: listener.labels.clone(),
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate, FiredExecution, FlowListener, FlowTriggerError, ListeningFlow, Outcome, Refusal,
-        SourceExecution, WhenVerdict, DEFAULT_MAX_EXECUTION_DEPTH,
+        evaluate, FiredExecution, FlowTriggerError, ListeningFlow, Outcome, Refusal,
+        SourceExecution, WhenVerdict, WindowFreeFlowTrigger, DEFAULT_MAX_EXECUTION_DEPTH,
     };
     use crate::models::{ExecutionKind, State, Trigger};
     use uuid::Uuid;
+
+    fn ws() -> Uuid {
+        Uuid::parse_str("99999999-8888-7777-6666-555555555555").unwrap()
+    }
+
+    fn other_ws() -> Uuid {
+        Uuid::parse_str("00000000-8888-7777-6666-555555555555").unwrap()
+    }
 
     fn trigger(yaml: &str) -> Trigger {
         serde_norway::from_str(yaml).unwrap_or_else(|e| panic!("bad fixture trigger: {e}\n{yaml}"))
     }
 
     /// A flow trigger with no `states`, no `when`, no `dependsOn`.
-    fn plain() -> FlowListener {
-        FlowListener::resolve(&trigger(
+    fn plain() -> WindowFreeFlowTrigger {
+        WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n",
         ))
         .expect("plain flow trigger resolves")
@@ -571,6 +764,7 @@ mod tests {
 
     fn listening() -> ListeningFlow {
         ListeningFlow {
+            workspace_id: ws(),
             namespace: "t6.listen".into(),
             flow_id: "listener".into(),
             disabled: false,
@@ -585,6 +779,7 @@ mod tests {
     fn source(state: State) -> SourceExecution {
         SourceExecution {
             id: src_id(),
+            workspace_id: ws(),
             namespace: "t6.probe".into(),
             flow_id: "producer".into(),
             state,
@@ -597,7 +792,7 @@ mod tests {
     /// The fixtures below that declare no `when:` key still carry Kestra's
     /// default of `"true"`, so this renders it -- passing `NotDeclared` for
     /// them would exercise `Refusal::WhenNotRendered` and nothing else.
-    fn run(l: &FlowListener, f: &ListeningFlow, s: &SourceExecution) -> Outcome {
+    fn run(l: &WindowFreeFlowTrigger, f: &ListeningFlow, s: &SourceExecution) -> Outcome {
         let when = match l.when_source() {
             None => WhenVerdict::NotDeclared,
             Some(src) => WhenVerdict::Rendered(src.to_string()),
@@ -635,7 +830,7 @@ mod tests {
     /// source, one field different.
     #[test]
     fn a_terminal_state_that_is_not_listed_does_not_fire() {
-        let l = FlowListener::resolve(&trigger(
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [SUCCESS]\n",
         ))
         .unwrap();
@@ -695,7 +890,7 @@ mod tests {
                 "{state:?} was chosen for this table because it is NOT terminal"
             );
             let wire = format!("{state:?}").to_uppercase();
-            let l = FlowListener::resolve(&trigger(&format!(
+            let l = WindowFreeFlowTrigger::resolve(&trigger(&format!(
                 "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [{wire}]\n"
             )))
             .unwrap();
@@ -801,7 +996,7 @@ mod tests {
     /// call false.
     #[test]
     fn the_when_condition_refuses_exactly_kestras_four_falsy_strings() {
-        let l = FlowListener::resolve(&trigger(
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [SUCCESS]\nwhen: \"{{ x }}\"\n",
         ))
         .unwrap();
@@ -850,7 +1045,7 @@ mod tests {
     /// have fired. It did not.
     #[test]
     fn a_when_the_caller_could_not_render_refuses_rather_than_firing() {
-        let l = FlowListener::resolve(&trigger(
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [SUCCESS]\nwhen: \"x{{ missing.field }}\"\n",
         ))
         .unwrap();
@@ -893,7 +1088,7 @@ mod tests {
         let s = source(State::Success);
 
         // `when: null` -> `models::Trigger` parses to `None`.
-        let absent = FlowListener::resolve(&trigger(
+        let absent = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [SUCCESS]\nwhen: null\n",
         ))
         .unwrap();
@@ -912,7 +1107,7 @@ mod tests {
         // A trigger with NO `when:` key at all takes Kestra's default of
         // `"true"`, which is a declared condition as far as this seam is
         // concerned -- so `NotDeclared` is a caller bug.
-        let defaulted = FlowListener::resolve(&trigger(
+        let defaulted = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [SUCCESS]\n",
         ))
         .unwrap();
@@ -956,6 +1151,7 @@ mod tests {
         let s = source(State::Success);
 
         let same_pair = ListeningFlow {
+            workspace_id: s.workspace_id,
             namespace: s.namespace.clone(),
             flow_id: s.flow_id.clone(),
             disabled: false,
@@ -990,7 +1186,7 @@ mod tests {
     fn disabled_refuses_on_both_the_trigger_and_the_flow() {
         let s = source(State::Success);
 
-        let off = FlowListener::resolve(&trigger(
+        let off = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\ndisabled: true\n",
         ))
         .unwrap();
@@ -1085,7 +1281,7 @@ mod tests {
     /// rather than trusting the caller.
     #[test]
     fn the_entry_state_is_refused_even_when_it_is_listed() {
-        let l = FlowListener::resolve(&trigger(
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\nstates: [CREATED, SUCCESS]\n",
         ))
         .unwrap();
@@ -1119,7 +1315,7 @@ mod tests {
              dependsOn:\n  - namespace: t6.probe\n",
         );
         assert_eq!(
-            FlowListener::resolve(&one),
+            WindowFreeFlowTrigger::resolve(&one),
             Err(FlowTriggerError::UnsupportedDependsOn(1))
         );
 
@@ -1128,17 +1324,17 @@ mod tests {
              dependsOn:\n  - namespace: t6.probe\n  - flowId: other\n",
         );
         assert_eq!(
-            FlowListener::resolve(&two),
+            WindowFreeFlowTrigger::resolve(&two),
             Err(FlowTriggerError::UnsupportedDependsOn(2))
         );
 
         let empty =
             trigger("id: listen\ntype: io.kestra.plugin.core.trigger.Flow\ndependsOn: []\n");
         assert!(
-            FlowListener::resolve(&empty).is_ok(),
+            WindowFreeFlowTrigger::resolve(&empty).is_ok(),
             "`ListUtils.isEmpty` is what Kestra branches on, not `!= null`"
         );
-        assert!(FlowListener::resolve(&trigger(
+        assert!(WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n"
         ))
         .is_ok());
@@ -1189,7 +1385,7 @@ mod tests {
                 }
                 declares = true;
                 let name = format!("{}/{}", flow.id, t.id);
-                match FlowListener::resolve(t) {
+                match WindowFreeFlowTrigger::resolve(t) {
                     Ok(_) => resolved.push(name),
                     Err(FlowTriggerError::UnsupportedDependsOn(_)) => refused.push(name),
                     Err(e) => panic!("{name}: unexpected {e}"),
@@ -1214,13 +1410,13 @@ mod tests {
     #[test]
     fn a_schedule_is_not_a_flow_trigger() {
         assert_eq!(
-            FlowListener::resolve(&trigger(
+            WindowFreeFlowTrigger::resolve(&trigger(
                 "id: t\ntype: io.kestra.plugin.core.trigger.Schedule\ncron: \"0 2 * * *\"\n"
             )),
             Err(FlowTriggerError::NotAFlowTrigger)
         );
         // ... and the inverse, so this is not measuring the fixture loader.
-        assert!(FlowListener::resolve(&trigger(
+        assert!(WindowFreeFlowTrigger::resolve(&trigger(
             "id: t\ntype: io.kestra.plugin.core.trigger.Flow\n"
         ))
         .is_ok());
@@ -1233,9 +1429,10 @@ mod tests {
     /// **The fired execution is linked by `trigger_execution_id` and by
     /// nothing else.**
     ///
-    /// Measured across 211 trigger-fired executions on the artifact, in three
-    /// independent rounds: `parentId` was `null` on every one and
-    /// `trigger.variables.executionId` named the source. Migration 0138's
+    /// Measured across **210** trigger-fired executions on the artifact, in
+    /// four independent rounds (the table in this module's doc): `parentId` was
+    /// `null` on every one and `trigger.variables.executionId` named the
+    /// immediate source. Migration 0138's
     /// `workflow_executions_one_link_kind` is what makes the wrong combination
     /// unrepresentable in the database; this is what makes it unrepresentable
     /// in the value a writer binds from.
@@ -1255,7 +1452,7 @@ mod tests {
     /// `Flow.inputs` are carried unrendered, exactly as declared.
     #[test]
     fn the_triggers_inputs_are_carried_unrendered() {
-        let l = FlowListener::resolve(&trigger(
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n\
              inputs:\n  from-parent: \"{{ outputs.only.value }}\"\n  n: 3\n",
         ))
@@ -1270,143 +1467,264 @@ mod tests {
         assert_eq!(e.inputs.get("n").and_then(|v| v.as_i64()), Some(3));
     }
 
-    /// The refusal reported is the FIRST reason in Kestra's order, not an
+    /// The refusal reported is the FIRST reason in the artifact's order, not an
     /// arbitrary one.
     ///
-    /// Built by stacking every refusal onto one input and peeling them off one
-    /// at a time: each step must report exactly the next reason, which is a
-    /// stronger statement than any single-refusal test and is the only thing
-    /// that pins the *order*.
+    /// A ladder, not a list: every refusal is violated at once, then **exactly
+    /// one field changes per step**, and each step must report the next reason
+    /// down. That is what pins the *order* — a step that changed two fields
+    /// could be explained by either, and fix round 1 found two such steps in
+    /// the first draft (`TriggerDisabled -> StateNotListed` changed the
+    /// listener *and* the state; `DepthExceeded -> TriggerDisabled` swapped the
+    /// whole flow and source at once). Every adjacency below is now
+    /// single-field, and at each rung every later check is still violated, so
+    /// the answer discriminates against all of them and not merely against its
+    /// neighbour.
     #[test]
     fn the_refusals_are_reported_in_the_artifacts_order() {
-        let disabled_listener = FlowListener::resolve(&trigger(
+        let disabled_listener = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n\
              states: [SUCCESS]\ndisabled: true\nwhen: \"{{ x }}\"\n",
         ))
         .unwrap();
-        let enabled_listener = FlowListener::resolve(&trigger(
+        let enabled_listener = WindowFreeFlowTrigger::resolve(&trigger(
             "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n\
              states: [SUCCESS]\nwhen: \"{{ x }}\"\n",
         ))
         .unwrap();
 
-        let worst_flow = ListeningFlow {
+        // Everything violated at once.
+        let mut listener = &disabled_listener;
+        let mut flow = ListeningFlow {
+            workspace_id: other_ws(),
             namespace: "t6.probe".into(),
             flow_id: "producer".into(),
             disabled: true,
             draft: true,
         };
-        let worst_source = SourceExecution {
+        let mut src = SourceExecution {
+            id: src_id(),
+            workspace_id: ws(),
+            namespace: "t6.probe".into(),
+            flow_id: "producer".into(),
             state: State::Created,
             kind: Some(ExecutionKind::Test),
             execution_depth: Some(DEFAULT_MAX_EXECUTION_DEPTH),
-            ..source(State::Created)
         };
+        let mut when = WhenVerdict::Rendered("0".into());
 
-        // Peel one layer per step. The expected reason at each step is the
-        // NEXT one in the bytecode's order.
-        let steps: Vec<(Refusal, ListeningFlow, SourceExecution, &FlowListener)> = vec![
-            (
-                Refusal::EntryState,
-                worst_flow.clone(),
-                worst_source.clone(),
-                &disabled_listener,
-            ),
-            (
-                Refusal::SameFlow,
-                worst_flow.clone(),
-                SourceExecution {
-                    state: State::Success,
-                    ..worst_source.clone()
-                },
-                &disabled_listener,
-            ),
-            (
-                Refusal::NotNormalKind(ExecutionKind::Test),
-                ListeningFlow {
-                    flow_id: "listener".into(),
-                    ..worst_flow.clone()
-                },
-                SourceExecution {
-                    state: State::Success,
-                    ..worst_source.clone()
-                },
-                &disabled_listener,
-            ),
-            (
-                Refusal::FlowDisabled,
-                ListeningFlow {
-                    flow_id: "listener".into(),
-                    ..worst_flow.clone()
-                },
-                SourceExecution {
-                    state: State::Success,
-                    kind: None,
-                    ..worst_source.clone()
-                },
-                &disabled_listener,
-            ),
-            (
-                Refusal::FlowDraft,
-                ListeningFlow {
-                    flow_id: "listener".into(),
-                    disabled: false,
-                    ..worst_flow.clone()
-                },
-                SourceExecution {
-                    state: State::Success,
-                    kind: None,
-                    ..worst_source.clone()
-                },
-                &disabled_listener,
-            ),
-            (
-                Refusal::DepthExceeded {
-                    depth: DEFAULT_MAX_EXECUTION_DEPTH + 1,
-                    max: DEFAULT_MAX_EXECUTION_DEPTH,
-                },
-                ListeningFlow {
-                    flow_id: "listener".into(),
-                    disabled: false,
-                    draft: false,
-                    ..worst_flow.clone()
-                },
-                SourceExecution {
-                    state: State::Success,
-                    kind: None,
-                    ..worst_source.clone()
-                },
-                &disabled_listener,
-            ),
-            (
-                Refusal::TriggerDisabled,
-                listening(),
-                source(State::Success),
-                &disabled_listener,
-            ),
-            (
-                Refusal::StateNotListed(State::Warning),
-                listening(),
-                source(State::Warning),
-                &enabled_listener,
-            ),
-            (
-                Refusal::WhenFalsy("0".into()),
-                listening(),
-                source(State::Success),
-                &enabled_listener,
-            ),
-        ];
-
-        for (expected, flow, src, listener) in steps {
-            let got = evaluate(
-                listener,
-                &flow,
-                &src,
-                &WhenVerdict::Rendered("0".into()),
-                DEFAULT_MAX_EXECUTION_DEPTH,
-            );
-            assert_eq!(refusal(got), expected, "flow={flow:?} source={src:?}");
+        macro_rules! step {
+            ($expected:expr) => {
+                assert_eq!(
+                    refusal(evaluate(
+                        listener,
+                        &flow,
+                        &src,
+                        &when,
+                        DEFAULT_MAX_EXECUTION_DEPTH
+                    )),
+                    $expected,
+                    "flow={:?} source={:?}",
+                    flow,
+                    src
+                );
+            };
         }
+
+        step!(Refusal::DifferentWorkspace);
+        flow.workspace_id = ws();
+        step!(Refusal::EntryState);
+        // WARNING, not SUCCESS: the state stays unlisted so `StateNotListed`
+        // is still pending and every rung below still discriminates.
+        src.state = State::Warning;
+        step!(Refusal::SameFlow);
+        flow.flow_id = "listener".into();
+        step!(Refusal::NotNormalKind(ExecutionKind::Test));
+        src.kind = None;
+        step!(Refusal::FlowDisabled);
+        flow.disabled = false;
+        step!(Refusal::FlowDraft);
+        flow.draft = false;
+        step!(Refusal::DepthExceeded {
+            depth: DEFAULT_MAX_EXECUTION_DEPTH + 1,
+            max: DEFAULT_MAX_EXECUTION_DEPTH,
+        });
+        src.execution_depth = None;
+        step!(Refusal::TriggerDisabled);
+        listener = &enabled_listener;
+        step!(Refusal::StateNotListed(State::Warning));
+        src.state = State::Success;
+        step!(Refusal::WhenFalsy("0".into()));
+        when = WhenVerdict::Rendered("true".into());
+
+        // ... and with the last one lifted it fires, so the ladder was a ladder
+        // and not a wall.
+        assert!(matches!(
+            evaluate(listener, &flow, &src, &when, DEFAULT_MAX_EXECUTION_DEPTH),
+            Outcome::Fired(_)
+        ));
+    }
+
+    /// **`max_depth` is the argument, and nothing before fix round 1 said so.**
+    ///
+    /// Every other depth assertion in this file passes
+    /// [`DEFAULT_MAX_EXECUTION_DEPTH`], so an implementation that ignored the
+    /// parameter and compared against the literal `100` was indistinguishable
+    /// from this one — the reviewer's mutation `depth > max_depth` →
+    /// `depth > 100` **survived all seventeen tests**. The lesson generalises
+    /// past the fix: *a two-sided pair on a comparison says nothing about where
+    /// its operand came from.* The boundary was pinned; the boundary's **input**
+    /// was not.
+    ///
+    /// So this drives the boundary with values the default can never produce,
+    /// two-sided at each, and then asserts the verdict **moves** when only
+    /// `max_depth` changes.
+    #[test]
+    fn the_depth_boundary_follows_the_argument_and_not_a_constant() {
+        let l = plain();
+        let f = listening();
+        let when = WhenVerdict::Rendered("true".into());
+
+        for max in [1u32, 3, 7, DEFAULT_MAX_EXECUTION_DEPTH + 41] {
+            assert_ne!(
+                max, DEFAULT_MAX_EXECUTION_DEPTH,
+                "a row equal to the default cannot tell the two apart"
+            );
+
+            // The rung at `max` runs ...
+            let at = SourceExecution {
+                execution_depth: Some(max - 1),
+                ..source(State::Success)
+            };
+            assert_eq!(
+                fired(evaluate(&l, &f, &at, &when, max)).execution_depth,
+                max,
+                "max_depth={max}: the boundary itself must fire"
+            );
+
+            // ... and the next one does not.
+            let past = SourceExecution {
+                execution_depth: Some(max),
+                ..source(State::Success)
+            };
+            assert_eq!(
+                refusal(evaluate(&l, &f, &past, &when, max)),
+                Refusal::DepthExceeded {
+                    depth: max + 1,
+                    max
+                },
+                "max_depth={max}: one past the boundary must refuse"
+            );
+
+            // The SAME source judged under the default gives the OTHER answer
+            // whenever the two bounds disagree. This is the assertion the old
+            // tests could not make, and the one the surviving mutation dies on.
+            let under_default = evaluate(&l, &f, &past, &when, DEFAULT_MAX_EXECUTION_DEPTH);
+            if max < DEFAULT_MAX_EXECUTION_DEPTH {
+                assert!(
+                    matches!(under_default, Outcome::Fired(_)),
+                    "max_depth={max} refused a depth the default admits"
+                );
+            } else {
+                assert_eq!(
+                    refusal(under_default),
+                    Refusal::DepthExceeded {
+                        depth: max + 1,
+                        max: DEFAULT_MAX_EXECUTION_DEPTH,
+                    },
+                    "max_depth={max} admitted a depth the default refuses"
+                );
+            }
+        }
+    }
+
+    /// The listening flow and the source must share a workspace.
+    ///
+    /// **egret's own refusal, not Kestra's** — see
+    /// [`Refusal::DifferentWorkspace`]. Three rows, because "they differ" has
+    /// two ways to be produced and a fixture that only moves the listener would
+    /// not tell them apart from "the listener is unusual".
+    #[test]
+    fn a_source_in_another_workspace_does_not_fire_a_flow_trigger() {
+        let l = plain();
+        let s = source(State::Success);
+
+        assert!(matches!(run(&l, &listening(), &s), Outcome::Fired(_)));
+
+        let elsewhere = ListeningFlow {
+            workspace_id: other_ws(),
+            ..listening()
+        };
+        assert_ne!(elsewhere.workspace_id, s.workspace_id);
+        assert_eq!(
+            refusal(run(&l, &elsewhere, &s)),
+            Refusal::DifferentWorkspace
+        );
+
+        // Move the SOURCE instead: same refusal.
+        let source_elsewhere = SourceExecution {
+            workspace_id: other_ws(),
+            ..source(State::Success)
+        };
+        assert_eq!(
+            refusal(run(&l, &listening(), &source_elsewhere)),
+            Refusal::DifferentWorkspace
+        );
+        // Move BOTH: not a mismatch, so this is about the PAIR and not about
+        // either value being special.
+        assert!(matches!(
+            run(&l, &elsewhere, &source_elsewhere),
+            Outcome::Fired(_)
+        ));
+    }
+
+    /// The trigger's declared `labels:` are carried unrendered.
+    ///
+    /// **Fix round 1.** `models::Trigger` models `labels`, and the first draft
+    /// of `resolve` dropped them on the floor — a flow declaring them parsed,
+    /// resolved and fired without them, and nothing said so. That is the
+    /// `lateMaximumDelay` failure under a new name.
+    /// `LabelService.fromTrigger` iterates `trigger.getLabels()` minus the
+    /// `system.` ones, renders each value, and attaches the survivors to the
+    /// execution Kestra creates, so dropping them is a behaviour difference.
+    #[test]
+    fn the_triggers_declared_labels_are_carried_unrendered() {
+        let l = WindowFreeFlowTrigger::resolve(&trigger(
+            "id: listen\ntype: io.kestra.plugin.core.trigger.Flow\n\
+             labels:\n  team: data\n  from: \"{{ trigger.flowId }}\"\n",
+        ))
+        .unwrap();
+        let e = fired(run(&l, &listening(), &source(State::Success)));
+
+        let mut got: Vec<(&str, &str)> = e
+            .labels
+            .iter()
+            .map(|x| (x.key.as_str(), x.value.as_str()))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![("from", "{{ trigger.flowId }}"), ("team", "data")],
+            "unrendered, and every declared label present"
+        );
+
+        // The other side: a trigger with no `labels:` carries none, so the
+        // assertion above is about the declaration and not about a default.
+        assert!(fired(run(&plain(), &listening(), &source(State::Success)))
+            .labels
+            .is_empty());
+    }
+
+    /// `system.correlationId` is Kestra's, and egret does not have it.
+    ///
+    /// Asserted rather than described, so the gap becomes a failing test the
+    /// day someone adds the column. See [`FiredExecution::correlation_id`].
+    #[test]
+    fn the_correlation_id_kestra_attaches_is_not_modelled_here() {
+        let e = fired(run(&plain(), &listening(), &source(State::Success)));
+        assert_eq!(e.correlation_id(), None);
+        // And it is NOT a spelling of the link: on the artifact the two
+        // coincide only when the source is top-level.
+        assert_eq!(e.trigger_execution_id, src_id());
     }
 }

@@ -4,7 +4,7 @@
 // kestra: core/src/main/java/io/kestra/plugin/core/trigger/SchedulableExecutionFactory.java
 
 //! Triggers — the schedule trigger and its backfill, driven by an injected
-//! clock, and the flow trigger ([`flow`], W6 Task 6).
+//! clock, and the flow trigger's window-free arm ([`flow`], W6 Task 6).
 //!
 //! # The ratchet says nothing about this module, and that is not a verdict
 //!
@@ -95,8 +95,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 
 pub use flow::{
-    evaluate as evaluate_flow_trigger, FiredExecution, FlowListener, FlowTriggerError,
-    ListeningFlow, Outcome as FlowTriggerOutcome, Refusal, SourceExecution, WhenVerdict,
+    evaluate as evaluate_flow_trigger, FiredExecution, FlowTriggerError, ListeningFlow,
+    Outcome as FlowTriggerOutcome, Refusal, SourceExecution, WhenVerdict, WindowFreeFlowTrigger,
     DEFAULT_MAX_EXECUTION_DEPTH,
 };
 pub use schedule::{
