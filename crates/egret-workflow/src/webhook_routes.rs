@@ -244,6 +244,14 @@ pub const WEBHOOK_ATTEMPTS_PER_WINDOW: u32 = 60;
 /// The attempt limiter's fixed window.
 pub const WEBHOOK_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 
+/// What the attempt limiter counts against: the three path segments that name a
+/// target, and deliberately **not** the key — keying on the key would give an
+/// attacker a fresh budget per guess.
+pub type AttemptKey = (String, String, String);
+
+/// One fixed window: when it started, and how many attempts it has seen.
+pub type AttemptWindow = (Instant, u32);
+
 /// The two in-process bounds, built once per router.
 ///
 /// **Fixed window, not a token bucket**, and the difference is admitted rather
@@ -255,7 +263,7 @@ pub const WEBHOOK_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 #[derive(Debug)]
 pub struct WebhookGuard {
     bulkhead: Semaphore,
-    attempts: Mutex<HashMap<(String, String, String), (Instant, u32)>>,
+    attempts: Mutex<HashMap<AttemptKey, AttemptWindow>>,
 }
 
 impl WebhookGuard {
@@ -278,7 +286,7 @@ impl WebhookGuard {
     ///
     /// `now` is a parameter so the test drives it rather than sleeping — this
     /// workspace has lost whole gate runs to wall-clock assertions.
-    pub fn admit_attempt(&self, key: (String, String, String), now: Instant) -> bool {
+    pub fn admit_attempt(&self, key: AttemptKey, now: Instant) -> bool {
         let mut map = self.attempts.lock().expect("webhook attempt map poisoned");
         if map.len() >= Self::SWEEP_AT {
             map.retain(|_, (started, _)| now.duration_since(*started) < WEBHOOK_ATTEMPT_WINDOW);
@@ -469,7 +477,7 @@ async fn handle(
     // `responseCode` were parsed into `models::Webhook` and then silently
     // dropped, which is the `lateMaximumDelay` shape -- a field an author can
     // write, that validates, and that changes nothing. Only `wait` was refused.
-    for unsupported in [
+    if let Some(unsupported) = [
         webhook.wait.then_some(Unsupported::Wait),
         webhook.return_outputs.then_some(Unsupported::ReturnOutputs),
         webhook
@@ -483,6 +491,7 @@ async fn handle(
     ]
     .into_iter()
     .flatten()
+    .next()
     {
         return Err(Error::Conflict(unsupported.message(&trigger.id)));
     }
