@@ -1775,3 +1775,125 @@ triggers:
     }
     assert_eq!(common::execution_count(&db, ws).await, 0);
 }
+
+/// **Fix round 3, Importants 5 and 6, through HTTP.**
+///
+/// A `trigger` reference in a nested value, and one reached by indirection
+/// through `vars`, both used to answer **200**. The first stored the template
+/// text verbatim (the check was asked only for a top-level `Value::String`);
+/// the second rendered to `"[null]"` (the check was asked of pass 1 while the
+/// renderer is a fixpoint loop).
+#[tokio::test]
+async fn nested_and_indirect_trigger_references_are_refused_through_the_route() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let base = fresh_namespace();
+    let app = common::webhook_app(&db).await;
+
+    for (n, decl) in [
+        // Important 5 -- nested, and neither rendered nor refused before.
+        "      x: [\"{{ trigger }}\"]",
+        "      x:\n        b: \"{{ trigger }}\"",
+        "      x:\n        \"{{ trigger }}\": 1",
+        // Important 6 -- indirection through `vars`, which is ordinary
+        // authoring.
+        "      x: \"{{ vars.tpl }}\"",
+        "      x: [\"{{ vars.tpl }}\"]",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ns = format!("{base}.n{n}");
+        let yaml = format!(
+            "\
+id: fx-flow
+namespace: {ns}
+variables:
+  tpl: \"{{{{ [trigger] }}}}\"
+inputs:
+  - id: x
+    type: STRING
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+    inputs:
+{decl}
+"
+        );
+        common::seed_flow(&db, ws, user, &yaml, "draft").await;
+        let res = common::anon(
+            &app,
+            "POST",
+            &url(ws, &ns, "fx-flow", "fx-key"),
+            Some("application/json"),
+            b"{}",
+        )
+        .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::CONFLICT,
+            "declaration {n} was ACCEPTED:\n{decl}"
+        );
+    }
+
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        0,
+        "not one of the five started anything"
+    );
+
+    // The control: nested values and `vars` indirection that do NOT reach the
+    // root are rendered and stored -- so the five refusals above are not
+    // satisfied by a handler that refuses every nested input.
+    let ok_ns = format!("{base}.ok");
+    let yaml = format!(
+        "\
+id: fx-flow
+namespace: {ok_ns}
+variables:
+  tpl: \"from-{{{{ flow.id }}}}\"
+inputs:
+  - id: x
+    type: STRING
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+    inputs:
+      x: \"{{{{ vars.tpl }}}}\"
+      nested:
+        deep: [\"{{{{ flow.namespace }}}}\", 7]
+"
+    );
+    common::seed_flow(&db, ws, user, &yaml, "draft").await;
+    let res = common::anon(
+        &app,
+        "POST",
+        &url(ws, &ok_ns, "fx-flow", "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let inputs: serde_json::Value =
+        sqlx::query_scalar("SELECT inputs FROM workflow.executions WHERE workspace_id = $1")
+            .bind(ws)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read inputs");
+    assert_eq!(
+        inputs,
+        json!({"x": "from-fx-flow", "nested": {"deep": [ok_ns, 7]}}),
+        "nested strings render, non-strings pass through, and `vars` indirection \
+         reaches its fixpoint"
+    );
+}

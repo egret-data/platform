@@ -235,7 +235,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::models::{FetchType, Trigger, TriggerKind, Webhook};
-use crate::runners::{render_str, RenderContext};
+use crate::runners::{render_str, render_str_guarded, GuardedRender, RenderContext};
 
 /// The request, reduced to what the trigger can see.
 ///
@@ -790,36 +790,84 @@ impl InputRefusal {
     }
 }
 
-/// Does `template` refer to the `trigger` root?
+/// Does `template` refer to the `trigger` root, in **any** pass of the render?
 ///
-/// It asks the **parser**: [`crate::runners::referenced_roots`] returns the
-/// top-level names the template refers to, taken from minijinja's own AST after
-/// the same `{% raw %}` protection and [`crate::runners::rewrite`] the renderer
-/// applies. So `{{ trigger }}`, `{{ trigger.body }}`, `{{ trigger['body'] }}`,
-/// `{{ trigger | json }}`, `{{ [trigger] }}`, `{{ trigger ?? 'x' }}`,
-/// `{{ trigger is defined }}` and `{% set t = trigger %}{{ t }}` all answer
-/// true, while the literal word in a text run answers false.
+/// [`crate::runners::render_str_guarded`] asks
+/// [`crate::runners::referenced_roots`] — minijinja's own AST — of every text
+/// the fixpoint loop is about to evaluate, not only of the source. See that
+/// function for why one pass is not enough.
 ///
-/// **It is asked BEFORE the render, and that is fix round 2's Important 1.**
-/// The first version asked only when a render had already failed, which is a
-/// different question: it catches every expression that *needs* the root and
-/// misses every expression that merely *reads* it and is total over an
-/// undefined value. Those latter ones rendered — to `[null]`, `{}`, the
-/// fallback, `false` — and were accepted.
-///
-/// **It is still not the security boundary.** That is [`InputContext`] simply
-/// not binding the name, which is what makes the object unreachable by any
-/// spelling at all. This decides *acceptance*, and a false negative here is an
+/// It is **not** the security boundary. That is [`InputContext`] simply not
+/// binding the name, which is what makes the object unreachable by any spelling
+/// at all. This decides *acceptance*, and a false negative here is an
 /// over-acceptance rather than a leak.
+const FORBIDDEN_INPUT_ROOTS: &[&str] = &["trigger"];
+
+/// Render one declared value the way the artifact renders it.
 ///
-/// A template that will not **parse** answers false, and then fails the render
-/// below with its own message — the author's template is broken in a way that
-/// has nothing to do with the root.
-#[must_use]
-fn references_trigger(template: &str) -> bool {
-    crate::runners::referenced_roots(template)
-        .map(|roots| roots.contains("trigger"))
-        .unwrap_or(false)
+/// `VariableRenderer.renderObject(Object, Map, boolean)`, measured from the
+/// bytecode of the pinned image rather than from a signature — see
+/// [`render_inputs`] for the table and for the sentence this replaced.
+fn render_value(v: &Value, cx: &RenderContext, path: &str) -> Result<Value, InputRefusal> {
+    match v {
+        // `instanceof String` -> render.
+        Value::String(text) => match render_str_guarded(text, cx, FORBIDDEN_INPUT_ROOTS) {
+            Ok(GuardedRender::Rendered(out)) => Ok(Value::String(out)),
+            Ok(GuardedRender::Forbidden(_)) => Err(InputRefusal::NeedsTriggerContext {
+                key: path.to_string(),
+            }),
+            Err(e) => Err(InputRefusal::Unrenderable {
+                key: path.to_string(),
+                error: e.to_string(),
+            }),
+        },
+        // `instanceof List` -> renderList, which is renderObject per element.
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                out.push(render_value(item, cx, &format!("{path}[{i}]"))?);
+            }
+            Ok(Value::Array(out))
+        }
+        // `instanceof Map` -> render(Map, Map, Z), which renders the KEY and
+        // renderObject's the value.
+        Value::Object(map) => {
+            let mut out = Map::new();
+            // Sorted rather than source order, and that is a deliberate,
+            // recorded divergence -- see [`render_inputs`].
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for k in keys {
+                let here = if path.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{path}.{k}")
+                };
+                let rendered_key = match render_str_guarded(k, cx, FORBIDDEN_INPUT_ROOTS) {
+                    Ok(GuardedRender::Rendered(out)) => out,
+                    Ok(GuardedRender::Forbidden(_)) => {
+                        return Err(InputRefusal::NeedsTriggerContext {
+                            key: format!("{here} (the key itself)"),
+                        })
+                    }
+                    Err(e) => {
+                        return Err(InputRefusal::Unrenderable {
+                            key: format!("{here} (the key itself)"),
+                            error: e.to_string(),
+                        })
+                    }
+                };
+                let value = render_value(&map[k], cx, &here)?;
+                // `putIfAbsent`: the first key to render to a given string
+                // wins, and the later one is DROPPED rather than overwriting.
+                out.entry(rendered_key).or_insert(value);
+            }
+            Ok(Value::Object(out))
+        }
+        // Everything else is returned unchanged -- the `else` arm of
+        // `renderObject`.
+        other => Ok(other.clone()),
+    }
 }
 
 /// The `inputs:` a matched webhook trigger supplies to the execution it starts.
@@ -844,53 +892,68 @@ fn references_trigger(template: &str) -> bool {
 /// own exclusion reason — cannot be honoured. Kestra answers **200**; egret
 /// answers **409**, which is under-acceptance and therefore the safe direction.
 ///
-/// Non-string values pass through untouched: `runContext.render(Map)` renders
-/// strings and leaves everything else alone.
+/// # What `runContext.render(Map)` actually does
+///
+/// This doc used to say *"Non-string values pass through untouched:
+/// `runContext.render(Map)` renders strings and leaves everything else
+/// alone."* **That is false, and it is stated backwards** — fix round 3's
+/// claim 16. It was read off a signature; the behaviour is the opposite, and
+/// the false sentence is why nobody looked at the nested case, which is fix
+/// round 3's Importants 5 and 6.
+///
+/// Measured from `javap -c io.kestra.core.runners.VariableRenderer` on the
+/// pinned image. `renderObject(Object, Map, boolean)` is a four-arm instanceof:
+///
+/// | arm | what happens |
+/// |---|---|
+/// | `Map` | `render(Map, Map, Z)` — **recurses**, and **renders the KEY** with `render(String, Map)` |
+/// | `List` | `renderList` — `renderObject` per element, **recurses** |
+/// | `Set` | `render(Set, Map, Z)` — `render(String, …)` per element |
+/// | `String` | `render(Object, Map, Z, true)` — the **typed** render |
+/// | anything else | `Optional.ofNullable(o)` — returned unchanged |
+///
+/// and `render(Map, Map, Z)` builds a **`LinkedHashMap`** and inserts with
+/// **`putIfAbsent`**, so when two keys render to the same string the **first in
+/// iteration order wins** and the second is dropped.
+///
+/// [`render_value`] reproduces the `Map`, `List` and `String` arms and the
+/// `putIfAbsent` rule. **Three divergences, named rather than found:**
+///
+/// 1. **`Set` has no JSON counterpart**, so there is no arm for it. A YAML
+///    sequence parses to `Value::Array` and takes the `List` arm, which is what
+///    Kestra does with a `List` too.
+/// 2. **The typed String render is not reproduced.** Kestra's String arm passes
+///    `true` for `tryParseJson`, so a nested string that renders to `{"a":1}`
+///    becomes a `Map`. egret keeps it a `Value::String`. Downstream,
+///    `worker::render::Surface::load` applies the flow's declared input types
+///    to whatever is stored, so the coercion happens later rather than never —
+///    but it happens against the *declared* type, not against the rendered
+///    text's shape, and those differ for an input declared `STRING` whose value
+///    renders to JSON.
+/// 3. **Key order is sorted, not source order.** Kestra iterates a
+///    `LinkedHashMap` in YAML order, so its `putIfAbsent` winner is the one
+///    written first. `models::Webhook::inputs` is a `HashMap`, so egret has no
+///    source order to iterate — it would be *random per process*. Sorting makes
+///    the winner deterministic, which is strictly better than random and still
+///    not Kestra's. It is observable only when two keys render to one string.
+///
+/// # The check runs on every pass, not on the source
+///
+/// See [`crate::runners::render_str_guarded`]. Asking
+/// [`crate::runners::referenced_roots`] of the declared text alone asks about
+/// pass 1, and `vars.tpl = "{{ [trigger] }}"` with `a: "{{ vars.tpl }}"`
+/// reaches the root on pass 2.
 pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, InputRefusal> {
     let Some(declared) = webhook.inputs.as_ref() else {
         return Ok(Value::Object(Map::new()));
     };
-    let cx = icx.render_context();
-    let mut out = Map::new();
-    for (k, v) in declared {
-        let rendered = match v {
-            Value::String(s) => {
-                // **The root check runs BEFORE the render, not after it.**
-                //
-                // Fix round 2, Important 1. It used to run only on the failure
-                // path, which closed the leak and left the over-acceptance:
-                // `{{ [trigger] }}`, `{{ {'a': trigger} }}`, `{{ trigger ?? X }}`,
-                // `{{ trigger | default(X) }}` and `{{ trigger is defined }}`
-                // all RENDER against a context with no `trigger` binding --
-                // to `[null]`, `{}`, `X` and `false` -- so they answered 200
-                // and stored a value the author did not ask for.
-                //
-                // Nothing leaked: a missing binding cannot produce the object,
-                // which is why every member access still failed. But a flow
-                // that says `trigger` and gets `false` has been *accepted*
-                // wrongly, and over-acceptance is the one direction the oracle
-                // cannot catch.
-                //
-                // Asking first makes the answer independent of whether the
-                // expression happens to be total over an undefined value.
-                if references_trigger(s) {
-                    return Err(InputRefusal::NeedsTriggerContext { key: k.clone() });
-                }
-                match render_str(s.as_str(), &cx) {
-                    Ok(text) => Value::String(text),
-                    Err(e) => {
-                        return Err(InputRefusal::Unrenderable {
-                            key: k.clone(),
-                            error: e.to_string(),
-                        })
-                    }
-                }
-            }
-            other => other.clone(),
-        };
-        out.insert(k.clone(), rendered);
-    }
-    Ok(Value::Object(out))
+    let as_value = Value::Object(
+        declared
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    render_value(&as_value, &icx.render_context(), "")
 }
 
 #[cfg(test)]
@@ -1734,16 +1797,159 @@ triggers:
         }
     }
 
-    /// Non-string input values pass through untouched — Kestra's
-    /// `runContext.render(Map)` only renders strings.
+    /// **Claim 16's regression test.** Nested values are rendered, and the
+    /// fixture is templates rather than numbers.
     ///
-    /// The fixture uses three different non-string JSON types AND a string in
-    /// the same map, so "passes through" is distinguished from "is dropped"
-    /// and from "the whole map is copied".
+    /// The test this replaces was called
+    /// `non_string_input_values_are_not_rendered` and its "list" row was
+    /// `l: [1, 2]` — two numbers, never a template — so it asserted the
+    /// doc's false sentence against a fixture that could not have
+    /// contradicted it. That is this branch's recurring shape one more time,
+    /// and it is why nobody looked at the nested case.
+    ///
+    /// Measured arms of `VariableRenderer.renderObject`: `Map` recurses **and
+    /// renders the key**, `List` recurses per element, `String` renders,
+    /// anything else is returned unchanged.
     #[test]
-    fn non_string_input_values_are_not_rendered() {
+    fn nested_values_are_rendered_the_way_the_artifact_renders_them() {
         let yaml = "\
-id: wi2
+id: nested
+namespace: fx.ns
+variables:
+  vkey: V
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: h
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k
+    inputs:
+      plain: \"{{ vars.vkey }}\"
+      inlist: [\"{{ vars.vkey }}\", 7, true, null]
+      inmap:
+        deep: \"{{ vars.vkey }}\"
+      deeper:
+        - a: [\"{{ vars.vkey }}\"]
+      untouched: 7
+      alsountouched: true
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
+        let out = render_inputs(w, &InputContext::of(&kcx)).unwrap();
+
+        assert_eq!(out["plain"], json!("V"), "the top-level string");
+        assert_eq!(
+            out["inlist"],
+            json!(["V", 7, true, null]),
+            "a LIST element is rendered and the non-strings beside it are not"
+        );
+        assert_eq!(out["inmap"]["deep"], json!("V"), "a MAP value is rendered");
+        assert_eq!(
+            out["deeper"][0]["a"][0],
+            json!("V"),
+            "list -> map -> list -> string still renders"
+        );
+        assert_eq!(out["untouched"], json!(7));
+        assert_eq!(out["alsountouched"], json!(true));
+    }
+
+    /// Map **keys** are rendered, and two keys that render to one string
+    /// resolve by `putIfAbsent`.
+    #[test]
+    fn map_keys_are_rendered_and_collide_by_put_if_absent() {
+        let yaml = "\
+id: keys
+namespace: fx.ns
+variables:
+  vkey: V
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: h
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k
+    inputs:
+      \"{{ vars.vkey }}\": rendered-key
+      nested:
+        \"pre-{{ vars.vkey }}\": also-rendered
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
+        let out = render_inputs(w, &InputContext::of(&kcx)).unwrap();
+
+        assert_eq!(out["V"], json!("rendered-key"), "the KEY rendered");
+        assert!(
+            out.get("{{ vars.vkey }}").is_none(),
+            "and the source spelling is gone: {out}"
+        );
+        assert_eq!(out["nested"]["pre-V"], json!("also-rendered"));
+
+        // `putIfAbsent`: two keys rendering to one string keep the FIRST, and
+        // egret's "first" is sorted order because its source is a `HashMap`.
+        // Asserted so the recorded divergence is a running claim.
+        let collide = "\
+id: collide
+namespace: fx.ns
+variables:
+  vkey: V
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: h
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k
+    inputs:
+      \"a{{ vars.vkey }}\": from-a
+      \"b{{ vars.vkey }}\": from-b
+";
+        let f = flow_of(
+            &collide
+                .replace("a{{ vars.vkey }}", "V")
+                .replace("b{{ vars.vkey }}", "{{ vars.vkey }}"),
+        );
+        let kcx = kcx_of(&f);
+        let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
+        let out = render_inputs(w, &InputContext::of(&kcx)).unwrap();
+        assert_eq!(
+            out,
+            json!({"V": "from-a"}),
+            "two keys rendering to `V`; sorted order puts the literal first, and \
+             putIfAbsent drops the second"
+        );
+    }
+
+    /// **Important 5.** A `trigger` reference inside a NON-STRING value is
+    /// refused, wherever it is.
+    ///
+    /// It used to be neither rendered nor refused: the check was asked only for
+    /// a top-level `Value::String`, so `a: ["{{ trigger }}"]` was stored
+    /// verbatim — the template text itself reaching the execution's `inputs`.
+    #[test]
+    fn a_trigger_reference_anywhere_in_a_nested_value_is_refused() {
+        for (what, decl) in [
+            ("in a list", "      a: [\"{{ trigger }}\"]"),
+            ("in a map value", "      a:\n        b: \"{{ trigger }}\""),
+            ("in a map KEY", "      a:\n        \"{{ trigger }}\": 1"),
+            (
+                "two deep",
+                "      a:\n        - b: [\"{{ trigger.body }}\"]",
+            ),
+            (
+                "beside a legitimate sibling",
+                "      a: [\"{{ flow.id }}\", \"{{ trigger }}\"]",
+            ),
+        ] {
+            let yaml = format!(
+                "\
+id: nest
 namespace: fx.ns
 tasks:
   - id: t
@@ -1754,21 +1960,118 @@ triggers:
     type: io.kestra.plugin.core.trigger.Webhook
     key: k
     inputs:
-      n: 7
-      b: true
-      l: [1, 2]
-      s: \"{{ flow.namespace }}\"
+{decl}
+"
+            );
+            let f = flow_of(&yaml);
+            let kcx = kcx_of(&f);
+            let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
+            let out = render_inputs(w, &InputContext::of(&kcx));
+            assert!(
+                matches!(out, Err(InputRefusal::NeedsTriggerContext { .. })),
+                "{what}: {out:?}"
+            );
+            // The refusal names WHERE, which a flat key could not.
+            let Err(e) = out else { unreachable!() };
+            let msg = e.message("h");
+            assert!(msg.contains("input 'a"), "{what}: {msg}");
+        }
+
+        // The control: the same shapes without the root still render.
+        let yaml = "\
+id: nestok
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: h
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k
+    inputs:
+      a: [\"{{ flow.id }}\"]
+      b:
+        c: \"{{ flow.id }}\"
 ";
         let f = flow_of(yaml);
         let kcx = kcx_of(&f);
         let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
         assert_eq!(
             render_inputs(w, &InputContext::of(&kcx)).unwrap(),
-            json!({"n": 7, "b": true, "l": [1, 2], "s": "fx.ns"})
+            json!({"a": ["nestok"], "b": {"c": "nestok"}})
         );
     }
 
-    /// No `inputs:` at all is the empty object, not a null and not an error.
+    /// **Important 6.** Indirection through `vars` cannot reach the root.
+    ///
+    /// The render is a fixpoint of up to `MAX_RENDERING_AMOUNT` passes and a
+    /// pass can emit a template the next pass evaluates. Asking the source
+    /// alone asks about pass 1: `vars.tpl = "{{ [trigger] }}"` with
+    /// `a: "{{ vars.tpl }}"` named only `vars` on pass 1, rendered to
+    /// `"[null]"` on pass 2, and answered **200**.
+    ///
+    /// Indirection through `vars` is ordinary authoring, not an exotic attack.
+    #[test]
+    fn indirection_through_vars_cannot_reach_the_trigger_root() {
+        let yaml = "\
+id: indirect
+namespace: fx.ns
+variables:
+  tpl: \"{{ [trigger] }}\"
+  deep: \"{{ vars.tpl }}\"
+  innocent: \"{{ flow.id }}\"
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: one
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-one
+    inputs:
+      a: \"{{ vars.tpl }}\"
+  - id: two
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-two
+    inputs:
+      a: \"{{ vars.deep }}\"
+  - id: three
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-three
+    inputs:
+      a: [\"{{ vars.tpl }}\"]
+  - id: ok
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-ok
+    inputs:
+      a: \"{{ vars.innocent }}\"
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let icx = InputContext::of(&kcx);
+
+        for key in ["k-one", "k-two", "k-three"] {
+            let (_, w) = find(&f.triggers, key, &kcx).unwrap();
+            let out = render_inputs(w, &icx);
+            assert!(
+                matches!(out, Err(InputRefusal::NeedsTriggerContext { .. })),
+                "{key} reached the root by indirection: {out:?}"
+            );
+        }
+
+        // The control, on the same fixture: indirection through `vars` that
+        // does NOT reach the root still renders, and renders to its fixpoint
+        // rather than to the intermediate template.
+        let (_, w) = find(&f.triggers, "k-ok", &kcx).unwrap();
+        assert_eq!(
+            render_inputs(w, &icx).unwrap(),
+            json!({"a": "indirect"}),
+            "two passes, and the answer is the fixpoint"
+        );
+    }
+
+    /// No `inputs:` at all is the empty object, not a null and not an error.    /// No `inputs:` at all is the empty object, not a null and not an error.
     #[test]
     fn a_trigger_with_no_inputs_renders_the_empty_object() {
         let f = flow_of(FIXTURE);
