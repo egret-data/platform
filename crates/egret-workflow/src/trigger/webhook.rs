@@ -1,0 +1,1502 @@
+// kestra: webserver/src/main/java/io/kestra/webserver/controllers/api/ExecutionController.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/Webhook.java
+// kestra: core/src/main/java/io/kestra/plugin/core/trigger/AbstractWebhookTrigger.java
+// kestra: webserver/src/main/java/io/kestra/webserver/services/MicronautHttpService.java
+// kestra: core/src/main/java/io/kestra/core/services/WebhookService.java
+
+//! The webhook trigger — W6 Task 7.
+//!
+//! # The ratchet says nothing about this module, and that is not a verdict
+//!
+//! Fifteen corpus flows declare a `io.kestra.plugin.core.trigger.Webhook`.
+//! **Zero are reachable by the oracle**, and the reason is not an accident of
+//! this task: `oracle-exec/harvest.py` **never calls**
+//! `POST …/executions/webhook/…`. The string `webhook` appears in that file
+//! exactly once, as the *reason* `valids/webhook-inputs` is excluded:
+//!
+//! ```text
+//! "valids/webhook-inputs":
+//!     "Executed only through POST /executions/webhook/{ns}/webhook-inputs/{key} with a "
+//!     "webhook body, not from an execution POST."
+//! ```
+//!
+//! So `oracle-exec/baseline.txt` did not move for this work and **could not
+//! have**: 127 before, 127 after, measured both times with `--nocapture` (see
+//! the task report). Every claim in this module is judged by its own tests,
+//! which puts it where `trigger::schedule`, `trigger::flow`, `egret.sql` and
+//! `egret.container` already sit. Nothing here reaches a database, a container
+//! or a network, so there is no dependency to be missing and nothing to skip:
+//! every test in this file runs on every `cargo test`, or the build fails.
+//!
+//! # Measured on the artifact, not read off a class
+//!
+//! Everything below was taken from `kestra/kestra@sha256:28f59bf1…` — the
+//! pinned digest — by `javap`-ing the fat `/app/kestra` (class-file v69, so
+//! Corretto 25) **and** by driving real requests at a running server. Where
+//! the two could disagree, the running server wins and the bytecode says why.
+//!
+//! ## 1. The URL shape, and that it is unauthenticated
+//!
+//! `ExecutionController` carries
+//! `@Controller("/api/v1/{tenant}/executions")`, and its five webhook methods
+//! all carry the same `uri`:
+//!
+//! ```text
+//! @AnonymousAccess
+//! @Post(uri = "/webhook/{namespace}/{id}/{key}{/path}", consumes = "*/*")
+//! Mono<HttpResponse<?>> triggerExecutionByPostWebhook(namespace, id, key, path, request)
+//! ```
+//!
+//! — plus `triggerExecutionByGetWebhook`, `triggerExecutionByPutWebhook` and
+//! the two multipart variants, on the identical template. **`@AnonymousAccess`
+//! is the whole of the security model**: the key in the path is the only
+//! credential, which is why [`keys_match`] is written the way it is.
+//!
+//! egret's equivalent is [`crate::webhook_routes`], and it differs in exactly
+//! one structural way: Kestra's `{tenant}` is resolved by
+//! `tenantService.resolveTenant()` from the *request*, and egret's
+//! `{workspace}` is a slug in the path that is resolved to a workspace id and
+//! then used to scope **every** subsequent lookup. See that module for the two
+//! places the scoping is load-bearing.
+//!
+//! ## 2. The key comparison — `ExecutionController.lambda$findWebhook$2`
+//!
+//! ```text
+//! RunContext runContext = runContextFactory.of(flow, w);
+//! String webhookKey = runContext.render(w.getKey()).trim();
+//! return MessageDigest.isEqual(webhookKey.getBytes(UTF_8), key.getBytes(UTF_8));
+//! ```
+//!
+//! Four facts, each of which [`keys_match`] and [`render_key`] reproduce and
+//! each of which has a test with a discriminating fixture:
+//!
+//! * **the DECLARED key is rendered**, so `key: "{{ flow.id }}"` matches the
+//!   flow's id and does *not* match the literal text `{{ flow.id }}`
+//!   (measured: `…/t7-probe-multi/t7-probe-multi` → 200,
+//!   `…/t7-probe-multi/%7B%7B%20flow.id%20%7D%7D` → 404);
+//! * **the declared key is `.trim()`ed and the URL key is NOT.** This is the
+//!   one-sided trim, and it is the fixture that separates two rules which
+//!   agree everywhere else. A flow declaring `key: "  spaced-key  "` answers
+//!   **200** at `…/spaced-key` and **404** at `…/%20%20spaced-key%20%20`;
+//! * **the comparison is constant-time** — `MessageDigest.isEqual`, not
+//!   `String.equals`. [`ct_eq`] is a behavioural port of that method,
+//!   including its length handling;
+//! * **a key that fails to render makes that trigger invisible, not the
+//!   request an error.** Kestra catches `IllegalVariableEvaluationException`,
+//!   logs `Unable to render the webhook key {}, the webhook will be ignored`
+//!   (interpolating the **URL** key, not the declared one — `aload_2`) and
+//!   returns `false`. Measured: a flow whose *first* trigger declares
+//!   `key: "{{ nosuchroot.nothing }}"` still answers 200 for its *third*
+//!   trigger's literal key, and the server logs that warning once per
+//!   unrenderable trigger examined.
+//!
+//! ## 3. What the request becomes — `Webhook.buildOutput`
+//!
+//! ```text
+//! output = Output.builder()
+//!     .headers(request.getHeaders() != null ? request.getHeaders().map() : null)
+//!     .parameters(webhookService.parseParameters(context));
+//! if (storedBodyUri != null) return output.uri(storedBodyUri.toString()).build();
+//! switch (requestBody) {
+//!     case MultipartFormDataRequestBody m -> output.parts(…).formFields(…);
+//!     case ByteArrayRequestBody b         -> output.body(BASE64.encodeToString(b.getContent()));
+//!     case StringRequestBody t            -> output.body(tryMap(s).or(() -> tryArray(s)).orElse(s));
+//!     default                             -> output.body(requestBody.getContent());
+//! }
+//! ```
+//!
+//! and which `RequestBody` you get is `MicronautHttpService.byteArrayRequestBody`:
+//!
+//! ```text
+//! if (content.length == 0) return null;                     // no body at all
+//! isTextual(mediaType) ? StringRequestBody : ByteArrayRequestBody
+//! ```
+//!
+//! with `isTextual` = `mediaType == null || mediaType.isTextBased() ||
+//! mediaType == APPLICATION_FORM_URLENCODED_TYPE`.
+//!
+//! Reproduced by [`build_output`]; measured end to end:
+//!
+//! | request | `trigger.variables` |
+//! |---|---|
+//! | `POST` `{"hello":"world","n":3}`, `application/json` | `body` = the **object** |
+//! | `POST` `[1,2]`, `application/json` | `body` = the **array** |
+//! | `POST` `just plain text`, `text/plain` | `body` = the **string** |
+//! | `GET` with no body | **no `body` key at all** |
+//! | `?validationToken=abc&validationToken=def&x=1` | `parameters` = `{"validationToken":["abc","def"],"x":["1"]}` |
+//! | `fetchType: NONE` | no `body`, no `uri` |
+//! | `fetchType: STORE` | no `body`; `uri` = `kestra:///…/webhook/body` |
+//!
+//! `parameters` is `URIBuilder(uri).getQueryParams()` grouped by name into
+//! lists (`Collectors.groupingBy` + `Collectors.mapping`), so a repeated
+//! parameter keeps **both** values in URL order and a single one is still a
+//! one-element list. `parameters` is `{}` — present and empty — when there is
+//! no query string at all.
+//!
+//! ## 4. The refusals, and their order
+//!
+//! Measured, in the order Kestra evaluates them:
+//!
+//! | condition | Kestra | egret |
+//! |---|---|---|
+//! | no such flow | **404** `Flow not found` | **404**, body identical to the next row |
+//! | flow `disabled: true` | **409** `Cannot execute flow: flow is disabled.` | **409**, but only *after* the key matches |
+//! | no trigger whose key matches | **404** `Webhook not found` | **404** |
+//! | matched trigger `disabled: true` | **409** `Cannot execute webhook: the trigger 'x' is disabled.` | **409** |
+//! | trigger `inputs:` will not render | **422** | **422** (`InvalidInput`) |
+//! | flow `draft: true` | **200** — a draft IS reachable | n/a: egret has no `draft:` on the flow model |
+//!
+//! **The two divergences are deliberate and are about disclosure, not
+//! behaviour.** Kestra's first two rows answer differently for a caller who
+//! has presented no credential at all, which makes the endpoint an oracle for
+//! "does namespace N hold a flow called F, and is it switched on" — on a
+//! surface that is anonymous by construction. egret collapses "no such flow"
+//! into the same 404 as "no such webhook", and moves the disabled checks
+//! **behind** the key comparison, so a 409 is only ever seen by a caller that
+//! has already proved it holds the key. Neither direction fires where Kestra
+//! would not, which is the constraint that actually binds
+//! (`over-acceptance must not ship`); both are under-disclosure.
+//!
+//! # Where this is knowingly narrower than Kestra, stated rather than found
+//!
+//! * **`wait:`, `returnOutputs:`, `responseContentType:` and `responseCode:`
+//!   are not implemented.** They are `Webhook.evaluate`'s streaming path —
+//!   `WebhookService.followExecution` returns a `Flux<Event<Execution>>` and
+//!   the response is held open until the execution terminates. egret answers
+//!   the asynchronous shape only. A flow declaring them still fires; it simply
+//!   gets the `CREATED` response immediately. **Not silently**: see
+//!   [`Unsupported::Wait`].
+//! * **`fetchType: STORE` is refused**, not approximated. It needs egret's
+//!   object store, which this crate does not depend on, and answering as if it
+//!   were `NONE` would hand the flow a `trigger` with the body silently
+//!   missing. A refusal is the safe direction; a wrong output is not.
+//! * **`multipart/form-data` is not implemented** — `parts` needs the same
+//!   object store `STORE` does (each file part is written to internal storage
+//!   and reaches the flow as a URI). Refused, for the same reason.
+//! * **`trigger.*` is NOT published into the render context.** See the next
+//!   section; this is the single most consequential omission here and it is
+//!   deliberate.
+//!
+//! # Why `trigger.*` is not in the render context
+//!
+//! [`Output`] is *built* here and *stored* on the execution row
+//! (`workflow.executions.execution_trigger`, migration 0140). It is **not**
+//! published as a `trigger` root by `worker::render::Surface`, and this task
+//! did not touch that file.
+//!
+//! Two reasons, one measured and one structural:
+//!
+//! 1. **The golden was harvested with no trigger context at all.** Every one of
+//!    the 294 golden entries was produced by a plain execution POST, so
+//!    Kestra's own `Execution.trigger` is null for all of them. A `trigger`
+//!    root that exists unconditionally therefore changes the render context of
+//!    293 entries that have nothing to do with webhooks, and the plan's rule
+//!    is that an entry which moves for an unattributed reason is a coincidence
+//!    rather than a bank.
+//!
+//!    **The specific risk this task was warned about does not exist, and the
+//!    measurement is what says so.** The brief predicted that publishing the
+//!    root "would make `valids/webhook-plaintext` diverge further". It does
+//!    not: that entry renders
+//!    `{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}`, which
+//!    misses at `trigger.parameters` and *then* indexes `.validationToken` on
+//!    the result — two levels, where `oracle-exec/baseline.txt`'s
+//!    missing-root/missing-member sentence is about one. With the root absent
+//!    it errors; with the root present and empty it errors identically.
+//!    [`tests::the_missing_root_is_why_webhook_plaintext_is_baselined`] is the
+//!    running program that holds all four rows, and the task report records
+//!    the direct ratchet measurement taken by temporarily adding the root to
+//!    `worker/render.rs`: **127 before, 127 after, zero entries moved.**
+//!
+//!    So the reason not to publish it here is the 293, not the one.
+//! 2. `worker/render.rs` already carries two findings assigned to W6 Task 8.
+//!    Publishing the root is that task's, on top of the column this one
+//!    writes.
+//!
+//! **The key-rendering context built here is a different object and is not
+//! covered by that sentence.** [`KeyContext::render_context_for`] does bind a
+//! `trigger` root, because Kestra's own `runContextFactory.of(flow, trigger)`
+//! does and `key: "tid-{{ trigger.id }}"` was measured resolving to
+//! `tid-trg-tid` on the artifact. It is local to the key comparison, is never
+//! seen by a task, and cannot reach the oracle.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+
+use crate::models::{FetchType, Trigger, TriggerKind, Webhook};
+use crate::runners::{render_str, RenderContext};
+
+/// The request, reduced to what the trigger can see.
+///
+/// Deliberately owned and inert: nothing in this module touches an axum type,
+/// so every arm below is reachable from a unit test without a server.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WebhookRequest {
+    /// The HTTP method, uppercased by the caller. Recorded rather than acted
+    /// on — Kestra routes `GET`, `POST` and `PUT` to the same handler and the
+    /// trigger output has no method field.
+    pub method: String,
+    /// Query parameters **in URL order, duplicates kept**. Grouping them is
+    /// [`build_output`]'s job, and it cannot be done by the caller without
+    /// losing the order two values of one name have to keep.
+    pub query: Vec<(String, String)>,
+    /// Request headers, lowercased names, in wire order.
+    pub headers: Vec<(String, String)>,
+    /// The `Content-Type` header value, if any, already extracted from
+    /// [`Self::headers`]. `None` is *textual* — see [`is_textual`].
+    pub content_type: Option<String>,
+    /// The raw body. Empty means "no body", which is a distinct outcome from
+    /// "an empty JSON object": Kestra's
+    /// `MicronautHttpService.byteArrayRequestBody` returns `null` for a
+    /// zero-length body and `Webhook.Output.body` is then absent entirely.
+    pub body: Vec<u8>,
+}
+
+/// `io.kestra.plugin.core.trigger.Webhook$Output`, which is what Kestra puts
+/// in `Execution.trigger.variables` and therefore what a flow sees as
+/// `trigger.*`.
+///
+/// Every field is skipped when absent, because Kestra's own serialisation is
+/// `@JsonInclude(NON_NULL)` through `ExecutionTrigger.of` and the measured
+/// wire shape has no `body` key at all for a `GET`.
+///
+/// `parts` and `formFields` are **not fields here** — see the module doc's
+/// "knowingly narrower" list. They cannot be half-supported: a `parts` entry
+/// is a URI into internal storage, and there is nothing to put a file in.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Output {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<BTreeMap<String, Vec<String>>>,
+}
+
+/// `io.kestra.core.models.executions.ExecutionTrigger`, which is the whole of
+/// what gets stored on the execution row.
+///
+/// `{id, type, variables}` — the three fields `ExecutionTrigger.of(trigger,
+/// output)` sets, confirmed on the wire:
+///
+/// ```json
+/// "trigger": {"id":"hook","type":"io.kestra.plugin.core.trigger.Webhook",
+///             "variables":{"body":…,"headers":…,"parameters":…}}
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionTrigger {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub r#type: String,
+    pub variables: Output,
+}
+
+/// A declared webhook this port cannot honour, named rather than approximated.
+///
+/// Each of these fires **after** the key has matched, so reporting it discloses
+/// nothing to a caller that has not already authenticated itself with the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unsupported {
+    /// `fetchType: STORE` — the body goes to internal storage and the flow
+    /// gets a `uri`. Needs an object store this crate does not depend on.
+    StoreBody,
+    /// `multipart/form-data` — `parts` are stored files.
+    Multipart,
+    /// `wait: true` (with or without `returnOutputs`) — the response is held
+    /// open until the execution terminates.
+    Wait,
+}
+
+impl Unsupported {
+    /// The message the route turns into a 409.
+    pub fn message(&self, trigger_id: &str) -> String {
+        match self {
+            Self::StoreBody => format!(
+                "webhook trigger '{trigger_id}' declares fetchType: STORE, which egret does not \
+                 implement yet -- the request body would have to be written to internal storage \
+                 and reach the flow as `trigger.uri`"
+            ),
+            Self::Multipart => format!(
+                "webhook trigger '{trigger_id}' received a multipart/form-data body, which egret \
+                 does not implement yet -- each file part would have to be written to internal \
+                 storage and reach the flow as `trigger.parts`"
+            ),
+            Self::Wait => format!(
+                "webhook trigger '{trigger_id}' declares wait: true, which egret does not \
+                 implement yet -- the response would have to be held open until the execution \
+                 terminates"
+            ),
+        }
+    }
+}
+
+/// Everything the key template may read, and nothing else.
+///
+/// Kestra builds `runContextFactory.of(flow, trigger)`. Measured against the
+/// artifact, that context resolves `flow.id`, `flow.namespace`,
+/// `flow.revision`, `vars.*` and `trigger.id` — all four probes answered 200.
+///
+/// `flow.revision` is **absent here and that is a pre-existing gap, not a
+/// choice made in this task**: egret's flow model has no revision at all
+/// (`worker::render::Surface` publishes `flow` as `{id, namespace}` for the
+/// same reason). A key declaring `{{ flow.revision }}` therefore fails to
+/// render, which puts it on the "trigger ignored" arm rather than making it
+/// match something wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyContext {
+    pub flow_id: String,
+    pub namespace: String,
+    pub vars: BTreeMap<String, Value>,
+}
+
+impl KeyContext {
+    /// The context a *specific* trigger's key renders against.
+    ///
+    /// Per-trigger rather than per-flow because `trigger.id` is in it. Two
+    /// triggers in one flow therefore get two different contexts, and a key of
+    /// `"{{ trigger.id }}"` means a different string in each — which is the
+    /// artifact's behaviour (`key: "tid-{{ trigger.id }}"` matched
+    /// `tid-trg-tid`).
+    ///
+    /// **This `trigger` root is not the one the module doc says is withheld.**
+    /// That one is `worker::render::Surface`'s, seen by tasks. This one is
+    /// local to a key comparison and no task can reach it.
+    pub fn render_context_for(&self, trigger: &Trigger) -> RenderContext {
+        let mut cx = RenderContext::new();
+        cx.insert(
+            "flow",
+            json!({"id": self.flow_id, "namespace": self.namespace}),
+        );
+        cx.insert(
+            "vars",
+            Value::Object(
+                self.vars
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            ),
+        );
+        cx.insert("trigger", json!({"id": trigger.id, "type": trigger.r#type}));
+        cx
+    }
+}
+
+/// Kestra's `MessageDigest.isEqual`, ported behaviour-for-behaviour.
+///
+/// ```text
+/// if (digesta == digestb) return true;
+/// if (digesta == null || digestb == null) return false;
+/// int lenA = digesta.length, lenB = digestb.length;
+/// if (lenB == 0) return lenA == 0;
+/// int result = 0;
+/// result |= lenA - lenB;
+/// for (int i = 0; i < lenA; i++) {
+///     int indexB = ((i - lenB) >>> 31) * i;
+///     result |= digesta[i] ^ digestb[indexB];
+/// }
+/// return result == 0;
+/// ```
+///
+/// The `indexB` trick clamps out-of-range reads to index 0 so the loop always
+/// runs `lenA` times whatever `lenB` is. This port keeps that: the running
+/// time depends on the length of the **declared** key and on nothing the
+/// caller supplies except its own length, and no byte comparison short-circuits.
+///
+/// **Why it is not `a == b`.** The key is a bearer credential on an anonymous
+/// endpoint, so a comparison that returns early on the first differing byte
+/// leaks the key one byte at a time to anyone who can time the response. That
+/// is not a hypothetical class for this repository's threat model — it is the
+/// reason Kestra reached for `MessageDigest.isEqual` rather than
+/// `String.equals` in the one place it compares a webhook key.
+/// [`tests::the_key_is_never_compared_with_a_plain_equality`] is a running
+/// check that no equality operator reappears in this file's key path.
+#[must_use]
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if b.is_empty() {
+        return a.is_empty();
+    }
+    // `lenA - lenB` as a 64-bit OR, so a length difference can never cancel
+    // against a byte difference the way an 8-bit accumulator could.
+    let mut result: u64 = (a.len() as i64 - b.len() as i64) as u64;
+    for (i, byte) in a.iter().enumerate() {
+        let index_b = if i < b.len() { i } else { 0 };
+        result |= u64::from(byte ^ b[index_b]);
+    }
+    result == 0
+}
+
+/// Does a **rendered** declared key match the key taken from the URL?
+///
+/// The trim is one-sided on purpose, and that is the measurement this whole
+/// function exists to hold: Kestra trims the declared key (`render(...).trim()`)
+/// and hands the URL key to `getBytes` untouched.
+///
+/// * declared `"  spaced-key  "` + URL `"spaced-key"` → **true** (measured 200)
+/// * declared `"  spaced-key  "` + URL `"  spaced-key  "` → **false** (measured 404)
+#[must_use]
+pub fn keys_match(declared_rendered: &str, url_key: &str) -> bool {
+    ct_eq(declared_rendered.trim().as_bytes(), url_key.as_bytes())
+}
+
+/// Render one trigger's declared key, or `None` if it cannot be rendered.
+///
+/// `None` is *ignore this trigger*, never *fail the request*. Kestra:
+///
+/// ```text
+/// } catch (IllegalVariableEvaluationException e) {
+///     log.warn("Unable to render the webhook key {}, the webhook will be ignored", key, e);
+///     return false;
+/// }
+/// ```
+///
+/// A trigger with no `key:` at all is also `None` — `getKey()` would be null
+/// and `render(null)` throws — so it can never be matched by an empty URL
+/// segment.
+#[must_use]
+pub fn render_key(trigger: &Trigger, webhook: &Webhook, kcx: &KeyContext) -> Option<String> {
+    let source = webhook.key.as_ref()?.source();
+    render_str(source, &kcx.render_context_for(trigger)).ok()
+}
+
+/// Find the webhook trigger a URL key names, in declaration order.
+///
+/// `findFirst()` in Kestra, over `flow.getTriggers()` filtered to
+/// `instanceof AbstractWebhookTrigger`. **Declaration order matters and is
+/// tested**: a trigger whose key will not render does not stop the scan, so a
+/// later trigger is still reachable past it (measured — a flow whose first
+/// trigger declared `{{ nosuchroot.nothing }}` still answered 200 on its third
+/// trigger's key).
+///
+/// `disabled:` is deliberately **not** filtered here. Kestra matches a disabled
+/// trigger and then refuses it with a 409 naming it
+/// (`Cannot execute webhook: the trigger 'offhook' is disabled.`, measured), so
+/// filtering it out here would turn that 409 into a 404 and lose the operator's
+/// only clue. The refusal is the caller's job — see
+/// [`crate::webhook_routes`].
+#[must_use]
+pub fn find<'a>(
+    triggers: &'a [Trigger],
+    url_key: &str,
+    kcx: &KeyContext,
+) -> Option<(&'a Trigger, &'a Webhook)> {
+    triggers.iter().find_map(|t| {
+        let TriggerKind::Webhook(w) = &t.kind else {
+            return None;
+        };
+        let rendered = render_key(t, w, kcx)?;
+        keys_match(&rendered, url_key).then_some((t, w))
+    })
+}
+
+/// Is this content type "textual" in Kestra's sense?
+///
+/// `MicronautHttpService.isTextual`:
+///
+/// ```text
+/// mediaType == null
+///   || mediaType.isTextBased()
+///   || mediaType == MediaType.APPLICATION_FORM_URLENCODED_TYPE
+/// ```
+///
+/// Micronaut's `MediaType.isTextBased()` is true for a `text/*` type, and for
+/// a type whose subtype ends in `json` or `xml` (`application/json`,
+/// `application/ld+json`, `application/xml`, `image/svg+xml`). Reproduced
+/// rather than approximated, because getting it wrong turns a JSON body into a
+/// base64 string.
+#[must_use]
+pub fn is_textual(content_type: Option<&str>) -> bool {
+    let Some(ct) = content_type else {
+        return true;
+    };
+    // Strip parameters (`application/json; charset=utf-8`) and normalise.
+    let ct = ct
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if ct.is_empty() {
+        return true;
+    }
+    if ct == "application/x-www-form-urlencoded" {
+        return true;
+    }
+    let Some((kind, subtype)) = ct.split_once('/') else {
+        return false;
+    };
+    kind == "text" || subtype.ends_with("json") || subtype.ends_with("xml")
+}
+
+/// `Webhook.tryMap(s).or(() -> tryArray(s)).orElse(s)`.
+///
+/// An object first, then an array, then the raw string. Note the order is
+/// observable: it is why `[1,2]` arrives as an array and `just plain text`
+/// arrives as a string rather than as a parse error.
+///
+/// A bare JSON scalar (`3`, `true`, `"x"`) is **neither** a map nor an array,
+/// so it stays the raw string — which is what the two `tryX` helpers do and
+/// not what a single `serde_json::from_str::<Value>` would do.
+#[must_use]
+fn parse_text_body(text: &str) -> Value {
+    if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(text) {
+        return Value::Object(m);
+    }
+    if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(text) {
+        return Value::Array(a);
+    }
+    Value::String(text.to_string())
+}
+
+/// Group `(name, value)` pairs into `{name: [values…]}`, preserving the order
+/// two values of one name arrived in.
+///
+/// `Collectors.groupingBy(NameValuePair::getName,
+/// Collectors.mapping(NameValuePair::getValue, Collectors.toList()))`.
+fn group(pairs: &[(String, String)]) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (k, v) in pairs {
+        out.entry(k.clone()).or_default().push(v.clone());
+    }
+    out
+}
+
+/// Build `trigger.variables` from the request.
+///
+/// Returns `Err(Unsupported)` for the shapes this port refuses rather than
+/// approximates. `stored_uri` is always `None` today — it is the parameter
+/// `fetchType: STORE` would fill, kept so the refusal has an obvious place to
+/// be deleted from when someone implements it.
+pub fn build_output(
+    req: &WebhookRequest,
+    fetch: FetchType,
+    stored_uri: Option<&str>,
+) -> Result<Output, Unsupported> {
+    let mut out = Output {
+        headers: Some(group(&req.headers)),
+        parameters: Some(group(&req.query)),
+        ..Output::default()
+    };
+
+    if is_multipart(req.content_type.as_deref()) {
+        return Err(Unsupported::Multipart);
+    }
+
+    // `if (storedBodyUri != null) return output.uri(...).build();` — the URI
+    // branch returns BEFORE the body switch, so a STORE webhook never carries
+    // both.
+    if let Some(uri) = stored_uri {
+        out.uri = Some(uri.to_string());
+        return Ok(out);
+    }
+    match fetch {
+        FetchType::Store => return Err(Unsupported::StoreBody),
+        // `WebhookBodyService.read` hands `null` back for NONE, so the switch
+        // falls through the `case null` arm and no body is set.
+        FetchType::None => return Ok(out),
+        FetchType::Fetch => {}
+    }
+
+    // `if (content.length == 0) return null;` — a zero-length body is not an
+    // empty string, it is the absence of a body, and `body` is then absent.
+    if req.body.is_empty() {
+        return Ok(out);
+    }
+
+    out.body = Some(if is_textual(req.content_type.as_deref()) {
+        // `new String(bytes, charset)` — Java replaces malformed input rather
+        // than failing, which `from_utf8_lossy` also does.
+        parse_text_body(&String::from_utf8_lossy(&req.body))
+    } else {
+        use base64::Engine as _;
+        Value::String(base64::engine::general_purpose::STANDARD.encode(&req.body))
+    });
+    Ok(out)
+}
+
+/// Is this a `multipart/form-data` request?
+///
+/// Separate from [`is_textual`] because Micronaut routes multipart to a
+/// different controller method entirely (`triggerExecutionByPostWebhookMultipart`),
+/// so it is not a body-typing question but a routing one.
+#[must_use]
+fn is_multipart(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|ct| {
+        ct.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("multipart/form-data")
+    })
+}
+
+/// The `inputs:` a matched webhook trigger supplies to the execution it starts.
+///
+/// `WebhookService.newExecution`:
+///
+/// ```text
+/// if (webhook.getInputs() != null) {
+///     Map<String, Object> inputs = runContext.render(webhook.getInputs());
+///     inputs = readExecutionInputs(flow, execution, inputs);
+///     execution = execution.withInputs(inputs);
+/// }
+/// ```
+///
+/// with a `catch (Exception e)` that logs `Unable to render the webhook inputs`
+/// and throws `WebhookInputRenderException` — measured as an HTTP **422**.
+///
+/// **The `runContext` this renders against is the EXECUTION's**, i.e. the one
+/// that already carries `trigger.*` fully populated. egret does not publish
+/// that root (see the module doc), so a trigger declaring
+/// `inputs: {body: "{{ trigger.body }}"}` — which is `valids/webhook-inputs`,
+/// the corpus flow `harvest.py` names in its own exclusion reason — cannot be
+/// honoured. Kestra answers **200** for it; egret answers **409**, which is
+/// under-acceptance and therefore the safe direction.
+///
+/// **Measured, because the obvious guess is wrong.** Rendering it against
+/// [`KeyContext`] does *not* produce an empty string: `trigger` is a defined
+/// root there (it carries `id` and `type`), so `trigger.body` is a defined
+/// root with an undefined member and the renderer errors with
+/// `input 'body': undefined value`. That message accuses the author's template
+/// of being broken when the real cause is a root egret does not supply, which
+/// is exactly why [`inputs_reference_the_trigger_root`] intercepts it and says
+/// so instead.
+pub fn inputs_reference_the_trigger_root(webhook: &Webhook) -> bool {
+    webhook.inputs.as_ref().is_some_and(|m| {
+        m.values().any(|v| {
+            v.as_str()
+                .is_some_and(|s| s.contains("trigger.") || s.contains("trigger["))
+        })
+    })
+}
+
+/// Render a matched webhook's `inputs:` against the key context.
+///
+/// Only reached when [`inputs_reference_the_trigger_root`] is false, so the
+/// gap above cannot be papered over.
+pub fn render_inputs(
+    trigger: &Trigger,
+    webhook: &Webhook,
+    kcx: &KeyContext,
+) -> Result<Value, String> {
+    let Some(declared) = webhook.inputs.as_ref() else {
+        return Ok(Value::Object(Map::new()));
+    };
+    let cx = kcx.render_context_for(trigger);
+    let mut out = Map::new();
+    for (k, v) in declared {
+        let rendered = match v {
+            Value::String(s) => {
+                Value::String(render_str(s.as_str(), &cx).map_err(|e| format!("input '{k}': {e}"))?)
+            }
+            other => other.clone(),
+        };
+        out.insert(k.clone(), rendered);
+    }
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::parse;
+
+    fn flow_of(yaml: &str) -> crate::models::Flow {
+        parse(yaml).unwrap_or_else(|e| panic!("fixture does not parse: {}", e.message))
+    }
+
+    fn kcx_of(f: &crate::models::Flow) -> KeyContext {
+        KeyContext {
+            flow_id: f.id.clone(),
+            namespace: f.namespace.clone(),
+            vars: f.variables.clone().into_iter().collect(),
+        }
+    }
+
+    /// The fixture the whole module is calibrated on.
+    ///
+    /// **Every field is distinct from every other**, which is the point: the
+    /// flow id, the namespace, each trigger id and each key are five different
+    /// strings, so a mutation that reads the wrong one of them cannot survive
+    /// by coincidence. That is the operand problem this branch has paid for
+    /// twice — a fixture whose `max_depth` happened to equal the default made
+    /// a mutation to the literal `100` invisible.
+    const FIXTURE: &str = "\
+id: fx-flow-id
+namespace: fx.ns
+variables:
+  vkey: fx-var-value
+tasks:
+  - id: fx-task
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: fx-trg-broken
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"{{ nosuchroot.nothing }}\"
+  - id: fx-trg-literal
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-literal-key
+  - id: fx-trg-dynamic
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"dyn-{{ flow.id }}\"
+  - id: fx-trg-vars
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"{{ vars.vkey }}\"
+  - id: fx-trg-tid
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"tid-{{ trigger.id }}\"
+  - id: fx-trg-spaced
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"  fx-spaced-key  \"
+  - id: fx-trg-schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: \"* * * * *\"
+";
+
+    // ------------------------------------------------------------------
+    // ct_eq: the comparison itself
+    // ------------------------------------------------------------------
+
+    /// The four `MessageDigest.isEqual` arms, each with its own row.
+    #[test]
+    fn ct_eq_reproduces_message_digest_is_equal() {
+        assert!(ct_eq(b"", b""), "two empties are equal");
+        assert!(!ct_eq(b"a", b""), "non-empty vs empty");
+        assert!(!ct_eq(b"", b"a"), "empty vs non-empty");
+        assert!(ct_eq(b"abc", b"abc"), "identical");
+        assert!(!ct_eq(b"abc", b"abd"), "last byte differs");
+        assert!(!ct_eq(b"abc", b"bbc"), "first byte differs");
+        assert!(!ct_eq(b"abc", b"abcd"), "a is a prefix of b");
+        assert!(!ct_eq(b"abcd", b"abc"), "b is a prefix of a");
+        assert!(!ct_eq(b"ABC", b"abc"), "case is significant");
+    }
+
+    /// **The control for the accumulator.** A 64-bit OR is used rather than a
+    /// `u8` so that a length difference cannot cancel against a byte
+    /// difference. This is the pair that would pass under a `u8` accumulator
+    /// if the length term were dropped, and it is here so that the width is
+    /// asserted rather than assumed.
+    #[test]
+    fn a_length_difference_cannot_cancel_a_byte_difference() {
+        // `lenA - lenB` = 1; byte 0 differs by 1 as well. Under a narrow
+        // accumulator that ORed a truncated difference these would still be
+        // caught (OR never cancels) -- so the real property is that BOTH
+        // signals are present, and each alone is enough.
+        assert!(!ct_eq(b"b", b"a"), "same length, byte differs");
+        assert!(!ct_eq(b"ab", b"a"), "length differs, prefix matches");
+        assert!(!ct_eq(b"bb", b"a"), "both differ");
+    }
+
+    /// Non-UTF-8 bytes are compared as bytes, not as strings.
+    #[test]
+    fn ct_eq_is_over_bytes() {
+        assert!(ct_eq(&[0xff, 0x00], &[0xff, 0x00]));
+        assert!(!ct_eq(&[0xff, 0x00], &[0xff, 0x01]));
+    }
+
+    // ------------------------------------------------------------------
+    // keys_match: the one-sided trim
+    // ------------------------------------------------------------------
+
+    /// **The discriminating row.** Two rules agree on every ordinary key:
+    ///
+    /// * R1 — trim the declared key only (Kestra's, measured);
+    /// * R2 — trim both sides.
+    ///
+    /// They disagree on exactly one input, and this is it. Measured on the
+    /// artifact in both directions: `…/spaced-key` → 200,
+    /// `…/%20%20spaced-key%20%20` → 404.
+    #[test]
+    fn only_the_declared_key_is_trimmed() {
+        assert!(
+            keys_match("  spaced-key  ", "spaced-key"),
+            "R1 and R2 agree: the declared key trims"
+        );
+        assert!(
+            !keys_match("  spaced-key  ", "  spaced-key  "),
+            "R1 says no, R2 says yes -- the artifact says 404"
+        );
+        // And the third rule the first row alone does not kill: no trim at all.
+        assert!(
+            !keys_match("spaced-key", "  spaced-key  "),
+            "R3 (no trim anywhere) would also reject this -- kept as the control \
+             that the first row is what separates R1 from R3"
+        );
+    }
+
+    /// A key of only whitespace trims to empty, and an empty URL segment is
+    /// not routable, so it can never match.
+    #[test]
+    fn a_whitespace_only_key_matches_nothing_routable() {
+        assert!(keys_match("   ", ""), "it does equal the empty string");
+        assert!(!keys_match("   ", " "), "and nothing a URL can carry");
+    }
+
+    #[test]
+    fn keys_match_is_not_a_prefix_test() {
+        assert!(!keys_match("key", "keyX"));
+        assert!(!keys_match("key", "ke"));
+        assert!(!keys_match("keyX", "key"));
+    }
+
+    #[test]
+    fn keys_match_is_case_sensitive() {
+        assert!(!keys_match("Key", "key"));
+        assert!(!keys_match("key", "KEY"));
+    }
+
+    // ------------------------------------------------------------------
+    // render_key / find
+    // ------------------------------------------------------------------
+
+    /// **The row that kills "compare the declared source".** The literal text
+    /// of the template must NOT match; the rendered value must. Measured on
+    /// the artifact in both directions (200 for `t7-probe-multi`, 404 for the
+    /// percent-encoded `{{ flow.id }}`).
+    #[test]
+    fn the_rendered_key_is_what_is_compared_not_the_source() {
+        let f = flow_of(FIXTURE);
+        let kcx = kcx_of(&f);
+
+        let hit = find(&f.triggers, "dyn-fx-flow-id", &kcx).expect("the rendered key matches");
+        assert_eq!(hit.0.id, "fx-trg-dynamic");
+
+        assert!(
+            find(&f.triggers, "dyn-{{ flow.id }}", &kcx).is_none(),
+            "the SOURCE must not match -- this is the mutation `render_key` exists to fail"
+        );
+    }
+
+    /// The three roots the artifact was measured resolving, each with a key
+    /// whose rendered value is distinct from the flow id, the namespace and
+    /// the trigger id.
+    #[test]
+    fn the_key_context_carries_flow_vars_and_trigger() {
+        let f = flow_of(FIXTURE);
+        let kcx = kcx_of(&f);
+
+        assert_eq!(
+            find(&f.triggers, "dyn-fx-flow-id", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("fx-trg-dynamic"),
+            "flow.id"
+        );
+        assert_eq!(
+            find(&f.triggers, "fx-var-value", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("fx-trg-vars"),
+            "vars.vkey"
+        );
+        assert_eq!(
+            find(&f.triggers, "tid-fx-trg-tid", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("fx-trg-tid"),
+            "trigger.id -- and note it is the PER-TRIGGER id, not the first one"
+        );
+    }
+
+    /// `trigger.id` is per-trigger, which is only observable with two triggers
+    /// that both read it. Without this row, a context built once per flow and
+    /// pinned to `triggers[0]` would pass every other test in this file.
+    #[test]
+    fn the_trigger_root_is_rebuilt_for_each_trigger() {
+        let yaml = "\
+id: two-tid
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: alpha
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"k-{{ trigger.id }}\"
+  - id: beta
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: \"k-{{ trigger.id }}\"
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        assert_eq!(
+            find(&f.triggers, "k-alpha", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            find(&f.triggers, "k-beta", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("beta"),
+            "a context pinned to triggers[0] would answer None here"
+        );
+    }
+
+    /// The artifact logs a warning and returns `false`; it does not fail the
+    /// request. The proof that the scan CONTINUES is that a trigger declared
+    /// *after* the broken one is still reachable — `fx-trg-broken` is
+    /// deliberately first in the fixture.
+    #[test]
+    fn an_unrenderable_key_hides_its_trigger_and_does_not_stop_the_scan() {
+        let f = flow_of(FIXTURE);
+        let kcx = kcx_of(&f);
+
+        let (broken, w) = f
+            .triggers
+            .iter()
+            .find_map(|t| match (&t.kind, t.id.as_str()) {
+                (TriggerKind::Webhook(w), "fx-trg-broken") => Some((t, w)),
+                _ => None,
+            })
+            .expect("fixture carries the broken trigger");
+        assert_eq!(
+            render_key(broken, w, &kcx),
+            None,
+            "an unresolvable root does not render"
+        );
+        assert_eq!(
+            f.triggers.iter().position(|t| t.id == "fx-trg-broken"),
+            Some(0),
+            "and it is FIRST, so the next assertion proves the scan continued"
+        );
+        assert_eq!(
+            find(&f.triggers, "fx-literal-key", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("fx-trg-literal")
+        );
+    }
+
+    /// A `Schedule` in the same `triggers:` list is skipped, not matched and
+    /// not an error. The fixture carries one.
+    #[test]
+    fn a_non_webhook_trigger_is_never_matched() {
+        let f = flow_of(FIXTURE);
+        let kcx = kcx_of(&f);
+        assert!(f
+            .triggers
+            .iter()
+            .any(|t| matches!(t.kind, TriggerKind::Schedule(_))));
+        assert!(find(&f.triggers, "* * * * *", &kcx).is_none());
+        assert!(find(&f.triggers, "fx-trg-schedule", &kcx).is_none());
+    }
+
+    /// A trigger with no `key:` at all can never be matched — in particular
+    /// not by an empty key.
+    #[test]
+    fn a_webhook_with_no_key_matches_nothing() {
+        let yaml = "\
+id: nokey
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: keyless
+    type: io.kestra.plugin.core.trigger.Webhook
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        assert!(find(&f.triggers, "", &kcx).is_none());
+        assert!(find(&f.triggers, "keyless", &kcx).is_none());
+    }
+
+    /// Declaration order decides, and the fixture for it has **two triggers
+    /// with the same key**, which is the only way the rule is observable.
+    #[test]
+    fn the_first_matching_trigger_in_declaration_order_wins() {
+        let yaml = "\
+id: dup
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: first
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: shared
+  - id: second
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: shared
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        assert_eq!(
+            find(&f.triggers, "shared", &kcx).map(|(t, _)| t.id.as_str()),
+            Some("first")
+        );
+    }
+
+    /// A disabled trigger is still FOUND. It is refused one layer up, with a
+    /// 409 that names it — filtering it here would turn that into a 404.
+    #[test]
+    fn a_disabled_trigger_is_still_matched_here() {
+        let yaml = "\
+id: off
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: offhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: offkey
+    disabled: true
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let (t, _) = find(&f.triggers, "offkey", &kcx).expect("matched despite being disabled");
+        assert!(t.disabled);
+    }
+
+    // ------------------------------------------------------------------
+    // build_output
+    // ------------------------------------------------------------------
+
+    fn req(ct: Option<&str>, body: &[u8]) -> WebhookRequest {
+        WebhookRequest {
+            method: "POST".into(),
+            query: vec![],
+            headers: vec![("content-type".into(), ct.unwrap_or("").into())],
+            content_type: ct.map(str::to_string),
+            body: body.to_vec(),
+        }
+    }
+
+    /// The five body shapes, each measured on the artifact and each with the
+    /// value a *different* rule would have produced named in the message.
+    #[test]
+    fn the_body_is_typed_the_way_the_artifact_types_it() {
+        let o = build_output(
+            &req(Some("application/json"), br#"{"hello":"world","n":3}"#),
+            FetchType::Fetch,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            o.body,
+            Some(json!({"hello":"world","n":3})),
+            "an object, not a string"
+        );
+
+        let o = build_output(
+            &req(Some("application/json"), b"[1,2]"),
+            FetchType::Fetch,
+            None,
+        )
+        .unwrap();
+        assert_eq!(o.body, Some(json!([1, 2])), "an array, not a string");
+
+        let o = build_output(
+            &req(Some("text/plain"), b"just plain text"),
+            FetchType::Fetch,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            o.body,
+            Some(json!("just plain text")),
+            "a string, not a parse error"
+        );
+
+        // A bare JSON scalar is neither a map nor an array: `tryMap` and
+        // `tryArray` both miss, so it stays the RAW STRING. A single
+        // `from_str::<Value>` would have made this the number 3.
+        let o = build_output(&req(Some("application/json"), b"3"), FetchType::Fetch, None).unwrap();
+        assert_eq!(o.body, Some(json!("3")), "a bare scalar stays a string");
+
+        // Non-textual: base64.
+        let o = build_output(
+            &req(Some("application/octet-stream"), &[0x00, 0xff]),
+            FetchType::Fetch,
+            None,
+        )
+        .unwrap();
+        assert_eq!(o.body, Some(json!("AP8=")), "base64, not lossy UTF-8");
+    }
+
+    /// An absent body is not an empty body, and `body` is then absent
+    /// entirely. Measured: a `GET` webhook's `trigger.variables` has no `body`
+    /// key at all.
+    #[test]
+    fn an_empty_body_produces_no_body_key() {
+        let o = build_output(&req(Some("application/json"), b""), FetchType::Fetch, None).unwrap();
+        assert_eq!(o.body, None);
+        // The control: one byte of body, same content type, and the key
+        // appears. Without this row the assertion above would also pass for an
+        // implementation that never set `body` at all.
+        let o = build_output(&req(Some("application/json"), b"x"), FetchType::Fetch, None).unwrap();
+        assert_eq!(o.body, Some(json!("x")));
+    }
+
+    /// `fetchType` decides whether there is a body at all, and the three
+    /// values are three different answers.
+    #[test]
+    fn fetch_type_none_carries_headers_and_parameters_but_no_body() {
+        let mut r = req(Some("application/json"), br#"{"k":1}"#);
+        r.query = vec![("a".into(), "1".into())];
+
+        let none = build_output(&r, FetchType::None, None).unwrap();
+        assert_eq!(none.body, None);
+        assert_eq!(none.uri, None);
+        assert_eq!(
+            none.parameters.as_ref().and_then(|p| p.get("a")),
+            Some(&vec!["1".to_string()]),
+            "NONE still carries parameters -- measured"
+        );
+        assert!(none.headers.is_some(), "and headers");
+
+        let fetch = build_output(&r, FetchType::Fetch, None).unwrap();
+        assert_eq!(
+            fetch.body,
+            Some(json!({"k":1})),
+            "the control: the SAME request under FETCH does carry the body"
+        );
+
+        assert_eq!(
+            build_output(&r, FetchType::Store, None),
+            Err(Unsupported::StoreBody)
+        );
+    }
+
+    /// The `uri` branch returns before the body switch, so a stored body never
+    /// carries both. `stored_uri` is unreachable from the route today; this is
+    /// the unit test that keeps the branch honest for whoever wires it.
+    #[test]
+    fn a_stored_uri_replaces_the_body_rather_than_joining_it() {
+        let o = build_output(
+            &req(Some("application/json"), br#"{"k":1}"#),
+            FetchType::Store,
+            Some("kestra:///ns/flow/executions/e/webhook/body"),
+        )
+        .unwrap();
+        assert_eq!(
+            o.uri.as_deref(),
+            Some("kestra:///ns/flow/executions/e/webhook/body")
+        );
+        assert_eq!(o.body, None);
+    }
+
+    #[test]
+    fn multipart_is_refused_rather_than_half_read() {
+        let r = req(Some("multipart/form-data; boundary=abc"), b"--abc--");
+        assert_eq!(
+            build_output(&r, FetchType::Fetch, None),
+            Err(Unsupported::Multipart)
+        );
+    }
+
+    /// Repeated query parameters keep both values, in URL order, and a single
+    /// one is still a list. Measured:
+    /// `{"validationToken":["abc","def"],"x":["1"]}`.
+    #[test]
+    fn query_parameters_group_by_name_and_keep_order() {
+        let mut r = req(Some("application/json"), b"{}");
+        r.query = vec![
+            ("validationToken".into(), "abc".into()),
+            ("validationToken".into(), "def".into()),
+            ("x".into(), "1".into()),
+        ];
+        let o = build_output(&r, FetchType::Fetch, None).unwrap();
+        let p = o.parameters.expect("parameters present");
+        assert_eq!(p["validationToken"], vec!["abc", "def"]);
+        assert_eq!(p["x"], vec!["1"]);
+
+        // The control for "keep order": the reversed input must give the
+        // reversed list, or the assertion above is satisfied by sorting.
+        let mut r2 = r.clone();
+        r2.query.swap(0, 1);
+        let o2 = build_output(&r2, FetchType::Fetch, None).unwrap();
+        assert_eq!(
+            o2.parameters.expect("present")["validationToken"],
+            vec!["def", "abc"]
+        );
+    }
+
+    /// No query string at all still produces `parameters`, empty — measured.
+    #[test]
+    fn an_absent_query_string_produces_an_empty_map_not_an_absent_key() {
+        let o = build_output(&req(Some("text/plain"), b"x"), FetchType::Fetch, None).unwrap();
+        let p = o.parameters.as_ref().expect("parameters is PRESENT");
+        assert!(p.is_empty());
+        assert!(
+            serde_json::to_string(&o)
+                .unwrap()
+                .contains("\"parameters\":{}"),
+            "and it serialises as an empty object, not as a missing key"
+        );
+    }
+
+    #[test]
+    fn textual_media_types_follow_micronauts_is_text_based() {
+        for ct in [
+            None,
+            Some("text/plain"),
+            Some("text/csv"),
+            Some("application/json"),
+            Some("application/json; charset=utf-8"),
+            Some("application/ld+json"),
+            Some("application/xml"),
+            Some("image/svg+xml"),
+            Some("application/x-www-form-urlencoded"),
+            Some("  APPLICATION/JSON  "),
+        ] {
+            assert!(is_textual(ct), "{ct:?} should be textual");
+        }
+        for ct in [
+            Some("application/octet-stream"),
+            Some("image/png"),
+            Some("application/pdf"),
+            Some("audio/mpeg"),
+        ] {
+            assert!(!is_textual(ct), "{ct:?} should NOT be textual");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // inputs
+    // ------------------------------------------------------------------
+
+    /// The gap is detected rather than papered over: a trigger whose `inputs:`
+    /// read `trigger.*` is refused by name, because the renderer's own message
+    /// for it (`undefined value`) blames the author's template for a root
+    /// egret does not supply.
+    #[test]
+    fn inputs_that_read_the_trigger_root_are_detected() {
+        let yaml = "\
+id: wi
+namespace: fx.ns
+inputs:
+  - id: body
+    type: STRING
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: reads-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k1
+    inputs:
+      body: \"{{ trigger.body }}\"
+  - id: reads-flow
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k2
+    inputs:
+      body: \"{{ flow.id }}\"
+  - id: reads-nothing
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k3
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+
+        let (t1, w1) = find(&f.triggers, "k1", &kcx).unwrap();
+        assert!(inputs_reference_the_trigger_root(w1));
+
+        let (t2, w2) = find(&f.triggers, "k2", &kcx).unwrap();
+        assert!(
+            !inputs_reference_the_trigger_root(w2),
+            "the control: inputs that do NOT read trigger.* are renderable"
+        );
+        assert_eq!(render_inputs(t2, w2, &kcx).unwrap(), json!({"body": "wi"}));
+
+        let (t3, w3) = find(&f.triggers, "k3", &kcx).unwrap();
+        assert!(!inputs_reference_the_trigger_root(w3));
+        assert_eq!(render_inputs(t3, w3, &kcx).unwrap(), json!({}));
+
+        // And the refused one is refused for the RIGHT reason.
+        //
+        // **Measured, and NOT what the first draft of this test asserted.**
+        // The first version claimed it "renders to an empty string"; it does
+        // not. `trigger` IS a defined root here (the test above proves
+        // `trigger.id` resolves), so `trigger.body` is a defined root with an
+        // undefined MEMBER, and minijinja errors:
+        //
+        //     input 'body': undefined value (in <string>:1)
+        //
+        // which is the whole reason the guard earns its place: that message
+        // tells an author their template is wrong when the truth is that egret
+        // cannot supply the root.
+        let err = render_inputs(t1, w1, &kcx).expect_err("trigger.body is undefined here");
+        assert!(
+            err.contains("input 'body'") && err.contains("undefined value"),
+            "unexpected error text: {err}"
+        );
+        // The control for "defined root, undefined member": the SAME context
+        // renders `trigger.id` without complaint.
+        assert_eq!(
+            render_str("{{ trigger.id }}", &kcx.render_context_for(t1)).unwrap(),
+            "reads-trigger"
+        );
+    }
+
+    /// Non-string input values pass through untouched — Kestra's
+    /// `runContext.render(Map)` only renders strings.
+    #[test]
+    fn non_string_input_values_are_not_rendered() {
+        let yaml = "\
+id: wi2
+namespace: fx.ns
+tasks:
+  - id: t
+    type: io.kestra.plugin.core.debug.Return
+    format: x
+triggers:
+  - id: h
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k
+    inputs:
+      n: 7
+      b: true
+      s: \"{{ flow.namespace }}\"
+";
+        let f = flow_of(yaml);
+        let kcx = kcx_of(&f);
+        let (t, w) = find(&f.triggers, "k", &kcx).unwrap();
+        assert_eq!(
+            render_inputs(t, w, &kcx).unwrap(),
+            json!({"n": 7, "b": true, "s": "fx.ns"})
+        );
+    }
+
+    /// **Step 4's measurement, and it falsifies the premise it was given.**
+    ///
+    /// The task brief warned that publishing a `trigger` root into the render
+    /// context "would make `valids/webhook-plaintext` diverge further". It
+    /// would not — not for an empty root, anyway — and this test is the
+    /// running program that says so.
+    ///
+    /// `valids/webhook-plaintext`'s only task renders
+    /// `{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}`. Kestra
+    /// renders `hello-world` (the golden was harvested through a plain
+    /// execution POST, so its `Execution.trigger` is null). egret errors, and
+    /// `oracle-exec/baseline.txt` attributes that to `??` resolving a missing
+    /// MEMBER but not a missing ROOT.
+    ///
+    /// Measured here, with the real renderer:
+    ///
+    /// | context | result |
+    /// |---|---|
+    /// | no `trigger` root at all | `Err(undefined value)` |
+    /// | `trigger` root present, no `parameters` | **`Err(undefined value)` — the same** |
+    /// | `trigger.parameters.validationToken` present | `Ok("tok")` |
+    ///
+    /// So the middle row is the one that matters: **defining the root changes
+    /// nothing**, because the expression misses at `trigger.parameters` and
+    /// then indexes `.validationToken` on the result — two levels, not one, and
+    /// the baseline's one-level sentence does not reach it. The entry stays
+    /// baselined either way, which is why the ratchet reads 127 before and 127
+    /// after (see the task report for the direct measurement of that, taken by
+    /// temporarily adding the root to `worker/render.rs` and running the
+    /// oracle).
+    ///
+    /// The root is still not published here, for the two reasons the module
+    /// doc gives — neither of which is this one.
+    #[test]
+    fn the_missing_root_is_why_webhook_plaintext_is_baselined() {
+        const EXPR: &str = "{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}";
+
+        fn cx(trigger: Option<Value>) -> RenderContext {
+            let mut cx = RenderContext::new();
+            cx.insert(
+                "flow",
+                json!({"id": "webhook-plaintext", "namespace": "io.kestra.tests"}),
+            );
+            if let Some(t) = trigger {
+                cx.insert("trigger", t);
+            }
+            cx
+        }
+
+        // Row 1 — today's shipping context.
+        assert!(
+            render_str(EXPR, &cx(None)).is_err(),
+            "egret cannot render it with no trigger root -- this is why the entry is baselined"
+        );
+        // Row 2 — the change Step 4 warned about. IT IS THE SAME ANSWER.
+        assert!(
+            render_str(EXPR, &cx(Some(json!({})))).is_err(),
+            "a defined-but-empty trigger root does NOT rescue it, and does not break it either"
+        );
+        // Row 3 — the control, without which rows 1 and 2 are satisfied by a
+        // renderer that can never render this expression at all.
+        assert_eq!(
+            render_str(
+                EXPR,
+                &cx(Some(json!({"parameters": {"validationToken": ["tok"]}})))
+            )
+            .expect("a fully populated trigger root renders"),
+            "tok"
+        );
+        // Row 4 — the one-level miss the baseline's sentence IS about, kept as
+        // the discriminator between "?? never works" and "?? works on a member".
+        let mut one_level = cx(None);
+        one_level.insert("outputs", json!({}));
+        assert_eq!(
+            render_str("{{ outputs.not_existing ?? 'fallback' }}", &one_level)
+                .expect("a one-level miss does fall back"),
+            "fallback"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // policy
+    // ------------------------------------------------------------------
+
+    /// A running check that the key is never compared with `==`.
+    ///
+    /// Modelled on `super::super::tests::no_wall_clock_in_the_trigger_path`,
+    /// and here for the same reason: a constant-time comparison and a plain
+    /// one are behaviourally identical, so **no behavioural test can tell them
+    /// apart**. A mutation table cannot either — replacing [`ct_eq`]'s body
+    /// with `a == b` passes every other test in this file. The only instrument
+    /// that sees the difference is one that reads the source, so that is the
+    /// instrument.
+    ///
+    /// It scans the shipping slice of this file only (everything before
+    /// `#[cfg(test)]`), and asserts the marker was found so that a file with
+    /// no test module cannot silently scan nothing.
+    #[test]
+    fn the_key_is_never_compared_with_a_plain_equality() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/trigger/webhook.rs");
+        let source = std::fs::read_to_string(&path).expect("read own source");
+        assert!(source.len() > 500, "did the scan read the right file?");
+
+        let marker = source
+            .find("\n#[cfg(test)]")
+            .expect("this file has a test module; the scan must stop at it");
+        let shipping = &source[..marker];
+        assert!(!shipping.is_empty());
+
+        // The needles are spelled as they would appear in the key path. A
+        // plain `==` is legal elsewhere in the file (`ct == "text"`), so the
+        // check is over the two IDENTIFIERS that carry the key, not over the
+        // operator alone.
+        for needle in [
+            "declared_rendered ==",
+            "== declared_rendered",
+            "url_key ==",
+            "== url_key",
+            "declared_rendered.eq",
+            "url_key.eq",
+            "rendered == ",
+            ".key ==",
+        ] {
+            assert!(
+                !shipping.contains(needle),
+                "`{needle}` appears in the shipping half of webhook.rs: the webhook key must be \
+                 compared only through ct_eq()"
+            );
+        }
+
+        // And the positive half: the one comparison that IS there.
+        assert_eq!(
+            shipping.matches("ct_eq(").count(),
+            2,
+            "expected exactly two occurrences of `ct_eq(` in the shipping half -- its \
+             definition and its one call in keys_match. A third means a second comparison \
+             site appeared; a first means keys_match stopped using it. (Counted, not \
+             guessed: the first draft of this assertion said three and was wrong, because \
+             the doc-link spelling is ``[`ct_eq`]`` and carries no parenthesis.)"
+        );
+    }
+}

@@ -89,6 +89,7 @@
 
 pub mod flow;
 pub mod schedule;
+pub mod webhook;
 
 use std::collections::BTreeMap;
 
@@ -101,6 +102,11 @@ pub use flow::{
 };
 pub use schedule::{
     Backfill, Cron, CronError, Field, ScheduleDates, ScheduleError, ScheduleTrigger, SkipReason,
+};
+pub use webhook::{
+    build_output as build_webhook_output, ct_eq, find as find_webhook, keys_match,
+    ExecutionTrigger, KeyContext, Output as WebhookOutput, Unsupported as UnsupportedWebhook,
+    WebhookRequest,
 };
 
 /// The scheduler's clock, injected everywhere.
