@@ -6174,8 +6174,12 @@ separate *what a bank proves* from *what shipped beside it*. **That makes the
 risk this section exists for sharper rather than smaller.** W4's problem was
 that a number which never moves reads as "nothing happened"; W6's is the
 opposite — **sixteen banked entries can make four triggers look measured when
-none of them is.** Half of what this package shipped by volume is judged by
-nothing in this file.
+none of them is.** And it really is half by volume, not a figure of speech:
+**12,274 of the 23,267 lines this package added under `crates/`** are
+`src/trigger/`, `src/webhook_routes.rs` and the two webhook route suites —
+**53%** of the package, judged by nothing in this file. *(`git diff --numstat
+cc4ad991 HEAD`, added lines; a line count is a crude measure of anything, and it
+is used here only to say that the uncovered half is not a corner.)*
 
 Every figure in this section is either derived by a named test on every run or
 labelled as a measurement someone took. The derivations are
@@ -6234,8 +6238,8 @@ have to change to make each one visible.
 | construct | corpus | golden entries | what the ratchet holds | **the mechanism of the blindness** |
 |---|---|---|---|---|
 | **webhook** | 15 flows, 15 declarations | 14 — 11 matching, 3 baselined | nothing | **The harness never sends the request.** `harvest.py` contains the string `executions/webhook` **exactly once**, and that once is the *reason* `valids/webhook-inputs` is excluded from the corpus ("Executed only through POST /executions/webhook/…"). The trigger is not invisible to a discovery walk; it is **never invoked**, and the one corpus flow that can only be started that way has **no golden entry at all** |
-| **schedule / cron** | 7 flows, 8 declarations | 6 — all 6 matching | nothing | **The execution exists and hangs off nothing.** `docker compose` runs `server standalone`, so the scheduler is live and fires it; the execution it creates carries `parent_id` NULL **and no trigger link either**. `descendants()` walks `parent_id` transitively from the one root the harness posted, so a schedule-fired execution is not a descendant of anything and cannot be attributed to an entry even in principle. Unioning `trigger_execution_id` — which is what the flow trigger needs — **would not find this one** |
-| **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution carries `trigger_execution_id`, a column **no arm of `descendants()` reads**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and it would still need `normalise.py` to build its tree on that link — today it builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
+| **schedule / cron** | 7 flows, 8 declarations | 6 — all 6 matching | nothing | **The execution exists and hangs off nothing.** `docker compose` runs `command: server standalone`, so the scheduler is live and fires it — the design spec's §1.1 measured **13** executions on the artifact of which **10** came from something other than the harness's POST, six of them from a `Schedule` nobody asked for. The execution it creates carries `parentId` NULL **and no trigger link either** (measured there, not here). `descendants()` walks the generated `parent_id` column transitively **from the one root the harness posted**, so a schedule-fired execution is not a descendant of anything and cannot be attributed to an entry even in principle. The `trigger`-link union the flow-trigger row needs **would not find this one** |
+| **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
 
 **Both sides are blind, and the second half is egret's.** Even if Kestra's
@@ -6311,8 +6315,10 @@ avoid.
 
 **The flow trigger** is `WindowFreeFlowTrigger`, and the name is the second
 refusal. **Refusal 2 — `dependsOn` is refused, and that is 20 of the 21 corpus
-declarations**, which is the only figure in this half that a running program
-compares: `the_corpus_flow_triggers_split_twenty_to_one` resolves exactly one
+declarations**, which is the only figure in this half a test compares **against
+the corpus** (the 94 tests above are counted by `--list`, and everything else
+here is a measurement someone took on the artifact; `oracle-exec/corpus` appears
+in exactly one place under `src/trigger/`, and this is it): `the_corpus_flow_triggers_split_twenty_to_one` resolves exactly one
 declaration (`flow-trigger-when-condition-flow-listen/on_completion`) and
 refuses twenty, and it is written as the **acceptance criterion that fails the
 day the window lands**. The hazard behind the refusal was seen **live on the
