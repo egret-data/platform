@@ -4630,6 +4630,193 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
     );
 }
 
+/// **`CANCELLED` never comes from a flow `concurrency:` limit** — the fourth
+/// run of the rule `the_skipped_state_comes_from_runif_and_never_from_disabled`
+/// established, and the third time the trigger was a state credited to the
+/// wrong construct.
+///
+/// `oracle-exec/README.md` labelled the residual baseline's `flow
+/// concurrency:` row `→ CANCELLED` in two places, and the programme spec built
+/// a W8 package on it. It is false in exactly the shape `disabled:`/`SKIPPED`
+/// was: the state really is in the golden, three times, and **not one of the
+/// three is a concurrency limit's**. A row is then reachable-looking for a
+/// reason that has nothing to do with the construct it names.
+///
+/// Three halves, because only the third is a control:
+///
+/// - every entry whose trace holds `CANCELLED` is named here, with what
+///   produces it — an `sla:` whose `behavior: CANCEL`, or an
+///   `io.kestra.plugin.core.execution.Exit` declaring `state: CANCELLED`;
+/// - **no** such entry is produced by a `concurrency:` limit, asserted as the
+///   positive form: each of the three declares a CANCEL-behaviour producer that
+///   is not one;
+/// - and the control that makes the zero a measurement rather than an absence:
+///   **`behavior: CANCEL` is the only `concurrency:` configuration that could
+///   ever cancel, two corpus flows write it, and neither produces a `CANCELLED`
+///   anywhere in its trace.** Without this half the test would pass on a corpus
+///   that simply contained no cancelling limit, which is a different fact and a
+///   much weaker one.
+///
+/// **What this evidence does not contain**, named rather than generalised over:
+/// it says nothing about whether Kestra's `concurrency: {behavior: CANCEL}`
+/// cancels *in general* — it cannot, because `harvest.py` drives flows strictly
+/// serially (`for i, rec in enumerate(wanted, 1): execute_once(...)`, each
+/// awaited to termination) and so never contends a `limit: 1`. The claim is the
+/// narrow one the ratchet needs: **under this oracle** the state is never a
+/// limit's, so a row attributing it to one strands its entries.
+///
+/// The one contended population the corpus does hold —
+/// `valids/flow-concurrency-parallel-subflow-kill`, whose `Parallel` starts two
+/// `Subflow`s of the same limited flow at once — is asserted below to be
+/// **banked**, and its golden shows why a `QUEUE` that really did fire would
+/// still be invisible: all three of its `order` pairs are `overlapping` and its
+/// `spawned` is empty, so *when* the second child execution starts is in no
+/// compared field.
+#[test]
+fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
+    let mut cancelled: Vec<String> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let mut stack: Vec<&Trace> = vec![&trace];
+        let mut saw = false;
+        while let Some(t) = stack.pop() {
+            if t.execution.iter().any(|s| s == "CANCELLED") {
+                saw = true;
+            }
+            for run in &t.runs {
+                if run.state.iter().any(|s| s == "CANCELLED")
+                    || run.attempts.iter().flatten().any(|s| s == "CANCELLED")
+                {
+                    saw = true;
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if saw {
+            cancelled.push(entry.id.clone());
+        }
+    }
+
+    cancelled.sort();
+    assert_eq!(
+        cancelled,
+        [
+            "valids/exit-cancelled",
+            "valids/flow-concurrency-sla-assert-cancel",
+            "valids/sla-execution-condition",
+        ],
+        "every golden entry whose trace holds CANCELLED, by name. \
+         `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
+         counts them (3); this says WHICH, which is the whole question"
+    );
+
+    // The positive half: each of the three declares a CANCEL-behaviour producer
+    // that is not a concurrency limit.
+    for id in &cancelled {
+        let source = corpus_source(id);
+        let sla_cancel = source.contains("\nsla:") && source.contains("behavior: CANCEL");
+        let exit_cancel = source.contains("io.kestra.plugin.core.execution.Exit")
+            && source.contains("state: CANCELLED");
+        assert!(
+            sla_cancel || exit_cancel,
+            "{id}: holds a CANCELLED and declares neither an `sla:` with \
+             `behavior: CANCEL` nor an `Exit` with `state: CANCELLED`. The \
+             attribution has moved and every table naming an owner for this \
+             state must move with it"
+        );
+    }
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|id| corpus_source(id).contains("\nsla:"))
+            .count(),
+        2,
+        "two of the three are an `sla:`'s; the third is `valids/exit-cancelled`, \
+         an `ExecutionUpdatableTask`. Counted so that a corpus in which all \
+         three became one construct's could not pass the loop above unnoticed"
+    );
+
+    // The control, and the reason the zero is a measurement: `behavior: CANCEL`
+    // is the only `concurrency:` setting that can cancel anything. Both flows
+    // that write it are named, so this can never silently become an empty loop.
+    let mut declarers: Vec<String> = Vec::new();
+    let mut cancel_limits: Vec<String> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let source = corpus_source(&entry.id);
+        if !source.contains("\nconcurrency:") {
+            continue;
+        }
+        declarers.push(entry.id.clone());
+        if source.contains("behavior: CANCEL") && !source.contains("\nsla:") {
+            cancel_limits.push(entry.id.clone());
+            assert!(
+                !cancelled.contains(&entry.id),
+                "{}: declares `concurrency: {{behavior: CANCEL}}` AND holds a \
+                 CANCELLED. This corpus can no longer tell a limit's cancel \
+                 from an `sla:`'s, and the attribution must be re-derived by \
+                 hand",
+                entry.id
+            );
+        }
+    }
+    declarers.sort();
+    cancel_limits.sort();
+    assert_eq!(
+        cancel_limits,
+        [
+            "valids/flow-concurrency-cancel",
+            "valids/flow-concurrency-cancel-pause"
+        ],
+        "the control's own population, named so it cannot silently become \
+         empty: two comparable golden entries declare a limit whose behaviour \
+         is CANCEL, and neither cancels. `valids/flow-concurrency-cancel`'s \
+         whole execution history is `CREATED RUNNING SUCCESS`"
+    );
+
+    // The third leg: 7 of the 13 declarers are not baselined at all, which the
+    // ratchet's other direction means they MATCH with nothing implemented.
+    let baseline = baseline();
+    let matching: Vec<&String> = declarers
+        .iter()
+        .filter(|id| !baseline.contains(*id))
+        .collect();
+    assert_eq!(
+        (declarers.len(), matching.len()),
+        (13, 7),
+        "13 comparable entries declare a flow `concurrency:` and 7 of them \
+         already match, which is what makes `reaches 0` a control rather than \
+         an assertion about an unimplemented construct: {matching:?}"
+    );
+    // **The contending flow is not itself a declarer, and asserting that it was
+    // is how this guard first failed.** `valids/flow-concurrency-parallel-
+    // subflow-kill` writes no `concurrency:` at all: its `Parallel` starts two
+    // `Subflow`s of `-child`, and it is `-child` that carries the limit. The
+    // pair is asserted as a pair for that reason -- a scan of declarers alone
+    // cannot see the only contention this corpus creates.
+    assert!(
+        matching.contains(&&"valids/flow-concurrency-parallel-subflow-kill-child".to_string()),
+        "the corpus's ONLY limited-and-contended flow, banked by W6 Task 3"
+    );
+    let contender = "valids/flow-concurrency-parallel-subflow-kill";
+    assert!(
+        !corpus_source(contender).contains("\nconcurrency:")
+            && corpus_source(contender).contains("io.kestra.plugin.core.flow.Parallel")
+            && !baseline.contains(contender),
+        "the flow that CREATES the contention -- two `Subflow`s of `-child` \
+         from one `Parallel`, so `limit: 1` really does fire -- declares no \
+         limit of its own and is banked. It matches anyway, because what QUEUE \
+         changes (when the second child execution starts) is in no compared \
+         field: its three `order` pairs are all `overlapping` and its \
+         `spawned` is empty"
+    );
+
+    println!(
+        "CANCELLED: {cancelled:?}; concurrency declarers: {}, already matching: {}",
+        declarers.len(),
+        matching.len()
+    );
+}
+
 // --------------------------------------------------------------------------
 // Task 8: the refusals
 // --------------------------------------------------------------------------
@@ -5010,10 +5197,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         //
         // The remaining 10 are all held by something else, and lowering the
         // number instead would have kept six of them attributed to a construct
-        // that works. Four are absorbed by rows that stayed (`flow
-        // concurrency:` once, `Loop` once, `AllowFailure` twice); the other six
-        // are named one by one in `UNATTRIBUTED` below, which is where the
-        // honest attribution for each of them lives.
+        // that works. **Three** are absorbed by rows that stayed (`Loop` once,
+        // `AllowFailure` twice) and the other **seven** are named one by one in
+        // `UNATTRIBUTED` below, which is where the honest attribution for each
+        // of them lives. This sentence said "four" and "six" and named `flow
+        // concurrency:` as the fourth absorber; W8 Task 1 deleted that row for
+        // being an attribution to a construct that holds nothing, and its one
+        // entry -- `valids/flow-concurrency-sla-fail-parent` -- became the
+        // seventh name below. The fourth absorber was itself the misattribution.
         ("finally:", 16, &["finally:"]),
         (
             "ExecutionUpdatableTask",
@@ -5050,11 +5241,40 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
                 "core.waitfor",
             ],
         ),
-        // 7 through W5; `valids/flow-concurrency-parallel-subflow-kill-child`
-        // banked at W6 Task 3, because what its `concurrency: {behavior:
-        // QUEUE}` changes is WHEN its own child starts and its trace does not
-        // record that.
-        ("flow concurrency:", 6, &["\nconcurrency:"]),
+        // **`flow concurrency:` was a row here with 7 through W5 and 6 through
+        // W6, and W8 Task 1 REMOVES it rather than lowering it to 0.** Fourth
+        // run of the same rule, and the third time the trigger was a state
+        // credited to the wrong construct: the row's label in
+        // `oracle-exec/README.md` was `concurrency:` -> `CANCELLED`, and
+        // `the_cancelled_state_never_comes_from_a_concurrency_limit` derives
+        // that `CANCELLED` occurs in exactly three golden entries of which
+        // **two are an `sla:`'s and one is an `Exit`'s**. Not one is a limit's.
+        // That is `disabled:`/`SKIPPED` again: a row looks reachable because
+        // the state really is there, for another reason.
+        //
+        // The row is deleted rather than lowered because a row attributes an
+        // entry to the construct that HOLDS it, and this one holds nothing --
+        // five of its six are counted, unmoved, by rows above (`Pause` twice,
+        // `afterExecution:` twice, `sla:` once) and the sixth is
+        // `valids/flow-concurrency-sla-fail-parent`, which moves to
+        // `UNATTRIBUTED` below with the cause that really holds it: an `sla:`
+        // in its CHILD. That is exactly where `valids/sla-parent-flow` already
+        // sits, for exactly that reason.
+        //
+        // **And the zero has a mechanism rather than being a zero.**
+        // `oracle-exec/harvest.py`'s trace loop is strictly serial -- `for i,
+        // rec in enumerate(wanted, 1): execute_once(...)`, each awaited to
+        // termination -- so a `limit: 1` is never contended by the harness.
+        // That alone would not settle it, because a single flow can contend
+        // with itself: `valids/flow-concurrency-parallel-subflow-kill` starts
+        // two `Subflow`s of the same limited flow from one `Parallel`, and it
+        // is the corpus's ONLY contended population. **W6 Task 3 banked it**,
+        // along with `-child` and `valids/flow-concurrency-subflow`, and its
+        // golden says why the bank was possible: its three `order` pairs are
+        // all `overlapping` and its `spawned` is empty, so what `QUEUE` changes
+        // -- WHEN the second child execution starts -- lands in no compared
+        // field. The third leg is a control: **7 of the 13 corpus declarers
+        // already MATCH** with nothing implemented.
         // `disabled: true` was a row here through Task 8 with 6 entries, and
         // `runIf:` was a row with 7 through W3a's final review. Both are
         // implemented now, so neither holds anything and a row for either would
@@ -5098,8 +5318,17 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     // Every baselined entry that declares none of them, with what holds it.
     // Sorted, because the derivation walks `baseline()` -- a `BTreeSet`.
     //
-    // **There are 29, and this comment said "eleven of the thirteen" until W3b
-    // Task 7's sweep.** W3b Task 5 added sixteen rows here in one commit and
+    // **There are 36, this comment said 29, and the paragraph below it says a
+    // number here would be a third place to be wrong. Both of those were true
+    // at once until W8 Task 1's sweep.** The 29 went stale at W6 and nothing
+    // caught it, because the derivation compares the LIST and never the count
+    // -- which is precisely the argument the paragraph below makes for not
+    // writing one. It is kept, corrected, only because the sentence it opens is
+    // a history that has earned its place; the derivation remains the authority
+    // and this number is not read by anything.
+    //
+    // This comment said "eleven of the thirteen" until W3b
+    // Task 7's sweep. W3b Task 5 added sixteen rows here in one commit and
     // left the sentence above them describing the list before it did -- the
     // same stale-twin shape the README carried, one file over. There were
     // fourteen before that: `valids/switch-impossible` is banked by the
@@ -5156,6 +5385,17 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/sla-parent-flow",
             "`sla:` in its child `valids/sla-subflow`, which egret does not              implement, so the child SUCCEEDS and the parent transmits it",
+        ),
+        // **Moved here by W8 Task 1, from the `flow concurrency:` row that was
+        // deleted above.** It declares a `concurrency:` and that is not what
+        // holds it: its golden is `CREATED RUNNING FAILED`, never `CANCELLED`,
+        // and the FAILED comes from `MAX_DURATION` in its child. Identical in
+        // shape and cause to `valids/sla-parent-flow` two entries up, which is
+        // why it sits beside it -- a per-flow needle over `sla:` structurally
+        // cannot see either of them.
+        (
+            "valids/flow-concurrency-sla-fail-parent",
+            "`sla:` in its child `valids/flow-concurrency-sla-fail-child`,              which egret does not implement, so the child SUCCEEDS and              `transmitFailed` carries a SUCCESS Kestra never had up to it",
         ),
         (
             "valids/subflow-secret-output-parent",

@@ -185,9 +185,12 @@ file states: the circularity figure under *What the oracle feeds in* is now
 measured rather than quoted (and the quoted one was impossible), `RunState`
 gained `SUBMITTED`, the elapsed-time hole's second cause is closed, and
 `timeout:` turns out not to be `advance()`'s to implement at all. It also added
-*States and constructs no W3a task claims*, which names five things — `Pause`,
-flow concurrency, `disabled:`, `ExecutionUpdatableTask` and **`Subflow`** — that
-strand baselined entries with no owner. See *What Task 3 had to change, and what
+*States and constructs no W3a task claims*, which named five things — `Pause`,
+flow concurrency, `disabled:`, `ExecutionUpdatableTask` and **`Subflow`** — as
+stranding baselined entries with no owner. Three of the five have since been
+corrected out of that reading: `disabled:` and `Subflow` are implemented, and
+**flow concurrency stranded nothing** — its state was misattributed and W8 Task
+1 deleted the row. See *What Task 3 had to change, and what
 it banked*.
 
 Every number **in this harvest section** is a number `harvest.py` prints. If this
@@ -1606,8 +1609,8 @@ task that owns it:
 |---|---|---|
 | `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
 | `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
-| `WARNING` | 10 | `AllowFailure` and `warningOnRetry` — **not Task 7's**, and this row said it was. `warningOnRetry` turns a retried task's eventual SUCCESS into WARNING, so `valids/retry-success` and `valids/task-allow-failure-runnable` need it; `AllowFailure` is planned opaque and belongs to W8. Unclaimed |
-| `CANCELLED` | 3 | flow concurrency, which no W3a task claims |
+| `WARNING` | 10 | **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. `warningOnRetry` turns a retried task's eventual SUCCESS into WARNING, so `valids/retry-success` and `valids/task-allow-failure-runnable` need it; `AllowFailure` is planned opaque and belongs to W8. Unclaimed |
+| `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's |
 
 `SKIPPED` was a fifth row, 4 entries, credited first to `disabled: true` (wrong)
 and then to `runIf:` (right). **W3c implements `runIf:`**, so the row is gone
@@ -3095,18 +3098,64 @@ owner is how a suppression list starts.
 | construct | what it strands | produced by | owner |
 |---|---|---|---|
 | `Pause` | `PAUSED`, 18 golden `runs` entries | `io.kestra.plugin.core.flow.Pause` | W8 |
-| flow concurrency | `CANCELLED`, 3 entries | flow-level `concurrency:` | W8 |
+| ~~flow concurrency~~ | ~~`CANCELLED`, 3 entries~~ — **the state was misattributed and the row is DELETED, not lowered**; see the two paragraphs below this table | flow-level `concurrency:` | **nobody, and deliberately.** It reaches **0** baselined entries and the ratchet cannot score it. W8 Task 1 removed the row under the same rule that removed `disabled:` and `runIf:` |
 | `disabled:` | ~~`SKIPPED`, 4 entries~~ — **the state was misattributed and the construct is now implemented**; see the two rows below | a task-level flag | **W3a's final review took it.** `flatten_list` drops a disabled task from the plan, which is Kestra's own rule (`Execution.removeDisabled`, called on `tasks`, `errors` and `finally` inside `findTaskDependingFlowState`): no taskrun at all, and a flowable whose children are all disabled still succeeds. 4 of its 6 baselined entries banked |
 | `runIf:` | ~~**6 runs across 4 entries** — the golden's whole `SKIPPED` population — and 7 baselined entries~~ — **implemented by W3c** | a task-level expression, rendered per run | **W3c took it**, and both halves moved in one commit: W1's `Task` carries `run_if` and `RunState` has `Skipped`. **None of the 7 banks and none of the 6 skipped runs is reproduced under this oracle** — not because the rule is wrong but because the harness cannot render any of the four flows' conditions; see *What W3c had to change, and what it did NOT bank* |
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
-| `WARNING` | 10 golden `runs` entries, including `valids/retry-success` and `valids/task-allow-failure-runnable` | `AllowFailure` and `retry.warningOnRetry` | **unclaimed — and this table's state list said Task 7 owned it.** Task 7 reads `warningOnRetry` into `RetryPolicy` and does nothing with it, because `RunState` cannot hold `WARNING`; `AllowFailure` is planned opaque |
+| `WARNING` | 10 golden `runs` entries | `AllowFailure`, the `allowFailure:` flag, `retry.warningOnRetry` and an `Exit` | **W8 for 8 of the 10, unclaimed for 2** — corrected at W8 Task 1, and this cell had said Task 7's and then unclaimed. The 8 are the allow\* axis's (`AllowFailure` ×3, `allowFailure:` ×5) and the programme spec §9 has always given `allowFailure` to W8; the 2 that stay unclaimed are `valids/retry-success` (`warningOnRetry` alone — Task 7 reads it into `RetryPolicy` and does nothing with it) and `valids/exit` (an `Exit`, this table's `ExecutionUpdatableTask` row). See the residual table's `allowFailure` paragraph for the derivation by entry name |
 | a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
 | ~~the replay a `CREATE_NEW_EXECUTION` retry starts~~ — **taken by W6 Task 4, all 4 banked** | ~~4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned`~~ | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6 Task 4.** It is the third kind of sub-execution and `ExecutionState` had no field for any of them; it has one now — `metadata`, Kestra's own `ExecutionMetadata`, stored by migration 0139. `worker::replay::spawn_due` is the other half of the artifact's execution-delay loop |
 | `afterExecution:` | **10** baselined entries | `Flow.afterExecution` | **unclaimed — new at Task 8.** W1's `Flow::after_execution` parses and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors` and nothing else, so those tasks are in no plan. It is `finally:`'s sibling and unclaimed for the same reason |
 | `sla:` | **5** baselined entries | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8** (programme spec). W1 ports it as a data shape and says so; nothing evaluates one, and the row is here because a reader of the residual baseline had no way to learn that from this file |
+
+**The `flow concurrency:` row is the fourth this table has deleted rather than
+lowered, and the third deleted because a STATE was credited to the wrong
+construct.** `disabled:` lost `SKIPPED` to `runIf:`; `Subflow` lost its 22 when
+it started executing; and this row's label — `concurrency:` → `CANCELLED` — is
+false in the same shape as the first of those. `CANCELLED` is in exactly three
+golden entries and **two are an `sla:`'s and one is an `Exit`'s**. Not one is a
+limit's. A row like that is not merely too big: it makes the construct look
+reachable *because the state really is there*, for another reason, and a
+programme budgeting entries against it budgets against nothing.
+
+**And the zero is a mechanism rather than an absence**, which is the half this
+programme keeps having to add after the fact. Three legs, each measured:
+
+1. **The harness never creates the contention.** `harvest.py`'s trace loop is
+   strictly serial — `for i, rec in enumerate(wanted, 1): execute_once(...)`,
+   each execution awaited to termination before the next is posted — so a
+   `limit: 1` is never exceeded from outside.
+2. **A flow can still contend with itself, and exactly one does.**
+   `valids/flow-concurrency-parallel-subflow-kill` starts two `Subflow`s of
+   `…-kill-child` from one `Parallel`, and `-child` is the flow carrying the
+   limit. **W6 Task 3 banked all three of that family**, and the parent's golden
+   says why a `QUEUE` that really fires is still invisible: its three `order`
+   pairs are all `overlapping` and its `spawned` is empty, so *when* the second
+   child execution starts is in no compared field. (Leg 1 alone would not have
+   settled this, and naming that is the point of stating both.)
+3. **The control.** Seven of the thirteen corpus declarers already MATCH with
+   nothing implemented, and the only two writing `behavior: CANCEL` — the sole
+   configuration that could cancel — are among them:
+   `valids/flow-concurrency-cancel`'s whole execution history is
+   `CREATED RUNNING SUCCESS`.
+
+`tests/executor.rs`'s `the_cancelled_state_never_comes_from_a_concurrency_limit`
+derives all of it on every run, so the sentence cannot drift back. Of the row's
+six baselined entries, five are counted unmoved by rows that stayed (`Pause`
+twice, `afterExecution:` twice, `sla:` once) and the sixth,
+`valids/flow-concurrency-sla-fail-parent`, is now named in the residual
+derivation's `UNATTRIBUTED` list beside `valids/sla-parent-flow` — same cause,
+an `sla:` in its **child**, which a per-flow needle cannot see.
+
+**What this does NOT say**, named rather than generalised over: nothing here is
+a claim that Kestra's `concurrency:` does not cancel, or that the construct is
+unimportant or untestable. It is the narrow claim the ratchet needs — *under
+this oracle* the state is never a limit's — and the consequence is only that
+flow `concurrency:` must be specified as an un-ratcheted surface with its own
+tests, the position `egret.sql` and the four trigger words already occupy.
 
 **Two rows are Task 8's, and checking the REMAINDER rather than trusting the
 table is what found them** — the same method Task 3 used for `Subflow` and Task
@@ -5920,14 +5969,13 @@ exhaustive and named.
 | 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
-| 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **unclaimed** |
+| 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8** — see the paragraph on its two owners below |
 | 12 | `Pause` → `PAUSED` | W8 |
 | 10 | `afterExecution:` | **unclaimed** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
-| 6 | flow `concurrency:` → `CANCELLED` | W8 |
 | 5 | `sla:` | W8 |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **35** | **none of the above** | named individually in `UNATTRIBUTED` |
+| **36** | **none of the above** | named individually in `UNATTRIBUTED` |
 
 **The `CREATE_NEW_EXECUTION` replay row was 4 and is GONE, which is the fourth
 time this table has lost a row rather than lowered one.** W6 Task 4 banked all
@@ -5941,9 +5989,9 @@ flow declaring it" — **it declares no such thing**, its `retry:` is a bare
 **The `Subflow` row was 22 and is GONE, which is the third time this table has
 lost a row rather than lowered one.** `Subflow` executes since W6 Task 3, so it
 holds nothing — the same rule `disabled: true` and `runIf:` were removed under.
-Twelve of the 22 banked in that commit; four of the remaining ten are absorbed
-by rows that stayed (`flow concurrency:` once, `Loop` once, `AllowFailure`
-twice) and the other six are named one by one in `UNATTRIBUTED`, with the cause
+Twelve of the 22 banked in that commit; **three** of the remaining ten are
+absorbed by rows that stayed (`Loop` once, `AllowFailure` twice) and the other
+**seven** are named one by one in `UNATTRIBUTED`, with the cause
 that actually holds each: two on `state::apply`'s attempt rule
 (`valids/retry-subflow`, `valids/subflow-parent-retry`, where Kestra accumulates
 a sub-execution's retries INSIDE the parent's attempt), two on a child-side
@@ -5951,14 +5999,31 @@ over-acceptance the parent now transmits (`valids/restart-parent`,
 `valids/sla-parent-flow`), one on the unevaluated flow-level `outputs:`
 (`valids/subflow-secret-output-parent`), and one on `OutputValues` having no
 handler (`valids/task-runif` — whose `Subflow` is the corpus's only unresolvable
-target and is SKIPPED by a falsy `runIf:`, so `Subflow` was never what held it).
+target and is SKIPPED by a falsy `runIf:`, so `Subflow` was never what held it),
+and — the seventh, added by W8 Task 1 when the `flow concurrency:` row that had
+been absorbing it was deleted — a second child-side over-acceptance,
+`valids/flow-concurrency-sla-fail-parent`, whose child's `sla: MAX_DURATION`
+egret does not evaluate.
 **Lowering the row to 10 instead would have kept six entries attributed to a
 construct that works**, which is the failure mode the rule exists to prevent.
 
-The `flow concurrency:` row is 7 → 6 for the same commit:
-`valids/flow-concurrency-parallel-subflow-kill-child` banked, and its
-`concurrency:` was never a blocker for its own trace — `behavior: QUEUE` changes
-WHEN a child starts and a parent's `taskRunList` does not record that.
+**The `flow concurrency:` row was 7, then 6, and is GONE — the fifth time this
+table has lost a row rather than lowered one, and the third time because a STATE
+was credited to the wrong construct.** W6 Task 3 took it 7 → 6 by banking
+`valids/flow-concurrency-parallel-subflow-kill-child`, already on the grounds
+that its `concurrency:` was never a blocker for its own trace. W8 Task 1 found
+the label itself false: `CANCELLED` is in three golden entries and **two are an
+`sla:`'s and one is an `Exit`'s**, never a limit's, so the row was making the
+construct look reachable *because the state really is there, for another
+reason* — `disabled:`/`SKIPPED` exactly. Five of its six entries are counted
+unmoved by rows that stayed (`Pause` ×2, `afterExecution:` ×2, `sla:` ×1) and
+the sixth, `valids/flow-concurrency-sla-fail-parent`, is named in
+`UNATTRIBUTED` with the cause that holds it: an `sla:` in its **child**.
+The construct reaches **0** here for a reason with a mechanism — a serial
+harvester, one self-contending flow already banked, and seven of thirteen
+declarers already matching — written out under *States and constructs no W3a
+task claims* above and derived by
+`the_cancelled_state_never_comes_from_a_concurrency_limit`.
 
 **The `Loop` row was 37, then 21, then 20, and is 19; the label moved with the
 number.** The 20 → 19 is `valids/loop-with-subflow` at W6 Task 3.
@@ -5972,13 +6037,37 @@ shape (an ION file URI), and the loop `outputs:` family. Nobody has been asked t
 account for the row entry by entry, and this table should not be read as though
 somebody had.
 
+**`allowFailure` had two owners in two documents, and W8 is the right one.**
+The programme spec §9 gives `allowFailure` to W8; this table gave its 12
+baselined entries to **unclaimed**, through the `WARNING` row of *States and
+constructs no W3a task claims*. One of the two had to be wrong, and it was this
+one: the W8 measurement finds all 12 reach — the construct is what holds every
+one of them — and **6 are bankable by W8 alone**, which makes it the cheapest
+set in the whole W8 row rather than an orphan. Six of the twelve run to
+completion today and differ from the golden on **one symbol**, the final
+terminal. "Unclaimed" is corrected here rather than §9 being lowered.
+
+The `WARNING` population splits, and the split is derived rather than asserted:
+**10 golden entries hold `WARNING` and 8 of them are the allow\* axis's** —
+`valids/allow-failure`, `…-with-retry` and `valids/finally-allowfailure` on the
+`AllowFailure` flowable; `valids/pause-timeout-allow-failure`,
+`valids/task-allow-failure-executable-flow`, `…-flowable`, `…-runnable` and
+`valids/waitfor-child-task-warning` on the `allowFailure:` flag. **The other two
+are not W8's and stay unclaimed**: `valids/retry-success` (`warningOnRetry`
+alone) and `valids/exit` (an `Exit`, the `ExecutionUpdatableTask` row's). So
+`RunState::Warning` arriving banks neither of those two, and two of the eight
+need no new variant at all — `allowWarning: true` maps `WARNING → SUCCESS`, so
+their golden terminal is `SUCCESS`.
+
 **`disabled: true` and `runIf:` are not rows here and both are implemented.** A
 row is an attribution to the thing that *holds* an entry, not to a construct the
 flow happens to declare — the same rule that adds a row when a cause is found,
 run backwards.
 
-**The named remainder went from 13 to 29, and to 35 at W6 Task 3** (the six
-above, moved out of the retired `Subflow` row rather than newly discovered), and
+**The named remainder went from 13 to 29, to 35 at W6 Task 3, and to 36 at W8
+Task 1** (that last one is `valids/flow-concurrency-sla-fail-parent`, moved out
+of the deleted `flow concurrency:` row; the six before it were moved out of the
+retired `Subflow` row rather than newly discovered), and
 16 of the 18 names the 13 → 29 added are W3b
 Task 5's: eleven entries whose task type has no handler at all (`OutputValues`
 ×6, `PurgeLogs` ×5, `Assert` ×1 — measured in advance by W3b Task 1) and five
