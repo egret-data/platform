@@ -1893,14 +1893,33 @@ triggers:
         );
         assert_eq!(out["nested"]["pre-V"], json!("also-rendered"));
 
-        // `putIfAbsent`: two keys rendering to one string keep the FIRST, and
-        // egret's "first" is sorted order because its source is a `HashMap`.
-        // Asserted so the recorded divergence is a running claim.
-        let collide = "\
+        // **`putIfAbsent`, and the fixture is eight groups of eight rather
+        // than one pair.** Fix round 4's Important.
+        //
+        // The previous version used TWO colliding keys, so a random iteration
+        // order picked the sorted-first one half the time -- and mutation D6
+        // (drop `keys.sort()`) accordingly **survived 10 of 18 runs**. A
+        // mutation reported dead from one run is a coin flip reported as a
+        // measurement, and this fixture is what makes the coin have 8^8 faces:
+        // eight independent collision groups, each of eight keys, each group's
+        // winner independently uniform if the order is random. A false pass
+        // needs all eight groups to land on their sorted-first key at once --
+        // 8^-8, about 6 in 100 million.
+        //
+        // The keys differ only by a minijinja COMMENT, which renders away
+        // (`{#0#}G0` and `{#7#}G0` both render to `G0`, measured), so the eight
+        // are genuinely one key after rendering while being eight distinct YAML
+        // keys before it. Their sort order is the comment's digit.
+        let mut decl = String::new();
+        for g in 0..8 {
+            for i in 0..8 {
+                decl.push_str(&format!("      \"{{#{i}#}}G{g}\": won-by-{i}\n"));
+            }
+        }
+        let collide = format!(
+            "\
 id: collide
 namespace: fx.ns
-variables:
-  vkey: V
 tasks:
   - id: t
     type: io.kestra.plugin.core.debug.Return
@@ -1910,22 +1929,27 @@ triggers:
     type: io.kestra.plugin.core.trigger.Webhook
     key: k
     inputs:
-      \"a{{ vars.vkey }}\": from-a
-      \"b{{ vars.vkey }}\": from-b
-";
-        let f = flow_of(
-            &collide
-                .replace("a{{ vars.vkey }}", "V")
-                .replace("b{{ vars.vkey }}", "{{ vars.vkey }}"),
+{decl}"
         );
+        let f = flow_of(&collide);
         let kcx = kcx_of(&f);
         let (_, w) = find(&f.triggers, "k", &kcx).unwrap();
-        let out = render_inputs(w, &InputContext::of(&kcx)).unwrap();
         assert_eq!(
-            out,
-            json!({"V": "from-a"}),
-            "two keys rendering to `V`; sorted order puts the literal first, and \
-             putIfAbsent drops the second"
+            w.inputs.as_ref().map(|m| m.len()),
+            Some(64),
+            "the fixture must carry all 64 source keys, or the groups are not independent"
+        );
+        let out = render_inputs(w, &InputContext::of(&kcx)).unwrap();
+
+        let expected: serde_json::Value = (0..8)
+            .map(|g| (format!("G{g}"), json!("won-by-0")))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        assert_eq!(
+            out, expected,
+            "eight groups of eight keys all rendering to one string each; `putIfAbsent` keeps \
+             the first in SORTED order, which is `won-by-0` in every group. A random iteration \
+             order agrees on all eight at once with probability 8^-8."
         );
     }
 
@@ -2074,7 +2098,7 @@ triggers:
         );
     }
 
-    /// No `inputs:` at all is the empty object, not a null and not an error.    /// No `inputs:` at all is the empty object, not a null and not an error.
+    /// No `inputs:` at all is the empty object, not a null and not an error.
     #[test]
     fn a_trigger_with_no_inputs_renders_the_empty_object() {
         let f = flow_of(FIXTURE);

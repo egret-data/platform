@@ -1197,15 +1197,42 @@ mod tests {
     }
 
     /// **The exposure lever, at the layer that parses it.** Fix round 3,
-    /// Minor 3: the `String`→`bool` step had no test at all.
+    /// Minor 3: the `String`→`bool` step had no test at all. Fix round 4,
+    /// Minor 1: it then had one whose middle arm was **dead code** —
+    /// `if let Ok(..)` over three values that are all errors, so `assert!(false)`
+    /// inside it passed, and **the behaviour that distinguishes round 3's lever
+    /// from round 2's was unasserted**.
     ///
-    /// Three rows, and the third is the one that matters: a value figment
-    /// cannot parse is a **startup error**, not a silent `false`. An operator
-    /// who meant to turn this on and mistyped finds out at boot rather than
-    /// discovering months later that the surface was never up — and, equally,
-    /// a typo can never turn it ON.
+    /// Measured, on this figment, rather than assumed:
+    ///
+    /// | value | result |
+    /// |---|---|
+    /// | `true` | `Ok(true)` |
+    /// | `false` | `Ok(false)` |
+    /// | `1`, `on`, `yes` | **startup error** |
+    /// | `TRUE`, `True`, `FALSE` | **startup error** |
+    /// | `yep`, `2`, empty | **startup error** |
+    ///
+    /// **Exactly two spellings are accepted.** That is the change from round 2,
+    /// whose hand-rolled `matches!("1" | "true" | "yes" | "on")` accepted three
+    /// of the rows above and silently answered `false` for the rest. Strictness
+    /// is the right trade here because the only producer a deployment has is
+    /// helm, which renders a Go bool as lowercase `true`/`false` — asserted
+    /// below against the chart itself, because "the chart can only emit a legal
+    /// spelling" is the sentence that makes refusing everything else safe.
     #[test]
     fn the_webhook_lever_defaults_off_and_refuses_what_it_cannot_parse() {
+        // **Every arm below counts its own iterations and the counts are
+        // asserted at the end.** Fix round 4, Minor 1: the arm this replaces
+        // was `if let Ok(..)` over three values that are all errors, so its
+        // body never ran and `assert!(false)` inside it passed. A test whose
+        // arm cannot execute is worse than no test, and the only cheap way to
+        // know is to count.
+        let mut accepted = 0usize;
+        let mut refused = 0usize;
+        let mut padded = 0usize;
+
+        // 1. The default.
         figment::Jail::expect_with(|_jail| {
             let c: Config = Config::figment().extract().expect("defaults");
             assert!(
@@ -1215,50 +1242,99 @@ mod tests {
             Ok(())
         });
 
-        figment::Jail::expect_with(|jail| {
-            jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", "true");
-            let c: Config = Config::figment().extract().expect("true");
-            assert!(
-                c.workflow.webhooks_enabled,
-                "the control: it can be turned on"
-            );
-            Ok(())
-        });
-
-        for spelling in ["1", "on", "yes"] {
+        // 2. The two spellings that ARE accepted, both directions.
+        for (spelling, expected) in [("true", true), ("false", false)] {
             figment::Jail::expect_with(|jail| {
                 jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", spelling);
-                // Whatever figment does with these, it must not be a silent
-                // `false` that reads as "the operator did not ask".
-                // Accepted -> must be ON. Refused at boot is also fine: an
-                // operator who asked for the surface and was told no at least
-                // knows. A silent `false` is the only wrong answer.
-                if let Ok(c) = Config::figment().extract::<Config>() {
-                    assert!(
-                        c.workflow.webhooks_enabled,
-                        "`{spelling}` parsed to false -- an operator who asked for the \
-                         surface would not get it and nothing would say so"
-                    );
-                }
+                let c: Config = Config::figment()
+                    .extract()
+                    .unwrap_or_else(|e| panic!("`{spelling}` must parse: {e}"));
+                assert_eq!(c.workflow.webhooks_enabled, expected);
+                accepted += 1;
                 Ok(())
             });
         }
 
-        for bad in ["ＴＲＵＥ", "tRuE\u{200b}", "yep", "enabled", "2", ""] {
+        // 3. Everything else is a STARTUP ERROR, not a silent `false`.
+        //
+        // The first three are round 2's accepted spellings: this arm is the
+        // running record of what changed. The rest include the review's own
+        // fullwidth and zero-width-space probes.
+        for spelling in [
+            "1",
+            "on",
+            "yes", // round 2 accepted these
+            "TRUE",
+            "True",
+            "FALSE",
+            "ＴＲＵＥ",
+            "tRuE\u{200b}", // case and lookalikes
+            "yep",
+            "enabled",
+            "2",
+            "", // junk
+        ] {
             figment::Jail::expect_with(|jail| {
-                jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", bad);
+                jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", spelling);
                 match Config::figment().extract::<Config>() {
-                    // Refused at boot: the right answer.
-                    Err(_) => {}
-                    // Accepted: it must be OFF. A malformed value that turns an
-                    // anonymous surface ON is the failure this test exists for.
-                    Ok(c) => assert!(
-                        !c.workflow.webhooks_enabled,
-                        "{bad:?} turned the anonymous webhook surface ON"
+                    Err(_) => refused += 1,
+                    Ok(c) => panic!(
+                        "{spelling:?} was ACCEPTED as {} -- it must be a startup error, so an \
+                         operator who mistyped finds out at boot and a typo can never turn an \
+                         anonymous surface on",
+                        c.workflow.webhooks_enabled
                     ),
                 }
                 Ok(())
             });
         }
+
+        // 3b. **Whitespace padding IS tolerated**, and that is a measurement
+        //     rather than a design choice: figment trims before parsing, so
+        //     `" true"` is `true`. Recorded because nothing else in this test
+        //     says it, and because a reader of arm 3 would otherwise conclude
+        //     the parser is byte-exact. It is the benign direction -- the value
+        //     is unambiguous either way -- and it is a spelling round 2's
+        //     `matches!` also accepted, so it is not part of what changed.
+        for spelling in [" true", "true ", "\ttrue\n"] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", spelling);
+                let c: Config = Config::figment()
+                    .extract()
+                    .unwrap_or_else(|e| panic!("{spelling:?} must parse: {e}"));
+                assert!(c.workflow.webhooks_enabled, "{spelling:?}");
+                padded += 1;
+                Ok(())
+            });
+        }
+
+        // 4. **The chart can only emit a legal spelling**, which is what makes
+        //    the strictness above safe rather than a trap. Helm renders a Go
+        //    bool as lowercase `true`/`false`; the assertion is that the
+        //    template interpolates the value rather than hard-coding a word
+        //    this parser would refuse.
+        let chart = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/templates/configmap-env.yaml");
+        let src = std::fs::read_to_string(&chart)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", chart.display()));
+        assert!(
+            src.contains(
+                r#"EGRET_WORKFLOW__WEBHOOKS_ENABLED: "{{ .Values.workflow.webhooksEnabled }}""#
+            ),
+            "the chart must interpolate the Go bool, not a literal this parser would refuse"
+        );
+        let values = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../deploy/helm/egret/values.yaml");
+        let vsrc = std::fs::read_to_string(&values).expect("values.yaml");
+        assert!(
+            vsrc.contains("webhooksEnabled: false"),
+            "and the chart's default must be off"
+        );
+
+        // The counts. Without these every loop above is `if let`-shaped dead
+        // code away from asserting nothing, which is exactly what Minor 1 was.
+        assert_eq!(accepted, 2, "arm 2 did not run for both spellings");
+        assert_eq!(refused, 12, "arm 3 did not run for every refused spelling");
+        assert_eq!(padded, 3, "arm 3b did not run");
     }
 }

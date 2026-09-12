@@ -298,7 +298,9 @@ async fn the_management_group_does_carry_csrf() {
 /// review's "not approved for exposure" had nothing behind it: an operator who
 /// agreed with the verdict could not act on it. `workflow_webhooks_enabled` is
 /// that lever, it defaults to **false**, and `egret-bin` reads
-/// `EGRET_WORKFLOW_WEBHOOKS_ENABLED`.
+/// `[workflow] webhooks_enabled` — `EGRET_WORKFLOW__WEBHOOKS_ENABLED` — through
+/// `egret_config::Config`. (It named the round-2 spelling, without the section
+/// separator, until fix round 4.)
 ///
 /// Three rows, because a default is only a default if the OTHER value is also
 /// asserted and if the management surface is shown to be unaffected.
