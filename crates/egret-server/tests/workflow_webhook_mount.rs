@@ -121,6 +121,34 @@ fn composed_app_with_workflow() -> axum::Router {
         pdp: Arc::new(DenyPdp),
         audit: egret_audit::AuditSink::new(16).0,
     };
+    build_router(
+        AppState::without_db()
+            .with_workflow(state)
+            .with_workflow_webhooks(),
+    )
+}
+
+/// The same state with the exposure lever left at its default.
+fn composed_app_with_workflow_webhooks_off() -> axum::Router {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(250))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .expect("lazy pool");
+    let db = Db { pool };
+    let state = egret_workflow::WorkflowState {
+        db: db.clone(),
+        repo: egret_workflow::FlowRepo::new(db.clone()),
+        refs: Arc::new(UnreachableRefs),
+        sessions: egret_auth::session::SessionService::new(
+            db.clone(),
+            chrono::Duration::hours(24),
+            chrono::Duration::minutes(60),
+        ),
+        workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        pdp: Arc::new(DenyPdp),
+        audit: egret_audit::AuditSink::new(16).0,
+    };
     build_router(AppState::without_db().with_workflow(state))
 }
 
@@ -261,5 +289,105 @@ async fn the_management_group_does_carry_csrf() {
         StatusCode::FORBIDDEN,
         "a cookie-less POST to the management router must be stopped by the CSRF layer \
          before it reaches anything. Got {status}: {body}"
+    );
+}
+
+/// **The exposure lever, and its default.**
+///
+/// Fix round 2. The webhook group was mounted unconditionally, so the security
+/// review's "not approved for exposure" had nothing behind it: an operator who
+/// agreed with the verdict could not act on it. `workflow_webhooks_enabled` is
+/// that lever, it defaults to **false**, and `egret-bin` reads
+/// `EGRET_WORKFLOW_WEBHOOKS_ENABLED`.
+///
+/// Three rows, because a default is only a default if the OTHER value is also
+/// asserted and if the management surface is shown to be unaffected.
+#[tokio::test]
+async fn the_webhook_surface_is_off_unless_switched_on() {
+    // 1. The default: the workflow seam is present and the webhook path is NOT
+    //    mounted, so it 404s like any unrouted URL rather than being
+    //    mounted-and-refusing.
+    let app = composed_app_with_workflow_webhooks_off();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(webhook_uri())
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let off_status = res.status();
+
+    // **Asserted against a path that has never existed, not against a literal.**
+    //
+    // Measured: with the lever off this answers **403**, not 404, and so does
+    // `/no-such-surface/at/all` — the composed router's CSRF layer carries a
+    // fallback that catches every unrouted POST. The first draft of this test
+    // asserted 404 and was wrong about the mechanism. What matters is not the
+    // number but that the two are **the same**: with the lever off the webhook
+    // path is indistinguishable from a URL nobody ever wrote.
+    let app = composed_app_with_workflow_webhooks_off();
+    let unrouted = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/no-such-surface/at/all")
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        off_status,
+        unrouted.status(),
+        "with the lever off the webhook path must be indistinguishable from a path that has \
+         never existed"
+    );
+
+    // 2. The control: the SAME state with the lever on reaches the handler.
+    //    Without this row, row 1 is satisfied by a router that mounts nothing
+    //    at all -- which is exactly what `the_path_is_not_mounted_when_the_seam_
+    //    is_absent` already covers for a different reason.
+    let app = composed_app_with_workflow();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(webhook_uri())
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_ne!(
+        off_status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the two answers must differ, or row 1 proves nothing about reachability"
+    );
+
+    // 3. The lever gates ONLY the webhook group: management is still mounted
+    //    with the lever off, and still behind CSRF.
+    let app = composed_app_with_workflow_webhooks_off();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/ws/{}/workflows/flows", Uuid::new_v4()))
+                .header("Content-Type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "turning webhooks off must not turn flow authoring off"
     );
 }

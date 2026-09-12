@@ -63,6 +63,27 @@ pub struct AppState {
     /// Workflow management surface (W1 Task 7): flow drafts and their
     /// published versions; `None` in unit tests.
     pub workflow: Option<egret_workflow::WorkflowState>,
+    /// **The exposure lever for the anonymous webhook surface (W6 Task 7).
+    /// `false` means the routes are not mounted at all.**
+    ///
+    /// `POST /workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}`
+    /// is unauthenticated by construction — the key in the path is the whole
+    /// credential — and its own security review's verdict is *not approved for
+    /// exposure*. Until fix round 2 that verdict had **no lever**: the router
+    /// was mounted unconditionally, so an operator who had read the warning
+    /// could do nothing about it. A documented limitation nobody can act on is
+    /// not a control.
+    ///
+    /// **Default `false`**, in [`AppState::without_db`] and in `egret-bin`,
+    /// which reads `EGRET_WORKFLOW_WEBHOOKS_ENABLED`. Off is the only safe
+    /// default for a surface whose own doc says it should not be exposed; an
+    /// operator who wants it says so once, deliberately.
+    ///
+    /// It gates **only** the webhook group. Workflow management
+    /// (`/api/ws/{workspace}/workflows/...`, session-authenticated) is
+    /// unaffected: turning this off stops webhook traffic and nothing else,
+    /// which is the same split `flows.state = 'disabled'` makes per flow.
+    pub workflow_webhooks_enabled: bool,
 }
 
 impl AppState {
@@ -88,6 +109,10 @@ impl AppState {
             idp: None,
             dataapi: None,
             workflow: None,
+            // Off. See the field's doc: this is the lever for a surface whose
+            // security review says "do not expose", so the default has to be
+            // the side of that sentence.
+            workflow_webhooks_enabled: false,
         }
     }
 
@@ -120,6 +145,18 @@ impl AppState {
     /// `build_router` wraps it.
     pub fn with_workflow(mut self, workflow: egret_workflow::WorkflowState) -> Self {
         self.workflow = Some(workflow);
+        self
+    }
+
+    /// Turn the anonymous webhook surface ON for a test.
+    ///
+    /// Separate from [`Self::with_workflow`] on purpose: a test that wants the
+    /// management router must not get the anonymous one as a side effect, and
+    /// the one test file that drives the webhook mount has to say so in its own
+    /// source. See [`AppState::workflow_webhooks_enabled`].
+    #[must_use]
+    pub fn with_workflow_webhooks(mut self) -> Self {
+        self.workflow_webhooks_enabled = true;
         self
     }
 }
@@ -426,13 +463,24 @@ pub fn build_router(state: AppState) -> Router {
         // cookie it can never hold would make every POST impossible — which is
         // exactly what shipping `render_router` inside the layered group did.
         //
-        // **It is anonymous on purpose.** The key in the path is the whole
-        // credential; `egret_workflow::webhook_routes`' module doc is where the
-        // scoping argument lives.
-        let webhooks = Router::new()
-            .nest("/workflows/v1", egret_workflow::webhook_router())
-            .with_state(workflow);
-        router = router.merge(webhooks);
+        // **It is anonymous on purpose, and therefore OFF by default.** The key
+        // in the path is the whole credential;
+        // `egret_workflow::webhook_routes`' module doc is where the scoping
+        // argument lives, and its security review's verdict is "not approved
+        // for exposure".
+        //
+        // `AppState::workflow_webhooks_enabled` is the lever that verdict
+        // needs. Before fix round 2 this `nest` was unconditional, so the
+        // warning had nothing behind it — an operator who agreed with it could
+        // not act on it. When the flag is false the routes are **not mounted**,
+        // so the paths 404 like any other unrouted URL rather than being
+        // mounted-and-refusing, and nothing about them is discoverable.
+        if state.workflow_webhooks_enabled {
+            let webhooks = Router::new()
+                .nest("/workflows/v1", egret_workflow::webhook_router())
+                .with_state(workflow);
+            router = router.merge(webhooks);
+        }
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {

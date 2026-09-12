@@ -35,6 +35,27 @@
 //! on the flow does — and so does `disabled: true` in its YAML — which is the
 //! same answer the Data API gives for its own serving path.
 //!
+//! # This surface is OFF by default, and here is the switch
+//!
+//! **`EGRET_WORKFLOW_WEBHOOKS_ENABLED`** — read once at boot by `egret-bin`,
+//! which sets `egret_server::AppState::workflow_webhooks_enabled`. Any of
+//! `1`/`true`/`yes`/`on` turns it on; **anything else, including an unset
+//! variable and including a typo, leaves it off**, because a misspelled opt-in
+//! must fail closed. With it off the routes below are **not mounted at all**,
+//! so their URLs answer exactly as a URL nobody ever wrote does — measured, and
+//! asserted against an unrouted control in
+//! `egret-server/tests/workflow_webhook_mount.rs`.
+//!
+//! It exists because the alternative was worse than a gap. This surface's own
+//! security review returned *not approved for exposure*, and until fix round 2
+//! the router was mounted unconditionally — so an operator who had read that
+//! verdict and agreed with it **had nothing to do about it**. A documented
+//! limitation nobody can act on is not a control. The lever is the difference.
+//!
+//! It gates only this group. Workflow management
+//! (`/api/ws/{workspace}/workflows/...`, session-authenticated) is unaffected,
+//! which is the same split `flows.state = 'disabled'` makes per flow.
+//!
 //! # Authorization is the whole of this module
 //!
 //! A webhook is an unauthenticated public surface by construction: **the key in
@@ -163,11 +184,12 @@
 //! to expose to the open internet; the security review's verdict stands, and
 //! these bound the blast radius rather than remove it.
 
-use axum::body::Bytes;
-use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::routing::post;
@@ -250,53 +272,109 @@ pub const WEBHOOK_ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 pub type AttemptKey = (String, String, String);
 
 /// One fixed window: when it started, and how many attempts it has seen.
+///
+/// `count == 0` means the slot has never been used; the instant is then
+/// whatever the guard was built at, which is exactly what the reset arm wants.
 pub type AttemptWindow = (Instant, u32);
+
+/// How many windows the attempt limiter keeps, for ever.
+///
+/// **This is a CAP, not a sweep trigger, and the difference is fix round 2's
+/// Important 2.** The previous version kept a `HashMap<AttemptKey, _>` and
+/// swept expired entries when the map reached 4096 — which bounds nothing,
+/// because every one of the three segments is attacker-chosen and none has to
+/// name anything real. 65,536 distinct URLs inside one window produce 65,536
+/// live entries, and each admission then walks the whole map under the mutex.
+/// A rate limiter built to stop a flood was itself the cheapest flood in the
+/// process.
+///
+/// The replacement allocates **once, at construction**, and never again: a
+/// fixed array of windows, indexed by a hash of the key. Admission is O(1) —
+/// one hash, one index, one compare — and the mutex is held for that and
+/// nothing else. Memory is `WEBHOOK_ATTEMPT_SLOTS * size_of::<AttemptWindow>()`
+/// whatever anyone sends, which at 4096 slots is under 100 KiB.
+pub const WEBHOOK_ATTEMPT_SLOTS: usize = 4096;
 
 /// The two in-process bounds, built once per router.
 ///
 /// **Fixed window, not a token bucket**, and the difference is admitted rather
 /// than hidden: a fixed window lets 2x the rate through across a boundary. A
 /// bucket needs either a shared store (which this crate does not depend on) or
-/// per-key state with eviction; the window's state is one entry per
-/// `(workspace, namespace, flow)` that has been called, swept whenever the map
-/// grows past [`Self::SWEEP_AT`].
+/// per-key state with eviction, and per-key state is what Important 2 was
+/// about.
+///
+/// # Collisions are real, bounded, and unchooseable
+///
+/// [`WEBHOOK_ATTEMPT_SLOTS`] windows serve every target, so two targets whose
+/// keys hash to one slot **share a budget**. That is the price of a constant
+/// allocation and it is the right trade on an anonymous surface: the
+/// alternative — exact per-target accounting — is an allocation the attacker
+/// sizes.
+///
+/// The damage is bounded and it cannot be aimed. The hasher is a
+/// [`std::collections::hash_map::RandomState`] built **per guard**, i.e. per
+/// process, so the slot a given `(workspace, namespace, flow)` lands in is not
+/// derivable from outside and is different in every replica. An attacker
+/// spending a whole window on one slot degrades `1/4096` of targets in one
+/// process, chosen by neither of you, and the degradation is a 429 that clears
+/// within [`WEBHOOK_ATTEMPT_WINDOW`].
 #[derive(Debug)]
 pub struct WebhookGuard {
     bulkhead: Semaphore,
-    attempts: Mutex<HashMap<AttemptKey, AttemptWindow>>,
+    /// Fixed length [`WEBHOOK_ATTEMPT_SLOTS`], allocated once in [`Self::new`]
+    /// and never resized. `Box<[_]>` rather than `Vec<_>` so that "never
+    /// resized" is a property of the type rather than of the code below.
+    attempts: Mutex<Box<[AttemptWindow]>>,
+    /// Fixed per guard, so the key→slot mapping is stable within a process and
+    /// unpredictable between them.
+    hasher: RandomState,
 }
 
 impl WebhookGuard {
-    /// Sweep expired windows when the map reaches this size.
-    ///
-    /// Without it the map is an unbounded allocation an anonymous caller
-    /// controls the key of: every distinct `(ws, namespace, flow)` in a URL
-    /// makes an entry, and none of the three has to name anything real.
-    const SWEEP_AT: usize = 4096;
-
     #[must_use]
     pub fn new(permits: usize) -> Self {
+        let now = Instant::now();
         Self {
             bulkhead: Semaphore::new(permits),
-            attempts: Mutex::new(HashMap::new()),
+            attempts: Mutex::new(vec![(now, 0u32); WEBHOOK_ATTEMPT_SLOTS].into_boxed_slice()),
+            hasher: RandomState::new(),
         }
+    }
+
+    /// Which window serves `key`.
+    fn slot(&self, key: &AttemptKey) -> usize {
+        let mut h = self.hasher.build_hasher();
+        key.hash(&mut h);
+        // `WEBHOOK_ATTEMPT_SLOTS` is a power of two, so the mask is exact. It
+        // is asserted rather than assumed -- see
+        // `tests::the_slot_count_is_a_power_of_two`.
+        (h.finish() as usize) & (WEBHOOK_ATTEMPT_SLOTS - 1)
     }
 
     /// Record one attempt against `key`. `false` means the window is exhausted.
     ///
     /// `now` is a parameter so the test drives it rather than sleeping — this
     /// workspace has lost whole gate runs to wall-clock assertions.
+    ///
+    /// **The work under the lock is O(1) and independent of what has been sent
+    /// before**, which is the whole of Important 2's fix. There is no sweep, no
+    /// iteration and no insertion.
     pub fn admit_attempt(&self, key: AttemptKey, now: Instant) -> bool {
-        let mut map = self.attempts.lock().expect("webhook attempt map poisoned");
-        if map.len() >= Self::SWEEP_AT {
-            map.retain(|_, (started, _)| now.duration_since(*started) < WEBHOOK_ATTEMPT_WINDOW);
+        let slot = self.slot(&key);
+        let mut windows = self.attempts.lock().expect("webhook attempt map poisoned");
+        let window = &mut windows[slot];
+        if window.1 == 0 || now.saturating_duration_since(window.0) >= WEBHOOK_ATTEMPT_WINDOW {
+            *window = (now, 0);
         }
-        let entry = map.entry(key).or_insert((now, 0));
-        if now.duration_since(entry.0) >= WEBHOOK_ATTEMPT_WINDOW {
-            *entry = (now, 0);
-        }
-        entry.1 += 1;
-        entry.1 <= WEBHOOK_ATTEMPTS_PER_WINDOW
+        window.1 += 1;
+        window.1 <= WEBHOOK_ATTEMPTS_PER_WINDOW
+    }
+
+    /// How many bytes of window state this guard holds. Constant, and the test
+    /// that says so sends a million distinct keys at it.
+    #[must_use]
+    pub fn window_bytes(&self) -> usize {
+        self.attempts.lock().expect("poisoned").len() * std::mem::size_of::<AttemptWindow>()
     }
 }
 
@@ -878,33 +956,78 @@ mod tests {
         assert!(!g.admit_attempt(key(), t0));
     }
 
-    /// The map is swept, so an anonymous caller cannot grow it without bound by
-    /// naming targets that do not exist.
+    /// **Important 2's regression test.** The window state is a CAP, so an
+    /// anonymous caller cannot make this process allocate by naming targets
+    /// that do not exist.
+    ///
+    /// The previous version swept a `HashMap` at 4096 entries, which is a
+    /// trigger and not a bound: 65,536 attacker-chosen URLs inside one window
+    /// held 65,536 entries and made every admission walk all of them under the
+    /// mutex. This drives **a quarter of a million distinct keys** — sixty
+    /// times the old sweep point — and asserts the allocation does not move.
     #[test]
-    fn the_attempt_map_is_swept_rather_than_grown_for_ever() {
+    fn the_window_state_is_capped_not_swept() {
         let g = WebhookGuard::new(1);
+        let before = g.window_bytes();
+        assert_eq!(
+            before,
+            WEBHOOK_ATTEMPT_SLOTS * std::mem::size_of::<AttemptWindow>()
+        );
         let t0 = Instant::now();
-        for i in 0..WebhookGuard::SWEEP_AT {
-            g.admit_attempt(("ws".into(), "ns".into(), format!("flow-{i}")), t0);
+        for i in 0..250_000 {
+            g.admit_attempt(
+                (format!("ws-{i}"), format!("ns-{i}"), format!("flow-{i}")),
+                t0,
+            );
         }
         assert_eq!(
-            g.attempts.lock().unwrap().len(),
-            WebhookGuard::SWEEP_AT,
-            "nothing expires while the clock stands still"
-        );
-        // One more, a window later: the sweep fires and drops the expired ones.
-        g.admit_attempt(
-            ("ws".into(), "ns".into(), "late".into()),
-            t0 + WEBHOOK_ATTEMPT_WINDOW,
-        );
-        assert_eq!(
-            g.attempts.lock().unwrap().len(),
-            1,
-            "the sweep must drop every expired window, keeping only the new one"
+            g.window_bytes(),
+            before,
+            "a quarter of a million attacker-chosen keys moved the allocation"
         );
     }
 
-    /// The bulkhead holds its permit for the span of a request and releases it
+    /// The slot mask is exact only if the count is a power of two.
+    #[test]
+    fn the_slot_count_is_a_power_of_two() {
+        assert!(WEBHOOK_ATTEMPT_SLOTS.is_power_of_two());
+        // And every slot is reachable, so the mask is not silently folding the
+        // whole key space into a corner of the array.
+        let g = WebhookGuard::new(1);
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..(WEBHOOK_ATTEMPT_SLOTS * 20) {
+            seen.insert(g.slot(&(format!("w{i}"), "n".into(), "f".into())));
+        }
+        assert!(
+            seen.len() > WEBHOOK_ATTEMPT_SLOTS * 9 / 10,
+            "only {} of {WEBHOOK_ATTEMPT_SLOTS} slots were reachable",
+            seen.len()
+        );
+    }
+
+    /// The key→slot mapping differs between guards, so an attacker cannot
+    /// choose which legitimate target it collides with.
+    ///
+    /// Two guards, the same thousand keys: if the mapping were derivable the
+    /// two would agree on every one of them.
+    #[test]
+    fn the_slot_mapping_is_not_derivable_from_outside() {
+        let a = WebhookGuard::new(1);
+        let b = WebhookGuard::new(1);
+        let keys: Vec<AttemptKey> = (0..1000)
+            .map(|i| (format!("ws{i}"), "ns".to_string(), "flow".to_string()))
+            .collect();
+        let agree = keys.iter().filter(|k| a.slot(k) == b.slot(k)).count();
+        // Chance agreement is ~1/4096 per key, so ~0 of 1000. Anything near
+        // 1000 means the hasher is deterministic across guards.
+        assert!(
+            agree < 50,
+            "{agree} of 1000 keys landed in the same slot in two guards -- the mapping is \
+             derivable, so a collision can be aimed"
+        );
+    }
+
+    /// The bulkhead holds its permit for the span of a request and releases it    /// The bulkhead holds its permit for the span of a request and releases it
     /// on drop.
     #[test]
     fn the_bulkhead_refuses_past_its_permits() {

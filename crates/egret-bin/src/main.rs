@@ -2071,6 +2071,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         idp,
         dataapi,
         workflow,
+        // **The anonymous webhook surface is OFF unless an operator says
+        // otherwise.** See `egret_server::AppState::workflow_webhooks_enabled`:
+        // the key in the URL is the whole credential, the surface's own
+        // security review says it is not approved for exposure, and before fix
+        // round 2 that verdict had no lever at all.
+        //
+        // Any of `1`/`true`/`yes`/`on` (case-insensitive) turns it on; anything
+        // else, including an unset variable and including a typo, leaves it off.
+        // A misspelled opt-in must fail CLOSED.
+        workflow_webhooks_enabled: matches!(
+            std::env::var("EGRET_WORKFLOW_WEBHOOKS_ENABLED")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)
