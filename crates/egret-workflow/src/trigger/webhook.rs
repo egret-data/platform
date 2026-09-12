@@ -412,8 +412,14 @@ impl KeyContext {
 /// is not a hypothetical class for this repository's threat model — it is the
 /// reason Kestra reached for `MessageDigest.isEqual` rather than
 /// `String.equals` in the one place it compares a webhook key.
-/// [`tests::the_key_is_never_compared_with_a_plain_equality`] is a running
-/// check that no equality operator reappears in this file's key path.
+/// **A behavioural test cannot see the difference, and a mutation table cannot
+/// either** — measured, not argued: replacing this function's body with
+/// `a == b` (mutation M1) leaves all 27 unit tests and all 22 route tests
+/// green. The only instrument that sees it is one that reads the source, so
+/// [`tests::the_key_is_never_compared_with_a_plain_equality`] is that
+/// instrument, and it pins this body's SHAPE as well as forbidding an equality
+/// at the call sites. The first version of it forbade only the call sites and
+/// M1 walked straight through; the assertion below is the correction.
 #[must_use]
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if b.is_empty() {
@@ -1485,6 +1491,58 @@ triggers:
                 !shipping.contains(needle),
                 "`{needle}` appears in the shipping half of webhook.rs: the webhook key must be \
                  compared only through ct_eq()"
+            );
+        }
+
+        // ------------------------------------------------------------------
+        // The body of `ct_eq` itself.
+        //
+        // The needles above are call-site spellings, and **mutation M1 proved
+        // they are not enough**: swapping this function's body for `a == b`
+        // changes no call site, matches no needle, and passes every
+        // behavioural test in the crate. So the body is pinned by shape.
+        //
+        // `pub fn ct_eq(` .. the next line that is exactly `}` at column 0.
+        // ------------------------------------------------------------------
+        let start = shipping
+            .find("pub fn ct_eq(")
+            .expect("ct_eq is defined in the shipping half");
+        let rest = &shipping[start..];
+        let end = rest.find("\n}\n").expect("ct_eq has a closing brace") + 1;
+        let body = &rest[..end];
+        assert!(
+            body.len() > 100 && body.len() < 1000,
+            "the ct_eq slice is {} bytes -- the extraction is looking at the wrong thing",
+            body.len()
+        );
+        for required in [
+            // the loop runs over EVERY byte of the declared key
+            "for (i, byte) in a.iter().enumerate()",
+            // out-of-range reads are clamped rather than skipped
+            "let index_b = if i < b.len() { i } else { 0 };",
+            // the accumulator ORs; it never branches out early
+            "result |= u64::from(byte ^ b[index_b]);",
+            "result == 0",
+        ] {
+            assert!(
+                body.contains(required),
+                "ct_eq no longer contains `{required}`. Its constant-time property is not \
+                 observable from behaviour -- mutation M1 (body -> `a == b`) passed all 49 \
+                 tests -- so this shape is the only thing asserting it."
+            );
+        }
+        for forbidden in [
+            "a == b",
+            "b == a",
+            "a.eq(b)",
+            "b.eq(a)",
+            "break",
+            "return false",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "ct_eq contains `{forbidden}`, which either compares or short-circuits: \
+                 both leak the key one byte at a time to a caller that can time the response"
             );
         }
 
