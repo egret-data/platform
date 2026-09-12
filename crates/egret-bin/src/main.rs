@@ -2077,17 +2077,17 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         // security review says it is not approved for exposure, and before fix
         // round 2 that verdict had no lever at all.
         //
-        // Any of `1`/`true`/`yes`/`on` (case-insensitive) turns it on; anything
-        // else, including an unset variable and including a typo, leaves it off.
-        // A misspelled opt-in must fail CLOSED.
-        workflow_webhooks_enabled: matches!(
-            std::env::var("EGRET_WORKFLOW_WEBHOOKS_ENABLED")
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
+        // It comes through `Config` like every other deployment switch —
+        // `[workflow] webhooks_enabled`, i.e.
+        // `EGRET_WORKFLOW__WEBHOOKS_ENABLED`, the `EGRET_<SECTION>__<KEY>`
+        // convention `EGRET_CATALOG__ENABLED` and `EGRET_OIDC__ENABLED`
+        // already follow. Fix round 2 shipped it as a flat `std::env::var`
+        // read here, which was outside the config type, outside the chart and
+        // outside the convention (fix round 3, Minors 2 and 3). figment does
+        // the string→bool step, so a value it cannot parse is a **startup
+        // error** rather than a silent `false`: an operator who meant to turn
+        // this on and mistyped finds out at boot.
+        workflow_webhooks_enabled: config.workflow.webhooks_enabled,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

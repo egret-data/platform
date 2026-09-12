@@ -37,12 +37,23 @@
 //!
 //! # This surface is OFF by default, and here is the switch
 //!
-//! **`EGRET_WORKFLOW_WEBHOOKS_ENABLED`** — read once at boot by `egret-bin`,
-//! which sets `egret_server::AppState::workflow_webhooks_enabled`. Any of
-//! `1`/`true`/`yes`/`on` turns it on; **anything else, including an unset
-//! variable and including a typo, leaves it off**, because a misspelled opt-in
-//! must fail closed. With it off the routes below are **not mounted at all**,
-//! so their URLs answer exactly as a URL nobody ever wrote does — measured, and
+//! **`EGRET_WORKFLOW__WEBHOOKS_ENABLED`** — `[workflow] webhooks_enabled` in
+//! `egret.toml`, read through `egret_config::Config` like every other
+//! deployment switch and set into
+//! `egret_server::AppState::workflow_webhooks_enabled` by `egret-bin`. It is in
+//! the chart (`deploy/helm/egret/values.yaml`'s `workflow.webhooksEnabled`,
+//! wired through `configmap-env.yaml`) and it follows the
+//! `EGRET_<SECTION>__<KEY>` convention `EGRET_CATALOG__ENABLED` already sets.
+//!
+//! Fix round 2 first shipped it as a flat `EGRET_WORKFLOW_WEBHOOKS_ENABLED`
+//! read with `std::env::var` in `main.rs` — outside the config type, outside
+//! the chart and outside the convention (fix round 3, Minors 2 and 3).
+//!
+//! **Default `false`.** figment does the string→bool step, so a value it cannot
+//! parse is a **startup error** rather than a silent `false`: an operator who
+//! meant to turn this on and mistyped finds out at boot, and a typo can never
+//! turn it on. With it off the routes below are **not mounted at all**, so
+//! their URLs answer exactly as a URL nobody ever wrote does — measured, and
 //! asserted against an unrouted control in
 //! `egret-server/tests/workflow_webhook_mount.rs`.
 //!
@@ -110,7 +121,7 @@
 //! surface where the caller has presented no credential at all, which makes the
 //! endpoint an oracle for *does workspace W, namespace N hold a flow called F*.
 //! Anyone can enumerate it. Collapsing them costs an operator one diagnostic
-//! and removes the enumeration; `the_three_absences_are_indistinguishable` is
+//! and removes the enumeration; `the_four_absences_are_indistinguishable` is
 //! the running check that they stay collapsed, and it compares **bodies**, not
 //! just statuses.
 //!
@@ -357,6 +368,20 @@ impl WebhookGuard {
     /// **The work under the lock is O(1) and independent of what has been sent
     /// before**, which is the whole of Important 2's fix. There is no sweep, no
     /// iteration and no insertion.
+    /// # The `count == 0` arm is not redundant, and here is what it changes
+    ///
+    /// Fix round 3, Minor 1. A slot that has never been used holds
+    /// `(built_at, 0)`. Without the first arm, the **first** admission against
+    /// a fresh slot within a window of construction would not reset it, so the
+    /// window it starts is measured from **the guard's construction** rather
+    /// than from that admission — and the target gets whatever is left of a
+    /// window it never used.
+    ///
+    /// It is observable, and `tests::an_unused_slot_starts_its_window_when_it_is_first_used`
+    /// is the discriminator: build at `t0`, spend the quota at `t0 + 59s`, ask
+    /// again at `t0 + 61s`. With the arm the window began at `t0 + 59s` and is
+    /// still live, so the caller is refused; without it the window began at
+    /// `t0` and has expired, so the caller is admitted with a fresh budget.
     pub fn admit_attempt(&self, key: AttemptKey, now: Instant) -> bool {
         let slot = self.slot(&key);
         let mut windows = self.attempts.lock().expect("webhook attempt map poisoned");
@@ -995,6 +1020,50 @@ mod tests {
             key(),
             t0 + WEBHOOK_ATTEMPT_WINDOW - Duration::from_millis(1)
         ));
+    }
+
+    /// **Minor 1's discriminator.** The `count == 0` arm of the reset decides
+    /// *when a fresh slot's window starts*, and that is observable.
+    ///
+    /// Build at `t0`; first use at `t0 + 59s`; ask again at `t0 + 61s`.
+    ///
+    /// * with the arm — the window began at `t0 + 59s`, two seconds ago, and
+    ///   the caller is **refused**;
+    /// * without it — the first use did not reset, so the window began at the
+    ///   guard's construction, has expired, and the caller is **admitted**.
+    ///
+    /// Mutation `R-I` (delete `window.1 == 0 ||`) survived 741 green tests
+    /// before this existed.
+    #[test]
+    fn an_unused_slot_starts_its_window_when_it_is_first_used() {
+        let g = WebhookGuard::new(1);
+        let key = || ("ws".to_string(), "ns".to_string(), "flow".to_string());
+        // `new()` stamps the slots with its own `Instant::now()`, so `t0` has
+        // to be that instant rather than a later one -- read it back off an
+        // untouched slot so the fixture cannot drift from the constructor.
+        let t0 = g.attempts.lock().unwrap()[0].0;
+
+        let first_use = t0 + Duration::from_secs(59);
+        for i in 1..=WEBHOOK_ATTEMPTS_PER_WINDOW {
+            assert!(g.admit_attempt(key(), first_use), "attempt {i}");
+        }
+        assert!(
+            !g.admit_attempt(key(), first_use),
+            "the quota is spent at the instant it was spent"
+        );
+
+        // t0 + 61s: 61 seconds after CONSTRUCTION, 2 seconds after first use.
+        assert!(
+            !g.admit_attempt(key(), t0 + Duration::from_secs(61)),
+            "the window must be measured from FIRST USE, not from construction -- \
+             admitting here means a target gets a fresh budget 2 seconds into its window"
+        );
+        // The control: 60 seconds after first use it really does reset, so the
+        // assertion above is not satisfied by a window that never expires.
+        assert!(
+            g.admit_attempt(key(), first_use + WEBHOOK_ATTEMPT_WINDOW),
+            "and it does expire a full window after first use"
+        );
     }
 
     /// A refused attempt is still COUNTED. That is the whole point: a key guess

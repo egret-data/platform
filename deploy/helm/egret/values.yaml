@@ -82,6 +82,14 @@ oidc:
   keycloakImage: quay.io/keycloak/keycloak:26.0
   keycloakAdmin: admin
   keycloakAdminPassword: admin
+# The workflow engine's deployment switches.
+workflow:
+  # The ANONYMOUS webhook surface. Off by default, and it should stay off unless
+  # you have read `egret_workflow::webhook_routes`' module doc: the key in the
+  # URL is the whole credential, the surface's own security review says it is
+  # not approved for exposure, and the in-process bounds are per replica.
+  webhooksEnabled: false
+
 ranger:
   enabled: false
 deps:

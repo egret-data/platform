@@ -392,6 +392,53 @@ pub struct Config {
     pub automation: AutomationConfig,
     #[serde(default = "default_data_api")]
     pub data_api: DataApiConfig,
+    /// The workflow engine's deployment-level switches. Serde-defaulted for the
+    /// same reason `data_api` is: a deployment's TOML predates the section.
+    #[serde(default = "default_workflow")]
+    pub workflow: WorkflowConfig,
+}
+
+/// `[workflow]` — what a deployment may switch on or off about the workflow
+/// engine.
+///
+/// One key today. It is a section rather than a bare env var because
+/// **`EGRET_<SECTION>__<KEY>` is this deployment's convention**
+/// (`EGRET_CATALOG__ENABLED`, `EGRET_OIDC__ENABLED`, `EGRET_RANGER__ENABLED`
+/// in `deploy/helm/egret/templates/configmap-env.yaml`), and W6 Task 7 fix
+/// round 2 first shipped it as a flat `EGRET_WORKFLOW_WEBHOOKS_ENABLED` read
+/// with `std::env::var` — outside the config type, outside the chart, and
+/// outside the convention. Fix round 3's Minors 2 and 3.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkflowConfig {
+    /// **The exposure lever for the anonymous webhook surface (W6 Task 7), and
+    /// it defaults to `false`.**
+    ///
+    /// `POST /workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}` is
+    /// unauthenticated by construction — the key in the path is the whole
+    /// credential — and its security review's verdict is *not approved for
+    /// exposure*. When this is false the routes are **not mounted at all**, so
+    /// their URLs answer exactly as a URL nobody ever wrote does.
+    ///
+    /// Off is the only safe default for a surface whose own doc says it should
+    /// not be exposed; an operator who wants it says so once, deliberately.
+    /// `EGRET_WORKFLOW__WEBHOOKS_ENABLED=true`.
+    ///
+    /// It gates only that group. Workflow **management**
+    /// (`/api/ws/{workspace}/workflows/...`, session-authenticated) is
+    /// unaffected.
+    #[serde(default)]
+    pub webhooks_enabled: bool,
+}
+
+/// Serde's fallback for a `[workflow]` section a deployment's TOML predates.
+///
+/// `webhooks_enabled: false` — the same value `Default` gives, written out
+/// rather than derived so that the safe side of the security verdict is a
+/// literal a reader can see rather than a property of `bool`.
+fn default_workflow() -> WorkflowConfig {
+    WorkflowConfig {
+        webhooks_enabled: false,
+    }
 }
 
 /// Serde's fallback for a `[data_api]` section a deployment's TOML predates.
@@ -574,6 +621,7 @@ impl Default for Config {
                 results_prefix: "query-results".into(),
             },
             data_api: default_data_api(),
+            workflow: default_workflow(),
             audit: AuditConfig {
                 enabled: true,
                 retention_days: 90,
@@ -1146,5 +1194,70 @@ mod tests {
             assert_eq!(cfg.kernel.namespace, "custom-ns");
             Ok(())
         });
+    }
+
+    /// **The exposure lever, at the layer that parses it.** Fix round 3,
+    /// Minor 3: the `String`→`bool` step had no test at all.
+    ///
+    /// Three rows, and the third is the one that matters: a value figment
+    /// cannot parse is a **startup error**, not a silent `false`. An operator
+    /// who meant to turn this on and mistyped finds out at boot rather than
+    /// discovering months later that the surface was never up — and, equally,
+    /// a typo can never turn it ON.
+    #[test]
+    fn the_webhook_lever_defaults_off_and_refuses_what_it_cannot_parse() {
+        figment::Jail::expect_with(|_jail| {
+            let c: Config = Config::figment().extract().expect("defaults");
+            assert!(
+                !c.workflow.webhooks_enabled,
+                "the anonymous webhook surface must default to OFF"
+            );
+            Ok(())
+        });
+
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", "true");
+            let c: Config = Config::figment().extract().expect("true");
+            assert!(
+                c.workflow.webhooks_enabled,
+                "the control: it can be turned on"
+            );
+            Ok(())
+        });
+
+        for spelling in ["1", "on", "yes"] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", spelling);
+                // Whatever figment does with these, it must not be a silent
+                // `false` that reads as "the operator did not ask".
+                let got = Config::figment().extract::<Config>();
+                match got {
+                    Ok(c) => assert!(
+                        c.workflow.webhooks_enabled,
+                        "`{spelling}` parsed to false -- an operator who asked for the \
+                         surface would not get it and nothing would say so"
+                    ),
+                    Err(_) => {}
+                }
+                Ok(())
+            });
+        }
+
+        for bad in ["ＴＲＵＥ", "tRuE\u{200b}", "yep", "enabled", "2", ""] {
+            figment::Jail::expect_with(|jail| {
+                jail.set_env("EGRET_WORKFLOW__WEBHOOKS_ENABLED", bad);
+                match Config::figment().extract::<Config>() {
+                    // Refused at boot: the right answer.
+                    Err(_) => {}
+                    // Accepted: it must be OFF. A malformed value that turns an
+                    // anonymous surface ON is the failure this test exists for.
+                    Ok(c) => assert!(
+                        !c.workflow.webhooks_enabled,
+                        "{bad:?} turned the anonymous webhook surface ON"
+                    ),
+                }
+                Ok(())
+            });
+        }
     }
 }

@@ -15,6 +15,21 @@ data:
   EGRET_OIDC__CLIENT_ID: "{{ .Values.oidc.clientId }}"
   EGRET_OIDC__REDIRECT_URL: "{{ include "egret.externalUrl" . }}/api/auth/oidc/callback"
   EGRET_RANGER__ENABLED: "{{ .Values.ranger.enabled }}"
+  # **The anonymous webhook surface, OFF by default.**
+  #
+  # `POST /workflows/v1/{ws}/executions/webhook/{ns}/{flow}/{key}` is
+  # unauthenticated by construction: the key in the URL is the whole credential.
+  # Its security review's verdict is NOT APPROVED FOR EXPOSURE, and this is the
+  # lever that verdict needs — with it false the routes are not mounted at all.
+  #
+  # ⚠️ Turning it on publishes an endpoint that starts executions to anyone who
+  # learns a key. The in-process bounds (a 256 KiB body cap, a 16-permit
+  # bulkhead, 60 attempts per minute per target) bound the blast radius; they do
+  # not make it safe to expose to the open internet, and they are PER REPLICA.
+  # Read `egret_workflow::webhook_routes`' module doc before setting this.
+  #
+  # It gates only that group: flow authoring under /api/ws/… is unaffected.
+  EGRET_WORKFLOW__WEBHOOKS_ENABLED: "{{ .Values.workflow.webhooksEnabled }}"
   EGRET_RANGER__AUTH_TOKEN: ""
   EGRET_ADMIN_EMAIL: "{{ .Values.admin.email }}"
   # Package 4 — HOW MANY OF ME THERE ARE. A pod cannot discover this: the count

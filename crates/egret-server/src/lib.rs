@@ -74,10 +74,14 @@ pub struct AppState {
     /// could do nothing about it. A documented limitation nobody can act on is
     /// not a control.
     ///
-    /// **Default `false`**, in [`AppState::without_db`] and in `egret-bin`,
-    /// which reads `EGRET_WORKFLOW_WEBHOOKS_ENABLED`. Off is the only safe
-    /// default for a surface whose own doc says it should not be exposed; an
-    /// operator who wants it says so once, deliberately.
+    /// **Default `false`**, in [`AppState::without_db`] and in
+    /// `egret_config::WorkflowConfig`, which `egret-bin` reads as
+    /// `[workflow] webhooks_enabled` / `EGRET_WORKFLOW__WEBHOOKS_ENABLED` —
+    /// the `EGRET_<SECTION>__<KEY>` convention, and a key the helm chart sets.
+    /// Off is the only safe default for a surface whose own doc says it should
+    /// not be exposed; an operator who wants it says so once, deliberately, and
+    /// a value figment cannot parse is a startup error rather than a silent
+    /// `false`.
     ///
     /// It gates **only** the webhook group. Workflow management
     /// (`/api/ws/{workspace}/workflows/...`, session-authenticated) is
