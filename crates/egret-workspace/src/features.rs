@@ -195,6 +195,18 @@ pub const FEATURES: &[Feature] = &[
         // `data_api` record above: an unmatched prefix rule is inert, but a
         // route that lands before its rule fails OPEN. W1's management routes
         // land under `/api/ws/{ws}/workflows/...` and are claimed on arrival.
+        //
+        // The WEBHOOK surface (W6 Task 7) is deliberately NOT covered, exactly
+        // as `data_api`'s serving path above is not: it lives at
+        // `/workflows/v1/{ws}/executions/webhook/...`, outside `/api/ws/`, and
+        // authenticates with the key in the URL rather than with a session --
+        // there is no `WsContext` for the gate to run in. Its path parameter is
+        // spelled `{ws}` rather than `{workspace}` for that reason, which is
+        // the marker `egret-server`'s `feature_route_coverage` suite reads.
+        //
+        // Turning this module off therefore stops flows being authored and
+        // published; stopping webhook traffic is `state = 'disabled'` on the
+        // flow, which `webhook_routes` answers with a 409.
         rules: &[prefix("workflows")],
     },
 ];

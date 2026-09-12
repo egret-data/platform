@@ -984,6 +984,35 @@ pub async fn start_execution(
     source: &str,
     inputs: serde_json::Value,
 ) -> Result<Uuid> {
+    start_execution_with_trigger(pool, workspace_id, flow_id, source, inputs, None).await
+}
+
+/// [`start_execution`] with Kestra's `Execution.trigger` supplied.
+///
+/// A **sibling** rather than a sixth parameter on `start_execution`, because
+/// that function has twenty call sites and nineteen of them have no trigger:
+/// widening it would mean writing `None` nineteen times to serve one caller,
+/// and the nineteen `None`s would be the kind of uniform argument that hides a
+/// mutation (W6 Task 6's `max_depth` survived a two-sided mutation for exactly
+/// that reason -- every fixture passed the default).
+///
+/// `trigger` is `{id, type, variables}` and lands in
+/// `workflow.executions.execution_trigger` (migration 0140), whose CHECK
+/// refuses a record missing any of the three. It is stored and **not**
+/// published into the render context; see that migration for the measurement
+/// behind that split.
+///
+/// It is written in the SAME transaction as the execution row and its first
+/// settle, so an execution can never be visible without the record of what
+/// started it.
+pub async fn start_execution_with_trigger(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    trigger: Option<serde_json::Value>,
+) -> Result<Uuid> {
     let flow = crate::spec::parse(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     let plan = build_plan(source)
@@ -992,8 +1021,9 @@ pub async fn start_execution(
     let mut tx = pool.begin().await.map_err(db_err)?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6) RETURNING id",
+           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+            execution_trigger) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -1005,6 +1035,7 @@ pub async fn start_execution(
     } else {
         serde_json::json!({})
     })
+    .bind(trigger)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;

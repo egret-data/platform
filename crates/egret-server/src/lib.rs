@@ -396,8 +396,27 @@ pub fn build_router(state: AppState) -> Router {
         let group = Router::new()
             .nest("/api", egret_workflow::management_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(workflow);
+            .with_state(workflow.clone());
         router = router.merge(group);
+
+        // The webhook surface (W6 Task 7), WITHOUT the CSRF layer and outside
+        // `/api` — the same placement, and the same two reasons, as the Data
+        // API serving group above.
+        //
+        // Outside `/api`: `WsContext`'s feature-entitlement gate recognises a
+        // path beginning `/api/ws/` or `/ws/`, and this caller has no session
+        // for it to resolve. Outside CSRF: a webhook caller is a machine that
+        // types the credential into the URL, so nothing is ambient and a CSRF
+        // cookie it can never hold would make every POST impossible — which is
+        // exactly what shipping `render_router` inside the layered group did.
+        //
+        // **It is anonymous on purpose.** The key in the path is the whole
+        // credential; `egret_workflow::webhook_routes`' module doc is where the
+        // scoping argument lives.
+        let webhooks = Router::new()
+            .nest("/workflows/v1", egret_workflow::webhook_router())
+            .with_state(workflow);
+        router = router.merge(webhooks);
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {

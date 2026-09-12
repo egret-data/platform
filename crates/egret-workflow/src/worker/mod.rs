@@ -83,7 +83,10 @@ mod subflow;
 mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
-pub use claim::{apply_outcome, claim, resume, start_execution, tick, wake, Claimed};
+pub use claim::{
+    apply_outcome, claim, resume, start_execution, start_execution_with_trigger, tick, wake,
+    Claimed,
+};
 pub use reaper::reap;
 pub use registry::Handlers;
 /// **How far down a chain of child executions this worker will spawn** — the
