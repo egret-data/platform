@@ -6187,14 +6187,25 @@ elsewhere" does not cover, and it is the only one this sweep created rather than
 found. **The numerator was claimed exact and not moving, and that was the same trap
 one half further in** — `82fd8ba9` edits `webhook_routes.rs`, which is one of
 the four numerator paths, so the numerator moves whenever this package touches
-its own uncovered half. Measured at `a20f5e72`, both halves dated together:
+its own uncovered half. Both halves dated together, **at `82fd8ba9`**:
 numerator **12,279** = `src/trigger/*` + `webhook_routes.rs` **1,215** +
 `tests/webhook_route.rs` + `egret-server/tests/workflow_webhook_mount.rs`;
 denominator **23,740**; **52%**. Dating the denominator and leaving the
 numerator undated in the same sentence is what let it through: **a sentence
 escapes the self-reference trap only if EVERY figure in it is dated, and the
 ratio is the only part worth quoting undated, because both halves move
-together.** A line count is a crude measure of anything and is used here only
+together.**
+
+**And the third instance is this paragraph.** The correction above shipped
+labelled *"measured at `a20f5e72`"*, and `12,279 / 23,740` are `82fd8ba9`'s
+figures — at `a20f5e72` they are `12,274 / 23,273`. Re-measured at five commits
+to find that: `b4e1c368` 12,274/23,267 · `a20f5e72` 12,274/23,273 · `ef943cf2`
+12,274/23,585 · `82fd8ba9` 12,279/23,740 · `a8bb1da6` 12,279/**23,754** — and
+the last of those moved *because that commit edits this file*, which is the rule
+demonstrating itself for the third time in one paragraph. **A date is a figure
+too, and it needs the same treatment as the number it labels.** The ratio has
+been 52–53% at every one of the five, which is why it is the only part worth
+quoting. A line count is a crude measure of anything and is used here only
 to say that the uncovered half is not a corner.)*
 
 Every figure in this section is either derived by a named test on every run or
