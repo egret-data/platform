@@ -5481,10 +5481,11 @@ commit, sixteen entries banked — twelve by `Subflow` executing and four by the
 `CREATE_NEW_EXECUTION` replay. So the sweep is not the whole yield this time;
 half of it is the W6 section below, which exists because **sixteen banked
 entries can make four triggers look measured when none of them is.** The sweep
-found **eleven** stale copies, and every single one is a figure the suite
-asserts under a name the stale sentence did not use — including **two of the
-five bullets in this file's own opening reading instructions**, and a pair that
-moved in opposite directions by the same amount so that *the total held*. Both
+found stale copies at **sixteen** sites — thirteen corrected, three named — and
+every single one is a figure the suite asserts under a name the stale sentence
+did not use, including **two of the five bullets in this file's own opening
+reading instructions**, four doc comments in `src/` and `tests/`, and a pair
+that moved in opposite directions by the same amount so that *the total held*. Both
 of those falsify rules this statement has relied on, and they are written out at
 the end of the W6 section rather than here.
 
@@ -6375,6 +6376,12 @@ rule. **Every figure it found was already compared by a running program, under a
 name the stale sentence did not use.** These are not numbers nobody checked;
 they are numbers checked under their own name and copied out under another.
 
+**Thirteen rows below: ten corrected in place and three named rather than
+corrected.** One of the ten rows is four separate doc comments, so it is
+**thirteen corrected sites and sixteen in all** — four of them in `src/` and
+`tests/` rather than anything in this file, and two in this file's own opening
+reading instructions.
+
 | where | said | is |
 |---|---|---|
 | **this file's opening blockquote**, the sub-execution bullet | `16 of the 41 MATCH, 6 inside, 19 on more` | **22 / 4 / 15** — the note that exists to stop a reader picking up a stale figure, two packages stale itself, in the file's own reading instructions |
@@ -6386,6 +6393,8 @@ they are numbers checked under their own name and copied out under another.
 | *The sub-executions: what is compared* — the retirement note on W3a's table | `16 of the 41`, `35 entries` | **22**, **39**: a stale figure inside the note that retires the table above it |
 | *What this oracle does not prove* (W3b's), the sub-execution bullet | `35 / 16 / 6 / 19` | **39 / 22 / 4 / 15** |
 | `oracle-exec/baseline.txt:204` | `It is 16 of the 41 MATCHING` | **22**. **Not corrected, and the reason is a constraint**: this package may not edit `baseline.txt`, whose md5 (`a3d887ae72595e61c8bc16e8530f9951`) is the reference every published W1–W6 number is stated against, and a comment-only edit still moves it. Named here instead |
+| `src/trigger/mod.rs`, the scheduler's own module doc | `seven corpus flows declare a cron and **one of those is baselined**` | **none of the six comparable entries is baselined**. Inherited from the design spec's §1 table, which was measured *before* the package; the one entry it counted is `valids/task-flow`, which W6 Task 3 banked because `Subflow` executes. **The scheduler's own doc invited a reader to read a `Subflow` bank as a schedule bank** |
+| `src/worker/subflow.rs`, `tests/executor.rs` (twice) and `tests/worker.rs` | `the ratchet is unmoved at 131` | **127**. The value the day W6 Task 3 measured it, four lines of the same package before Task 4 banked four more. The claim is *unmoved*; the number beside it was a moment, and all four now say so |
 | `oracle-exec/runnable.txt`, W4's *measured now* table | `matching 151 / baselined 143`, `357 / 747`, `17 / 8 / 16` | **167 / 127**, **360 / 744**, **22 / 4 / 15**. W6 appends its own block there rather than rewriting W4's, which is that file's convention |
 | the flip and corruption **experiments** in this section | `green at 143`, `144 mismatching` | left as they were run. They are experimental records on a different tree, and an adjusted experimental result is a number no program ever produced. Both mechanisms are still checked on every run by `a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to` and the pairs test; only the printed counts are historical |
 
@@ -6400,6 +6409,28 @@ sweep would find:
 2. *"Assert the total beside the parts and an error shows up"* — the
    `22 + 4 + 15` row is a counterexample this file can now point at. Two figures
    moved in opposite directions by the same amount and the total held.
+3. **"Where this section and anything above it disagree, this section is
+   right"** — this statement's own governance rule, and the sweep falsified it
+   *inside* the section. *The sub-executions* said **35** entries produce a
+   `spawned` while *The ordered pairs*, two screens up **in the same section**,
+   said **39**; item 2's five family figures were a package behind while the
+   tables they are drawn from were current. The authority is not this section.
+   **It is the named constants in `tests/executor.rs`** — `SPAWNED_ENTRIES_THAT_MATCH`,
+   `ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED`, `TERMINALS_ON_BASELINED_ENTRIES`
+   and the rest — which is where the next sweep should start.
+
+**And the method that worked, stated so the next sweep does not have to find it
+again: sweep from the CONSTANTS outward, not from the prose inward.** Every
+earlier formulation scoped the search by *place* (this file, this section, the
+files this task touched) and every one of them missed copies living somewhere
+nobody had a reason to open. Enumerating the constants the suite asserts and
+then grepping each one's **concept** — "of the 41", "entries produce a
+`spawned`", "end unfinished", "kept ordered pairs", and the bare ratchet values
+`143`/`131` — over `src/`, `tests/`, `oracle-exec/` and `docs/` in every file
+type found every one of the sixteen, including the four `131`s in doc comments
+and the module doc that had inherited a figure from the design spec's
+pre-package table. A phrase grep would have found what its author already knew
+was there; the constants are a list nobody has to remember.
 
 #### What this section does not do
 
