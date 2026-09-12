@@ -319,3 +319,131 @@ pub async fn draft(
     .await
     .expect("create draft")
 }
+
+// ---------------------------------------------------------------------------
+// The webhook surface (W6 Task 7)
+// ---------------------------------------------------------------------------
+
+/// The **anonymous** webhook app: `egret_workflow::webhook_router()` nested at
+/// `/workflows/v1`, exactly as `egret-server::build_router` mounts it.
+///
+/// A separate builder from [`app`] rather than a second route on it, because
+/// the two differ in the thing under test: [`app`] nests under `/api` so
+/// `WsContext`'s gate sees the shape it needs, and this one deliberately does
+/// not, because there is no session for that gate to run in. Mounting the
+/// webhook router under `/api` in a test would prove the opposite of what this
+/// suite claims.
+///
+/// It carries no `SessionService` handle because nothing here mints a session:
+/// [`anon`] sends the request with no cookie at all, which is the whole point.
+pub struct WebhookApp {
+    router: axum::Router,
+}
+
+pub async fn webhook_app(db: &Db) -> WebhookApp {
+    let sessions = egret_auth::session::SessionService::new(
+        db.clone(),
+        chrono::Duration::hours(24),
+        chrono::Duration::minutes(60),
+    );
+    let pdp: std::sync::Arc<dyn egret_core::authz::Pdp> = std::sync::Arc::new(
+        egret_auth::pdp::CedarPdp::build(db.clone(), &egret_events::EventBus::new())
+            .await
+            .expect("build CedarPdp"),
+    );
+    let state = egret_workflow::WorkflowState {
+        db: db.clone(),
+        repo: egret_workflow::FlowRepo::new(db.clone()),
+        refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
+            flows: egret_workflow::FlowRepo::new(db.clone()),
+            dataapi_endpoints: std::sync::Arc::new(UnreachableDataApi),
+            notebooks: std::sync::Arc::new(UnreachableNotebooks),
+        }),
+        sessions,
+        workspaces: egret_workspace::workspaces::WorkspaceRepo::new(db.clone()),
+        authz: egret_workspace::rbac::Authorizer::new(db.clone()),
+        pdp,
+        audit: egret_audit::AuditSink::new(16).0,
+    };
+    WebhookApp {
+        router: axum::Router::new()
+            .nest("/workflows/v1", egret_workflow::webhook_router())
+            .with_state(state),
+    }
+}
+
+/// Send a request carrying **no credential of any kind** -- no cookie, no
+/// bearer, nothing but the URL and the body.
+///
+/// That is what a webhook caller is, and it is why every assertion in
+/// `tests/webhook_route.rs` is meaningful: there is nothing for the server to
+/// authenticate except the key in the path.
+pub async fn anon(
+    app: &WebhookApp,
+    method: &str,
+    path: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> axum::response::Response {
+    use tower::ServiceExt;
+    let mut b = axum::http::Request::builder().method(method).uri(path);
+    if let Some(ct) = content_type {
+        b = b.header("Content-Type", ct);
+    }
+    app.router
+        .clone()
+        .oneshot(b.body(axum::body::Body::from(body.to_vec())).unwrap())
+        .await
+        .unwrap()
+}
+
+/// Insert a flow draft directly, so a webhook test never has to go through the
+/// authenticated management router to set one up.
+///
+/// `state` is a parameter because `'disabled'` is one of the refusals under
+/// test and `soft_delete` is another.
+pub async fn seed_flow(db: &Db, ws: Uuid, owner: UserId, source: &str, state: &str) -> Uuid {
+    let row = draft(
+        &egret_workflow::FlowRepo::new(db.clone()),
+        ws,
+        owner,
+        source,
+    )
+    .await;
+    if state != "draft" {
+        sqlx::query("UPDATE workflow.flows SET state = $2 WHERE id = $1")
+            .bind(row.id)
+            .bind(state)
+            .execute(&db.pool)
+            .await
+            .expect("set flow state");
+    }
+    row.id
+}
+
+/// How many executions exist in `ws`. The assertion that actually matters for
+/// a cross-workspace test: a 404 with a side-effect is the failure, and only a
+/// count can see it.
+pub async fn execution_count(db: &Db, ws: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE workspace_id = $1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count executions")
+}
+
+/// The stored `ExecutionTrigger` of the one execution in `ws`.
+pub async fn only_execution_trigger(db: &Db, ws: Uuid) -> Option<serde_json::Value> {
+    sqlx::query_scalar("SELECT execution_trigger FROM workflow.executions WHERE workspace_id = $1")
+        .bind(ws)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read execution_trigger")
+}
+
+pub async fn body_text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
