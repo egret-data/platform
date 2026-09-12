@@ -5182,6 +5182,24 @@ async fn a_replay_is_not_started_from_a_nested_settle_and_the_next_resume_starts
 /// The condition of an `If` is the observation point because `advance()` stores
 /// the render in `task_runs.rendered`, which is a column a test can read
 /// without a handler in the middle.
+///
+/// # `maxAttempts: 3`, and the two-link chain is the whole point
+///
+/// **This test claimed to keep `root` from drifting and did not** — W6 Task 6's
+/// Important, carried to Task 8 and fixed here. Its fixture was `maxAttempts:
+/// 2`, i.e. **one** link, where the chain root and the immediate parent are the
+/// same row: replacing `root = id` inside `Surface::load`'s walk with
+/// `if root == ctx.id { root = id; }` — *take the nearest ancestor, not the
+/// top* — answered the same id, passed this test, passed the rest of the crate
+/// and passed the ratchet. The exact shape of
+/// [`a_replay_chain_carries_its_attempt_number_and_its_origin_offset`]'s
+/// `attempt.max(2)`, one module over: **a fixture answers the question you
+/// built it for and stays silent about the one you then generalise to.**
+///
+/// So the chain is three executions long and the assertion that matters is on
+/// the **second** replay, whose parent is the first replay and whose root is
+/// the original. Measured: with that mutation applied, the second replay
+/// renders the FIRST replay's id and this test fails naming both.
 #[sqlx::test(migrations = "../../migrations")]
 async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
@@ -5189,7 +5207,7 @@ async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool:
     let reg = AlwaysFails::default();
 
     let source = "id: cid\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
-                  type: constant\n  interval: PT1S\n  maxAttempts: 2\ntasks:\n  - id: cond\n    \
+                  type: constant\n  interval: PT1S\n  maxAttempts: 3\ntasks:\n  - id: cond\n    \
                   type: io.kestra.plugin.core.flow.If\n    \
                   condition: \"{{ labels.system.correlationId }}\"\n    then:\n      - id: a\n        \
                   type: io.kestra.plugin.core.log.Log\n        message: hi\n";
@@ -5231,6 +5249,50 @@ async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool:
          that walk (the one `inheriting` uses for outputs) would answer {replay} \
          here and diverge from the artifact"
     );
+
+    // **The SECOND link, which is the one a nearest-ancestor `root` gets
+    // wrong.** Everything above is one link deep, where the chain root IS the
+    // immediate parent, so it cannot tell the two apart -- and until this
+    // block existed, a `root` that stopped at the nearest ancestor passed the
+    // whole crate and the ratchet.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![replay],
+        "attempt 2 of 3 is not the last, so the first replay's own replacement \
+         comes due -- if this is empty the chain is one link long again and the \
+         assertion below is measuring nothing"
+    );
+    let second = replay_of(&pool, replay)
+        .await
+        .expect("the second replacement exists");
+    drain_with(&pool, &reg).await;
+    assert_ne!(second, replay, "the second replay is its own execution");
+    assert_eq!(
+        parent_of(&pool, second).await,
+        Some(replay),
+        "and it hangs off the FIRST replay, not off the root: the two-link \
+         chain this assertion needs does not exist otherwise"
+    );
+    assert_eq!(
+        rendered(&pool, second).await,
+        Some(root.to_string()),
+        "two links up, and the label is still the ORIGINAL execution's id. A \
+         `root` that took the nearest ancestor instead of the top of the chain \
+         answers {replay} here -- it answers the same thing as the correct walk \
+         one link up, which is why the one-link fixture this test used to carry \
+         could not see it"
+    );
+}
+
+/// `parent_execution_id` of one execution, for the tests that need to assert
+/// the SHAPE of a chain rather than only its rendered output.
+async fn parent_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT parent_execution_id FROM workflow.executions WHERE id = $1")
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the parent link")
 }
 
 /// **A second `resume` on an execution whose replay already exists starts no

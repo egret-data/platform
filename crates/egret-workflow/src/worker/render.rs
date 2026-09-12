@@ -139,10 +139,40 @@ impl Surface {
             .map(|f| json!({"id": f.id, "namespace": f.namespace}))
             .unwrap_or(Value::Null);
         // `labels`: the flow's own `labels:` block, plus the ONE system label
-        // the corpus reads. Kestra namespaces system labels under `system`, and
-        // `correlationId` is the id of the execution at the root of the parent
-        // chain — a sub-execution shares its parent's. Measured from the two
-        // entries that read it (`valids/follow-dependencies-partial-child` and
+        // the corpus reads. Kestra namespaces system labels under `system`.
+        //
+        // **The artifact's mechanism is a COPY, not a computation, and the
+        // gloss this comment used to state is false of the class.** It read
+        // *"`correlationId` is the id of the execution at the root of the
+        // parent chain"*. Kestra copies the cause's own `system.correlationId`
+        // **label** verbatim (`Flow.evaluate`'s `lambda$evaluate$2`;
+        // `ExecutionService.replay` for a replay) and `Execution.java:213`
+        // fills one in only when the label is **ABSENT** — so the root's id is
+        // what the copying *produces* in a chain Kestra generated, and nothing
+        // more. Measured on the pinned artifact by W6 Task 6: a root started
+        // with an explicit `system.correlationId: ZZZTESTROOT` hands
+        // `ZZZTESTROOT` — not an execution id at all — to all three children.
+        // The derivation is in `crate::trigger::flow`'s module doc, and
+        // `trigger::flow::FiredExecution::correlation_id` owns the gap.
+        //
+        // `root` below is the chain root's **id**, computed by walking
+        // `parent_execution_id`. That agrees with the artifact on every
+        // machine-generated chain and diverges on a seeded one, where the
+        // artifact answers the seeded label. **Nothing in this oracle can
+        // reach the divergence** and that is derived rather than assumed:
+        // three corpus flows declare a `system.*` label at all
+        // (`invalids/system-labels` twice, `valids/minimal` once) and **none of
+        // the three is `system.correlationId`**, while the only two flows whose
+        // text names `correlationId` read it and seed nothing — see
+        // `the_correlation_id_divergence_has_no_corpus_population` in
+        // `tests/executor.rs`, which compares all three figures. Related, same
+        // mechanism, same population of zero: the unconditional
+        // `labels.insert("system", …)` below **shadows** a declared `system.*`
+        // label, so `valids/minimal`'s `system.readOnly` would not render — it
+        // matches because the flow never reads it.
+        //
+        // Measured from the two entries that read the label
+        // (`valids/follow-dependencies-partial-child` and
         // `valids/subflow-grand-child`, both `{{ labels.system.correlationId }}`
         // in a `Log`, both SUCCESS in the golden). No other system label is
         // supplied, so an expression over one still fails.
