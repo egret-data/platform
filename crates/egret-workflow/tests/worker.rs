@@ -4667,8 +4667,9 @@ async fn metadata_of(pool: &sqlx::PgPool, execution: Uuid) -> (i32, i64) {
 /// This is the shipping worker's half of the replay and **the oracle cannot see
 /// any of it**: `oracle-exec/driver.rs` makes the delay elapse by rewinding
 /// `executions.created_at` and calling `worker::resume` itself, so a
-/// `due_retries` that named nobody would leave the ratchet at 131 and this
-/// suite is the only instrument that would say why.
+/// `due_retries` that named nobody would leave the ratchet at **127** (131 when
+/// this sentence was written, before Task 4's own four banks) and this suite is
+/// the only instrument that would say why.
 ///
 /// **Nothing here rewinds anything** — the delay elapses in real time, exactly
 /// as `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`

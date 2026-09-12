@@ -173,6 +173,16 @@ Unchanged, with three that carry weight here:
 
 ## 7. Contradictions in the existing record, to be corrected
 
+**Status, added after the fact: all four landed.** 1 and 2 at W6 Task 8, at the
+origin (`oracle-exec/README.md`'s *Sub-executions are hidden from
+`/executions/search`* and `harvest.py`'s `descendants()` docstring, plus the call
+site and a third copy of the dead-arm method in W3a's own plan); 2 was
+re-measured by **running** the regex over both artifact shapes with a positive
+control (0 / 0 / 1). 3 at W6 Task 4 — the constant read **84** when this section
+was written, 63 after Task 3 and **59** since, with the four
+`retry-new-execution-*` ids asserted absent by name rather than described as
+gone. 4 in this spec's own commit, both languages.
+
 Each measured, not inferred:
 
 1. `oracle-exec/README.md` claims *"A sub-execution … carries `parentId`"* —

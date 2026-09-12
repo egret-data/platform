@@ -673,10 +673,12 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
 /// *and* declared a trigger would shrink every census below and look exactly
 /// like a smaller corpus. This returns both halves so the caller can assert
 /// `parsed + unparsed == 345` and check what the unparsed ones contain.
-fn parsed_corpus() -> (
+type ParsedCorpus = (
     Vec<(String, egret_workflow::models::Flow)>,
     Vec<(String, String)>,
-) {
+);
+
+fn parsed_corpus() -> ParsedCorpus {
     let (mut ok, mut bad) = (Vec::new(), Vec::new());
     for entry in corpus() {
         let text = corpus_source(&entry.id);
@@ -2304,7 +2306,9 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (619, 125, 744),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 744 leaves \
-         the ratchet green and unmoved at 131"
+         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
+         and at 127 since Task 4's four banks; the claim is `unmoved`, and the \
+         number beside it is a moment"
     );
     assert_eq!(
         (
@@ -6099,8 +6103,9 @@ fn no_corpus_subflow_turns_transmit_failed_off() {
 /// chain, which counts
 /// a `Loop` sub-execution as a link too; this walk cannot see loop nesting at
 /// all. So the 2 below is a lower bound on the real chain, and what says
-/// `MAX_SPAWN_CHAIN` refuses nothing real is the ratchet: 131 with the same
-/// twelve, re-run after the bound went in.
+/// `MAX_SPAWN_CHAIN` refuses nothing real is the ratchet: **127** with the same
+/// twelve — `131` when the bound went in and `127` since W6 Task 4's four
+/// replay banks, re-run at both.
 ///
 /// Walked over `(namespace, flowId)` pairs with a visited set, because the
 /// graph **can** cycle — `spec::validate`'s `self_dependency` refuses only a

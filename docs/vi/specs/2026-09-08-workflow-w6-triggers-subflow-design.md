@@ -174,6 +174,16 @@ Giữ nguyên, ba điều dưới đây chịu lực:
 
 ## 7. Những khẳng định sai trong hồ sơ, phải sửa
 
+**Trạng thái, ghi thêm sau khi làm xong: cả bốn đã xong.** Mục 1 và 2 ở W6 Task
+8, sửa ngay tại gốc (`oracle-exec/README.md` mục *Sub-executions are hidden from
+`/executions/search`* và docstring `descendants()` trong `harvest.py`, cộng chỗ
+gọi và một bản thứ ba của cùng phương pháp chết trong plan của W3a); mục 2 được
+**đo lại bằng cách CHẠY** chính cái regex đó trên cả hai dạng của artifact, có
+control dương (0 / 0 / 1). Mục 3 ở W6 Task 4 — hằng số đọc **84** khi viết mục
+này, 63 sau Task 3 và **59** từ đó, với bốn id `retry-new-execution-*` được
+assert là đã rời khỏi tập hợp theo TÊN chứ không chỉ tả bằng lời. Mục 4 ngay
+trong commit của spec này, cả hai ngôn ngữ.
+
 Mỗi cái đều đo được, không suy luận:
 
 1. `oracle-exec/README.md` khẳng định *"Một sub-execution … mang `parentId`"* —

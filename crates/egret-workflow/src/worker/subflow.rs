@@ -175,7 +175,10 @@ use crate::runners::{render_str, RenderContext};
 /// frames only pile up when children terminate **inside** the caller's
 /// transaction, which is exactly when the stack really is that deep. Nothing in
 /// the corpus is near it (deepest chain: 2 links) and the ratchet is unmoved at
-/// 131 with the same twelve, which is what says so.
+/// **127** with the same twelve, which is what says so. *(This read `131` — the
+/// value the day W6 Task 3 measured it, and W6 Task 4's four replay banks moved
+/// it four lines later. W6 Task 8's sweep re-derived it: the claim is "unmoved",
+/// and the number beside it is a moment.)*
 ///
 /// # What neither bound closes, measured on the artifact rather than assumed
 ///

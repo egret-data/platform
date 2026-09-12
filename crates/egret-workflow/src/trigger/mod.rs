@@ -13,12 +13,32 @@
 //! `harvest.py`'s settle walks `parent_id`, and Kestra leaves that column
 //! **NULL** for anything a `Schedule` creates — and for anything a `Flow`
 //! trigger creates, which [`flow`] measured directly over **210** trigger-fired
-//! executions. Seven of the 345 corpus flows
-//! declare a cron and one of those is baselined; **zero are reachable**. The
-//! flow trigger's own population is seventeen flows, **zero** baselined.
-//! Backfill has **zero live declarations in the whole corpus** — two
-//! commented-out lines. So `baseline.txt` did not move for this work and could
-//! not have: **127 before, 127 after**.
+//! executions.
+//!
+//! **And "walks `parent_id`" is only one of the four mechanisms.** W6 Task 8's
+//! coverage statement splits them, because merging them loses the only thing a
+//! reader can act on: a `Schedule`-fired execution carries **no link at all**,
+//! so unioning `trigger_execution_id` — which is what the flow trigger needs —
+//! would still not find it; the webhook's request is **never sent** (the string
+//! `executions/webhook` appears once in `harvest.py`, as the reason
+//! `valids/webhook-inputs` is excluded); and backfill has no population to be
+//! blind to. See `oracle-exec/README.md`, *The coverage statement* → the W6
+//! section.
+//!
+//! Seven of the 345 corpus flows declare a cron, six of them are comparable
+//! golden entries, and **none of the six is baselined** — `zero` reachable
+//! either way. *(This doc said "one of those is baselined", inherited from the
+//! design spec's §1 table, which was measured before the package: the one
+//! entry it counted is `valids/task-flow`, which W6 Task 3 banked because
+//! `Subflow` executes — so a reader could read a `Subflow` bank as a schedule
+//! bank. Corrected by W6 Task 8's sweep;
+//! `the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`
+//! asserts the split and that `valids/task-flow` is the only overlap.)* The
+//! flow trigger's own population is seventeen flows, twelve golden entries,
+//! **zero** baselined. Backfill has **zero live declarations in the whole
+//! corpus** — two commented-out lines, in `valids/full` and
+//! `valids/labels-deserialization`. So `baseline.txt` did not move for this
+//! work and could not have: **127 before, 127 after**.
 //!
 //! That puts this module where `egret.sql` (W3b) and `egret.container` (W4)
 //! already sit — judged entirely by its own tests — and it inherits W4's rule
