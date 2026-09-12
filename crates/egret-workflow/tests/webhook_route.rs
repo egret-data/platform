@@ -1209,9 +1209,20 @@ async fn a_half_written_trigger_record_is_unrepresentable() {
             "id is not a string",
             json!({"id": 1, "type": "t", "variables": {}}),
         ),
+        // Fix round 1's sweep: the CHECK has three `jsonb_typeof` clauses and
+        // only two of them had a row. A clause no row reaches is a clause that
+        // could be deleted with the suite still green.
+        (
+            "type is not a string",
+            json!({"id": "i", "type": 1, "variables": {}}),
+        ),
         (
             "variables is not an object",
             json!({"id": "i", "type": "t", "variables": []}),
+        ),
+        (
+            "variables is a non-empty array",
+            json!({"id": "i", "type": "t", "variables": [1, 2]}),
         ),
         ("not an object at all", json!("i")),
     ] {
@@ -1571,5 +1582,59 @@ async fn a_webhook_runs_the_current_draft_source() {
     assert!(
         ran.contains("after-edit") && !ran.contains("before-edit"),
         "the webhook ran a source that is not the current draft: {ran}"
+    );
+}
+
+/// A flow whose stored `source` does not parse answers the same 404 as an
+/// absent one — it has no triggers, so no key can match it, and telling a
+/// caller "this exists but is broken" is the existence oracle again.
+///
+/// Fix round 1's sweep: the branch was in the handler from the first commit and
+/// **no test reached it**.
+#[tokio::test]
+async fn an_unparseable_flow_answers_the_same_404() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let ns = fresh_namespace();
+    let flow = common::seed_flow(&db, ws, user, &hook_flow(&ns), "draft").await;
+    let app = common::webhook_app(&db).await;
+
+    // The control FIRST, so the refusal below is attributable to the edit.
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(common::execution_count(&db, ws).await, 1);
+
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind("id: fx-flow\nnamespace: x\ntasks: [ this is not: yaml: at all")
+        .execute(&db.pool)
+        .await
+        .expect("break the source");
+
+    let res = common::anon(
+        &app,
+        "POST",
+        &hook_url(ws, &ns, "fx-key"),
+        Some("application/json"),
+        b"{}",
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let body = common::body_text(res).await;
+    assert_eq!(
+        body, r#"{"error":"not found: webhook"}"#,
+        "and it must be the SAME body as every other absence, not a parse error"
+    );
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        1,
+        "nothing new started"
     );
 }

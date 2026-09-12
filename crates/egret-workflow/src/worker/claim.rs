@@ -990,11 +990,18 @@ pub async fn start_execution(
 /// [`start_execution`] with Kestra's `Execution.trigger` supplied.
 ///
 /// A **sibling** rather than a sixth parameter on `start_execution`, because
-/// that function has twenty call sites and nineteen of them have no trigger:
-/// widening it would mean writing `None` nineteen times to serve one caller,
-/// and the nineteen `None`s would be the kind of uniform argument that hides a
-/// mutation (W6 Task 6's `max_depth` survived a two-sided mutation for exactly
-/// that reason -- every fixture passed the default).
+/// that function has **65** call sites across `crates/` and all but one of them
+/// have no trigger: widening it would mean writing `None` sixty-four times to
+/// serve one caller, and sixty-four uniform `None`s are the kind of argument
+/// that hides a mutation (W6 Task 6's `max_depth` survived a two-sided mutation
+/// for exactly that reason -- every fixture passed the default).
+///
+/// The figure is counted, not estimated. This doc said "twenty" until fix round
+/// 1's sweep ran
+/// `grep -rn "start_execution(" crates/ --include="*.rs" | grep -v with_trigger | grep -v "///"`
+/// on 2026-09-12 and got 65. A number nobody has compared to a running command
+/// is the same shape of claim as an untested guard, which is the point of the
+/// sentence it appears in.
 ///
 /// `trigger` is `{id, type, variables}` and lands in
 /// `workflow.executions.execution_trigger` (migration 0140), whose CHECK

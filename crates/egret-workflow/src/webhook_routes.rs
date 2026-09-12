@@ -13,16 +13,27 @@
 //! resolves from the request through `tenantService.resolveTenant()`, replaced
 //! by egret's `{ws}` **slug in the path**.
 //!
-//! **The parameter is spelled `{ws}` and not `{workspace}`, and that is a
-//! convention rather than a shortening.** `egret-server`'s
-//! `feature_route_coverage` suite reads `{workspace}` as the marker of a route
-//! the `WsContext` feature gate is expected to cover, and this surface is
-//! deliberately outside that gate — it has no session for the gate to resolve.
-//! `egret-dataapi`'s serving router carries the identical spelling for the
-//! identical reason, and `egret-workspace`'s `features.rs` records both
-//! exemptions beside the module each belongs to. **Turning the `workflows`
-//! module off does not stop webhook traffic**; `state = 'disabled'` on the flow
-//! does, which is the same answer the Data API gives for its own serving path.
+//! **The parameter is spelled `{ws}` and not `{workspace}`**, following
+//! `egret-dataapi`'s serving router, whose own doc records `{workspace}` as the
+//! marker of a route the `WsContext` feature gate is expected to cover. This
+//! surface is deliberately outside that gate — it has no session for the gate
+//! to resolve.
+//!
+//! **That spelling is a signal to a reader here, not a mechanism**, and fix
+//! round 1's sweep is what made the difference matter: `egret-server`'s
+//! `feature_route_coverage` suite reads the **OpenAPI document**, and this route
+//! contributes nothing to it (see "no OpenAPI document" below), so neither
+//! spelling would be seen by that suite either way. For `egret-dataapi`'s
+//! serving router — which *does* publish a document — the spelling really is
+//! load-bearing. Saying so here without the qualification claimed a guard this
+//! route does not have.
+//!
+//! What *is* enforced is written down rather than mechanised:
+//! `egret-workspace`'s `features.rs` records the exemption beside the
+//! `workflows` entry, as it already did beside `data_api`. **Turning the
+//! `workflows` module off does not stop webhook traffic**; `state = 'disabled'`
+//! on the flow does — and so does `disabled: true` in its YAML — which is the
+//! same answer the Data API gives for its own serving path.
 //!
 //! # Authorization is the whole of this module
 //!
