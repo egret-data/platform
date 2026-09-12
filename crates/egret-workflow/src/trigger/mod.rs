@@ -4,15 +4,18 @@
 // kestra: core/src/main/java/io/kestra/plugin/core/trigger/SchedulableExecutionFactory.java
 
 //! Triggers — the schedule trigger and its backfill, driven by an injected
-//! clock.
+//! clock, and the flow trigger ([`flow`], W6 Task 6).
 //!
 //! # The ratchet says nothing about this module, and that is not a verdict
 //!
 //! `oracle-exec/`'s execution ratchet cannot see a single trigger-fired
 //! execution, and the reason is structural rather than accidental:
 //! `harvest.py`'s settle walks `parent_id`, and Kestra leaves that column
-//! **NULL** for anything a `Schedule` creates. Seven of the 345 corpus flows
-//! declare a cron and one of those is baselined; **zero are reachable**.
+//! **NULL** for anything a `Schedule` creates — and for anything a `Flow`
+//! trigger creates, which [`flow`] measured directly over 211 trigger-fired
+//! executions. Seven of the 345 corpus flows
+//! declare a cron and one of those is baselined; **zero are reachable**. The
+//! flow trigger's own population is seventeen flows, **zero** baselined.
 //! Backfill has **zero live declarations in the whole corpus** — two
 //! commented-out lines. So `baseline.txt` did not move for this work and could
 //! not have: **127 before, 127 after**.
@@ -84,12 +87,18 @@
 //! Getting 3 backwards would advance a backfill twice per tick and drop every
 //! other window date.
 
+pub mod flow;
 pub mod schedule;
 
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+pub use flow::{
+    evaluate as evaluate_flow_trigger, FiredExecution, FlowListener, FlowTriggerError,
+    ListeningFlow, Outcome as FlowTriggerOutcome, Refusal, SourceExecution, WhenVerdict,
+    DEFAULT_MAX_EXECUTION_DEPTH,
+};
 pub use schedule::{
     Backfill, Cron, CronError, Field, ScheduleDates, ScheduleError, ScheduleTrigger, SkipReason,
 };
@@ -533,8 +542,8 @@ mod tests {
         files.sort();
 
         assert!(
-            files.len() >= 2,
-            "expected at least mod.rs and schedule.rs under {}, found {files:?}",
+            files.len() >= 3,
+            "expected at least mod.rs, schedule.rs and flow.rs under {}, found {files:?}",
             dir.display()
         );
 
