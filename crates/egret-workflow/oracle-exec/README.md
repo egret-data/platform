@@ -7001,7 +7001,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 |---|---|---|
 | **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
 | **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
-| **W8** (`sla:`, flow `concurrency:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
+| **W8** (`sla:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
 | **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
 
 A **stalled** execution is deliberately not in this class: egret doing less than
@@ -7792,8 +7792,11 @@ every later reader the guarantee.
 by **the first package that legitimately opens `src/executor/`**, in the same
 commit that opens it, because that commit already pays the whole cost. By this
 file's own residual-baseline table that is **W8** — `Pause` (12 entries),
-`LoopUntil`/`WaitFor` (9), flow `concurrency:` (7) and `sla:` (5) are all its,
-and all four are flowables that must be ported into `advance()` — unless **W6**
+`LoopUntil`/`WaitFor` (9), `AllowFailure`/`allowFailure:` (12) and `sla:` (5)
+are all its, and the first three are flowables that must be ported into
+`advance()`. (This list said flow `concurrency:` (7); that row was 6 by W6 and
+is deleted at W8 Task 1, its state having been misattributed, and `allowFailure`
+takes its place in the enumeration because §9 owns it.) Unless **W6**
 gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
 `executor/retry.rs`. Whoever it is: the two lines are in `command.rs`'s
 `SpawnExecution` doc and `loop_.rs`'s module doc and `values:` note, and this

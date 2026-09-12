@@ -114,7 +114,14 @@ pub struct ValidationReport {
 /// Both rows are gone. The five that remain were re-checked the same way:
 /// `concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
 /// reader outside this validator, and `triggers` is W6's. `oracle-exec/README.md`'s
-/// unclaimed table records the same status for flow `concurrency:` and `sla:`.
+/// unclaimed table records the same status for `sla:`. **It no longer has a row
+/// for flow `concurrency:` and that does not change this one**: W8 Task 1
+/// deleted that row because the construct holds no baselined entry under the
+/// execution oracle, which is a statement about what the RATCHET can score and
+/// not about whether this validator must warn. A flow declaring `concurrency:`
+/// still gets no enforcement, so the warning here stays exactly as it was —
+/// the two tables answer different questions, and conflating them is how a
+/// deleted row turns into a silently dropped warning.
 ///
 /// `the_not_yet_enforced_list_is_pinned_in_both_directions` is what makes a
 /// wrong row fail from now on — the reported finding was not only that the row

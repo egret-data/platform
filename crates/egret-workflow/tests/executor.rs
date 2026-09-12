@@ -4063,9 +4063,14 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W4: a `Sleep` still in flight when its sibling failed the `Parallel`. Kestra FAILED it; \
          the kill path reaches only a task's own expired `timeout:`, so egret completes it",
     ),
-    // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
-    // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
-    // construct, so it runs the tasks.
+    // **W8, through `sla:` alone.** Kestra CANCELLED or KILLED the execution;
+    // egret does not evaluate an `sla:`, so it runs the tasks. This comment
+    // said "`sla:` and flow `concurrency:`, both rows of the residual
+    // baseline", and both halves went at W8 Task 1: every one of the five is an
+    // `sla:`'s, three of them merely happen to write a `concurrency:` too, and
+    // the `flow concurrency:` row no longer exists -- it was deleted for
+    // attributing `CANCELLED` to a construct that never produces it. See
+    // `the_cancelled_state_never_comes_from_a_concurrency_limit`.
     (
         "valids/flow-concurrency-sla-assert-cancel",
         "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
