@@ -185,7 +185,7 @@
 //! these bound the blast radius rather than remove it.
 
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -343,12 +343,10 @@ impl WebhookGuard {
 
     /// Which window serves `key`.
     fn slot(&self, key: &AttemptKey) -> usize {
-        let mut h = self.hasher.build_hasher();
-        key.hash(&mut h);
         // `WEBHOOK_ATTEMPT_SLOTS` is a power of two, so the mask is exact. It
         // is asserted rather than assumed -- see
         // `tests::the_slot_count_is_a_power_of_two`.
-        (h.finish() as usize) & (WEBHOOK_ATTEMPT_SLOTS - 1)
+        (self.hasher.hash_one(key) as usize) & (WEBHOOK_ATTEMPT_SLOTS - 1)
     }
 
     /// Record one attempt against `key`. `false` means the window is exhausted.
