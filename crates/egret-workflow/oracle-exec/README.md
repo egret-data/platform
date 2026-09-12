@@ -750,17 +750,23 @@ exists; nothing keyed on `parentId` can see it. **That is a hole in this
 oracle's population, not merely in this sentence**, and it is why W6 links a
 subflow child by a column of its own.
 
-`descendants()` is documented below as unioning **two independent discoveries**.
-It has **one**:
+`descendants()` **was** documented — in its own docstring in `harvest.py`, the
+only place it is documented — as unioning **two independent discoveries**. It
+has **one**, and since W6 Task 8 the docstring and the call site say so too, so a
+reader who never opens this file is no longer told there are two:
 
 1. ~~the parent's log lines, which carry `in sub-execution [[link execution="…"]]`~~
    — **dead**: the regex matches neither the raw JSON body (escaped quotes) nor
    the decoded message, whose markup carries `flowId=` and `namespace=` before
    the closing `]]`. W6 Task 4 saw the live shape again while probing a `Loop`:
-   `in sub-execution [[link execution="5Z4dkYmmBkChEpPYNR1HLM" flowId="replay-in-loop" namespace="egret.probe4"]]`;
+   `in sub-execution [[link execution="5Z4dkYmmBkChEpPYNR1HLM" flowId="replay-in-loop" namespace="egret.probe4"]]`.
+   W6 Task 8 re-measured it by **running the regex** over both shapes with a
+   **positive control on the shape it was written for** — 0 matches, 0 matches,
+   1 match — because an arm that matched nothing on every input would look
+   identical to a dead one;
 2. a recursive walk of Kestra's Postgres over the generated `parent_id` column,
    which is the storage layer rather than the API — **the only arm that has ever
-   found anything.**
+   found anything**, and the one all **142** recovered sub-executions came from.
 
 The SQL goes over psql's **stdin**, not `-c`, and the id is a psql variable
 (`:'root'`): psql does not interpolate variables into a `-c` string, so the
@@ -768,6 +774,16 @@ parameterisation would silently not happen. A non-zero psql exit is fatal — an
 with the log-scrape arm dead, a swallowed error would degrade sub-execution
 recovery to **nothing at all**, silently, and the harvest would still write a
 plausible `corpus.json`.
+
+**The dead arm is left in the code, with an owner, and that is a decision.** It
+is dead against *this artifact's log markup* — a measurement about the artifact,
+not about the code — and deleting it changes what a re-harvest requests, which
+is a change W6 cannot run end to end because W6 deliberately does not
+re-harvest. It belongs to the package that makes triggers measurable, which has
+to open `descendants()` anyway to union `trigger_execution_id`; see the W6
+section of *The coverage statement*. **And the dead arm is not the hole**:
+`parent_id` is NULL for a subflow child and for anything a trigger creates, so
+no arm keyed on it could see those however well its regex matched.
 
 ### Terminal is not the same as finished
 

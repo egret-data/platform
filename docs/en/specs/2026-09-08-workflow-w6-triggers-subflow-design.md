@@ -22,6 +22,20 @@ backfill"*. Measured over the 345-flow corpus and the 143-entry baseline
 **Four of the row's five words are worth zero baselined entries, and one of
 those four has no corpus population at all.** So:
 
+**The outcome, added by W6 Task 8 so a reader arriving after the fact is not
+left holding the estimate.** Every figure below is derived by
+`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none` in
+`crates/egret-workflow/tests/executor.rs`, not quoted:
+
+| row | this table predicted | measured after the package |
+|---|---|---|
+| `Subflow` | 9 strict / 11 upper bound | **12 banked** — the upper bound was exceeded by one, because *declares* `concurrency:` was read as *blocked by* it, and `QUEUE`/`CANCEL` only change WHEN a child starts |
+| `CREATE_NEW_EXECUTION` replay | 4 | **4 banked** |
+| flow trigger / schedule / webhook / backfill | 0 each | **0 each**, and the mechanism of each zero is now stated rather than the verdict — `oracle-exec/README.md`, *The coverage statement* → the W6 section |
+
+`143 → 127`, i.e. **16 = 12 + 4**. The estimate of 13–15 was low by one at the
+top end, and the four zeros held.
+
 - **The bankable half is `Subflow` + replay** — 13 to 15 entries, judged by the
   existing ratchet, and they share one migration.
 - **The unmeasurable half is cron, webhook, flow trigger and backfill.** W6

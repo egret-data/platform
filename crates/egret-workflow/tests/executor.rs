@@ -665,6 +665,624 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     );
 }
 
+/// Every corpus flow, parsed by the product's own model, plus the ones that do
+/// not parse — **counted, never skipped.**
+///
+/// `trigger::flow`'s own corpus test walks the directory and `continue`s on a
+/// flow `serde_norway` refuses, which is silent: a flow that failed to parse
+/// *and* declared a trigger would shrink every census below and look exactly
+/// like a smaller corpus. This returns both halves so the caller can assert
+/// `parsed + unparsed == 345` and check what the unparsed ones contain.
+fn parsed_corpus() -> (
+    Vec<(String, egret_workflow::models::Flow)>,
+    Vec<(String, String)>,
+) {
+    let (mut ok, mut bad) = (Vec::new(), Vec::new());
+    for entry in corpus() {
+        let text = corpus_source(&entry.id);
+        match serde_norway::from_str::<egret_workflow::models::Flow>(&text) {
+            Ok(flow) => ok.push((entry.id.clone(), flow)),
+            Err(e) => bad.push((entry.id.clone(), e.to_string())),
+        }
+    }
+    (ok, bad)
+}
+
+/// Does this corpus flow declare a task of type `ty`?
+///
+/// Textual, and deliberately the same shape as
+/// [`no_corpus_entry_can_exercise_the_egret_sql_handler`]'s scanner, whose
+/// `core.log.Log` control this reuses: a scanner that parsed nothing would
+/// report zero of everything and look identical to the truth.
+fn declares_type(source: &str, ty: &str) -> bool {
+    source.lines().any(|line| {
+        line.trim()
+            .trim_start_matches("- ")
+            .trim()
+            .strip_prefix("type:")
+            .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'') == ty)
+            .unwrap_or(false)
+    })
+}
+
+/// **The sixteen entries the W6 ratchet movement speaks for, and the four
+/// constructs it does not speak for at all.**
+///
+/// This is the derivation behind the W6 section of `oracle-exec/README.md`'s
+/// coverage statement, and it exists because **sixteen banked entries can make
+/// four triggers look measured when none of them is**. Everything the statement
+/// prints is computed here, with the total beside its parts, because a figure is
+/// safe only if a running program compares it.
+///
+/// # The twelve are not a list, they are a predicate — and the predicate has a trap
+///
+/// The twelve `Subflow` banks are derived as *golden entries declaring a
+/// `Subflow` task, verdict `runs`, matching*. Read carelessly that is *matching
+/// ∧ declares a `Subflow`*, which is **thirteen**: `invalids/recursive-flow` is
+/// a flow Kestra REFUSED, egret refuses it too, and it has matched since long
+/// before this package. Counting it would attribute a thirteenth bank to
+/// `Subflow` executing. It is asserted separately, by name, for exactly that
+/// reason — *a fixture answers the question you built it for and stays silent
+/// about the one you then generalise to.*
+///
+/// # The four constructs, and the blindness is FOUR different mechanisms
+///
+/// Derived below, per construct, rather than summarised as "the oracle cannot
+/// see it":
+///
+/// 1. **webhook** — the harness never sends the request. `harvest.py` contains
+///    the string `executions/webhook` exactly **once**, as the *reason*
+///    `valids/webhook-inputs` is excluded from the corpus. The trigger is not
+///    invisible; it is never invoked.
+/// 2. **schedule** — Kestra's scheduler fires it (the compose file runs
+///    `server standalone`), and the execution it creates hangs off **nothing**:
+///    `parent_id` NULL and no trigger link either. `descendants()` walks
+///    `parent_id` from one root, so a schedule-fired execution is not a
+///    descendant of anything the harness posted and cannot be attributed to an
+///    entry at all.
+/// 3. **flow trigger** — fires, and the execution carries
+///    `trigger_execution_id`, a column **no arm of `descendants()` reads**. Same
+///    verdict as (2), different mechanism: here the link exists and is not
+///    walked; there there is no link to walk.
+/// 4. **backfill** — no population. **Zero** live declarations in 345 flows;
+///    the only two occurrences are commented out, and they are named here so
+///    the zero is a measurement and not a scanner that reads nothing.
+///
+/// The control that makes the zero mean something is the **142** sub-executions
+/// the golden does hold: this oracle records sub-executions when Kestra links
+/// them by `parent_id`, so "no trigger-fired execution anywhere in the golden"
+/// is a statement about the link, not about an instrument that records nothing.
+///
+/// # The sharpest single row: `valids/task-flow`
+///
+/// One of the sixteen banked entries **declares a `Schedule` trigger**, and it
+/// banked because `Subflow` executes. The design spec's §1 recorded the cron row
+/// as *1 baselined declaration*; it is **0** now, and not one thing egret does
+/// with a schedule caused that. An attribution by construct that counted
+/// declarations would have credited the scheduler with a bank.
+#[test]
+fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
+    // ---- the split every figure below is stated against --------------------
+    let golden = golden();
+    let baselined = baseline();
+    let ids: BTreeSet<String> = golden.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(ids.len(), golden.len(), "golden ids must be unique");
+    assert!(
+        baselined.is_subset(&ids),
+        "every baseline line must name a golden entry"
+    );
+    let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
+    assert_eq!(
+        (golden.len(), matching.len(), baselined.len()),
+        (294, 167, 127),
+        "294 = 167 matching + 127 baselined, the total beside its parts"
+    );
+
+    // ---- the sixteen, by name and by derivation ----------------------------
+    const TWELVE: [&str; 12] = [
+        "valids/flow-concurrency-parallel-subflow-kill",
+        "valids/flow-concurrency-parallel-subflow-kill-child",
+        "valids/flow-concurrency-subflow",
+        "valids/loop-with-subflow",
+        "valids/subflow-child",
+        "valids/subflow-inherited-labels-parent",
+        "valids/subflow-nullable-input-parent",
+        "valids/subflow-parent",
+        "valids/subflow-parent-no-wait",
+        "valids/subflow-parent-of-failed",
+        "valids/task-flow",
+        "valids/task-flow-inherited-labels",
+    ];
+    const FOUR: [&str; 4] = [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-flow-duration",
+        "valids/retry-new-execution-task-attempts",
+        "valids/retry-new-execution-task-duration",
+    ];
+    let twelve: BTreeSet<String> = TWELVE.iter().map(|s| s.to_string()).collect();
+    let four: BTreeSet<String> = FOUR.iter().map(|s| s.to_string()).collect();
+    let sixteen: BTreeSet<String> = twelve.union(&four).cloned().collect();
+    assert_eq!(
+        (twelve.len(), four.len(), sixteen.len()),
+        (12, 4, 16),
+        "16 = 12 + 4, and no id is counted in both halves"
+    );
+    assert!(
+        sixteen.is_subset(&matching),
+        "all sixteen must be on the MATCHING side, or the ratchet does not \
+         speak for them: {:?}",
+        sixteen.difference(&matching).collect::<Vec<_>>()
+    );
+
+    const SUBFLOW: &str = "io.kestra.plugin.core.flow.Subflow";
+    let (mut sub_runs_matching, mut sub_refused_matching, mut sub_baselined) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let (mut cne_matching, mut cne_baselined) = (BTreeSet::new(), BTreeSet::new());
+    let mut log_control = 0usize;
+    for entry in &golden {
+        let source = corpus_source(&entry.id);
+        if declares_type(&source, "io.kestra.plugin.core.log.Log") {
+            log_control += 1;
+        }
+        if declares_type(&source, SUBFLOW) {
+            match (baselined.contains(&entry.id), entry.verdict) {
+                (true, _) => sub_baselined.insert(entry.id.clone()),
+                (false, Verdict::Runs) => sub_runs_matching.insert(entry.id.clone()),
+                (false, Verdict::Refused) => sub_refused_matching.insert(entry.id.clone()),
+            };
+        }
+        if source.contains("CREATE_NEW_EXECUTION") {
+            if baselined.contains(&entry.id) {
+                cne_baselined.insert(entry.id.clone());
+            } else {
+                cne_matching.insert(entry.id.clone());
+            }
+        }
+    }
+    assert_eq!(
+        log_control, 97,
+        "the scanner's positive control over the GOLDEN population -- the same \
+         97 `core.log.Log` entries `no_corpus_entry_can_exercise_the_egret_sql_handler` \
+         counts. A scanner that read nothing would report every census below as \
+         zero and look exactly like the truth"
+    );
+    assert_eq!(
+        sub_runs_matching, twelve,
+        "the twelve `Subflow` banks, DERIVED: every golden entry that declares a \
+         `Subflow`, that Kestra ran, and that egret now reproduces. If this set \
+         grows, the coverage statement's 16 is stale and must be re-derived -- \
+         which is the point of asserting the set rather than the count"
+    );
+    assert_eq!(
+        sub_refused_matching,
+        ["invalids/recursive-flow"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        "THE TRAP, asserted rather than avoided: one `Subflow`-declaring entry \
+         matches and is NOT a W6 bank. Kestra refused it, egret refuses it too, \
+         and it has matched since long before this package -- so `matching AND \
+         declares a Subflow` is 13, and the twelve is the `runs` half"
+    );
+    assert_eq!(
+        (
+            sub_runs_matching.len() + sub_refused_matching.len() + sub_baselined.len(),
+            sub_runs_matching.len(),
+            sub_refused_matching.len(),
+            sub_baselined.len()
+        ),
+        (23, 12, 1, 10),
+        "23 `Subflow`-declaring golden entries = 12 banked + 1 refusal that \
+         always matched + 10 still baselined. The design spec's 22 was the \
+         BASELINED count before this package (22 = 12 + 10), which is a \
+         different population from this one"
+    );
+    assert_eq!(
+        cne_matching, four,
+        "the four `CREATE_NEW_EXECUTION` banks, derived the same way"
+    );
+    assert!(
+        cne_baselined.is_empty(),
+        "and no `CREATE_NEW_EXECUTION` entry is left baselined: {cne_baselined:?}"
+    );
+
+    // ---- the four constructs -----------------------------------------------
+    let (parsed, unparsed) = parsed_corpus();
+    assert_eq!(
+        parsed.len() + unparsed.len(),
+        345,
+        "every corpus flow is parsed or named, never skipped"
+    );
+    assert!(
+        unparsed
+            .iter()
+            .all(|(id, _)| !corpus_source(id).contains("triggers:")),
+        "a flow that does not parse AND declares a `triggers:` block would \
+         shrink the census below and look exactly like a smaller corpus, so the \
+         census is only honest while this holds: {unparsed:?}"
+    );
+
+    const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
+    const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
+    const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+    let mut census: BTreeMap<&str, (BTreeSet<String>, usize)> = BTreeMap::new();
+    let mut declaring_flows: BTreeSet<String> = BTreeSet::new();
+    for (id, flow) in &parsed {
+        for t in &flow.triggers {
+            let ty = t.r#type.as_str();
+            let Some(key) = [SCHEDULE, FLOW_TRIGGER, WEBHOOK]
+                .into_iter()
+                .find(|k| *k == ty)
+            else {
+                continue;
+            };
+            // The product's own classifier must agree with the type string --
+            // two derivations of one fact, and a `Leaf` here would mean the
+            // scheduler never sees a trigger this census says it does.
+            let typed = matches!(
+                (key, &t.kind),
+                (SCHEDULE, egret_workflow::models::TriggerKind::Schedule(_))
+                    | (FLOW_TRIGGER, egret_workflow::models::TriggerKind::Flow(_))
+                    | (WEBHOOK, egret_workflow::models::TriggerKind::Webhook(_))
+            );
+            assert!(
+                typed,
+                "{id}/{} declares {ty} and the model classified it as something \
+                 else -- the census and the scheduler would disagree",
+                t.id
+            );
+            let e = census.entry(key).or_default();
+            e.0.insert(id.clone());
+            e.1 += 1;
+            declaring_flows.insert(id.clone());
+        }
+    }
+    let flows_and_declarations = |k: &str| {
+        let (f, d) = census.get(k).cloned().unwrap_or_default();
+        (f.len(), d)
+    };
+    assert_eq!(
+        (
+            flows_and_declarations(SCHEDULE),
+            flows_and_declarations(FLOW_TRIGGER),
+            flows_and_declarations(WEBHOOK),
+        ),
+        ((7, 8), (17, 21), (15, 15)),
+        "(flows, declarations) per construct. The 17 flow-trigger flows and 21 \
+         declarations are the same two numbers \
+         `trigger::flow::tests::the_corpus_flow_triggers_split_twenty_to_one` \
+         derives from the directory -- two independent routes to one census"
+    );
+
+    let trigger_golden: BTreeSet<String> = declaring_flows.intersection(&ids).cloned().collect();
+    let trigger_matching: BTreeSet<String> =
+        trigger_golden.intersection(&matching).cloned().collect();
+    let trigger_baselined: BTreeSet<String> =
+        trigger_golden.intersection(&baselined).cloned().collect();
+    assert_eq!(
+        (
+            declaring_flows.len(),
+            trigger_golden.len(),
+            trigger_matching.len(),
+            trigger_baselined.len()
+        ),
+        (38, 31, 28, 3),
+        "corpus flows declaring one of the three (38 = 7 + 17 + 15 with \
+         `invalids/duplicate` declaring two kinds), how many the oracle compares \
+         at all, and the split. **28 MATCHING entries declare a trigger this \
+         package built, and their matching is evidence the trigger was not \
+         evaluated on either side** -- which is the inversion this statement \
+         exists to prevent a reader making"
+    );
+    let uncompared: BTreeSet<String> = declaring_flows.difference(&ids).cloned().collect();
+    assert_eq!(
+        (
+            uncompared.len(),
+            uncompared.contains("valids/webhook-inputs")
+        ),
+        (7, true),
+        "and the other 7 have no golden entry at all -- they are in the 51 this \
+         oracle never compares. One of them is `valids/webhook-inputs`, which is \
+         there for exactly the reason this construct is invisible: it can only be \
+         started by the webhook POST the harness never sends. 38 = 31 + 7"
+    );
+    assert_eq!(
+        trigger_baselined,
+        [
+            "valids/webhook-outputs",
+            "valids/webhook-plaintext",
+            "valids/webhook-wait"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<BTreeSet<_>>(),
+        "the three baselined trigger-declaring entries, all webhook, all \
+         baselined for reasons that are not the trigger (the design spec's §1 \
+         webhook row: 3, unchanged by this package)"
+    );
+
+    // Not one trigger-fired execution anywhere in the golden.
+    fn sub_executions(spawned: &[GoldenSpawned], loopish: &mut usize, replayish: &mut usize) {
+        for s in spawned {
+            if s.parent_run.is_none() && s.value.is_null() {
+                *replayish += 1;
+            } else {
+                *loopish += 1;
+            }
+            sub_executions(&s.spawned, loopish, replayish);
+        }
+    }
+    let (mut loopish, mut replayish, mut carriers) = (0usize, 0usize, 0usize);
+    for entry in &golden {
+        let (mut l, mut r) = (0usize, 0usize);
+        sub_executions(&entry.spawned, &mut l, &mut r);
+        if l + r > 0 {
+            carriers += 1;
+        }
+        if trigger_golden.contains(&entry.id) {
+            assert_eq!(
+                (l, r),
+                (0, 0),
+                "{} declares a trigger and its golden entry holds {} \
+                 sub-executions. Every one of the 31 holds exactly ONE \
+                 execution -- the harness's own POST -- so nothing a trigger \
+                 fired reached the golden",
+                entry.id,
+                l + r
+            );
+        }
+        loopish += l;
+        replayish += r;
+    }
+    assert_eq!(
+        (loopish + replayish, loopish, replayish, carriers),
+        (142, 134, 8, 41),
+        "THE CONTROL for the zero above: 142 sub-executions over 41 entries = \
+         134 carrying a loop index + 8 carrying none (the `CREATE_NEW_EXECUTION` \
+         replays). This oracle records a sub-execution when Kestra links it by \
+         `parent_id`, so the zero is a statement about the LINK and not about an \
+         instrument that records nothing"
+    );
+
+    // `valids/task-flow`: banked, and it declares a schedule.
+    let schedule_flows = census.get(SCHEDULE).cloned().unwrap_or_default().0;
+    assert!(
+        schedule_flows.contains("valids/task-flow") && sixteen.contains("valids/task-flow"),
+        "one of the sixteen declares a `Schedule` trigger and banked because \
+         `Subflow` executes. The cron row's `1 baselined declaration` is 0 now \
+         for a reason that has nothing to do with a schedule"
+    );
+    assert!(
+        schedule_flows
+            .intersection(&sixteen)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 1
+            && census
+                .get(FLOW_TRIGGER)
+                .cloned()
+                .unwrap_or_default()
+                .0
+                .is_disjoint(&sixteen)
+            && census
+                .get(WEBHOOK)
+                .cloned()
+                .unwrap_or_default()
+                .0
+                .is_disjoint(&sixteen),
+        "and it is the ONLY overlap: no other banked entry declares any of the \
+         three"
+    );
+
+    // ---- the webhook's own mechanism: the request is never sent ------------
+    let harvest = include_str!("../oracle-exec/harvest.py");
+    assert_eq!(
+        harvest.matches("executions/webhook").count(),
+        1,
+        "`harvest.py` names the webhook execution path exactly once, and it is \
+         the REASON `valids/webhook-inputs` is excluded. A second occurrence \
+         would mean the harness posts one somewhere"
+    );
+    assert!(
+        harvest
+            .lines()
+            .find(|l| l.contains("executions/webhook"))
+            .is_some_and(|l| l.contains("webhook-inputs")),
+        "and that one occurrence is the exclusion reason, not a request"
+    );
+    assert!(
+        harvest.contains("parent_id = :'root'"),
+        "the one live discovery arm keys on `parent_id`, which Kestra leaves \
+         NULL for a subflow child and for anything a trigger creates -- the \
+         predicate is evaluated on every settle poll of all 268 executed flows \
+         and structurally cannot select a trigger-fired execution"
+    );
+    let normalise = include_str!("../oracle-exec/normalise.py");
+    assert!(
+        normalise.contains("parentId"),
+        "and the normaliser builds the tree on `parentId` too, so even a \
+         DISCOVERED trigger-fired execution could not be normalised into a trace"
+    );
+
+    // ---- backfill: no population at all ------------------------------------
+    let (mut live, mut commented) = (Vec::new(), BTreeSet::new());
+    for entry in corpus() {
+        for line in corpus_source(&entry.id).lines() {
+            if line.contains("backfill") {
+                if line.trim_start().starts_with('#') {
+                    commented.insert(entry.id.clone());
+                } else {
+                    live.push((entry.id.clone(), line.trim().to_string()));
+                }
+            }
+        }
+    }
+    assert!(
+        live.is_empty(),
+        "no corpus flow declares a live `backfill:`: {live:?}"
+    );
+    assert_eq!(
+        commented,
+        ["valids/full", "valids/labels-deserialization"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        "and the two commented-out occurrences are the scanner's own control: \
+         it finds what IS there, so the zero above is a measurement rather than \
+         a scanner that reads nothing"
+    );
+}
+
+/// **The `correlationId` divergence `worker::render`'s comment records has no
+/// corpus population**, and every figure in that comment is compared here
+/// rather than stated.
+///
+/// Kestra copies the cause's `system.correlationId` **label** verbatim and fills
+/// one in only when it is ABSENT, so a root that declares one hands that value —
+/// `ZZZTESTROOT` in W6 Task 6's probe, not an execution id at all — to every
+/// descendant. `render::Surface::load` derives the value from the chain root's
+/// **id** instead, and its unconditional `labels.insert("system", …)`
+/// additionally **shadows** any declared `system.*` label.
+///
+/// Both would show only on a flow that declares `system.correlationId`, or that
+/// reads a `system.*` label it declares, and the corpus holds neither. That is
+/// why the gap is recorded against the wiring seam
+/// (`trigger::flow::FiredExecution::correlation_id`) rather than banked or
+/// fixed: **the ratchet cannot move either way on it.**
+///
+/// # This census is TEXTUAL, and the first version was not — which is the finding
+///
+/// Taken through `models::Flow`, the label census reads **21** flows, not 22,
+/// because **four corpus flows do not parse with the product's own model** —
+/// all four `invalids/`, which Kestra refused too — and **one of them,
+/// `invalids/system-labels`, carries two of the three `system.*` declarations
+/// this test names.** A model-based census would have reported one declaration
+/// where there are three, silently, and the sentence it was supporting would
+/// still have read as true. Both counts are asserted below so the gap between
+/// the two instruments is a number rather than a surprise; the claim is about
+/// what the corpus *says*, so the text is the instrument and the model is the
+/// cross-check.
+///
+/// The trigger census in
+/// [`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`]
+/// IS model-based and is sound for a reason it asserts rather than assumes:
+/// none of the four unparsed flows declares a `triggers:` block.
+#[test]
+fn the_correlation_id_divergence_has_no_corpus_population() {
+    let mut declaring_labels = 0usize;
+    let mut system_declarations: Vec<String> = Vec::new();
+    let mut correlation_lines: Vec<(String, String)> = Vec::new();
+    for entry in corpus() {
+        let source = corpus_source(&entry.id);
+        if source.lines().any(|l| l.trim_end() == "labels:") {
+            declaring_labels += 1;
+        }
+        for line in source.lines() {
+            // A label key at map depth 1 whose name is namespaced `system.…`:
+            // indented, `system.` , a name, then the colon.
+            let t = line.trim_start();
+            if line.starts_with(' ')
+                && t.starts_with("system.")
+                && t.split(':').next().is_some_and(|k| {
+                    k.len() > "system.".len() && !k.contains(' ') && !k.contains('{')
+                })
+            {
+                system_declarations.push(format!("{}:{}", entry.id, t.trim()));
+            }
+            // `labels.system.correlationId`, WITHOUT assuming the spacing: one
+            // of the two corpus reads is `{{labels.system.correlationId}}` and
+            // the other `{{ labels.system.correlationId }}`, so a grep for
+            // either spelling finds exactly half of this population.
+            if line.contains("correlationId") {
+                correlation_lines.push((entry.id.clone(), line.trim().to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        declaring_labels, 22,
+        "the control: 22 corpus flows declare a top-level `labels:` block, so a \
+         zero below is a measurement and not a scanner that sees no labels"
+    );
+    system_declarations.sort();
+    assert_eq!(
+        system_declarations,
+        vec![
+            "invalids/system-labels:system.id: id",
+            "invalids/system-labels:system.label: system_key",
+            "valids/minimal:system.readOnly: \"true\"",
+        ],
+        "three `system.*` label declarations exist, in two flows -- named, \
+         because `none of them is system.correlationId` is only worth saying \
+         beside the ones that ARE there"
+    );
+    assert!(
+        !system_declarations
+            .iter()
+            .any(|d| d.contains("system.correlationId")),
+        "and none seeds `system.correlationId`, which is the whole reason the \
+         divergence is unreachable here: {system_declarations:?}"
+    );
+
+    let mut readers: Vec<String> = correlation_lines.iter().map(|(id, _)| id.clone()).collect();
+    readers.sort();
+    assert_eq!(
+        readers,
+        vec![
+            "valids/follow-dependencies-partial-child",
+            "valids/subflow-grand-child"
+        ],
+        "the only two corpus flows whose text names `correlationId` are the two \
+         `render.rs` names as the measurement its `system` label exists for"
+    );
+    assert!(
+        correlation_lines
+            .iter()
+            .all(|(_, line)| line.contains("labels.system.correlationId") && line.contains("{{")),
+        "and both READ the label through an expression rather than declaring \
+         one: {correlation_lines:?}"
+    );
+    let ids: BTreeSet<String> = golden().into_iter().map(|e| e.id).collect();
+    let baselined = baseline();
+    for id in &readers {
+        assert!(
+            ids.contains(id) && !baselined.contains(id),
+            "{id} reads the label and must be a MATCHING golden entry, or the \
+             claim that egret's value agrees with the artifact's on every chain \
+             this oracle can reach is not being checked by anything"
+        );
+    }
+
+    // The instrument gap, as a number: what the product's own model sees.
+    let (parsed, unparsed) = parsed_corpus();
+    assert_eq!(
+        parsed.len() + unparsed.len(),
+        345,
+        "every corpus flow is parsed or named, never skipped"
+    );
+    let model_labels = parsed.iter().filter(|(_, f)| !f.labels.is_empty()).count();
+    let model_system = parsed
+        .iter()
+        .flat_map(|(id, f)| f.labels.iter().map(move |l| (id, l)))
+        .filter(|(_, l)| l.key.starts_with("system."))
+        .count();
+    let unparsed_ids: BTreeSet<&str> = unparsed.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        (
+            unparsed.len(),
+            model_labels,
+            model_system,
+            unparsed_ids.contains("invalids/system-labels")
+        ),
+        (4, 21, 1, true),
+        "the model-based census, beside the textual one: FOUR flows `models::Flow` \
+         refuses (all `invalids/`), so it sees 21 label-declaring flows of 22 and \
+         ONE `system.*` declaration of three -- because the flow holding the other \
+         two is one of the four. 22 - 21 = 1 flow and 3 - 1 = 2 declarations, and \
+         both differences are that one flow. Unparsed: {unparsed_ids:?}"
+    );
+}
+
 /// Is `name` a database `egret-test-db` created for one test process?
 ///
 /// The rule is that crate's `CLONE_PATTERN`, restated where the destructive

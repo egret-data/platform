@@ -1069,14 +1069,48 @@ def detail(body):
 def descendants(root_id, pg):
     """Sub-executions are HIDDEN from /executions/search.
 
-    Two independent discoveries, unioned:
-      1. the parent's log lines, which carry `in sub-execution [[link execution="..."]]`
-      2. Kestra's Postgres, walking the generated `parent_id` column transitively
-    Neither alone is trusted: the log line only appears for tasks that log it, and
-    Postgres is the storage layer rather than the API.
+    **ONE discovery, not two.  This docstring said "two independent discoveries,
+    unioned" and that was false** -- the design spec's §7 item 2, corrected by W6
+    Task 8:
+
+      1. the parent's log lines: `SUBEXEC_RE` matches
+         `[[link execution="..."]]` and **nothing on the pinned artifact emits
+         that shape**.  The live markup carries `flowId=` and `namespace=`
+         before the closing `]]`
+         (`[[link execution="5Z4dkYmmBkChEpPYNR1HLM" flowId="replay-in-loop"
+         namespace="egret.probe4"]]`, seen again by W6 Task 4 while probing a
+         `Loop`), so the regex matches neither the decoded message nor the raw
+         JSON body, where the quotes are escaped as well.  Measured by running
+         the regex over both shapes **with a positive control on the shape it
+         was written for**: 0 matches, 0 matches, 1 match.  An arm that returned
+         nothing on every input would look exactly like a dead arm, which is
+         why the control is part of the measurement.
+      2. Kestra's Postgres, walking the generated `parent_id` column
+         transitively -- **the only arm that has ever found anything**, and the
+         one all 142 recovered sub-executions came from.
+
+    So "neither alone is trusted" describes an intent, not this function: arm 2
+    is alone, which is why a psql failure below is fatal rather than degraded.
+
+    **Arm 1 is left in place rather than deleted**, and that is a decision with a
+    reason: it is dead *against this artifact's log markup*, which is a
+    measurement about the artifact and not about this code, and removing it
+    changes what a re-harvest requests -- a change nothing in W6 can run
+    end-to-end, since W6 deliberately does not re-harvest.  It belongs to the
+    package that makes triggers measurable (see README, *The coverage statement*
+    -> the W6 section), together with the `trigger_execution_id` union that
+    package needs anyway.  Until then this docstring, not the code shape, is
+    what tells a reader how many arms there are.
+
+    **And a dead arm is not the hole here.**  `parent_id` is NULL for a subflow
+    child and for anything a trigger creates, so no arm keyed on it can see
+    those at all -- README, *Sub-executions are hidden from /executions/search*.
     """
     found = set()
 
+    # ARM 1, AND IT IS DEAD ON THIS ARTIFACT -- measured, see the docstring.
+    # `SUBEXEC_RE` matches no shape this Kestra emits, so this GET has never
+    # contributed an id.  It is not a fallback for the arm below.
     status, body = http("GET", f"{BASE}/{TENANT}/logs/{root_id}")
     if status == 200:
         found.update(SUBEXEC_RE.findall(body))

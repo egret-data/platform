@@ -24,6 +24,20 @@ dòng nào**:
 **Bốn trong năm chữ của dòng ấy đáng KHÔNG mục baseline nào, và một trong bốn
 chữ đó không có lấy một dòng khai báo trong corpus.** Nên:
 
+**Kết quả, do W6 Task 8 thêm vào để người đọc đến sau không cầm phải con số ước
+lượng.** Mọi số dưới đây do
+`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`
+trong `crates/egret-workflow/tests/executor.rs` dẫn ra, không phải trích:
+
+| dòng | bảng trên dự đoán | đo được sau khi làm xong |
+|---|---|---|
+| `Subflow` | 9 chặt / 11 cận trên | **bank 12** — vượt cận trên một mục, vì tôi đọc *khai báo* `concurrency:` thành *bị chặn bởi* nó, mà `QUEUE`/`CANCEL` chỉ đổi THỜI ĐIỂM con chạy |
+| replay `CREATE_NEW_EXECUTION` | 4 | **bank 4** |
+| flow trigger / schedule / webhook / backfill | mỗi thứ 0 | **mỗi thứ 0**, và giờ ghi CƠ CHẾ của từng con 0 chứ không chỉ phán quyết — `oracle-exec/README.md`, *The coverage statement* → mục W6 |
+
+`143 → 127`, tức **16 = 12 + 4**. Ước lượng 13–15 thiếu một ở cận trên, và bốn
+con 0 vẫn đứng.
+
 - **Nửa bank được là `Subflow` + replay** — 13 tới 15 mục, phán xử bằng ratchet
   đang có, và chúng **dùng chung một migration**.
 - **Nửa không đo được là cron, webhook, flow trigger và backfill.** W6 vẫn xây,
