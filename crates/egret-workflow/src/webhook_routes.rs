@@ -158,7 +158,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Path, RawQuery, State};
-use axum::http::{HeaderMap, Method};
+use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use egret_core::{Error, Result as EgretResult};
@@ -350,7 +350,6 @@ pub fn webhook_router_with_guard(guard: Arc<WebhookGuard>) -> Router<WorkflowSta
 async fn handle(
     State(st): State<WorkflowState>,
     axum::Extension(guard): axum::Extension<Arc<WebhookGuard>>,
-    method: Method,
     Path((workspace, namespace, flow, key)): Path<(String, String, String, String)>,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
@@ -478,12 +477,10 @@ async fn handle(
     }
 
     // --- 5. what the flow will see -------------------------------------------
+    // The verb is not passed on: `WebhookRequest` has no `method` field, for
+    // the reason its doc gives. It is read above only to reject nothing -- all
+    // three verbs reach this handler, as Kestra's five do.
     let req = WebhookRequest {
-        // Fix round 1: this was hard-coded `"POST"`, so a GET and a PUT both
-        // recorded themselves as a POST. Nothing reads it today -- Kestra's
-        // `Webhook.Output` has no method field either -- which is exactly why a
-        // wrong value could sit there unnoticed.
-        method: method.as_str().to_ascii_uppercase(),
         query: parse_query(query.as_deref()),
         headers: collect_headers(&headers),
         content_type: headers

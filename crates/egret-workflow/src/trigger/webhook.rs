@@ -241,12 +241,17 @@ use crate::runners::{render_str, RenderContext};
 ///
 /// Deliberately owned and inert: nothing in this module touches an axum type,
 /// so every arm below is reachable from a unit test without a server.
+///
+/// **There is no `method` field.** One was here, holding the HTTP verb, and it
+/// was hard-coded `"POST"` by the only caller — so a GET recorded itself as a
+/// POST and nothing could tell, because nothing read it (fix round 1's sweep).
+/// Kestra's `Webhook.Output` has no method either. A field nothing reads is a
+/// claim nothing can check, so it is deleted rather than fixed: the verb
+/// genuinely does not affect what a trigger sees, and
+/// `webhook_route::a_get_carries_parameters_and_no_body` is where the verbs are
+/// distinguished by their observable consequence instead.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WebhookRequest {
-    /// The HTTP method, uppercased by the caller. Recorded rather than acted
-    /// on — Kestra routes `GET`, `POST` and `PUT` to the same handler and the
-    /// trigger output has no method field.
-    pub method: String,
     /// Query parameters **in URL order, duplicates kept**. Grouping them is
     /// [`build_output`]'s job, and it cannot be done by the caller without
     /// losing the order two values of one name have to keep.
@@ -771,7 +776,9 @@ impl InputRefusal {
     pub fn message(&self, trigger_id: &str) -> String {
         match self {
             Self::NeedsTriggerContext { key } => format!(
-                "webhook trigger '{trigger_id}' declares input '{key}' whose value needs the                  `trigger` render root, which egret does not publish yet -- the trigger record                  is stored on the execution but no task can read it"
+                "webhook trigger '{trigger_id}' declares input '{key}' whose value needs the \
+                 `trigger` render root, which egret does not publish yet -- the trigger record \
+                 is stored on the execution but no task can read it"
             ),
             Self::Unrenderable { key, error } => {
                 format!("webhook trigger '{trigger_id}' input '{key}': {error}")
@@ -1222,7 +1229,6 @@ triggers:
 
     fn req(ct: Option<&str>, body: &[u8]) -> WebhookRequest {
         WebhookRequest {
-            method: "POST".into(),
             query: vec![],
             headers: vec![("content-type".into(), ct.unwrap_or("").into())],
             content_type: ct.map(str::to_string),
