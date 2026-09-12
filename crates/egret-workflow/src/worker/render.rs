@@ -283,12 +283,19 @@ impl Surface {
         // the loop iteration that spawned its PARENT. A subflow child is a
         // separate execution whose values arrive as `inputs:`; nothing of the
         // caller's iteration reaches it. The gate is a no-op on every row that
-        // existed before: a replay's only writable shape is a replay of a
-        // top-level execution (`worker::replay::spawn_due` refuses a replay
-        // under a `Loop`, because the artifact refuses it too, throwing
+        // existed before, and the reason needs no claim about what is
+        // WRITABLE: a replay never carries loop columns at all, so it never
+        // pushes a level. (An earlier draft here said "a replay's only writable
+        // shape is a replay of a top-level execution". That is false --
+        // `worker::replay::spawn_due` refuses only `parent_run_ix IS NOT NULL`,
+        // and a SUBFLOW CHILD has it NULL and is replayable; the crate writes
+        // that row on purpose in
+        // `a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`.
+        // The conclusion held, the premise was narrower than true -- which is
+        // the shape this whole finding was about. `spawn_due` does refuse a
+        // replay under a `Loop`, because the artifact refuses it too, throwing
         // `Can't find taskrun with taskrunId <the LOOP run's>` out of
-        // `markWithTaskRunAs(..., markParents = true)`), so the flag was still
-        // true at every push this code has ever made. It also closes the
+        // `markWithTaskRunAs(..., markParents = true)`.) It also closes the
         // asymmetry W6 Task 2's re-review recorded as N-2, where `item` crossed
         // a non-loop link while `outputs` stopped.
         //

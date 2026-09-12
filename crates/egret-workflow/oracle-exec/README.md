@@ -6184,11 +6184,18 @@ file it lives in, so every later edit to this README falsified it — the
 whole-branch review caught it one commit after it was written, at 23,273. A
 figure that counts its own file is a shape "hunt the number whose checker is
 elsewhere" does not cover, and it is the only one this sweep created rather than
-found. The numerator is exact and does not move:
-`src/trigger/*` 8,770 + `webhook_routes.rs` 1,210 + `tests/webhook_route.rs`
-1,899 + `egret-server/tests/workflow_webhook_mount.rs` 395. A line count is a
-crude measure of anything and is used here only to say that the uncovered half
-is not a corner.)*
+found. **The numerator was claimed exact and not moving, and that was the same trap
+one half further in** — `82fd8ba9` edits `webhook_routes.rs`, which is one of
+the four numerator paths, so the numerator moves whenever this package touches
+its own uncovered half. Measured at `a20f5e72`, both halves dated together:
+numerator **12,279** = `src/trigger/*` + `webhook_routes.rs` **1,215** +
+`tests/webhook_route.rs` + `egret-server/tests/workflow_webhook_mount.rs`;
+denominator **23,740**; **52%**. Dating the denominator and leaving the
+numerator undated in the same sentence is what let it through: **a sentence
+escapes the self-reference trap only if EVERY figure in it is dated, and the
+ratio is the only part worth quoting undated, because both halves move
+together.** A line count is a crude measure of anything and is used here only
+to say that the uncovered half is not a corner.)*
 
 Every figure in this section is either derived by a named test on every run or
 labelled as a measurement someone took. The derivations are
