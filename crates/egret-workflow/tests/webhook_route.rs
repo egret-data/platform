@@ -1708,3 +1708,60 @@ async fn the_bulkhead_gates_the_handler() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(common::execution_count(&db, ws).await, 2);
 }
+
+/// The two input refusals carry **two different statuses**, and that split had
+/// no test.
+///
+/// Fix round 1's sweep, mutation M29: collapsing `InvalidInput` into `Conflict`
+/// in the handler left every test green, because only the 409 arm was ever
+/// asserted. A capability gap egret owes (**409**) and an author's broken
+/// template (**400**) are different facts and a client that retries on one must
+/// not retry on the other.
+#[tokio::test]
+async fn a_broken_input_is_400_and_a_missing_root_is_409() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let base = fresh_namespace();
+    let app = common::webhook_app(&db).await;
+
+    for (suffix, expr, expect) in [
+        (
+            "broken",
+            "{{ nosuchroot.nothing }}",
+            StatusCode::BAD_REQUEST,
+        ),
+        ("root", "{{ trigger.body }}", StatusCode::CONFLICT),
+    ] {
+        let ns = format!("{base}.{suffix}");
+        let yaml = format!(
+            "\
+id: fx-flow
+namespace: {ns}
+inputs:
+  - id: x
+    type: STRING
+tasks:
+  - id: fx-task
+    type: core.log
+    message: hello
+triggers:
+  - id: fx-trigger
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: fx-key
+    inputs:
+      x: \"{expr}\"
+"
+        );
+        common::seed_flow(&db, ws, user, &yaml, "draft").await;
+        let res = common::anon(
+            &app,
+            "POST",
+            &url(ws, &ns, "fx-flow", "fx-key"),
+            Some("application/json"),
+            b"{}",
+        )
+        .await;
+        assert_eq!(res.status(), expect, "`{expr}` answered the wrong status");
+    }
+    assert_eq!(common::execution_count(&db, ws).await, 0);
+}
