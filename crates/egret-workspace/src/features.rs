@@ -200,9 +200,23 @@ pub const FEATURES: &[Feature] = &[
         // as `data_api`'s serving path above is not: it lives at
         // `/workflows/v1/{ws}/executions/webhook/...`, outside `/api/ws/`, and
         // authenticates with the key in the URL rather than with a session --
-        // there is no `WsContext` for the gate to run in. Its path parameter is
-        // spelled `{ws}` rather than `{workspace}` for that reason, which is
-        // the marker `egret-server`'s `feature_route_coverage` suite reads.
+        // there is no `WsContext` for the gate to run in.
+        //
+        // Its path parameter is spelled `{ws}` rather than `{workspace}`
+        // following `data_api`'s serving router, but for THAT surface the
+        // spelling is load-bearing and for this one it is only a signal to a
+        // reader: `feature_route_coverage` reads the OpenAPI document, and the
+        // webhook route contributes nothing to it. This comment claimed
+        // otherwise until fix round 2's claim 14 -- the same sentence was
+        // corrected in `webhook_routes` in fix round 1 and this copy was
+        // missed, which is the "correction applied where it was found and not
+        // swept for" shape.
+        //
+        // The surface is also OFF by default: `egret-bin` reads
+        // `EGRET_WORKFLOW_WEBHOOKS_ENABLED` into
+        // `egret_server::AppState::workflow_webhooks_enabled`, so this
+        // exemption describes a group that is not mounted unless an operator
+        // asks for it.
         //
         // Turning this module off therefore stops flows being authored and
         // published; stopping webhook traffic is `state = 'disabled'` on the

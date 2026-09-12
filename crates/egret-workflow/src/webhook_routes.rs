@@ -797,32 +797,95 @@ mod tests {
     /// Fix round 1, Important 2: the only test of the cap sent `cap + 1` and
     /// `cap`, so raising the constant 64x left it green. A bound nothing
     /// compares to a literal is a bound that can move silently.
+    ///
+    /// Fix round 2, Important 3 / claim 13: the *second* version of this test
+    /// had **M24's own shape inside the round that found M24**. It compared
+    /// `MAX_WEBHOOK_BODY_BYTES` to a local function returning the literal
+    /// `64 * 1024` and claimed "if that constant moves, this is what says so" —
+    /// which is false, and the review proved it by raising the real
+    /// `SERVING_MAX_BODY_BYTES` 16x and watching this pass. A copy of a number
+    /// cannot detect the original moving.
+    ///
+    /// So it now READS the original. `egret-workflow` must not depend on
+    /// `egret-dataapi` (the port-trait convention), and a test may still open a
+    /// file — which the policy tests in this crate already do. The parse is
+    /// deliberately strict: a `const` whose spelling changes fails loudly here
+    /// rather than silently reverting to a copied number.
     #[test]
     fn the_body_cap_is_this_number_and_not_another() {
         assert_eq!(MAX_WEBHOOK_BODY_BYTES, 256 * 1024);
-        // And the comparison the doc makes, asserted rather than remembered --
-        // the first version of that doc got this figure wrong by 16x.
         assert_eq!(
             MAX_WEBHOOK_BODY_BYTES as u64,
-            4 * egret_dataapi_guard_cap(),
-            "the doc says this seam is four times `SERVING_MAX_BODY_BYTES`; if that constant \
-             moves, this is what says so"
+            4 * serving_max_body_bytes(),
+            "this seam is documented as four times `SERVING_MAX_BODY_BYTES`; one of the two \
+             moved"
         );
     }
 
-    /// `egret-dataapi`'s `SERVING_MAX_BODY_BYTES`, restated so the assertion
-    /// above compares to something real.
+    /// `egret_dataapi::serving::guard::SERVING_MAX_BODY_BYTES`, read from its
+    /// source.
     ///
-    /// It is a literal rather than a dependency edge on purpose: this crate must
-    /// not depend on `egret-dataapi` (the whole point of the port-trait
-    /// convention), so the figure is copied and the copy is dated. Read off
-    /// `crates/egret-dataapi/src/serving/guard.rs:214` on 2026-09-12:
-    /// `pub const SERVING_MAX_BODY_BYTES: u64 = 64 * 1024;`
-    fn egret_dataapi_guard_cap() -> u64 {
-        64 * 1024
+    /// Not a dependency edge: this crate must not depend on `egret-dataapi`, so
+    /// the value is parsed out of the file. Not a copy either — that was claim
+    /// 13. If the constant is renamed, moved to another file, or written in a
+    /// form this does not parse, the test **fails** rather than falling back to
+    /// a literal, because a silent fallback is exactly the copy this replaced.
+    fn serving_max_body_bytes() -> u64 {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../egret-dataapi/src/serving/guard.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let needle = "pub const SERVING_MAX_BODY_BYTES: u64 = ";
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not found in {}", path.display()));
+        let expr: String = src[at + needle.len()..]
+            .chars()
+            .take_while(|c| *c != ';')
+            .collect();
+        // The two forms this has ever been written in: `N` and `N * M`.
+        let value: u64 = expr
+            .split('*')
+            .map(|part| {
+                part.trim()
+                    .replace('_', "")
+                    .parse::<u64>()
+                    .unwrap_or_else(|e| panic!("cannot parse {expr:?} from guard.rs: {e}"))
+            })
+            .product();
+        assert!(value > 0, "parsed {expr:?} as zero");
+        value
     }
 
-    /// A header whose value is not valid UTF-8 is dropped, not mangled.
+    /// The reader above must be able to FAIL — otherwise it is a copy with
+    /// extra steps, which is what claim 13 was.
+    ///
+    /// It is driven against a fixture whose constant is a different number, so
+    /// the parse is shown to track the file rather than to return a constant.
+    #[test]
+    fn the_serving_cap_reader_tracks_the_file_it_reads() {
+        assert_eq!(serving_max_body_bytes(), 64 * 1024, "today's value");
+
+        // A stand-in file with a different value, parsed by the same two lines.
+        fn parse(src: &str) -> u64 {
+            let needle = "pub const SERVING_MAX_BODY_BYTES: u64 = ";
+            let at = src.find(needle).expect("needle");
+            let expr: String = src[at + needle.len()..]
+                .chars()
+                .take_while(|c| *c != ';')
+                .collect();
+            expr.split('*')
+                .map(|p| p.trim().replace('_', "").parse::<u64>().expect("number"))
+                .product()
+        }
+        assert_eq!(
+            parse("pub const SERVING_MAX_BODY_BYTES: u64 = 1024 * 1024;"),
+            1024 * 1024
+        );
+        assert_eq!(parse("pub const SERVING_MAX_BODY_BYTES: u64 = 4096;"), 4096);
+    }
+
+    /// A header whose value is not valid UTF-8 is dropped, not mangled.    /// A header whose value is not valid UTF-8 is dropped, not mangled.
     ///
     /// The claim existed in `collect_headers`' doc from the first commit and
     /// **had no test** — fix round 1's sweep. It would survive the

@@ -1391,6 +1391,15 @@ async fn no_input_spelling_can_reach_the_trigger_root_through_the_route() {
         "{{ trigger.body }}",
         "{{ trigger['body'] }}",
         "{% set t = trigger %}{{ t }}",
+        // Fix round 2, Important 1: these five RENDERED against a
+        // trigger-free context -- to `[null]`, `{}`, the fallback, the
+        // fallback and `false` -- so closing the leak left them answering
+        // **200** with a value the author never asked for.
+        "{{ [trigger] }}",
+        "{{ {'a': trigger} }}",
+        "{{ trigger ?? 'fallback' }}",
+        "{{ trigger | default('fallback') }}",
+        "{{ trigger is defined }}",
     ]
     .into_iter()
     .enumerate()
@@ -1424,10 +1433,11 @@ triggers:
             br#"{"hello":"world"}"#,
         )
         .await;
-        assert_ne!(
+        assert_eq!(
             res.status(),
-            StatusCode::OK,
-            "`{expr}` was ACCEPTED -- this is Critical 2"
+            StatusCode::CONFLICT,
+            "`{expr}` was ACCEPTED -- Critical 2 if it leaked, fix round 2's Important 1 if \
+             it merely rendered to something the author did not ask for"
         );
     }
 

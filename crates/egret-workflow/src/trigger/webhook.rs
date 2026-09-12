@@ -696,28 +696,31 @@ fn is_multipart(content_type: Option<&str>) -> bool {
 /// has arbitrarily many ways to name a binding.
 ///
 /// The replacement is not a better scan. **`inputs:` is rendered against a
-/// context in which `trigger` is not bound at all** ([`InputContext`]), so the
-/// object is unreachable rather than merely un-asked-for: there is no spelling,
+/// context in which `trigger` is not bound at all** — this type — so the object
+/// is unreachable rather than merely un-asked-for: there is no spelling,
 /// filter, index or alias that can reach a binding the environment does not
-/// contain. The refusal is then produced by the renderer failing, and
-/// [`classify_input_failure`] is what turns that failure into a message that
-/// names the real cause.
+/// contain.
 ///
-/// # How the two causes are told apart, without reading the template
+/// # Two questions, and they are not the same question
 ///
-/// A failed render has two possible causes here, and they need two different
-/// answers: "you asked for something egret cannot supply yet" (**409**, a
-/// capability gap) and "your template is broken" (**400**, the author's bug).
+/// 1. **Can an input reach the object?** No, and that is this type: the name is
+///    not bound. It is a property of the environment, not of any check.
+/// 2. **Should an input that mentions `trigger` be accepted at all?** No, and
+///    that is [`references_trigger`], asked **before** the render.
 ///
-/// The discriminator is behavioural. The same template is re-rendered against
-/// the same context **plus a sentinel `trigger` binding**. If it now renders,
-/// the missing root was the cause; if it still fails, it was not. That answers
-/// correctly for `{{ trigger }}`, `{{ trigger | json }}`, `{{ trigger.body }}`,
-/// `{{ trigger['body'] }}` and for any spelling nobody has thought of,
-/// because it asks the renderer rather than the string.
+/// Keeping them apart is fix round 2's Important 1. Closing (1) alone left
+/// `{{ [trigger] }}`, `{{ trigger ?? 'x' }}`, `{{ trigger | default('x') }}`
+/// and `{{ trigger is defined }}` **rendering** — to `[null]`, `'x'`, `'x'` and
+/// `false` — so they were accepted with a value the author never asked for.
+/// Nothing leaked; the acceptance was still wrong.
 ///
-/// **The sentinel is never used for output.** It exists only inside
-/// [`classify_input_failure`] and its value never leaves that function.
+/// # There is no sentinel
+///
+/// This doc described "a sentinel `trigger` binding" as the live discriminator
+/// until fix round 2's claim 15. **That approach was tried and rejected** — it
+/// misclassifies `{{ trigger.body }}`, because a sentinel object has no `body`
+/// member either — and no sentinel has ever existed in this file. The
+/// discriminator is [`references_trigger`], which reads minijinja's AST.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputContext {
     pub flow_id: String,
@@ -787,49 +790,36 @@ impl InputRefusal {
     }
 }
 
-/// Decide which of the two causes made `template` fail.
+/// Does `template` refer to the `trigger` root?
 ///
 /// It asks the **parser**: [`crate::runners::referenced_roots`] returns the
-/// top-level names the template refers to, taken from minijinja's own AST
-/// after the same `{% raw %}` protection and [`crate::runners::rewrite`] the
-/// renderer applies. If `trigger` is one of them, the missing root is the
-/// cause; otherwise it is not.
+/// top-level names the template refers to, taken from minijinja's own AST after
+/// the same `{% raw %}` protection and [`crate::runners::rewrite`] the renderer
+/// applies. So `{{ trigger }}`, `{{ trigger.body }}`, `{{ trigger['body'] }}`,
+/// `{{ trigger | json }}`, `{{ [trigger] }}`, `{{ trigger ?? 'x' }}`,
+/// `{{ trigger is defined }}` and `{% set t = trigger %}{{ t }}` all answer
+/// true, while the literal word in a text run answers false.
 ///
-/// **Three approaches were tried and two are recorded because they failed.**
+/// **It is asked BEFORE the render, and that is fix round 2's Important 1.**
+/// The first version asked only when a render had already failed, which is a
+/// different question: it catches every expression that *needs* the root and
+/// misses every expression that merely *reads* it and is total over an
+/// undefined value. Those latter ones rendered — to `[null]`, `{}`, the
+/// fallback, `false` — and were accepted.
 ///
-/// 1. A substring scan for `"trigger."` / `"trigger["`. This is what shipped
-///    and it is Critical 2: `{{ trigger }}` matches neither.
-/// 2. Re-rendering with a **sentinel** `trigger` value bound, and calling the
-///    failure "the root" if it then succeeded. Measured: it misclassifies
-///    `{{ trigger.body }}`, because a sentinel object has no `body` member
-///    either, so the probe fails for a second reason and the answer flips to
-///    `Unrenderable`. There is no sentinel value that answers every member —
-///    which is the general shape of the problem, not an accident of the value
-///    chosen.
-/// 3. This one, which does not need a value at all.
+/// **It is still not the security boundary.** That is [`InputContext`] simply
+/// not binding the name, which is what makes the object unreachable by any
+/// spelling at all. This decides *acceptance*, and a false negative here is an
+/// over-acceptance rather than a leak.
 ///
-/// It is **not** the security boundary. That is [`InputContext`] simply not
-/// binding the name; this only decides which message a refusal carries, so a
-/// misclassification is a worse error message and never a leak.
-///
-/// If the parse itself fails, the template is broken in a way that has nothing
-/// to do with the root — [`InputRefusal::Unrenderable`], with the render's own
-/// error rather than the parse's, because the render is what the author's
-/// request actually hit.
-fn classify_input_failure(key: &str, template: &str, error: String) -> InputRefusal {
-    let mentions_trigger = crate::runners::referenced_roots(template)
+/// A template that will not **parse** answers false, and then fails the render
+/// below with its own message — the author's template is broken in a way that
+/// has nothing to do with the root.
+#[must_use]
+fn references_trigger(template: &str) -> bool {
+    crate::runners::referenced_roots(template)
         .map(|roots| roots.contains("trigger"))
-        .unwrap_or(false);
-    if mentions_trigger {
-        InputRefusal::NeedsTriggerContext {
-            key: key.to_string(),
-        }
-    } else {
-        InputRefusal::Unrenderable {
-            key: key.to_string(),
-            error,
-        }
-    }
+        .unwrap_or(false)
 }
 
 /// The `inputs:` a matched webhook trigger supplies to the execution it starts.
@@ -864,10 +854,38 @@ pub fn render_inputs(webhook: &Webhook, icx: &InputContext) -> Result<Value, Inp
     let mut out = Map::new();
     for (k, v) in declared {
         let rendered = match v {
-            Value::String(s) => match render_str(s.as_str(), &cx) {
-                Ok(text) => Value::String(text),
-                Err(e) => return Err(classify_input_failure(k, s, e.to_string())),
-            },
+            Value::String(s) => {
+                // **The root check runs BEFORE the render, not after it.**
+                //
+                // Fix round 2, Important 1. It used to run only on the failure
+                // path, which closed the leak and left the over-acceptance:
+                // `{{ [trigger] }}`, `{{ {'a': trigger} }}`, `{{ trigger ?? X }}`,
+                // `{{ trigger | default(X) }}` and `{{ trigger is defined }}`
+                // all RENDER against a context with no `trigger` binding --
+                // to `[null]`, `{}`, `X` and `false` -- so they answered 200
+                // and stored a value the author did not ask for.
+                //
+                // Nothing leaked: a missing binding cannot produce the object,
+                // which is why every member access still failed. But a flow
+                // that says `trigger` and gets `false` has been *accepted*
+                // wrongly, and over-acceptance is the one direction the oracle
+                // cannot catch.
+                //
+                // Asking first makes the answer independent of whether the
+                // expression happens to be total over an undefined value.
+                if references_trigger(s) {
+                    return Err(InputRefusal::NeedsTriggerContext { key: k.clone() });
+                }
+                match render_str(s.as_str(), &cx) {
+                    Ok(text) => Value::String(text),
+                    Err(e) => {
+                        return Err(InputRefusal::Unrenderable {
+                            key: k.clone(),
+                            error: e.to_string(),
+                        })
+                    }
+                }
+            }
             other => other.clone(),
         };
         out.insert(k.clone(), rendered);
@@ -1481,6 +1499,31 @@ triggers:
     key: k-aliased
     inputs:
       a: \"{{ trigger.id ~ '' }}\"
+  - id: listed
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-listed
+    inputs:
+      a: \"{{ [trigger] }}\"
+  - id: dicted
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-dicted
+    inputs:
+      a: \"{{ {'a': trigger} }}\"
+  - id: coalesced
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-coalesced
+    inputs:
+      a: \"{{ trigger ?? 'fallback' }}\"
+  - id: defaulted
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-defaulted
+    inputs:
+      a: \"{{ trigger | default('fallback') }}\"
+  - id: probed
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: k-probed
+    inputs:
+      a: \"{{ trigger is defined }}\"
   - id: ok-flow
     type: io.kestra.plugin.core.trigger.Webhook
     key: k-ok-flow
@@ -1501,9 +1544,32 @@ triggers:
         let kcx = kcx_of(&f);
         let icx = InputContext::of(&kcx);
 
-        // **The security property, asserted for every spelling and before any
-        // question of classification.** None of them may produce a value.
-        for key in ["k-bare", "k-filtered", "k-dotted", "k-indexed", "k-aliased"] {
+        // **Ten spellings, and the last five are fix round 2's Important 1.**
+        //
+        // The first five FAIL to render against a context with no `trigger`
+        // binding, so closing the leak also refused them. The last five
+        // **succeed**: `[trigger]` is `[null]`, `{'a': trigger}` is `{}`,
+        // `?? 'fallback'` and `| default(...)` are the fallback, and
+        // `is defined` is `false`. Nothing leaked — a missing binding cannot
+        // produce the object — but each was ACCEPTED, and a flow that says
+        // `trigger` and is handed `false` has been accepted wrongly.
+        //
+        // Over-acceptance is the one direction the oracle cannot catch, which
+        // is why the root check now runs BEFORE the render rather than on its
+        // failure path.
+        const SPELLINGS: [&str; 10] = [
+            "k-bare",
+            "k-filtered",
+            "k-dotted",
+            "k-indexed",
+            "k-aliased",
+            "k-listed",
+            "k-dicted",
+            "k-coalesced",
+            "k-defaulted",
+            "k-probed",
+        ];
+        for key in SPELLINGS {
             let (_, w) = find(&f.triggers, key, &kcx).expect("the fixture matches");
             let out = render_inputs(w, &icx);
             assert!(
@@ -1513,9 +1579,9 @@ triggers:
         }
 
         // Then the classification, which is a diagnostic rather than a
-        // guarantee. All five name the root, so all five get the message that
+        // guarantee. All ten name the root, so all ten get the message that
         // says so.
-        for key in ["k-bare", "k-filtered", "k-dotted", "k-indexed", "k-aliased"] {
+        for key in SPELLINGS {
             let (_, w) = find(&f.triggers, key, &kcx).unwrap();
             let err = render_inputs(w, &icx).unwrap_err();
             assert_eq!(
@@ -1712,6 +1778,87 @@ triggers:
         assert_eq!(
             render_inputs(w, &InputContext::of(&kcx)).unwrap(),
             json!({})
+        );
+    }
+
+    /// **Step 4's measurement, and it falsifies the premise it was given.**
+    ///
+    /// *Deleted by accident in fix round 1 and restored here (fix round 2,
+    /// Important 4).* It went out with the block of `inputs:` tests that
+    /// Critical 2 replaced wholesale, and the module doc kept citing it as
+    /// "the running program that holds all four rows" — a citation to a test
+    /// that no longer existed. Restoring it is the right repair rather than
+    /// deleting the citation, because the measurement is still the reason the
+    /// `trigger` root is withheld.
+    ///
+    /// The task brief warned that publishing a `trigger` root into the render
+    /// context "would make `valids/webhook-plaintext` diverge further". It
+    /// would not — not for an empty root — and this is the running program that
+    /// says so.
+    ///
+    /// `valids/webhook-plaintext`'s only task renders
+    /// `{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}`. Kestra
+    /// renders `hello-world` (the golden was harvested through a plain
+    /// execution POST, so its `Execution.trigger` is null). egret errors, and
+    /// `oracle-exec/baseline.txt` attributes that to `??` resolving a missing
+    /// MEMBER but not a missing ROOT.
+    ///
+    /// | context | result |
+    /// |---|---|
+    /// | no `trigger` root at all | `Err(undefined value)` |
+    /// | `trigger` root present, no `parameters` | **`Err(undefined value)` — the same** |
+    /// | `trigger.parameters.validationToken` present | `Ok("tok")` |
+    ///
+    /// The middle row is the one that matters: **defining the root changes
+    /// nothing**, because the expression misses at `trigger.parameters` and
+    /// then indexes `.validationToken` on the result — two levels, not one, and
+    /// the baseline's one-level sentence does not reach it. The entry stays
+    /// baselined either way, which is why the ratchet reads 127 before and 127
+    /// after.
+    #[test]
+    fn the_missing_root_is_why_webhook_plaintext_is_baselined() {
+        const EXPR: &str = "{{ trigger.parameters.validationToken[0] ?? 'hello-world' }}";
+
+        fn cx(trigger: Option<Value>) -> RenderContext {
+            let mut cx = RenderContext::new();
+            cx.insert(
+                "flow",
+                json!({"id": "webhook-plaintext", "namespace": "io.kestra.tests"}),
+            );
+            if let Some(t) = trigger {
+                cx.insert("trigger", t);
+            }
+            cx
+        }
+
+        // Row 1 -- today's shipping context.
+        assert!(
+            render_str(EXPR, &cx(None)).is_err(),
+            "egret cannot render it with no trigger root -- this is why the entry is baselined"
+        );
+        // Row 2 -- the change Step 4 warned about. IT IS THE SAME ANSWER.
+        assert!(
+            render_str(EXPR, &cx(Some(json!({})))).is_err(),
+            "a defined-but-empty trigger root does NOT rescue it, and does not break it either"
+        );
+        // Row 3 -- the control, without which rows 1 and 2 are satisfied by a
+        // renderer that can never render this expression at all.
+        assert_eq!(
+            render_str(
+                EXPR,
+                &cx(Some(json!({"parameters": {"validationToken": ["tok"]}})))
+            )
+            .expect("a fully populated trigger root renders"),
+            "tok"
+        );
+        // Row 4 -- the one-level miss the baseline's sentence IS about, kept as
+        // the discriminator between "?? never works" and "?? works on a member".
+        let mut one_level = cx(None);
+        one_level.insert("outputs", json!({}));
+        assert_eq!(
+            render_str("{{ outputs.not_existing ?? 'fallback' }}", &one_level)
+                .expect("a one-level miss does fall back"),
+            "fallback"
         );
     }
 
