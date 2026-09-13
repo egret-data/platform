@@ -207,7 +207,8 @@ pub(crate) fn drive_concurrent(
     // discards anything else. Measured at W8 Task 3 fix round 1: **none of the
     // three can return [`Step::Done`] today** -- [`open`] returns `Commands` or
     // `Waiting` and its only delegating arm, `loop_::open`, does the same;
-    // `pause::resume` returns `Commands` or `Waiting`; and [`descend`] returns
+    // [`resume_paused`](super::resume_paused) returns `Commands` or `Waiting`;
+    // and [`descend`] returns
     // `Done` from none of its paths.
     //
     // **That last clause was stated imprecisely in fix round 1 and the fix

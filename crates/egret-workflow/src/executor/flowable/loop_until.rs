@@ -133,6 +133,48 @@ pub fn iteration(state: &ExecutionState, run: RunIx) -> usize {
 /// aggregate — one iteration and `FAILED`, which is exactly its golden.
 /// A version that asked "are they all terminal" instead would pause and loop a
 /// failing body until its limit.
+///
+/// # Handed to Task 5: `WARNING` is not a terminal here, it is not a state at all
+///
+/// W8 Task 4 fix round 2 pinned this predicate against **five** terminals
+/// (`the_five_terminals_split_the_way_is_terminated_no_fail_splits_them`) and
+/// that fixture is complete for `RunState` — which is exactly why it is silent
+/// about the element that matters next. Kestra's `isTerminatedNoFail()` is
+/// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`; **`RunState` has
+/// no `Warning`**, so a `WARNING` child is not "terminal-but-excluded" here, it
+/// is unrepresentable: `worker::from_wire` searches [`RunState::ALL`] and
+/// returns `None`, which the reader turns into `WorkerError::UnknownState`.
+/// Before that, `is_terminal()` is never even asked, so **this predicate
+/// answers `false` for ever** and the loop that owns such a child pauses until
+/// its `maxIterations:`/`maxDuration:` bound fires — or, with neither, never.
+/// `CANCELLED` is the same shape.
+///
+/// **Latent rather than hypothetical, and the golden says what the right
+/// answer is.** `valids/waitfor-child-task-warning` is a `WaitFor` whose first
+/// child is a `Fail` carrying `allowFailure: true` (the flow's own comment
+/// reads *"forcing a Warning"*), under `maxDuration: PT3S` and
+/// `failOnMaxReached: true`. Its golden run for that child is
+/// `["CREATED","SUBMITTED","RUNNING","WARNING"]` over an attempt of
+/// `["CREATED","RUNNING","FAILED"]`, and the loop **iterates**:
+/// `["CREATED","RUNNING","PAUSED","RUNNING","PAUSED","RUNNING","FAILED"]`, two
+/// pauses and a terminal that comes from the bound rather than from the child.
+/// So on the artifact the WARNING child **does** count as executed — the
+/// condition is asked, twice — and the entry is **already in `baseline.txt`**.
+/// It banks today for its own reasons and the ratchet compares set membership,
+/// not causes; **a bank carries no "why"**, which is this branch's own rule, so
+/// nothing will announce it when Task 5 gets this right or wrong.
+///
+/// **Task 5 owns the collision.** `allowWarning` maps `WARNING -> SUCCESS`, so
+/// the moment Task 5 makes a warning representable it must decide whether the
+/// mapping happens before this predicate sees the child (in which case a
+/// warning child counts as executed, matching Kestra) or after (in which case
+/// this predicate stalls the loop on a child Kestra would have let through).
+/// Adding a `RunState::Warning` **without** extending the `!matches!` arm below
+/// is the over-acceptance to avoid; adding it and extending the arm reproduces
+/// `isTerminatedNoFail` exactly. Re-run
+/// `the_five_terminals_split_...` with the new variant as a sixth row — a
+/// fixture answers only the question it was built for, and this one was built
+/// for five.
 pub(crate) fn children_executed(state: &ExecutionState, run: RunIx, tasks: &[TaskIx]) -> bool {
     tasks.iter().all(|&task| {
         super::run_of(state, Some(run), task)

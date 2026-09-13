@@ -339,6 +339,15 @@ pub struct Attempt {
 /// each: `WARNING` 10, `CANCELLED` 3.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
+///
+/// **Their absence is not inert, and W8 Task 4 fix round 3 hands one instance
+/// to Task 5.** Because there is no `Warning` variant, a `WARNING` child does
+/// not reach `is_terminal()` at all — `worker::from_wire` cannot decode it —
+/// so `flowable::loop_until::children_executed` answers *no* for ever and the
+/// loop pauses to its bound. `valids/waitfor-child-task-warning` is that flow
+/// and it is **already banked**. Task 5 owns `allowWarning`'s
+/// `WARNING -> SUCCESS`; see `children_executed`'s doc for which side of the
+/// predicate the mapping has to land on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,

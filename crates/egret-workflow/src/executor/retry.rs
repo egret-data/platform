@@ -447,9 +447,19 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
 /// give it a second attempt and mismatch every one of the twelve.
 ///
 /// So `flowable::sequential::walk` asks
-/// [`flowable::pause::resume`](super::flowable::pause) at the `PAUSED` run
-/// instead — which is also where the decision belongs, because the terminal
-/// depends on WHICH bound elapsed and only the plan knows that.
+/// [`flowable::resume_paused`](super::flowable::resume_paused) at the `PAUSED`
+/// run instead — which is also where the decision belongs.
+///
+/// **The REASON given here was falsified by W8 Task 4 fix round 2, so it is
+/// rewritten rather than repointed.** It read *"the terminal depends on WHICH
+/// bound elapsed and only the plan knows that"*. `resume_paused(state, run,
+/// now)` takes **no plan at all** and therefore cannot key on the bound. The
+/// bound is read once, in the round the pause is ENTERED
+/// ([`flowable::pause::drive`](super::flowable::pause)), and the terminal it
+/// chose is carried on `Command::PauseRun` as a
+/// [`Resume`](crate::executor::Resume). A `PAUSED` run holds the **answer**,
+/// not the question — which is the whole reason the two `TaskKind`-keyed
+/// guards could be deleted.
 ///
 /// **What the paragraph got right is worth keeping too**: the ratchet WOULD
 /// have caught the mistake. `driver::pass_time` moves the clock, calls

@@ -9252,9 +9252,12 @@ the golden's `RESTARTED` executions have.
   retry starts a NEW attempt, and a pause that ends must take its terminal on
   the attempt that is still open. Reopening a pause there would give it a second
   attempt and mismatch all twelve resumed entries. `sequential::walk` asks
-  `flowable::pause::resume` at the `PAUSED` run instead, which is also where the
-  decision belongs — the terminal depends on which bound elapsed, and only the
-  plan knows that.
+  `flowable::resume_paused` at the `PAUSED` run instead, which is also where the
+  decision belongs. *(This sentence used to add "the terminal depends on which
+  bound elapsed, and only the plan knows that". W8 Task 4 fix round 2 falsified
+  it: `resume_paused(state, run, now)` takes **no plan**, the bound is resolved
+  once when the pause is entered, and the terminal it chose rides on
+  `Command::PauseRun`.)*
 
 **`worker::claim::due_retries` is still SQL-gated to `'RETRYING' OR 'RETRIED'`
 and still cannot wake a `PAUSED` run.** W8 Task 2 wrote that down as a

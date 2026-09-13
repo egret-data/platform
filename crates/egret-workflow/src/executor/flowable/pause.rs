@@ -66,7 +66,20 @@ use super::{plus, Step};
 /// What one `Pause` run wants, at the round it is `RUNNING`.
 ///
 /// `RUNNING` is the only state this is asked at: [`super::descend`] reaches a
-/// child that is running, and a `PAUSED` one goes through [`resume`] instead.
+/// child that is running, and a `PAUSED` one goes through
+/// [`super::resume_paused`] instead. **That link read `[`resume`]` until fix
+/// round 3** — it named an item this module has not had since fix round 2
+/// deleted it.
+///
+/// **Nothing flagged it, and the mechanism is measured rather than guessed:**
+/// rustdoc link-checks only the items it documents, and `cargo doc` documents
+/// public items only. `drive` is `pub(crate)`. Control — an invented
+/// `[`zzz_invented_item_qqq`]` injected into this very doc comment: plain
+/// `cargo doc -p egret-workflow --no-deps` reports it **0** times,
+/// `--document-private-items` reports it **3**. Since essentially all of
+/// `executor/` is `pub(crate)`, **every intra-doc link in this directory is
+/// unchecked by the ordinary doc build**, and a dangling one survives until
+/// somebody sweeps the deleted name's own population by hand.
 /// The pause is entered in the same round the run is descended into for the
 /// first time, which is why the golden never holds a `RUNNING` that lasted a
 /// round on its own.

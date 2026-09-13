@@ -251,8 +251,9 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // would have to make is measured, not hypothetical.
     //
     // **W8 Task 3 widened it, and is the producer Task 2 said would have to.**
-    // `flowable::pause::resume` emits `SetExecutionState { Restarted }` when a
-    // bounded pause's wait ends, so the arm below now reads Kestra's
+    // `flowable::resume_paused` ends a bounded pause's wait, and the
+    // `SetExecutionState { Restarted }` that owes is `pause_mark`'s from the
+    // resulting batch, so the arm below now reads Kestra's
     // `isCreated()` exactly. Without the `Restarted` half a resumed execution
     // stops at `CREATED RUNNING PAUSED RESTARTED` and never re-enters
     // `RUNNING`; `a_resumed_pause_re_enters_running` is the test, and reverting
@@ -319,7 +320,7 @@ fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     }
     // "This batch ends a pause" is read as "it sets the state of a run that is
     // `PAUSED` right now", which is exact: `Command::PauseRun` is the only
-    // producer of that state and `flowable::pause::resume` is the only thing
+    // producer of that state and `flowable::resume_paused` is the only thing
     // that moves a run out of it. Matching on the command's own state instead
     // would have to guess, because a pause ends `SUCCESS` or `FAILED`
     // depending on which bound was written and both are ordinary terminals
@@ -6293,8 +6294,9 @@ tasks:
     /// 3. the SAME flow as row 1 with `pauseDuration: PT1S` added — which does
     ///    resume, at the same clock, through the same code.
     ///
-    /// Without row 3 a `pause::resume` that answered `Waiting` unconditionally
-    /// — or a `deadline` that returned `Unbounded` for everything — would pass
+    /// Without row 3 a `flowable::resume_paused` that answered `Waiting`
+    /// unconditionally — or a `deadline` that returned `Unbounded` for
+    /// everything — would pass
     /// rows 1 and 2 and be completely broken.
     #[test]
     fn an_unbounded_pause_never_resumes_itself() {
@@ -7094,7 +7096,10 @@ tasks:
                 "a Pause bounded by pauseDuration",
                 pause_flow("    pauseDuration: PT1S\n"),
             ),
-            ("a Pause bounded by timeout", pause_flow("    timeout: PT1S\n")),
+            (
+                "a Pause bounded by timeout",
+                pause_flow("    timeout: PT1S\n"),
+            ),
             ("an unbounded Pause", pause_flow("")),
             (
                 "a LoopUntil under a Sequential",

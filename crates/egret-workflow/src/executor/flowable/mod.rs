@@ -49,18 +49,52 @@ pub(crate) fn plus(at: Tick, d: std::time::Duration) -> Tick {
 /// There were two: `sequential::walk` and `parallel::drive_concurrent` each
 /// carried a `matches!(plan.tasks[task].kind, …)` list behind a catch-all, so
 /// a construct missing from either list paused and was never asked again.
-/// [`Resume`] records the answer when the pause is entered, so nothing here
+/// [`Resume`](crate::executor::Resume) records the answer when the pause is entered, so nothing here
 /// needs to know which kinds pause — and a kind that pauses cannot be missing
 /// from a list, because there is no list.
+///
+/// # The terminal is resolved ONCE, at pause time — and what that rests on
+///
+/// This function re-derives nothing. It reads a [`Resume`](crate::executor::Resume) that
+/// [`pause::drive`] computed in the round the pause was **entered**, from
+/// `(plan, attempt_started_at, rendered)`, and hands back the terminal that
+/// bound chose. Before W8 Task 4 fix round 2 the bound was recomputed on
+/// **every** round instead.
+///
+/// **That is safe only because `pause::Bound::NotRenderedYet` waits rather
+/// than pauses**, and the dependency is load-bearing: a `pauseDuration:` that
+/// is an expression the caller has not rendered yet makes `drive` return
+/// [`Step::Waiting`] *without* emitting a [`Command::PauseRun`] at all, so no
+/// run is ever parked carrying a terminal derived from an unrendered bound.
+/// Give that arm any other answer — pause with `Resume::Never`, pause with a
+/// default duration — and this function becomes **wrong rather than merely
+/// stale**: the render that arrives one round later can no longer change the
+/// terminal, because nothing re-reads the plan after the run is `PAUSED`.
+/// Nothing else in the pause path restores that property, and the two sites
+/// are in different modules, so the next change to `deadline`'s arms must come
+/// back here.
 ///
 /// **`Waiting` on `None` is unreachable rather than defensive.**
 /// [`RunState::Paused`] is pushed by exactly one command,
 /// [`Command::PauseRun`], and that command cannot be constructed without a
-/// [`Resume`]. It is `Waiting` and not a panic for the reason every other
+/// [`Resume`](crate::executor::Resume). It is `Waiting` and not a panic for the reason every other
 /// "cannot happen" in this executor is: `advance()` is handed state a caller
 /// stored and read back, and a state machine that aborts the process on a
 /// surprising row is a worse failure than one that stalls.
-/// `every_paused_run_names_its_resumer` is what keeps it unreachable.
+///
+/// **`every_paused_run_names_its_resumer` is what keeps it unreachable — and
+/// until W8 Task 4 fix round 3 that sentence cited a test that did not
+/// exist.** It does now, and it is only half the guard: it proves this
+/// *executor* never writes such a run. The other half is at the far end of the
+/// round trip, where `worker::claim` reads a `TaskRun` back out of Postgres —
+/// migration **0142**'s `workflow_task_runs_paused_names_its_resumer`, because
+/// migration 0141's two CHECKs are both predicated on `resume_with` itself and
+/// so are vacuously true when it is NULL. `state = 'PAUSED'` beside
+/// `resume_with IS NULL` was an accepted row, `parse_resume` mapped it to
+/// `None`, and this arm stalled it for ever: **the fix round 2 defect,
+/// unrepresentable in the type system and still representable in the
+/// database.** `a_paused_row_that_names_no_resumer_cannot_be_stored` is that
+/// half.
 pub(crate) fn resume_paused(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
     let Some(resume) = state.runs[run].resume_with else {
         return Step::Waiting;
@@ -422,7 +456,7 @@ pub(crate) fn descend(
         // Its `Step` is returned WITHOUT going through the `Done` mapping
         // below, because a pause does not terminate in the round it starts and
         // never returns `Done` at all -- the terminal is
-        // `pause::resume`'s, one clock move later.
+        // [`resume_paused`]'s, one clock move later.
         TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
         // W8 Task 4. It DOES go through the `Done` mapping below, unlike the
         // `Pause` above: a `LoopUntil` terminates in the round its last
