@@ -1139,6 +1139,31 @@ mod w6_subflow_link {
     /// produce, so "no children found" cannot be the only thing asserted.
     #[sqlx::test(migrations = "../../migrations")]
     async fn a_subflow_child_is_invisible_to_the_query_that_builds_spawned(pool: PgPool) {
+        // # This call cannot fire once any `#[sqlx::test]` in this binary has run
+        //
+        // **Pre-existing, not W8's, and it corrupts mutation runs** — recorded
+        // by W8 Task 2 fix round 2 because this is where the plant happens.
+        //
+        // `assert_database_url_is_exported()` returns early when `DATABASE_URL`
+        // is present in the PROCESS environment, and `#[sqlx::test]` calls
+        // `dotenvy::dotenv()` unconditionally, which puts `.env`'s value there.
+        // This test is itself a `#[sqlx::test]`. So in a run where nobody
+        // exported the variable, whichever DB-gated test wins the race sees a
+        // planted value and **passes**, while the ones that lose fail — and
+        // because test order inside a binary is not deterministic, **which one
+        // fails rotates between runs**.
+        //
+        // The consequence worth writing down: a mutation run made without
+        // exporting `DATABASE_URL` collects **exactly one rotating red for
+        // free**, and a free red is a red that can be mistaken for a kill. Every
+        // mutation verdict in W8 Task 2 was taken with the variable exported and
+        // against a 0-failing control for that reason.
+        //
+        // **Owner: `egret-test-db`**, not this driver and not W8 — the fix is
+        // for `assert_database_url_is_exported` to distinguish a value the
+        // operator exported from one `dotenvy` planted, which it already knows
+        // how to do (`dotenv_file_setting` reads the FILE for exactly this
+        // reason) but does not do on the early-return path.
         egret_test_db::assert_database_url_is_exported();
         let db = Db { pool: pool.clone() };
         let (ws, _user) = crate::common::seed_workspace(&db).await;

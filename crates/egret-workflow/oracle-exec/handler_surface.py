@@ -434,9 +434,13 @@ W3A_FLOWABLES = {
 # carrying anything else cannot be represented, whatever the handler does.
 # PAUSED and RESTARTED joined it at W8 Task 2; the two that remain outside are
 # WARNING and CANCELLED.  This set is a COPY of the Rust enum and so can
-# disagree with it -- `tests/executor.rs`'s
-# `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` is the one
-# that derives the vocabulary from `RunState::ALL` itself.
+# disagree with it -- and it DID, by two variants, until W8 Task 2.  The guard
+# is `tests/executor.rs`'s `handler_surfaces_run_state_copy_matches_the_enum`,
+# which parses this literal and compares it to `RunState::ALL` in both
+# directions.  It is NOT
+# `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`, which this
+# comment used to name: that one derives the vocabulary from `RunState::ALL`
+# and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
              "RETRYING", "RETRIED", "KILLED", "SKIPPED",
              "PAUSED", "RESTARTED"}

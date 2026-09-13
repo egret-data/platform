@@ -2989,6 +2989,61 @@ fn the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_
 ///
 /// **The `--self-test` assertion is a positive control, not a formality.** A
 /// self-test that ran *no* cases exits 0 and looks exactly like one where every
+/// case fired, so the count is read out of its own output and required to be a
+/// whole number of whole successes.
+#[test]
+fn the_handler_surface_generator_checks_itself_and_its_artifact() {
+    fn run(arg: &str) -> (bool, String) {
+        let out = std::process::Command::new("python3")
+            .current_dir(ORACLE)
+            .args(["handler_surface.py", arg])
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "python3 must be available to run oracle-exec/handler_surface.py {arg}: {e}. \
+                     This is not a skip: everything the generator reads is committed, so a \
+                     machine that cannot run it cannot check the artifact at all"
+                )
+            });
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    }
+
+    let (ok, text) = run("--self-test");
+    let fired = text
+        .lines()
+        .find_map(|l| {
+            let rest = l.strip_prefix("[self-test] ")?;
+            let (a, b) = rest.split_once(" guards fired")?.0.split_once('/')?;
+            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
+        })
+        .unwrap_or_else(|| {
+            panic!("--self-test printed no `[self-test] N/M guards fired` line:\n{text}")
+        });
+    assert!(
+        fired.0 == fired.1 && fired.1 >= 13,
+        "every guard in handler_surface.py must fire for its OWN reason, and there \
+         must still be at least the 13 W3b Task 1 wrote -- a self-test that ran \
+         nothing would exit 0 and print nothing to contradict it. Got {}/{}:\n{text}",
+        fired.0,
+        fired.1
+    );
+    assert!(ok, "--self-test exited non-zero:\n{text}");
+
+    let (ok, text) = run("--check");
+    assert!(
+        ok,
+        "handler-surface.txt no longer matches what handler_surface.py derives \
+         from the committed corpus, golden and baseline. Re-run \
+         `python3 handler_surface.py` and say in the commit message what moved \
+         the ceiling and why:\n{text}"
+    );
+}
+
 /// **Cross-check 1 of 2: `handler_surface.py`'s `RUN_STATE` against the enum it
 /// copies** — W8 Task 2 fix round 1.
 ///
@@ -3080,8 +3135,112 @@ fn handler_surfaces_run_state_copy_matches_the_enum() {
 ///    shared member — **both ways**, so neither a widened nor a narrowed
 ///    `is_terminal` survives;
 /// 3. the variants `models::State` has and `RunState` does not are exactly the
-///    ones this crate says are missing, so a variant added to one and forgotten
-///    in the other fails here rather than in a reader's head.
+///    ones this crate says are missing.
+///
+/// # The third claim did not hold in fix round 1, and this is what makes it hold
+///
+/// Round 1 said *"a variant added to one and forgotten in the other fails
+/// here"*. **For `models::State` that was false**: adding an 18th variant
+/// survived the whole lib + executor suite, because `State` has no `ALL` and no
+/// exhaustive `match` anywhere, so the seventeen names below were a list the
+/// test carried rather than a list the type forced.
+///
+/// [`every_models_state_variant_is_accounted_for`] is the missing half, and it
+/// is a **compile-time** check rather than an assertion: an exhaustive `match`
+/// over `State` that maps each variant to its wire spelling. A new variant
+/// stops this test crate compiling until it is named there, which is stronger
+/// than any assertion could be and is the same mechanism `RunState::slot` uses
+/// on the other side.
+///
+/// **This is the shape refused for M10 and it is refused here too**: a guard
+/// whose stated scope exceeds its reach. The scope is now the reach.
+/// **Every `models::State` variant is accounted for, enforced by the compiler.**
+///
+/// The gap [`the_two_state_vocabularies_agree`] had in fix round 1: its
+/// seventeen-name list was carried by the test, so an 18th variant added to
+/// `models::State` changed nothing and nothing went red. `State` has no `ALL`
+/// and no exhaustive `match` in the crate, so there was no mechanism to widen.
+///
+/// This `match` is exhaustive, so **a new variant is a compile error in this
+/// test crate** until somebody names it and decides which side it belongs on.
+/// The returned wire spelling is then checked against serde's, so the arm
+/// cannot be added with the wrong string either.
+///
+/// It is a `fn` rather than a bare `match` so that the exhaustiveness is a
+/// property of a signature and not of a statement somebody can delete a line
+/// from without noticing.
+#[test]
+fn every_models_state_variant_is_accounted_for() {
+    use egret_workflow::models::State;
+
+    /// Exhaustive on purpose. Adding a variant to `models::State` fails to
+    /// compile here.
+    fn wire_of(s: State) -> &'static str {
+        match s {
+            State::Created => "CREATED",
+            State::Submitted => "SUBMITTED",
+            State::Running => "RUNNING",
+            State::Paused => "PAUSED",
+            State::Restarted => "RESTARTED",
+            State::Killing => "KILLING",
+            State::Success => "SUCCESS",
+            State::Warning => "WARNING",
+            State::Failed => "FAILED",
+            State::Killed => "KILLED",
+            State::Cancelled => "CANCELLED",
+            State::Queued => "QUEUED",
+            State::Retrying => "RETRYING",
+            State::Retried => "RETRIED",
+            State::Skipped => "SKIPPED",
+            State::Breakpoint => "BREAKPOINT",
+            State::Resubmitted => "RESUBMITTED",
+        }
+    }
+
+    let all = [
+        State::Created,
+        State::Submitted,
+        State::Running,
+        State::Paused,
+        State::Restarted,
+        State::Killing,
+        State::Success,
+        State::Warning,
+        State::Failed,
+        State::Killed,
+        State::Cancelled,
+        State::Queued,
+        State::Retrying,
+        State::Retried,
+        State::Skipped,
+        State::Breakpoint,
+        State::Resubmitted,
+    ];
+    // The arm's string and serde's must agree, or the exhaustive match could be
+    // widened with a spelling nothing else uses.
+    for s in all {
+        assert_eq!(
+            serde_json::to_string(&s).expect("State serialises"),
+            format!("\"{}\"", wire_of(s)),
+            "{s:?}'s arm in `wire_of` disagrees with its serde spelling"
+        );
+    }
+    let names: BTreeSet<&str> = all.iter().copied().map(wire_of).collect();
+    assert_eq!(
+        names.len(),
+        17,
+        "seventeen distinct spellings; `all` above must list every variant the \
+         exhaustive `match` accepts, and two variants sharing a spelling would \
+         hide one of them"
+    );
+    assert_eq!(
+        all.len(),
+        17,
+        "if the exhaustive `match` grew an arm, this array has to grow with it \
+         -- the compiler forces the arm, this forces the row"
+    );
+}
+
 #[test]
 fn the_two_state_vocabularies_agree() {
     use egret_workflow::models::State;
@@ -3170,61 +3329,6 @@ fn the_two_state_vocabularies_agree() {
         held.len() + missing.len(),
         17,
         "the two sets must partition Kestra's seventeen with nothing left over"
-    );
-}
-
-/// case fired, so the count is read out of its own output and required to be a
-/// whole number of whole successes.
-#[test]
-fn the_handler_surface_generator_checks_itself_and_its_artifact() {
-    fn run(arg: &str) -> (bool, String) {
-        let out = std::process::Command::new("python3")
-            .current_dir(ORACLE)
-            .args(["handler_surface.py", arg])
-            .output()
-            .unwrap_or_else(|e| {
-                panic!(
-                    "python3 must be available to run oracle-exec/handler_surface.py {arg}: {e}. \
-                     This is not a skip: everything the generator reads is committed, so a \
-                     machine that cannot run it cannot check the artifact at all"
-                )
-            });
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        (out.status.success(), text)
-    }
-
-    let (ok, text) = run("--self-test");
-    let fired = text
-        .lines()
-        .find_map(|l| {
-            let rest = l.strip_prefix("[self-test] ")?;
-            let (a, b) = rest.split_once(" guards fired")?.0.split_once('/')?;
-            Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
-        })
-        .unwrap_or_else(|| {
-            panic!("--self-test printed no `[self-test] N/M guards fired` line:\n{text}")
-        });
-    assert!(
-        fired.0 == fired.1 && fired.1 >= 13,
-        "every guard in handler_surface.py must fire for its OWN reason, and there \
-         must still be at least the 13 W3b Task 1 wrote -- a self-test that ran \
-         nothing would exit 0 and print nothing to contradict it. Got {}/{}:\n{text}",
-        fired.0,
-        fired.1
-    );
-    assert!(ok, "--self-test exited non-zero:\n{text}");
-
-    let (ok, text) = run("--check");
-    assert!(
-        ok,
-        "handler-surface.txt no longer matches what handler_surface.py derives \
-         from the committed corpus, golden and baseline. Re-run \
-         `python3 handler_surface.py` and say in the commit message what moved \
-         the ceiling and why:\n{text}"
     );
 }
 
