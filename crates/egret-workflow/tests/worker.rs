@@ -6074,3 +6074,95 @@ async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: 
          values arrive as `inputs:`)"
     );
 }
+
+/// **The eighth property, and the one the type system could not hold: a
+/// `PAUSED` row that names no resumer cannot be stored.**
+///
+/// W8 Task 4 fix round 2 removed a silent stall by making it unrepresentable in
+/// Rust — `Command::PauseRun` cannot be built without a `Resume`, so
+/// `executor::flowable::resume_paused`'s `Waiting`-on-`None` arm is unreachable
+/// through `advance()`. **That argument covers one of the two ways a `TaskRun`
+/// is built.** The other is `claim::state_of`, which reads the row back out of
+/// Postgres, and migration 0141 left `resume_with` nullable behind two CHECKs
+/// that are *both* predicated on `resume_with` itself:
+///
+/// ```sql
+/// resume_with IS NULL OR resume_with IN (...)           -- the vocabulary
+/// resume_with IS NULL OR (... not_before_ms ...)        -- the pairing
+/// ```
+///
+/// Both are vacuously true when the column is NULL, so
+/// `state = 'PAUSED' AND resume_with IS NULL` was **accepted**, `parse_resume`
+/// mapped it to `None`, and the run stalled for ever — byte for byte the defect
+/// fix round 2 deleted, relocated from the type system to storage. Migration
+/// **0142** closes it there.
+///
+/// **Nothing else in this crate can see this.** `tests/executor.rs` never
+/// touches Postgres, and the executor's own
+/// `every_paused_run_names_its_resumer` proves only that *this* executor does
+/// not write such a row — not that the column refuses one. The oracle is blind
+/// twice over: no merged code has ever written a `PAUSED` row at all.
+///
+/// Both directions, because a one-sided test passes against a CHECK that
+/// refuses everything.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_paused_row_that_names_no_resumer_cannot_be_stored(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let ex = start_execution(&pool, ws, None, &one_task("a"), serde_json::json!({}))
+        .await
+        .expect("start execution");
+
+    // The hole, exactly as a truncated `settle` or a future `Command` would
+    // leave it: the state moves to `PAUSED` and the discriminant stays NULL.
+    let refused = sqlx::query(
+        "UPDATE workflow.task_runs SET state = 'PAUSED' WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await;
+    let err = refused.expect_err(
+        "a PAUSED run with no `resume_with` was STORED — `resume_paused` answers \
+         `Waiting` to this row for ever and no trace in `golden.json` can show it",
+    );
+    // Named, not merely "some error": a NOT NULL, a typo'd column or a dropped
+    // table would all be `Err` here, and each would make this test pass while
+    // testing nothing.
+    assert!(
+        err.to_string()
+            .contains("workflow_task_runs_paused_names_its_resumer"),
+        "refused by the wrong thing: {err}"
+    );
+
+    // **The other direction**, and it is not decoration: the identical UPDATE
+    // that DOES name a resumer must still be accepted, or the constraint has
+    // simply made pausing impossible.
+    sqlx::query(
+        "UPDATE workflow.task_runs SET state = 'PAUSED', resume_with = 'NEVER' \
+           WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("an unbounded pause names `NEVER` and must be stored");
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("PAUSED"),
+        "the legal pause landed"
+    );
+
+    // And the converse migration 0142 deliberately does NOT refuse: a bounded
+    // pause that reached its terminal keeps its discriminant, because
+    // `Command::SetRunState` does not clear `resume_with` (only
+    // `Command::RestartLoop` does). This is `valids/pause-delay`'s resting
+    // shape, and the biconditional form of the CHECK refuses it — see MD1.
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'SUCCESS', resume_with = 'TERMINAL:SUCCESS', not_before_ms = 1000 \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect("a terminated bounded pause keeps its discriminant and must be stored");
+}
