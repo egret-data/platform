@@ -260,21 +260,24 @@ struct Leaf<'a> {
 /// none. Fix round 4 measured the model kind and fix round 5 re-measured it;
 /// the model divergence itself is the plan's Task 4 Step 0.
 ///
-/// **`Pause` is NOT one of those three, and W8 Task 1's first attempt put it
-/// among them.**
-/// It is plan-opaque like the three, but `models::TaskKind` has no `Pause`
-/// variant, so it reaches `TaskKind::Leaf` and **this function returns
-/// `Some`** — a perfectly ordinary leaf with an opaque `spec`. What stops it is
-/// the *next* gate: no handler is registered for `io.kestra.plugin.core.flow.Pause`,
-/// so the tick aborts with [`WorkerError::NoHandler`] instead.
-/// `worker::timeout`'s module doc reaches the same conclusion — but its
-/// reasoning for it was wrong until W8 Task 1 fix round 2 (it said the refusal
-/// came *before* the budget; the budget is applied first), so it is cited here
-/// as agreeing, not as the authority. Swapping one false member for another is
-/// the same defect twice; the two refusals are different refusals.
+/// **`Pause` is NOT one of those three either, and it no longer reaches this
+/// function at all.** W8 Task 1's first attempt put it among the three; W8 Task
+/// 1 fix round 1 corrected that to "it reaches `TaskKind::Leaf` and this
+/// function returns `Some`, and the NEXT gate — [`WorkerError::NoHandler`] —
+/// stops it"; **W8 Task 3 made both readings false.** A `Pause` is
+/// `models::TaskKind::Pause` and `executor::TaskKind::Pause` now, so
+/// `persist`'s `type_id` is `None` for it and the claim's own
+/// `WHERE type_id IS NOT NULL` never takes the run — the same tier a `Subflow`
+/// left this population for at W6 Task 3, reached by the same line of code.
+/// `advance()` drives it instead (`executor::flowable::pause`).
+///
+/// The history is kept rather than replaced with the current sentence because
+/// the two refusals it distinguishes are still two different refusals, and that
+/// distinction is what the next construct to arrive here will need.
+/// `worker::timeout`'s module doc carries the same correction.
 ///
 /// **The arm this function's `None` reaches** — to say it after a paragraph
-/// about `Pause`, whose whole point is that it does NOT reach it — is
+/// about `Pause`, which reaches neither — is
 /// [`WorkerError::NotALeaf`], which aborts the tick for that run exactly as an
 /// unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.
@@ -445,10 +448,15 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// woken rather than merely in what order.
 /// # It will never wake a `PAUSED` run, and the ratchet cannot tell you
 ///
-/// **W8 Task 2.** The gate below is `r.state = 'RETRYING' OR (r.state =
-/// 'RETRIED' AND …)`. A bounded `Pause` parks a run with a `not_before_ms` and
-/// a state of `'PAUSED'`, which matches neither — so in the **product** a
-/// bounded pause would never resume, however correct `advance()` was.
+/// **W8 Task 2, and W8 Task 3 made the hypothetical real.** The gate below is
+/// `r.state = 'RETRYING' OR (r.state = 'RETRIED' AND …)`. A bounded `Pause`
+/// parks a run with a `not_before_ms` and a state of `'PAUSED'`, which matches
+/// neither — so in the **product** a bounded pause never resumes, however
+/// correct `advance()` is. That was a prediction about a construct nothing
+/// emitted; since W8 Task 3 `flowable::pause` emits it, eight golden entries
+/// depend on the wait ending, and every one of them ends it through
+/// `driver::pass_time` rather than through this query. **The defect is live and
+/// it is Task 7's**, per the package's own assignment.
 ///
 /// **This is the half the oracle is blind to, and it is blind for a reason that
 /// is a property of the instrument.** `oracle-exec/driver.rs`'s `pass_time`

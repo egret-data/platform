@@ -30,7 +30,7 @@ Every task's requirements implicitly include this section.
 - **A wrong assertion is worse than none** — it converts a divergence into a defended invariant. Two shipped in W6 and each cost a round.
 - **A skipped suite must print `0 passed; N ignored`, never `N passed`.** Note `egret-test-db`'s opt-out currently violates this and `egret-query/tests/connector_trino_params.rs` self-skips in 0.01 s — **pre-existing, hand on, do not block**.
 - **Reconcile a gate by test-name-set diff, not arithmetic.** A W6 gate read `+2` where `+1` was expected and only a name-set diff could say the extra was a foreign probe; arithmetic would have reconciled and stayed silent.
-- **Tests:** export `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test`, `EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399`, `EGRET_TEST_STARROCKS_URL`. Run the **full** `cargo test --workspace --no-fail-fast -j 3`, exit read from the command, **never while another suite runs**. Baseline gate: **259 result lines / 3426 passed / 0 failed / 5 ignored**, exit 0. `sql_starrocks_live`'s **duration** ≈0.7–0.9 s, not its pass count. **Never write a temporary test into the shared worktree while a gate may be running** — that contaminated a W6 gate.
+- **Tests:** export `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test`, `EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399`, `EGRET_TEST_STARROCKS_URL`. Run the **full** `cargo test --workspace --no-fail-fast -j 3`, exit read from the command, **never while another suite runs**. Baseline gate: **259 result lines / 3433 passed / 0 failed / 5 ignored**, exit 0 — measured at `c41ecf0b`, after Tasks 1 and 2; the plan was written against 3426 and that figure was already stale when Task 3 opened. Ratchet **127**, md5 `a3d887ae72595e61c8bc16e8530f9951` at that commit. `sql_starrocks_live`'s **duration** ≈0.7–0.9 s, not its pass count. **Never write a temporary test into the shared worktree while a gate may be running** — that contaminated a W6 gate.
 - **Check for a running gate without naming the string you search for, and exclude your own process tree:** `ps -axo pid,ppid,args | awk -v me=$$ '$1!=me && $2!=me && /cargo/ && /test/' | wc -l`. Five earlier formulations were each wrong in a different way.
 - `cp`/`mv` hit `-i` aliases and **refuse while returning success** — `/bin/cp -f` and grep to confirm. Use `if [ -z "$(git status --porcelain)" ]`, never `&& echo CLEAN`. Run `bash -n` on generated scripts. **Commit before you deliberately break something**, and commit early — three agents died mid-task on the previous branch.
 - **`baseline.txt` moves only by a bank**, and its md5 must be reported before and after. Read the ratchet with `--nocapture` — a passing ratchet prints nothing.
@@ -80,15 +80,26 @@ Doing these first makes every later attribution honest, because two of them chan
 
 ---
 
-## Task 3: `Pause` — seven entries
+## Task 3: `Pause` — seven entries (**measured: EIGHT**)
+
+> **Closed.** Ratchet **127 → 119**, `baseline.txt` md5
+> `a3d887ae72595e61c8bc16e8530f9951` → `2b0506e3d706a4a9c772103f3206e9d0`.
+> The estimate of seven treated a `timeout:` on a flowable as W4's; that is what
+> `FlowService.java:574` says for every non-`RunnableTask` **except `Pause`**,
+> so `valids/pause-timeout` banks too. Step 2's question is answered NO: the
+> `pauseDuration:` expression reuses `TaskRun::rendered`, so `advance()`'s
+> contract is unchanged. Step 3's measurement: the artifact leaves an unbounded
+> pause `PAUSED` for the full 90 s of the harvest, and egret does the same.
+> See `oracle-exec/README.md`, *What W8 Task 3 had to change, and what it
+> banked*.
 
 **Files:** create `src/executor/flowable/pause.rs`; modify the planner.
 
-- [ ] **Step 1: All twelve baselined `Pause` entries bound the pause with `pauseDuration:` or `timeout:`** — `TaskRun::attempt_started_at()` and `TaskRun::not_before` already exist for that measurement, and `driver::pass_time` moves the clock to any `not_before_ms` **with no state term**. Verify all three of those before relying on them.
-- [ ] **Step 2: Two flows need a fourth caller-filled render slot**, because their `pauseDuration:`/`behavior:` is an expression. Identify them and decide whether the slot is this task's or a finding.
-- [ ] **Step 3: Implement, and refuse the unbounded case if the artifact does** — a `Pause` that resumes itself where Kestra waits for a human is the over-acceptance this task most risks, and **the oracle cannot catch it**.
-- [ ] **Step 4: Mutation** — including one that resumes a pause the artifact leaves waiting. If it kills nothing, say so plainly.
-- [ ] **Step 5: Ratchet before/after, every moved entry attributed by a reverting mutation; full gate; commit.**
+- [x] **Step 1: All twelve baselined `Pause` entries bound the pause with `pauseDuration:` or `timeout:`** — `TaskRun::attempt_started_at()` and `TaskRun::not_before` already exist for that measurement, and `driver::pass_time` moves the clock to any `not_before_ms` **with no state term**. Verify all three of those before relying on them.
+- [x] **Step 2: Two flows need a fourth caller-filled render slot**, because their `pauseDuration:`/`behavior:` is an expression. Identify them and decide whether the slot is this task's or a finding. — They are `valids/pause-duration-from-input` (`pauseDuration: "{{inputs.delay}}"`) and `valids/pause-behavior` (`behavior: "{{inputs.behavior}}"`). **The slot is this task's and it is not a fourth field:** a `Pause`'s `pauseDuration:` is a fourth READER of `TaskRun::rendered`, beside `If`, `Switch` and `Loop`, at a run state already in `advance()`'s table. `advance()`'s contract is unchanged. `behavior:` needs no slot at all — a `Pause` declaring one is planned opaque, so `valids/pause-behavior` does not bank.
+- [x] **Step 3: Implement, and refuse the unbounded case if the artifact does** — a `Pause` that resumes itself where Kestra waits for a human is the over-acceptance this task most risks, and **the oracle cannot catch it**.
+- [x] **Step 4: Mutation** — including one that resumes a pause the artifact leaves waiting. If it kills nothing, say so plainly. — That mutation (M4) moves the ratchet by **zero** and is killed only by `an_unbounded_pause_never_resumes_itself`, which is the whole reason that test exists.
+- [x] **Step 5: Ratchet before/after, every moved entry attributed by a reverting mutation; full gate; commit.** — 127 → 119; M1 reverts `pause_gap` and returns exactly the eight banked ids as regressions.
 
 ---
 

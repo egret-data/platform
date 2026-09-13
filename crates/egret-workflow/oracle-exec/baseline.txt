@@ -296,6 +296,68 @@
 # artifact, Kestra cannot replay a loop sub-execution either -- it throws
 # `Can't find taskrun with taskrunId ...` (the LOOP run's, which lives in the
 # parent execution) and the sub-execution ends FAILED with no child.
+#
+# W8 Task 3 (`Pause`) banked 8, 127 -> 119 -- the whole of the row
+# `README.md`'s residual table assigned to it is TWELVE, so four are left and
+# each is named below with what holds it.
+#
+#   flow-concurrency-cancel-pause   concurrency: CANCEL never fires with one execution; the pause is the whole flow
+#   flow-concurrency-queue-pause    the same for QUEUE
+#   flow-trigger-paused-flow        pause + a successor, and a flow trigger nothing in the oracle fires
+#   pause-delay                     the base case: pauseDuration: PT1S -> SUCCESS
+#   pause-duration-from-input       pauseDuration: "{{inputs.delay}}" -- the render slot, read at RUNNING
+#   pause-kill-delay                pauseDuration: PT1M; named for a kill nothing in it declares
+#   pause-timeout                   timeout: PT1S -> FAILED, and the successor is never created
+#   trigger-flow-with-pause         a pause between two Logs
+#
+# The plan's estimate for this row was **seven** and the measurement is eight.
+# The extra one is `pause-timeout`: the estimate treated `timeout:` on a
+# flowable as W4's, which is what `FlowService.java:574` says for every
+# non-`RunnableTask` EXCEPT `Pause`, and a `Pause`'s own `timeout:` is
+# `advance()`'s. Reading the exception as the rule cost one entry.
+#
+# **FOUR `Pause` entries are left and not one of them is held by the wait.**
+# Each declares a property `build_plan` refuses to plan -- `executor::plan::
+# pause_gap` -- so the task stays an opaque `TaskKind::Runnable` and its trace
+# is visibly wrong rather than plausibly wrong, which is the rule
+# `AllowFailure` and `WorkingDirectory` are already planned under:
+#
+#   pause-behavior                    `behavior: "{{inputs.behavior}}"`. Its golden is the ARTIFACT'S OWN
+#                                     DEFECT -- rendering a Pebble expression into `Property<Behavior>`
+#                                     fails at resume time and FAILS the task for every value, including
+#                                     the ones that would have succeeded (`README.md`, `EXECUTION_DRIFT`).
+#                                     Reproducing that would be a rule about Java reflection wearing the
+#                                     name of a pause rule, and the two terminals a LITERAL `behavior:`
+#                                     can produce -- `WARNING` and `CANCELLED` -- are not in `RunState`
+#                                     at all, so the construct is unrepresentable either way.
+#   pause_on_pause                    `onPause:`. Its golden records the sub-task as a run with
+#                                     `parent: null`, a SIBLING of the pause that `overlapping`s it.
+#   pause-errors-finally-after-execution  `errors:` AND `finally:` AND a flow-level `afterExecution:`.
+#                                     Its pause run re-enters RUNNING (`CREATED RUNNING PAUSED RUNNING
+#                                     FAILED`) to drive the handler; `finally:` and `afterExecution:`
+#                                     have no owner in this crate at all.
+#   pause-timeout-allow-failure       the ONLY one of the four that IS planned `TaskKind::Pause`, and it
+#                                     is held one layer out: `allowFailure: true` turns the timeout's
+#                                     FAILED into WARNING, `models::Task` carries no `allowFailure`, and
+#                                     `RunState` has no `Warning`. It is the `AllowFailure` row's, not
+#                                     this one's.
+#
+# **A `Pause` with NEITHER `pauseDuration:` nor `timeout:` stays PAUSED for
+# ever, and no line of this file can say so.** Seven corpus flows are written
+# that way -- `pause-test`, `pause_on_resume`, `pause_on_resume_optional`,
+# `loop-pause`, `resume-validate`, `pause_no_tasks`,
+# `follow-dependencies-partial-parent` -- and all seven are `not-standalone` in
+# `corpus.json`, i.e. absent from `golden.json`, because on the pinned artifact
+# each "reached PAUSED and stayed there for the full 90s". A pause that resumed
+# itself after some default would leave every figure in this file unchanged.
+# `an_unbounded_pause_never_resumes_itself` is the only thing that can see it.
+#
+# **Five corpus flows PUBLISH now that did not**, which is a second thing this
+# file cannot show: `flow-concurrency-cancel-pause`, `flow-concurrency-queue-
+# pause`, `follow-dependencies-partial-parent`, `loop-pause` and
+# `pause_on_pause` were refused at publish step 4 for an unported task type,
+# and the artifact published all five with a 200. Two of them are among the
+# eight banked above; the other three are not comparable at all.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -328,14 +390,11 @@ valids/finally-parallel
 valids/finally-sequential
 valids/finally-sequential-error
 valids/finally-sequential-error-first
-valids/flow-concurrency-cancel-pause
 valids/flow-concurrency-queue-after-execution
 valids/flow-concurrency-queue-killed-after-execution
-valids/flow-concurrency-queue-pause
 valids/flow-concurrency-sla-assert-cancel
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
-valids/flow-trigger-paused-flow
 valids/flow-with-array-outputs
 valids/flow-with-outputs-failed
 valids/full
@@ -361,11 +420,7 @@ valids/output-values
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
 valids/pause-behavior
-valids/pause-delay
-valids/pause-duration-from-input
 valids/pause-errors-finally-after-execution
-valids/pause-kill-delay
-valids/pause-timeout
 valids/pause-timeout-allow-failure
 valids/pause_on_pause
 valids/primitive-labels-flow
@@ -407,7 +462,6 @@ valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
-valids/trigger-flow-with-pause
 valids/unset-variables
 valids/variables
 valids/waitfor

@@ -524,8 +524,8 @@ pub enum WorkerError {
     /// Task 1 fix round 5.** Kestra's `WaitFor` alias is not egret's:
     /// `models::kind_for` has no `"waitfor"` row, so a `WaitFor` reaches
     /// `models::TaskKind::Leaf`, `claim::leaf` returns **`Some`** for it, and
-    /// the refusal is `NoHandler` — the `Pause` case the paragraph below
-    /// describes, reached by the same argument. The count of three is
+    /// the refusal is `NoHandler` — the case the paragraph below describes,
+    /// which used to be spelled with `Pause` and cannot be since W8 Task 3. The count of three is
     /// unaffected; the membership is, and **7 of the corpus's 10 flows of that
     /// construct use the `WaitFor` spelling**, so the population this arm is
     /// argued from contains none of them. Measured at fix round 4 and
@@ -536,9 +536,20 @@ pub enum WorkerError {
     /// "no handler".** Those are two different refusals and this doc briefly
     /// merged them at W8 Task 1. A task that IS a `Leaf` but whose type nothing
     /// implements gets [`WorkerError::NoHandler`] instead, one gate later, and
-    /// `Pause` is precisely that case: plan-opaque like the three, but
-    /// `models::TaskKind` has no `Pause` variant, so it reaches `Leaf`,
+    /// `WaitFor` is precisely that case: plan-opaque like the three, but
+    /// `models::kind_for` has no `"waitfor"` row, so it reaches `Leaf`,
     /// `claim::leaf` returns `Some`, and the refusal is `NoHandler`.
+    ///
+    /// **`Pause` was the example this paragraph used, and W8 Task 3 moved it
+    /// out of BOTH sets.** It is `models::TaskKind::Pause` now and
+    /// `executor::TaskKind::Pause` in the plan, so `claim::persist` writes it
+    /// no `type_id` at all and the claim's own `WHERE type_id IS NOT NULL`
+    /// never takes it — the same reason a `Subflow` is not here, one tier over.
+    /// A `Pause` therefore reaches neither refusal: `NotALeaf` is for a
+    /// `models` flowable the PLAN made claimable, and a `Pause` is claimable by
+    /// nothing. The example is replaced rather than deleted because the
+    /// distinction it draws — two different refusals, one gate apart — is what
+    /// this paragraph is for.
     ///
     /// **That list named `Subflow` first until W8 Task 1's sweep, and it had
     /// been false since W6 Task 3.** The staleness mattered more than a name

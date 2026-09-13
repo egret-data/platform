@@ -93,25 +93,37 @@
 //! Kestra's worker never sees a flowable, so "the worker enforces `timeout:`"
 //! and "`timeout:` is only relevant for runnable tasks" are the same sentence
 //! there. In egret they are not quite: `executor::build_plan` plans
-//! `WorkingDirectory`, `WaitFor`/`LoopUntil`, `AllowFailure` and **`Pause`** as
-//! opaque `TaskKind::Runnable`s, so a `Pause` carrying a `timeout:` is
-//! claimable by this worker.
+//! `WorkingDirectory`, `WaitFor`/`LoopUntil` and `AllowFailure` as opaque
+//! `TaskKind::Runnable`s, so one of those carrying a `timeout:` is claimable by
+//! this worker.
+//!
+//! **`Pause` was the fourth member of that list and the one the divergence was
+//! written about, and W8 Task 3 removed it.** It is a `TaskKind::Pause` now:
+//! `claim::persist` writes it no `type_id`, the claim's own
+//! `WHERE type_id IS NOT NULL` never takes it, and a `Pause`'s `timeout:` is
+//! enforced by `advance()` (`executor::flowable::pause`) where the artifact's
+//! own validator says it belongs. So the divergence this section names is
+//! **narrower** than it was, not gone: the three above are still claimable and
+//! still flowables.
 //!
 //! **This is a PLAN-level list and stays true for both spellings, but only
-//! `Pause` and `LoopUntil` are `models::TaskKind` flowables.** `WaitFor` is
-//! Kestra's alias for `LoopUntil` and not egret's: `models::kind_for` has no
-//! `"waitfor"` row, so like `Pause` it reaches `models::TaskKind::Leaf`.
-//! Nothing above changes -- `build_plan` plans it opaque either way, which is
-//! all this module reads -- and the distinction is recorded because W8 Task 1
-//! fix round 5 found two doc comments in `worker/` that drew the model-level
-//! conclusion from the plan-level fact and got it backwards.
+//! `LoopUntil` is a `models::TaskKind` flowable.** `WaitFor` is Kestra's alias
+//! for `LoopUntil` and not egret's: `models::kind_for` has no `"waitfor"` row,
+//! so it reaches `models::TaskKind::Leaf`. Nothing above changes --
+//! `build_plan` plans it opaque either way, which is all this module reads --
+//! and the distinction is recorded because W8 Task 1 fix round 5 found two doc
+//! comments in `worker/` that drew the model-level conclusion from the
+//! plan-level fact and got it backwards. (`Pause` was named here as the second
+//! model flowable; W8 Task 3 gave it a `models::TaskKind::Pause` AND a plan
+//! kind, so it left both halves of the sentence at once.)
 //!
-//! Three of the four baselined entries that declare a `timeout:`
-//! are exactly that — `valids/pause-timeout`,
-//! `valids/pause-timeout-allow-failure`,
-//! `valids/pause-errors-finally-after-execution` — and a `Pause`'s timeout is
-//! `advance()`'s, not this module's (`executor::plan::PlanTask::timeout` cites
-//! the artifact for it).
+//! Three of the four baselined entries that declared a `timeout:` were exactly
+//! that — `valids/pause-timeout`, `valids/pause-timeout-allow-failure`,
+//! `valids/pause-errors-finally-after-execution`. **Since W8 Task 3 they are
+//! two of three**: `pause-timeout` is banked, because a `Pause`'s timeout is
+//! `advance()`'s and `advance()` now enforces it
+//! (`executor::plan::PlanTask::timeout` cites the artifact for the division;
+//! `executor::flowable::pause` is where the enforcement lives).
 //!
 //! **This list named `Subflow` first until W8 Task 1 fix round 1**, and it had
 //! been false since W6 Task 3 made a `Subflow` a `TaskKind::Executable` — whose
@@ -123,23 +135,33 @@
 //! The census is **eight lists — seven prose and the derivation they are
 //! checked against — and all seven prose lists disagreed.**
 //!
-//! Today nothing reaches that hazard, and **not for the reason this paragraph
-//! used to give.** It said the claim aborts with `NoHandler` *"before any
-//! budget is applied"*, which its own next clause contradicted: the budget is
-//! applied **first**. `claim::run_one` calls `cancel::guarded`, which is
-//! `timeout::guard(budget, reg.run(task))` — the guard **wraps** the run
-//! future rather than gating it — and the instrumented oracle measured the
-//! budget applied **4** times, **three of them `Pause`es**
-//! (`oracle-exec/README.md`, and `tests/executor.rs` derives the same three).
-//! What actually stops the hazard is what happens inside that wrapper: no
-//! handler is registered for `Pause`, so `Registry::run` refuses with
+//! Nothing reaches that hazard, and the reason has been wrong twice. It first
+//! said the claim aborts with `NoHandler` *"before any budget is applied"*,
+//! which its own next clause contradicted: the budget is applied **first**.
+//! `claim::run_one` calls `cancel::guarded`, which is
+//! `timeout::guard(budget, reg.run(task))` — the guard **wraps** the run future
+//! rather than gating it — and the instrumented oracle measured the budget
+//! applied **4** times, **three of them `Pause`es**. What stopped the hazard
+//! was what happened inside that wrapper: no handler is registered for `Pause`,
+//! so `Registry::run` refused with
 //! [`WorkerError::NoHandler`](super::WorkerError), and because the guard wraps
-//! rather than replaces it the refusal still wins — the budget expired **0**
-//! times. **A special case here would be a
-//! guard nobody could ever see fail**, which is the trap this package has
-//! caught ten times, so the hazard is written down instead: whoever implements
-//! `Pause` must decide where its `timeout:` is enforced, and must not inherit
-//! this one by default.
+//! rather than replaces it the refusal still won — the budget expired **0**
+//! times.
+//!
+//! **W8 Task 3 removed the hazard at its source and the 4 is now stale.** A
+//! `Pause` gets no `type_id`, so the claim never takes one and this module
+//! never sees one; the three `Pause` applications in that measurement cannot
+//! happen on this build, leaving `valids/full`'s hour-long `core.log.Log`. The
+//! figure is NOT re-instrumented here — it was an application count and nothing
+//! re-ran the instrument — so it is corrected as a claim and whoever needs the
+//! number must measure it again. `tests/executor.rs`'s
+//! `the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet`
+//! carries the same correction beside the DECLARATION count it does derive.
+//!
+//! The written-down hazard did its job: *"whoever implements `Pause` must
+//! decide where its `timeout:` is enforced, and must not inherit this one by
+//! default."* W8 Task 3 decided `advance()`, which is the artifact's own
+//! division.
 
 use std::time::Duration;
 

@@ -5718,19 +5718,24 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **167** |
-| baselined — egret does not reproduce it yet | **127** |
+| matching | **175** |
+| baselined — egret does not reproduce it yet | **119** |
 
 ```text
-  matching  167 = 144 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 127 = 122 of the 266 `runs` +  5 of the 28 `refused`
+  matching  175 = 152 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 119 = 114 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-127 is simultaneously the mismatching count, the size of `baseline.txt` and the
+119 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
+
+**167 → 175 at W8 Task 3**, one construct with eight instances: `Pause`. See
+*What W8 Task 3 had to change, and what it banked* at the end of this file; the
+`refused` half is unchanged, because the only `Pause` flow Kestra refused is
+`invalids/workingdirectory-invalid` and egret still refuses it.
 
 **163 → 167 at W6 Task 4**, one cause with four instances: the
 `CREATE_NEW_EXECUTION` replay. `valids/retry-new-execution-{flow,task}-{attempts,duration}`
@@ -6027,7 +6032,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-127 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+119 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
@@ -6038,7 +6043,7 @@ exhaustive and named.
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8** — see the paragraph on its two owners below |
-| 12 | `Pause` → `PAUSED` | W8 |
+| 4 | `Pause` → `PAUSED` | W8 — and **not one of the four is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
 | 5 | `sla:` | W8 |
@@ -6092,6 +6097,28 @@ harvester, one self-contending flow already banked, and seven of thirteen
 declarers already matching — written out under *States and constructs no W3a
 task claims* above and derived by
 `the_cancelled_state_never_comes_from_a_concurrency_limit`.
+
+**The `Pause` row was 12 and is 4, and it is the first row this table has
+LOWERED where the remainder is held by something other than the construct the
+row names.** W8 Task 3 banked eight; `advance()` drives the wait, its bound and
+its resume, and the four that remain each declare a *property* of `Pause` that
+`executor::plan::pause_gap` refuses to plan, so the whole task stays an opaque
+`TaskKind::Runnable` — `AllowFailure`'s and `WorkingDirectory`'s rule, applied
+per task rather than per type:
+
+| entry | what holds it |
+|---|---|
+| `valids/pause-behavior` | `behavior:`, written as an expression. Its golden is the **artifact's own defect** (see *Drift at the execution seam*): rendering a Pebble expression into `Property<Behavior>` fails at resume and FAILS the task for every value. Reproducing that would be a rule about Java reflection wearing a pause rule's name — and the two terminals a *literal* `behavior:` can produce, `WARNING` and `CANCELLED`, are not in `RunState` at all |
+| `valids/pause_on_pause` | `onPause:`. Its golden records the sub-task as a run with `parent: null` — a **sibling** of the pause, `overlapping` it |
+| `valids/pause-errors-finally-after-execution` | `errors:` on the `Pause`, plus `finally:` and a flow-level `afterExecution:` — two rows above that are **unclaimed**. Its pause run re-enters `RUNNING` (`CREATED RUNNING PAUSED RUNNING FAILED`) to drive the handler |
+| `valids/pause-timeout-allow-failure` | the only one of the four that IS planned `TaskKind::Pause`, and it is held one layer out: `allowFailure: true` turns the timeout's `FAILED` into `WARNING`. That is the `AllowFailure` row's cause, counted here only because this table attributes by declaration |
+
+**The row is not deleted**, unlike the five below, and the difference is worth
+stating: a deleted row means the construct holds nothing. `Pause` still holds
+three of these four, in the narrow sense that a `Pause` property is what stops
+them. It is the fourth, `pause-timeout-allow-failure`, that this row
+over-claims — and it is left counted here because the alternative is a table
+whose rows silently disagree with the needle that derives them.
 
 **The `Loop` row was 37, then 21, then 20, and is 19; the label moved with the
 number.** The 20 → 19 is `valids/loop-with-subflow` at W6 Task 3.
@@ -6412,12 +6439,14 @@ entries declare a `Subflow`, and ten are still baselined — the design spec's
 "22 declarations" was the **baselined** population before the package
 (`22 = 12 + 10`), a different set from this one.
 
-#### The four constructs the ratchet cannot speak for, and the blindness is FOUR mechanisms
+#### The constructs the ratchet cannot speak for, and the blindness is FIVE mechanisms
 
 W4 established that *"the oracle cannot see it"* is at least three distinct
-facts. Here it is four, and **they must not be merged** — merging them would
-lose the only thing a reader can act on, which is what a future package would
-have to change to make each one visible.
+facts. W6/W7 made it four over the triggers. **W8 Task 3 adds a fifth that is
+not a trigger at all**, which is why the heading no longer counts constructs:
+the mechanisms are the subject and the constructs are the examples. **They must
+not be merged** — merging them would lose the only thing a reader can act on,
+which is what a future package would have to change to make each one visible.
 
 | construct | corpus | golden entries | what the ratchet holds | **the mechanism of the blindness** |
 |---|---|---|---|---|
@@ -6425,6 +6454,7 @@ have to change to make each one visible.
 | **schedule / cron** | 7 flows, 8 declarations | 6 — all 6 matching | nothing | **The execution exists and hangs off nothing.** `docker compose` runs `command: server standalone`, so the scheduler is live and fires it — the design spec's §1.1 measured **13** executions on the artifact of which **10** came from something other than the harness's POST, six of them from a `Schedule` nobody asked for. The execution it creates carries `parentId` NULL **and no trigger link either** (measured there, not here). `descendants()` walks the generated `parent_id` column transitively **from the one root the harness posted**, so a schedule-fired execution is not a descendant of anything and cannot be attributed to an entry even in principle. The `trigger`-link union the flow-trigger row needs **would not find this one** |
 | **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
+| **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
 
 **Both sides are blind, and the second half is egret's.** Even if Kestra's
 trigger-fired executions reached the golden, nothing on egret's side of this
@@ -9005,3 +9035,148 @@ exists because the `maxAttempts` chain cannot see the origin at all.
   over-acceptance: the child execution.
 - **The `system.replay` label.** The artifact adds one; egret's executions carry
   no labels of their own beyond the flow's, so there is nothing to add it to.
+
+---
+
+## What W8 Task 3 had to change, and what it banked
+
+**Ratchet: 127 → 119.** Eight entries banked, `baseline.txt` md5
+`a3d887ae72595e61c8bc16e8530f9951` → `2b0506e3d706a4a9c772103f3206e9d0`, and
+nothing moved in the other direction: 0 regressions, 0 stale lines, 0 broken.
+
+| banked | what it is |
+|---|---|
+| `valids/pause-delay` | the base case — `pauseDuration: PT1S`, then a `Return` |
+| `valids/pause-timeout` | `timeout: PT1S`, which ends the pause **FAILED** and the successor never exists |
+| `valids/pause-kill-delay` | `pauseDuration: PT1M`; named for a kill it does not declare |
+| `valids/pause-duration-from-input` | `pauseDuration: "{{inputs.delay}}"` — the render slot |
+| `valids/trigger-flow-with-pause` | a pause between two `Log`s |
+| `valids/flow-trigger-paused-flow` | a pause and a `Return`, in a namespace a flow trigger watches |
+| `valids/flow-concurrency-cancel-pause` | `concurrency: {behavior: CANCEL, limit: 1}` over a flow that is only the pause |
+| `valids/flow-concurrency-queue-pause` | the same for `QUEUE` |
+
+**The plan's estimate for this row was seven and the measurement is eight**, and
+the extra one is `valids/pause-timeout`. The estimate treated a `timeout:` on a
+flowable as W4's — which is what `FlowService.java:574` says for every
+non-`RunnableTask` **except `Pause`**, the exception this file has recorded
+since W3a Task 7. Reading the exception as the rule cost one entry.
+
+### What `advance()` gained, and what it did not
+
+`build_plan` gives a `Pause` a **`TaskKind::Pause`** instead of an opaque
+`TaskKind::Runnable`, and `models::kind_for` a **`TaskKind::Pause(Pause)`**
+instead of a `Leaf` — the variant `spec::validate`'s `KESTRA_FLOW_CONTROL` table
+has anticipated by name since W1 (*"say, a future `TaskKind::Pause`"*). Three
+things follow, and each is load-bearing on its own:
+
+1. **No `SUBMITTED`.** `flowable::start` emits it for a `Runnable` and for
+   nothing else, and **no `Pause` run in the golden carries it** — 12 entries,
+   12 runs, derived on every run by
+   `no_pause_run_in_the_golden_passes_through_submitted`. A `Pause` left opaque
+   mismatches all eight of the above on that token alone.
+2. **No `type_id`.** `claim::persist` writes one only for a `Runnable`, and the
+   claim's own predicate is `WHERE type_id IS NOT NULL`, so the run is not
+   claimable at all. Before this, a `Pause` WAS claimed, `Registry::run` refused
+   it with `NoHandler`, and the tick aborted — which is why all twelve entries
+   stalled with no trace rather than with a wrong one.
+3. **`timeout:` is `advance()`'s.** `PlanTask::timeout` was `None` for every
+   task in the crate and is populated for a `Pause`. That is the artifact's own
+   division of labour, not a convenience.
+
+`advance()`'s **contract is unchanged**: still pure over `(plan, state, now)`,
+still no I/O and no clock. The `pauseDuration:` expression uses
+`TaskRun::rendered`, the slot an `If`, a `Switch` and a `Loop` already use — a
+fourth reader of a field that exists, at a run state (`RUNNING`) already in the
+table. That was the open question in this task's brief and the answer is that
+the slot costs nothing.
+
+### `PAUSED` on the run and not on the attempt
+
+`Command::PauseRun` exists for one measured fact: `PAUSED` is in **20 of the
+golden's 840 run histories and 0 of its 878 attempt histories**. `apply`'s rule
+1 pushes any non-terminal `SetRunState` onto the open attempt, so a plain
+`SetRunState { Paused }` would write a state Kestra never records. W8 Task 2
+measured this and left the guard out because nothing emitted the variant; this
+task is the producer, and it took the answer that keeps `apply` decision-free —
+a command that writes the run's history and deliberately not the attempt's,
+rather than a `!= Paused` buried inside `apply`.
+
+The resumed shape is therefore run `CREATED RUNNING PAUSED <terminal>` over
+attempt `CREATED RUNNING <terminal>`, one attempt, and the execution
+`CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>` — the shape all twelve of
+the golden's `RESTARTED` executions have.
+
+### W8 Task 2 predicted two callers. One arrived and one did not
+
+- **`advance()`'s `not_running_yet`** was `history.last() == Created`, narrower
+  than Kestra's `isCreated()` (`CREATED || RESTARTED`), with a note saying
+  whoever emitted `RESTARTED` must widen it. **True, and done.** Without the
+  second term a resumed execution stops at `… PAUSED RESTARTED` and never
+  re-enters `RUNNING`.
+- **`retry::reopen_due`** carried a note saying the same function must learn to
+  reopen a `PAUSED` run with a due `not_before`. **False, and the arm is
+  byte-unchanged.** The two shapes part at `RunState::Created`: reopening a
+  retry starts a NEW attempt, and a pause that ends must take its terminal on
+  the attempt that is still open. Reopening a pause there would give it a second
+  attempt and mismatch all twelve resumed entries. `sequential::walk` asks
+  `flowable::pause::resume` at the `PAUSED` run instead, which is also where the
+  decision belongs — the terminal depends on which bound elapsed, and only the
+  plan knows that.
+
+**`worker::claim::due_retries` is still SQL-gated to `'RETRYING' OR 'RETRIED'`
+and still cannot wake a `PAUSED` run.** W8 Task 2 wrote that down as a
+prediction; it is a live product defect now, because eight golden entries depend
+on a pause ending and every one of them ends through `driver::pass_time` — which
+selects on `not_before_ms` with **no state term** — rather than through that
+query. It is Task 7's, per the package's own assignment, and the ratchet cannot
+see it.
+
+### The four `Pause` entries left, and the rule that keeps them honest
+
+None is held by the wait. Each declares a property `executor::plan::pause_gap`
+refuses to plan, so the whole task stays an opaque `TaskKind::Runnable` — the
+rule `build_plan` already applies to `AllowFailure` and `WorkingDirectory`,
+applied per **task** rather than per **type**. The residual-baseline table above
+names all four with what holds each.
+
+`pause_gap` is asked in two places and written once, and that is deliberate:
+`spec::validate` gives a `not_yet_enforced` warning for exactly the pauses
+`build_plan` leaves opaque. Two copies of the predicate would be a publish that
+says a `behavior:` is enforced over an executor that ignores it.
+
+**`valids/pause-behavior` is the one this task declines to bank on purpose.**
+Its golden is the artifact's own defect — see *Drift at the execution seam*:
+rendering a Pebble expression into `Property<Behavior>` fails at resume and
+FAILS the task for every value, including the ones that would have succeeded.
+Reproducing that would be a rule about Java reflection wearing a pause rule's
+name, and the two terminals a *literal* `behavior:` can produce, `WARNING` and
+`CANCELLED`, are not in `RunState` at all. Leaving the task opaque is the
+answer this file's own rule gives: a visibly wrong trace that stays baselined
+beats a plausible wrong one.
+
+### Five corpus flows PUBLISH now, and the ratchet cannot show it either
+
+`flow-concurrency-cancel-pause`, `flow-concurrency-queue-pause`,
+`follow-dependencies-partial-parent`, `loop-pause` and `pause_on_pause` were
+refused at publish step 4 for an unported task type, because a `Pause` reached
+`models::TaskKind::Leaf` and `registry::known_type` has no row for it. A typed
+`Pause` is dispatched before any `Leaf` arm exists to consult the registry —
+exactly as a `Subflow` is — so all five publish. **The artifact published all
+five with a 200**, so this is an over-refusal closing, and it is a divergence
+the ratchet structurally cannot see: a flow nobody can publish never reaches
+`golden.json`. `driver::publish_corpus`'s census carries the figures —
+`LIVE` 16 → 21, `UNKNOWN_TYPE_REFUSED` 301 → 296, and the
+`SUBFLOW_LOOKUPS_ON_PUBLISHED`/`_ON_REFUSED` pair 18/4 → 19/3, which must be
+read as one measurement because the total is 22 either way.
+
+### A figure this task invalidated without re-measuring it
+
+W4 instrumented `worker::timeout::guard` over all 294 entries and measured the
+budget applied **4** times, **three of them `Pause`es**. A `Pause` is not
+claimable now, so those three cannot happen on this build and the count is
+`valids/full`'s hour-long `core.log.Log` alone. **Nothing re-ran the
+instrument**, so that is corrected as a claim rather than restated as a
+measurement, in `worker::timeout`'s module doc and beside
+`the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet` —
+which derives DECLARATIONS (now 3 of 119, two `Pause`es and one `Log`) and never
+measured applications at all.

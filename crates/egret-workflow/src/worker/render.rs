@@ -567,16 +567,18 @@ impl Surface {
                     // divergence set is exactly `{Sequential, Parallel, If,
                     // Switch, Loop, Dag, Subflow}` -- note both ends of it:
                     // `Subflow` is in (it is `Executable`, not a flowable the
-                    // renderer sees), and the four opaque flowables
-                    // (`AllowFailure`, `WorkingDirectory`, `WaitFor`/`LoopUntil`,
-                    // `Pause`) are OUT, because they are planned `Runnable` and
-                    // so their `type_id` is populated. (Two of those four --
-                    // `Pause`, and `WaitFor` as opposed to `LoopUntil` -- are
-                    // not `models::TaskKind` flowables at all, because
-                    // `kind_for` has no row for either; it changes nothing
+                    // renderer sees), and **`Pause` is in too since W8 Task 3**
+                    // -- a `TaskKind::Pause` gets no `type_id` either, for the
+                    // same reason and by the same line of `claim::persist`. The
+                    // three opaque flowables (`AllowFailure`,
+                    // `WorkingDirectory`, `WaitFor`/`LoopUntil`) are OUT,
+                    // because they are planned `Runnable` and so their
+                    // `type_id` is populated. (`WaitFor` as opposed to
+                    // `LoopUntil` is not a `models::TaskKind` flowable at all,
+                    // because `kind_for` has no row for it; it changes nothing
                     // here, since the conclusion is drawn from the PLAN kind,
-                    // which is `Runnable` for all of them. W8 Task 1 fix
-                    // round 5.)
+                    // which is `Runnable` for both spellings. W8 Task 1 fix
+                    // round 5; the `Pause` half corrected at W8 Task 3.)
                     //
                     // **Latent, and the reason is nameable rather than
                     // incidental**: only two corpus flows write `{{task.type}}`

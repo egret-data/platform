@@ -2081,9 +2081,13 @@ mod tests {
                     "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
                 ),
             ] {
+                // NOT a `\`-continued literal: Rust's line continuation eats
+                // the next line's leading whitespace, and the first draft of
+                // this test lost the four spaces that make `pauseDuration:` a
+                // property of `gate` rather than a second mapping key. YAML
+                // refused it and the failure named a column, not a cause.
                 let yaml = format!(
-                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n\
-                         pauseDuration: PT1S\n{props}"
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n{props}"
                 );
                 let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{property}: {e:?}"));
                 let r = validate(&f);

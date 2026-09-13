@@ -428,6 +428,23 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.Switch",
     "io.kestra.plugin.core.flow.Loop",
     "io.kestra.plugin.core.flow.Subflow",
+    # W8 Task 3, the same shape a third time: `build_plan` gives a plain
+    # bounded-or-unbounded `Pause` a `TaskKind::Pause`, `advance()` drives the
+    # whole of it, and `claim::persist` writes it no `task_runs.type_id` -- so
+    # like `Subflow` it is not a `W3B_HANDLERS` entry and no worker ever claims
+    # it.
+    #
+    # **A `Pause` that declares `behavior:`, `onPause:`, its own `tasks:` or an
+    # `errors:` is NOT this**, and this set cannot say so: it is keyed by TYPE
+    # and that distinction is per TASK (`executor::plan::pause_gap`). The four
+    # entries it concerns are all still baselined and all still blocked --
+    # `pause-behavior`, `pause_on_pause`,
+    # `pause-errors-finally-after-execution` by `finally:`/`afterExecution:`
+    # rows that already exist, and `pause-timeout-allow-failure` by its
+    # `allowFailure:` row -- so the coarser key costs nothing today. It would
+    # cost something the moment one of those four banked, and the `blocked`
+    # guard below is what would say so.
+    "io.kestra.plugin.core.flow.Pause",
 }
 
 # `executor::RunState::ALL`, which is 11 of the golden's 13 states.  A trace
@@ -561,6 +578,42 @@ def declared_blockers(entry, flows, kinds):
         out.add(("construct", "CREATE_NEW_EXECUTION retry"))
     if re.search(r"allowFailure:\s*true", raw):
         out.add(("construct", "allowFailure:"))
+    pause_gaps(doc, out)
+    return out
+
+
+PAUSE_TYPES = {"io.kestra.plugin.core.flow.Pause", "core.pause"}
+
+# The four `Pause` properties `executor::plan::pause_gap` refuses to plan, in
+# its own order.  A `Pause` declaring any of them is planned an opaque
+# `TaskKind::Runnable`, so it is exactly as blocked as an unported construct --
+# and `W3A_FLOWABLES` above CANNOT say so, because that set is keyed by task
+# TYPE and this is a property of one task.
+#
+# Without these rows the four entries concerned land in "nothing found here
+# blocks it", i.e. in the CEILING, which is the one direction this file's own
+# rules call a defect: a ceiling that is too low hides work, and a bankable
+# list naming an entry nothing can bank is what sends the next task hunting.
+PAUSE_GAP_KEYS = ("tasks", "errors", "behavior", "onPause")
+
+
+def pause_gaps(node, out):
+    """Every `Pause` property in this document that `build_plan` will not plan.
+
+    Walks the parsed doc rather than the raw text on purpose: `behavior:` is
+    also a `concurrency:` key (`behavior: CANCEL`), and a regex over the source
+    would blame six flows that declare no `Pause` at all.
+    """
+    if isinstance(node, dict):
+        if node.get("type") in PAUSE_TYPES:
+            for k in PAUSE_GAP_KEYS:
+                if node.get(k):
+                    out.add(("construct", f"Pause {k}:"))
+        for v in node.values():
+            pause_gaps(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            pause_gaps(v, out)
     return out
 
 
@@ -722,9 +775,10 @@ def check_inputs(flows, kinds, golden, baseline):
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
-    # since W6 Task 4 banked the four `retry-new-execution-*` replays.
-    if len(baseline) != 127:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 127; the split "
+    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 since
+    # W8 Task 3 banked eight `Pause` entries.
+    if len(baseline) != 119:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 119; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1358,8 +1412,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 127",
-         "not 127",
+    case("baseline.txt is no longer 119",
+         "not 119",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

@@ -684,12 +684,15 @@ async fn on_child_terminal_inner(
 ///   `execution.getState().getCurrent() == State.Type.KILLED`. The pair is the
 ///   same one `spawn::terminated_in_error` reads for a `Loop`, but not for the
 ///   reason given.
-/// - It said `RunState` has no paused state. **From W8 Task 2 it does.** The
-///   narrowing is unchanged and the reason moves: nothing emits
-///   [`RunState::Paused`] yet — `Pause` and `LoopUntil` are still planned
-///   opaque — so a child execution cannot reach this function in it. Widening
-///   the trigger set here would be a branch no test could drive, which is what
-///   W8's `Pause` package owns together with `Warning`.
+/// - It said `RunState` has no paused state. **From W8 Task 2 it does, and from
+///   W8 Task 3 something emits it.** The narrowing is unchanged and the reason
+///   moves a second time: `flowable::pause` puts a RUN into
+///   [`RunState::Paused`], but this function is reached by a child
+///   EXECUTION's terminal, and a paused execution has not terminated —
+///   `State.Type.isTerminated()` does not list `PAUSED`, which is exactly what
+///   W8 Task 2 measured off the pinned artifact. So the trigger set stays
+///   narrow because a paused child never gets here at all, not because nothing
+///   can be paused. `Warning` is still W8's and still unreachable.
 ///
 /// The cost is two golden entries, named in this module's doc.
 ///

@@ -300,10 +300,16 @@ pub enum RunState {
     /// state Kestra never records unless it emits something other than a plain
     /// `SetRunState`. `valids/flow-concurrency-cancel-pause` is the shape —
     /// run `["CREATED","RUNNING","PAUSED","SUCCESS"]`, attempt
-    /// `["CREATED","RUNNING","SUCCESS"]`. No rule is added here because nothing
-    /// emits the variant yet and a guard nobody has seen fail is a guard nobody
-    /// has seen; it is recorded so the Pause task inherits the measurement
-    /// rather than the surprise.
+    /// `["CREATED","RUNNING","SUCCESS"]`.
+    ///
+    /// **W8 Task 3 is that producer, and it took the OTHER answer**: rather
+    /// than a rule inside [`apply`] excluding this variant from rule 1, the
+    /// pause emits a [`Command::PauseRun`](super::Command) — a command that
+    /// writes the run's history and deliberately not the attempt's. `apply`
+    /// therefore still contains no decision, which is what its own doc
+    /// promises, and the exclusion is visible at the call site rather than
+    /// buried in a `!= Paused`. The measurement above is what that command's
+    /// doc cites.
     ///
     /// [`apply`]: self::apply
     Paused,
