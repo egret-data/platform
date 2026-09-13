@@ -6742,6 +6742,814 @@ tasks:
         assert_eq!(names, ["valids/pause-behavior:pause"]);
     }
 
+    // ----------------------------------------------------------------------
+    // W8 Task 4: `LoopUntil` / `WaitFor`
+    // ----------------------------------------------------------------------
+
+    /// A one-`LoopUntil` flow: `props` go on the loop, `body` is its `tasks:`.
+    ///
+    /// The default body is a single `core.debug.Return`, which
+    /// [`run_loop_until`] completes with the outcome it is given -- so the body
+    /// is a knob (does the iteration succeed?) and `props` is the other one.
+    fn loop_until_flow(props: &str, body: &str) -> String {
+        format!(
+            "id: lu\nnamespace: io.kestra.tests\ntasks:\n  - id: loop\n    \
+             type: io.kestra.plugin.core.flow.LoopUntil\n{props}    tasks:\n{body}"
+        )
+    }
+
+    const ONE_RETURN: &str = "      - id: body\n        \
+                              type: io.kestra.plugin.core.debug.Return\n        \
+                              format: x\n";
+
+    /// [`run_to_fixpoint_passing_time`], plus the one render a `LoopUntil`
+    /// needs -- and the answers are a LIST, consumed one per render.
+    ///
+    /// **A list and not a constant, because the condition is asked once per
+    /// iteration and the whole construct is about what happens when the answer
+    /// CHANGES.** A fixture that returned one string for every render would
+    /// pass identically against an implementation that cached the first answer
+    /// for ever, which is `Command::RestartLoop` clearing `rendered` -- so it
+    /// would be a fixture that cannot see the rule it is placed to watch. The
+    /// last entry repeats once the list runs out.
+    ///
+    /// It applies the executor's OWN gate,
+    /// [`loop_condition_is_asked`](crate::executor::loop_condition_is_asked),
+    /// rather than rendering whatever is unrendered -- the same call
+    /// `worker::render`'s tier B makes, not a copy of it. Without the gate this
+    /// fixture renders at the START of every iteration including the one the
+    /// loop is already at its limit for, and `asked` -- the sharpest assertion
+    /// several of these tests make -- would count an evaluation Kestra never
+    /// performs. A fixture that cannot tell those apart cannot testify about
+    /// either.
+    fn run_loop_until(
+        plan: &Plan,
+        outcome: RunState,
+        answers: &[&str],
+    ) -> (ExecutionState, Tick, usize) {
+        let mut state = ExecutionState::new(plan);
+        let mut now = T0;
+        let mut asked = 0usize;
+        for _ in 0..1000 {
+            if !round_at(plan, &mut state, now).is_empty() {
+                continue;
+            }
+            let unrendered = (0..state.runs.len()).find(|&ix| {
+                state.runs[ix].history.last() == Some(&RunState::Running)
+                    && state.runs[ix].rendered.is_none()
+                    && crate::executor::loop_condition_is_asked(
+                        plan,
+                        &state,
+                        ix,
+                        state.runs[ix].task,
+                        now,
+                    )
+            });
+            if let Some(ix) = unrendered {
+                let answer = answers[asked.min(answers.len() - 1)];
+                asked += 1;
+                state.runs[ix].rendered = Some(answer.to_string());
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            if let Some(ix) = in_flight {
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                );
+                continue;
+            }
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(next) => now = next,
+                None => return (state, now, asked),
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// **The condition is asked, and a truthy answer stops the loop where it
+    /// stands** -- one iteration, no `PAUSED`, and no second run of the body.
+    ///
+    /// `valids/waitfor` is this shape in the corpus: its condition is truthy on
+    /// the first iteration and its golden run is `CREATED RUNNING SUCCESS` with
+    /// no pause at all.
+    ///
+    /// **The negative half is the point.** A `LoopUntil` that re-entered
+    /// whatever the condition said would still terminate on every corpus flow
+    /// that has a `maxIterations:` or a `maxDuration:`, and would still end
+    /// `SUCCESS` -- it would simply run the body more times, which no run
+    /// history records once the body's runs are thrown away and re-created. So
+    /// the body's ATTEMPT COUNT is asserted beside the histories: it is 1, and
+    /// a second iteration would make it 1 again, which is exactly why
+    /// `asked` -- how many times the fixture was asked for the condition -- is
+    /// asserted instead. One iteration asks once.
+    #[test]
+    fn a_truthy_condition_stops_a_loop_until_where_it_stands() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      interval: PT1S\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, now, asked) = run_loop_until(&plan, RunState::Success, &["true"]);
+
+        assert_eq!(run_ids(&plan, &state), ["loop", "body"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "SUCCESS"],
+            "a truthy condition ends the loop in the round its body finished"
+        );
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "the body ran exactly once and as a runnable"
+        );
+        assert_eq!(asked, 1, "one iteration asks the condition once");
+        assert_eq!(now, T0, "nothing waited, so the clock never had to move");
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "SUCCESS"],
+            "and the execution never entered PAUSED"
+        );
+    }
+
+    /// **A falsy condition pauses for `interval` and starts the body again**,
+    /// and the second iteration's body is a NEW run rather than a second
+    /// attempt on the old one.
+    ///
+    /// Both halves are measured on `valids/waitfor-nested`, whose `loop_1` ran
+    /// three iterations and whose child `loop_1_return` appears **once** in the
+    /// golden, reading `CREATED SUBMITTED RUNNING SUCCESS` with one attempt.
+    ///
+    /// The loop's own attempt is asserted too, and it is the other half of the
+    /// same measurement: Kestra's `resetAttempts()` drops the attempt and the
+    /// next `RUNNING` builds a new one, so the record holds exactly one however
+    /// many iterations ran. `Command::RestartLoop` writes the run's history and
+    /// not the attempt's, which reaches the same record by not moving.
+    #[test]
+    fn a_falsy_condition_pauses_for_the_interval_and_runs_the_body_again() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 2\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, now, asked) = run_loop_until(&plan, RunState::Success, &["false"]);
+
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+            "maxIterations 2 with a falsy condition runs THREE iterations: \
+             `reachedMaximums` is `iterationCount > maxIterations`"
+        );
+        assert_eq!(
+            state.runs[0].attempts.len(),
+            1,
+            "one attempt, whatever the iteration count -- 
+             `retryWaitFor` drops it and the golden holds one"
+        );
+        assert_eq!(
+            wire(&state.runs[0].attempts[0].history),
+            ["CREATED", "RUNNING", "SUCCESS"],
+            "and the RUNNINGs of the later iterations are not on it"
+        );
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "the body's record is the LAST iteration's, with no trace of the two before"
+        );
+        assert_eq!(
+            state.runs[1].attempts.len(),
+            1,
+            "a re-created run, not a retried one: a retry would add an attempt"
+        );
+        assert_eq!(
+            asked, 2,
+            "once per iteration EXCEPT the last: the third iteration is the one \
+             `iterationCount > maxIterations` is true for, and `nextExecutionDate` \
+             evaluates the condition only when it is not"
+        );
+        assert_eq!(
+            now,
+            Tick(2000),
+            "two pauses of PT1S each, measured from the round the iteration ended"
+        );
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+            "the execution alternates PAUSED/RUNNING and carries NO `RESTARTED`: \
+             6 of the golden's 18 PAUSED executions are this shape and all six \
+             are a LoopUntil's"
+        );
+    }
+
+    /// **`iterationCount > maxIterations`, strictly** -- so a limit of `n` runs
+    /// `n + 1` iterations when the condition never becomes true.
+    ///
+    /// `valids/waitfor-max-iterations` is the row that decides it: limit 3, a
+    /// condition that never holds, and a golden run of
+    /// `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING PAUSED RUNNING FAILED` --
+    /// three pauses, four `RUNNING`s. The three corpus flows that stop AT their
+    /// limit (`waitfor`, `waitfor-multiple-tasks`, `waitfor-no-success`) stop
+    /// because their condition becomes true on that iteration, which is why a
+    /// `>=` reading agrees with all three of them and is wrong.
+    ///
+    /// **`failOnMaxReached` decides the TERMINAL and never the count**, which
+    /// is why both values are driven over the same limit here. It is read after
+    /// the loop has already stopped.
+    #[test]
+    fn a_limit_of_n_runs_n_plus_one_iterations_and_fail_on_max_decides_only_the_terminal() {
+        for (fail_on_max, terminal) in [(false, "SUCCESS"), (true, "FAILED")] {
+            let plan = build_plan(&loop_until_flow(
+                &format!(
+                    "    condition: \"{{{{ done }}}}\"\n    failOnMaxReached: {fail_on_max}\n    \
+                     checkFrequency:\n      interval: PT1S\n      maxIterations: 3\n"
+                ),
+                ONE_RETURN,
+            ))
+            .expect("it plans");
+            let (state, _, asked) = run_loop_until(&plan, RunState::Success, &["false"]);
+            assert_eq!(
+                wire(&state.runs[0].history),
+                [
+                    "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
+                    "RUNNING", terminal
+                ],
+                "failOnMaxReached: {fail_on_max} -- four iterations under a limit of three, \
+                 and the flag changes only the last state"
+            );
+            assert_eq!(
+                asked, 3,
+                "the FOURTH iteration never asks the condition: `nextExecutionDate` \
+                 evaluates it only `if (!this.reachedMaximums(...))`, so a loop at \
+                 its limit renders nothing"
+            );
+        }
+    }
+
+    /// **`checkFrequency.maxDuration` is measured from the loop run's creation,
+    /// not from the iteration**, and the bound is checked when the iteration
+    /// ENDS.
+    ///
+    /// Kestra reads the last `isCreated()` entry of the taskrun's own history,
+    /// which `resetAttempts()` never appends to -- so however many iterations
+    /// have gone by, the instant is the original one. Here that instant is the
+    /// attempt's, because a `LoopUntil` opens exactly one attempt and
+    /// `Command::RestartLoop` does not reopen it.
+    ///
+    /// **The comparison is STRICT and this fixture is built to land exactly on
+    /// it.** Kestra's is `creationDate.plus(maxDuration).isBefore(now)`, so a
+    /// loop whose iteration ends AT `created + PT3S` has not reached the bound;
+    /// with `PT1S` between iterations and a clock that jumps to the deadline
+    /// and no further, iteration 4 ends at exactly T+3000 and iteration 5 at
+    /// T+4000 is the first one past. A `<=` reading stops at four, which is why
+    /// the fixture is arranged to land on the boundary rather than near it.
+    ///
+    /// `oracle-exec/driver.rs::pass_time` lands one millisecond PAST each
+    /// deadline, so the real driver reaches the bound one iteration earlier --
+    /// which is what `valids/loop-until-restart` shows, at four. **That entry
+    /// is baselined at four against a golden of three**, and the gap is the
+    /// artifact's delay poller: its two `PT1S` pauses took 1.17 s and 1.92 s on
+    /// the captured round, so its third iteration ended at T+3.33 s. A rule
+    /// that looked one interval AHEAD would match that golden and would not be
+    /// `reachedMaximums`; this test is what pins which of the two egret
+    /// implements.
+    #[test]
+    fn a_max_duration_is_measured_from_the_loops_creation_and_checked_when_an_iteration_ends() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    failOnMaxReached: true\n    checkFrequency:\n      \
+             interval: PT1S\n      maxDuration: PT3S\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, now, _) = run_loop_until(&plan, RunState::Success, &["false"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            [
+                "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
+                "RUNNING", "PAUSED", "RUNNING", "FAILED"
+            ],
+            "FIVE iterations: the bound is `created + PT3S < now`, strictly, so the \
+             iteration that ends AT T+3000 has not reached it and the one at T+4000 \
+             is the first that has. A `<=` reading stops one earlier"
+        );
+        assert_eq!(now, Tick(4000), "four pauses of PT1S");
+    }
+
+    /// **A loop with no maximum and a falsy condition never stops**, which is
+    /// the over-acceptance this construct's `None` arms exist to refuse.
+    ///
+    /// The mirror of `an_unbounded_pause_never_resumes_itself`. A `LoopUntil`
+    /// with neither `maxIterations:` nor `maxDuration:` is exactly Kestra's
+    /// "unlimited" (`CheckFrequency`'s own javadoc says so for both fields),
+    /// and `valids/waitfor-nested` is written that way -- all three of its
+    /// loops stop on the condition alone. An implementation that invented a
+    /// default limit would bank the same entries and ship a different product,
+    /// and nothing in the ratchet could see it.
+    ///
+    /// Driven by rounds rather than to a fixed point, because a fixed point is
+    /// what this must NOT have.
+    #[test]
+    fn an_unbounded_loop_until_with_a_falsy_condition_never_stops() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      interval: PT1S\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut now = T0;
+        for _ in 0..200 {
+            if !round_at(&plan, &mut state, now).is_empty() {
+                continue;
+            }
+            if state.runs[0].rendered.is_none()
+                && crate::executor::loop_condition_is_asked(&plan, &state, 0, 0, now)
+            {
+                state.runs[0].rendered = Some("false".to_string());
+                continue;
+            }
+            if let Some(ix) = (1..state.runs.len())
+                .find(|&ix| state.runs[ix].history.last() == Some(&RunState::Running))
+            {
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Success,
+                    },
+                );
+                continue;
+            }
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(next) => now = next,
+                None => panic!(
+                    "an unbounded LoopUntil settled: {:?}. Nothing this executor \
+                     holds may end one -- a default limit would be a terminal the \
+                     artifact does not produce",
+                    wire(&state.runs[0].history)
+                ),
+            }
+        }
+        assert!(
+            !state.runs[0]
+                .history
+                .last()
+                .is_some_and(|s| s.is_terminal()),
+            "after 200 rounds the loop must still be going: {:?}",
+            wire(&state.runs[0].history)
+        );
+        assert!(
+            now >= Tick(10_000),
+            "and the clock must have moved by one interval per iteration: {now:?}"
+        );
+    }
+
+    /// **A body that FAILED ends the loop without asking the condition** --
+    /// Kestra's `childTaskRunExecuted`, whose filter is `isTerminatedNoFail()`
+    /// and not `isTerminated()`.
+    ///
+    /// `valids/waitfor-multiple-tasks-failed` is the corpus row: its second
+    /// child is a `Fail`, and its golden is ONE iteration ending `FAILED` with
+    /// no `PAUSED` at all -- under `maxIterations: 5` and a condition that
+    /// never becomes true, i.e. a loop that would otherwise have run six times.
+    /// An implementation that read "all children terminated" would loop a
+    /// failing body to its limit.
+    ///
+    /// `asked` is 0, which is the sharper half: the condition is not merely
+    /// ignored, it is never evaluated -- and a render that will not resolve
+    /// FAILS a run, so evaluating it would be a terminal the artifact does not
+    /// produce rather than a wasted call.
+    #[test]
+    fn a_failed_body_ends_a_loop_until_without_asking_the_condition() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 5\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, now, asked) = run_loop_until(&plan, RunState::Failed, &["false"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "one iteration, no pause, and the children's aggregate as the terminal"
+        );
+        assert_eq!(
+            asked, 0,
+            "and the condition was never evaluated at all: `resolveState` asks \
+             `childTaskRunExecuted` first"
+        );
+        assert_eq!(now, T0, "nothing waited");
+    }
+
+    /// **The condition is re-rendered every iteration, and the answer that
+    /// decides iteration `k` is the one taken in iteration `k`.**
+    ///
+    /// A two-sided pair on the truthiness operator says nothing about where the
+    /// OPERAND came from: an implementation that evaluated the condition once
+    /// and cached it passes `a_truthy_condition_stops_a_loop_until_where_it_
+    /// stands` and `a_falsy_condition_pauses_...` both, because in each of
+    /// those every answer is the same string. This is the fixture where they
+    /// differ -- `false`, then `true` -- and it is Kestra's own
+    /// `runContext.render(this.condition).skipCache()`.
+    ///
+    /// Asserted from BOTH sides, so neither a stuck-falsy nor a stuck-truthy
+    /// cache passes: the loop must run exactly two iterations, which is neither
+    /// one (cached truthy) nor its `maxIterations` limit of four (cached
+    /// falsy).
+    #[test]
+    fn the_condition_that_decides_an_iteration_is_that_iterations_render() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 4\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, _, asked) = run_loop_until(&plan, RunState::Success, &["false", "true"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+            "exactly two iterations: one for the falsy answer, one for the truthy \
+             one. A cached truthy answer gives one, a cached falsy answer gives five"
+        );
+        assert_eq!(asked, 2);
+    }
+
+    /// **`iterationCount` is 1-based, and it RESETS when an outer loop restarts
+    /// the inner one.**
+    ///
+    /// `valids/waitfor-nested` is the row that decides both halves at once. Its
+    /// three loops each exit on `{{ outputs.<child>.value | number >= 3 }}`
+    /// where the child returned the loop's own `iterationCount`, and each runs
+    /// exactly three iterations -- so the child saw 1, 2, 3 and not 0, 1, 2.
+    /// And its execution carries **26** `PAUSED` states, which is
+    /// `2 + 3x2 + 9x2`: `loop_3` is started nine times and pauses twice on
+    /// every one of them, which it can only do if its count starts again at 1
+    /// each time.
+    ///
+    /// The derivation is over the run's history, which is what makes the reset
+    /// free: `Command::RestartLoop` empties a descendant's history, so an inner
+    /// loop that is restarted counts from zero without anything being cleared
+    /// on purpose.
+    #[test]
+    fn the_iteration_count_is_one_based_and_a_restarted_loop_counts_from_one_again() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 2\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let mut state = ExecutionState::new(&plan);
+        let mut now = T0;
+        let mut seen = Vec::new();
+        for _ in 0..1000 {
+            if !round_at(&plan, &mut state, now).is_empty() {
+                continue;
+            }
+            if state.runs[0].rendered.is_none()
+                && crate::executor::loop_condition_is_asked(&plan, &state, 0, 0, now)
+            {
+                // Read at the moment the condition is asked, which is the
+                // moment the body of that iteration has finished -- the same
+                // moment `worker::render` builds `outputs.<loop>` from it.
+                seen.push(crate::executor::loop_iteration(&state, 0));
+                state.runs[0].rendered = Some("false".to_string());
+                continue;
+            }
+            if let Some(ix) = (1..state.runs.len())
+                .find(|&ix| state.runs[ix].history.last() == Some(&RunState::Running))
+            {
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: RunState::Success,
+                    },
+                );
+                continue;
+            }
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(next) => now = next,
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen,
+            [1, 2],
+            "the count the children of iteration k see is k, 1-based. A 0-based \
+             counter makes `valids/waitfor-nested` exit one iteration late, or \
+             never"
+        );
+
+        // And the reset, on a run whose history `RestartLoop` emptied: after
+        // `Command::RecreateRun` gives it its `CREATED` back it has no `RUNNING`
+        // at all, so its own count starts again at 1.
+        let mut nested = ExecutionState::new(&plan);
+        nested.runs.push(crate::executor::TaskRun {
+            task: 0,
+            parent: None,
+            value: None,
+            rendered: Some("cached".into()),
+            rendered_run_if: None,
+            history: vec![
+                RunState::Created,
+                RunState::Running,
+                RunState::Paused,
+                RunState::Running,
+            ],
+            attempts: Vec::new(),
+            not_before: Some(Tick(5)),
+        });
+        nested.runs.push(crate::executor::TaskRun {
+            task: 1,
+            parent: Some(0),
+            value: None,
+            rendered: None,
+            rendered_run_if: Some("true".into()),
+            history: vec![RunState::Created, RunState::Success],
+            attempts: Vec::new(),
+            not_before: None,
+        });
+        assert_eq!(crate::executor::loop_iteration(&nested, 0), 2);
+        apply(&mut nested, &Command::RestartLoop { run: 0 });
+        assert_eq!(
+            crate::executor::loop_iteration(&nested, 0),
+            3,
+            "the loop's OWN count goes up: its history keeps every RUNNING"
+        );
+        assert_eq!(
+            nested.runs[0].rendered, None,
+            "and its cached condition is gone"
+        );
+        assert!(
+            nested.runs[1].history.is_empty()
+                && nested.runs[1].rendered_run_if.is_none()
+                && nested.runs[1].attempts.is_empty(),
+            "while the DESCENDANT is thrown away entirely -- an empty history is \
+             this executor's spelling of Kestra's `removeIf`"
+        );
+        apply(&mut nested, &Command::RecreateRun { run: 1 });
+        assert_eq!(
+            wire(&nested.runs[1].history),
+            ["CREATED"],
+            "and the walk gives it back one `CREATED` when it reaches it"
+        );
+    }
+
+    /// **The one expression in this corpus that Pebble refuses and minijinja
+    /// answers**, and the whole of why `valids/loopuntil-failed-flowable` is
+    /// still baselined.
+    ///
+    /// That entry's runs, attempts and ordered pairs are reproduced exactly and
+    /// it differs on ONE field: its `LoopUntil` ends `SUCCESS` where the golden
+    /// holds `FAILED`. The condition is
+    /// `{{ outputs.loop.iterationCount < "5" }}` -- a relational operator over
+    /// a number and a string. Pebble's `OperatorUtils` widens both operands to
+    /// `Number` and throws on a `String`, the exception comes out of
+    /// `runContext.render(this.condition)` inside `nextExecutionDate`, and the
+    /// task fails; the artifact's own trace agrees, failing the `loop` taskrun
+    /// 11 ms after its only child SUCCEEDED with no `PAUSED` in between, which
+    /// is the only outcome `LoopUntil.resolveState` has no other path to.
+    /// minijinja orders values across kinds instead and answers a truthy
+    /// string, so the loop stops on its first iteration and succeeds.
+    ///
+    /// **Two halves, and the first is what keeps the second from being a
+    /// sentence about one flow.** The scan derives, from all 345 corpus flows,
+    /// that this shape occurs exactly once -- so the divergence is bounded, and
+    /// a flow added later that writes another one fails here rather than
+    /// quietly joining the baseline.
+    ///
+    /// **This test asserts egret's DIVERGENT answer on purpose**, which is the
+    /// one thing a test may not normally do. It is here because the answer is
+    /// load-bearing for a baseline line: if egret ever gains Pebble-strict
+    /// relational operators, this fails, and the reader is sent to
+    /// `oracle-exec/baseline.txt`'s entry for that id -- which will by then be
+    /// bankable. A comment claiming the same thing would not be.
+    #[test]
+    fn the_one_corpus_comparison_pebble_refuses_and_minijinja_answers() {
+        /// Every `{{ … }}` region in `src` holding a relational operator whose
+        /// right-hand side opens with a quote.
+        ///
+        /// Hand-written rather than a regex because the corpus quotes the
+        /// operand through YAML escaping (`< \"5\"`), and a scanner that has to
+        /// be told about the backslash in one place is easier to read than one
+        /// that hides it in a character class.
+        fn quoted_comparisons(src: &str) -> usize {
+            let mut found = 0;
+            let bytes = src.as_bytes();
+            let mut i = 0;
+            while let Some(open) = src[i..].find("{{") {
+                let start = i + open + 2;
+                let Some(len) = src[start..].find("}}") else { break };
+                let region = &src[start..start + len];
+                let mut j = 0;
+                let rb = region.as_bytes();
+                while j < rb.len() {
+                    if rb[j] == b'<' || rb[j] == b'>' {
+                        let mut k = j + 1;
+                        if k < rb.len() && rb[k] == b'=' {
+                            k += 1;
+                        }
+                        while k < rb.len() && rb[k] == b' ' {
+                            k += 1;
+                        }
+                        if k < rb.len() && rb[k] == b'\\' {
+                            k += 1;
+                        }
+                        if k < rb.len() && (rb[k] == b'"' || rb[k] == b'\'') {
+                            found += 1;
+                        }
+                    }
+                    j += 1;
+                }
+                i = start + len + 2;
+            }
+            let _ = bytes;
+            found
+        }
+
+        let mut writers = Vec::new();
+        for (id, src) in every_corpus_flow() {
+            if quoted_comparisons(&src) > 0 {
+                writers.push(id);
+            }
+        }
+        assert_eq!(
+            writers,
+            ["valids/loopuntil-failed-flowable"],
+            "the corpus's relational-operator-against-a-quoted-operand population. \
+             A second member is a second entry this renderer divergence decides, \
+             and it must be reasoned about rather than discovered in a baseline"
+        );
+
+        // The control first: the same operator with a BARE number is what every
+        // other corpus comparison writes, and it is not this class.
+        // `valids/retry-with-flowable-errors` writes
+        // `{{ kv(...) < 2 ? ko : 'It works' }}` -- a quote appears in the
+        // region and is not the operand.
+        assert_eq!(
+            quoted_comparisons("{{ a < 2 ? ko : 'It works' }}"),
+            0,
+            "a quote that is not the operand must not count, or the scan blames a \
+             flow whose comparison Pebble is perfectly happy with"
+        );
+        assert_eq!(quoted_comparisons("{{ a < \\\"5\\\" }}"), 1);
+
+        let mut cx = crate::runners::RenderContext::new();
+        cx.insert(
+            "outputs",
+            serde_json::json!({"loop": {"iterationCount": 1}}),
+        );
+        let rendered = crate::render_str(
+            "{{ outputs.loop.iterationCount < \"5\" }}",
+            &cx,
+        )
+        .expect(
+            "egret's renderer ANSWERS this, and the artifact throws -- if this \
+             becomes an error, `valids/loopuntil-failed-flowable` is bankable and \
+             `oracle-exec/baseline.txt` says so",
+        );
+        assert!(
+            crate::executor::is_truthy(&rendered),
+            "and the answer is truthy, which is what makes the loop SUCCEED on its \
+             first iteration where the artifact FAILED the task: {rendered:?}"
+        );
+    }
+
+    /// **Every `LoopUntil` bound in the corpus is a literal**, which is what
+    /// makes `build_plan` reading them without a `RenderContext` a measured
+    /// non-issue rather than an assumption -- and what makes
+    /// [`plan::loop_until_gap`](crate::executor::plan) an arm nothing in this
+    /// corpus takes.
+    ///
+    /// All four are checked, not just the two the comparable entries use: a
+    /// derivation that swept only the fields today's flows happen to write is
+    /// the shape this package keeps paying for.
+    #[test]
+    fn every_corpus_loop_until_bound_is_a_literal() {
+        let mut dynamic = Vec::new();
+        let mut seen = 0usize;
+        for (id, src) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            for (task_id, lu) in corpus_loop_untils(&flow) {
+                seen += 1;
+                if let Some(field) = crate::executor::plan::loop_until_gap(lu) {
+                    dynamic.push(format!("{id}:{task_id} = {field}"));
+                }
+            }
+        }
+        assert!(
+            seen >= 12,
+            "the walk found {seen} LoopUntil/WaitFor tasks, which is fewer than the \
+             12 the ten corpus flows of this construct declare between them -- it \
+             has stopped reaching them"
+        );
+        assert!(
+            dynamic.is_empty(),
+            "a corpus LoopUntil writes a bound `build_plan` cannot read, so it is \
+             planned OPAQUE and the arm that does it is reachable after all: {dynamic:?}"
+        );
+    }
+
+    /// **No corpus `LoopUntil` can be retried**, which is what bounds
+    /// [`loop_iteration`](crate::executor::loop_iteration)'s derivation.
+    ///
+    /// Counting `RUNNING`s is `iterationCount` only while a run enters
+    /// `RUNNING` once per iteration and for no other reason. A retry re-enters
+    /// `CREATED` and then `RUNNING` again, and the count would carry the
+    /// previous attempt's iterations into the new one. Nothing can reach it --
+    /// `retry::scan` retries a `Runnable` or an `Executable` and a `LoopUntil`
+    /// is neither -- and this says so from the corpus's side as well, over both
+    /// ways a task can acquire a policy.
+    #[test]
+    fn no_corpus_loop_until_declares_a_retry_or_inherits_one() {
+        let mut with_retry = Vec::new();
+        for (id, src) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            let flow_level = flow.retry.is_some();
+            for (task_id, _) in corpus_loop_untils(&flow) {
+                if flow_level {
+                    with_retry.push(format!("{id}:{task_id} (flow-level retry:)"));
+                }
+            }
+            fn walk(task: &crate::models::Task, under_retry: bool, id: &str, out: &mut Vec<String>) {
+                let under = under_retry || task.retry.is_some();
+                if under
+                    && matches!(task.kind, crate::models::TaskKind::LoopUntil(_))
+                {
+                    out.push(format!("{id}:{} (task-level retry:)", task.id));
+                }
+                for child in task.children().into_iter().chain(task.error_children()) {
+                    walk(child, under, id, out);
+                }
+            }
+            for task in flow.tasks.iter().chain(flow.errors.iter()) {
+                walk(task, false, &id, &mut with_retry);
+            }
+        }
+        assert!(
+            with_retry.is_empty(),
+            "a corpus LoopUntil is inside a retry policy, so `loop_iteration`'s \
+             RUNNING count can carry a previous attempt's iterations: {with_retry:?}"
+        );
+    }
+
+    /// Every `LoopUntil`/`WaitFor` in a flow, at any depth, with its task id.
+    fn corpus_loop_untils(
+        flow: &crate::models::Flow,
+    ) -> Vec<(String, &crate::models::LoopUntil)> {
+        fn walk<'a>(
+            task: &'a crate::models::Task,
+            out: &mut Vec<(String, &'a crate::models::LoopUntil)>,
+        ) {
+            if let crate::models::TaskKind::LoopUntil(lu) = &task.kind {
+                out.push((task.id.clone(), lu));
+            }
+            for child in task.children().into_iter().chain(task.error_children()) {
+                walk(child, out);
+            }
+        }
+        let mut out = Vec::new();
+        for task in flow
+            .tasks
+            .iter()
+            .chain(flow.errors.iter())
+            .chain(flow.finally_.iter())
+            .chain(flow.after_execution.iter())
+        {
+            walk(task, &mut out);
+        }
+        out
+    }
+
     /// Every `pauseDuration:` and `timeout:` written on a corpus `Pause`, and
     /// the two facts `flowable::pause` relies on: **no `Pause` writes both**,
     /// and **every one that parses at all parses as ISO-8601**.

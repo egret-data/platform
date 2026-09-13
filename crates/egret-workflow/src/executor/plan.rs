@@ -1212,50 +1212,50 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         }
         // W8 Task 4. The two spellings are one arm because they are one Kestra
         // class; see `LOOP_UNTIL_TYPE`.
-        (ModelKind::LoopUntil(lu), Some(LOOP_UNTIL_TYPE) | Some(WAIT_FOR_TYPE)) => {
-            if loop_until_gap(lu).is_none() {
-                // `condition` is `@NotNull` in Java and there is nothing to
-                // loop until without one -- the same shape and the same
-                // refusal as an `If` with no `condition`, which
-                // `spec::validate` also reports as
-                // `loop_until_condition_required`.
-                let condition = lu
-                    .condition
+        (ModelKind::LoopUntil(lu), Some(LOOP_UNTIL_TYPE) | Some(WAIT_FOR_TYPE))
+            if loop_until_gap(lu).is_none() =>
+        {
+            // `condition` is `@NotNull` in Java and there is nothing to
+            // loop until without one -- the same shape and the same
+            // refusal as an `If` with no `condition`, which
+            // `spec::validate` also reports as
+            // `loop_until_condition_required`.
+            let condition = lu
+                .condition
+                .as_ref()
+                .map(|c| c.source().to_string())
+                .ok_or_else(|| PlanError {
+                    message: format!(
+                        "loopUntil '{}' has no condition to loop until",
+                        task.id
+                    ),
+                })?;
+            let cf = lu.check_frequency.as_ref();
+            // No `errors:` is flattened, because W1's `models::LoopUntil`
+            // has no such field -- Kestra's `AbstractBranch` does, and the
+            // omission is W1's rather than this task's. Nothing in the
+            // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
+            // stays the empty slice every caller already handles.
+            let children = flatten_list(out, &lu.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::LoopUntil {
+                tasks: children,
+                condition,
+                interval: cf
+                    .and_then(|c| c.interval.as_ref())
+                    .and_then(|p| super::retry::parse_duration(p.source()))
+                    .unwrap_or(DEFAULT_CHECK_INTERVAL),
+                max_iterations: cf
+                    .and_then(|c| c.max_iterations.as_ref())
+                    .and_then(|p| p.source().trim().parse::<i64>().ok()),
+                max_duration: cf
+                    .and_then(|c| c.max_duration.as_ref())
+                    .and_then(|p| super::retry::parse_duration(p.source())),
+                fail_on_max_reached: lu
+                    .fail_on_max_reached
                     .as_ref()
-                    .map(|c| c.source().to_string())
-                    .ok_or_else(|| PlanError {
-                        message: format!(
-                            "loopUntil '{}' has no condition to loop until",
-                            task.id
-                        ),
-                    })?;
-                let cf = lu.check_frequency.as_ref();
-                // No `errors:` is flattened, because W1's `models::LoopUntil`
-                // has no such field -- Kestra's `AbstractBranch` does, and the
-                // omission is W1's rather than this task's. Nothing in the
-                // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
-                // stays the empty slice every caller already handles.
-                let children = flatten_list(out, &lu.tasks, depth + 1)?;
-                out[ix].kind = TaskKind::LoopUntil {
-                    tasks: children,
-                    condition,
-                    interval: cf
-                        .and_then(|c| c.interval.as_ref())
-                        .and_then(|p| super::retry::parse_duration(p.source()))
-                        .unwrap_or(DEFAULT_CHECK_INTERVAL),
-                    max_iterations: cf
-                        .and_then(|c| c.max_iterations.as_ref())
-                        .and_then(|p| p.source().trim().parse::<i64>().ok()),
-                    max_duration: cf
-                        .and_then(|c| c.max_duration.as_ref())
-                        .and_then(|p| super::retry::parse_duration(p.source())),
-                    fail_on_max_reached: lu
-                        .fail_on_max_reached
-                        .as_ref()
-                        .and_then(|p| p.source().trim().parse::<bool>().ok())
-                        .unwrap_or(false),
-                };
-            }
+                    .and_then(|p| p.source().trim().parse::<bool>().ok())
+                    .unwrap_or(false),
+            };
         }
         _ => {}
     }
