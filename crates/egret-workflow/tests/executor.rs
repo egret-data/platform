@@ -779,9 +779,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 175, 119),
-        "294 = 175 matching + 119 baselined, the total beside its parts. It read \
-         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries"
+        (294, 176, 118),
+        "294 = 176 matching + 118 baselined, the total beside its parts. It read \
+         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries and \
+         its fix round a ninth"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -2704,18 +2705,22 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// eight entries W8 Task 3 banked, which leave the un-falsifiable half for the
 /// reported half. 840 is unchanged, because banking moves a run across the line
 /// rather than creating one.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 419;
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 418;
+// Fix round 1: 419 -> 418, `valids/pause-behavior`'s single run terminal.
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
 /// **165 through W8 Task 2, 157 now** -- the eight `Pause` entries W8 Task 3
 /// banked, none of which carries a sub-execution, so the fall is exactly eight.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 157;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 156;
+// Fix round 1: 157 -> 156, the ninth bank. It carries no sub-execution.
 /// **1703 through W8 Task 2, 1647 now** -- 56 run-history tokens on the eight
 /// banked entries.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1647;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1643;
+// Fix round 1: 1647 -> 1643 -- `CREATED RUNNING PAUSED FAILED`, four tokens.
 /// **665 through W8 Task 2, 617 now** -- 48 execution-history tokens on the
 /// eight banked entries, i.e. six apiece: every one of them reads
 /// `CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 617;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 611;
+// Fix round 1: 617 -> 611 -- the ninth's six execution-history tokens.
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3920,9 +3925,11 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// **90 through W8 Task 2, 82 now**: all eight `Pause` entries W8 Task 3
 /// banked differed on their execution history (`PAUSED`/`RESTARTED` were never
 /// emitted), so every one of them leaves this count.
-const MISMATCH_ON_EXECUTION: usize = 82;
+const MISMATCH_ON_EXECUTION: usize = 81;
+/// Fix round 1 banked a ninth (`valids/pause-behavior`).
 /// **112 through W8 Task 2, 104 now** -- the same eight.
-const MISMATCH_ON_RUNS: usize = 104;
+const MISMATCH_ON_RUNS: usize = 103;
+/// Fix round 1 banked a ninth (`valids/pause-behavior`).
 /// **72 through W8 Task 2, 67 now**: five of the eight carry an ordered pair.
 const MISMATCH_ON_ORDER: usize = 67;
 const MISMATCH_ON_SPAWNED: usize = 15;
@@ -3931,7 +3938,8 @@ const MISMATCH_ON_SPAWNED: usize = 15;
 /// refusal except `invalids/workingdirectory-invalid`, which egret still
 /// refuses and for the same reason (`is_runnable_child` answers `false` for a
 /// typed kind, and `models::TaskKind::Pause` is one).
-const MISMATCHING_RUNS_ENTRIES: usize = 114;
+const MISMATCHING_RUNS_ENTRIES: usize = 113;
+/// Fix round 1 banked a ninth (`valids/pause-behavior`).
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -3973,7 +3981,11 @@ const MISMATCHING_RUNS_ENTRIES: usize = 114;
 /// unstall are different events and this figure counts the second**, which is
 /// why the two numbers differ by one and why that is worth a sentence rather
 /// than an arithmetic reconciliation.
-const ENTRIES_LEFT_UNFINISHED: usize = 50;
+const ENTRIES_LEFT_UNFINISHED: usize = 49;
+/// Fix round 1: 50 -> 49. `valids/pause-behavior` was stalling because a
+/// `Pause` with a `behavior:` was planned opaque and the claim took it; it is
+/// a `TaskKind::Pause` now, so it finishes — and it MATCHES, which is the
+/// ninth bank.
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4820,7 +4832,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             unplanned + in_an_errors_list,
             over_fed.values().sum::<usize>() + is_a_subflow
         ),
-        (415, 83, 342, 105),
+        (414, 84, 342, 104),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -4859,7 +4871,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     );
     assert_eq!(
         (flow_then + is_a_subflow, over_fed.len() + 1),
-        (80, 12),
+        (79, 12),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
          `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6"
     );
@@ -5916,19 +5928,23 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
                 "allowFailure: true",
             ],
         ),
-        // **12 through W8 Task 2, 4 now.** W8 Task 3 banked eight and the four
-        // that remain are held by four DIFFERENT properties of the construct
-        // rather than by the wait: `pause-behavior` by `behavior:`,
+        // **12 through W8 Task 2, 4 after W8 Task 3, 3 after its fix round.**
+        // Nine banked. The three that remain are held by three DIFFERENT
+        // properties of the construct rather than by the wait:
         // `pause_on_pause` by `onPause:`,
         // `pause-errors-finally-after-execution` by `errors:`/`finally:`/
         // `afterExecution:`, and `pause-timeout-allow-failure` by
         // `allowFailure:` turning FAILED into a `WARNING` `RunState` cannot
         // hold -- which is the `AllowFailure` row's cause, not this one's, and
         // is counted here only because this table attributes by declaration.
-        // `oracle-exec/baseline.txt` names all four with what holds each.
+        // `valids/pause-behavior` left in fix round 1: its `behavior:` is an
+        // EXPRESSION, and the artifact's answer to one is a failure rather than
+        // a behaviour, so it is reproduced rather than refused. A LITERAL
+        // `behavior:` would still be here and no corpus flow writes one.
+        // `oracle-exec/baseline.txt` names all three with what holds each.
         (
             "Pause",
-            4,
+            3,
             &["io.kestra.plugin.core.flow.Pause", "core.pause"],
         ),
         ("afterExecution:", 10, &["afterExecution:"]),
@@ -6550,7 +6566,7 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (3, 116, 119),
+        (3, 115, 118),
         "the baselined population that declares a `timeout:`, and the rest. It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \

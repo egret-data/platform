@@ -5718,21 +5718,22 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **175** |
-| baselined — egret does not reproduce it yet | **119** |
+| matching | **176** |
+| baselined — egret does not reproduce it yet | **118** |
 
 ```text
-  matching  175 = 152 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 119 = 114 of the 266 `runs` +  5 of the 28 `refused`
+  matching  176 = 153 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 118 = 113 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-119 is simultaneously the mismatching count, the size of `baseline.txt` and the
+118 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
 
-**167 → 175 at W8 Task 3**, one construct with eight instances: `Pause`. See
+**167 → 175 at W8 Task 3, and → 176 in its fix round**, one construct with
+nine instances: `Pause`. See
 *What W8 Task 3 had to change, and what it banked* at the end of this file; the
 `refused` half is unchanged, because the only `Pause` flow Kestra refused is
 `invalids/workingdirectory-invalid` and egret still refuses it.
@@ -6032,7 +6033,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-119 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+118 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
@@ -6043,7 +6044,7 @@ exhaustive and named.
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8** — see the paragraph on its two owners below |
-| 4 | `Pause` → `PAUSED` | W8 — and **not one of the four is held by the wait**; see below |
+| 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
 | 5 | `sla:` | W8 |
@@ -6098,9 +6099,9 @@ declarers already matching — written out under *States and constructs no W3a
 task claims* above and derived by
 `the_cancelled_state_never_comes_from_a_concurrency_limit`.
 
-**The `Pause` row was 12 and is 4, and it is the first row this table has
+**The `Pause` row was 12, then 4, and is 3 — the first row this table has
 LOWERED where the remainder is held by something other than the construct the
-row names.** W8 Task 3 banked eight; `advance()` drives the wait, its bound and
+row names.** W8 Task 3 banked eight and its fix round a ninth; `advance()` drives the wait, its bound and
 its resume, and the four that remain each declare a *property* of `Pause` that
 `executor::plan::pause_gap` refuses to plan, so the whole task stays an opaque
 `TaskKind::Runnable` — `AllowFailure`'s and `WorkingDirectory`'s rule, applied
@@ -6108,15 +6109,24 @@ per task rather than per type:
 
 | entry | what holds it |
 |---|---|
-| `valids/pause-behavior` | `behavior:`, written as an expression. Its golden is the **artifact's own defect** (see *Drift at the execution seam*): rendering a Pebble expression into `Property<Behavior>` fails at resume and FAILS the task for every value. Reproducing that would be a rule about Java reflection wearing a pause rule's name — and the two terminals a *literal* `behavior:` can produce, `WARNING` and `CANCELLED`, are not in `RunState` at all |
 | `valids/pause_on_pause` | `onPause:`. Its golden records the sub-task as a run with `parent: null` — a **sibling** of the pause, `overlapping` it |
 | `valids/pause-errors-finally-after-execution` | `errors:` on the `Pause`, plus `finally:` and a flow-level `afterExecution:` — two rows above that are **unclaimed**. Its pause run re-enters `RUNNING` (`CREATED RUNNING PAUSED RUNNING FAILED`) to drive the handler |
 | `valids/pause-timeout-allow-failure` | the only one of the four that IS planned `TaskKind::Pause`, and it is held one layer out: `allowFailure: true` turns the timeout's `FAILED` into `WARNING`. That is the `AllowFailure` row's cause, counted here only because this table attributes by declaration |
 
+**`valids/pause-behavior` left this table in W8 Task 3's fix round**, and the
+reason it was ever here is worth keeping: the task refused it because a
+`behavior:`'s `WARN`/`CANCEL` terminals are `WARNING`/`CANCELLED`, which
+`RunState` cannot hold. True of a **literal** one, and the corpus contains no
+literal one — 31 `behavior:` lines, exactly one on a `Pause`, and it is an
+expression. Its golden is byte-identical to `valids/pause-timeout`'s but for
+the id, so it needed no new state at all; what it needed was the artifact's
+defect reproduced. `every_corpus_behavior_line_is_accounted_for` is the
+derivation that was missing the first time.
+
 **The row is not deleted**, unlike the five below, and the difference is worth
 stating: a deleted row means the construct holds nothing. `Pause` still holds
-three of these four, in the narrow sense that a `Pause` property is what stops
-them. It is the fourth, `pause-timeout-allow-failure`, that this row
+two of these three, in the narrow sense that a `Pause` property is what stops
+them. It is the third, `pause-timeout-allow-failure`, that this row
 over-claims — and it is left counted here because the alternative is a table
 whose rows silently disagree with the needle that derives them.
 
@@ -9180,3 +9190,73 @@ measurement, in `worker::timeout`'s module doc and beside
 `the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet` —
 which derives DECLARATIONS (now 3 of 119, two `Pause`es and one `Log`) and never
 measured applications at all.
+
+### What the fix round changed, and the ninth bank
+
+**Ratchet: 119 → 118**, md5 `2b0506e3d706a4a9c772103f3206e9d0` →
+`f3b6dedf29696e90b7ae4d9fc765fc7f`. One entry, `valids/pause-behavior`, and
+nothing moved in the other direction.
+
+**The first round refused it and the refusal was a fixture answering a question
+it was not built for.** The stated blocker was that a `behavior:`'s `WARN` and
+`CANCEL` terminals are `WARNING` and `CANCELLED`, which `RunState` cannot hold.
+That is true of a **literal** `behavior:` and says nothing about an expression —
+and the entry writes an expression. Measured over the corpus's **31**
+`behavior:` lines, exactly **one** sits on a `Pause` and it is that one; the
+other 30 belong to `concurrency:`, `retry:` and `sla:`, three constructs whose
+`behavior:` is a different field with different values. So the property that
+blocked the entry belongs to a class element this corpus does not contain.
+`every_corpus_behavior_line_is_accounted_for` is the derivation that was
+missing, and it fails the day a literal one appears.
+
+**It needed no new state, no new command and no render.** Its golden is
+**byte-identical to `valids/pause-timeout`'s but for the id** —
+`CREATED RUNNING PAUSED RESTARTED RUNNING FAILED`, one run
+`CREATED RUNNING PAUSED FAILED`, one attempt `CREATED RUNNING FAILED`. What it
+needed was the artifact's own defect reproduced: a dynamic `behavior:` ends the
+pause `FAILED` whichever bound elapsed, and the successor is never created.
+`pause::ends_with` is one function rather than an `if` in each bound's arm,
+because the two arms choose different defaults (`SUCCESS` for a
+`pauseDuration:`, `FAILED` for a `timeout:`) and a rule written twice can
+disagree with itself; `the_dynamic_behavior_defect_overrides_either_bound`
+drives both with the same `behavior:` and both controls.
+
+`{` rather than `{{` is the dynamic test, and it is Kestra's own short-circuit
+(`VariableRenderer.java:76-79`) — the line that decides whether a Pebble
+evaluation happens at all and therefore whether one can throw. A **literal**
+`behavior:` is still planned opaque, which is the construct's boundary and not
+a convenience.
+
+### Two dead arms this task created, and the guard that replaces them
+
+`spec::validate` carried two branches that existed because a `Pause` reached
+`models::TaskKind::Leaf`. **It cannot since W8 Task 3.** `KESTRA_FLOW_CONTROL`
+and `models::kind_for` now name the same 11 types — difference empty in both
+directions — so no task carrying a control-flow name reaches `Leaf` at all, and
+both branches were unreachable:
+
+* `is_runnable_child`'s arm refusing a `Leaf` whose canonical name had a row.
+  It is `matches!(task.kind, TaskKind::Leaf { .. })` now, and
+  `invalids/workingdirectory-invalid` is still refused — by the typed-variant
+  arm, because its offending child is a `models::TaskKind::Pause`.
+* `walk_task`'s arm reading a row's package name into the `not_yet_enforced`
+  message, and with it the `KestraFlowControl::Unported` variant. Every row is
+  `Ported`, so it could not be constructed.
+
+Deleted rather than left behind an `#[allow(dead_code)]`, which is what this
+crate did with the two `isRetrying` guards W3a measured unreachable. **The
+fail-CLOSED half is untouched and is the half that matters**: anything spelled
+like Kestra control flow that reaches `Leaf` and is not a registered type still
+warns, and that test never read the table.
+
+**The table's agreement with `kind_for` is a new invariant this task created**,
+and `the_two_control_flow_tables_name_the_same_types` states it in both
+directions — a probe per row through the real parser, and a source walk over
+`kind_for`'s arms with a count check so a regex that matched nothing cannot make
+the direction vacuous. It is what keeps the two deletions above safe.
+
+**`waitfor` is in neither table, and Task 4 must add it to both.** Since
+`is_runnable_child` no longer consults the table, a `kind_for` arm is what
+closes the publish-side over-acceptance (a `WaitFor` child of a
+`WorkingDirectory` publishes clean where the identical `LoopUntil` child is
+refused) — and the guard then refuses the half-edit.

@@ -596,6 +596,13 @@ PAUSE_TYPES = {"io.kestra.plugin.core.flow.Pause", "core.pause"}
 # list naming an entry nothing can bank is what sends the next task hunting.
 PAUSE_GAP_KEYS = ("tasks", "errors", "behavior", "onPause")
 
+# `behavior` is a gap only when it is a LITERAL, which is `executor::plan::
+# pause_gap`'s rule since W8 Task 3 fix round 1: an EXPRESSION is reproduced
+# (the artifact fails the task rendering it), so a pause carrying one is
+# planned and is not blocked by it.  `{` rather than `{{` is Kestra's own
+# short-circuit, `VariableRenderer.java:76-79`.
+DYNAMIC_IS_NOT_A_GAP = ("behavior",)
+
 
 def pause_gaps(node, out):
     """Every `Pause` property in this document that `build_plan` will not plan.
@@ -607,8 +614,12 @@ def pause_gaps(node, out):
     if isinstance(node, dict):
         if node.get("type") in PAUSE_TYPES:
             for k in PAUSE_GAP_KEYS:
-                if node.get(k):
-                    out.add(("construct", f"Pause {k}:"))
+                v = node.get(k)
+                if not v:
+                    continue
+                if k in DYNAMIC_IS_NOT_A_GAP and "{" in str(v):
+                    continue
+                out.add(("construct", f"Pause {k}:"))
         for v in node.values():
             pause_gaps(v, out)
     elif isinstance(node, list):
@@ -775,10 +786,10 @@ def check_inputs(flows, kinds, golden, baseline):
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
-    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 since
-    # W8 Task 3 banked eight `Pause` entries.
-    if len(baseline) != 119:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 119; the split "
+    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
+    # W8 Task 3 banked eight `Pause` entries and its fix round a ninth.
+    if len(baseline) != 118:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 118; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1412,8 +1423,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 119",
-         "not 119",
+    case("baseline.txt is no longer 118",
+         "not 118",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

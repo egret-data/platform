@@ -962,6 +962,7 @@ fn expression_of(plan: &Plan, task: usize) -> Option<String> {
         TaskKind::Loop { values, .. } => Some(values.clone()),
         TaskKind::Pause {
             duration: Some(source),
+            ..
         } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
         _ => None,
     }

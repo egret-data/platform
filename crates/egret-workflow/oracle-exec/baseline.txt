@@ -203,7 +203,16 @@
 # differ on NOTHING ELSE`, `the spawned hole is now 38 of 41` and `nothing
 # executes Command::SpawnExecution until W3b/W6`. It is 16 of the 41 MATCHING,
 # 6 differing only INSIDE `spawned` and 19 on more; the command has an executor
-# and this oracle drives it. The test named in the Task 6 block --
+# and this oracle drives it.
+#   [W8 Task 3 fix round 1: `16 of the 41 MATCHING` is itself stale now -- W6
+#   Task 4's four `retry-new-execution-*` banks left the hole, as that task's
+#   own block below says. It was left uncorrected on the ground that editing
+#   this file moves its md5, and **W8 Task 3 dissolved that ground by moving
+#   the md5 twice.** It is not restated with a number here: the split is
+#   derived on every run by
+#   `the_sub_executions_are_compared_and_this_is_what_they_cost` and reported
+#   by `README.md`'s coverage statement, which is the single authority. A
+#   figure copied into a second file is what this whole paragraph is about.] The test named in the Task 6 block --
 # `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` -- was
 # renamed to `the_sub_executions_are_compared_and_this_is_what_they_cost`.
 # `oracle-exec/README.md`'s coverage statement is the single current authority
@@ -297,7 +306,9 @@
 # `Can't find taskrun with taskrunId ...` (the LOOP run's, which lives in the
 # parent execution) and the sub-execution ends FAILED with no child.
 #
-# W8 Task 3 (`Pause`) banked 8, 127 -> 119 -- the whole of the row
+# W8 Task 3 (`Pause`) banked 8, 127 -> 119, and its fix round banked a NINTH,
+# 119 -> 118. The nine are the whole of the row `README.md`'s residual table
+# assigned to this construct but three -- the whole of the row
 # `README.md`'s residual table assigned to it is TWELVE, so four are left and
 # each is named below with what holds it.
 #
@@ -309,6 +320,7 @@
 #   pause-kill-delay                pauseDuration: PT1M; named for a kill nothing in it declares
 #   pause-timeout                   timeout: PT1S -> FAILED, and the successor is never created
 #   trigger-flow-with-pause         a pause between two Logs
+#   pause-behavior                  the NINTH, added in fix round 1 -- see below
 #
 # The plan's estimate for this row was **seven** and the measurement is eight.
 # The extra one is `pause-timeout`: the estimate treated `timeout:` on a
@@ -316,20 +328,36 @@
 # non-`RunnableTask` EXCEPT `Pause`, and a `Pause`'s own `timeout:` is
 # `advance()`'s. Reading the exception as the rule cost one entry.
 #
-# **FOUR `Pause` entries are left and not one of them is held by the wait.**
+# **The ninth, and why the first round refused it.** `valids/pause-behavior`
+# writes `behavior: "{{inputs.behavior}}"`, and round 1 left it opaque on the
+# grounds that a `behavior:`'s `WARN` and `CANCEL` terminals are `WARNING` and
+# `CANCELLED`, which `RunState` cannot hold. That is TRUE of a **literal**
+# `behavior:` and says nothing about an expression -- a fixture answering a
+# question it was not built for. Measured over the corpus's 31 `behavior:`
+# lines, exactly ONE sits on a `Pause` and it is an expression; the other 30
+# belong to `concurrency:`, `retry:` and `sla:`. So the blocker described a
+# class element this corpus does not contain
+# (`every_corpus_behavior_line_is_accounted_for`).
+#
+# Its golden is **byte-identical to `valids/pause-timeout`'s but for the id** --
+# `CREATED RUNNING PAUSED RESTARTED RUNNING FAILED`, one run, one attempt -- so
+# it needs no new state, no new command and no render. What it needs is the
+# artifact's own DEFECT, reproduced: rendering a Pebble expression into
+# `Property<Behavior>` fails at the moment the pause ends and takes the task
+# down, for every value including the ones that would have succeeded. A dynamic
+# `behavior:` therefore ends the pause FAILED whichever bound elapsed, and the
+# successor is never created.
+#
+# A LITERAL `behavior:` is still planned opaque, and that boundary is the
+# construct's, not a convenience: `RESUME`/`WARN`/`FAIL`/`CANCEL` really are
+# four different terminals and two of them are unrepresentable here.
+#
+# **THREE `Pause` entries are left and not one of them is held by the wait.**
 # Each declares a property `build_plan` refuses to plan -- `executor::plan::
 # pause_gap` -- so the task stays an opaque `TaskKind::Runnable` and its trace
 # is visibly wrong rather than plausibly wrong, which is the rule
 # `AllowFailure` and `WorkingDirectory` are already planned under:
 #
-#   pause-behavior                    `behavior: "{{inputs.behavior}}"`. Its golden is the ARTIFACT'S OWN
-#                                     DEFECT -- rendering a Pebble expression into `Property<Behavior>`
-#                                     fails at resume time and FAILS the task for every value, including
-#                                     the ones that would have succeeded (`README.md`, `EXECUTION_DRIFT`).
-#                                     Reproducing that would be a rule about Java reflection wearing the
-#                                     name of a pause rule, and the two terminals a LITERAL `behavior:`
-#                                     can produce -- `WARNING` and `CANCELLED` -- are not in `RunState`
-#                                     at all, so the construct is unrepresentable either way.
 #   pause_on_pause                    `onPause:`. Its golden records the sub-task as a run with
 #                                     `parent: null`, a SIBLING of the pause that `overlapping`s it.
 #   pause-errors-finally-after-execution  `errors:` AND `finally:` AND a flow-level `afterExecution:`.
@@ -419,7 +447,6 @@ valids/npe-labels-update-task
 valids/output-values
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
-valids/pause-behavior
 valids/pause-errors-finally-after-execution
 valids/pause-timeout-allow-failure
 valids/pause_on_pause

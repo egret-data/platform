@@ -639,7 +639,13 @@ const LIVE: usize = 21;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
-/// finding, and the reason `LIVE` is 16 and not 295.
+/// finding, and the reason [`LIVE`] is 21 and not 295.
+///
+/// (It read *"the reason `LIVE` is 16 and not 295"* until W8 Task 3 fix round
+/// 1 — **three lines below `const LIVE: usize = 21;`, in the same doc block
+/// that task had just rewritten.** A fact corrected where it was found and
+/// left standing three lines away is this branch's named failure mode; it is
+/// a `[LIVE]` link now, so the number cannot be restated here at all.)
 ///
 /// `registry::known_type` is an allow-list of the eight `egret.*` types plus
 /// `core.http`/`core.slack`/`core.log`, and the corpus is Kestra's: every leaf

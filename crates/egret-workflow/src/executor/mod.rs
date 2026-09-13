@@ -6393,9 +6393,13 @@ tasks:
         // The control.
         let src = pause_flow("    pauseDuration: PT1S\n");
         let plan = build_plan(&src).unwrap();
-        assert_eq!(plan.tasks[0].kind, TaskKind::Pause {
-            duration: Some("PT1S".to_string())
-        });
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Pause {
+                duration: Some("PT1S".to_string()),
+                dynamic_behavior: false,
+            }
+        );
         let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
         assert!(
             !report
@@ -6608,6 +6612,179 @@ tasks:
         assert_eq!(run_ids(&plan, &state), ["both", "early", "wrapper", "late"]);
     }
 
+    /// **A dynamic `behavior:` ends the pause FAILED, whichever bound
+    /// elapsed** — the artifact's own defect, reproduced. W8 Task 3 fix
+    /// round 1.
+    ///
+    /// Four rows, and the first two are the discriminating pair: the SAME
+    /// dynamic `behavior:` over a `pauseDuration:` (whose bound says `SUCCESS`)
+    /// and over a `timeout:` (whose bound says `FAILED`). Only a rule that
+    /// overrides BOTH gives `FAILED` twice; a rule written into one arm passes
+    /// one row and fails the other, which is why `pause::ends_with` is one
+    /// function and not an `if` at each call site.
+    ///
+    /// Rows three and four are the controls that stop the first two being
+    /// satisfied by "a `Pause` always fails": the same flows with the
+    /// `behavior:` removed end `SUCCESS` and `FAILED` respectively.
+    ///
+    /// The successor is asserted for every row, because the terminal alone
+    /// does not say whether the pause stopped the list — and
+    /// `valids/pause-behavior`'s golden has ONE run where the flow declares
+    /// two, which is the half a terminal-only assertion would miss.
+    #[test]
+    fn the_dynamic_behavior_defect_overrides_either_bound() {
+        for (label, props, terminal, runs) in [
+            (
+                "dynamic behavior over a pauseDuration",
+                "    pauseDuration: PT1S\n    behavior: \"{{inputs.b}}\"\n",
+                "FAILED",
+                vec!["gate"],
+            ),
+            (
+                "dynamic behavior over a timeout",
+                "    timeout: PT1S\n    behavior: \"{{inputs.b}}\"\n",
+                "FAILED",
+                vec!["gate"],
+            ),
+            (
+                "control: the same pauseDuration, no behavior",
+                "    pauseDuration: PT1S\n",
+                "SUCCESS",
+                vec!["gate", "after"],
+            ),
+            (
+                "control: the same timeout, no behavior",
+                "    timeout: PT1S\n",
+                "FAILED",
+                vec!["gate"],
+            ),
+        ] {
+            let plan = build_plan(&pause_flow(props)).unwrap_or_else(|e| panic!("{label}: {e}"));
+            assert!(
+                matches!(plan.tasks[0].kind, TaskKind::Pause { .. }),
+                "{label}: a dynamic `behavior:` must NOT keep the task opaque"
+            );
+            let (state, ended_at) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+            assert_eq!(ended_at, Tick(1_000), "{label}: the wait still happened");
+            assert_eq!(
+                wire(&state.runs[0].history),
+                ["CREATED", "RUNNING", "PAUSED", terminal],
+                "{label}: the pause run"
+            );
+            assert_eq!(
+                wire(&state.runs[0].attempts[0].history),
+                ["CREATED", "RUNNING", terminal],
+                "{label}: the attempt"
+            );
+            assert_eq!(run_ids(&plan, &state), runs, "{label}: runs");
+        }
+    }
+
+    /// **A LITERAL `behavior:` still keeps the task opaque**, and that is the
+    /// boundary the ninth bank is drawn at.
+    ///
+    /// The dynamic case is reproduced because the artifact's answer to it is a
+    /// failure. A literal one is a real four-valued construct whose `WARN` and
+    /// `CANCEL` terminals are `WARNING` and `CANCELLED` — neither in
+    /// [`RunState`] — so it is unrepresentable rather than merely unwritten,
+    /// and `build_plan` leaves it a `Runnable`.
+    ///
+    /// **No corpus flow writes one**, which is the fact that made the earlier
+    /// refusal of `valids/pause-behavior` wrong: the blocker was true of a
+    /// class element the corpus does not contain.
+    /// `every_corpus_behavior_line_is_accounted_for` derives that from all 345
+    /// flows; this pins the rule the derivation licenses.
+    #[test]
+    fn a_literal_pause_behavior_is_still_opaque_and_a_dynamic_one_is_not() {
+        for literal in ["RESUME", "WARN", "FAIL", "CANCEL"] {
+            let src = pause_flow(&format!("    pauseDuration: PT1S\n    behavior: {literal}\n"));
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{literal}: {e}"));
+            assert_eq!(
+                plan.tasks[0].kind,
+                TaskKind::Runnable {
+                    type_id: "io.kestra.plugin.core.flow.Pause".to_string()
+                },
+                "a literal `behavior: {literal}` must stay opaque"
+            );
+            let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|w| w.code == "not_yet_enforced" && w.message.contains("behavior")),
+                "a literal `behavior: {literal}` must still say it is not enforced: {:?}",
+                report.warnings
+            );
+        }
+
+        // The other side of the same predicate, so neither answer is the one
+        // nobody compares.
+        let src = pause_flow("    pauseDuration: PT1S\n    behavior: \"{{inputs.b}}\"\n");
+        let plan = build_plan(&src).unwrap();
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Pause {
+                duration: Some("PT1S".to_string()),
+                dynamic_behavior: true,
+            }
+        );
+        let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
+            "a dynamic `behavior:` is REPRODUCED, so it must not be reported as \
+             unenforced: {:?}",
+            report.warnings
+        );
+    }
+
+    /// Every `behavior:` line in the corpus, by the construct that owns it.
+    ///
+    /// **This is the derivation the ninth bank rests on**, and it exists
+    /// because its absence is what made the first round refuse the entry: the
+    /// refusal generalised from `Pause`'s literal `behavior:` to every
+    /// `behavior:`, and nothing measured whether the corpus contained one.
+    ///
+    /// Exactly one of the 31 sits on a `Pause`, and it is an expression. The
+    /// other 30 belong to `concurrency:`, `retry:` and `sla:` — three
+    /// constructs whose `behavior:` is a different field with different values,
+    /// none of them `RESUME`/`WARN`/`FAIL`/`CANCEL`.
+    #[test]
+    fn every_corpus_behavior_line_is_accounted_for() {
+        let (mut on_pause_dynamic, mut on_pause_literal, mut elsewhere) = (0usize, 0usize, 0usize);
+        let mut dynamic_names = Vec::new();
+        for (id, src) in every_corpus_flow() {
+            elsewhere += src.matches("behavior:").count();
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            for (task_id, pause, _) in corpus_pauses(&flow) {
+                let Some(b) = pause.behavior.as_ref() else {
+                    continue;
+                };
+                elsewhere -= 1;
+                match b.source().contains('{') {
+                    true => {
+                        on_pause_dynamic += 1;
+                        dynamic_names.push(format!("{id}:{task_id}"));
+                    }
+                    false => on_pause_literal += 1,
+                }
+            }
+        }
+        assert_eq!(
+            (on_pause_dynamic, on_pause_literal, elsewhere),
+            (1, 0, 30),
+            "one dynamic `behavior:` on a `Pause`, NO literal one, and 30 lines \
+             owned by another construct. A literal one appearing here is the \
+             event that makes `pause_gap`'s `behavior` arm load-bearing again, \
+             and a `WARNING`/`CANCELLED` terminal `RunState` cannot hold"
+        );
+        assert_eq!(dynamic_names, ["valids/pause-behavior:pause"]);
+    }
+
     /// Every `pauseDuration:` and `timeout:` written on a corpus `Pause`, and
     /// the two facts `flowable::pause` relies on: **no `Pause` writes both**,
     /// and **every one that parses at all parses as ISO-8601**.
@@ -6768,7 +6945,7 @@ tasks:
                 continue;
             };
             for ix in 0..plan.tasks.len() {
-                let TaskKind::Pause { duration } = &plan.tasks[ix].kind else {
+                let TaskKind::Pause { duration, .. } = &plan.tasks[ix].kind else {
                     continue;
                 };
                 planned_pauses += 1;

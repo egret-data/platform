@@ -200,28 +200,38 @@ pub(crate) fn drive_concurrent(
     }
 
     // Rule 3.
+    //
+    // # Every `Step` is accounted for, and none is dropped by an `if let`
+    //
+    // The three arms below used `if let Step::Commands(inner)`, which silently
+    // discards anything else. Measured at W8 Task 3 fix round 1: **none of the
+    // three can return [`Step::Done`] today** -- [`open`] returns `Commands` or
+    // `Waiting` and its only delegating arm, `loop_::open`, does the same;
+    // [`descend`] maps `Done` into a `SetRunState` before it returns; and
+    // `pause::resume` returns `Commands` or `Waiting`. So the `if let` was
+    // dropping `Waiting` and nothing else, which is correct -- a sibling with
+    // nothing to ask for must not stop the siblings that have.
+    //
+    // It is written as an exhaustive `match` anyway, because the fact above is
+    // a property of three OTHER functions and nothing here would notice if one
+    // of them changed. **Not `unreachable!()`**: a panic arm nobody can drive
+    // is the guard this crate has twice paid for (`descend`'s deleted depth
+    // guard says so in as many words). A correct arm costs the same line and
+    // cannot be wrong.
     let mut cmds = Vec::new();
     for (&task, run) in children.iter().zip(&runs) {
         let Some(ix) = *run else { continue };
-        match latest(state, ix) {
-            Some(RunState::Created) => {
-                if let Step::Commands(inner) = open(plan, state, ix, task, now) {
-                    cmds.extend(inner);
-                }
-            }
-            Some(RunState::Running) => {
-                if let Step::Commands(inner) = descend(plan, state, ix, task, now) {
-                    cmds.extend(inner);
-                }
-            }
+        let step = match latest(state, ix) {
+            Some(RunState::Created) => open(plan, state, ix, task, now),
+            Some(RunState::Running) => descend(plan, state, ix, task, now),
             // W8 Task 3, and it is the same door `sequential::walk` opens for
             // the same state: a `PAUSED` run is the one non-terminal state no
             // worker is holding, so somebody has to ask it every round whether
             // its bound has elapsed. Without this arm a `Pause` inside a
             // `Parallel` or a `Dag` pauses and is never asked again.
             //
-            // **No corpus flow reaches it** -- the six corpus `Pause`es that
-            // sit under a `Parallel`, a `Dag` or a `Loop` are all unbounded and
+            // **No corpus flow reaches it** -- the corpus `Pause`es that sit
+            // under a `Parallel`, a `Dag` or a `Loop` are all unbounded and
             // none is in `golden.json`
             // (`the_corpus_pauses_that_sit_inside_another_flowable_are_named`).
             // It is here rather than left out because the alternative is not "a
@@ -230,11 +240,19 @@ pub(crate) fn drive_concurrent(
             Some(RunState::Paused)
                 if matches!(plan.tasks[task].kind, crate::executor::plan::TaskKind::Pause { .. }) =>
             {
-                if let Step::Commands(inner) = super::pause::resume(plan, state, ix, task, now) {
-                    cmds.extend(inner);
-                }
+                super::pause::resume(plan, state, ix, task, now)
             }
-            _ => {}
+            _ => continue,
+        };
+        match step {
+            Step::Commands(inner) => cmds.extend(inner),
+            // In flight with nothing to ask for. Its siblings still might, so
+            // this keeps walking rather than returning.
+            Step::Waiting => {}
+            // Unreachable today -- see the block above -- and this is
+            // `descend`'s own mapping, so a child list that finished takes its
+            // terminal rather than being swallowed.
+            Step::Done(s) => cmds.push(Command::SetRunState { run: ix, state: s }),
         }
     }
     if !cmds.is_empty() {
