@@ -50,6 +50,26 @@ pub struct Task {
     /// (`no_corpus_flow_writes_a_null_run_if` re-derives that from all 345 on
     /// every run), and `disabled: null` is already read the same way.
     pub run_if: Option<String>,
+    /// `Task.java:92` — `@Builder.Default private boolean allowFailure = false;`
+    ///
+    /// **A plain `boolean`, not a `Property<Boolean>`**, so a pure builder can
+    /// read it and no render is involved. Measured on the pinned artifact
+    /// rather than read from the checkout: `javap -p
+    /// io/kestra/core/models/tasks/Task.class` declares
+    /// `private boolean allowFailure` and the accessor
+    /// `public boolean isAllowFailure()`, which is the method
+    /// `State$Type.fail(Task)` invokes.
+    ///
+    /// W8 Task 5. Until it, this field and [`Task::allow_warning`] were the two
+    /// `Task.java` properties `models::Task` did not carry at all, which is
+    /// what `worker::subflow::guess_state`'s doc records from the other side.
+    pub allow_failure: bool,
+    /// `Task.java:93` — `@Builder.Default private boolean allowWarning = false;`
+    ///
+    /// **It is read at two different kinds of site and they are not the same
+    /// function** — see [`crate::executor::allow_failure`] for the table and
+    /// for which corpus entry reaches which.
+    pub allow_warning: bool,
     pub kind: TaskKind,
 }
 
@@ -89,7 +109,9 @@ pub enum TaskKind {
     /// an opaque `spec` map would be a second opinion about which keys a
     /// `Pause` has, beside this struct.
     Pause(Pause),
-    Leaf { spec: serde_json::Value },
+    Leaf {
+        spec: serde_json::Value,
+    },
 }
 
 impl Task {
@@ -650,6 +672,12 @@ impl<'de> Deserialize<'de> for Task {
         // survives -- which is where it was through W3a, and why the executor
         // could not see it.
         let run_if: Option<String> = optional(&mut map, "runIf")?;
+        // Taken out of `map` for the same reason `runIf` is: these are
+        // `Task.java`'s own fields, and leaving them in `rest` would make a
+        // `Leaf`'s opaque `spec` the only place they survive -- invisible to
+        // `build_plan`, which is the one caller that needs them.
+        let allow_failure: bool = with_default(&mut map, "allowFailure", false)?;
+        let allow_warning: bool = with_default(&mut map, "allowWarning", false)?;
 
         let rest = serde_json::Value::Object(map);
         let kind = kind_for(&r#type, rest).map_err(D::Error::custom)?;
@@ -662,6 +690,8 @@ impl<'de> Deserialize<'de> for Task {
             timeout,
             disabled,
             run_if,
+            allow_failure,
+            allow_warning,
             kind,
         })
     }
@@ -748,6 +778,17 @@ impl Serialize for Task {
                 "runIf".to_string(),
                 serde_json::Value::String(run_if.clone()),
             );
+        }
+        // Emitted only when TRUE, following `runIf` above rather than
+        // `disabled`: `false` is Kestra's default and both spellings
+        // (`allowFailure: false` and no key at all) parse to the same `false`,
+        // so round-tripping stays idempotent while a task nobody wrote the key
+        // on does not grow one.
+        if self.allow_failure {
+            map.insert("allowFailure".to_string(), serde_json::Value::Bool(true));
+        }
+        if self.allow_warning {
+            map.insert("allowWarning".to_string(), serde_json::Value::Bool(true));
         }
 
         serde_json::Value::Object(map).serialize(serializer)

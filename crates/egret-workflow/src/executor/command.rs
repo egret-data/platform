@@ -206,6 +206,38 @@ pub enum Command {
         run: RunIx,
         state: RunState,
     },
+    /// A terminal the RUN and its ATTEMPT do **not** agree on — W8 Task 5.
+    ///
+    /// [`Command::SetRunState`] writes one state to both, under the rule that
+    /// the attempt takes it only while the attempt is still open. Two shapes in
+    /// the artifact need a different pair, and neither can be spelled as a
+    /// sequence of `SetRunState`s:
+    ///
+    /// | shape | run gets | the attempt gets | why |
+    /// |---|---|---|---|
+    /// | a **runnable** whose `allowFailure:`/`allowWarning:` moved its terminal | the softened state | the handler's own | `WorkerTaskProcessor` builds the attempt from the raw result and only then does `taskRun.withState(softened)`. `valids/task-allow-failure-runnable`'s golden is a run ending `WARNING` over three attempts that all end `FAILED` |
+    /// | a **`Subflow`** whose `ExecutableUtils.guessState` disagrees with its child | the guessed state | the same state, **after the attempt has already closed** | `ExecutableUtils.subflowExecutionResult` rebuilds the attempt from the parent taskrun's whole `State`, so a `Subflow`'s attempt is a COPY of its run's history. `valids/task-allow-warning-executable-flow`'s run and attempt both read `CREATED RUNNING FAILED SUCCESS` |
+    ///
+    /// **`attempt` is pushed whether or not the attempt has closed**, which is
+    /// the whole difference from `SetRunState` and is why the second row needs
+    /// this command rather than a rule change. Widening `SetRunState` instead
+    /// would be wrong for every retry: `valids/retry-failed`'s attempts each end
+    /// `FAILED` and the `RETRYING` that follows must not join them.
+    ///
+    /// `None` leaves the attempt alone entirely. No caller writes it today; it
+    /// is the spelling for a run whose history moves while no attempt is open,
+    /// and it is here so that the field's meaning is a value rather than a
+    /// convention about which states are safe to push.
+    ///
+    /// It contains no decision: both halves are values the emitter has already
+    /// chosen, exactly as `SkipRun`'s two writes are.
+    CompleteRun {
+        run: RunIx,
+        /// Pushed onto the run's own history.
+        run_state: RunState,
+        /// Pushed onto the latest attempt, open or closed.
+        attempt: Option<RunState>,
+    },
     SetExecutionState {
         state: RunState,
     },

@@ -296,6 +296,20 @@ pub struct PlanTask {
     /// the two spellings reach the same answer everywhere this executor can
     /// look.
     pub errors: Vec<TaskIx>,
+    /// This task's `allowFailure:` and `allowWarning:` — W8 Task 5.
+    ///
+    /// **Carried for every kind, flowable and `Runnable` alike, exactly like
+    /// [`PlanTask::run_if`]**, and for the same reason: they are `Task.java`'s
+    /// fields, not any one flowable's, and the artifact reads them at four
+    /// different sites that between them cover both. See
+    /// [`crate::executor::allow_failure`] for the sites and for the two
+    /// spellings the artifact gives the same table.
+    ///
+    /// Plain `bool`s rather than `Option<bool>`: `Task.java`'s own default is
+    /// `false` and `models::Task` has already collapsed an absent key onto it,
+    /// so there is no third state to carry.
+    pub allow_failure: bool,
+    pub allow_warning: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1061,6 +1075,8 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         retry: super::retry::policy_of(task.retry.as_ref()),
         timeout: None,
         errors: Vec::new(),
+        allow_failure: task.allow_failure,
+        allow_warning: task.allow_warning,
     });
 
     // Kestra dispatches on the wire `type`, and so does this -- through the
@@ -1200,7 +1216,10 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                     .as_ref()
                     .and_then(|t| super::retry::parse_duration(t.source()));
                 out[ix].kind = TaskKind::Pause {
-                    duration: pause.pause_duration.as_ref().map(|d| d.source().to_string()),
+                    duration: pause
+                        .pause_duration
+                        .as_ref()
+                        .map(|d| d.source().to_string()),
                 };
             }
         }

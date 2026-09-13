@@ -542,9 +542,6 @@ valids/subflow-secret-output-parent
 valids/task-allow-failure-executable-flow
 valids/task-allow-failure-flowable
 valids/task-allow-failure-runnable
-valids/task-allow-warning-executable-flow
-valids/task-allow-warning-flowable
-valids/task-allow-warning-runnable
 valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate

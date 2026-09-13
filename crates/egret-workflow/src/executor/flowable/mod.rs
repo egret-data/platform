@@ -466,7 +466,27 @@ pub(crate) fn descend(
         TaskKind::LoopUntil { .. } => loop_until::drive(plan, state, run, task, now),
     };
     match step {
-        Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),
+        // **The single door `allowFailure:`/`allowWarning:` go through for a
+        // flowable** -- W8 Task 5. In the artifact the mapping is the tail of
+        // `Execution.guessFinalState`, which every `FlowableTask.resolveState`
+        // calls with its own `isAllowFailure()`/`isAllowWarning()`; here every
+        // one of those calls has already come back as a `Step::Done`, so one
+        // application covers `Sequential`, `Parallel`, `Dag`, `If`, `Switch`
+        // and `LoopUntil` alike -- including `If`/`Switch`'s no-branch answer,
+        // which Java routes through `guessFinalState(null, ...)` rather than
+        // around it.
+        //
+        // It is NOT applied to the top-level list: `advance` drives
+        // `plan.roots` with no parent run and turns its `Done` into a
+        // `SetExecutionState`, and Kestra's flow-level call is
+        // `guessFinalState(flow)` -- `(false, false)`, a flow has no task
+        // flags. That asymmetry is why this lives here and not in
+        // [`aggregate`].
+        Step::Done(s) => {
+            let t = &plan.tasks[task];
+            let state = crate::executor::allow_failure::soften(s, t.allow_failure, t.allow_warning);
+            Step::Commands(vec![Command::SetRunState { run, state }])
+        }
         other => other,
     }
 }

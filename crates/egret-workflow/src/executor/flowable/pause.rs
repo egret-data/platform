@@ -83,12 +83,7 @@ use super::{plus, Step};
 /// The pause is entered in the same round the run is descended into for the
 /// first time, which is why the golden never holds a `RUNNING` that lasted a
 /// round on its own.
-pub(crate) fn drive(
-    plan: &Plan,
-    state: &ExecutionState,
-    run: RunIx,
-    task: TaskIx,
-) -> Step {
+pub(crate) fn drive(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx) -> Step {
     let Some(started) = state.runs[run].attempt_started_at() else {
         // A `Pause` run reaches `RUNNING` only through
         // `flowable::start`'s `Command::StartRun`, which opens an attempt in
@@ -164,13 +159,7 @@ enum Bound {
 /// alternative — failing the run — would be inventing a terminal the artifact
 /// has not been measured to produce, and an unbounded pause is the one answer
 /// that can never be an over-acceptance.
-fn deadline(
-    plan: &Plan,
-    state: &ExecutionState,
-    run: RunIx,
-    task: TaskIx,
-    started: Tick,
-) -> Bound {
+fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, started: Tick) -> Bound {
     let crate::executor::plan::TaskKind::Pause { duration } = &plan.tasks[task].kind else {
         // Unreachable for the same reason `drive`'s missing attempt is: both
         // callers match on this kind before they get here.

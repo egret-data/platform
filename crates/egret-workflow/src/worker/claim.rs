@@ -915,13 +915,35 @@ pub async fn apply_outcome(
             format!("negative run_ix {}", claimed.run_ix),
         ))
     })?;
-    apply(
-        &mut state,
-        &Command::SetRunState {
+    // **The `allowFailure:`/`allowWarning:` door for a RUNNABLE, and it is the
+    // worker's rather than `advance()`'s** -- W8 Task 5. The artifact puts it
+    // in the same place, `WorkerTaskProcessor`'s nominal path, between the
+    // handler's answer and `taskRun.withState(state)`; `advance()` is pure over
+    // `(plan, state, now)` and never sees a handler's outcome, so it could not
+    // hold this even if the division of labour were free to move.
+    //
+    // Only the RUN's state moves. The attempt already carries the handler's own
+    // terminal and keeps it, which is exactly what
+    // `valids/task-allow-failure-runnable`'s golden holds: a run ending
+    // `WARNING` over three attempts that all end `FAILED`.
+    let terminal =
+        crate::executor::allow_failure::for_runnable(&ctx.plan, &state, run, outcome.state, now);
+    // `SetRunState` while the two agree, so every run nobody wrote a flag on
+    // takes exactly the path it took before this task; `CompleteRun` only where
+    // they differ, because the attempt must keep the handler's own terminal.
+    let cmd = if terminal == outcome.state {
+        Command::SetRunState {
             run,
-            state: outcome.state,
-        },
-    );
+            state: terminal,
+        }
+    } else {
+        Command::CompleteRun {
+            run,
+            run_state: terminal,
+            attempt: Some(outcome.state),
+        }
+    };
+    apply(&mut state, &cmd);
     settle(
         conn,
         &ctx,

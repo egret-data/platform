@@ -41,6 +41,7 @@
 //! counts; `flowable::loop_` derives why it is a consequence of purity rather
 //! than a shortcut.
 
+pub(crate) mod allow_failure;
 mod command;
 mod flowable;
 mod plan;
@@ -6179,7 +6180,11 @@ tasks:
         round_at(&plan, &mut state, Tick(700)); // PAUSED, decided at a later now
 
         assert_eq!(state.runs[0].not_before, Some(Tick(1_500)));
-        assert_ne!(state.runs[0].not_before, Some(Tick(1_000)), "not the origin");
+        assert_ne!(
+            state.runs[0].not_before,
+            Some(Tick(1_000)),
+            "not the origin"
+        );
         assert_ne!(state.runs[0].not_before, Some(Tick(1_700)), "not `now`");
 
         // And the deadline DECIDES, rather than merely being stored: one tick
@@ -6216,13 +6221,27 @@ tasks:
                 "valids/pause-delay",
                 "SUCCESS",
                 vec!["pause", "last"],
-                vec!["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "SUCCESS"],
+                vec![
+                    "CREATED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RESTARTED",
+                    "RUNNING",
+                    "SUCCESS",
+                ],
             ),
             (
                 "valids/pause-timeout",
                 "FAILED",
                 vec!["pause"],
-                vec!["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "FAILED"],
+                vec![
+                    "CREATED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RESTARTED",
+                    "RUNNING",
+                    "FAILED",
+                ],
             ),
         ] {
             let plan = plan_of(id);
@@ -6268,7 +6287,14 @@ tasks:
         let (state, _) = run_to_fixpoint_passing_time(&plan, RunState::Success);
         assert_eq!(
             wire(&state.history),
-            ["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "SUCCESS"]
+            [
+                "CREATED",
+                "RUNNING",
+                "PAUSED",
+                "RESTARTED",
+                "RUNNING",
+                "SUCCESS"
+            ]
         );
         assert_eq!(
             wire(&state.runs[1].history),
@@ -6302,10 +6328,7 @@ tasks:
     fn an_unbounded_pause_never_resumes_itself() {
         for (label, src) in [
             ("no bound at all", pause_flow("")),
-            (
-                "valids/pause-test",
-                corpus_source("valids/pause-test"),
-            ),
+            ("valids/pause-test", corpus_source("valids/pause-test")),
         ] {
             let plan = build_plan(&src).unwrap_or_else(|e| panic!("{label}: {e}"));
             let paused: Vec<TaskIx> = (0..plan.tasks.len())
@@ -6490,9 +6513,12 @@ tasks:
         // The control.
         let src = pause_flow("    pauseDuration: PT1S\n");
         let plan = build_plan(&src).unwrap();
-        assert_eq!(plan.tasks[0].kind, TaskKind::Pause {
-            duration: Some("PT1S".to_string())
-        });
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Pause {
+                duration: Some("PT1S".to_string())
+            }
+        );
         let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
         assert!(
             !report
@@ -6555,8 +6581,14 @@ tasks:
             }
         }
         assert_eq!(run_ids(&plan, &state), ["both", "quick", "slow"]);
-        assert_eq!(wire(&state.runs[1].history), ["CREATED", "RUNNING", "PAUSED"]);
-        assert_eq!(wire(&state.runs[2].history), ["CREATED", "RUNNING", "PAUSED"]);
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "RUNNING", "PAUSED"]
+        );
         assert_eq!(
             wire(&state.history),
             ["CREATED", "RUNNING", "PAUSED"],

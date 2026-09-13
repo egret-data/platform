@@ -2082,10 +2082,7 @@ mod tests {
     fn a_pause_warns_only_for_the_properties_egret_does_not_run() {
         for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
             // Silent: both shapes this executor reproduces.
-            for (label, props) in [
-                ("unbounded", ""),
-                ("bounded", "    pauseDuration: PT1S\n"),
-            ] {
+            for (label, props) in [("unbounded", ""), ("bounded", "    pauseDuration: PT1S\n")] {
                 let yaml = format!(
                     "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n{props}"
                 );
@@ -2807,11 +2804,9 @@ mod tests {
         );
 
         // ---- direction 2: every `kind_for` arm has a row, by source --------
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/models/task.rs"
-        ))
-        .expect("read models/task.rs");
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/models/task.rs"))
+                .expect("read models/task.rs");
         let body = {
             let from = src.find("fn kind_for(").expect("kind_for still exists");
             let rest = &src[from..];

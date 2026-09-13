@@ -779,7 +779,7 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 176, 118),
+        (294, 179, 115),
         "294 = 176 matching + 118 baselined, the total beside its parts. It read \
          167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries and \
          W8 Task 4 banked `valids/waitfor-nested`"
@@ -853,9 +853,20 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
          counts. A scanner that read nothing would report every census below as \
          zero and look exactly like the truth"
     );
+    // **Twelve until W8 Task 5, thirteen now** -- and the set is asserted
+    // rather than the count precisely so that a thirteenth cannot arrive
+    // silently. `valids/task-allow-warning-executable-flow` is a `Subflow`
+    // whose `allowFailure: true` + `allowWarning: true` turn its failing
+    // child's terminal into `SUCCESS`, so it joined the matching side without
+    // anything about `Subflow` itself changing. The coverage statement's 16 is
+    // W6 Task 3's and stays 16: this is not one of its twelve.
+    let thirteen: BTreeSet<String> = twelve
+        .union(&["valids/task-allow-warning-executable-flow".to_string()].into())
+        .cloned()
+        .collect();
     assert_eq!(
-        sub_runs_matching, twelve,
-        "the twelve `Subflow` banks, DERIVED: every golden entry that declares a \
+        sub_runs_matching, thirteen,
+        "the `Subflow` banks, DERIVED: every golden entry that declares a \
          `Subflow`, that Kestra ran, and that egret now reproduces. If this set \
          grows, the coverage statement's 16 is stale and must be re-derived -- \
          which is the point of asserting the set rather than the count"
@@ -869,7 +880,7 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         "THE TRAP, asserted rather than avoided: one `Subflow`-declaring entry \
          matches and is NOT a W6 bank. Kestra refused it, egret refuses it too, \
          and it has matched since long before this package -- so `matching AND \
-         declares a Subflow` is 13, and the twelve is the `runs` half"
+         declares a Subflow` is 14, and the thirteen above is the `runs` half"
     );
     assert_eq!(
         (
@@ -878,11 +889,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
             sub_refused_matching.len(),
             sub_baselined.len()
         ),
-        (23, 12, 1, 10),
-        "23 `Subflow`-declaring golden entries = 12 banked + 1 refusal that \
-         always matched + 10 still baselined. The design spec's 22 was the \
-         BASELINED count before this package (22 = 12 + 10), which is a \
-         different population from this one"
+        (23, 13, 1, 9),
+        "23 `Subflow`-declaring golden entries = 13 reproduced + 1 refusal that \
+         always matched + 9 still baselined. It read `12 + 1 + 10` until W8 \
+         Task 5 moved `valids/task-allow-warning-executable-flow` across on its \
+         `allowWarning:`. The design spec's 22 was the BASELINED count before \
+         this package (22 = 12 + 10), which is a different population from this \
+         one"
     );
     assert_eq!(
         cne_matching, four,
@@ -2242,7 +2255,7 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
 /// at their loop run, and a run that never terminates has no right endpoint and
 /// so contributes no pair. Their bodies run now, banked or not. Neither task
 /// moves the nested figure -- no `LoopUntil` entry carries a `spawned`.
-const EGRET_TOP_LEVEL_PAIRS: usize = 613;
+const EGRET_TOP_LEVEL_PAIRS: usize = 617;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2327,7 +2340,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (286, 102, 388),
+        (291, 102, 393),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2335,7 +2348,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (591, 125, 716),
+        (586, 125, 711),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 744 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
@@ -2708,23 +2721,23 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 /// terminals plus the 7 `valids/waitfor-nested` carries, which leave the
 /// un-falsifiable half for the reported half. 840 is unchanged, because banking
 /// moves a run across the line rather than creating one.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 412;
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 405;
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
 /// **165 through W8 Task 2, 157 after W8 Task 3, 156 now** -- the eight `Pause`
 /// entries W8 Task 3 banked and the one `LoopUntil` entry W8 Task 4 banked,
 /// none of which carries a sub-execution, so each fall is exactly the count.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 156;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 153;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 now** -- 56 run-history
 /// tokens on Task 3's eight, and 37 on `valids/waitfor-nested`, whose seven runs
 /// include three loops reading `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING
 /// SUCCESS`.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1610;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1573;
 /// **665 through W8 Task 2, 617 after W8 Task 3, 562 now** -- 48
 /// execution-history tokens on Task 3's eight, i.e. six apiece (every one of
 /// them reads `CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>`), and 55 on
 /// `valids/waitfor-nested` alone, whose execution alternates `PAUSED`/`RUNNING`
 /// 26 times.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 562;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 547;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2842,7 +2855,7 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 9;
 /// than after. It was 791 because 12 `Subflow` entries that
 /// stalled at their first run now finish and the runs after them have
 /// endpoints.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 824;
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 828;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3929,17 +3942,17 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// **90 through W8 Task 2, 82 now**: all eight `Pause` entries W8 Task 3
 /// banked differed on their execution history (`PAUSED`/`RESTARTED` were never
 /// emitted), so every one of them leaves this count.
-const MISMATCH_ON_EXECUTION: usize = 81;
+const MISMATCH_ON_EXECUTION: usize = 78;
 /// **112 through W8 Task 2, 104 after W8 Task 3, 103 now** -- the same eight,
 /// then `valids/waitfor-nested`.
-const MISMATCH_ON_RUNS: usize = 103;
+const MISMATCH_ON_RUNS: usize = 100;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
 /// `loop_2_return`/`loop_3` and `loop_3_return`/`loop_3_log`, every one of them
 /// a pair between siblings that a bulk reset made `overlapping`. See
 /// `Command::RecreateRun`.
-const MISMATCH_ON_ORDER: usize = 64;
+const MISMATCH_ON_ORDER: usize = 61;
 const MISMATCH_ON_SPAWNED: usize = 15;
 /// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
 /// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
@@ -3949,7 +3962,7 @@ const MISMATCH_ON_SPAWNED: usize = 15;
 /// answers `false` for a typed kind, and `models::TaskKind::Pause` is one --
 /// as, since W8 Task 4, is `models::TaskKind::LoopUntil` for BOTH its
 /// spellings).
-const MISMATCHING_RUNS_ENTRIES: usize = 113;
+const MISMATCHING_RUNS_ENTRIES: usize = 110;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -5974,7 +5987,7 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "AllowFailure / allowFailure:",
-            12,
+            9,
             &[
                 "io.kestra.plugin.core.flow.AllowFailure",
                 "core.allowfailure",
@@ -6625,7 +6638,7 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (3, 115, 118),
+        (3, 112, 115),
         "the baselined population that declares a `timeout:`, and the rest. It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
@@ -6825,7 +6838,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         .partition(|id| baseline.contains(id.as_str()));
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
-        (10, 15, 25),
+        (9, 16, 25),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -6842,12 +6855,14 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/retry-with-flowable-errors",
             "valids/subflow-parent-retry",
             "valids/task-allow-failure-runnable",
-            "valids/task-allow-warning-runnable",
         ],
-        "the ten, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
-         and W6 Task 4 banked the four `retry-new-execution-*` entries out of \
-         the list -- which is the whole of the difference between fourteen and \
-         ten"
+        "the NINE, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
+         W6 Task 4 banked the four `retry-new-execution-*` entries out of the \
+         list -- which is the whole of the difference between fourteen and ten \
+         -- and W8 Task 5 took `valids/task-allow-warning-runnable` out of it, \
+         which is a `retry:` a bank has moved to the matching side for the \
+         first time since. Its three attempts all still fail; what moved is the \
+         run's own terminal after the last of them"
     );
 
     // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
@@ -6864,7 +6879,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (0, 10, 10),
+        (0, 9, 9),
         "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
          because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
          assertion under this used to name them; the successor is the matching \
@@ -6891,11 +6906,15 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             matching_new_execution.len(),
             matching.len()
         ),
-        (11, 4, 15),
+        (12, 4, 16),
         "the matching half, split the same way. It was (11, 0, 11): every \
          matching entry declared the behaviour that writes a `not_before`, and \
          W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \
-         is the FIRST time the ratchet speaks for that behaviour at all. \
+         is the FIRST time the ratchet speaks for that behaviour at all. W8 \
+         Task 5 moved a twelfth `RETRY_FAILED_TASK` one across, \
+         `valids/task-allow-warning-runnable`, whose `retry:` is exactly what \
+         gates its `allowFailure:` -- the first two failures are retried and \
+         only the third is softened. \
          failed_task: {matching_failed_task:?}; new_execution: \
          {matching_new_execution:?}"
     );
@@ -7156,11 +7175,7 @@ fn the_unbounded_pauses_are_absent_from_the_golden_and_the_ratchet_cannot_see_th
                 }
                 _ => false,
             };
-            here || t
-                .children()
-                .into_iter()
-                .chain(t.error_children())
-                .any(walk)
+            here || t.children().into_iter().chain(t.error_children()).any(walk)
         }
         let Ok(flow) = egret_workflow::spec::parse(source) else {
             return false;

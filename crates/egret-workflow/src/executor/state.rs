@@ -714,6 +714,21 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             r.not_before = resume.at();
             r.resume_with = Some(*resume);
         }
+        // W8 Task 5 -- the run and the attempt take DIFFERENT states, or the
+        // same one after the attempt has closed. See `Command::CompleteRun`
+        // for the two artifact shapes that need it and for why widening the
+        // `SetRunState` arm below instead would be wrong for every retry.
+        Command::CompleteRun {
+            run,
+            run_state,
+            attempt,
+        } => {
+            let r = &mut state.runs[*run];
+            r.history.push(*run_state);
+            if let (Some(s), Some(a)) = (attempt, r.attempts.last_mut()) {
+                a.history.push(*s);
+            }
+        }
         // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
         // halves are the two loops below. See `Command::RestartLoop`.
         Command::RestartLoop { run } => {

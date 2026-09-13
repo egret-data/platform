@@ -3928,14 +3928,24 @@ async fn transmit_failed_decides_what_a_failing_child_does_to_its_parent(pool: s
         ),
         (
             serde_json::json!(["CREATED", "RUNNING", "FAILED", "SUCCESS"]),
-            vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+            vec![serde_json::json!([
+                "CREATED", "RUNNING", "FAILED", "SUCCESS"
+            ])],
             Some("SUCCESS".to_string()),
             serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
         ),
         "transmitFailed OFF: the run takes the child's FAILED first and \
-         `guessState`'s SUCCESS after it -- the artifact's two-step. The ATTEMPT \
-         stops at FAILED, where the artifact's carries the SUCCESS too; that is \
-         `state::apply` rule 1 and it is unreachable from the corpus"
+         `guessState`'s SUCCESS after it -- the artifact's two-step, and the \
+         ATTEMPT now carries BOTH. **This assertion read \
+         `[CREATED, RUNNING, FAILED]` until W8 Task 5**, with a note saying the \
+         artifact's carries the SUCCESS too and that `state::apply` rule 1 made \
+         it unreachable from the corpus. Both halves were true when written and \
+         the second stopped being: `valids/task-allow-warning-executable-flow` \
+         is the corpus reaching exactly this shape, through `allowWarning:` \
+         rather than through `transmitFailed: false`, so \
+         `Command::CompleteRun` now writes the second state onto the closed \
+         attempt and `egret.probe/probe-notransmit-parent`'s measurement is \
+         reproduced rather than registered as a divergence"
     );
 }
 
