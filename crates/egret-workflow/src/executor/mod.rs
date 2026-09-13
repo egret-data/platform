@@ -6429,6 +6429,16 @@ tasks:
     /// end apart with `RUNNING` between, so the second `RESTARTED` is a
     /// separate event. A suppression keyed on "has this execution ever been
     /// restarted" would pass every other assertion here and be wrong.
+    ///
+    /// **It does NOT drive `pause_mark`'s suppression, and measuring that is
+    /// what found the hole.** Mutation M8 deleted the `if` and this test stayed
+    /// green: both pauses are reached by `drive_concurrent`'s rule 3 in ONE
+    /// round, so the batch carries two `PauseRun`s and `pause_mark` answers
+    /// once for it whether or not the guard is there. The round that can reach
+    /// the guard is one where a pause begins while the execution is ALREADY
+    /// `PAUSED`, which needs the two to begin in DIFFERENT rounds —
+    /// `a_second_pause_beginning_later_does_not_repeat_the_execution_state`
+    /// below.
     #[test]
     fn two_pauses_in_one_parallel_resume_independently() {
         let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: both\n    \
@@ -6499,6 +6509,103 @@ tasks:
              that one too would be inventing a rule that says an execution can \
              only be restarted once"
         );
+    }
+
+    /// **A second pause that begins a round LATER does not repeat the
+    /// execution's `PAUSED`**, which is the only round `pause_mark`'s
+    /// suppression can reach.
+    ///
+    /// **This test exists because mutation M8 survived without it.** Deleting
+    /// the `if state.history.last() != Some(&mark)` left the whole crate green:
+    /// `two_pauses_in_one_parallel_resume_independently` puts both pauses in
+    /// one batch, and `pause_mark` answers once per batch whatever the guard
+    /// says. A guard nobody has seen fail is a guard nobody has seen, and this
+    /// package has paid for that ten times.
+    ///
+    /// The fixture staggers them by nesting one inside a `Sequential`: the
+    /// sibling `Pause` is reached by `drive_concurrent`'s rule 3 immediately,
+    /// while the nested one needs two further rounds (the `Sequential` must go
+    /// `RUNNING`, then create and start its child), so the second `PauseRun` is
+    /// emitted in a round where the execution's last state is already `PAUSED`.
+    ///
+    /// The assertion is the whole history, and the `RESTARTED` half is the
+    /// control: it is NOT suppressed, because `RUNNING` sits between the two
+    /// resumes. A test asserting only "one PAUSED" would also pass under a
+    /// guard that suppressed everything.
+    #[test]
+    fn a_second_pause_beginning_later_does_not_repeat_the_execution_state() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: both\n    \
+                   type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                   - id: early\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   pauseDuration: PT3S\n      - id: wrapper\n        \
+                   type: io.kestra.plugin.core.flow.Sequential\n        tasks:\n          \
+                   - id: late\n            type: io.kestra.plugin.core.flow.Pause\n            \
+                   pauseDuration: PT1S\n";
+        let plan = build_plan(src).expect("plans");
+
+        // Drive by hand to the standstill so the ROUNDS can be inspected, which
+        // is what this test is about.
+        let mut state = ExecutionState::new(&plan);
+        let mut marks: Vec<(usize, Vec<&'static str>)> = Vec::new();
+        for r in 0..12 {
+            let cmds = round_at(&plan, &mut state, T0);
+            if cmds.is_empty() {
+                break;
+            }
+            let emitted: Vec<&'static str> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    Command::SetExecutionState { state } => Some(state.wire()),
+                    _ => None,
+                })
+                .collect();
+            let paused = cmds
+                .iter()
+                .filter(|c| matches!(c, Command::PauseRun { .. }))
+                .count();
+            if paused > 0 {
+                marks.push((r, emitted));
+            }
+        }
+
+        // The fixture must actually stagger them, or it is the parallel test
+        // again under a different name.
+        assert_eq!(
+            marks.len(),
+            2,
+            "two rounds must each emit exactly one `PauseRun`: {marks:?}"
+        );
+        assert_ne!(marks[0].0, marks[1].0, "they must be DIFFERENT rounds");
+        assert_eq!(
+            marks[0].1,
+            ["PAUSED"],
+            "the first pause moves the execution: {marks:?}"
+        );
+        assert_eq!(
+            marks[1].1,
+            Vec::<&str>::new(),
+            "the second does NOT, because the execution is already PAUSED — \
+             this is the round `pause_mark`'s suppression exists for, and \
+             mutation M8 survives without it: {marks:?}"
+        );
+
+        let (state, _) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+        assert_eq!(
+            wire(&state.history),
+            [
+                "CREATED",
+                "RUNNING",
+                "PAUSED",
+                "RESTARTED",
+                "RUNNING",
+                "RESTARTED",
+                "RUNNING",
+                "SUCCESS"
+            ],
+            "one PAUSED — and TWO RESTARTED, which is the control: the guard \
+             suppresses an immediate repeat and nothing else"
+        );
+        assert_eq!(run_ids(&plan, &state), ["both", "early", "wrapper", "late"]);
     }
 
     /// Every `pauseDuration:` and `timeout:` written on a corpus `Pause`, and
