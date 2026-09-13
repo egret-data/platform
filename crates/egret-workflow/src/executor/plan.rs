@@ -212,8 +212,9 @@ pub struct PlanTask {
     /// it would conclude the `If`/`Switch`/`Dag` arms do not exist.
     ///
     /// **The types that really are left out are `Loop` and every opaque one,
-    /// and only one of those is a gap.** `AllowFailure`, `LoopUntil` (and its
-    /// alias `WaitFor`), `Pause` and `WorkingDirectory` are planned
+    /// and only one of those is a gap.** `AllowFailure`, `LoopUntil` (and
+    /// `WaitFor`, which is Kestra's alias for it and **not** egret's — see
+    /// [`build_plan`]), `Pause` and `WorkingDirectory` are planned
     /// [`TaskKind::Runnable`], so their children
     /// get no run and a field on them would indeed be unreadable.
     /// **This sentence omitted `LoopUntil`**, which is opaque for the same
@@ -693,7 +694,8 @@ const SUBFLOW_TYPE: &str = "subflow";
 /// there and its children are not — and so stays honestly baselined.
 ///
 /// That opacity is applied to `AllowFailure`, `WorkingDirectory` and
-/// `LoopUntil` (alias `WaitFor`) too, even
+/// `LoopUntil` (`WaitFor` is Kestra's alias for it; egret's model does not
+/// carry the alias — see below) too, even
 /// though each would "work" if mapped to
 /// [`TaskKind::Sequential`]. `AllowFailure` turns a child's failure into
 /// `WARNING`, which `RunState` cannot hold; `WorkingDirectory` hands its whole
@@ -713,6 +715,26 @@ const SUBFLOW_TYPE: &str = "subflow";
 /// enumeration is derived by
 /// `executor::tests::every_other_flowable_stays_opaque`; this prose agrees with
 /// that test and not the other way round.
+///
+/// **`WaitFor` is in the fourth tier, not in the three, and W8 Task 1 fix
+/// round 4 is what measured it.** `models::kind_for` matches
+/// `Some("loopuntil")` and has no row for `"waitfor"`; neither does
+/// `spec::validate`'s `KESTRA_FLOW_CONTROL`. So
+/// `io.kestra.plugin.core.flow.WaitFor` parses to `ModelKind::Leaf` with its
+/// `tasks:` inside the opaque `spec`, exactly like `Pause` — the alias is
+/// Kestra's and egret's model does not have it. Every sentence in this crate
+/// saying `build_plan` plans `WaitFor` opaque stays **true**, because both
+/// tiers are planned [`TaskKind::Runnable`] and the plan is byte-identical
+/// either way; what was wrong was only which tier it is in, and the
+/// derivation above could not see it for the same reason — the two tiers
+/// agree on everything the plan records. The probe that found it is the one
+/// that DECLARES which `models::TaskKind` arm it means to reach. The model
+/// divergence is real below the plan (a `Leaf` has no `children()`, a
+/// `LoopUntil` does, and `children()` is what `spec::validate`,
+/// `publish::resolve_all` and `worker::claim` walk) and is **not fixed
+/// here**: W8 Task 1 is a test-and-docs change, `kind_for` is production, and
+/// no corpus entry can show it because no `WaitFor` flow's children reach a
+/// plan either way.
 pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let flow = crate::spec::parse(source).map_err(|e| PlanError {
         message: match (e.line, e.column) {

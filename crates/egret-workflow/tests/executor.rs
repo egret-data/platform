@@ -4821,14 +4821,30 @@ fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
     //
     // **The population here is DECLARERS, and the class the control argues
     // about is "executions a CANCEL limit could have cancelled".** Those are
-    // not the same set, and two corpus entries sit in the gap:
-    // `valids/flow-concurrency-subflow` runs a `Subflow` of
-    // `valids/flow-concurrency-cancel`, so a SECOND execution runs under that
-    // CANCEL limit while declaring none itself (golden
-    // `CREATED RUNNING SUCCESS`, not baselined); and
-    // `valids/trigger-flow-listener-with-concurrency-limit` listens on
-    // `trigger-flow-with-concurrency-limit`'s `QUEUED`/`RUNNING`/`SUCCESS`.
-    // Neither would be seen by the scan below. **The conclusion survives
+    // not the same set, and two corpus entries sit outside the scan below --
+    // **for two DIFFERENT reasons, which the wording this comment carried
+    // until W8 Task 1 fix round 4 merged into one by saying both "sit in the
+    // gap":**
+    //
+    // * `valids/flow-concurrency-subflow` runs a `Subflow` of
+    //   `valids/flow-concurrency-cancel`, so a SECOND execution runs under
+    //   that CANCEL limit while declaring none itself (golden
+    //   `CREATED RUNNING SUCCESS`, not baselined). It is in the gap of the
+    //   class named above, exactly.
+    // * `valids/trigger-flow-listener-with-concurrency-limit` listens on
+    //   `trigger-flow-with-concurrency-limit`'s `QUEUED`/`RUNNING`/`SUCCESS`.
+    //   That flow declares **`behavior: QUEUE`**, not `CANCEL`, so the
+    //   listener is **not** in the gap of "executions a CANCEL limit could
+    //   have cancelled" -- no CANCEL limit is anywhere near it. It is in the
+    //   gap of a wider class, "executions related to a limit", and it earns
+    //   its place in this comment as the `QUEUED` witness, which is what the
+    //   sentence below already says it is.
+    //
+    // The wording came verbatim from the review that raised this, so it is a
+    // conflation adopted rather than one invented -- and adopting a sentence
+    // without re-deriving it is the error this task has recorded six times.
+    //
+    // Neither entry would be seen by the scan below. **The conclusion survives
     // because it does not rest on this scan**: the first assertion above pins
     // the whole `CANCELLED` set by name, over every entry, so a cancel landing
     // on a non-declarer would have been caught there. The two are named here so

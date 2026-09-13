@@ -2882,14 +2882,24 @@ mod tests {
     /// wrong trace.
     ///
     /// **This doc named those two and the loop below has always driven four**,
-    /// which is the doc-contradicted-by-its-own-test shape. The four rows are
-    /// three `models::TaskKind` variants (`WaitFor` and `LoopUntil` are one),
-    /// and they are **exactly** the typed variants `build_plan`'s `match` has
-    /// no arm for — which is what makes this test the enumeration every prose
-    /// list of the opaque types is checked against. `Subflow` was a fifth until
-    /// W6 Task 3 gave it [`TaskKind::Executable`]; a type that reaches
-    /// `ModelKind::Leaf` instead (`Pause`) is opaque for a different reason and
-    /// is not this test's subject.
+    /// which is the doc-contradicted-by-its-own-test shape.
+    ///
+    /// This doc then said the four rows are *"three `models::TaskKind`
+    /// variants (`WaitFor` and `LoopUntil` are one), and they are **exactly**
+    /// the typed variants `build_plan`'s `match` has no arm for"*. **W8 Task 1
+    /// fix round 4 measured that and it is false**, by the probe-declares-its-
+    /// arm assertion below: `models::kind_for` knows `"loopuntil"` and has no
+    /// row for `"waitfor"` at all, so the four rows are **four** variants —
+    /// `AllowFailure`, `WorkingDirectory`, `LoopUntil`, and `Leaf` for the
+    /// `WaitFor` spelling — and the fourth is the untyped catch-all rather
+    /// than a typed variant with no arm. The three typed variants with no arm
+    /// are `AllowFailure`, `WorkingDirectory` and `LoopUntil`. What survives
+    /// is the conclusion this test exists for: all four are planned
+    /// [`TaskKind::Runnable`], which is why every prose list of the opaque
+    /// types is still checked against this test. `Subflow` was a fifth row
+    /// until W6 Task 3 gave it [`TaskKind::Executable`]; a type that reaches
+    /// `ModelKind::Leaf` instead (`Pause`) is opaque for a different reason
+    /// and is not this test's subject.
     ///
     /// The `Sequential` row is the control: the same YAML, one word different,
     /// comes out the other way. Without it this test would pass against a
@@ -2933,6 +2943,24 @@ mod tests {
             );
         }
 
+        // The YAML for the typed flowables whose shape `branch` cannot
+        // produce. They are bound here rather than written inline at their
+        // assertions below because the classifier probe loop drives the SAME
+        // sources: a probe that has drifted away from the control it claims to
+        // share a flow with is a probe that stopped testing what it says.
+        let dag_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n";
+        let loop_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n";
+        let if_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ inputs.p }}\"\n    then:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n";
+        let switch_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{ inputs.p }}\"\n    cases:\n      A:\n        - id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n";
+        // The `Subflow` probe. It is NOT `branch`'s shape: a `Subflow` declares
+        // `namespace:`/`flowId:` and takes no `tasks:` at all, which is the
+        // corpus shape (`valids/flow-concurrency-subflow.yml`) and the whole
+        // reason it lands in a tier of its own.
+        let subflow_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Subflow\n    namespace: io.kestra.tests\n    flowId: child\n";
+        // And a `Leaf`, so the arm that catches everything Kestra calls a task
+        // is driven by a probe rather than assumed.
+        let leaf_src = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.debug.Return\n    format: x\n";
+
         // **m3: this test is called "the derivation" in three shipped docs, and
         // until W8 Task 1 fix round 3 it was four literal strings in a `for`.**
         // A new typed `models::TaskKind` variant with no `build_plan` arm would
@@ -2940,10 +2968,61 @@ mod tests {
         // sweep method that found the stale lists. The match below is the
         // derivation the name claims: it is **exhaustive over
         // `models::TaskKind`**, so adding a variant is a COMPILE error here and
-        // whoever adds it must classify it. `Leaf` is the second tier -- a
-        // Kestra flowable `kind_for` does not model (`Pause`) lands there and is
-        // opaque for a different reason, which is why it answers `false` too.
-        fn build_plan_descends_into(kind: &crate::models::TaskKind) -> bool {
+        // whoever adds it must classify it.
+        //
+        // # Fix round 4 (I1): it is three-valued, because `build_plan` is
+        //
+        // Round 3 shipped this classifier as a `bool` -- "are this kind's
+        // children flattened into the plan?" -- asserted against
+        // `plan.tasks.len() > 1` for five probes out of eleven arms. The arm
+        // `K::Subflow(_) => true` was among the six never compared, and it is
+        // **false**: `plan.rs`'s `Subflow` arm says so itself (*"It takes no
+        // children: a `Subflow` runs a DIFFERENT flow"*), assigns
+        // [`TaskKind::Executable`] and calls no `flatten_list`, so the plan
+        // holds one task and the predicate is `false`. A short probe list
+        // AGREES with a wrong table -- and only that direction is
+        // consequential, because a shorter list matches every subset of the
+        // table it certifies and nothing goes red. That is the same
+        // lost-member asymmetry `plan.rs`'s census records, this time sitting
+        // **inside the guard built to stop the previous instance of it**.
+        //
+        // The defect is a design gap and not a slip. `build_plan`'s outcome
+        // space is **three-valued**:
+        //
+        // * [`TaskKind::Runnable`] -- opaque; the executor hands it to a
+        //   worker. Two different reasons land here (a genuine leaf, and a
+        //   Kestra flowable `build_plan` has no arm for), and this tier does
+        //   not separate them because `build_plan` does not.
+        // * [`TaskKind::Executable`] -- the executor runs it itself, and it
+        //   takes no children because its children belong to a **different
+        //   flow**. **W6 Task 3 created this tier** and `Subflow` is its only
+        //   member, which is exactly why `Subflow` is the one construct a
+        //   `bool` cannot express.
+        // * a typed kind whose children were flattened into the plan.
+        //
+        // A bare `K::Subflow(_) => false` would have made the test green and
+        // true under the old predicate, and would have classified `Subflow`
+        // identically to the opaque four -- discarding the W6 Task 3
+        // distinction this task exists to keep. It matters forward as well:
+        // Kestra has further `ExecutableTask` implementations and the README's
+        // `ExecutableUpdatableTask` row anticipates more arriving, so a `bool`
+        // gate would force the next one into `true` or `false` with both
+        // wrong.
+        #[derive(Debug, PartialEq, Eq)]
+        enum PlannedAs {
+            /// [`TaskKind::Runnable`].
+            Opaque,
+            /// [`TaskKind::Executable`] -- W6 Task 3's middle tier.
+            Executable,
+            /// A typed kind; `build_plan` descended and flattened its children.
+            Descends,
+        }
+
+        // Exhaustive over the MODEL. Adding a `models::TaskKind` variant is a
+        // compile error here, and the author must now say which of the three
+        // tiers it is planned into rather than answer a yes/no question that
+        // has no right answer for the middle one.
+        fn classify(kind: &crate::models::TaskKind) -> PlannedAs {
             use crate::models::TaskKind as K;
             match kind {
                 K::Sequential(_)
@@ -2951,31 +3030,194 @@ mod tests {
                 | K::If(_)
                 | K::Switch(_)
                 | K::Dag(_)
-                | K::Loop(_)
-                | K::Subflow(_) => true,
-                K::LoopUntil(_) | K::AllowFailure(_) | K::WorkingDirectory(_) => false,
-                K::Leaf { .. } => false,
+                | K::Loop(_) => PlannedAs::Descends,
+                K::Subflow(_) => PlannedAs::Executable,
+                K::LoopUntil(_) | K::AllowFailure(_) | K::WorkingDirectory(_) => PlannedAs::Opaque,
+                K::Leaf { .. } => PlannedAs::Opaque,
             }
         }
 
-        // And it is asserted against `build_plan` rather than left as a table:
-        // for every probe above, the classifier and the builder must agree.
-        for ty in [
-            "io.kestra.plugin.core.flow.AllowFailure",
-            "io.kestra.plugin.core.flow.WorkingDirectory",
-            "io.kestra.plugin.core.flow.WaitFor",
-            "io.kestra.plugin.core.flow.LoopUntil",
-            "io.kestra.plugin.core.flow.Sequential",
-        ] {
-            let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
-            let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
-            assert_eq!(
-                build_plan_descends_into(&flow.tasks[0].kind),
-                plan.tasks.len() > 1,
-                "{ty}: the exhaustive classifier and `build_plan` disagree about \
-                 whether this kind is descended into"
-            );
+        // Exhaustive over the PLAN, and it is a second gate rather than a
+        // restatement of the first: the tier is read off the plan VARIANT, not
+        // off `plan.tasks.len() > 1`. The length predicate cannot tell
+        // `Executable` from `Runnable` at all, and it would also call a
+        // `Sequential` with an empty `tasks:` opaque. A new `plan::TaskKind`
+        // variant is a compile error here too.
+        fn observed(kind: &TaskKind) -> PlannedAs {
+            match kind {
+                TaskKind::Runnable { .. } => PlannedAs::Opaque,
+                TaskKind::Executable { .. } => PlannedAs::Executable,
+                TaskKind::Sequential { .. }
+                | TaskKind::Parallel { .. }
+                | TaskKind::If { .. }
+                | TaskKind::Switch { .. }
+                | TaskKind::Dag { .. }
+                | TaskKind::Loop { .. } => PlannedAs::Descends,
+            }
         }
+
+        // The arm each kind falls into, so probe COVERAGE can be asserted
+        // instead of counted. A figure ("all eleven are probed") beside a
+        // derivation is the thing this task keeps correcting; a set compared
+        // against a set is not.
+        fn arm_name(kind: &crate::models::TaskKind) -> &'static str {
+            use crate::models::TaskKind as K;
+            match kind {
+                K::Sequential(_) => "Sequential",
+                K::Parallel(_) => "Parallel",
+                K::If(_) => "If",
+                K::Switch(_) => "Switch",
+                K::Dag(_) => "Dag",
+                K::Loop(_) => "Loop",
+                K::LoopUntil(_) => "LoopUntil",
+                K::Subflow(_) => "Subflow",
+                K::AllowFailure(_) => "AllowFailure",
+                K::WorkingDirectory(_) => "WorkingDirectory",
+                K::Leaf { .. } => "Leaf",
+            }
+        }
+
+        // Every one of the eleven arms is driven against `build_plan` here, and
+        // each probe DECLARES the arm it means to reach, so that a probe which
+        // does not reach it fails rather than passes.
+        //
+        // **That declaration found a false sentence on its first run, which is
+        // why it is here and not a formality.** This test's own doc said the
+        // four rows above are *"three `models::TaskKind` variants (`WaitFor`
+        // and `LoopUntil` are one)"*. They are not one.
+        // `models::kind_for` matches `Some("loopuntil")` and nothing else, and
+        // `"waitfor"` appears in **no** table in this crate -- not `kind_for`,
+        // not `spec::validate`'s `KESTRA_FLOW_CONTROL` -- so
+        // `io.kestra.plugin.core.flow.WaitFor` parses to
+        // [`crate::models::TaskKind::Leaf`], not to `LoopUntil`. The alias is
+        // Kestra's; egret's model does not have it.
+        //
+        // Nothing above could have caught that, and neither could a
+        // three-valued classifier on its own: `Leaf` and `LoopUntil` are both
+        // planned [`TaskKind::Runnable`], so the plan is byte-identical either
+        // way and every prose list saying *"`build_plan` plans `WaitFor`
+        // opaque"* stays true. Only a probe that says which arm it is aiming at
+        // can see it. The `WaitFor` row is kept, declared as the `Leaf` it
+        // actually reaches, precisely because the doc claimed otherwise --
+        // and the divergence in the MODEL (a `Leaf` has no `children()`, a
+        // `LoopUntil` does) is recorded as a finding rather than fixed here:
+        // W8 Task 1 is a test-and-docs change and `kind_for` is production.
+        let probes: [(&str, String); 12] = [
+            (
+                "AllowFailure",
+                branch("io.kestra.plugin.core.flow.AllowFailure"),
+            ),
+            (
+                "WorkingDirectory",
+                branch("io.kestra.plugin.core.flow.WorkingDirectory"),
+            ),
+            // Kestra's alias; egret's model has no row for it, so it is a
+            // `Leaf`. See the paragraph above.
+            ("Leaf", branch("io.kestra.plugin.core.flow.WaitFor")),
+            ("LoopUntil", branch("io.kestra.plugin.core.flow.LoopUntil")),
+            (
+                "Sequential",
+                branch("io.kestra.plugin.core.flow.Sequential"),
+            ),
+            ("Parallel", branch("io.kestra.plugin.core.flow.Parallel")),
+            ("If", if_src.to_string()),
+            ("Switch", switch_src.to_string()),
+            ("Dag", dag_src.to_string()),
+            ("Loop", loop_src.to_string()),
+            ("Subflow", subflow_src.to_string()),
+            ("Leaf", leaf_src.to_string()),
+        ];
+        let mut arms_probed: BTreeSet<&'static str> = BTreeSet::new();
+        for (declared, src) in &probes {
+            let flow = crate::spec::parse(src).unwrap_or_else(|e| panic!("{declared}: {e:?}"));
+            let plan = build_plan(src).unwrap_or_else(|e| panic!("{declared}: {e}"));
+            let arm = arm_name(&flow.tasks[0].kind);
+            assert_eq!(
+                arm, *declared,
+                "this probe no longer reaches the `models::TaskKind` arm it was \
+                 written for, so it is not testing what the coverage set below \
+                 counts it as testing"
+            );
+            assert_eq!(
+                classify(&flow.tasks[0].kind),
+                observed(&plan.tasks[0].kind),
+                "{declared}: the exhaustive classifier and `build_plan` disagree \
+                 about which of the three tiers this kind is planned into"
+            );
+            arms_probed.insert(arm);
+        }
+
+        // **The coverage gate, and it is the whole lesson of I1.** Round 3's
+        // table was eleven arms and its probe list was five; the five agreed
+        // with the table and six arms -- one of them wrong -- were never
+        // compared with anything. So the set of arms actually driven above is
+        // compared against the set `arm_name` names, rather than trusted.
+        //
+        // What this does NOT close, stated rather than left implicit: the
+        // expected list below is itself a written list, so a twelfth
+        // `models::TaskKind` variant added, classified in all three `match`es
+        // and left out of BOTH this list and `probes` would still be
+        // unasserted. The compile gate forces the classification; it cannot
+        // force a probe, because a probe needs a YAML shape only the author of
+        // the variant knows. The mitigation is adjacency: `arm_name`'s match is
+        // twenty lines up, and the two lists are read together.
+        assert_eq!(
+            arms_probed.iter().copied().collect::<Vec<_>>(),
+            [
+                "AllowFailure",
+                "Dag",
+                "If",
+                "Leaf",
+                "Loop",
+                "LoopUntil",
+                "Parallel",
+                "Sequential",
+                "Subflow",
+                "Switch",
+                "WorkingDirectory",
+            ],
+            "every arm of the exhaustive classifier must be compared against \
+             `build_plan` by a probe; a probe list shorter than the table it \
+             certifies agrees with a wrong table"
+        );
+
+        // And the three tiers must all be REACHED, so the assertion above
+        // cannot be satisfied by a classifier that answers one thing for
+        // everything.
+        let tiers: BTreeSet<&str> = probes
+            .iter()
+            .map(|(_, src)| {
+                let plan = build_plan(src).expect("probe must plan");
+                match observed(&plan.tasks[0].kind) {
+                    PlannedAs::Opaque => "Opaque",
+                    PlannedAs::Executable => "Executable",
+                    PlannedAs::Descends => "Descends",
+                }
+            })
+            .collect();
+        assert_eq!(
+            tiers.iter().copied().collect::<Vec<_>>(),
+            ["Descends", "Executable", "Opaque"],
+            "all three of `build_plan`'s outcomes must be exercised, or the \
+             three-valued classifier is a two-valued one wearing an enum"
+        );
+
+        // The `Subflow` tier, spelled out once rather than only reached through
+        // the loop: this is the fact round 3's `bool` could not represent.
+        let plan = build_plan(subflow_src).expect("the Subflow probe must plan");
+        assert_eq!(
+            plan.tasks.len(),
+            1,
+            "a `Subflow` takes no children: its tasks run in the CHILD execution"
+        );
+        assert_eq!(
+            plan.tasks[0].kind,
+            TaskKind::Executable {
+                type_id: "io.kestra.plugin.core.flow.Subflow".to_string()
+            },
+            "and it is `Executable`, not `Runnable` -- the distinction W6 Task 3 \
+             created and the one a `len() > 1` predicate cannot see"
+        );
 
         let plan = build_plan(&branch("io.kestra.plugin.core.flow.Sequential"))
             .expect("the control must plan");
@@ -2999,10 +3241,7 @@ mod tests {
             },
             "a Parallel flattens its children too, as of Task 4"
         );
-        let plan = build_plan(
-            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
-        )
-        .expect("the control must plan");
+        let plan = build_plan(dag_src).expect("the control must plan");
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::Dag {
@@ -3017,10 +3256,7 @@ mod tests {
         // Task 6's, and the one whose children are flattened and then never
         // run: a `Loop` body gets a `PlanTask` so that W3b can execute the
         // sub-execution, and no `CreateRun` in THIS execution ever names it.
-        let plan = build_plan(
-            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Loop\n    values: '[\"a\"]'\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-        )
-        .expect("the control must plan");
+        let plan = build_plan(loop_src).expect("the control must plan");
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::Loop {
@@ -3040,10 +3276,7 @@ mod tests {
         // dispatch the three above use -- which reaches each of them from four
         // spellings, not from the FQCN alone. This comment said "the FQCN
         // only" and was true of the builder until the final review.
-        let plan = build_plan(
-            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.If\n    condition: \"{{ inputs.p }}\"\n    then:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
-        )
-        .expect("the control must plan");
+        let plan = build_plan(if_src).expect("the control must plan");
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::If {
@@ -3053,10 +3286,7 @@ mod tests {
             },
             "an If flattens both branches, as of Task 5"
         );
-        let plan = build_plan(
-            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Switch\n    value: \"{{ inputs.p }}\"\n    cases:\n      A:\n        - id: inner\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
-        )
-        .expect("the control must plan");
+        let plan = build_plan(switch_src).expect("the control must plan");
         assert_eq!(
             plan.tasks[0].kind,
             TaskKind::Switch {
