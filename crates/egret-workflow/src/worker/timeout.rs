@@ -97,24 +97,36 @@
 //! opaque `TaskKind::Runnable`s, so a `Pause` carrying a `timeout:` is
 //! claimable by this worker.
 //!
-//! **This list named `Subflow` first until W8 Task 1 fix round 1**, and it had
-//! been false since W6 Task 3 made a `Subflow` a `TaskKind::Executable` — whose
-//! `type_id` is never written, so the claim cannot take one at all. It is worth
-//! recording where the correction came from: W8 Task 1 swept every list in this
-//! crate enumerating the opaque types, **certified this one as the only correct
-//! list, and did so from a transcription that had silently dropped `Subflow`**.
-//! It was wrong in exactly the way the seven it caught were wrong. The census
-//! is **eight lists, seven disagreed, none correct**. Three of the four baselined entries that declare a `timeout:`
+//! Three of the four baselined entries that declare a `timeout:`
 //! are exactly that — `valids/pause-timeout`,
 //! `valids/pause-timeout-allow-failure`,
 //! `valids/pause-errors-finally-after-execution` — and a `Pause`'s timeout is
 //! `advance()`'s, not this module's (`executor::plan::PlanTask::timeout` cites
 //! the artifact for it).
 //!
-//! Today nothing reaches that hazard: no handler is registered for `Pause`, so
-//! the claim aborts with [`WorkerError::NoHandler`](super::WorkerError) before
-//! any budget is applied, and the budget wraps `Registry::run` rather than
-//! replacing it, so the refusal still wins. **A special case here would be a
+//! **This list named `Subflow` first until W8 Task 1 fix round 1**, and it had
+//! been false since W6 Task 3 made a `Subflow` a `TaskKind::Executable` — whose
+//! `type_id` is never written, so the claim cannot take one at all. Where the
+//! correction came from is worth recording: W8 Task 1 swept every list in this
+//! crate enumerating the opaque types, **certified this one as the only correct
+//! prose list, and did so from a transcription that had silently dropped
+//! `Subflow`**. It was wrong in exactly the way the seven it caught were wrong.
+//! The census is **eight lists — seven prose and the derivation they are
+//! checked against — and all seven prose lists disagreed.**
+//!
+//! Today nothing reaches that hazard, and **not for the reason this paragraph
+//! used to give.** It said the claim aborts with `NoHandler` *"before any
+//! budget is applied"*, which its own next clause contradicted: the budget is
+//! applied **first**. `claim::run_one` calls `cancel::guarded`, which is
+//! `timeout::guard(budget, reg.run(task))` — the guard **wraps** the run
+//! future rather than gating it — and the instrumented oracle measured the
+//! budget applied **4** times, **three of them `Pause`es**
+//! (`oracle-exec/README.md`, and `tests/executor.rs` derives the same three).
+//! What actually stops the hazard is what happens inside that wrapper: no
+//! handler is registered for `Pause`, so `Registry::run` refuses with
+//! [`WorkerError::NoHandler`](super::WorkerError), and because the guard wraps
+//! rather than replaces it the refusal still wins — the budget expired **0**
+//! times. **A special case here would be a
 //! guard nobody could ever see fail**, which is the trap this package has
 //! caught ten times, so the hazard is written down instead: whoever implements
 //! `Pause` must decide where its `timeout:` is enforced, and must not inherit

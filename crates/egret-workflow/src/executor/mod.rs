@@ -4752,8 +4752,19 @@ tasks:
     ///
     /// The check is in [`flowable::open`], before the flowable is descended
     /// into at all, so this holds for every kind — it is asserted on a
-    /// `Sequential` because a `Subflow` is planned opaque and could not tell
-    /// the difference.
+    /// `Sequential` because a `Sequential` is the cheapest kind that really
+    /// has children in the plan to count.
+    ///
+    /// **This sentence said "because a `Subflow` is planned opaque and could
+    /// not tell the difference" until W8 Task 1 fix round 2**, and that had
+    /// been false since W6 Task 3 gave `Subflow` a [`TaskKind::Executable`].
+    /// It mattered more than a stale name because it was the stated *reason*
+    /// for the test's design — a reader checking whether the choice of kind
+    /// still holds would have been checking a fact that no longer exists.
+    /// W8 Task 1's own opacity sweep missed it: that sweep looked for lists
+    /// that *enumerate* the opaque types, and this is a single construct named
+    /// inside an argument. The needle that finds it is every `opaque` in the
+    /// tree, tense-read for each `Subflow` near one.
     #[test]
     fn a_skipped_flowable_creates_no_children_and_leaves_its_parent_successful() {
         let plan = build_plan(

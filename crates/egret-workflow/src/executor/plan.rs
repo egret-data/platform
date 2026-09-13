@@ -220,14 +220,32 @@ pub struct PlanTask {
     /// reason as the other two typed ones and stalls nine baselined entries;
     /// W8 Task 1 swept every list in this crate that claims to enumerate the
     /// opaque types against `every_other_flowable_stays_opaque`, which is the
-    /// derivation. **Eight lists, seven disagreed, and none was correct**:
-    /// three omit `LoopUntil` and four still name `Subflow`, which stopped being
+    /// derivation. **Eight lists — seven prose and the derivation they are
+    /// checked against — and all seven prose lists disagreed**: three omit
+    /// `LoopUntil` and four still name `Subflow`, which stopped being
     /// opaque at W6 Task 3. This sentence first read "six disagreed … only
-    /// `worker::timeout`'s module doc had it right", and that eighth list was
-    /// the one the sweep never re-read — it names `Subflow` too. **The sweep's
-    /// own headline was an instance of the class it was sweeping for**, and the
-    /// rule it broke is the one this programme already has: check the artefact,
-    /// not your transcription of it. **`Loop` is
+    /// `worker::timeout`'s module doc had it right", and then "none correct",
+    /// which contradicted itself — the eighth list is the derivation and it is
+    /// correct by construction. `worker::timeout` was the one list the sweep
+    /// never re-read, and it names `Subflow` too. **The sweep's
+    /// own headline was an instance of the class it was sweeping for.**
+    ///
+    /// **The mechanism is worth more than the instance, because it is ordinary:
+    /// `grep` prints LINES and a prose list WRAPS.** `Subflow` ended
+    /// `timeout.rs`'s line 95 and every needle the sweep searched for —
+    /// `WorkingDirectory`, `AllowFailure`, `Pause` — sat on line 96, so the
+    /// match printed line 96 and the list's first member was never on screen.
+    /// Nothing was truncated; the line was 79 characters. A needle set drawn
+    /// from the members you expect cannot see a member you do not.
+    ///
+    /// **And the structural half predicts WHICH list will be wrong**:
+    /// `worker::timeout` is the only list-bearing file the sweep did not edit,
+    /// so the one list it merely *classified* is the one that was wrong. The
+    /// asymmetry is why that is not a coincidence — **a transcription that
+    /// loses a member can acquit a wrong list, and only the acquittal is
+    /// consequential.** Losing a legitimate member instead convicts a correct
+    /// list, which costs a second look and nothing else. Re-read the lists you
+    /// are not changing first. **`Loop` is
     /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
     /// `errors` field, so **four** corpus flows' lists are invisible here:
     /// `valids/all-flowable`, `valids/finally-loop`,

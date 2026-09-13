@@ -238,17 +238,21 @@ struct Leaf<'a> {
 /// `Subflow` is [`crate::executor::TaskKind::Executable`] now, `type_id` below
 /// is written only for a `Runnable`, and the claim's own
 /// `WHERE type_id IS NOT NULL` therefore cannot take one. The arm is still a
-/// case — the **three** above are still opaque — but the count was measured
-/// with `Subflow` in the set and has not been re-derived since.
+/// case — the **three** named above are still opaque — but the count was
+/// measured with `Subflow` in the set and has not been re-derived since.
 ///
-/// **`Pause` is NOT one of them, and W8 Task 1's first attempt put it here.**
+/// **`Pause` is NOT one of those three, and W8 Task 1's first attempt put it
+/// among them.**
 /// It is plan-opaque like the three, but `models::TaskKind` has no `Pause`
 /// variant, so it reaches `TaskKind::Leaf` and **this function returns
 /// `Some`** — a perfectly ordinary leaf with an opaque `spec`. What stops it is
 /// the *next* gate: no handler is registered for `io.kestra.plugin.core.flow.Pause`,
-/// so the tick aborts with [`WorkerError::NoHandler`], which `worker::timeout`'s
-/// module doc has always said. Swapping one false member for another is the
-/// same defect twice; the two refusals are different refusals. It is
+/// so the tick aborts with [`WorkerError::NoHandler`] instead.
+/// `worker::timeout`'s module doc reaches the same conclusion — but its
+/// reasoning for it was wrong until W8 Task 1 fix round 2 (it said the refusal
+/// came *before* the budget; the budget is applied first), so it is cited here
+/// as agreeing, not as the authority. Swapping one false member for another is
+/// the same defect twice; the two refusals are different refusals. It is
 /// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
 /// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.

@@ -1609,7 +1609,7 @@ task that owns it:
 |---|---|---|
 | `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
 | `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
-| `WARNING` | 10 | **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key**, it declares `allowFailure:` and nothing else — and it ended with the word "Unclaimed", the owner the cell had just overturned. `warningOnRetry` is `valids/retry-success`'s alone |
+| `WARNING` | 10 | **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key** (it declares `allowFailure: true` and a 3-attempt `retry: {type: constant, interval: PT0.100S, maxAttempts: 3}`) — and it ended with the word "Unclaimed", the owner the cell had just overturned. **Two** of the ten declare `warningOnRetry`: `valids/retry-success` and `valids/allow-failure-with-retry`. (Fix round 1's replacement said "`allowFailure:` and nothing else" and "`retry-success`'s alone", losing the `retry:` and the second declarer — a transcription that lost a member, inside the commit whose headline is a transcription that lost a member. Corrected in fix round 2) |
 | `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's |
 
 `SKIPPED` was a fifth row, 4 entries, credited first to `disabled: true` (wrong)
@@ -3121,17 +3121,34 @@ limit's. A row like that is not merely too big: it makes the construct look
 reachable *because the state really is there*, for another reason, and a
 programme budgeting entries against it budgets against nothing.
 
-**The zero is proved by one count, and that count is the primary evidence.**
-**`QUEUED` occurs zero times in `golden.json`** — over every execution history,
-run history, attempt history and sub-execution. It is in `harvest.py`'s
-`STATE_TYPES`, the vocabulary every captured state is validated against, and
-`normalise.py`'s rule 4 keeps history sequences **verbatim**, so a queued run
-would have reached the golden had one ever existed. `QUEUED` is the only state a
-limit's default `behavior: QUEUE` produces. So this is not "the oracle could not
-see a limit fire": **no concurrency limit ever fired in this corpus at all.**
-That is one check a running program makes, and
-`the_cancelled_state_never_comes_from_a_concurrency_limit` makes it, with a
-two-sided half so the count cannot be vacuous.
+**No limit ever fired, and it takes three instruments to say so — one per
+`behavior`.** The thirteen declarers are **10 `QUEUE`, 2 `CANCEL`, 1 `FAIL`**,
+and each behaviour leaves a different trace, so no single count covers all
+thirteen:
+
+- **`QUEUE` (10).** **`QUEUED` occurs zero times in `golden.json`** — over every
+  execution history, run history, attempt history and sub-execution. It is in
+  `harvest.py`'s `STATE_TYPES`, the vocabulary every captured state is validated
+  against, and `normalise.py`'s rule 4 keeps history sequences **verbatim**, so
+  a queued run would have reached the golden had one existed. `QUEUED` is the
+  only state a `QUEUE` produces, so zero is not "the oracle could not see it" —
+  it is *it did not happen*.
+- **`CANCEL` (2).** Covered by the `CANCELLED` derivation above:
+  `valids/flow-concurrency-cancel` and `…-cancel-pause` are the only flows
+  writing `behavior: CANCEL`, and neither golden holds a `CANCELLED`.
+- **`FAIL` (1).** Covered by neither of those, and **a count of `FAILED` could
+  not cover it** — 609 of them are in the golden for every other reason. What
+  covers it is that `valids/flow-concurrency-fail` is one of the **seven
+  declarers that already MATCH**: egret implements no concurrency whatsoever,
+  so an entry egret reproduces exactly is an entry whose limit did not fire.
+  The ratchet asserts that match, and the `(13, 7)` assertion below names the
+  population.
+
+**Fix round 2 wrote this out.** The first version said the `QUEUED` zero proved
+"no concurrency limit ever fired at all". The conclusion is true and all three
+legs above hold, but `QUEUED` alone can only see `QUEUE` behaviour — a claim
+true for a reason wider than its stated evidence, which is the same defect as a
+figure written beside a derivation.
 
 **And the zero has a mechanism rather than being an absence** — the count says
 *that* no limit fired, these say *why*, which a count cannot. Three legs, each
@@ -7204,10 +7221,13 @@ worker and DOES get a worker budget applied** — `build_plan` plans `Pause`,
 `TaskKind::Runnable`s, which Kestra's worker never sees. (This sentence named
 `Subflow` as a fifth; W6 Task 3 made it a `TaskKind::Executable`, whose
 `type_id` is never written, so it is not claimable at all. Corrected by W8 Task
-1's sweep of every list enumerating the opaque types — **eight of them, seven
-wrong, none right**. The sweep's first census said six, because it certified
-`worker::timeout`'s list correct from a transcription that had dropped
-`Subflow`; that list names `Subflow` too, and was corrected in fix round 1.) Nothing reaches the
+1's sweep of every list enumerating the opaque types — **eight of them: seven
+prose lists, all seven wrong, plus the derivation they are checked against**.
+The sweep's first census said six, because it certified `worker::timeout`'s
+list correct from a transcription that had dropped `Subflow`; that list names
+`Subflow` too, and was corrected in fix round 1. The transcription lost the
+member because `grep` prints lines and the list **wrapped** — `Subflow` ended
+one line and every needle sat on the next.) Nothing reaches the
 hazard today (no handler is registered for `Pause`, so `Registry::run` refuses
 before any budget can expire), and it is written down in `worker::timeout`'s
 module doc rather than special-cased, because a special case there would be a

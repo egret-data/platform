@@ -4669,23 +4669,35 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
 ///   that simply contained no cancelling limit, which is a different fact and a
 ///   much weaker one.
 ///
-/// # The one fact that subsumes the mechanism: `QUEUED` never occurs
+/// # `QUEUED` never occurs — and what that does and does not cover
 ///
-/// Added in fix round 1, and it is the primary evidence because it is a single
-/// check a running program makes rather than three arguments a reader has to
-/// accept. **`QUEUED` occurs zero times in `golden.json`.** It is in
-/// `harvest.py`'s `STATE_TYPES` — the vocabulary the harvester validates every
-/// captured state against — and `normalise.py`'s rule 4 keeps history state
-/// sequences **verbatim**, so a queued run would have survived into the golden
-/// had one ever happened. `QUEUED` is the *only* state a limit's default
-/// `behavior: QUEUE` produces. Zero occurrences is therefore not "we could not
-/// see it": it is **no concurrency limit ever fired in this corpus**, which is
-/// a strictly stronger statement than the three legs below and does not depend
-/// on any of them.
+/// **`QUEUED` occurs zero times in `golden.json`.** It is in `harvest.py`'s
+/// `STATE_TYPES` — the vocabulary the harvester validates every captured state
+/// against — and `normalise.py`'s rule 4 keeps history state sequences
+/// **verbatim**, so a queued run would have survived into the golden had one
+/// ever happened. Zero is therefore not "we could not see it"; it is *it did
+/// not happen*.
 ///
-/// The three legs are kept as the **mechanism** — they say *why* it never
-/// fired, which the count alone cannot: the harness drives flows serially, the
-/// single self-contending flow is banked, and 7 of 13 declarers already match.
+/// **But it can only see `QUEUE` behaviour, and fix round 1 over-claimed from
+/// it.** That version said the zero proved "no concurrency limit ever fired at
+/// all". The conclusion is true; the stated evidence did not reach it. The 13
+/// declarers are **10 `QUEUE`, 2 `CANCEL`, 1 `FAIL`**, and it takes one
+/// instrument per behaviour:
+///
+/// - the **10 `QUEUE`** are the `QUEUED` zero above;
+/// - the **2 `CANCEL`** are the `CANCELLED` control below — `flow-concurrency-cancel`
+///   and `…-cancel-pause` are the only flows writing `behavior: CANCEL` and
+///   neither golden holds a `CANCELLED`;
+/// - the **1 `FAIL`** (`valids/flow-concurrency-fail`) is covered by neither,
+///   and **a count of `FAILED` could not cover it** — the golden holds 609 of
+///   them for other reasons. What covers it is that this flow is one of the
+///   **7 declarers that already MATCH**, asserted below: egret implements no
+///   concurrency at all, so an entry it reproduces exactly is an entry whose
+///   limit did not fire.
+///
+/// The three legs are kept as the **mechanism** — they say *why* no limit ever
+/// fired, which no count can: the harness drives flows serially, the single
+/// self-contending flow is banked, and 7 of 13 declarers already match.
 ///
 /// **What this evidence does not contain**, named rather than generalised over:
 /// it says nothing about whether Kestra's `concurrency: {behavior: CANCEL}`
