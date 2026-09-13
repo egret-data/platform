@@ -941,19 +941,37 @@ fn fail(state: &mut ExecutionState, ix: RunIx) {
 
 /// The unrendered expression a planned task holds, by kind.
 ///
-/// Three kinds hold one: an `If`'s `condition`, a `Switch`'s `value` and a
-/// `Loop`'s `values`.
+/// Four kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
+/// `values` and — W8 Task 3 — a `Pause`'s `pauseDuration:`.
+///
+/// **The `Pause` arm is narrower than the other three**, and deliberately: it
+/// offers the expression only when the source does NOT already parse as an
+/// ISO-8601 literal. Every other kind's expression has to be rendered whatever
+/// it says, but `pauseDuration: PT1S` is a complete answer on its own, and
+/// `executor::flowable::pause` reads it without waiting for a render. Putting a
+/// literal `Pause` into this population would cost nothing on the oracle (the
+/// render is the identity for a source with no `{`) and would make the run's
+/// `rendered` slot non-`None` for 11 of the 12 baselined `Pause` entries, which
+/// is a stored field nothing reads and something can later disagree with.
 fn expression_of(plan: &Plan, task: usize) -> Option<String> {
     match &plan.tasks.get(task)?.kind {
         TaskKind::If { condition, .. } => Some(condition.clone()),
         TaskKind::Switch { value, .. } => Some(value.clone()),
         TaskKind::Loop { values, .. } => Some(values.clone()),
+        TaskKind::Pause {
+            duration: Some(source),
+        } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
         _ => None,
     }
 }
 
 /// The run state at which this task's expression is rendered — see
 /// [`render_expressions`] for the measurement.
+///
+/// A `Pause` takes the `RUNNING` default with the `If` and the `Switch`, and
+/// that is forced rather than chosen: its `pauseDuration:` is measured from
+/// [`TaskRun::attempt_started_at`](crate::executor::TaskRun::attempt_started_at),
+/// so the attempt has to be open before the answer is worth anything.
 fn renders_at(plan: &Plan, task: usize) -> RunState {
     match plan.tasks.get(task).map(|t| &t.kind) {
         Some(TaskKind::Loop { .. }) => RunState::Created,

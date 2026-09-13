@@ -49,8 +49,8 @@ mod state;
 
 pub use command::Command;
 pub use plan::{
-    build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay, RetryPolicy, TaskIx,
-    TaskKind,
+    build_plan, pause_gap, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay,
+    RetryPolicy, TaskIx, TaskKind,
 };
 pub use state::{apply, Attempt, ExecutionMeta, ExecutionState, RunIx, RunState, TaskRun, Tick};
 
@@ -119,7 +119,17 @@ use flowable::{sequential, Step};
 /// | field | filled when the run is | for |
 /// |---|---|---|
 /// | [`TaskRun::rendered_run_if`](crate::executor::TaskRun::rendered_run_if) | `CREATED` | the task's `runIf:`, if [`PlanTask::run_if`] is `Some` — W3c |
-/// | [`TaskRun::rendered`](crate::executor::TaskRun::rendered) | `CREATED` for a `Loop`, `RUNNING` for an `If`/`Switch` | that flowable's own expression — Tasks 5-6 |
+/// | [`TaskRun::rendered`](crate::executor::TaskRun::rendered) | `CREATED` for a `Loop`, `RUNNING` for an `If`/`Switch`/`Pause` | that flowable's own expression — Tasks 5-6, and W8 Task 3's `pauseDuration:` |
+///
+/// **`Pause` is the fourth kind to use the second slot and it needed no new
+/// field**, which is the whole of W8 Task 3's answer to "does the render slot
+/// change `advance()`'s contract": it does not. The contract is *(plan, state,
+/// now) -> commands* with the caller filling two named fields, and a
+/// `pauseDuration:` expression is a fourth reader of a field that already
+/// exists, at a state that is already in the table. A `Pause` whose
+/// `pauseDuration:` is a literal never enters the population at all — see
+/// [`flowable::pause`] — so the flows that stall on an unanswered render are
+/// exactly the flows whose author wrote an expression.
 ///
 /// **An unanswered render is [`Waiting`](flowable::Step::Waiting), not an
 /// error, and that is the trap.** A caller that never fills `rendered_run_if`
@@ -184,6 +194,29 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // `… FAILED RETRYING …`, never `… RETRYING FAILED …`.
     work.extend(retry::scan(plan, state, now));
 
+    // **The execution's `PAUSED`/`RESTARTED`, answered once for the whole
+    // batch.** W8 Task 3.
+    //
+    // A pause writes its own run's state and nothing else
+    // ([`flowable::pause`]); the execution's half is here because a `Parallel`
+    // of two `Pause`es enters both in ONE batch, and an emission per run puts
+    // `PAUSED` into the execution's history twice. No golden execution history
+    // repeats a state, for any construct, in any of its 408 entries.
+    //
+    // **What is measured and what is chosen.** That a paused execution reads
+    // `PAUSED` and a resumed one `RESTARTED` is measured — 18 and 12 of the
+    // golden's execution histories, shape `CREATED RUNNING PAUSED RESTARTED
+    // RUNNING …`. What Kestra does with TWO pauses is not: no corpus flow
+    // declares two in one execution
+    // (`the_corpus_has_no_execution_with_two_pauses`), so answering once is a
+    // choice against an unmeasured artifact, taken because a repeated state is
+    // a shape nothing in the golden has.
+    if let Some(mark) = pause_mark(state, &work) {
+        if state.history.last() != Some(&mark) {
+            work.insert(0, Command::SetExecutionState { state: mark });
+        }
+    }
+
     // # `not_running_yet` is Kestra's `isCreated()`, and it is narrower by `RESTARTED`
     //
     // **W8 Task 2, and its population is 12 rather than 0.** Kestra's
@@ -194,11 +227,13 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // `CREATED RUNNING PAUSED RESTARTED RUNNING …`, so the transition this arm
     // would have to make is measured, not hypothetical.
     //
-    // It is left narrow because nothing emits `SetExecutionState { Restarted }`
-    // yet, and a branch no test can drive is the over-acceptance this programme
-    // forbids. **Whoever emits it must widen this comparison**, or a resumed
-    // execution never re-enters `RUNNING` and every one of those twelve
-    // diverges on its execution history.
+    // **W8 Task 3 widened it, and is the producer Task 2 said would have to.**
+    // `flowable::pause::resume` emits `SetExecutionState { Restarted }` when a
+    // bounded pause's wait ends, so the arm below now reads Kestra's
+    // `isCreated()` exactly. Without the `Restarted` half a resumed execution
+    // stops at `CREATED RUNNING PAUSED RESTARTED` and never re-enters
+    // `RUNNING`; `a_resumed_pause_re_enters_running` is the test, and reverting
+    // this one term is mutation M-P3.
     //
     // The sibling rule — `apply`'s rule 2, which clears a run's renders on
     // re-entering `CREATED` — is narrow for a *different* reason and the two
@@ -206,7 +241,10 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // **0 of 840 run histories**, because `RESTARTED` is execution-only in this
     // corpus. Mutating rule 2 to include `Restarted` survives the whole suite;
     // mutating this one will not, once a producer exists.
-    let not_running_yet = state.history.last() == Some(&RunState::Created);
+    let not_running_yet = matches!(
+        state.history.last(),
+        Some(&RunState::Created) | Some(&RunState::Restarted)
+    );
     let has_a_run = !state.runs.is_empty();
     let terminating = matches!(
         work.first(),
@@ -220,6 +258,43 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
         return cmds;
     }
     work
+}
+
+/// Which execution state, if any, this batch of commands owes — W8 Task 3.
+///
+/// `Paused` if the batch enters a pause, `Restarted` if it ends one. Read off
+/// the commands rather than off the state, because both facts are decisions
+/// [`flowable::pause`] has already taken and re-deriving them here would be a
+/// second opinion about which runs are pausing.
+///
+/// **A batch cannot owe both**, and that is structural rather than lucky: a run
+/// that is `RUNNING` this round is entered, a run that is `PAUSED` is resumed,
+/// and `sequential::walk` returns at the FIRST child that wants something while
+/// `parallel::drive_concurrent`'s rule 3 reaches a given run through exactly
+/// one arm. `Paused` is tested first so that a future caller which did produce
+/// both would pause rather than resume, which is the half that cannot
+/// over-accept.
+fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
+    if work.iter().any(|c| matches!(c, Command::PauseRun { .. })) {
+        return Some(RunState::Paused);
+    }
+    // "This batch ends a pause" is read as "it sets the state of a run that is
+    // `PAUSED` right now", which is exact: `Command::PauseRun` is the only
+    // producer of that state and `flowable::pause::resume` is the only thing
+    // that moves a run out of it. Matching on the command's own state instead
+    // would have to guess, because a pause ends `SUCCESS` or `FAILED`
+    // depending on which bound was written and both are ordinary terminals
+    // everywhere else.
+    work.iter()
+        .any(|c| match c {
+            Command::SetRunState { run, .. } => state
+                .runs
+                .get(*run)
+                .and_then(|r| r.history.last())
+                .is_some_and(|s| *s == RunState::Paused),
+            _ => false,
+        })
+        .then_some(RunState::Restarted)
 }
 
 #[cfg(test)]
@@ -518,6 +593,19 @@ mod tests {
                             "{corpus_id}: runnable {} must pass through SUBMITTED",
                             plan.tasks[run.task].id
                         );
+                    }
+                    // W8 Task 3's fourth tier. No flow in the list above
+                    // declares one -- a `Pause` does not terminate under
+                    // `run_to_fixpoint_rendering`, which never moves the clock
+                    // -- and `a_pause_enters_paused_without_putting_it_on_the_
+                    // attempt` asserts the same discriminator for it directly.
+                    // The arm is here because the `match` is exhaustive and a
+                    // catch-all would silently stop counting the next kind.
+                    TaskKind::Pause { .. } => {
+                        panic!(
+                            "{corpus_id}: a `Pause` reached this fixture, which never \
+                             moves the clock, so it cannot assert anything about one"
+                        )
                     }
                     TaskKind::Executable { .. } => {
                         executables += 1;
@@ -3038,15 +3126,43 @@ mod tests {
             Executable,
             /// A typed kind; `build_plan` descended and flattened its children.
             Descends,
+            /// A typed kind the executor drives ITSELF and whose children are
+            /// not in the plan -- W8 Task 3's [`TaskKind::Pause`], its only
+            /// member.
+            ///
+            /// **A fourth tier, for the reason `Subflow` needed a third.** A
+            /// `Pause` is not `Opaque` (no worker ever sees it and no `Pause`
+            /// run in the golden carries `SUBMITTED`), not `Executable` (it
+            /// spawns nothing), and not `Descends` (`plan.tasks.len()` is 1).
+            /// Folding it into any of the three would discard exactly the
+            /// distinction that decides whether a `type_id` is written, which
+            /// is what decides whether the worker claims it at all.
+            Waits,
         }
 
         // Exhaustive over the MODEL. Adding a `models::TaskKind` variant is a
         // compile error here, and the author must now say which of the three
         // tiers it is planned into rather than answer a yes/no question that
         // has no right answer for the middle one.
-        fn classify(kind: &crate::models::TaskKind) -> PlannedAs {
+        //
+        // # `Pause` is the one arm whose tier depends on the task's CONTENT
+        //
+        // Every other kind is planned into one tier whatever it says. A
+        // `Pause` is planned [`TaskKind::Pause`] only when it declares none of
+        // the four properties `build_plan` does not reproduce, and an opaque
+        // `Runnable` otherwise -- so this arm has to ask the same question
+        // `build_plan` asks, through the same `pause_gap`, or the two would be
+        // two opinions about which pauses are reproduced.
+        //
+        // **That makes this ONE arm weaker than the others and it is said out
+        // loud rather than left for a reader to assume.** A shared predicate
+        // cannot catch a wrong predicate; what it still catches is a wrong
+        // TIER, which is the thing this test is named for, and a `Pause`
+        // probe is driven from BOTH sides of `pause_gap` below so that neither
+        // outcome is the one nobody compares.
+        fn classify(task: &crate::models::Task) -> PlannedAs {
             use crate::models::TaskKind as K;
-            match kind {
+            match &task.kind {
                 K::Sequential(_)
                 | K::Parallel(_)
                 | K::If(_)
@@ -3054,6 +3170,8 @@ mod tests {
                 | K::Dag(_)
                 | K::Loop(_) => PlannedAs::Descends,
                 K::Subflow(_) => PlannedAs::Executable,
+                K::Pause(p) if pause_gap(p).is_none() => PlannedAs::Waits,
+                K::Pause(_) => PlannedAs::Opaque,
                 K::LoopUntil(_) | K::AllowFailure(_) | K::WorkingDirectory(_) => PlannedAs::Opaque,
                 K::Leaf { .. } => PlannedAs::Opaque,
             }
@@ -3075,6 +3193,7 @@ mod tests {
                 | TaskKind::Switch { .. }
                 | TaskKind::Dag { .. }
                 | TaskKind::Loop { .. } => PlannedAs::Descends,
+                TaskKind::Pause { .. } => PlannedAs::Waits,
             }
         }
 
@@ -3095,6 +3214,7 @@ mod tests {
                 K::Subflow(_) => "Subflow",
                 K::AllowFailure(_) => "AllowFailure",
                 K::WorkingDirectory(_) => "WorkingDirectory",
+                K::Pause(_) => "Pause",
                 K::Leaf { .. } => "Leaf",
             }
         }
@@ -3124,7 +3244,14 @@ mod tests {
         // and the divergence in the MODEL (a `Leaf` has no `children()`, a
         // `LoopUntil` does) is recorded as a finding rather than fixed here:
         // W8 Task 1 is a test-and-docs change and `kind_for` is production.
-        let probes: [(&str, String); 12] = [
+        // The two `Pause` probes. **Both**, because `pause_gap` has two
+        // outcomes and a probe list holding only one of them would leave the
+        // other classified by nothing -- which is exactly the lost-member
+        // asymmetry this test's own doc records one tier up.
+        let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
+        let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: FAIL\n";
+
+        let probes: [(&str, String); 14] = [
             (
                 "AllowFailure",
                 branch("io.kestra.plugin.core.flow.AllowFailure"),
@@ -3147,6 +3274,8 @@ mod tests {
             ("Dag", dag_src.to_string()),
             ("Loop", loop_src.to_string()),
             ("Subflow", subflow_src.to_string()),
+            ("Pause", pause_plain.to_string()),
+            ("Pause", pause_with_behavior.to_string()),
             ("Leaf", leaf_src.to_string()),
         ];
         let mut arms_probed: BTreeSet<&'static str> = BTreeSet::new();
@@ -3161,7 +3290,7 @@ mod tests {
                  counts it as testing"
             );
             assert_eq!(
-                classify(&flow.tasks[0].kind),
+                classify(&flow.tasks[0]),
                 observed(&plan.tasks[0].kind),
                 "{declared}: the exhaustive classifier and `build_plan` disagree \
                  about which of the three tiers this kind is planned into"
@@ -3193,6 +3322,7 @@ mod tests {
                 "Loop",
                 "LoopUntil",
                 "Parallel",
+                "Pause",
                 "Sequential",
                 "Subflow",
                 "Switch",
@@ -3214,14 +3344,15 @@ mod tests {
                     PlannedAs::Opaque => "Opaque",
                     PlannedAs::Executable => "Executable",
                     PlannedAs::Descends => "Descends",
+                    PlannedAs::Waits => "Waits",
                 }
             })
             .collect();
         assert_eq!(
             tiers.iter().copied().collect::<Vec<_>>(),
-            ["Descends", "Executable", "Opaque"],
-            "all three of `build_plan`'s outcomes must be exercised, or the \
-             three-valued classifier is a two-valued one wearing an enum"
+            ["Descends", "Executable", "Opaque", "Waits"],
+            "all FOUR of `build_plan`'s outcomes must be exercised, or the \
+             four-valued classifier is a three-valued one wearing an enum"
         );
 
         // The `Subflow` tier, spelled out once rather than only reached through
@@ -5805,5 +5936,762 @@ tasks:
             "`scan` gates on `TaskKind::Runnable`, so a flowable is never retried"
         );
         assert!(state.runs[0].not_before.is_none());
+    }
+    // ----------------------------------------------------------------------
+    // `Pause` — W8 Task 3
+    // ----------------------------------------------------------------------
+
+    /// [`round`], at a `now` the caller chooses.
+    ///
+    /// `round` pins `T0`, which is the right default for every rule that does
+    /// not read the clock and the wrong one for every rule that does: with
+    /// `now` fixed at `Tick(0)` a deadline of `started + d`, of `Tick(0) + d`
+    /// and of `now + d` are the SAME NUMBER, and a fixture that cannot tell
+    /// three rules apart cannot testify about any of them.
+    fn round_at(plan: &Plan, state: &mut ExecutionState, now: Tick) -> Vec<Command> {
+        let cmds = advance(plan, state, now);
+        for cmd in &cmds {
+            apply(state, cmd);
+        }
+        cmds
+    }
+
+    /// Drive `advance` to a fixed point **with a clock that moves the way
+    /// `oracle-exec/driver.rs::pass_time` moves it**, completing every
+    /// `Runnable` that goes `Running` with `outcome`.
+    ///
+    /// Returns the final state and the `now` it ended at.
+    ///
+    /// A fixed `now` cannot testify about a `Pause` at all, and the first draft
+    /// of these tests learned that the hard way: with the clock pinned, the
+    /// attempt opens at `now` and the deadline is `now + d`, so **every**
+    /// bounded pause is still waiting whatever number is chosen. The
+    /// environment has to do what the driver does — when nothing else can move,
+    /// jump to the EARLIEST deadline still ahead, and never further.
+    ///
+    /// `pass_time` reads `not_before_ms` with **no state term**, so this reads
+    /// `TaskRun::not_before` with none either: a fixture that only woke runs it
+    /// believed were paused would be asserting its own belief. An unbounded
+    /// pause writes no `not_before`, which is exactly why nothing here can
+    /// wake one.
+    fn run_to_fixpoint_passing_time(plan: &Plan, outcome: RunState) -> (ExecutionState, Tick) {
+        let mut state = ExecutionState::new(plan);
+        let mut now = T0;
+        for _ in 0..1000 {
+            if !round_at(plan, &mut state, now).is_empty() {
+                continue;
+            }
+            let in_flight = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+            });
+            if let Some(ix) = in_flight {
+                apply(
+                    &mut state,
+                    &Command::SetRunState {
+                        run: ix,
+                        state: outcome,
+                    },
+                );
+                continue;
+            }
+            // `driver::pass_time`: the earliest deadline still ahead of `now`,
+            // over every run, with no state term at all.
+            match state
+                .runs
+                .iter()
+                .filter_map(|r| r.not_before)
+                .filter(|t| *t > now)
+                .min()
+            {
+                Some(next) => now = next,
+                None => return (state, now),
+            }
+        }
+        panic!("did not settle in 1000 rounds");
+    }
+
+    /// A one-task flow whose `Pause` carries exactly `props`.
+    fn pause_flow(props: &str) -> String {
+        format!(
+            "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: gate\n    \
+             type: io.kestra.plugin.core.flow.Pause\n{props}  - id: after\n    \
+             type: io.kestra.plugin.core.debug.Return\n    format: done\n"
+        )
+    }
+
+    /// **`PAUSED` goes on the run and NOT on the attempt**, which is the one
+    /// thing `Command::PauseRun` exists for.
+    ///
+    /// Derived rather than remembered: `PAUSED` is in 20 of the golden's 840
+    /// run histories and **0** of its 878 attempt histories
+    /// (`the_golden_populations_are_derived_recursed_and_unrecursed` pins the
+    /// denominators), and `valids/pause-delay` is that shape — run
+    /// `CREATED RUNNING PAUSED SUCCESS`, attempt `CREATED RUNNING SUCCESS`.
+    ///
+    /// Four things are asserted here and each has a rule that would break it
+    /// alone: the attempt (a plain `SetRunState` would carry `PAUSED` onto it),
+    /// the absence of `SUBMITTED` (planning a `Pause` `Runnable` would emit
+    /// one), the execution's own `PAUSED`, and `not_before` (a bound written
+    /// nowhere means the environment never learns the clock has to move).
+    #[test]
+    fn a_pause_enters_paused_without_putting_it_on_the_attempt() {
+        let plan = plan_of("valids/pause-delay");
+        let state = run_to_fixpoint(&plan, RunState::Success);
+
+        assert_eq!(
+            run_ids(&plan, &state),
+            ["pause"],
+            "the successor must not be created while the pause is still paused"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "the run takes PAUSED"
+        );
+        assert_eq!(
+            wire(&state.runs[0].attempts[0].history),
+            ["CREATED", "RUNNING"],
+            "the attempt does not: 0 of the golden's 878 attempt histories hold PAUSED"
+        );
+        assert_eq!(state.runs[0].attempts.len(), 1, "one attempt, still open");
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "the execution takes PAUSED in the same round the run does"
+        );
+        assert_eq!(
+            state.runs[0].not_before,
+            Some(Tick(1_000)),
+            "`pauseDuration: PT1S` off an attempt that started at Tick(0)"
+        );
+    }
+
+    /// **The wait is measured from the attempt's start, not from the
+    /// execution's origin and not from the round the pause is entered in.**
+    ///
+    /// The three rules are separated by construction. The attempt opens at
+    /// `Tick(500)`, the pause is entered at `Tick(700)`, and `pauseDuration` is
+    /// `PT1S`, so:
+    ///
+    /// | rule | deadline |
+    /// |---|---|
+    /// | `attempt_started_at + d` | **1500** |
+    /// | `Tick(0) + d` | 1000 |
+    /// | `now + d` | 1700 |
+    ///
+    /// Every one of the three is a plausible implementation and only one of
+    /// them is 1500. With the clock pinned at `T0` all three read 1000, which
+    /// is why [`round_at`] exists.
+    #[test]
+    fn the_wait_is_measured_from_the_attempt_and_not_from_the_execution_origin() {
+        let plan = plan_of("valids/pause-delay");
+        let mut state = ExecutionState::new(&plan);
+
+        round_at(&plan, &mut state, Tick(500)); // CreateRun
+        round_at(&plan, &mut state, Tick(500)); // RUNNING, attempt opens at 500
+        assert_eq!(
+            state.runs[0].attempt_started_at(),
+            Some(Tick(500)),
+            "the fixture has not set up the thing it is about to measure"
+        );
+        round_at(&plan, &mut state, Tick(700)); // PAUSED, decided at a later now
+
+        assert_eq!(state.runs[0].not_before, Some(Tick(1_500)));
+        assert_ne!(state.runs[0].not_before, Some(Tick(1_000)), "not the origin");
+        assert_ne!(state.runs[0].not_before, Some(Tick(1_700)), "not `now`");
+
+        // And the deadline DECIDES, rather than merely being stored: one tick
+        // short of it the pause holds, and on it the pause ends.
+        let mut short = state.clone();
+        assert!(
+            advance(&plan, &short, Tick(1_499)).is_empty(),
+            "a pause one tick short of its deadline must not move"
+        );
+        round_at(&plan, &mut short, Tick(1_500));
+        assert_eq!(
+            wire(&short.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+        );
+    }
+
+    /// **Which bound was written decides the terminal**, and the two flows that
+    /// say so differ in nothing else.
+    ///
+    /// `valids/pause-delay` and `valids/pause-timeout` are both a `Pause`
+    /// followed by a `core.debug.Return`, both bounded at one second, and their
+    /// goldens differ on every field the bound touches: the run ends `SUCCESS`
+    /// against `FAILED`, the execution ends `SUCCESS` against `FAILED`, and the
+    /// successor has a run in one and no run at all in the other.
+    ///
+    /// The successor is asserted because it is the half a terminal-only
+    /// assertion would miss: a `timeout:` that ended the pause `SUCCESS` would
+    /// still produce two runs and a `SUCCESS` execution, i.e. exactly
+    /// `pause-delay`'s trace under `pause-timeout`'s flow.
+    #[test]
+    fn the_bound_that_was_written_decides_the_terminal() {
+        for (id, terminal, runs, execution) in [
+            (
+                "valids/pause-delay",
+                "SUCCESS",
+                vec!["pause", "last"],
+                vec!["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "SUCCESS"],
+            ),
+            (
+                "valids/pause-timeout",
+                "FAILED",
+                vec!["pause"],
+                vec!["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "FAILED"],
+            ),
+        ] {
+            let plan = plan_of(id);
+            let (state, ended_at) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+            assert_eq!(
+                ended_at,
+                Tick(1_000),
+                "{id}: both flows bound the pause at one second, so the clock \
+                 must have been moved to exactly that deadline and no further"
+            );
+            assert_eq!(run_ids(&plan, &state), runs, "{id}: runs");
+            assert_eq!(
+                wire(&state.runs[0].history),
+                ["CREATED", "RUNNING", "PAUSED", terminal],
+                "{id}: the pause run"
+            );
+            assert_eq!(
+                wire(&state.runs[0].attempts[0].history),
+                ["CREATED", "RUNNING", terminal],
+                "{id}: the attempt takes the terminal and never the PAUSED"
+            );
+            assert_eq!(wire(&state.history), execution, "{id}: the execution");
+        }
+    }
+
+    /// **A resumed execution re-enters `RUNNING`, and it does so through
+    /// `RESTARTED`.**
+    ///
+    /// W8 Task 2 left `advance`'s not-running-yet arm narrower than Kestra's
+    /// `isCreated()` — `CREATED` only, where Kestra's is `CREATED ||
+    /// RESTARTED` — and wrote down that whoever emitted `RESTARTED` would have
+    /// to widen it. This is that test: with the `Restarted` term removed the
+    /// execution stops at `… PAUSED RESTARTED` and never takes `RUNNING` again,
+    /// and `last` is never created because `advance` returns before the walk.
+    ///
+    /// The assertion is the WHOLE history rather than a `contains`, because
+    /// `RESTARTED` appearing somewhere is not the claim — the claim is that it
+    /// appears once, between the pause and the re-run, which is the shape all
+    /// twelve of the golden's `RESTARTED` executions have.
+    #[test]
+    fn a_resumed_pause_re_enters_running() {
+        let plan = plan_of("valids/pause-delay");
+        let (state, _) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED", "RESTARTED", "RUNNING", "SUCCESS"]
+        );
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "the successor is an ordinary `Runnable` and is submitted like one"
+        );
+    }
+
+    /// **A `Pause` with neither `pauseDuration:` nor `timeout:` never resumes
+    /// itself, at any clock.**
+    ///
+    /// This is the over-acceptance W8 Task 3 most risks and **the oracle cannot
+    /// see it**: all seven corpus flows written that way reached `PAUSED` on
+    /// the pinned artifact and stayed there for the full 90 s of the harvest,
+    /// so every one of them is `not-standalone` in `corpus.json` and absent
+    /// from `golden.json`. A pause that resumed itself after some default would
+    /// leave the ratchet exactly where it is.
+    ///
+    /// Three rows, and the third is the control that can disagree:
+    ///
+    /// 1. neither bound, driven at a clock 100 000 years past the origin;
+    /// 2. `valids/pause-test`, one of the seven real ones, at the same clock;
+    /// 3. the SAME flow as row 1 with `pauseDuration: PT1S` added — which does
+    ///    resume, at the same clock, through the same code.
+    ///
+    /// Without row 3 a `pause::resume` that answered `Waiting` unconditionally
+    /// — or a `deadline` that returned `Unbounded` for everything — would pass
+    /// rows 1 and 2 and be completely broken.
+    #[test]
+    fn an_unbounded_pause_never_resumes_itself() {
+        for (label, src) in [
+            ("no bound at all", pause_flow("")),
+            (
+                "valids/pause-test",
+                corpus_source("valids/pause-test"),
+            ),
+        ] {
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let paused: Vec<TaskIx> = (0..plan.tasks.len())
+                .filter(|&ix| matches!(plan.tasks[ix].kind, TaskKind::Pause { .. }))
+                .collect();
+            assert_eq!(
+                paused.len(),
+                1,
+                "{label}: the fixture must REACH the construct, or it proves nothing"
+            );
+
+            let (state, _) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+            let gate = state
+                .runs
+                .iter()
+                .position(|r| paused.contains(&r.task))
+                .unwrap_or_else(|| panic!("{label}: the pause got no run"));
+            assert_eq!(
+                wire(&state.runs[gate].history),
+                ["CREATED", "RUNNING", "PAUSED"],
+                "{label}: an unbounded pause must still be PAUSED"
+            );
+            assert_eq!(
+                state.runs[gate].not_before, None,
+                "{label}: no deadline may be written, or `pass_time` moves the clock for it"
+            );
+            assert_eq!(
+                wire(&state.history),
+                ["CREATED", "RUNNING", "PAUSED"],
+                "{label}: the execution must not terminate"
+            );
+            assert!(
+                advance(&plan, &state, Tick(i64::MAX)).is_empty(),
+                "{label}: nothing this executor can be asked ends an unbounded pause"
+            );
+        }
+
+        // The control. Same flow, same environment, one property added.
+        let bounded = build_plan(&pause_flow("    pauseDuration: PT1S\n")).unwrap();
+        let (state, ended_at) = run_to_fixpoint_passing_time(&bounded, RunState::Success);
+        assert_eq!(ended_at, Tick(1_000), "the environment did move the clock");
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"],
+            "a BOUNDED pause at the same clock does resume — without this row the \
+             assertions above are satisfied by a pause that never works at all"
+        );
+        assert_eq!(run_ids(&bounded, &state), ["gate", "after"]);
+    }
+
+    /// **A literal `pauseDuration:` needs no render; an expression does, and
+    /// the RENDER is what decides.**
+    ///
+    /// The two rows are `valids/pause-delay` (`PT1S`) and
+    /// `valids/pause-duration-from-input` (`{{inputs.delay}}`, declared default
+    /// `PT1S`), and the render written in is `PT3S` — neither the source text
+    /// nor the declared default. A deadline of 3 000 can therefore only have
+    /// come from the render: 1 000 would be the default, and the source is not
+    /// a duration at all.
+    ///
+    /// The literal row is the one that says the gate is narrow. A `Pause`
+    /// added to the render tier unconditionally would stall `pause-delay` for
+    /// ever under a caller that renders nothing, which is what `Step::Waiting`
+    /// on an unanswered slot means — and eleven of the twelve baselined `Pause`
+    /// entries are literal.
+    #[test]
+    fn a_literal_pause_duration_needs_no_render_and_an_expression_does() {
+        let literal = plan_of("valids/pause-delay");
+        let state = run_to_fixpoint(&literal, RunState::Success);
+        assert_eq!(
+            state.runs[0].rendered, None,
+            "a literal must not be routed through the caller"
+        );
+        assert_eq!(state.runs[0].not_before, Some(Tick(1_000)));
+
+        let expr = plan_of("valids/pause-duration-from-input");
+        let mut state = ExecutionState::new(&expr);
+        round(&expr, &mut state); // CreateRun
+        round(&expr, &mut state); // RUNNING
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING"],
+            "the expression is read at RUNNING, so the run must reach it first"
+        );
+        assert!(
+            advance(&expr, &state, T0).is_empty(),
+            "an unanswered render is a wait, not a default"
+        );
+
+        state.runs[0].rendered = Some("PT3S".to_string());
+        round(&expr, &mut state);
+        assert_eq!(
+            state.runs[0].not_before,
+            Some(Tick(3_000)),
+            "3000 is the RENDER; 1000 would be the flow's declared default"
+        );
+    }
+
+    /// **A `Pause` this executor does not reproduce stays an opaque
+    /// `Runnable`**, and its children stay out of the plan with it.
+    ///
+    /// That is `build_plan`'s standing rule for an unimplemented flowable —
+    /// `AllowFailure` and `WorkingDirectory` take it — and the reason is
+    /// recorded there: an unimplemented construct mapped onto a construct that
+    /// nearly fits trades a visible mismatch for a plausible-looking wrong
+    /// trace, and only the first stays honestly baselined.
+    ///
+    /// The control is the last row: the same flow with none of the four is a
+    /// `TaskKind::Pause`. Without it every row would pass under a `build_plan`
+    /// that had no `Pause` arm at all.
+    ///
+    /// `spec::validate` is asserted in the same loop and against the same
+    /// predicate, because the two answers must not come apart: a publish that
+    /// says a `behavior:` is enforced over an executor that ignores it is the
+    /// over-acceptance this programme forbids.
+    #[test]
+    fn a_pause_this_executor_does_not_reproduce_stays_opaque() {
+        let rows: [(&str, &str); 4] = [
+            (
+                "tasks",
+                "    pauseDuration: PT1S\n    tasks:\n      - id: inner\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "errors",
+                "    pauseDuration: PT1S\n    errors:\n      - id: oops\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            ("behavior", "    pauseDuration: PT1S\n    behavior: FAIL\n"),
+            (
+                "onPause",
+                "    pauseDuration: PT1S\n    onPause:\n      id: hello\n      \
+                 type: io.kestra.plugin.core.debug.Return\n      format: x\n",
+            ),
+        ];
+        for (property, props) in rows {
+            let src = pause_flow(props);
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{property}: {e}"));
+            assert_eq!(
+                plan.tasks[0].kind,
+                TaskKind::Runnable {
+                    type_id: "io.kestra.plugin.core.flow.Pause".to_string()
+                },
+                "{property}: a pause carrying it must stay opaque"
+            );
+            assert_eq!(
+                plan.tasks.len(),
+                2,
+                "{property}: `gate` and `after` only — an opaque flowable's children \
+                 are not in the plan"
+            );
+            let flow = crate::spec::parse(&src).expect("parses");
+            let report = crate::spec::validate(&flow);
+            let warned = report
+                .warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.message.contains(property));
+            assert!(
+                warned,
+                "{property}: publish must say it is not enforced: {:?}",
+                report.warnings
+            );
+        }
+
+        // The control.
+        let src = pause_flow("    pauseDuration: PT1S\n");
+        let plan = build_plan(&src).unwrap();
+        assert_eq!(plan.tasks[0].kind, TaskKind::Pause {
+            duration: Some("PT1S".to_string())
+        });
+        let report = crate::spec::validate(&crate::spec::parse(&src).unwrap());
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
+            "a pause this executor DOES reproduce must not warn: {:?}",
+            report.warnings
+        );
+    }
+
+    /// **Two pauses in one `Parallel` pause and resume independently, and the
+    /// execution's history holds one `PAUSED` and one `RESTARTED`.**
+    ///
+    /// Two separate rules are driven here and neither has a corpus flow:
+    ///
+    /// * `parallel::drive_concurrent`'s rule 3 has a `Paused` arm. Without it a
+    ///   `Pause` under a `Parallel`, a `Dag` or an `If` pauses and is never
+    ///   asked again — a stall, not a wrong trace.
+    /// * `pause::execution_state` suppresses a repeat. Without it the execution
+    ///   reads `… PAUSED PAUSED …`, and no golden execution history repeats a
+    ///   state for any construct.
+    ///
+    /// The two pauses are one second apart so that the resume round for each is
+    /// a different round, which is what "independently" means and what a single
+    /// shared deadline would hide.
+    ///
+    /// **And it is what separates the suppression from a stronger rule nobody
+    /// wrote.** The result is one `PAUSED` and TWO `RESTARTED`: the pauses
+    /// begin together, so the second `PAUSED` is an immediate repeat, and they
+    /// end apart with `RUNNING` between, so the second `RESTARTED` is a
+    /// separate event. A suppression keyed on "has this execution ever been
+    /// restarted" would pass every other assertion here and be wrong.
+    #[test]
+    fn two_pauses_in_one_parallel_resume_independently() {
+        let src = "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: both\n    \
+                   type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      \
+                   - id: quick\n        type: io.kestra.plugin.core.flow.Pause\n        \
+                   pauseDuration: PT1S\n      - id: slow\n        \
+                   type: io.kestra.plugin.core.flow.Pause\n        \
+                   pauseDuration: PT2S\n";
+        let plan = build_plan(src).expect("plans");
+        let mut state = ExecutionState::new(&plan);
+
+        // Far enough for both to be created, started and paused, and no
+        // further: `advance` answers nothing once both are waiting.
+        for _ in 0..10 {
+            if round_at(&plan, &mut state, T0).is_empty() {
+                break;
+            }
+        }
+        assert_eq!(run_ids(&plan, &state), ["both", "quick", "slow"]);
+        assert_eq!(wire(&state.runs[1].history), ["CREATED", "RUNNING", "PAUSED"]);
+        assert_eq!(wire(&state.runs[2].history), ["CREATED", "RUNNING", "PAUSED"]);
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "one PAUSED, not two"
+        );
+
+        // The first deadline only.
+        round_at(&plan, &mut state, Tick(1_000));
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+        );
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "RUNNING", "PAUSED"],
+            "the second pause's own deadline has not come"
+        );
+
+        let (state, ended_at) = run_to_fixpoint_passing_time(&plan, RunState::Success);
+        assert_eq!(
+            ended_at,
+            Tick(2_000),
+            "the clock stopped at the LATER of the two deadlines"
+        );
+        assert_eq!(
+            wire(&state.runs[2].history),
+            ["CREATED", "RUNNING", "PAUSED", "SUCCESS"]
+        );
+        assert_eq!(
+            wire(&state.history),
+            [
+                "CREATED",
+                "RUNNING",
+                "PAUSED",
+                "RESTARTED",
+                "RUNNING",
+                "RESTARTED",
+                "RUNNING",
+                "SUCCESS"
+            ],
+            "ONE `PAUSED` and TWO `RESTARTED`, which is the shape the \
+             suppression actually has and not the one this assertion was first \
+             written for. The two pauses BEGIN in the same round, so a second \
+             `PAUSED` would be an immediate repeat and is suppressed; they END \
+             in different rounds, with `RUNNING` between them, so the second \
+             `RESTARTED` is a separate event rather than a repeat. Suppressing \
+             that one too would be inventing a rule that says an execution can \
+             only be restarted once"
+        );
+    }
+
+    /// Every `pauseDuration:` and `timeout:` written on a corpus `Pause`, and
+    /// the two facts `flowable::pause` relies on: **no `Pause` writes both**,
+    /// and **every one that parses at all parses as ISO-8601**.
+    ///
+    /// The precedence in `pause::deadline` is a choice with no measurement
+    /// behind it, and this is what says so out loud rather than leaving the
+    /// next reader to assume it was measured. If a corpus flow ever writes
+    /// both, this fails and whoever added it has to measure the artifact.
+    #[test]
+    fn every_corpus_pause_bound_is_one_or_none() {
+        let mut both = Vec::new();
+        let mut seen = 0usize;
+        for (id, src) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            for (task_id, pause, timeout) in corpus_pauses(&flow) {
+                seen += 1;
+                if pause.pause_duration.is_some() && timeout.is_some() {
+                    both.push(format!("{id}:{task_id}"));
+                }
+            }
+        }
+        assert!(
+            seen >= 20,
+            "the walk found {seen} pauses, which is fewer than the 20 corpus flows \
+             known to declare one — it has stopped reaching them"
+        );
+        assert!(
+            both.is_empty(),
+            "a corpus Pause writes BOTH bounds, so `pause::deadline`'s unmeasured \
+             precedence now decides a comparable entry: {both:?}"
+        );
+    }
+
+    /// **Every `timeout:` on a corpus `Pause` is an ISO-8601 literal**, which
+    /// is what makes `build_plan` reading it without a `RenderContext` a
+    /// measured non-issue rather than an assumption.
+    ///
+    /// The same fact for `pauseDuration:` is NOT asserted and must not be:
+    /// `valids/pause-duration-from-input` writes an expression into it, which
+    /// is exactly why that one goes through the render slot and this one does
+    /// not.
+    #[test]
+    fn every_corpus_pause_timeout_is_a_literal() {
+        let mut dynamic = Vec::new();
+        let mut literals = 0usize;
+        for (id, src) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            for (task_id, _, timeout) in corpus_pauses(&flow) {
+                let Some(t) = timeout else { continue };
+                match retry::parse_duration(t.source()) {
+                    Some(_) => literals += 1,
+                    None => dynamic.push(format!("{id}:{task_id} = {:?}", t.source())),
+                }
+            }
+        }
+        assert!(
+            dynamic.is_empty(),
+            "a corpus Pause's `timeout:` is not a literal, so `build_plan` cannot \
+             read it: {dynamic:?}"
+        );
+        assert_eq!(
+            literals, 3,
+            "the three baselined `timeout:`-on-a-Pause declarations — \
+             pause-timeout, pause-timeout-allow-failure and \
+             pause-errors-finally-after-execution. A zero here would satisfy the \
+             assertion above while measuring nothing"
+        );
+    }
+
+    /// **No comparable corpus flow declares two `Pause`es in one execution**,
+    /// which is the population `pause::execution_state`'s suppression would be
+    /// measured against if one existed.
+    #[test]
+    fn the_corpus_has_no_execution_with_two_pauses() {
+        let mut many = Vec::new();
+        for (id, src) in every_corpus_flow() {
+            let Ok(flow) = crate::spec::parse(&src) else {
+                continue;
+            };
+            let n = corpus_pauses(&flow).len();
+            if n > 1 {
+                many.push(format!("{id} ({n})"));
+            }
+        }
+        assert!(
+            many.is_empty(),
+            "a corpus flow declares more than one Pause, so the repeat-suppression \
+             in `pause::execution_state` is now measurable and must be measured \
+             against the artifact rather than chosen: {many:?}"
+        );
+    }
+
+    /// Every `Pause` in a flow, with the `timeout:` that sits on its `Task`.
+    ///
+    /// The walk is `Task::children()` plus `error_children()`, i.e. the same
+    /// two lists `Plan::children_of` reads, so a `Pause` nested inside any
+    /// flowable's `tasks:` or `errors:` is found. A walk over the flow's top
+    /// level alone would miss six of the corpus's twenty.
+    fn corpus_pauses(
+        flow: &crate::models::Flow,
+    ) -> Vec<(
+        String,
+        &crate::models::Pause,
+        Option<&crate::models::Property<std::time::Duration>>,
+    )> {
+        fn walk<'a>(
+            task: &'a crate::models::Task,
+            out: &mut Vec<(
+                String,
+                &'a crate::models::Pause,
+                Option<&'a crate::models::Property<std::time::Duration>>,
+            )>,
+        ) {
+            if let crate::models::TaskKind::Pause(p) = &task.kind {
+                out.push((task.id.clone(), p, task.timeout.as_ref()));
+            }
+            for child in task.children().into_iter().chain(task.error_children()) {
+                walk(child, out);
+            }
+        }
+        let mut out = Vec::new();
+        for task in flow
+            .tasks
+            .iter()
+            .chain(&flow.errors)
+            .chain(&flow.finally_)
+            .chain(&flow.after_execution)
+        {
+            walk(task, &mut out);
+        }
+        out
+    }
+
+    /// The corpus `Pause`es that can reach another flowable's `Paused` arm,
+    /// derived **from the plan** — `parallel::drive_concurrent`'s new arm cites
+    /// this as the reason no corpus flow drives it.
+    ///
+    /// Read off `Plan` rather than off the parsed flow, and the first draft of
+    /// this test read the flow and was wrong twice over. A `Pause` is only
+    /// reachable there if it has a `PlanTask` at all and that task is not a
+    /// root, and the model walk answered `invalids/workingdirectory-invalid`'s
+    /// `Pause` — a flow `build_plan` REFUSES, whose parent is planned opaque
+    /// anyway, so neither the pause nor the refusal ever reaches an executor.
+    /// A population that includes flows nothing can run is not this population.
+    ///
+    /// Every member must be UNBOUNDED. A bounded one would reach the arm and
+    /// make the comment beside it false.
+    #[test]
+    fn the_corpus_pauses_that_sit_inside_another_flowable_are_named() {
+        let mut nested: Vec<(String, bool)> = Vec::new();
+        let mut planned_pauses = 0usize;
+        for (id, src) in every_corpus_flow() {
+            let Ok(plan) = build_plan(&src) else {
+                continue;
+            };
+            for ix in 0..plan.tasks.len() {
+                let TaskKind::Pause { duration } = &plan.tasks[ix].kind else {
+                    continue;
+                };
+                planned_pauses += 1;
+                if plan.roots.contains(&ix) {
+                    continue;
+                }
+                nested.push((
+                    format!("{id}:{}", plan.tasks[ix].id),
+                    duration.is_some() || plan.tasks[ix].timeout.is_some(),
+                ));
+            }
+        }
+        assert!(
+            planned_pauses >= 12,
+            "only {planned_pauses} corpus `Pause`es reach a `TaskKind::Pause`, which \
+             is fewer than the twelve baselined entries that declare one — the walk \
+             has stopped reaching them and every assertion below is vacuous"
+        );
+        let names: Vec<&str> = nested.iter().map(|(n, _)| n.as_str()).collect();
+        let bounded: Vec<&str> = nested
+            .iter()
+            .filter(|(_, b)| *b)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(
+            bounded.is_empty(),
+            "a BOUNDED corpus Pause is now planned inside another flowable \
+             ({bounded:?}), so `parallel::drive_concurrent`'s `Paused` arm is \
+             reachable from the corpus after all and the comment beside it is \
+             stale. The whole nested set is {names:?}"
+        );
     }
 }

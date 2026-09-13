@@ -539,6 +539,21 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         Command::ScheduleRetry { run, not_before } => {
             state.runs[*run].not_before = Some(*not_before);
         }
+        // `PAUSED` on the RUN's history and deliberately not on the attempt --
+        // see `Command::PauseRun` for the 0-of-878 measurement that makes this
+        // a command of its own rather than a `SetRunState`. `until` is written
+        // to `not_before` because that is the one field the environment reads
+        // to decide the clock has to move (`oracle-exec/driver.rs::pass_time`),
+        // and an unbounded pause writes none: the run is left with whatever
+        // `not_before` it already had, which for a `Pause` is always `None`
+        // because nothing else ever sets one on a run this executor drives.
+        Command::PauseRun { run, until } => {
+            let r = &mut state.runs[*run];
+            r.history.push(RunState::Paused);
+            if let Some(t) = until {
+                r.not_before = Some(*t);
+            }
+        }
         // The run's own history always takes the state. The attempt takes it
         // only while the attempt is still open, and that is a **rule** rather
         // than bookkeeping -- see the block comment below.

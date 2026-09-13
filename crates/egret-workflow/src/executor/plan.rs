@@ -128,6 +128,11 @@ impl Plan {
                 .copied()
                 .collect(),
             TaskKind::Dag { nodes } => nodes.iter().map(|n| n.task).collect(),
+            // A planned `Pause` has none: `build_plan` only assigns this kind
+            // to a `Pause` whose `tasks:` is empty (`pause_gap`), so an empty
+            // list here is the whole truth rather than a walk this kind is
+            // missing.
+            TaskKind::Pause { .. } => Vec::new(),
         }
     }
 }
@@ -442,6 +447,51 @@ pub enum TaskKind {
         tasks: Vec<TaskIx>,
         concurrency_limit: u32,
     },
+    /// `io.kestra.plugin.core.flow.Pause` — W8 Task 3.
+    ///
+    /// **A flowable the executor drives that takes no children in the plan**,
+    /// which is a shape none of the arms above has. It is not
+    /// [`Runnable`](TaskKind::Runnable) (no worker ever sees it, and no `Pause`
+    /// run in the golden carries `SUBMITTED` — 20 of them, derived by
+    /// `no_pause_run_in_the_golden_passes_through_submitted`), it is not
+    /// [`Executable`](TaskKind::Executable) (it spawns nothing), and it does
+    /// not descend.
+    ///
+    /// # `duration` is the author's `pauseDuration:`, unrendered
+    ///
+    /// Same rule as [`If::condition`](TaskKind::If): [`advance`](super::advance)
+    /// is pure, so the caller renders it into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) and `advance`
+    /// reads the answer. It is read at `RUNNING`, like an `If`'s condition and
+    /// unlike a `Loop`'s `values` — the pause has to be a run with an open
+    /// attempt before there is anything to measure the wait from.
+    /// `valids/pause-duration-from-input` is the corpus flow that needs it
+    /// (`pauseDuration: "{{inputs.delay}}"`).
+    ///
+    /// `None` means the author wrote no `pauseDuration:` at all, which is NOT
+    /// the same as "not rendered yet" and is why this is an `Option<String>`
+    /// rather than a `String`.
+    ///
+    /// # `timeout` is on [`PlanTask::timeout`], not here
+    ///
+    /// It is `Task.java`'s field, carried by every kind, and a `Pause` is the
+    /// one place `advance()` enforces it — Kestra's own validator says
+    /// `timeout:` is "only relevant for runnable tasks" **with `Pause` the
+    /// single exception** (`FlowService.java:574`). See
+    /// [`super::flowable::pause`] for which of the two bounds ends the pause
+    /// and with which state.
+    ///
+    /// # What a `Pause` planned this way does NOT carry
+    ///
+    /// `tasks:`, `errors:`, `behavior:` and `onPause:`. A `Pause` declaring any
+    /// of them is planned an opaque [`Runnable`](TaskKind::Runnable) instead —
+    /// see [`pause_gap`] — under the rule [`build_plan`] already applies to
+    /// `AllowFailure` and `WorkingDirectory`: an unimplemented flowable
+    /// produces a visibly wrong trace and stays honestly baselined, rather than
+    /// a plausible-looking wrong one.
+    Pause {
+        duration: Option<String>,
+    },
 }
 
 /// One node of a [`TaskKind::Dag`]: a task and the sibling nodes it waits for.
@@ -602,6 +652,55 @@ const SWITCH_TYPE: &str = "switch";
 const LOOP_TYPE: &str = "loop";
 /// `io.kestra.plugin.core.flow.Subflow`, in the same canonical spelling. W6.
 const SUBFLOW_TYPE: &str = "subflow";
+/// `io.kestra.plugin.core.flow.Pause`, in the same canonical spelling. W8.
+const PAUSE_TYPE: &str = "pause";
+
+/// The first property of this `Pause` that [`build_plan`] does not reproduce,
+/// or `None` for a plain wait.
+///
+/// **One rule, two readers.** [`build_plan`] uses it to decide whether a
+/// `Pause` becomes a [`TaskKind::Pause`] or stays an opaque
+/// [`TaskKind::Runnable`], and `spec::validate` uses it to decide whether the
+/// author still gets the `not_yet_enforced` warning that a `Pause` used to get
+/// unconditionally. Two copies of this predicate would be two answers to "is
+/// this pause reproduced", and a publish that says yes over an executor that
+/// says no is exactly the over-acceptance this programme forbids.
+///
+/// Each of the four is a real construct with a measured trace this executor
+/// does not produce, and the order is declaration order in `Pause.java`:
+///
+/// * `tasks:` — the list a pause runs **after** it is resumed. No baselined
+///   corpus entry writes one, so a rule here would be a rule nothing can
+///   exercise.
+/// * `errors:` — `valids/pause-errors-finally-after-execution` writes one, and
+///   its golden run history is `CREATED RUNNING PAUSED RUNNING FAILED`: the
+///   pause re-enters `RUNNING` to drive the handler. Nothing else in this
+///   corpus has that shape.
+/// * `behavior:` — `RESUME`/`WARN`/`FAIL`/`CANCEL` at the moment the pause
+///   ends. Two of the four terminals it can produce, `WARNING` and
+///   `CANCELLED`, are not in [`RunState`](crate::executor::RunState) at all, so
+///   the construct is **unrepresentable** here and not merely unwritten.
+/// * `onPause:` — a single task run when the pause begins.
+///   `valids/pause_on_pause`'s golden records it as a run with `parent: null`,
+///   i.e. a SIBLING of the pause rather than a child, `overlapping` it.
+///
+/// The order decides only which name a warning prints; the decision is the
+/// same for any non-`None`.
+pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
+    if !p.tasks.is_empty() {
+        return Some("tasks");
+    }
+    if !p.errors.is_empty() {
+        return Some("errors");
+    }
+    if p.behavior.is_some() {
+        return Some("behavior");
+    }
+    if p.on_pause.is_some() {
+        return Some("onPause");
+    }
+    None
+}
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
@@ -977,6 +1076,29 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 nodes: flatten_dag(out, &task.id, &nodes, depth + 1)?,
             };
             out[ix].errors = flatten_list(out, &dag.errors, depth + 1)?;
+        }
+        // W8 Task 3. A `Pause` this executor reproduces carries its
+        // `pauseDuration:` unrendered and its `timeout:` parsed; one that
+        // declares anything else falls through to the opaque `Runnable` this
+        // function already assigned above, which is the same answer
+        // `AllowFailure` and `WorkingDirectory` get and for the same reason.
+        //
+        // **`timeout:` is read HERE and nowhere else in `advance()`'s half of
+        // the crate**, and it is a literal parse rather than a render for the
+        // reason [`PlanTask::retry`] gives about durations: `build_plan` is
+        // pure. `every_corpus_pause_timeout_is_a_literal` re-derives from all
+        // 345 flows that no corpus `timeout:` on a `Pause` is an expression, so
+        // the fallback is measured unreachable rather than assumed.
+        (ModelKind::Pause(pause), Some(PAUSE_TYPE)) => {
+            if pause_gap(pause).is_none() {
+                out[ix].timeout = task
+                    .timeout
+                    .as_ref()
+                    .and_then(|t| super::retry::parse_duration(t.source()));
+                out[ix].kind = TaskKind::Pause {
+                    duration: pause.pause_duration.as_ref().map(|d| d.source().to_string()),
+                };
+            }
         }
         _ => {}
     }

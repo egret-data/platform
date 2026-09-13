@@ -149,6 +149,17 @@ enum KestraFlowControl {
     /// indistinguishable from an ordinary task -- so whatever control-flow
     /// behaviour it declared (a manual-approval gate, for `Pause`) silently
     /// does not happen. Must warn, naming the package that will port it.
+    /// **Never constructed since W8 Task 3, which ported the last one.**
+    ///
+    /// `#[allow(dead_code)]` rather than deletion, and the reason is the one
+    /// this whole table exists for: the variant is the SHAPE the next Kestra
+    /// control-flow class takes when somebody adds a row for it, and deleting
+    /// it would mean that person has to re-derive the fail-closed design
+    /// (`walk_task`'s `Leaf` arm warns whether or not there is a row; a row
+    /// only supplies the package name) from nothing. The dangerous direction
+    /// is a real unported class with no row, and that direction is covered by
+    /// the `None` arm of the same lookup, which warns without naming a package.
+    #[allow(dead_code)]
     Unported { package: &'static str },
 }
 
@@ -220,7 +231,15 @@ const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
     ("subflow", KestraFlowControl::Ported),
     ("allowfailure", KestraFlowControl::Ported),
     ("workingdirectory", KestraFlowControl::Ported),
-    ("pause", KestraFlowControl::Unported { package: "W8" }),
+    // **W8 Task 3 ported it, and only half of it.** `models::TaskKind::Pause`
+    // exists and `executor::build_plan` drives a plain bounded or unbounded
+    // wait, so the blanket `not_yet_enforced` warning this row used to produce
+    // for every `Pause` would now be false for the flows that work. The four
+    // properties still unported get the warning from the `TaskKind::Pause` arm
+    // of `walk_task` instead, which asks `executor::plan::pause_gap` -- the
+    // same predicate `build_plan` decides with, so a flow warned here is
+    // exactly a flow planned opaque there.
+    ("pause", KestraFlowControl::Ported),
 ];
 
 /// Whether a task may be a child of a [`TaskKind::WorkingDirectory`] --
@@ -1186,6 +1205,26 @@ fn walk_task(
                 });
             }
         }
+        // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
+        // none and the artifact published it with a 200 -- so the only check
+        // here is the honesty one: a `Pause` whose `behavior:`, `onPause:`,
+        // `tasks:` or `errors:` this executor does not reproduce must SAY so,
+        // which is the same thing the blanket row in `KESTRA_FLOW_CONTROL` used
+        // to say about every `Pause`.
+        TaskKind::Pause(p) => {
+            if let Some(property) = crate::executor::pause_gap(p) {
+                report.warnings.push(Finding {
+                    code: "not_yet_enforced",
+                    message: format!(
+                        "task '{}' is a pause with '{property}', which egret parses but does \
+                         not run: the pause itself waits, and '{property}' is ignored. \
+                         Enforcement lands in W8",
+                        task.id
+                    ),
+                    path: format!("{path}.{property}"),
+                });
+            }
+        }
         TaskKind::WorkingDirectory(w) => {
             if w.tasks.is_empty() {
                 report.errors.push(Finding {
@@ -1987,30 +2026,87 @@ mod tests {
 
     // -- Fix round 1 --
 
-    /// Finding 1 (CRITICAL): `Pause` has no `TaskKind` variant, so it falls
-    /// through to `Leaf` and is indistinguishable from an ordinary task --
-    /// previously invisible to validation entirely. A user pasting a Kestra
-    /// flow whose `Pause` is a manual-approval gate must be told it does not
-    /// gate anything yet, not shown a green publish.
+    /// Finding 1 (CRITICAL), **as W8 Task 3 left it.** The original test asserted
+    /// that a `Pause` warns unconditionally, because it had no `TaskKind`
+    /// variant and nothing ran it: a user pasting a Kestra flow whose `Pause` is
+    /// a manual-approval gate had to be told it gates nothing.
+    ///
+    /// It gates now. `executor::build_plan` runs the wait — bounded by
+    /// `pauseDuration:`/`timeout:`, unbounded otherwise, which is what the
+    /// pinned artifact does with each — so a blanket warning would be the
+    /// OPPOSITE lie, telling a user that a feature which works does not.
+    ///
+    /// What survives is the half that is still true, and the test now asserts
+    /// both directions of it because only the pair can fail for the right
+    /// reason: a `Pause` carrying one of the four properties `build_plan` does
+    /// not reproduce still warns and still names W8, and a plain one does not
+    /// warn at all. `executor::pause_gap` is the single predicate both this and
+    /// `build_plan` ask, so a flow warned here is exactly a flow planned opaque
+    /// there.
     #[test]
-    fn pause_falls_through_to_leaf_and_warns_naming_its_package() {
+    fn a_pause_warns_only_for_the_properties_egret_does_not_run() {
         for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
-            let yaml =
-                format!("id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n");
-            let f = parse(&yaml).unwrap();
-            let r = validate(&f);
-            let w = r
-                .warnings
-                .iter()
-                .find(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate")
-                .unwrap_or_else(|| {
-                    panic!("{spelling}: no unported-control-flow warning for 'gate': {r:?}")
-                });
-            assert!(w.message.contains("W8"), "{spelling}: {}", w.message);
-            assert!(
-                r.errors.is_empty(),
-                "{spelling}: an unported control-flow type is a warning, not an error: {r:?}"
-            );
+            // Silent: both shapes this executor reproduces.
+            for (label, props) in [
+                ("unbounded", ""),
+                ("bounded", "    pauseDuration: PT1S\n"),
+            ] {
+                let yaml = format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n{props}"
+                );
+                let r = validate(&parse(&yaml).unwrap());
+                assert!(
+                    !r.warnings
+                        .iter()
+                        .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
+                    "{spelling}/{label}: a pause egret runs must not be reported as \
+                     unenforced: {r:?}"
+                );
+                assert!(r.errors.is_empty(), "{spelling}/{label}: {r:?}");
+            }
+
+            // Loud: the four it does not.
+            for (property, props) in [
+                ("behavior", "    behavior: FAIL\n"),
+                (
+                    "onPause",
+                    "    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
+                ),
+                (
+                    "tasks",
+                    "    tasks:\n      - id: after\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+                (
+                    "errors",
+                    "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+            ] {
+                let yaml = format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n\
+                         pauseDuration: PT1S\n{props}"
+                );
+                let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{property}: {e:?}"));
+                let r = validate(&f);
+                let w = r
+                    .warnings
+                    .iter()
+                    .find(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate"))
+                    .unwrap_or_else(|| {
+                        panic!("{spelling}/{property}: no warning for 'gate': {r:?}")
+                    });
+                assert!(
+                    w.message.contains(property),
+                    "{spelling}/{property}: the warning must name the property that is \
+                     ignored, not merely the task: {}",
+                    w.message
+                );
+                assert!(w.message.contains("W8"), "{spelling}/{property}: {}", w.message);
+                assert!(
+                    r.errors.is_empty(),
+                    "{spelling}/{property}: an unenforced property is a warning, not an \
+                     error: {r:?}"
+                );
+            }
         }
     }
 

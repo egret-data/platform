@@ -104,23 +104,41 @@ fn walk(
 
         match state.runs[ix].history.last() {
             Some(RunState::Created) => return Some(open(plan, state, ix, task, now)),
+            // W8 Task 3. A `PAUSED` run is the ONE non-terminal state the
+            // executor still owns: nothing else is going to move it, because no
+            // worker holds it and no message reaches `advance()`. So it is
+            // asked, every round, whether its bound has elapsed --
+            // `super::pause::resume` answers `Waiting` until it has, which is
+            // what the arm below used to answer unconditionally.
+            //
+            // It cannot be folded into the `Running` arm above: `descend` is
+            // reached at `RUNNING` and enters the pause, this is reached at
+            // `PAUSED` and leaves it, and a single door would have to branch on
+            // the state anyway.
+            Some(RunState::Paused)
+                if matches!(plan.tasks[task].kind, crate::executor::plan::TaskKind::Pause { .. }) =>
+            {
+                return Some(super::pause::resume(plan, state, ix, task, now))
+            }
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.
             Some(RunState::Running) => return Some(descend(plan, state, ix, task, now)),
             Some(s) if s.is_terminal() => {}
             // `Submitted` (handed to a worker, not picked up), `Retrying`
-            // (waiting for its own delay), `Paused` (waiting for a resume or a
-            // `pauseDuration`) and `Restarted` are all "in flight, not the
-            // executor's turn". So is a run with no history at all, which
-            // cannot happen and is not worth a branch of its own.
+            // (waiting for its own delay), `Paused` on anything this executor
+            // does NOT drive as a pause, and `Restarted` are all "in flight,
+            // not the executor's turn". So is a run with no history at all,
+            // which cannot happen and is not worth a branch of its own.
             //
-            // **The last two joined this arm at W8 Task 2 and nothing reaches
-            // it with them**: `Pause` and `LoopUntil` are still planned opaque,
-            // so no command puts a run into either state. Waiting is
-            // nevertheless the answer that matches the artifact — a `PAUSED`
-            // run blocks its sequence until `ExecutionService.resume` moves it,
-            // and 0 of the golden's 840 run histories ever hold `RESTARTED`.
+            // **`Paused` left this arm for `TaskKind::Pause` at W8 Task 3 and
+            // stayed in it for everything else.** `LoopUntil` is still planned
+            // opaque, so nothing can put one of its runs into `PAUSED` today;
+            // if something does, waiting is still the answer that matches the
+            // artifact — a `PAUSED` run blocks its sequence until
+            // `ExecutionService.resume` moves it. `Restarted` is untouched and
+            // still reaches nothing: 0 of the golden's 840 run histories hold
+            // it.
             _ => return Some(Step::Waiting),
         }
     }

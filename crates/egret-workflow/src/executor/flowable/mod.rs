@@ -17,6 +17,7 @@ pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod loop_;
 pub(crate) mod parallel;
+pub(crate) mod pause;
 pub(crate) mod sequential;
 
 use crate::executor::command::Command;
@@ -349,6 +350,16 @@ pub(crate) fn descend(
             branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
+        // W8 Task 3. It is neither `Waiting` (there is a command to emit, and
+        // the executor is the only thing that can emit it) nor a list to walk:
+        // the whole of a `Pause` is the transition into `PAUSED`, which
+        // `pause::drive` decides from the plan and the clock alone.
+        //
+        // Its `Step` is returned WITHOUT going through the `Done` mapping
+        // below, because a pause does not terminate in the round it starts and
+        // never returns `Done` at all -- the terminal is
+        // `pause::resume`'s, one clock move later.
+        TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
     };
     match step {
         Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),

@@ -66,6 +66,42 @@ pub enum Command {
         run: RunIx,
         not_before: Tick,
     },
+    /// Put a [`Pause`](super::TaskKind::Pause) run into `PAUSED`, and record
+    /// when — if ever — the wait ends. W8 Task 3.
+    ///
+    /// # It is not a [`Command::SetRunState`], and the reason is measured
+    ///
+    /// [`apply`](super::apply)'s rule 1 pushes any state onto the run's open
+    /// attempt, and `PAUSED` appears in **0** of the golden's 878 attempt
+    /// histories while appearing in 20 of its 840 run histories. The shape is
+    /// `valids/pause-delay`'s: run `["CREATED","RUNNING","PAUSED","SUCCESS"]`,
+    /// attempt `["CREATED","RUNNING","SUCCESS"]` — the same attempt, still
+    /// open, taking the terminal directly from the `RUNNING` it was left at.
+    /// `RunState::Paused`'s own doc recorded this hazard at W8 Task 2 and left
+    /// the guard out because nothing emitted the variant yet; this is the
+    /// producer that makes it reachable, so the separation is a command rather
+    /// than a special case inside `apply`.
+    ///
+    /// # `until` is `Option`, and `None` is the case that must not resume
+    ///
+    /// `Some(t)` is a pause the author bounded, with `t` the [`Tick`] the wait
+    /// ends at — `pauseDuration:` or `timeout:`, whichever
+    /// [`pause`](super::flowable::pause) resolved. `None` is a `Pause` with
+    /// **neither**, which on the pinned artifact waits for a human and nothing
+    /// else: measured, seven corpus flows are written that way and every one of
+    /// them "reached PAUSED and stayed there for the full 90s" (`corpus.json`'s
+    /// `not-standalone` disposition, one entry each). It writes no
+    /// [`TaskRun::not_before`](super::TaskRun::not_before) at all, which is what
+    /// keeps the driver's clock from ever being asked to move for it.
+    ///
+    /// **None of those seven is in `golden.json`**, so the oracle cannot see
+    /// this distinction in either direction. That is why it is a separate
+    /// field with its own test rather than a `Tick` some far-future sentinel
+    /// stands in for.
+    PauseRun {
+        run: RunIx,
+        until: Option<Tick>,
+    },
     SetRunState {
         run: RunIx,
         state: RunState,

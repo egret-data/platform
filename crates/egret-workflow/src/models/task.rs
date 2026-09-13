@@ -77,6 +77,16 @@ pub enum TaskKind {
     Subflow(Subflow),
     AllowFailure(AllowFailure),
     WorkingDirectory(WorkingDirectory),
+    /// `io.kestra.plugin.core.flow.Pause` -- W8 Task 3.
+    ///
+    /// **It was a [`TaskKind::Leaf`] until W8 Task 3**, and
+    /// `spec::validate`'s `KESTRA_FLOW_CONTROL` table anticipated this
+    /// variant by name ("say, a future `TaskKind::Pause`"). The reason it is
+    /// typed now is not tidiness: `executor::build_plan` has to read
+    /// `pauseDuration`/`timeout` to bound the pause, and reading them out of
+    /// an opaque `spec` map would be a second opinion about which keys a
+    /// `Pause` has, beside this struct.
+    Pause(Pause),
     Leaf { spec: serde_json::Value },
 }
 
@@ -107,6 +117,15 @@ impl Task {
             TaskKind::LoopUntil(l) => l.tasks.iter().collect(),
             TaskKind::AllowFailure(a) => a.tasks.iter().collect(),
             TaskKind::WorkingDirectory(w) => w.tasks.iter().collect(),
+            // `Pause.tasks` is Kestra's own field -- the list a pause runs
+            // AFTER it is resumed -- so it is a control-flow child like any
+            // other and this walk has to see it. `executor::build_plan` does
+            // NOT descend into it; see `executor::plan::TaskKind::Pause` for
+            // why a `Pause` that declares one is planned opaque instead.
+            // The two answers differ on purpose: this walk is
+            // `spec::validate`'s (duplicate ids, cycles, `is_runnable_child`),
+            // and a child invisible to it is a child nothing checks.
+            TaskKind::Pause(p) => p.tasks.iter().collect(),
             TaskKind::Subflow(_) | TaskKind::Leaf { .. } => Vec::new(),
         }
     }
@@ -138,6 +157,11 @@ impl Task {
             TaskKind::If(i) => i.errors.iter().collect(),
             TaskKind::Switch(s) => s.errors.iter().collect(),
             TaskKind::Dag(d) => d.errors.iter().collect(),
+            // Six kinds now. `Pause.errors` is real -- `valids/pause-errors-
+            // finally-after-execution` declares one -- and it is read for the
+            // same reason `children()` reads `Pause.tasks`: a handler nested
+            // in it must be findable by `worker::claim::leaf_spec`.
+            TaskKind::Pause(p) => p.errors.iter().collect(),
             _ => Vec::new(),
         }
     }
@@ -427,6 +451,39 @@ pub struct Subflow {
     pub flow_ref: Option<uuid::Uuid>,
 }
 
+// kestra: core/src/main/java/io/kestra/plugin/core/flow/Pause.java --
+// `extends Sequential`, so `tasks` and `errors` are `AbstractBranch`'s, plus
+// four of its own.
+//
+// **`finally` is dropped here, exactly as `Sequential` drops it**, and that
+// is the same decision rather than a new loss: no `models` type carries the
+// field, because nothing in this crate implements `finally:`. It was
+// previously preserved by accident -- a `Pause` was a `Leaf`, so every key it
+// wrote survived inside the opaque `spec` -- and `valids/pause-errors-finally-
+// after-execution` is the one corpus flow that writes it.
+//
+// `pauseDuration` and `behavior` are `Property<..>`: Java declares both
+// `dynamic = true` (`Pause.java`), and two corpus flows write an expression
+// into them -- `valids/pause-duration-from-input` and `valids/pause-behavior`.
+// Holding the SOURCE is what lets `executor::advance` stay pure.
+//
+// `onPause` is a single task, not a list: that is Kestra's shape and
+// `valids/pause_on_pause` writes it as one mapping.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Pause {
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
+    pub tasks: Vec<Task>,
+    #[serde(default, deserialize_with = "crate::models::wire::null_is_absent")]
+    pub errors: Vec<Task>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_duration: Option<Property<Duration>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_pause: Option<Box<Task>>,
+}
+
 // kestra: AllowFailure.java -- `extends Sequential` with no fields of its
 // own, so its Rust shape is identical to `Sequential`'s.
 //
@@ -598,6 +655,7 @@ impl Serialize for Task {
             TaskKind::Subflow(v) => serde_json::to_value(v),
             TaskKind::AllowFailure(v) => serde_json::to_value(v),
             TaskKind::WorkingDirectory(v) => serde_json::to_value(v),
+            TaskKind::Pause(v) => serde_json::to_value(v),
             // The leaf's own fields are already a flat map -- `rest` from
             // `Deserialize`, untouched -- so there is nothing to flatten
             // them out of, unlike a struct-variant's `#[serde(untagged)]`
@@ -726,6 +784,7 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TaskKind, serde_jso
         Some("subflow") => TaskKind::Subflow(serde_json::from_value(rest)?),
         Some("allowfailure") => TaskKind::AllowFailure(serde_json::from_value(rest)?),
         Some("workingdirectory") => TaskKind::WorkingDirectory(serde_json::from_value(rest)?),
+        Some("pause") => TaskKind::Pause(serde_json::from_value(rest)?),
         _ => TaskKind::Leaf { spec: rest },
     })
 }

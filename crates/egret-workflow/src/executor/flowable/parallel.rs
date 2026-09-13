@@ -214,6 +214,26 @@ pub(crate) fn drive_concurrent(
                     cmds.extend(inner);
                 }
             }
+            // W8 Task 3, and it is the same door `sequential::walk` opens for
+            // the same state: a `PAUSED` run is the one non-terminal state no
+            // worker is holding, so somebody has to ask it every round whether
+            // its bound has elapsed. Without this arm a `Pause` inside a
+            // `Parallel` or a `Dag` pauses and is never asked again.
+            //
+            // **No corpus flow reaches it** -- the six corpus `Pause`es that
+            // sit under a `Parallel`, a `Dag` or a `Loop` are all unbounded and
+            // none is in `golden.json`
+            // (`the_corpus_pauses_that_sit_inside_another_flowable_are_named`).
+            // It is here rather than left out because the alternative is not "a
+            // guard nobody sees fail" but a stall, and
+            // `two_pauses_in_one_parallel_resume_independently` drives it.
+            Some(RunState::Paused)
+                if matches!(plan.tasks[task].kind, crate::executor::plan::TaskKind::Pause { .. }) =>
+            {
+                if let Step::Commands(inner) = super::pause::resume(plan, state, ix, task, now) {
+                    cmds.extend(inner);
+                }
+            }
             _ => {}
         }
     }
