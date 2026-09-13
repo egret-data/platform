@@ -109,10 +109,18 @@ fn walk(
             // holds it and there is nothing to decide until it lands.
             Some(RunState::Running) => return Some(descend(plan, state, ix, task, now)),
             Some(s) if s.is_terminal() => {}
-            // `Submitted` (handed to a worker, not picked up) and `Retrying`
-            // (waiting for its own delay) are both "in flight, not the
+            // `Submitted` (handed to a worker, not picked up), `Retrying`
+            // (waiting for its own delay), `Paused` (waiting for a resume or a
+            // `pauseDuration`) and `Restarted` are all "in flight, not the
             // executor's turn". So is a run with no history at all, which
             // cannot happen and is not worth a branch of its own.
+            //
+            // **The last two joined this arm at W8 Task 2 and nothing reaches
+            // it with them**: `Pause` and `LoopUntil` are still planned opaque,
+            // so no command puts a run into either state. Waiting is
+            // nevertheless the answer that matches the artifact — a `PAUSED`
+            // run blocks its sequence until `ExecutionService.resume` moves it,
+            // and 0 of the golden's 840 run histories ever hold `RESTARTED`.
             _ => return Some(Step::Waiting),
         }
     }

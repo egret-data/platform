@@ -191,7 +191,7 @@ pub struct Attempt {
 /// One type for both, so the vocabulary it has to cover is the union of both.
 ///
 /// **That union is 13 states**, measured over `golden.json`; this enum holds
-/// **9** of them. Every number in this paragraph is derived on every run by
+/// **11** of them. Every number in this paragraph is derived on every run by
 /// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`,
 /// which is what stops it becoming a count written beside a derivation — it was
 /// one from Task 3 until Task 7 had to move it.
@@ -204,13 +204,23 @@ pub struct Attempt {
 /// Measured over the 266 `runs` entries, by how many are wholly inside the
 /// vocabulary: **35** for the six the plan drafted, **229** once Task 3 added
 /// `Submitted`, **233** once Task 7 added `Retried`, **237** once W3c added
-/// `Skipped`. `Submitted` is the addition that made the sequential slice
+/// `Skipped`, **253** once W8 Task 2 added `Paused` and `Restarted`.
+/// `Submitted` is the addition that made the sequential slice
 /// reachable at all; `Retried` buys exactly the four `retry-new-execution-*`
 /// entries, none of which can bank, because the replacement execution a
 /// `CREATE_NEW_EXECUTION` retry starts is not representable here at all.
 ///
-/// The four still missing, with the number of `runs` entries whose trace uses
-/// each: `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `CANCELLED` 3.
+/// **W8 Task 2's 16 buy nothing either, and that is stated rather than left to
+/// a green ratchet to imply.** Being inside the vocabulary is necessary and not
+/// sufficient — `SKIPPED`'s four and `RETRIED`'s four are the two earlier
+/// measured examples — and nothing in this crate *emits* either new variant
+/// yet: the constructs that do are `Pause` and `LoopUntil`, both still planned
+/// opaque by [`build_plan`](super::plan::build_plan). The variants are here
+/// because those two constructs need the **same** one, so splitting them across
+/// packages would block each on the other's state.
+///
+/// The two still missing, with the number of `runs` entries whose trace uses
+/// each: `WARNING` 10, `CANCELLED` 3.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +270,66 @@ pub enum RunState {
     /// `valids/task-runif-executionupdating` is that case measured — two of its
     /// five runs are `SKIPPED` and the execution ends `SUCCESS`.
     Skipped,
+    /// **Non-terminal**, and the state `Pause` and `LoopUntil` both stop in —
+    /// W8 Task 2, which is what took this enum from 9 of the golden's 13 states
+    /// to 10.
+    ///
+    /// **Non-terminal is measured on the pinned artifact, not inferred from the
+    /// name.** `State.Type.isTerminated()` is `FAILED || WARNING || SUCCESS ||
+    /// KILLED || CANCELLED || RETRIED || SKIPPED || RESUBMITTED` — eight
+    /// members, and `PAUSED` is not one of them; nor is it in
+    /// `isTerminatedNoFail()` or `isTerminatedInError()`. Decompiled from
+    /// `/app/kestra` in `kestra/kestra@sha256:28f59bf1…` (class-file v69,
+    /// Corretto 25), `io/kestra/core/models/flows/State.java`,
+    /// `State.Type.isTerminated()`. The same file gives `isPaused()` as
+    /// `this == PAUSED` and `canBeRestarted()` as `isFailed() || isPaused()`.
+    ///
+    /// **The golden agrees from the other side**: over the 408 execution
+    /// histories, `PAUSED` is in 18 and **ends none of them**; over the 840 run
+    /// histories it is in 20 and ends none.
+    ///
+    /// **And it appears in 0 of the golden's 604 attempt histories.** That is
+    /// not a detail: [`apply`]'s rule 1 pushes any non-terminal `SetRunState`
+    /// onto the open attempt, so the first producer of this variant will push a
+    /// state Kestra never records unless it emits something other than a plain
+    /// `SetRunState`. `valids/flow-concurrency-cancel-pause` is the shape —
+    /// run `["CREATED","RUNNING","PAUSED","SUCCESS"]`, attempt
+    /// `["CREATED","RUNNING","SUCCESS"]`. No rule is added here because nothing
+    /// emits the variant yet and a guard nobody has seen fail is a guard nobody
+    /// has seen; it is recorded so the Pause task inherits the measurement
+    /// rather than the surprise.
+    ///
+    /// [`apply`]: self::apply
+    Paused,
+    /// **Non-terminal, execution-only, and it is Kestra's word for "created
+    /// again"** — W8 Task 2, which is what took this enum from 10 of the
+    /// golden's 13 states to **11**.
+    ///
+    /// `State.Type.isCreated()` is `this == CREATED || this == RESTARTED`, so
+    /// in the artifact `RESTARTED` is a member of the *created* class rather
+    /// than a terminal, and `isTerminated()` does not list it. It is written by
+    /// `ExecutionService.markAs` — `return newState == CANCELLED ?
+    /// withState(CANCELLED) : withState(RESTARTED)` — which is the tail of
+    /// `ExecutionService.resume`, i.e. **what a resumed pause leaves on the
+    /// execution**; `ExecutorService.handleRestart` then maps it straight back
+    /// to `RUNNING`. Both decompiled from the pinned digest.
+    ///
+    /// **Execution-only is measured, not assumed**: `RESTARTED` appears in 12
+    /// of the golden's 408 execution histories and in **0** of its 840 run
+    /// histories and **0** of its 604 attempt histories. Every one of the 12 is
+    /// a `Pause` that was resumed, and the shape is always
+    /// `CREATED RUNNING PAUSED RESTARTED RUNNING …`. The six remaining `PAUSED`
+    /// executions carry no `RESTARTED` at all — those are `LoopUntil`'s, which
+    /// re-enters `RUNNING` directly.
+    ///
+    /// **[`apply`]'s rule 2 is therefore narrower than Kestra's `isCreated()`
+    /// and deliberately stays so.** That rule clears a run's renders when the
+    /// run re-enters `CREATED`; Kestra would count `RESTARTED` as a re-creation
+    /// too. Widening it would be a guard on a path 0 of 840 run histories
+    /// takes.
+    ///
+    /// [`apply`]: self::apply
+    Restarted,
 }
 
 impl RunState {
@@ -289,6 +359,8 @@ impl RunState {
         RunState::Retried,
         RunState::Killed,
         RunState::Skipped,
+        RunState::Paused,
+        RunState::Restarted,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -303,6 +375,8 @@ impl RunState {
             RunState::Retried => 6,
             RunState::Killed => 7,
             RunState::Skipped => 8,
+            RunState::Paused => 9,
+            RunState::Restarted => 10,
         }
     }
 
@@ -318,6 +392,8 @@ impl RunState {
             RunState::Retried => "RETRIED",
             RunState::Killed => "KILLED",
             RunState::Skipped => "SKIPPED",
+            RunState::Paused => "PAUSED",
+            RunState::Restarted => "RESTARTED",
         }
     }
 
@@ -537,6 +613,119 @@ mod tests {
     fn a_skipped_run_is_terminal() {
         assert!(RunState::Skipped.is_terminal());
         assert_eq!(RunState::Skipped.wire(), "SKIPPED");
+    }
+
+    /// **Neither state W8 Task 2 added is terminal, and the control is the
+    /// other nine.**
+    ///
+    /// One-sided would be worthless here: `is_terminal` is an allow-list, so a
+    /// pair of `assert!(!…)` passes on an implementation that answers `false`
+    /// for everything. Both directions are asserted against Kestra's own
+    /// `State.Type.isTerminated()`, decompiled from `/app/kestra` in
+    /// `kestra/kestra@sha256:28f59bf1…`:
+    ///
+    /// ```text
+    /// return this == FAILED || this == WARNING || this == SUCCESS
+    ///     || this == KILLED || this == CANCELLED || this == RETRIED
+    ///     || this == SKIPPED || this == RESUBMITTED;
+    /// ```
+    ///
+    /// Five of those eight are members of this enum and every one of them is
+    /// asserted true; the six non-members of the list are asserted false. So a
+    /// `Paused` quietly added to `is_terminal` fails, and so does a `Success`
+    /// quietly removed.
+    ///
+    /// The wire spellings are here for the same reason `run_state_all_holds…`
+    /// checks them: a variant whose `wire()` collides with another's is
+    /// invisible to the golden.
+    #[test]
+    fn neither_paused_nor_restarted_is_terminal() {
+        for state in [
+            RunState::Success,
+            RunState::Failed,
+            RunState::Killed,
+            RunState::Retried,
+            RunState::Skipped,
+        ] {
+            assert!(
+                state.is_terminal(),
+                "{state:?} is in State.Type.isTerminated() and must stay terminal"
+            );
+        }
+        for state in [
+            RunState::Created,
+            RunState::Submitted,
+            RunState::Running,
+            RunState::Retrying,
+            RunState::Paused,
+            RunState::Restarted,
+        ] {
+            assert!(
+                !state.is_terminal(),
+                "{state:?} is NOT in State.Type.isTerminated() -- a run in it is \
+                 still the executor's business"
+            );
+        }
+        assert_eq!(RunState::Paused.wire(), "PAUSED");
+        assert_eq!(RunState::Restarted.wire(), "RESTARTED");
+        assert_eq!(
+            RunState::ALL.len(),
+            11,
+            "the golden's vocabulary is 13; this enum now holds 11 of it, and \
+             `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
+             is what derives the rest"
+        );
+    }
+
+    /// **`Paused` enters `walk`'s waiting arm rather than its terminal arm**,
+    /// driven rather than asserted about.
+    ///
+    /// [`RunState::is_terminal`] is read by `flowable::is_terminal`, which is
+    /// read by `sequential::walk`; this is the only one of the three a caller
+    /// can drive with a hand-built state, and driving it is what makes the
+    /// difference between "the predicate says false" and "the executor waits".
+    ///
+    /// The control is the row above it: the SAME fixture with the run in
+    /// `Success` retires that child and moves on, so a `walk` that answered
+    /// `Waiting` for everything fails here.
+    #[test]
+    fn a_paused_run_makes_its_sequence_wait() {
+        use crate::executor::flowable::{sequential, Step};
+
+        let plan = crate::executor::build_plan(
+            "id: f\nnamespace: n\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: x\n  - id: b\n    type: io.kestra.plugin.core.log.Log\n    message: y\n",
+        )
+        .expect("the fixture flow must plan");
+        let roots = plan.roots.clone();
+
+        let mut state = ExecutionState::new(&plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: roots[0],
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 0,
+                at: Tick(0),
+            },
+        );
+
+        for (set, expect_waiting) in [(RunState::Paused, true), (RunState::Success, false)] {
+            let mut s = state.clone();
+            apply(&mut s, &Command::SetRunState { run: 0, state: set });
+            let step = sequential::drive(&plan, &s, &roots, &[], None, Tick(1));
+            assert_eq!(
+                matches!(step, Step::Waiting),
+                expect_waiting,
+                "with run 0 in {set:?} the sequence should {}; got {step:?}",
+                if expect_waiting { "wait" } else { "move on" }
+            );
+        }
     }
 
     /// **A skip writes the state AND the attempt Kestra records with it.**

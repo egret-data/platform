@@ -286,10 +286,17 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
 /// Java's priority is `KILLED > FAILED > CANCELLED > WARNING > PAUSED`, over a
 /// single pass that breaks on `KILLED`
 /// (`core/src/main/java/io/kestra/core/models/executions/Execution.java:769`).
-/// `CANCELLED`, `WARNING` and `PAUSED` are three of the six states this enum
-/// still cannot represent — they belong to flow concurrency, `AllowFailure` and
-/// `Pause`, none of which is Task 4's — so what is left of the order here is
-/// `KILLED`, then `FAILED`, then the `SUCCESS` it starts from.
+///
+/// **This said `CANCELLED`, `WARNING` and `PAUSED` were "three of the six
+/// states this enum still cannot represent", and by W8 Task 2 both halves of
+/// that were stale.** The count was the enum's seven-member era (13 golden
+/// states minus 7); it had been 4 since W3c and is **2** now — `WARNING` (10
+/// entries) and `CANCELLED` (3), owned by `AllowFailure`/`allowFailure:` and by
+/// `sla:`/`Exit`. `PAUSED` **is** representable from W8 Task 2, so it is left
+/// out of this aggregate for a different reason, and a measured one: it is not
+/// terminal, `aggregate_created` runs only over runs that are, and `PAUSED`
+/// sits below `WARNING` in the priority above anyway. What is left of the order
+/// here is `KILLED`, then `FAILED`, then the `SUCCESS` it starts from.
 fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
     let mut out = RunState::Success;
     for &ix in runs {

@@ -4443,19 +4443,33 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let drafted: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "SUBMITTED" | "RETRIED" | "SKIPPED"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "SUBMITTED" | "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED"
+            )
+        })
         .collect();
     let through_task_6: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "RETRIED" | "SKIPPED"))
+        .filter(|s| !matches!(*s, "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED"))
         .collect();
-    let through_w3a: BTreeSet<&str> = held.iter().copied().filter(|s| *s != "SKIPPED").collect();
+    let through_w3a: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "SKIPPED" | "PAUSED" | "RESTARTED"))
+        .collect();
+    let through_w3c: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED"))
+        .collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut fits_drafted, mut fits_task_6, mut fits_w3a, mut fits_now, mut entries) =
-        (0, 0, 0, 0, 0usize);
+    let (mut fits_drafted, mut fits_task_6, mut fits_w3a, mut fits_w3c, mut fits_now, mut entries) =
+        (0, 0, 0, 0, 0, 0usize);
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         entries += 1;
@@ -4484,6 +4498,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         if used.iter().all(|s| through_w3a.contains(s.as_str())) {
             fits_w3a += 1;
         }
+        if used.iter().all(|s| through_w3c.contains(s.as_str())) {
+            fits_w3c += 1;
+        }
         if used.iter().all(|s| held.contains(s.as_str())) {
             fits_now += 1;
         }
@@ -4493,8 +4510,8 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         "state vocabulary: the golden uses {} states over {entries} `runs` entries; \
          RunState holds {}. Entries wholly inside the vocabulary: {fits_drafted} \
          (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_w3a} \
-         (Task 7, 8), {fits_now} (W3c, 9). Still missing, by entries using each: \
-         {missing:?}",
+         (Task 7, 8), {fits_w3c} (W3c, 9), {fits_now} (W8 Task 2, 11). Still \
+         missing, by entries using each: {missing:?}",
         all.len(),
         held.len()
     );
@@ -4505,8 +4522,8 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          state table is derived from these"
     );
     assert_eq!(
-        (fits_drafted, fits_task_6, fits_w3a, fits_now),
-        (35, 229, 233, 237),
+        (fits_drafted, fits_task_6, fits_w3a, fits_w3c, fits_now),
+        (35, 229, 233, 237, 253),
         "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
          big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
          `RETRIED` population -- and the four entries are exactly the \
@@ -4516,19 +4533,18 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          **none of them banks**: every one of the four is held by a construct \
          W3a does not implement as well (`Subflow`, an `ExecutionUpdatableTask`, \
          `finally:`, an opaque `WorkingDirectory`). Being inside the vocabulary \
-         is necessary and not sufficient"
+         is necessary and not sufficient -- and **W8 Task 2's 16 (237 -> 253) \
+         bank nothing at all**, which is the third measured example: `Pause` \
+         and `LoopUntil` are still planned opaque, so no command in this crate \
+         emits either new variant"
     );
     assert_eq!(
         missing,
-        BTreeMap::from([
-            ("CANCELLED".to_string(), 3),
-            ("PAUSED".to_string(), 18),
-            ("RESTARTED".to_string(), 12),
-            ("WARNING".to_string(), 10),
-        ]),
-        "the four states still outside `RunState`, with the number of `runs` \
+        BTreeMap::from([("CANCELLED".to_string(), 3), ("WARNING".to_string(), 10),]),
+        "the two states still outside `RunState`, with the number of `runs` \
          entries whose trace uses each. `oracle-exec/README.md` names the owner \
-         of each; `RETRIED` left this table at Task 7 and `SKIPPED` at W3c"
+         of each; `RETRIED` left this table at Task 7, `SKIPPED` at W3c, and \
+         `PAUSED` (18) and `RESTARTED` (12) at W8 Task 2"
     );
 }
 

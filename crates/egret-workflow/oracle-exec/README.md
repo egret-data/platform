@@ -1562,8 +1562,9 @@ number from the right file.)* Going the other way,
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
 unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`, W3c added
-`SKIPPED`**, so the enum has nine and **4 of the 13 remain unrepresentable**:
-`PAUSED`, `RESTARTED`, `WARNING`, `CANCELLED`. Each is recorded here rather than
+`SKIPPED`, and W8 Task 2 added `PAUSED` and `RESTARTED`**, so the enum has
+eleven and **2 of the 13 remain unrepresentable**:
+`WARNING`, `CANCELLED`. Each is recorded here rather than
 worked around in the normaliser, because a normaliser that quietly maps an
 unrepresentable state onto a representable one is a normaliser that hides the gap
 it was built to expose.
@@ -1576,11 +1577,12 @@ it green. It now derives the vocabulary from `RunState::ALL`, which is the
 single list, and `run_state_all_holds_every_variant_in_order` is what keeps that
 list and the enum in step.
 
-**What each addition bought, and what the four still cost.** Of the 266 `runs`
+**What each addition bought, and what the two still cost.** Of the 266 `runs`
 entries, **35** use only the six members the plan drafted, **229** use only the
-seven, **233** use only the eight and **237** use only the nine — so `SUBMITTED`
-alone is what moved the reachable set by 194 entries, `RETRIED` moves it by 4 and
-`SKIPPED` by 4,
+seven, **233** use only the eight, **237** use only the nine and **253** use
+only the eleven — so `SUBMITTED`
+alone is what moved the reachable set by 194 entries, `RETRIED` moves it by 4,
+`SKIPPED` by 4 and W8 Task 2's pair by 16,
 and it was the single cheapest thing any task could do to this oracle. It is
 also not optional for Task 3's own slice: `SUBMITTED` is in 580 of the golden's
 840 run histories and on every task the worker ran, so a sequential flow of
@@ -1602,13 +1604,41 @@ four are `FAILED` where Kestra recorded `RETRIED`, which is a wrong answer rathe
 than a missing one — but it moved them from *wrong on several fields* to *right
 on everything except the field nothing produces*. See the sub-execution hole.
 
-The other four, with the number of `runs` entries whose trace uses each and the
+**W8 Task 2's 16 buy no bank either, and that is the third measured instance of
+"inside the vocabulary is necessary and not sufficient".** `PAUSED` (18 entries)
+and `RESTARTED` (12) were added together because `Pause` and `LoopUntil` need
+the **same** variant and splitting them across packages would block each on the
+other's state. Nothing in the crate emits either one: `build_plan` still plans
+`Pause`, `LoopUntil` and `WaitFor` opaque, so the ratchet is **unchanged at
+127** across the commit that added them. What the two rows record, measured over
+`golden.json` rather than inferred:
+
+- `PAUSED` is in **18** of the 408 execution histories and **20** of the 840 run
+  histories, and **0** of the 604 attempt histories — a paused run's attempt
+  reads `["CREATED","RUNNING","SUCCESS"]` while the run itself reads
+  `["CREATED","RUNNING","PAUSED","SUCCESS"]`
+  (`valids/flow-concurrency-cancel-pause`). The first producer of the variant
+  has to emit something other than a plain `SetRunState` or it will push a
+  state Kestra never records onto the open attempt.
+- `RESTARTED` is in **12** execution histories and **0** run and **0** attempt
+  histories. All 12 are `Pause`-and-resume, shape
+  `CREATED RUNNING PAUSED RESTARTED RUNNING …`; the other **6** `PAUSED`
+  executions carry no `RESTARTED` at all and are exactly `LoopUntil`/`WaitFor`'s,
+  which re-enters `RUNNING` directly. **That 12 + 6 is where the 18-entry
+  population's split comes from**, derived here rather than taken from the
+  design doc.
+- Neither is terminal on the artifact. `State.Type.isTerminated()` decompiled
+  from `/app/kestra` in the pinned digest lists `FAILED, WARNING, SUCCESS,
+  KILLED, CANCELLED, RETRIED, SKIPPED, RESUBMITTED` and neither of these; and
+  neither ends any of the 408 execution histories. `RESTARTED` is in
+  `isCreated()` beside `CREATED`, and `ExecutorService.handleRestart` maps it
+  straight back to `RUNNING`.
+
+The other two, with the number of `runs` entries whose trace uses each and the
 task that owns it:
 
 | state | `runs` entries | owner |
 |---|---|---|
-| `PAUSED` | 18 | `Pause`, which no W3a task claims — see the hole list |
-| `RESTARTED` | 12 | execution histories only; a restart is W3b's, not `advance()`'s |
 | `WARNING` | 10 | **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key** (it declares `allowFailure: true` and a 3-attempt `retry: {type: constant, interval: PT0.100S, maxAttempts: 3}`) — and it ended with the word "Unclaimed", the owner the cell had just overturned. **Two** of the ten declare `warningOnRetry`: `valids/retry-success` and `valids/allow-failure-with-retry`. (Fix round 1's replacement said "`allowFailure:` and nothing else" and "`retry-success`'s alone", losing the `retry:` and the second declarer — a transcription that lost a member, inside the commit whose headline is a transcription that lost a member. Corrected in fix round 2) |
 | `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's |
 

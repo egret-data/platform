@@ -669,14 +669,27 @@ async fn on_child_terminal_inner(
 /// } else return SUCCESS;
 /// ```
 ///
-/// **Three of its inputs do not exist here and that is stated rather than
+/// **Two of its inputs do not exist here and that is stated rather than
 /// approximated**: `models::Task` carries no `allowFailure` and no
-/// `allowWarning`, and [`RunState`] has neither `Warning` nor a paused state.
-/// So the two `allow*` branches are unreachable and the trigger set narrows
-/// from `{FAILED, PAUSED, KILLED, WARNING}` to `{Failed, Killed}` —
-/// `State.Type.isFailed()` is `FAILED || KILLED` in Java, which is where the
-/// second of those comes from, and it is the same pair
-/// `spawn::terminated_in_error` reads for a `Loop`.
+/// `allowWarning`, so the two `allow*` branches are unreachable, and
+/// [`RunState`] has no `Warning`. The trigger set therefore narrows from
+/// `{FAILED, PAUSED, KILLED, WARNING}` to `{Failed, Killed}`.
+///
+/// **Two corrections W8 Task 2 owes this paragraph, both from the decompiled
+/// artifact** (`/app/kestra` in `kestra/kestra@sha256:28f59bf1…`):
+///
+/// - It said `KILLED` came from `State.Type.isFailed()` being
+///   `FAILED || KILLED`. It is not: `isFailed()` is `this == FAILED` alone, and
+///   `KILLED` is a disjunct `guessState` spells out itself —
+///   `execution.getState().getCurrent() == State.Type.KILLED`. The pair is the
+///   same one `spawn::terminated_in_error` reads for a `Loop`, but not for the
+///   reason given.
+/// - It said `RunState` has no paused state. **From W8 Task 2 it does.** The
+///   narrowing is unchanged and the reason moves: nothing emits
+///   [`RunState::Paused`] yet — `Pause` and `LoopUntil` are still planned
+///   opaque — so a child execution cannot reach this function in it. Widening
+///   the trigger set here would be a branch no test could drive, which is what
+///   W8's `Pause` package owns together with `Warning`.
 ///
 /// The cost is two golden entries, named in this module's doc.
 ///
