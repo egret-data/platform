@@ -1239,11 +1239,12 @@ mod tests {
     #[test]
     fn the_allow_flags_only_move_a_transmitted_failure() {
         // `valids/task-allow-failure-executable-flow` is `(true, Failed, true,
-        // false)`, whose artifact answer is WARNING -- unrepresentable at Step
-        // 2, so it is still `Failed` here. Step 3 changes this row.
+        // false)`. This row read `Failed` at Step 2, where `RunState` had no
+        // `Warning`; Step 3 added the variant and this is the artifact's
+        // answer.
         assert_eq!(
             guess_state(true, RunState::Failed, true, false),
-            RunState::Failed
+            RunState::Warning
         );
         // `valids/task-allow-warning-executable-flow`.
         assert_eq!(

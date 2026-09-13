@@ -108,30 +108,64 @@ use super::plan::Plan;
 use super::retry;
 use super::state::{ExecutionState, RunIx, RunState, Tick};
 
-/// Spelling B, restricted to the half this enum can currently express — W8
-/// Task 5 Step 2.
+/// **Spelling B, whole** — W8 Task 5 Step 3 closed the hole Step 2 named.
 ///
-/// # The hole is named rather than approximated
+/// Step 2 shipped this with `(Failed, true, false)` returning `Failed`, because
+/// `RunState` had no `Warning` to return; Step 3 added the variant and this is
+/// the artifact's table with nothing left out.
 ///
-/// `(Failed, allow_failure = true, allow_warning = false)` is `WARNING` on the
-/// artifact and there is **no [`RunState`] variant for it**, so that input is
-/// left alone here and returns `Failed`. That is a DIVERGENCE, not a rule: it
-/// is wrong for the four entries Step 3 takes, and it is right for nothing —
-/// the three entries this step banks never reach it, because all three write
-/// both flags.
+/// Written as one `match` over the triple rather than as Java's two sequential
+/// `if`s, and the two are equal by cases rather than by resemblance:
 ///
-/// It is written as an explicit arm rather than as a catch-all so that the next
-/// step widens a `match` the compiler has already laid out, and so that a
-/// reader cannot mistake the gap for a decision.
+/// | state | `allow_failure` | `allow_warning` | Java | here |
+/// |---|---|---|---|---|
+/// | `FAILED` | false | any | neither `if` fires | `Failed` |
+/// | `FAILED` | true | false | first fires, second does not | `Warning` |
+/// | `FAILED` | true | true | first fires, then the second | `Success` |
+/// | `WARNING` | any | true | only the second fires | `Success` |
+/// | `WARNING` | any | false | neither | `Warning` |
+/// | anything else | any | any | neither | unchanged |
+///
+/// The `(Warning, _, true)` row is the one this function cannot be handed by
+/// any corpus flow and is implemented anyway, for the reason
+/// `worker::subflow::guess_state`'s `transmitFailed: false` row is: a
+/// differential oracle's job is the behaviour and not the subset of it one
+/// corpus happens to reach. It is also the ONLY row that separates spelling B
+/// from spelling A — see this module's doc — so leaving it out would make the
+/// two indistinguishable and quietly turn this into [`fail`].
 pub(crate) fn soften(state: RunState, allow_failure: bool, allow_warning: bool) -> RunState {
     match (state, allow_failure, allow_warning) {
-        // Both flags: `FAILED -> WARNING -> SUCCESS` on the artifact, and the
-        // intermediate is a local that never reaches a history.
+        // Java's first `if`, then its second on the result.
         (RunState::Failed, true, true) => RunState::Success,
-        // `(Failed, true, false)` is the hole above.
-        // `(Warning, _, true)` is spelling B's second `if` and is
-        // unrepresentable for the same reason.
+        (RunState::Failed, true, false) => RunState::Warning,
+        // Java's second `if` alone, over a `WARNING` that arrived some other
+        // way. `allow_failure` is not read: the first `if` is predicated on
+        // `state.isFailed()`, which `WARNING` is not.
+        (RunState::Warning, _, true) => RunState::Success,
         _ => state,
+    }
+}
+
+/// **Spelling A** — `io.kestra.core.models.flows.State$Type.fail(Task)`, the
+/// three-way CONSTRUCTION out of two booleans.
+///
+/// It takes no state because the artifact's does not: see this module's doc for
+/// the bytecode. Its one caller here is
+/// [`flowable::pause::deadline`](super::flowable::pause), which is
+/// `ExecutorService.java:937`'s `State.Type.fail(pauseTask)` — the terminal a
+/// `Pause`'s **`timeout:`** ends at. A `pauseDuration:` bound does not go
+/// through it and must not: the same ternary gives that branch
+/// `behavior.mapToState()` instead.
+///
+/// `soften(Failed, af, aw)` answers the same thing for every input, and that is
+/// a fact about `FAILED` rather than about the two functions. They are kept
+/// apart because their *domains* differ — this one has none — and because the
+/// call site reads as what the artifact does there.
+pub(crate) fn fail(allow_failure: bool, allow_warning: bool) -> RunState {
+    match (allow_failure, allow_warning) {
+        (false, _) => RunState::Failed,
+        (true, false) => RunState::Warning,
+        (true, true) => RunState::Success,
     }
 }
 
@@ -204,11 +238,51 @@ mod tests {
         assert_eq!(soften(RunState::Failed, false, true), RunState::Failed);
         // Both: SUCCESS, in one step.
         assert_eq!(soften(RunState::Failed, true, true), RunState::Success);
-        // `allowFailure:` alone is WARNING on the artifact and is the hole this
-        // step names. Asserted as `Failed` on purpose: an assertion that said
-        // `Success` here would ship the over-acceptance, and one that said
-        // nothing would let Step 3 change it without anything going red.
-        assert_eq!(soften(RunState::Failed, true, false), RunState::Failed);
+        // `allowFailure:` alone is WARNING. This row read `Failed` at Step 2,
+        // where the enum had no variant for it.
+        assert_eq!(soften(RunState::Failed, true, false), RunState::Warning);
+    }
+
+    /// **The row that separates the artifact's two spellings**, and the only
+    /// one no corpus flow can supply.
+    ///
+    /// `State$Type.fail` cannot be handed a `WARNING` at all; spelling B can,
+    /// and maps it under `allowWarning:` **whatever `allowFailure:` says** —
+    /// its first `if` is predicated on `isFailed()`, which `WARNING` is not.
+    /// Both values of `allow_failure` are supplied because a fixture that only
+    /// passed `true` would agree with a wrong implementation that read the two
+    /// flags as one.
+    #[test]
+    fn allow_warning_alone_moves_an_existing_warning() {
+        assert_eq!(soften(RunState::Warning, false, true), RunState::Success);
+        assert_eq!(soften(RunState::Warning, true, true), RunState::Success);
+        // Without `allowWarning:` a WARNING stays, however `allowFailure:`
+        // reads -- the arm a mutation widening the pattern to `(Warning, _, _)`
+        // would break.
+        assert_eq!(soften(RunState::Warning, false, false), RunState::Warning);
+        assert_eq!(soften(RunState::Warning, true, false), RunState::Warning);
+    }
+
+    /// Spelling A's whole table — all four combinations, none of them omitted
+    /// because the corpus writes only two.
+    ///
+    /// **It is asserted beside `soften` over `FAILED`, not instead of it**: the
+    /// two agree on every input spelling A has, and the pair is what makes that
+    /// agreement a measured fact rather than an assumption the call sites rest
+    /// on.
+    #[test]
+    fn fail_is_the_construction_and_agrees_with_soften_over_failed() {
+        assert_eq!(fail(false, false), RunState::Failed);
+        assert_eq!(fail(false, true), RunState::Failed);
+        assert_eq!(fail(true, false), RunState::Warning);
+        assert_eq!(fail(true, true), RunState::Success);
+        for (af, aw) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(
+                fail(af, aw),
+                soften(RunState::Failed, af, aw),
+                "the two spellings must agree over FAILED: af={af} aw={aw}"
+            );
+        }
     }
 
     /// **The flags move a `FAILED` and nothing else.** Kestra's two `if`s are
@@ -217,18 +291,16 @@ mod tests {
     /// mutation that deleted the `RunState::Failed` pattern would break.
     #[test]
     fn no_other_state_is_touched_by_either_flag() {
-        for state in [
-            RunState::Created,
-            RunState::Submitted,
-            RunState::Running,
-            RunState::Success,
-            RunState::Retrying,
-            RunState::Retried,
-            RunState::Killed,
-            RunState::Skipped,
-            RunState::Paused,
-            RunState::Restarted,
-        ] {
+        // **Derived from `RunState::ALL` rather than listed**, so a variant
+        // added to the enum joins this population without anybody remembering
+        // to add it -- which is how the Step 2 version of this test would have
+        // stayed green through `Warning` arriving. The two states the flags DO
+        // move are excluded by name.
+        for state in RunState::ALL
+            .iter()
+            .copied()
+            .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
+        {
             for (af, aw) in [(false, false), (false, true), (true, false), (true, true)] {
                 assert_eq!(
                     soften(state, af, aw),
@@ -237,5 +309,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The population above is not empty and not the whole enum — **a zero is
+    /// unfalsifiable alone**, and a filter that excluded everything would make
+    /// the loop above pass by running nothing.
+    #[test]
+    fn the_untouched_population_is_ten_of_the_twelve() {
+        let untouched = RunState::ALL
+            .iter()
+            .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
+            .count();
+        assert_eq!((untouched, RunState::ALL.len()), (10, 12));
     }
 }

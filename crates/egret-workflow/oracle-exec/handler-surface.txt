@@ -314,31 +314,31 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    179  reproduced today, and by nothing the driver removes
+    183  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     26  not reproduced today, and nothing found here blocks it
-     89  not reproduced today, and blocked -- by cause below
+     27  not reproduced today, and nothing found here blocks it
+     84  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 179 + 26 = **205**
-  CEILING, feed retained = 179 + 0 + 26 = 205
+  CEILING, feed removed  = 183 + 27 = **210**
+  CEILING, feed retained = 183 + 0 + 27 = 210
 
-  Today the ratchet matches 179. The two ceilings are the same
+  Today the ratchet matches 183. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **205 is the bound this package should be held to**, because removing
+  **210 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  205 -- reported as a decision, not as progress.
+  210 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 26 nothing here blocks:
+  The 27 nothing here blocks:
     invalids/loop-switch-failed
     valids/all-flowable
     valids/dag
@@ -361,6 +361,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration
     valids/retry-flowable-parallel
     valids/retry-subflow
+    valids/retry-success
     valids/sla-parent-flow
     valids/subflow-parent-retry
     valids/subflow-secret-output-parent
@@ -372,10 +373,8 @@ Two rules, and they are deliberately different:
        23  handler    io.kestra.plugin.core.output.OutputValues
        16  construct  finally:
        10  construct  afterExecution:
-       10  state      WARNING, which RunState cannot hold
         7  construct  flow-level outputs:
         7  construct  io.kestra.plugin.core.execution.Labels
-        5  construct  allowFailure:
         5  construct  flow sla:
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
@@ -392,16 +391,17 @@ Two rules, and they are deliberately different:
         1  construct  Pause behavior:
         1  construct  Pause errors:
         1  construct  Pause onPause:
+        1  construct  allowFailure:
         1  handler    io.kestra.plugin.core.kv.Set
         1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       89  DISTINCT entries blocked (the rows above overlap)
+       84  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        32  a missing handler
-       64  a construct no W3b task owns
-       13  a state RunState cannot hold
+       60  a construct no W3b task owns
+        3  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
   `an unreachable ordered pair` and `an output the handler cannot
@@ -448,12 +448,12 @@ Two rules, and they are deliberately different:
         here: BANKABLE
     valids/retry-success
         W3a : WARNING, which RunState cannot hold
-        here: blocked: state/WARNING, which RunState cannot hold
+        here: BANKABLE
     valids/subflow-secret-output-child
         W3a : a SECRET output; no encryption key
         here: blocked: construct/flow-level outputs:
 
-  5 of the thirteen are bankable by this file's rules and carry a W3a
+  6 of the thirteen are bankable by this file's rules and carry a W3a
   cause this file cannot re-derive. They are the shortfall between the
   ceiling and what W3b should EXPECT:
 
@@ -462,8 +462,9 @@ Two rules, and they are deliberately different:
     valids/if                                three `order` pairs, same cause
     valids/parallel-disabled-tasks           one `order` pair, same cause
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
+    valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 205 - 5 = 200
+    working expectation = 210 - 6 = 204
 
   Two of them deserve a sentence each:
 

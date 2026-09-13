@@ -335,8 +335,8 @@ pub struct Attempt {
 /// `RUNNING`. Measured: of the golden's 18 `PAUSED` execution histories, 12
 /// carry a `RESTARTED` and 6 do not, and the 6 are exactly `LoopUntil`'s.
 ///
-/// The two still missing, with the number of `runs` entries whose trace uses
-/// each: `WARNING` 10, `CANCELLED` 3.
+/// **`WARNING` arrived at W8 Task 5**; the one still missing is `CANCELLED`,
+/// with 3 `runs` entries whose trace uses it.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
 ///
@@ -469,6 +469,43 @@ pub enum RunState {
     ///
     /// [`apply`]: self::apply
     Restarted,
+    /// **The terminal `allowFailure: true` leaves behind, and it is terminal in
+    /// the BENIGN half** — W8 Task 5, which is what took this enum from 11 of
+    /// the golden's 13 states to **12**. `CANCELLED` is the one that remains.
+    ///
+    /// **Terminal, and on which side of `isTerminatedNoFail` it falls is
+    /// measured rather than inferred from the name.** Decompiled from
+    /// `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`: `isTerminated()` is
+    /// `FAILED || WARNING || SUCCESS || KILLED || CANCELLED || RETRIED ||
+    /// SKIPPED || RESUBMITTED` and `isTerminatedNoFail()` is
+    /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`. So `WARNING`
+    /// is terminal AND not a failure, which is two separate facts and both of
+    /// them move something here: [`RunState::is_terminal`] gains it, and
+    /// `flowable::loop_until::children_executed` — whose predicate is
+    /// `isTerminatedNoFail` — must count a `WARNING` child as executed rather
+    /// than stall on it.
+    ///
+    /// **It has exactly one producer and that is what keeps it from
+    /// over-accepting.** `crate::executor::allow_failure::soften` is the only
+    /// expression in this crate that returns it, and it returns it only for
+    /// `(Failed, allow_failure = true, allow_warning = false)`. No handler can
+    /// report it — `worker::from_wire` will now decode the wire spelling, but
+    /// nothing egret runs emits one — and no aggregate invents one: a
+    /// `WARNING` in [`flowable::aggregate`](super::flowable::aggregate) can
+    /// only have come from a child run that already held it.
+    ///
+    /// **The golden's `WARNING` population is 10 run histories**, and this
+    /// variant arriving banks four of them: `valids/task-allow-failure-`
+    /// `{runnable,flowable,executable-flow}` and
+    /// `valids/pause-timeout-allow-failure`. The other six are held by
+    /// something else, entry by entry, in `oracle-exec/README.md`'s residual
+    /// table — four by the `AllowFailure` FLOWABLE, which is a different
+    /// construct from the `allowFailure:` flag and is still planned opaque, one
+    /// (`valids/waitfor-child-task-warning`) by an
+    /// `io.kestra.plugin.core.output.OutputValues` child `driver.rs` ships no
+    /// handler for, and one (`valids/retry-success`) by `warningOnRetry`.
+    Warning,
 }
 
 impl RunState {
@@ -500,6 +537,7 @@ impl RunState {
         RunState::Skipped,
         RunState::Paused,
         RunState::Restarted,
+        RunState::Warning,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -516,6 +554,7 @@ impl RunState {
             RunState::Skipped => 8,
             RunState::Paused => 9,
             RunState::Restarted => 10,
+            RunState::Warning => 11,
         }
     }
 
@@ -533,6 +572,7 @@ impl RunState {
             RunState::Skipped => "SKIPPED",
             RunState::Paused => "PAUSED",
             RunState::Restarted => "RESTARTED",
+            RunState::Warning => "WARNING",
         }
     }
 
@@ -549,6 +589,11 @@ impl RunState {
                 | RunState::Retried
                 | RunState::Killed
                 | RunState::Skipped
+                // W8 Task 5. `State.Type.isTerminated()` lists `WARNING`
+                // second, beside `FAILED`; `isTerminatedNoFail()` lists it
+                // first, beside `SUCCESS`. Both readings matter and they are
+                // not the same predicate -- see `RunState::Warning`.
+                | RunState::Warning
         )
     }
 }
@@ -914,8 +959,9 @@ mod tests {
         assert_eq!(RunState::Restarted.wire(), "RESTARTED");
         assert_eq!(
             RunState::ALL.len(),
-            11,
-            "the golden's vocabulary is 13; this enum now holds 11 of it, and \
+            12,
+            "the golden's vocabulary is 13; this enum now holds 12 of it (11 \
+             until W8 Task 5 added `Warning`; `CANCELLED` is the one left), and \
              `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
              is what derives the rest"
         );

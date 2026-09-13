@@ -461,10 +461,10 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.WaitFor",
 }
 
-# `executor::RunState::ALL`, which is 11 of the golden's 13 states.  A trace
+# `executor::RunState::ALL`, which is 12 of the golden's 13 states.  A trace
 # carrying anything else cannot be represented, whatever the handler does.
-# PAUSED and RESTARTED joined it at W8 Task 2; the two that remain outside are
-# WARNING and CANCELLED.  This set is a COPY of the Rust enum and so can
+# PAUSED and RESTARTED joined it at W8 Task 2 and WARNING at W8 Task 5; the one
+# that remains outside is CANCELLED.  This set is a COPY of the Rust enum and so can
 # disagree with it -- and it DID, by two variants, until W8 Task 2.  The guard
 # is `tests/executor.rs`'s `handler_surfaces_run_state_copy_matches_the_enum`,
 # which parses this literal and compares it to `RunState::ALL` in both
@@ -474,7 +474,15 @@ W3A_FLOWABLES = {
 # and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
              "RETRYING", "RETRIED", "KILLED", "SKIPPED",
-             "PAUSED", "RESTARTED"}
+             "PAUSED", "RESTARTED", "WARNING"}
+
+# `State.Type`'s seventeen, i.e. `models::State`.  Used ONLY by the self-test,
+# to pick a state that is real to Kestra and absent from RUN_STATE above --
+# see `blocker_rule_too_wide` for why that choice cannot be a literal.
+KESTRA_STATES = {"CREATED", "SUBMITTED", "RUNNING", "PAUSED", "RESTARTED",
+                 "KILLING", "SUCCESS", "WARNING", "FAILED", "KILLED",
+                 "CANCELLED", "QUEUED", "RETRYING", "RETRIED", "SKIPPED",
+                 "BREAKPOINT", "RESUBMITTED"}
 
 # Expression markers that read something only a task that RAN can produce.
 # The plan's Step 2 names these three.  They are kept apart in the report
@@ -851,10 +859,11 @@ def check_inputs(flows, kinds, golden, baseline):
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
     # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
     # W8 Task 3 banked eight `Pause` entries; 118 after W8 Task 4 banked
-    # `valids/waitfor-nested`; 115 since W8 Task 5 banked the three
-    # `valids/task-allow-warning-*` entries.
-    if len(baseline) != 115:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 115; the split "
+    # `valids/waitfor-nested`; 111 since W8 Task 5 banked seven -- the three
+    # `valids/task-allow-warning-*`, the three `valids/task-allow-failure-*`
+    # and `valids/pause-timeout-allow-failure`.
+    if len(baseline) != 111:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 111; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1488,8 +1497,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 115",
-         "not 115",
+    case("baseline.txt is no longer 111",
+         "not 111",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a
@@ -1538,10 +1547,23 @@ def self_test():
         #
         # The victim is DERIVED, not named: the first matching `runs` entry with
         # a run. Naming one is how the old case rotted.
+        #
+        # **The STATE it is given is derived too, and W8 Task 5 is why.** This
+        # line appended the literal `"WARNING"` until then, and `RunState`
+        # gained `Warning` in that task -- so the mutation became a no-op, the
+        # guard stayed silent, and the self-test failed for the right reason
+        # rather than passing a case it was no longer exercising. A literal here
+        # rots on the very event the guard exists to notice. What is appended
+        # now is a state Kestra really has that `RUN_STATE` really lacks, chosen
+        # at run time; `_SENTINEL` is the fallback for the day `RUN_STATE`
+        # holds all seventeen, because a case that cannot mutate is worse than
+        # one that mutates artificially.
+        outside = sorted(KESTRA_STATES - RUN_STATE)
         m = copy.deepcopy(golden)
         victim = next(e for e in m
                       if e["verdict"] == "runs" and e["id"] not in baseline and e.get("runs"))
-        victim["runs"][0]["state"] = list(victim["runs"][0]["state"]) + ["WARNING"]
+        victim["runs"][0]["state"] = list(victim["runs"][0]["state"]) + [
+            outside[0] if outside else "_SENTINEL"]
         run(golden_=m)
     case("a blocker rule that fires on an entry egret already reproduces",
          "the blocker rules are wrong",

@@ -508,7 +508,6 @@ valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
 valids/pause-behavior
 valids/pause-errors-finally-after-execution
-valids/pause-timeout-allow-failure
 valids/pause_on_pause
 valids/primitive-labels-flow
 valids/purge_logs_execution_only
@@ -539,9 +538,6 @@ valids/sleep-long-after-execution-flowable
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-valids/task-allow-failure-executable-flow
-valids/task-allow-failure-flowable
-valids/task-allow-failure-runnable
 valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate

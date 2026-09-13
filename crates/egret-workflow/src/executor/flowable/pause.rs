@@ -185,8 +185,21 @@ fn deadline(plan: &Plan, state: &ExecutionState, run: RunIx, task: TaskIx, start
         };
     }
 
-    match plan.tasks[task].timeout {
-        Some(d) => Bound::Until(plus(started, d), RunState::Failed),
+    // **`timeout:` and `pauseDuration:` take DIFFERENT terminals from the two
+    // `allow*` flags, and the artifact's own line is what says so** -- W8 Task
+    // 5. `ExecutorService.java:937` is
+    // `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))`,
+    // so the flags reach the `timeout:` branch and NOT the `pauseDuration:`
+    // one above, which keeps `RunState::Success` whatever anybody wrote.
+    // `valids/pause-timeout-allow-failure` is the flow that measures it: a
+    // `Pause` with `timeout: PT1S` and `allowFailure: true` whose golden run is
+    // `["CREATED","RUNNING","PAUSED","WARNING"]`.
+    let task = &plan.tasks[task];
+    match task.timeout {
+        Some(d) => Bound::Until(
+            plus(started, d),
+            crate::executor::allow_failure::fail(task.allow_failure, task.allow_warning),
+        ),
         None => Bound::Unbounded,
     }
 }

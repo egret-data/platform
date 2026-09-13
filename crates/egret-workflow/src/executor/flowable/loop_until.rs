@@ -179,6 +179,14 @@ pub(crate) fn children_executed(state: &ExecutionState, run: RunIx, tasks: &[Tas
     tasks.iter().all(|&task| {
         super::run_of(state, Some(run), task)
             .and_then(|ix| super::latest(state, ix))
+            // `isTerminatedNoFail()` is `WARNING || SUCCESS || RETRIED ||
+            // SKIPPED || RESUBMITTED`, so the complement inside the terminals
+            // this enum holds is `FAILED || KILLED` -- and W8 Task 5's
+            // `RunState::Warning` falls on the EXECUTED side, which is the
+            // decision the section above hands this task. Adding the variant
+            // without widening this arm would have been the over-acceptance
+            // named there in reverse: a `WARNING` child that stalls a loop
+            // Kestra lets through.
             .is_some_and(|s| s.is_terminal() && !matches!(s, RunState::Failed | RunState::Killed))
     })
 }

@@ -252,6 +252,16 @@ pub(crate) fn aggregate(
         match latest(state, ix) {
             Some(RunState::Killed) => return RunState::Killed,
             Some(RunState::Failed) => out = RunState::Failed,
+            // **W8 Task 5, and its position in the chain is the artifact's
+            // priority order, not an accident of where it was pasted.**
+            // `Execution.guessFinalState`'s single pass is
+            // `KILLED > FAILED > CANCELLED > WARNING > PAUSED`, so a `WARNING`
+            // child loses to a `FAILED` sibling and beats a `SUCCESS` one --
+            // which the `!=` guard below is: it upgrades `Success` and refuses
+            // to downgrade `Failed`. `CANCELLED` sits between them on the
+            // artifact and is the one state this enum still lacks; when it
+            // arrives it belongs above this arm, not below it.
+            Some(RunState::Warning) if out != RunState::Failed => out = RunState::Warning,
             _ => {}
         }
     }
