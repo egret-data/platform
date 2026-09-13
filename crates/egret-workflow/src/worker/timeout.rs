@@ -93,9 +93,18 @@
 //! Kestra's worker never sees a flowable, so "the worker enforces `timeout:`"
 //! and "`timeout:` is only relevant for runnable tasks" are the same sentence
 //! there. In egret they are not quite: `executor::build_plan` plans
-//! `WorkingDirectory`, `WaitFor`/`LoopUntil` and `AllowFailure` as opaque
-//! `TaskKind::Runnable`s, so one of those carrying a `timeout:` is claimable by
-//! this worker.
+//! `WorkingDirectory` and `AllowFailure` as opaque `TaskKind::Runnable`s, so
+//! one of those carrying a `timeout:` is claimable by this worker.
+//!
+//! **`WaitFor`/`LoopUntil` was the third member of that list and W8 Task 4
+//! removed it, exactly as Task 3 removed `Pause` below.** Both spellings reach
+//! `models::TaskKind::LoopUntil` now (`LoopUntil.java` registers `WaitFor` as
+//! an alias on itself) and `build_plan` gives them a
+//! `plan::TaskKind::LoopUntil`, so `claim::persist` writes no `type_id` and the
+//! claim never takes one. The residue is per-TASK rather than per-type: a
+//! `LoopUntil` whose `checkFrequency:` bound this pure builder cannot read is
+//! still planned opaque (`executor::plan::loop_until_gap`), and no corpus flow
+//! writes one.
 //!
 //! **`Pause` was the fourth member of that list and the one the divergence was
 //! written about, and W8 Task 3 removed it.** It is a `TaskKind::Pause` now:

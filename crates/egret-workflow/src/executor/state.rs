@@ -219,6 +219,13 @@ pub struct Attempt {
 /// because those two constructs need the **same** one, so splitting them across
 /// packages would block each on the other's state.
 ///
+/// **Both producers exist now** — `Pause` at W8 Task 3 (eight banked entries)
+/// and `LoopUntil` at W8 Task 4 (one) — and they leave the state by different
+/// doors, which is what `advance`'s `pause_mark` has three arms for: a resumed
+/// `Pause` owes the execution `RESTARTED` and a resumed `LoopUntil` owes it
+/// `RUNNING`. Measured: of the golden's 18 `PAUSED` execution histories, 12
+/// carry a `RESTARTED` and 6 do not, and the 6 are exactly `LoopUntil`'s.
+///
 /// The two still missing, with the number of `runs` entries whose trace uses
 /// each: `WARNING` 10, `CANCELLED` 3.
 /// `oracle-exec/README.md` prints the full table and names which later task owns

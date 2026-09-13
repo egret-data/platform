@@ -77,6 +77,8 @@ pub enum TaskKind {
     Subflow(Subflow),
     AllowFailure(AllowFailure),
     WorkingDirectory(WorkingDirectory),
+    // `LoopUntil` sits above, beside `Loop`; both spellings of it reach that
+    // variant since W8 Task 4 -- see `kind_for`'s `waitfor` row.
     /// `io.kestra.plugin.core.flow.Pause` -- W8 Task 3.
     ///
     /// **It was a [`TaskKind::Leaf`] until W8 Task 3**, and

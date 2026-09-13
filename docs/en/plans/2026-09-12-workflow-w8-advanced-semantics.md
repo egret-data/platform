@@ -30,7 +30,7 @@ Every task's requirements implicitly include this section.
 - **A wrong assertion is worse than none** — it converts a divergence into a defended invariant. Two shipped in W6 and each cost a round.
 - **A skipped suite must print `0 passed; N ignored`, never `N passed`.** Note `egret-test-db`'s opt-out currently violates this and `egret-query/tests/connector_trino_params.rs` self-skips in 0.01 s — **pre-existing, hand on, do not block**.
 - **Reconcile a gate by test-name-set diff, not arithmetic.** A W6 gate read `+2` where `+1` was expected and only a name-set diff could say the extra was a foreign probe; arithmetic would have reconciled and stayed silent.
-- **Tests:** export `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test`, `EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399`, `EGRET_TEST_STARROCKS_URL`. Run the **full** `cargo test --workspace --no-fail-fast -j 3`, exit read from the command, **never while another suite runs**. Baseline gate: **259 result lines / 3433 passed / 0 failed / 5 ignored**, exit 0 — measured at `c41ecf0b`, after Tasks 1 and 2; the plan was written against 3426 and that figure was already stale when Task 3 opened. Ratchet **127**, md5 `a3d887ae72595e61c8bc16e8530f9951` at that commit. `sql_starrocks_live`'s **duration** ≈0.7–0.9 s, not its pass count. **Never write a temporary test into the shared worktree while a gate may be running** — that contaminated a W6 gate.
+- **Tests:** export `DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test`, `EGRET_TEST_SHARED_STORE_URL=redis://localhost:6399`, `EGRET_TEST_STARROCKS_URL`. Run the **full** `cargo test --workspace --no-fail-fast -j 3`, exit read from the command, **never while another suite runs**. Baseline gate, **re-measured at W8 Task 4 and dated on purpose — every earlier figure in this line was stale within one task of being written**: **259 result lines / 3463 passed / 0 failed / 5 ignored**, exit 0, ratchet **118**, md5 `375c5c88276cc62606205e423a42ea25`. The arc, so a reader can tell a stale number from a wrong one: **3426** (as planned) → **3433** at `c41ecf0b` after Tasks 1–2, ratchet 127 / `a3d887ae72595e61c8bc16e8530f9951` → **3448** at `ed48c5b2` → **3450** at `520783e8` where Task 3 closed, ratchet 119 / `e5164b3fca309af2a11e2208a02d4f29` → **3463** now, +13 for W8 Task 4's tests. **Reconcile a move by test-NAME-SET diff over `src/`, `tests/executor.rs` and `oracle-exec/driver.rs`, never by arithmetic**: Task 4's +13 is 13 names added and 0 removed, and its integration-test name set is byte-identical. `sql_starrocks_live`'s **duration** ≈0.7–0.9 s, not its pass count. **Never write a temporary test into the shared worktree while a gate may be running** — that contaminated a W6 gate.
 - **Check for a running gate without naming the string you search for, and exclude your own process tree:** `ps -axo pid,ppid,args | awk -v me=$$ '$1!=me && $2!=me && /cargo/ && /test/' | wc -l`. Five earlier formulations were each wrong in a different way.
 - `cp`/`mv` hit `-i` aliases and **refuse while returning success** — `/bin/cp -f` and grep to confirm. Use `if [ -z "$(git status --porcelain)" ]`, never `&& echo CLEAN`. Run `bash -n` on generated scripts. **Commit before you deliberately break something**, and commit early — three agents died mid-task on the previous branch.
 - **`baseline.txt` moves only by a bank**, and its md5 must be reported before and after. Read the ratchet with `--nocapture` — a passing ratchet prints nothing.
@@ -83,7 +83,11 @@ Doing these first makes every later attribution honest, because two of them chan
 ## Task 3: `Pause` — seven entries (**measured: EIGHT**)
 
 > **Closed.** Ratchet **127 → 119**, `baseline.txt` md5
-> `a3d887ae72595e61c8bc16e8530f9951` → `2b0506e3d706a4a9c772103f3206e9d0`.
+> `a3d887ae72595e61c8bc16e8530f9951` → `2b0506e3d706a4a9c772103f3206e9d0`
+> at `ed48c5b2`, and → **`e5164b3fca309af2a11e2208a02d4f29`** at `520783e8`,
+> where Task 3 actually closed: its fix round 3 corrected the DATA in
+> `baseline.txt` without moving the count, so the md5 changed and the 119 did
+> not. Quoting the first md5 alone is the shape this branch keeps paying for.
 > The estimate of seven treated a `timeout:` on a flowable as W4's; that is what
 > `FlowService.java:574` says for every non-`RunnableTask` **except `Pause`**,
 > so `valids/pause-timeout` banks too. Step 2's question is answered NO: the
@@ -103,18 +107,41 @@ Doing these first makes every later attribution honest, because two of them chan
 
 ---
 
-## Task 4: `LoopUntil` / `WaitFor` — three entries
+## Task 4: `LoopUntil` / `WaitFor` — three entries → **ONE banked**
 
 **Files:** create `src/executor/flowable/loop_until.rs`.
 
 **Six of the nine have an `OutputValues` child with no handler** — those are not W8's, and the task must report them as the strict/upper-bound separator rather than as failures.
 
-- [ ] **Step 0 (added after Task 1 measured it): `WaitFor` does not parse to `LoopUntil`, and the corpus prefers the spelling that does not.** `models::kind_for` matches `Some("loopuntil")` and **`"waitfor"` has no row anywhere in `src/`** — not in `kind_for`, not in `spec::validate`'s `KESTRA_FLOW_CONTROL` — so it falls to **`Leaf`**, which is `Pause`'s tier, not `LoopUntil`'s. Measured over the corpus: **7 flows use `core.flow.WaitFor`, 3 use `core.flow.LoopUntil`**, so the **majority** of the population takes the unparsed spelling. **Nothing pointed at the plan could have seen this**, because both tiers plan `Runnable`, so every prose list saying *"`build_plan` plans `WaitFor` opaque"* stays true. Decide whether `kind_for` gains a row or the two tiers are handled separately — and note this touches `src/models/`, which no earlier W8 task opens. **`kind_for` is not the only table missing the row**: measured, a `WaitFor` child of a `WorkingDirectory` **publishes clean** while the identical `LoopUntil` child is **refused** with `working_directory_child_not_runnable`, because `spec::validate`'s `KESTRA_FLOW_CONTROL` has no `"waitfor"` row either. **That is an over-acceptance at publish**, so "handle the tiers separately" must add that row too — a `kind_for` row alone leaves it open. Bounding the class, by a total census of all **69** distinct corpus `type:` strings through `canonical_flow_type` + `kind_for`: exactly **four** fall to `Leaf` — `Pause` (documented), `Sleep` and `WorkingDirectoryTest$LocalFiles` (both correct), and `WaitFor`. **There is no fifth.**
-- [ ] **Step 1: Measure the artifact's loop condition and its interaction with the `PAUSED` state** — the 18-entry `PAUSED` population is 12 `Pause` + 6 `LoopUntil`, so this construct shares Task 2's variant.
-- [ ] **Step 2: Tests first, including the negative** — a condition that must **not** re-enter.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Mutation on the condition**, two-sided.
-- [ ] **Step 5: Ratchet before/after with attribution; full gate; commit.**
+- [x] **Step 0 (added after Task 1 measured it): `WaitFor` does not parse to `LoopUntil`, and the corpus prefers the spelling that does not.** `models::kind_for` matches `Some("loopuntil")` and **`"waitfor"` has no row anywhere in `src/`** — not in `kind_for`, not in `spec::validate`'s `KESTRA_FLOW_CONTROL` — so it falls to **`Leaf`**, which is `Pause`'s tier, not `LoopUntil`'s. Measured over the corpus: **7 flows use `core.flow.WaitFor`, 3 use `core.flow.LoopUntil`**, so the **majority** of the population takes the unparsed spelling. **Nothing pointed at the plan could have seen this**, because both tiers plan `Runnable`, so every prose list saying *"`build_plan` plans `WaitFor` opaque"* stays true. Decide whether `kind_for` gains a row or the two tiers are handled separately — and note this touches `src/models/`, which no earlier W8 task opens. **`kind_for` is not the only table missing the row**: measured, a `WaitFor` child of a `WorkingDirectory` **publishes clean** while the identical `LoopUntil` child is **refused** with `working_directory_child_not_runnable`, because `spec::validate`'s `KESTRA_FLOW_CONTROL` has no `"waitfor"` row either. **That is an over-acceptance at publish**, so "handle the tiers separately" must add that row too — a `kind_for` row alone leaves it open. Bounding the class, by a total census of all **69** distinct corpus `type:` strings through `canonical_flow_type` + `kind_for`: exactly **four** fall to `Leaf` — `Pause` (documented), `Sleep` and `WorkingDirectoryTest$LocalFiles` (both correct), and `WaitFor`. **There is no fifth.** — **Stale twice over, and corrected here rather than only in the task brief.** The `four` became **three** when Task 3 typed `Pause` (re-measured at `88be75b4` over **70** distinct strings), and **two** when Task 4 typed `WaitFor`: `Sleep` and `WorkingDirectoryTest$LocalFiles`, both `RunnableTask` at the pin and both correctly accepted. The class the census was drawn to bound — a Kestra flowable this crate silently accepts as a `WorkingDirectory` child — **is now empty**, and `spec::validate`'s `KESTRA_FLOW_CONTROL` doc holds the same statement beside the table it is about.
+- [x] **Step 1: Measure the artifact's loop condition and its interaction with the `PAUSED` state** — the 18-entry `PAUSED` population is 12 `Pause` + 6 `LoopUntil`, so this construct shares Task 2's variant. — Measured from `LoopUntil.java` rather than from the traces, which is what made Step 4 a two-sided test rather than a fit: `reachedMaximums` is **strictly** `iterationCount > maxIterations` (a limit of 3 with a condition that never holds runs **four** iterations, which `valids/waitfor-max-iterations`' golden shows), `childTaskRunExecuted` filters on `isTerminatedNoFail()` and not `isTerminated()`, and the condition is evaluated **only** when no maximum has been reached. The `PAUSED` half is measured from the golden: of its 18 `PAUSED` executions, 12 carry a `RESTARTED` and 6 do not, and the 6 are exactly `LoopUntil`'s — so a resumed loop owes the execution `RUNNING`, not `RESTARTED`.
+- [x] **Step 2: Tests first, including the negative** — a condition that must **not** re-enter. — Eleven tests. The negatives are `an_unbounded_loop_until_with_a_falsy_condition_never_stops` (an invented default limit would bank the same entries and ship a different product) and `a_failed_body_ends_a_loop_until_without_asking_the_condition`, which asserts the condition is **never evaluated**, not merely ignored.
+- [x] **Step 3: Implement.** — `flowable/loop_until.rs`, plus `Command::RestartLoop` / `Command::RecreateRun` (Kestra's `ExecutionService.retryWaitFor`: the loop's own run keeps its history and loses its cached condition, its descendants are thrown away and rebuilt **one at a time, as the walk reaches them** — a bulk reset gives every sibling one left endpoint and turns three measured `before` pairs into `overlapping`).
+- [x] **Step 4: Mutation on the condition**, two-sided. — `if true` and `if false` in place of `!is_truthy(rendered)`: 777/0 control, **774/3** and **771/6**, and on the ratchet `2 broken` and a regression naming `valids/waitfor-nested`. **A two-sided pair on the OPERATOR says nothing about the OPERAND**, so two operand mutations were run beside it: caching the rendered condition across iterations (**773/4**, and the ratchet stops settling at all) and making `iterationCount` 0-based (**774/3**, ratchet regression).
+- [x] **Step 5: Ratchet before/after with attribution; full gate; commit.** — **119 → 118**, `e5164b3fca309af2a11e2208a02d4f29` → `375c5c88276cc62606205e423a42ea25`. M2 reverts `descend`'s arm and returns exactly `valids/waitfor-nested`.
+
+> **Closed. ONE bank, not three, and the "three" was a spelling split rather
+> than a separator.** Six of the nine are held by the `OutputValues` handler —
+> and those six are exactly the `WaitFor`-spelled ones, which is why "3
+> `LoopUntil`-spelled" and "3 bankable" looked like the same number. Of the
+> other three, `valids/waitfor-nested` banks and the two that do not each differ
+> on exactly ONE field for a reason that is not the loop: a Pebble-vs-minijinja
+> relational-operator divergence, and a `maxDuration` whose golden iteration
+> count carries the artifact's delay-poller latency (its two `PT1S` pauses took
+> 1.17 s and 1.92 s). See the design doc's footnote on the `LoopUntil` row and
+> `oracle-exec/baseline.txt`'s Task 4 block.
+>
+> **Step 0's ruling: ONE row, shared.** `LoopUntil.java` carries
+> `@Plugin(aliases = "io.kestra.plugin.core.flow.WaitFor")` — an alias on the
+> class, not a second class — so both spellings map to one
+> `models::TaskKind::LoopUntil`, and that row is also what closes the publish
+> over-acceptance (`is_runnable_child` is `matches!(kind, Leaf)`).
+> `walk_task` **does** descend through `Task::children()`, which is why a
+> `Leaf`-typed `WaitFor` hid its whole subtree from validation.
+> **And the ratchet is blind to the whole of Step 0**: deleting the `"waitfor"`
+> row leaves it green at 118, because the one entry that banks is spelled
+> `LoopUntil` and the six spelled `WaitFor` are held by the handler. Only the
+> `spec::validate` tests can see it.
 
 ---
 

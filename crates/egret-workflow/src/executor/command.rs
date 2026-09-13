@@ -30,6 +30,12 @@ pub enum Command {
         /// `RETRY_FAILED_TASK`'s `maxDuration` from
         /// `this.attempts.getFirst().getState().minDate()`
         /// (`TaskRun.java:337`), and `WaitFor`/`Pause` from their own start.
+        /// A `LoopUntil`'s `checkFrequency.maxDuration` is the third, and it is
+        /// the one that made this sentence load-bearing rather than
+        /// explanatory: Kestra measures it from the loop taskrun's own
+        /// `CREATED`, which `resetAttempts()` never appends to, and egret reads
+        /// the same instant off the single attempt a `LoopUntil` opens and
+        /// never reopens.
         /// Something therefore has to store that instant, and there were three
         /// places to put it: a `now` parameter on
         /// [`apply`](super::apply), a field the caller sets by hand, or here.

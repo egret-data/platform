@@ -56,8 +56,10 @@
 //! count the iterations and nothing has to be persisted for it. [`iteration`]
 //! is the one definition, shared by this module and by
 //! [`worker::render`](crate::worker) — which is what puts
-//! `{{ outputs.<loop>.iterationCount }}` in front of the children, the
-//! expression three of the corpus's nine flows are written around.
+//! `{{ outputs.<loop>.iterationCount }}` in front of the children. **Nine of
+//! the corpus's ten flows of this construct are written around that
+//! expression**; the tenth, `valids/waitfor-child-task-warning`, reads a
+//! child's output instead.
 //!
 //! **Where that derivation is narrower than the stored counter**: a `LoopUntil`
 //! that is *retried* re-enters `CREATED` and then `RUNNING` again, and this
@@ -73,14 +75,29 @@
 //! ships no handler, so their children cannot run at all and no amount of
 //! correctness in this module can move them — they are the strict upper bound
 //! on what W8 Task 4 could bank, not failures of it. Of the remaining three,
-//! one (`valids/loop-until-restart`) is bounded by `maxDuration` and its
-//! iteration count is a function of the **artifact's delay-poller latency**
-//! rather than of the flow: its `PT1S` pauses took 1.17 s and 1.92 s on the
-//! round the golden was taken from, which is what put the third iteration past
-//! a `PT3S` bound that an exact clock does not reach until the fourth. See
-//! `oracle-exec/README.md`; `valids/waitfor-max-duration`, the same construct
-//! with a finer interval, is one of only **two** corpus flows Kestra itself
-//! could not reproduce across five rounds.
+//! `valids/waitfor-nested` is banked and the other two each differ from the
+//! golden on exactly ONE field, for a reason that is not this module:
+//!
+//! * `valids/loop-until-restart` runs FOUR iterations against a golden of
+//!   three. Its iteration count is a function of the **artifact's delay-poller
+//!   latency** rather than of the flow: its `PT1S` pauses took **1.17 s and
+//!   1.92 s** on the round the golden was taken from, which put the third
+//!   iteration past a `PT3S` bound that a clock moving to the earliest deadline
+//!   and no further does not reach until the fourth.
+//!   `valids/waitfor-max-duration`, the same construct with a finer interval,
+//!   is one of only **two** corpus flows Kestra ITSELF could not reproduce
+//!   across five rounds, which is the corroboration that this is a property of
+//!   the construct and not of one entry.
+//! * `valids/loopuntil-failed-flowable`'s loop ends `SUCCESS` where the golden
+//!   holds `FAILED`, because its condition is
+//!   `{{ outputs.loop.iterationCount < "5" }}`: Pebble widens both operands of
+//!   a relational operator to `Number` and throws on a `String`, and minijinja
+//!   orders values across kinds and answers `True`. A RENDERER divergence
+//!   wearing a loop's name.
+//!
+//! `oracle-exec/baseline.txt` and `oracle-exec/README.md` carry both, and
+//! `handler_surface.py` carries a blocker row for each so the ceiling does not
+//! name an entry nothing can bank.
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
@@ -225,14 +242,24 @@ pub(crate) fn resume(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
 ///     return true;
 /// ```
 ///
-/// **`>` and not `>=`, and that is measured, not transcribed.** The four corpus
-/// flows with a `maxIterations:` are the instrument:
-/// `valids/waitfor-max-iterations` sets `3` with a condition that never becomes
-/// true and runs **four** iterations, while `valids/waitfor-multiple-tasks` and
-/// `valids/waitfor-no-success` set `3` and `5` and stop at three and five —
-/// because their conditions become true on exactly that iteration, not because
-/// of the limit. A `>=` reading agrees with the last two and is wrong about the
-/// first, which is why the first is the row that decides it.
+/// **`>` and not `>=`, and that is measured, not transcribed.** The corpus has
+/// **five** flows with a `maxIterations:` and only ONE of them can tell the two
+/// readings apart:
+///
+/// | flow | limit | iterations in the golden | what stopped it |
+/// |---|---|---|---|
+/// | `valids/waitfor-max-iterations` | 3 | **4** | **the limit** |
+/// | `valids/waitfor-multiple-tasks` | 3 | 3 | the condition |
+/// | `valids/waitfor-no-success` | 5 | 5 | the condition |
+/// | `valids/waitfor` | 3 | 1 | the condition |
+/// | `valids/waitfor-multiple-tasks-failed` | 5 | 1 | a child FAILED |
+///
+/// A `>=` reading agrees with the last four and is wrong about the first, so
+/// the first is the whole instrument — and it is one of the six entries held by
+/// the `OutputValues` handler, which is why the ratchet cannot score this line
+/// either way (mutating `>` to `>=` leaves it green) and
+/// `a_limit_of_n_runs_n_plus_one_iterations_and_fail_on_max_decides_only_the_terminal`
+/// is what holds it.
 ///
 /// **`maxDuration` is measured from the loop run's CREATION**, not from the
 /// current iteration and not from the attempt: `resetAttempts()` rewinds

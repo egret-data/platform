@@ -3195,7 +3195,7 @@ owner is how a suppression list starts.
 | `runIf:` | ~~**6 runs across 4 entries** — the golden's whole `SKIPPED` population — and 7 baselined entries~~ — **implemented by W3c** | a task-level expression, rendered per run | **W3c took it**, and both halves moved in one commit: W1's `Task` carries `run_if` and `RunState` has `Skipped`. **None of the 7 banks and none of the 6 skipped runs is reproduced under this oracle** — not because the rule is wrong but because the harness cannot render any of the four flows' conditions; see *What W3c had to change, and what it did NOT bank* |
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
-| `LoopUntil`, and its alias `WaitFor` | **3** + **6** over-submitted runs | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8** (spec §2.1) — the plan gained the row after Task 6 named it |
+| ~~`LoopUntil`, and its alias `WaitFor`~~ — **taken by W8 Task 4** | ~~**3** + **6** over-submitted runs~~ — **0**, and the two spellings are one `models::TaskKind` now | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8 Task 4**, one entry banked (`valids/waitfor-nested`). The 9 over-submitted runs are gone: a `plan::TaskKind::LoopUntil` gets no `type_id`, so no worker claims it — and the SEPARATE fact Task 4 closed is that `WaitFor` never reached this tier at all. `models::kind_for` had no row for the alias, so it parsed to `Leaf` and its `tasks:` sat inside an opaque `spec` where `children()` could not see them; **seven of the ten corpus flows of this construct use that spelling.** Both now map to `TaskKind::LoopUntil`, which also closes the one publish egret accepted that the artifact refuses (a `WaitFor` child of a `WorkingDirectory`) |
 | `WARNING` | 10 golden `runs` entries | `AllowFailure`, the `allowFailure:` flag, `retry.warningOnRetry` and an `Exit` | **W8 for 8 of the 10, unclaimed for 2** — corrected at W8 Task 1, and this cell had said Task 7's and then unclaimed. The 8 are the allow\* axis's (`AllowFailure` ×3, `allowFailure:` ×5) and the programme spec §9 has always given `allowFailure` to W8; the 2 that stay unclaimed are `valids/retry-success` (`warningOnRetry` alone — Task 7 reads it into `RetryPolicy` and does nothing with it) and `valids/exit` (an `Exit`, this table's `ExecutionUpdatableTask` row). See the residual table's `allowFailure` paragraph for the derivation by entry name |
 | a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
@@ -5777,19 +5777,24 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **175** |
-| baselined — egret does not reproduce it yet | **119** |
+| matching | **176** |
+| baselined — egret does not reproduce it yet | **118** |
 
 ```text
-  matching  175 = 152 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 119 = 114 of the 266 `runs` +  5 of the 28 `refused`
+  matching  176 = 153 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 118 = 113 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-119 is simultaneously the mismatching count, the size of `baseline.txt` and the
+118 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
+
+**175 → 176 at W8 Task 4**, one entry: `valids/waitfor-nested`. The `refused`
+half is unchanged for the same reason Task 3's was — the only `LoopUntil`-family
+flow Kestra refused is none at all, and `invalids/workingdirectory-invalid` is
+still refused by egret, now for BOTH spellings of the construct rather than one.
 
 **167 → 175 at W8 Task 3**, one construct with eight instances: `Pause`. See
 *What W8 Task 3 had to change, and what it banked* at the end of this file; the
@@ -6091,7 +6096,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-119 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+118 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
@@ -6104,10 +6109,38 @@ exhaustive and named.
 | 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8** — see the paragraph on its two owners below |
 | 4 | `Pause` → `PAUSED` | W8 — and **not one of the four is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
-| 9 | `LoopUntil` / `WaitFor` | W8 |
+| 8 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below |
 | 5 | `sla:` | W8 |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
 | **36** | **none of the above** | named individually in `UNATTRIBUTED` |
+
+**The `LoopUntil` / `WaitFor` row is 9 → 8 at W8 Task 4, and the eight that
+remain are held by three things, none of which is the construct.** SIX have an
+`io.kestra.plugin.core.output.OutputValues` child and `driver.rs`'s registry
+ships four handlers, none of them that one — so their bodies cannot run at all,
+which is the strict/upper-bound separator for this row rather than a failure of
+it. (One of the six, `valids/waitfor-child-task-warning`, is held twice: its
+other child is an `allowFailure: true` `Fail` whose run is `WARNING`, which is
+the `AllowFailure` row's.) `valids/loopuntil-failed-flowable` differs on ONE
+field — its condition is `{{ outputs.loop.iterationCount < "5" }}`, Pebble
+widens both operands of a relational operator to `Number` and throws on a
+`String`, minijinja orders across kinds and answers `True`, so the loop succeeds
+where the artifact failed the task; it is registered in
+`STILL_OVER_ACCEPTED_AT_RUNTIME` with the four other renderer divergences.
+`valids/loop-until-restart` differs on ONE field too — four iterations against a
+golden of three, under `maxDuration: PT3S` with `interval: PT1S`, because the
+golden's third iteration is past that bound only by the **artifact's
+delay-poller latency**: its two `PT1S` pauses took **1.17 s and 1.92 s** on the
+captured round, and `driver.rs::pass_time` moves the clock to the earliest
+deadline and never further. The corroboration that this is a property of the
+CONSTRUCT rather than of that entry: `valids/waitfor-max-duration`, the same
+shape at `PT5S`/`PT0.2S`, is one of only **two** corpus flows whose normalised
+trace Kestra ITSELF could not reproduce across five rounds, so it has no golden
+entry and is excluded by name in `stability.json`. **This is a sixth way the
+oracle is blind, and it belongs beside the other five: a golden figure that is a
+function of the artifact's SCHEDULER rather than of the flow.** Both entries now
+carry a blocker row in `handler_surface.py` — `clock` and `render` — so the
+ceiling does not name an entry nothing can bank.
 
 **The `CREATE_NEW_EXECUTION` replay row was 4 and is GONE, which is the fourth
 time this table has lost a row rather than lowered one.** W6 Task 4 banked all
@@ -6520,6 +6553,29 @@ license somebody to over-claim, not because it is a new way of being blind.
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
 | **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
 | **an out-of-enum `behavior:`** (W8 Task 3 fix round 3) | **0 corpus flows**; measured on probes only | 0 | nothing | **No population, and the behaviour is a HANG rather than a state.** A `Pause` whose `behavior:` renders to something outside `RESUME`/`WARN`/`FAIL`/`CANCEL` -- `NOPE`, lower-case `fail`, an undefined `{{inputs.nosuch}}` -- leaves the execution `RUNNING` past 120 s, non-terminal, with the pause run still `RUNNING`. Every one of the four enum values terminates, and terminates differently (`FAILED`/1, `SUCCESS`/2, `WARNING`/2, `CANCELLED`/1). The corpus's single `Pause` `behavior:` posts `FAIL`, so nothing here can score this edge; it is listed because the sentence *"the artifact honours the value"* is true **inside the enum only**, and W8 Task 3 fix round 2 wrote it without that qualifier from a grid whose every cell was a valid constant |
+
+**W8 Task 4 found something this table does not have a shape for, and it is
+left here as a note rather than forced into a sixth row.** Every mechanism above
+is a reason the ratchet **cannot speak** for a construct — no population, no
+request, no link, no golden entry. `valids/loop-until-restart` is the opposite:
+the golden entry exists, the ratchet compares it, and **its value is a function
+of the artifact's SCHEDULER rather than of the flow**, so a correct
+implementation is baselined against it for ever. Its `LoopUntil` is bounded by
+`maxDuration: PT3S` with `interval: PT1S`, Kestra's `reachedMaximums` compares
+the loop taskrun's creation plus the bound against `Instant.now()`, and on the
+captured round its two `PT1S` pauses took **1.17 s and 1.92 s** — so its third
+iteration ended at T+3.33 s and was past the bound. `driver.rs::pass_time` moves
+the clock to the earliest deadline and never further, so egret's third iteration
+ends near T+2.05 s and a fourth runs. **The corroboration that this is the
+construct and not the entry**: `valids/waitfor-max-duration`, the same shape at
+`PT5S`/`PT0.2S`, is one of only **two** corpus flows whose normalised trace
+**Kestra itself** could not reproduce across five rounds, so it has no golden
+entry at all. The finer the interval, the more of the iteration count is
+latency. Whether that is a sixth mechanism, or a second KIND of thing that needs
+a table of its own, is W8 Task 7's to rule on with the coverage statement; it is
+written down here because a finding that lives only in a task report is a
+finding that has to be rediscovered. `handler_surface.py` carries it as a
+`clock` blocker so the ceiling does not name the entry as bankable.
 
 **Both sides are blind, and the second half is egret's.** Even if Kestra's
 trigger-fired executions reached the golden, nothing on egret's side of this

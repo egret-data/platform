@@ -3046,16 +3046,18 @@ mod tests {
     /// This doc then said the four rows are *"three `models::TaskKind`
     /// variants (`WaitFor` and `LoopUntil` are one), and they are **exactly**
     /// the typed variants `build_plan`'s `match` has no arm for"*. **W8 Task 1
-    /// fix round 4 measured that and it is false**, by the probe-declares-its-
-    /// arm assertion below: `models::kind_for` knows `"loopuntil"` and has no
-    /// row for `"waitfor"` at all, so the four rows are **four** variants —
+    /// fix round 4 measured that and it was false**, by the probe-declares-its-
+    /// arm assertion below: `models::kind_for` knew `"loopuntil"` and had no
+    /// row for `"waitfor"` at all, so the four rows were **four** variants —
     /// `AllowFailure`, `WorkingDirectory`, `LoopUntil`, and `Leaf` for the
-    /// `WaitFor` spelling — and the fourth is the untyped catch-all rather
-    /// than a typed variant with no arm. The three typed variants with no arm
-    /// are `AllowFailure`, `WorkingDirectory` and `LoopUntil`. What survives
-    /// is the conclusion this test exists for: all four are planned
-    /// [`TaskKind::Runnable`], which is why every prose list of the opaque
-    /// types is still checked against this test. `Subflow` was a fifth row
+    /// `WaitFor` spelling.
+    ///
+    /// **W8 Task 4 made the sentence true by making the two spellings one**:
+    /// `kind_for` has a `"waitfor"` row now, both probes declare `LoopUntil`,
+    /// and the loop above is down to the two types that are still opaque.
+    /// `LoopUntil` left that loop for the same reason `Pause` did — it is
+    /// planned into a typed variant now, and per TASK rather than per type, so
+    /// BOTH sides of `loop_until_gap` are probed below. `Subflow` was a fifth row
     /// until W6 Task 3 gave it [`TaskKind::Executable`]; a type that reaches
     /// `ModelKind::Leaf` instead (`Pause`) is opaque for a different reason
     /// and is not this test's subject.
@@ -3287,24 +3289,27 @@ mod tests {
         // **That declaration found a false sentence on its first run, which is
         // why it is here and not a formality.** This test's own doc said the
         // four rows above are *"three `models::TaskKind` variants (`WaitFor`
-        // and `LoopUntil` are one)"*. They are not one.
-        // `models::kind_for` matches `Some("loopuntil")` and nothing else, and
-        // `"waitfor"` appears in **no** table in this crate -- not `kind_for`,
+        // and `LoopUntil` are one)"*. **They were not one until W8 Task 4.**
+        // `models::kind_for` matched `Some("loopuntil")` and nothing else, and
+        // `"waitfor"` appeared in **no** table in this crate -- not `kind_for`,
         // not `spec::validate`'s `KESTRA_FLOW_CONTROL` -- so
-        // `io.kestra.plugin.core.flow.WaitFor` parses to
-        // [`crate::models::TaskKind::Leaf`], not to `LoopUntil`. The alias is
-        // Kestra's; egret's model does not have it.
+        // `io.kestra.plugin.core.flow.WaitFor` parsed to
+        // [`crate::models::TaskKind::Leaf`], not to `LoopUntil`.
         //
         // Nothing above could have caught that, and neither could a
-        // three-valued classifier on its own: `Leaf` and `LoopUntil` are both
-        // planned [`TaskKind::Runnable`], so the plan is byte-identical either
+        // three-valued classifier on its own: `Leaf` and `LoopUntil` were both
+        // planned [`TaskKind::Runnable`], so the plan was byte-identical either
         // way and every prose list saying *"`build_plan` plans `WaitFor`
-        // opaque"* stays true. Only a probe that says which arm it is aiming at
-        // can see it. The `WaitFor` row is kept, declared as the `Leaf` it
-        // actually reaches, precisely because the doc claimed otherwise --
-        // and the divergence in the MODEL (a `Leaf` has no `children()`, a
-        // `LoopUntil` does) is recorded as a finding rather than fixed here:
-        // W8 Task 1 is a test-and-docs change and `kind_for` is production.
+        // opaque"* stayed true. Only a probe that says which arm it is aiming
+        // at can see it -- and the divergence was real below the plan, because
+        // a `Leaf` has no `children()` and a `LoopUntil` does.
+        //
+        // **Both probes declare `LoopUntil` now**, which is the assertion W8
+        // Task 4's `kind_for` row had to satisfy: `LoopUntil.java` registers
+        // `WaitFor` as an alias on itself, so one row serves both and a fix
+        // that reached one spelling would fail here. The ratchet cannot see
+        // that row at all -- deleting it leaves the oracle green -- so this
+        // probe and the two `spec::validate` tests are the whole instrument.
         // The two `Pause` probes. **Both**, because `pause_gap` has two
         // outcomes and a probe list holding only one of them would leave the
         // other classified by nothing -- which is exactly the lost-member
@@ -6962,10 +6967,11 @@ tasks:
     /// `valids/waitfor-max-iterations` is the row that decides it: limit 3, a
     /// condition that never holds, and a golden run of
     /// `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING PAUSED RUNNING FAILED` --
-    /// three pauses, four `RUNNING`s. The three corpus flows that stop AT their
-    /// limit (`waitfor`, `waitfor-multiple-tasks`, `waitfor-no-success`) stop
-    /// because their condition becomes true on that iteration, which is why a
-    /// `>=` reading agrees with all three of them and is wrong.
+    /// three pauses, four `RUNNING`s. It is the ONLY one of the corpus's five
+    /// `maxIterations:` flows that can tell the two readings apart: the other
+    /// four stop for a reason that is not the limit (three on their condition,
+    /// one on a failed child), so a `>=` reading agrees with all four of them.
+    /// `reached_maximums`' own doc carries the table.
     ///
     /// **`failOnMaxReached` decides the TERMINAL and never the count**, which
     /// is why both values are driven over the same limit here. It is read after
@@ -7127,10 +7133,13 @@ tasks:
     /// Kestra's `childTaskRunExecuted`, whose filter is `isTerminatedNoFail()`
     /// and not `isTerminated()`.
     ///
-    /// `valids/waitfor-multiple-tasks-failed` is the corpus row: its second
-    /// child is a `Fail`, and its golden is ONE iteration ending `FAILED` with
-    /// no `PAUSED` at all -- under `maxIterations: 5` and a condition that
-    /// never becomes true, i.e. a loop that would otherwise have run six times.
+    /// `valids/waitfor-multiple-tasks-failed` is the corpus row, and it is the
+    /// only one: its second child is a `Fail`, and its golden is ONE iteration
+    /// ending `FAILED` with no `PAUSED` at all -- under `maxIterations: 5` and
+    /// a condition that never becomes true, i.e. a loop that would otherwise
+    /// have run six times. It is also one of the six entries the `OutputValues`
+    /// handler holds, so the ratchet cannot score this line and this test is
+    /// the whole instrument.
     /// An implementation that read "all children terminated" would loop a
     /// failing body to its limit.
     ///

@@ -609,16 +609,22 @@ impl Surface {
                     // `Subflow` is in (it is `Executable`, not a flowable the
                     // renderer sees), and **`Pause` is in too since W8 Task 3**
                     // -- a `TaskKind::Pause` gets no `type_id` either, for the
-                    // same reason and by the same line of `claim::persist`. The
-                    // three opaque flowables (`AllowFailure`,
-                    // `WorkingDirectory`, `WaitFor`/`LoopUntil`) are OUT,
-                    // because they are planned `Runnable` and so their
-                    // `type_id` is populated. (`WaitFor` as opposed to
-                    // `LoopUntil` is not a `models::TaskKind` flowable at all,
-                    // because `kind_for` has no row for it; it changes nothing
-                    // here, since the conclusion is drawn from the PLAN kind,
-                    // which is `Runnable` for both spellings. W8 Task 1 fix
-                    // round 5; the `Pause` half corrected at W8 Task 3.)
+                    // same reason and by the same line of `claim::persist`.
+                    // **`LoopUntil` joined them at W8 Task 4, under BOTH its
+                    // spellings** -- a `plan::TaskKind::LoopUntil` gets no
+                    // `type_id` either, and `kind_for` now maps
+                    // `io.kestra.plugin.core.flow.WaitFor` to the same
+                    // `models::TaskKind` as `...LoopUntil`, so the two
+                    // spellings no longer disagree here or anywhere else.
+                    // (They did through W8 Task 1 fix round 5, when `WaitFor`
+                    // reached `models::TaskKind::Leaf`; it changed nothing in
+                    // THIS comment even then, because the conclusion is drawn
+                    // from the PLAN kind and that was `Runnable` for both.)
+                    // The two opaque flowables left, `AllowFailure` and
+                    // `WorkingDirectory`, are OUT: they are planned `Runnable`
+                    // and so their `type_id` is populated -- as is a `Pause` or
+                    // a `LoopUntil` whose own properties `build_plan` cannot
+                    // read (`pause_gap`, `loop_until_gap`).
                     //
                     // **Latent, and the reason is nameable rather than
                     // incidental**: only two corpus flows write `{{task.type}}`
@@ -927,13 +933,24 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
     Pass::Rendered
 }
 
-/// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`.**
+/// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a
+/// `Pause`'s `pauseDuration:` and — W8 Task 4 — a `LoopUntil`'s `condition:`.**
 ///
 /// Each is read at its own run state, and that is measured rather than chosen:
-/// `CREATED` for a `Loop`, `RUNNING` for the other two. `valids/loop-empty`'s
+/// `CREATED` for a `Loop`, `RUNNING` for the rest. `valids/loop-empty`'s
 /// `1_each` reads `CREATED SUCCESS` with no `RUNNING` and no attempt and
 /// `valids/loop-null`'s reads `CREATED FAILED`, so on this artifact a `Loop`
 /// resolves its values *before* it runs; an `If` is started and then asked.
+///
+/// **A `LoopUntil` is the one kind whose state is not enough**, and the one
+/// asked MANY times for a single run. It is `RUNNING` for the whole of its
+/// body, so the state alone would evaluate its `condition:` before the children
+/// whose `outputs.<child>.…` it names have run; the third gate below is the
+/// executor's own `loop_until::condition_is_asked`, called rather than copied.
+/// And `Command::RestartLoop` clears `rendered` at every iteration, so the
+/// filter re-arms — which is Kestra's `runContext.render(this.condition)
+/// .skipCache()`, and is what stops iteration `k + 1` being decided by
+/// iteration `k`'s outputs.
 ///
 /// A render that fails FAILS the run — `valids/if-condition-fail`'s condition
 /// names an input the flow does not declare and its golden is one run,
@@ -1003,10 +1020,11 @@ fn fail(state: &mut ExecutionState, ix: RunIx) {
 
 /// The unrendered expression a planned task holds, by kind.
 ///
-/// Four kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
-/// `values` and — W8 Task 3 — a `Pause`'s `pauseDuration:`.
+/// Five kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
+/// `values`, a `Pause`'s `pauseDuration:` (W8 Task 3) and a `LoopUntil`'s
+/// `condition:` (W8 Task 4).
 ///
-/// **The `Pause` arm is narrower than the other three**, and deliberately: it
+/// **The `Pause` arm is narrower than the other four**, and deliberately: it
 /// offers the expression only when the source does NOT already parse as an
 /// ISO-8601 literal. Every other kind's expression has to be rendered whatever
 /// it says, but `pauseDuration: PT1S` is a complete answer on its own, and

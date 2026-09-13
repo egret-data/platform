@@ -15,7 +15,7 @@ that construct* — not *the flow declares it*:
 | construct | declared (baselined) | declared (corpus) | **reaches** | **bankable by W8 alone** |
 |---|---|---|---|---|
 | `Pause` | 12 | 20 | **12** | **7** |
-| `LoopUntil` / `WaitFor` | 9 | 10 | **9** | **3** |
+| `LoopUntil` / `WaitFor` | 9 | 10 | **9** | **3** &rarr; **1 measured** [^lu] |
 | `allowFailure` / `AllowFailure` | 12 | 15 | **12** | **6** |
 | `sla:` | 5 | 6 | **7** | **2** |
 | `WorkingDirectory` | 4 | 15 | **4** | **0 measured, 1 candidate** |
@@ -72,6 +72,29 @@ The residual table counts **5**; the cause is **7**. Two entries are held by an
 per-flow needle **structurally cannot see**. A declaration count and a cause count
 can differ in *both* directions, and this is the direction nobody had looked for.
 
+[^lu]: **Corrected by W8 Task 4, which implemented the construct and then
+    measured it.** The `3` was the number of entries spelled `LoopUntil` rather
+    than `WaitFor`, and that split is not the separator: the separator is the
+    `OutputValues` handler, which holds exactly the six `WaitFor`-spelled ones.
+    Of the other three, `valids/waitfor-nested` banks and the remaining two each
+    differ from the golden on exactly ONE field, for a reason that is not the
+    loop. `valids/loopuntil-failed-flowable`'s condition is
+    `{{ outputs.loop.iterationCount < "5" }}`: Pebble widens both operands of a
+    relational operator to `Number` and throws on a `String`, minijinja orders
+    across kinds and answers `True`, so the loop succeeds where the artifact
+    failed the task — a RENDERER divergence, and the corpus's only
+    number-against-string comparison.
+    `valids/loop-until-restart` runs four iterations against a golden of three
+    under `maxDuration: PT3S` / `interval: PT1S`, because the artifact's
+    delay poller made its two `PT1S` pauses take **1.17 s and 1.92 s** and
+    `driver.rs::pass_time` moves the clock to the earliest deadline and never
+    further. The corroboration that this is the construct rather than the entry:
+    `valids/waitfor-max-duration`, the same shape at `PT5S`/`PT0.2S`, is one of
+    only **two** corpus flows Kestra itself could not reproduce across five
+    rounds, so it has no golden entry at all. Both now carry a blocker row in
+    `oracle-exec/handler_surface.py`, so the ceiling no longer names an entry
+    nothing can bank.
+
 ## 2. `Pause` and `LoopUntil` are one problem and must not be split
 
 The 18-entry `PAUSED` population is **12 `Pause` + 6 `LoopUntil`**. They need the
@@ -81,6 +104,16 @@ state**. They ship together or not at all.
 `plan.rs`'s opacity doc names `AllowFailure`, `Pause` and `WorkingDirectory` and
 **omits `LoopUntil`** — which is opaque too, and stalls nine baselined entries.
 That omission is a W8 correction, not a W8 discovery.
+
+> **Superseded by W8 Tasks 3 and 4**: `Pause` left the opaque tier at Task 3 and
+> `LoopUntil` left it at Task 4, so that list is now `AllowFailure` and
+> `WorkingDirectory` and a `Pause` or a `LoopUntil` whose own properties this
+> pure builder cannot read (`pause_gap`, `loop_until_gap`). What Task 4 found
+> that this paragraph could not is one tier lower: **`WaitFor` never reached the
+> opaque tier at all**, because `models::kind_for` had no row for the alias and
+> it parsed to `TaskKind::Leaf` — the same plan either way, which is why every
+> prose list of the opaque types stayed true while being wrong about this one.
+> Seven of the ten corpus flows of the construct use that spelling.
 
 ## 3. What `advance()` needs, and what it does not
 

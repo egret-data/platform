@@ -894,56 +894,50 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// [`TaskKind::Runnable`], which produces a visibly wrong trace — the parent is
 /// there and its children are not — and so stays honestly baselined.
 ///
-/// That opacity is applied to `AllowFailure`, `WorkingDirectory` and
-/// `LoopUntil` (`WaitFor` is Kestra's alias for it; egret's model does not
-/// carry the alias — see below) too, even
+/// That opacity is applied to `AllowFailure` and `WorkingDirectory`, even
 /// though each would "work" if mapped to
-/// [`TaskKind::Sequential`]. **W8 Task 3 applies it to a `Pause` too, but per
-/// TASK rather than per type**: a `Pause` that is a plain wait is a
-/// [`TaskKind::Pause`], and one declaring any of the four properties this
-/// executor does not reproduce is a `Runnable` — see [`pause_gap`], which is
-/// the single predicate both this builder and `spec::validate`'s
-/// `not_yet_enforced` warning ask, so a flow warned at publish is exactly a
-/// flow planned opaque here. `AllowFailure` turns a child's failure into
-/// `WARNING`, which `RunState` cannot hold; `WorkingDirectory` hands its whole
-/// subtree to one worker; `LoopUntil` runs its `tasks:` **repeatedly** until a
-/// condition holds, and a `Sequential` would run them exactly once and record
-/// none of the `PAUSED`/`RUNNING` cycles the golden holds. Mapping any of them
-/// would trade a visible mismatch for a
+/// [`TaskKind::Sequential`]: the first turns a child's failure into `WARNING`,
+/// which `RunState` cannot hold, and the second hands its whole subtree to one
+/// worker. Mapping either would trade a visible mismatch for a
 /// plausible-looking wrong trace, which is the worse of the two.
 ///
-/// **Those three are the whole of it, and they are exactly the typed
-/// `models::TaskKind` variants this `match` has no arm for** — a fourth kind of
-/// opacity exists below them, where a flowable Kestra has and `kind_for` does
-/// not reaches `ModelKind::Leaf` with its children inside an opaque `spec`.
-/// `Pause` WAS the one such type with baselined entries and left this tier at
-/// W8 Task 3, which gave it a `models::TaskKind::Pause`; `Subflow` left it at
-/// W6 Task 3 for [`TaskKind::Executable`], which is a different thing from
-/// opaque — the executor runs it itself. So the fourth tier holds `WaitFor`
-/// alone, plus every ordinary leaf. The
-/// enumeration is derived by
+/// **Two more types were in that list and are not any more, and both left it
+/// per TASK rather than per type.** A `Pause` that is a plain wait is a
+/// [`TaskKind::Pause`] (W8 Task 3) and a `LoopUntil` whose bounds this pure
+/// builder can read is a [`TaskKind::LoopUntil`] (W8 Task 4); one that declares
+/// something the executor does not reproduce is still a `Runnable` — see
+/// [`pause_gap`] and [`loop_until_gap`], each of which is the single predicate
+/// both this builder and `spec::validate`'s `not_yet_enforced` warning ask, so
+/// a flow warned at publish is exactly a flow planned opaque here.
+///
+/// **A fourth kind of opacity exists below all of this**, where a flowable
+/// Kestra has and `kind_for` does not reaches `ModelKind::Leaf` with its
+/// children inside an opaque `spec`. Three types have left it: `Subflow` at W6
+/// Task 3 for [`TaskKind::Executable`] (a different thing from opaque — the
+/// executor runs it itself), `Pause` at W8 Task 3, and **`WaitFor` at W8 Task
+/// 4**. So that tier now holds no Kestra flowable at all, only ordinary leaves.
+/// The enumeration is derived by
 /// `executor::tests::every_other_flowable_stays_opaque`; this prose agrees with
 /// that test and not the other way round.
 ///
-/// **`WaitFor` is in the fourth tier, not in the three, and W8 Task 1 fix
-/// round 4 is what measured it.** `models::kind_for` matches
-/// `Some("loopuntil")` and has no row for `"waitfor"`; neither does
+/// **`WaitFor` was in the fourth tier and not in the three, W8 Task 1 fix
+/// round 4 measured it, and W8 Task 4 closed it.** `models::kind_for` matched
+/// `Some("loopuntil")` and had no row for `"waitfor"`; neither did
 /// `spec::validate`'s `KESTRA_FLOW_CONTROL`. So
-/// `io.kestra.plugin.core.flow.WaitFor` parses to `ModelKind::Leaf` with its
-/// `tasks:` inside the opaque `spec`, as `Pause` did until W8 Task 3 — the alias is
-/// Kestra's and egret's model does not have it. Every sentence in this crate
-/// saying `build_plan` plans `WaitFor` opaque stays **true**, because both
-/// tiers are planned [`TaskKind::Runnable`] and the plan is byte-identical
-/// either way; what was wrong was only which tier it is in, and the
-/// derivation above could not see it for the same reason — the two tiers
-/// agree on everything the plan records. The probe that found it is the one
-/// that DECLARES which `models::TaskKind` arm it means to reach. The model
-/// divergence is real below the plan (a `Leaf` has no `children()`, a
-/// `LoopUntil` does, and `children()` is what `spec::validate`,
-/// `publish::resolve_all` and `worker::claim` walk) and is **not fixed
-/// here**: W8 Task 1 is a test-and-docs change, `kind_for` is production, and
-/// no corpus entry can show it because no `WaitFor` flow's children reach a
-/// plan either way.
+/// `io.kestra.plugin.core.flow.WaitFor` parsed to `ModelKind::Leaf` with its
+/// `tasks:` inside the opaque `spec`, as `Pause` did until W8 Task 3 — and
+/// seven of the ten corpus flows of the construct use that spelling.
+/// **Every sentence in this crate saying `build_plan` plans `WaitFor` opaque
+/// was TRUE while it was wrong about which tier**, because both tiers were
+/// planned [`TaskKind::Runnable`] and the plan was byte-identical either way;
+/// the derivation above could not see it for the same reason. The probe that
+/// found it is the one that DECLARES which `models::TaskKind` arm it means to
+/// reach. The model divergence was real below the plan — a `Leaf` has no
+/// `children()`, a `LoopUntil` does, and `children()` is what `spec::validate`,
+/// `publish::resolve_all` and `worker::claim` walk — and **no corpus entry
+/// could show it**, which is why the instrument that closed it is a pair of
+/// `spec::validate` tests and not the ratchet: deleting the `"waitfor"` row
+/// today leaves the ratchet green at 118.
 pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let flow = crate::spec::parse(source).map_err(|e| PlanError {
         message: match (e.line, e.column) {
