@@ -92,10 +92,19 @@
 //!
 //! Kestra's worker never sees a flowable, so "the worker enforces `timeout:`"
 //! and "`timeout:` is only relevant for runnable tasks" are the same sentence
-//! there. In egret they are not quite: `executor::build_plan` plans `Subflow`,
-//! `WorkingDirectory`, `WaitFor`, `AllowFailure` and **`Pause`** as opaque
-//! `TaskKind::Runnable`s, so a `Pause` carrying a `timeout:` is claimable by
-//! this worker. Three of the four baselined entries that declare a `timeout:`
+//! there. In egret they are not quite: `executor::build_plan` plans
+//! `WorkingDirectory`, `WaitFor`/`LoopUntil`, `AllowFailure` and **`Pause`** as
+//! opaque `TaskKind::Runnable`s, so a `Pause` carrying a `timeout:` is
+//! claimable by this worker.
+//!
+//! **This list named `Subflow` first until W8 Task 1 fix round 1**, and it had
+//! been false since W6 Task 3 made a `Subflow` a `TaskKind::Executable` — whose
+//! `type_id` is never written, so the claim cannot take one at all. It is worth
+//! recording where the correction came from: W8 Task 1 swept every list in this
+//! crate enumerating the opaque types, **certified this one as the only correct
+//! list, and did so from a transcription that had silently dropped `Subflow`**.
+//! It was wrong in exactly the way the seven it caught were wrong. The census
+//! is **eight lists, seven disagreed, none correct**. Three of the four baselined entries that declare a `timeout:`
 //! are exactly that — `valids/pause-timeout`,
 //! `valids/pause-timeout-allow-failure`,
 //! `valids/pause-errors-finally-after-execution` — and a `Pause`'s timeout is

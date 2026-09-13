@@ -220,9 +220,14 @@ pub struct PlanTask {
     /// reason as the other two typed ones and stalls nine baselined entries;
     /// W8 Task 1 swept every list in this crate that claims to enumerate the
     /// opaque types against `every_other_flowable_stays_opaque`, which is the
-    /// derivation. **Eight lists, and six disagreed**: three omit `LoopUntil`
-    /// and three still name `Subflow`, which stopped being opaque at W6 Task 3.
-    /// Only `worker::timeout`'s module doc had it right. **`Loop` is
+    /// derivation. **Eight lists, seven disagreed, and none was correct**:
+    /// three omit `LoopUntil` and four still name `Subflow`, which stopped being
+    /// opaque at W6 Task 3. This sentence first read "six disagreed … only
+    /// `worker::timeout`'s module doc had it right", and that eighth list was
+    /// the one the sweep never re-read — it names `Subflow` too. **The sweep's
+    /// own headline was an instance of the class it was sweeping for**, and the
+    /// rule it broke is the one this programme already has: check the artefact,
+    /// not your transcription of it. **`Loop` is
     /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
     /// `errors` field, so **four** corpus flows' lists are invisible here:
     /// `valids/all-flowable`, `valids/finally-loop`,

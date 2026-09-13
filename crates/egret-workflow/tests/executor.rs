@@ -4067,10 +4067,17 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
     // egret does not evaluate an `sla:`, so it runs the tasks. This comment
     // said "`sla:` and flow `concurrency:`, both rows of the residual
     // baseline", and both halves went at W8 Task 1: every one of the five is an
-    // `sla:`'s, three of them merely happen to write a `concurrency:` too, and
-    // the `flow concurrency:` row no longer exists -- it was deleted for
-    // attributing `CANCELLED` to a construct that never produces it. See
-    // `the_cancelled_state_never_comes_from_a_concurrency_limit`.
+    // `sla:`'s, and the `flow concurrency:` row no longer exists -- it was
+    // deleted for attributing `CANCELLED` to a construct that never produces
+    // it. See `the_cancelled_state_never_comes_from_a_concurrency_limit`.
+    //
+    // **Exactly ONE of the five declares a `concurrency:`** --
+    // `valids/flow-concurrency-sla-assert-cancel`. A first draft of this
+    // comment said three, counting flow IDs rather than declarations, which is
+    // the name-versus-declaration confusion in the very sentence announcing
+    // that the confusion was fixed. `valids/flow-concurrency-sla-fail-child`
+    // carries the word in its **id** and writes no `concurrency:` at all; the
+    // other three do not carry it even there.
     (
         "valids/flow-concurrency-sla-assert-cancel",
         "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
@@ -4662,6 +4669,24 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
 ///   that simply contained no cancelling limit, which is a different fact and a
 ///   much weaker one.
 ///
+/// # The one fact that subsumes the mechanism: `QUEUED` never occurs
+///
+/// Added in fix round 1, and it is the primary evidence because it is a single
+/// check a running program makes rather than three arguments a reader has to
+/// accept. **`QUEUED` occurs zero times in `golden.json`.** It is in
+/// `harvest.py`'s `STATE_TYPES` — the vocabulary the harvester validates every
+/// captured state against — and `normalise.py`'s rule 4 keeps history state
+/// sequences **verbatim**, so a queued run would have survived into the golden
+/// had one ever happened. `QUEUED` is the *only* state a limit's default
+/// `behavior: QUEUE` produces. Zero occurrences is therefore not "we could not
+/// see it": it is **no concurrency limit ever fired in this corpus**, which is
+/// a strictly stronger statement than the three legs below and does not depend
+/// on any of them.
+///
+/// The three legs are kept as the **mechanism** — they say *why* it never
+/// fired, which the count alone cannot: the harness drives flows serially, the
+/// single self-contending flow is banked, and 7 of 13 declarers already match.
+///
 /// **What this evidence does not contain**, named rather than generalised over:
 /// it says nothing about whether Kestra's `concurrency: {behavior: CANCEL}`
 /// cancels *in general* — it cannot, because `harvest.py` drives flows strictly
@@ -4679,6 +4704,43 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
 /// compared field.
 #[test]
 fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
+    // **The primary evidence, first: `QUEUED` never occurs.** Every state string
+    // anywhere in the golden -- execution histories, run histories, attempt
+    // histories, sub-executions -- counted, so this cannot pass by looking in
+    // the wrong place. `QUEUE` is a limit's DEFAULT behaviour and `QUEUED` is
+    // the only state it produces; `harvest.py`'s `STATE_TYPES` carries the name
+    // and `normalise.py` keeps histories verbatim, so one would have survived.
+    let mut states: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for st in t
+                .execution
+                .iter()
+                .chain(t.runs.iter().flat_map(|r| r.state.iter()))
+                .chain(t.runs.iter().flat_map(|r| r.attempts.iter().flatten()))
+            {
+                *states.entry(st.clone()).or_default() += 1;
+            }
+            stack.extend(t.spawned.iter());
+        }
+    }
+    assert_eq!(
+        states.get("QUEUED"),
+        None,
+        "a `QUEUED` appeared in the golden, so a concurrency limit DID fire \
+         under this oracle and the whole zero has to be re-derived. States \
+         seen: {states:?}"
+    );
+    // The two-sided half: the walk above must really be finding states, or the
+    // assertion is over an empty map and says nothing.
+    assert!(
+        states.get("RUNNING").copied().unwrap_or(0) > 1000 && states.contains_key("CANCELLED"),
+        "the state walk found nothing to speak of, so the `QUEUED` assertion \
+         above was vacuous: {states:?}"
+    );
+
     let mut cancelled: Vec<String> = Vec::new();
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
