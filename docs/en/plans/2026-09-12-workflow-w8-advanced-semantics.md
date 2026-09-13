@@ -98,6 +98,7 @@ Doing these first makes every later attribution honest, because two of them chan
 
 **Six of the nine have an `OutputValues` child with no handler** — those are not W8's, and the task must report them as the strict/upper-bound separator rather than as failures.
 
+- [ ] **Step 0 (added after Task 1 measured it): `WaitFor` does not parse to `LoopUntil`, and the corpus prefers the spelling that does not.** `models::kind_for` matches `Some("loopuntil")` and **`"waitfor"` has no row anywhere in `src/`** — not in `kind_for`, not in `spec::validate`'s `KESTRA_FLOW_CONTROL` — so it falls to **`Leaf`**, which is `Pause`'s tier, not `LoopUntil`'s. Measured over the corpus: **7 flows use `core.flow.WaitFor`, 3 use `core.flow.LoopUntil`**, so the **majority** of the population takes the unparsed spelling. **Nothing pointed at the plan could have seen this**, because both tiers plan `Runnable`, so every prose list saying *"`build_plan` plans `WaitFor` opaque"* stays true. Decide whether `kind_for` gains a row or the two tiers are handled separately — and note this touches `src/models/`, which no earlier W8 task opens.
 - [ ] **Step 1: Measure the artifact's loop condition and its interaction with the `PAUSED` state** — the 18-entry `PAUSED` population is 12 `Pause` + 6 `LoopUntil`, so this construct shares Task 2's variant.
 - [ ] **Step 2: Tests first, including the negative** — a condition that must **not** re-enter.
 - [ ] **Step 3: Implement.**
