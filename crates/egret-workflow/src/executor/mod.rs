@@ -52,7 +52,9 @@ pub use plan::{
     build_plan, pause_gap, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay,
     RetryPolicy, TaskIx, TaskKind,
 };
-pub use state::{apply, Attempt, ExecutionMeta, ExecutionState, RunIx, RunState, TaskRun, Tick};
+pub use state::{
+    apply, Attempt, ExecutionMeta, ExecutionState, Resume, RunIx, RunState, TaskRun, Tick,
+};
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
 ///
@@ -6942,6 +6944,90 @@ tasks:
         );
     }
 
+    /// **A `PAUSED` run whose kind is neither `Pause` nor `LoopUntil` must
+    /// still leave `PAUSED`** — the class W8 Task 4 fix round 1 half-closed.
+    ///
+    /// Fix round 1 added a `LoopUntil` arm beside the `Pause` one. That fixed
+    /// the two constructs that exist and left the SHAPE: two catch-alls
+    /// (`parallel.rs`'s `_ => continue`, `sequential.rs`'s `_ => Waiting`)
+    /// keyed on a hand-written list of kinds, so a THIRD pausing construct
+    /// stalls for ever and nothing fails.
+    ///
+    /// The probe is a real [`Command::PauseRun`] applied to a `Runnable`'s run
+    /// — which is what a new pausing kind's `descend` arm would emit before
+    /// anybody remembered to extend the list — driven under all three
+    /// containers, with a `Pause` in the same fixture as the control.
+    #[test]
+    fn a_paused_run_of_any_kind_leaves_paused() {
+        let bodies = [
+            (
+                "Sequential",
+                "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+                 type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: t\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "Parallel",
+                "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+                 type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: t\n        \
+                 type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "Dag",
+                "id: p\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+                 type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          \
+                 id: t\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+            ),
+        ];
+        for (label, src) in bodies {
+            let plan = build_plan(src).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let mut state = ExecutionState::new(&plan);
+            // Drive until the leaf is RUNNING, then pause it the way a new
+            // pausing construct would.
+            let mut now = T0;
+            let leaf = loop {
+                let cmds = round_at(&plan, &mut state, now);
+                if let Some(ix) = (0..state.runs.len()).find(|&ix| {
+                    matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::Runnable { .. }
+                    ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                }) {
+                    break ix;
+                }
+                assert!(!cmds.is_empty(), "{label}: never reached a running leaf");
+            };
+            apply(
+                &mut state,
+                &Command::PauseRun {
+                    run: leaf,
+                    // The probe names a resumer, because since fix round 2 it
+                    // CANNOT avoid naming one -- which is the whole fix. A
+                    // third pausing construct's `descend` arm now faces the
+                    // same requirement at the compiler rather than at a list.
+                    resume: crate::executor::Resume::Terminal {
+                        at: Tick(10),
+                        state: RunState::Success,
+                    },
+                },
+            );
+            assert_eq!(state.runs[leaf].history.last(), Some(&RunState::Paused));
+
+            now = Tick(1_000);
+            let mut emitted = 0;
+            for _ in 0..20 {
+                emitted += round_at(&plan, &mut state, now).len();
+            }
+            assert!(
+                state.runs[leaf].history.last() != Some(&RunState::Paused),
+                "{label}: the run is STILL `PAUSED` {:?} after 20 rounds past its \
+                 deadline and {emitted} command(s) — nothing in this executor will \
+                 ever move it, and no assertion but this one can see that",
+                wire(&state.runs[leaf].history)
+            );
+        }
+    }
+
     /// **A `LoopUntil` inside a `Parallel` or a `Dag` must iterate, and until
     /// fix round 1 it stalled at its first `PAUSED` for ever.**
     ///
@@ -7043,6 +7129,82 @@ tasks:
             "and the ONE pause between them is `PT1M` — Kestra's `CheckFrequency` \
              default, not this executor's invention"
         );
+    }
+
+    /// **The other two thirds of `isTerminatedNoFail`**, supplied and pinned.
+    ///
+    /// `State.java:292` is `WARNING || SUCCESS || RETRIED || SKIPPED ||
+    /// RESUBMITTED`, and intersected with what `RunState` can hold that is
+    /// `{SUCCESS, RETRIED, SKIPPED}`; `FAILED` and `KILLED` are
+    /// `isTerminatedInError`. Fix round 1 supplied `SKIPPED` and left the other
+    /// two **un-supplied**: every fixture handed the loop a `SUCCESS` child, so
+    /// `MK1` (drop `Killed` from the exclusion) and `MR1` (add `Retried` to it)
+    /// both survived the whole suite at **780/0**.
+    ///
+    /// That is the operand rule one more time, and the fix is the same one:
+    /// name the competing rules, then supply a discriminating row for each.
+    /// The rules here are per-state, so the rows are per-state — `RunState`'s
+    /// five terminals are now driven **one each**, and the two-sided pair is
+    /// the point: `KILLED` must STOP the loop and `RETRIED` must NOT.
+    ///
+    /// **Reachability, measured rather than read.** `KILLED` reaches a
+    /// `LoopUntil` child through `worker::cancel`, which the kill path fires on
+    /// a task-level `timeout:` expiring — a `LoopUntil` child may carry one.
+    /// `RETRIED` is written by `retry::scan` for a `CREATE_NEW_EXECUTION`
+    /// behaviour, which is a `Runnable`'s `retry:` and so equally available to
+    /// a loop's child. Neither occurs in this corpus — no corpus `LoopUntil`
+    /// child declares a `timeout:` or a `retry:`, which
+    /// `no_corpus_loop_until_declares_a_retry_or_inherits_one` already derives
+    /// for one of the two — so **the ratchet cannot score either**, and these
+    /// assertions are the whole instrument.
+    #[test]
+    fn the_five_terminals_split_the_way_is_terminated_no_fail_splits_them() {
+        let src = loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 5\n",
+            ONE_RETURN,
+        );
+        let plan = build_plan(&src).expect("it plans");
+
+        // `isTerminatedInError`: the body did not execute, so the loop never
+        // asks its condition, never pauses, and takes the children's aggregate.
+        for stop in [RunState::Failed, RunState::Killed] {
+            let (state, now, asked) = run_loop_until(&plan, stop, &["false"]);
+            assert_eq!(
+                wire(&state.runs[0].history),
+                ["CREATED", "RUNNING", stop.wire()],
+                "{stop:?} is `isTerminatedInError`, so one iteration and the \
+                 children's aggregate — under `maxIterations: 5` and a condition \
+                 that never becomes true, i.e. a loop that would otherwise run six \
+                 times"
+            );
+            assert_eq!(
+                asked, 0,
+                "{stop:?}: and the condition is never EVALUATED, not merely \
+                 ignored — a render that will not resolve fails a run"
+            );
+            assert_eq!(now, T0, "{stop:?}: nothing waited");
+        }
+
+        // `isTerminatedNoFail`: the body executed, so the loop asks its
+        // condition and iterates to its limit. `SKIPPED` is
+        // `a_skipped_child_still_counts_as_executed_and_the_loop_iterates`,
+        // which needs a `runIf:` and so has a fixture of its own.
+        for go in [RunState::Success, RunState::Retried] {
+            let (state, now, asked) = run_loop_until(&plan, go, &["false"]);
+            assert_eq!(
+                wire(&state.runs[0].history),
+                [
+                    "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
+                    "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"
+                ],
+                "{go:?} is `isTerminatedNoFail`, so the loop iterates to \
+                 `iterationCount > maxIterations` — six iterations under a limit of \
+                 five, five pauses"
+            );
+            assert_eq!(asked, 5, "{go:?}: once per iteration but the last");
+            assert_eq!(now, Tick(5000), "{go:?}: five pauses of PT1S");
+        }
     }
 
     /// **A `SKIPPED` child still counts as executed**, so a loop whose body was
@@ -7520,6 +7682,7 @@ tasks:
             ],
             attempts: Vec::new(),
             not_before: Some(Tick(5)),
+            resume_with: None,
         });
         nested.runs.push(crate::executor::TaskRun {
             task: 1,
@@ -7530,6 +7693,7 @@ tasks:
             history: vec![RunState::Created, RunState::Success],
             attempts: Vec::new(),
             not_before: None,
+            resume_with: None,
         });
         assert_eq!(crate::executor::loop_iteration(&nested, 0), 2);
         apply(&mut nested, &Command::RestartLoop { run: 0 });
@@ -7977,6 +8141,81 @@ tasks:
              ({bounded:?}), so `parallel::drive_concurrent`'s `Paused` arm is \
              reachable from the corpus after all and the comment beside it is \
              stale. The whole nested set is {names:?}"
+        );
+
+        // **The `LoopUntil` half, added at W8 Task 4 fix round 2, and the
+        // reason is a method rather than a symmetry.** `parallel.rs`'s comment
+        // made two claims: a `Pause` one this test already compared, and a
+        // `LoopUntil` one that was PROSE. The prose was false for eleven days
+        // in the form Task 4 first wrote it, corrected in fix round 1, and its
+        // twin thirty lines up stayed false — because a text edit fixes the
+        // sentence it is looking at and a program compares every instance.
+        //
+        // So the question to ask of a claim is *does it have a program-checked
+        // twin?* This one did, and closing the gap is a test extension rather
+        // than a sweep.
+        //
+        // **A `LoopUntil` ALWAYS pauses if it iterates at all** — there is no
+        // unbounded/bounded split to filter on, the way there is for a `Pause`
+        // — so the assertion is over containment alone.
+        let mut inside: Vec<String> = Vec::new();
+        let mut contains_one: Vec<String> = Vec::new();
+        let mut planned_loops = 0usize;
+        for (id, src) in every_corpus_flow() {
+            let Ok(plan) = build_plan(&src) else {
+                continue;
+            };
+            for ix in 0..plan.tasks.len() {
+                if !matches!(plan.tasks[ix].kind, TaskKind::LoopUntil { .. }) {
+                    continue;
+                }
+                planned_loops += 1;
+                // Which flowable, if any, holds this one. A `LoopUntil` nested
+                // in another `LoopUntil` is `valids/waitfor-nested` and is NOT
+                // this arm's subject: that path is `loop_until::drive`'s own
+                // `sequential::drive`, not `drive_concurrent`.
+                let container = (0..plan.tasks.len()).find(|&p| {
+                    matches!(
+                        plan.tasks[p].kind,
+                        TaskKind::Parallel { .. } | TaskKind::Dag { .. }
+                    ) && plan.children_of(p).contains(&ix)
+                });
+                if container.is_some() {
+                    inside.push(format!("{id}:{}", plan.tasks[ix].id));
+                }
+                if plan.children_of(ix).iter().any(|&c| {
+                    matches!(
+                        plan.tasks[c].kind,
+                        TaskKind::Parallel { .. } | TaskKind::Dag { .. }
+                    )
+                }) {
+                    contains_one.push(format!("{id}:{}", plan.tasks[ix].id));
+                }
+            }
+        }
+        assert!(
+            planned_loops >= 12,
+            "only {planned_loops} corpus `LoopUntil`s reach a `TaskKind::LoopUntil`, \
+             which is fewer than the twelve the ten corpus flows of this construct \
+             declare between them — the walk has stopped reaching them and every \
+             assertion below is vacuous"
+        );
+        assert!(
+            inside.is_empty(),
+            "a corpus `LoopUntil` is now planned inside a `Parallel` or a `Dag` \
+             ({inside:?}), so `parallel::drive_concurrent`'s `Paused` arm is \
+             reachable from the corpus after all and BOTH comments beside it are \
+             stale — the one at its own line and the one thirty lines above it"
+        );
+        // The other direction, asserted rather than implied, because it is the
+        // half the first version of that comment got backwards: **the
+        // containment runs the other way and there is exactly one instance.**
+        assert_eq!(
+            contains_one,
+            ["valids/loopuntil-failed-flowable:loop"],
+            "the corpus `LoopUntil`s that CONTAIN a `Parallel` or a `Dag`. A
+             comment saying no corpus `LoopUntil` contains one was false when it
+             was written, and this is what compares it"
         );
     }
 }

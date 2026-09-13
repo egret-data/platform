@@ -43,6 +43,51 @@ pub(crate) fn plus(at: Tick, d: std::time::Duration) -> Tick {
     Tick(at.0.saturating_add(millis))
 }
 
+/// What a `PAUSED` run wants — **the one place this executor leaves `PAUSED`,
+/// and it reads the RUN rather than the kind.** W8 Task 4 fix round 2.
+///
+/// There were two: `sequential::walk` and `parallel::drive_concurrent` each
+/// carried a `matches!(plan.tasks[task].kind, …)` list behind a catch-all, so
+/// a construct missing from either list paused and was never asked again.
+/// [`Resume`] records the answer when the pause is entered, so nothing here
+/// needs to know which kinds pause — and a kind that pauses cannot be missing
+/// from a list, because there is no list.
+///
+/// **`Waiting` on `None` is unreachable rather than defensive.**
+/// [`RunState::Paused`] is pushed by exactly one command,
+/// [`Command::PauseRun`], and that command cannot be constructed without a
+/// [`Resume`]. It is `Waiting` and not a panic for the reason every other
+/// "cannot happen" in this executor is: `advance()` is handed state a caller
+/// stored and read back, and a state machine that aborts the process on a
+/// surprising row is a worse failure than one that stalls.
+/// `every_paused_run_names_its_resumer` is what keeps it unreachable.
+pub(crate) fn resume_paused(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
+    let Some(resume) = state.runs[run].resume_with else {
+        return Step::Waiting;
+    };
+    let Some(at) = resume.at() else {
+        // `Resume::Never`. **Neither a bound this executor holds nor a clock
+        // it can move ends this**, and reading it as "due" is the
+        // over-acceptance the variant exists to refuse: an unbounded `Pause`
+        // that resumed itself would leave every figure in `baseline.txt`
+        // unchanged, because none of the seven corpus flows written that way
+        // reaches `golden.json` at all.
+        return Step::Waiting;
+    };
+    if now < at {
+        return Step::Waiting;
+    }
+    match resume {
+        crate::executor::Resume::Never => Step::Waiting,
+        crate::executor::Resume::Terminal { state: s, .. } => {
+            Step::Commands(vec![Command::SetRunState { run, state: s }])
+        }
+        crate::executor::Resume::Iterate { .. } => {
+            Step::Commands(vec![Command::RestartLoop { run }])
+        }
+    }
+}
+
 /// What one task list wants from the caller.
 ///
 /// Three answers, not two, because "nothing to emit" and "finished" are

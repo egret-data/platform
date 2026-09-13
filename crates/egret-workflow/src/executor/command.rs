@@ -72,8 +72,16 @@ pub enum Command {
         run: RunIx,
         not_before: Tick,
     },
-    /// Put a [`Pause`](super::TaskKind::Pause) run into `PAUSED`, and record
-    /// when — if ever — the wait ends. W8 Task 3.
+    /// Put a run into `PAUSED`, and record **who ends the wait**. W8 Task 3;
+    /// the `resume` field is W8 Task 4 fix round 2.
+    ///
+    /// **Not "a [`Pause`](super::TaskKind::Pause) run", which is what this line
+    /// said through two constructs and two review rounds.** It has been a
+    /// `LoopUntil`'s since W8 Task 4, and since fix round 2 it is any kind's:
+    /// the command names its resumer, so nothing about the KIND is what makes a
+    /// run resumable. That is the fifth claim of this class the fix-round-2
+    /// sweep corrected, and its program-checked twin is now the type system —
+    /// this field cannot be omitted.
     ///
     /// # It is not a [`Command::SetRunState`], and the reason is measured
     ///
@@ -88,25 +96,28 @@ pub enum Command {
     /// producer that makes it reachable, so the separation is a command rather
     /// than a special case inside `apply`.
     ///
-    /// # `until` is `Option`, and `None` is the case that must not resume
+    /// # `resume` names who ends the wait, and that is the whole point
     ///
-    /// `Some(t)` is a pause the author bounded, with `t` the [`Tick`] the wait
-    /// ends at — `pauseDuration:` or `timeout:`, whichever
-    /// [`pause`](super::flowable::pause) resolved. `None` is a `Pause` with
-    /// **neither**, which on the pinned artifact waits for a human and nothing
-    /// else: measured, seven corpus flows are written that way and every one of
-    /// them "reached PAUSED and stayed there for the full 90s" (`corpus.json`'s
-    /// `not-standalone` disposition, one entry each). It writes no
-    /// [`TaskRun::not_before`](super::TaskRun::not_before) at all, which is what
-    /// keeps the driver's clock from ever being asked to move for it.
+    /// It used to be `until: Option<Tick>` — a deadline and nothing else — and
+    /// "which construct ends this wait" lived in two hand-written lists of
+    /// `TaskKind`s behind two catch-alls. **Measured: a `PauseRun` applied to a
+    /// run of any third kind stalls for ever, silently** — 20 rounds past its
+    /// deadline, 0 commands, under `Sequential`, `Parallel` and `Dag` alike.
+    /// See [`Resume`](super::Resume) for the whole finding and for why
+    /// changing this command's shape was ruled in scope.
     ///
-    /// **None of those seven is in `golden.json`**, so the oracle cannot see
-    /// this distinction in either direction. That is why it is a separate
-    /// field with its own test rather than a `Tick` some far-future sentinel
-    /// stands in for.
+    /// [`Resume::Never`](super::Resume::Never) is the old `until: None`, with a
+    /// name: a `Pause` with neither `pauseDuration:` nor `timeout:`, which on
+    /// the pinned artifact waits for a human and nothing else. It writes no
+    /// [`TaskRun::not_before`](super::TaskRun::not_before) at all, which is
+    /// what keeps the driver's clock from ever being asked to move for it —
+    /// and **none of the seven corpus flows written that way is in
+    /// `golden.json`**, so the oracle cannot see this distinction in either
+    /// direction. That is why it is a variant with its own doc rather than an
+    /// absent value.
     PauseRun {
         run: RunIx,
-        until: Option<Tick>,
+        resume: super::Resume,
     },
     /// Start the next iteration of a [`LoopUntil`](super::TaskKind::LoopUntil)
     /// run: put it back into `RUNNING` and throw away every run beneath it.

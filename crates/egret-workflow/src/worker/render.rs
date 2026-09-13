@@ -826,6 +826,7 @@ mod tests {
             history: vec![RunState::Created, state],
             attempts: Vec::<Attempt>::new(),
             not_before: None,
+            resume_with: None,
         };
         let state = ExecutionState {
             runs: vec![run(0, RunState::Success), run(1, RunState::Running)],

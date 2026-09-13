@@ -144,6 +144,103 @@ pub struct TaskRun {
     pub history: Vec<RunState>,
     pub attempts: Vec<Attempt>,
     pub not_before: Option<Tick>,
+    /// **Who ends this run's wait** — `None` for a run that has never been
+    /// paused. W8 Task 4 fix round 2, and it is a field rather than a rule.
+    ///
+    /// See [`Resume`] for the defect it closes. Written only by
+    /// [`Command::PauseRun`](super::Command::PauseRun) and cleared only by
+    /// [`Command::RestartLoop`](super::Command::RestartLoop), which is the one
+    /// command that takes a run out of `PAUSED` without terminating it.
+    pub resume_with: Option<Resume>,
+}
+
+/// **How a `PAUSED` run leaves `PAUSED`.** W8 Task 4 fix round 2.
+///
+/// # The defect this exists to make unrepresentable
+///
+/// [`RunState::Paused`] is a unit variant and
+/// [`Command::PauseRun`](super::Command::PauseRun) recorded no owner, so
+/// "which construct ends this wait" lived in **two hand-written lists of
+/// `TaskKind`s** — one in [`sequential::walk`](super::flowable::sequential),
+/// one in [`parallel::drive_concurrent`](super::flowable::parallel) — each
+/// behind a catch-all answering *wait* for everything else.
+///
+/// **Measured, not feared**: a real `PauseRun` applied to a run of any third
+/// kind leaves it at `["CREATED","SUBMITTED","RUNNING","PAUSED"]` for ever —
+/// 20 rounds past its deadline, **0 commands emitted** — under `Sequential`,
+/// `Parallel` *and* `Dag`, while a `Pause` in the same fixture moves. Nothing
+/// failed. W8 Task 4 shipped exactly that defect once (a `LoopUntil` under a
+/// `Parallel`) and fix round 1 repaired the instance by adding a row to both
+/// lists, **which is the same shape again**.
+///
+/// Carrying the answer on the command is what changes the shape: the resume
+/// side reads the RUN and never the kind, the two lists collapse to one site,
+/// and a construct that pauses **cannot fail to say who resumes it**, because
+/// it is a field the compiler requires and not a list to remember.
+///
+/// **This changes `advance()`'s command vocabulary**, which the W8 plan's
+/// Global Constraints call a contract change and therefore a finding rather
+/// than a step. It is ruled in scope for fix round 2 on the same standard that
+/// opened `src/models/`: say exactly what it buys. It buys the deletion of a
+/// silent-stall class that three enumeration methods and two review rounds did
+/// not see, and `advance()` stays pure over `(plan, state, now)`.
+///
+/// # The deadline is carried here and stored once
+///
+/// Both bounded variants carry the instant the wait ends;
+/// [`apply`](super::apply) writes it to [`TaskRun::not_before`], which is the
+/// one field `worker::claim::reopen_due` and `oracle-exec/driver.rs::pass_time`
+/// read — both with no state term at all. Migration 0141 stores only the
+/// discriminant, so there is one clock rather than two that can disagree, and
+/// its CHECK makes the pairing structural: `Never` has no deadline and the
+/// others must have one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// **Nothing this executor holds ends this wait** — a `Pause` with neither
+    /// `pauseDuration:` nor `timeout:`.
+    ///
+    /// Measured on the pinned artifact: seven corpus flows are written that
+    /// way and every one of them "reached PAUSED and stayed there for the full
+    /// 90s", because such a pause ends only on an explicit resume and a
+    /// standalone harvest issues none. **None of the seven is in
+    /// `golden.json`**, so a `Pause` that resumed itself by some default would
+    /// leave every figure in `baseline.txt` unchanged — which is why this is a
+    /// variant with a name rather than a `None` that reads like an omission.
+    Never,
+    /// At `at`, put the run into `state` — a bounded `Pause`.
+    ///
+    /// The terminal is decided by WHICH bound was written and is resolved once,
+    /// when the pause is entered: `pauseDuration:` ends `SUCCESS` and
+    /// `timeout:` ends `FAILED` (`valids/pause-delay` and
+    /// `valids/pause-timeout`, two otherwise identical flows).
+    Terminal { at: Tick, state: RunState },
+    /// At `at`, start the next iteration — a `LoopUntil`.
+    ///
+    /// It resumes into another `RUNNING` rather than into a terminal, which is
+    /// visible in the execution's own history: of the golden's 18 `PAUSED`
+    /// executions, 12 carry a `RESTARTED` (all `Pause`) and 6 do not (all
+    /// `LoopUntil`).
+    Iterate { at: Tick },
+}
+
+impl Resume {
+    /// The instant this wait ends, or `None` for [`Resume::Never`].
+    pub fn at(&self) -> Option<Tick> {
+        match self {
+            Resume::Never => None,
+            Resume::Terminal { at, .. } | Resume::Iterate { at } => Some(*at),
+        }
+    }
+
+    /// The discriminant migration 0141 stores. The instant is NOT in it — see
+    /// this enum's doc.
+    pub fn wire(&self) -> String {
+        match self {
+            Resume::Never => "NEVER".to_string(),
+            Resume::Iterate { .. } => "ITERATE".to_string(),
+            Resume::Terminal { state, .. } => format!("TERMINAL:{}", state.wire()),
+        }
+    }
 }
 
 impl TaskRun {
@@ -213,11 +310,23 @@ pub struct Attempt {
 /// **W8 Task 2's 16 buy nothing either, and that is stated rather than left to
 /// a green ratchet to imply.** Being inside the vocabulary is necessary and not
 /// sufficient — `SKIPPED`'s four and `RETRIED`'s four are the two earlier
-/// measured examples — and nothing in this crate *emits* either new variant
-/// yet: the constructs that do are `Pause` and `LoopUntil`, both still planned
-/// opaque by [`build_plan`](super::plan::build_plan). The variants are here
-/// because those two constructs need the **same** one, so splitting them across
-/// packages would block each on the other's state.
+/// measured examples — and **on the day Task 2 shipped** nothing in this crate
+/// emitted either new variant: the constructs that do were `Pause` and
+/// `LoopUntil`, both planned opaque by
+/// [`build_plan`](super::plan::build_plan) at that commit. The variants were
+/// added together because those two constructs need the **same** one, so
+/// splitting them across packages would have blocked each on the other's state.
+///
+/// **That paragraph is kept in the past tense it was always about.** Its claim
+/// is what Task 2's sixteen bought *on the day*, which is still nothing; its
+/// present-tense form — *"both still planned opaque"* — went on being read as a
+/// fact about HEAD and was false from W8 Task 3 onward. It is one of five
+/// claims of that class the Task 4 fix-round-2 sweep corrected, and the
+/// instrument that finds them is a question rather than a grep: **does this
+/// claim have a program-checked twin?** This one's twins are
+/// `a_pause_enters_paused_without_putting_it_on_the_attempt` and
+/// `a_falsy_condition_pauses_for_the_interval_and_runs_the_body_again`, one per
+/// producer.
 ///
 /// **Both producers exist now** — `Pause` at W8 Task 3 (eight banked entries)
 /// and `LoopUntil` at W8 Task 4 (one) — and they leave the state by different
@@ -550,6 +659,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             history: vec![RunState::Created],
             attempts: Vec::new(),
             not_before: None,
+            resume_with: None,
         }),
         Command::StartRun { run, at } => {
             let r = &mut state.runs[*run];
@@ -583,12 +693,17 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // and an unbounded pause writes none: the run is left with whatever
         // `not_before` it already had, which for a `Pause` is always `None`
         // because nothing else ever sets one on a run this executor drives.
-        Command::PauseRun { run, until } => {
+        Command::PauseRun { run, resume } => {
             let r = &mut state.runs[*run];
             r.history.push(RunState::Paused);
-            if let Some(t) = until {
-                r.not_before = Some(*t);
-            }
+            // **The deadline comes OUT of the `Resume`, so the two cannot
+            // disagree.** It used to be a separate `until` field beside it,
+            // which is two ways to say "this wait is unbounded" and one of them
+            // silently winning. `Resume::Never` writes none, which is what
+            // keeps the environment's clock from ever being asked to move for
+            // a pause that waits on a human -- see `Command::PauseRun`.
+            r.not_before = resume.at();
+            r.resume_with = Some(*resume);
         }
         // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
         // halves are the two loops below. See `Command::RestartLoop`.
@@ -608,6 +723,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 r.rendered = None;
                 r.rendered_run_if = None;
                 r.not_before = None;
+                r.resume_with = None;
             }
             let r = &mut state.runs[*run];
             // `RUNNING` on the run and NOT on the attempt -- the same
@@ -623,6 +739,12 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             // `apply`'s rule 2 closes for a retried `runIf:`.
             r.rendered = None;
             r.not_before = None;
+            // **Cleared with the deadline, not left behind.** The run is not
+            // waiting on anything any more, and migration 0141's
+            // `workflow_task_runs_resume_bound_matches` pairs the discriminant
+            // with `not_before_ms` -- so a stale `ITERATE` beside a NULL
+            // deadline is not merely untidy, it is a row Postgres refuses.
+            r.resume_with = None;
         }
         // The run's own history always takes the state. The attempt takes it
         // only while the attempt is still open, and that is a **rule** rather

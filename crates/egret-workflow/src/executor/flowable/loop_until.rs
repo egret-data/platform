@@ -101,7 +101,7 @@
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
-use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
+use crate::executor::state::{ExecutionState, Resume, RunIx, RunState, Tick};
 
 use super::{aggregate, plus, sequential, Step};
 
@@ -193,7 +193,11 @@ pub(crate) fn drive(
         if !super::branch::is_truthy(rendered) {
             return Step::Commands(vec![Command::PauseRun {
                 run,
-                until: Some(plus(now, *interval)),
+                // `Iterate`, and naming it is what stops this run from being
+                // parked with nobody to wake it -- see `executor::Resume`.
+                resume: Resume::Iterate {
+                    at: plus(now, *interval),
+                },
             }]);
         }
     }
@@ -203,30 +207,12 @@ pub(crate) fn drive(
     Step::Done(aggregate(state, tasks, Some(run)))
 }
 
-/// What a `PAUSED` `LoopUntil` run wants, which is nothing until its interval
-/// elapses and then the next iteration.
-///
-/// The deadline is read off [`TaskRun::not_before`] rather than re-derived,
-/// which is the one place this module differs from
-/// [`pause::resume`](super::pause::resume): a `Pause`'s bound is a function of
-/// the plan and the attempt's start, so it can be recomputed, while this one is
-/// `Instant.now().plus(interval)` taken at the moment the iteration ended and
-/// exists nowhere else.
-///
-/// [`TaskRun::not_before`]: crate::executor::TaskRun::not_before
-pub(crate) fn resume(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
-    let Some(at) = state.runs[run].not_before else {
-        // A `LoopUntil` only ever enters `PAUSED` through `drive`'s
-        // `Command::PauseRun { until: Some(_) }`, so this is unreachable rather
-        // than a condition -- and `Waiting` is the answer that cannot
-        // over-accept, exactly as it is for an unbounded `Pause`.
-        return Step::Waiting;
-    };
-    if now < at {
-        return Step::Waiting;
-    }
-    Step::Commands(vec![Command::RestartLoop { run }])
-}
+// **`resume` used to live here too**, reading `TaskRun::not_before` where
+// [`pause`](super::pause)'s read the plan — two functions, two
+// `TaskKind`-keyed guards, two walks. W8 Task 4 fix round 2 collapsed both
+// into [`flowable::resume_paused`](super::resume_paused), which reads the
+// `Resume` this module's [`drive`] wrote. See [`Resume`] for what that makes
+// unrepresentable.
 
 /// Kestra's `LoopUntil.reachedMaximums`, minus the logging.
 ///

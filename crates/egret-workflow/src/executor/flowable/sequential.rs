@@ -111,57 +111,44 @@ fn walk(
                 return Some(Step::Commands(vec![Command::RecreateRun { run: ix }]));
             }
             Some(RunState::Created) => return Some(open(plan, state, ix, task, now)),
-            // W8 Task 3. A `PAUSED` run is the ONE non-terminal state the
-            // executor still owns: nothing else is going to move it, because no
-            // worker holds it and no message reaches `advance()`. So it is
-            // asked, every round, whether its bound has elapsed --
-            // `super::pause::resume` answers `Waiting` until it has, which is
-            // what the arm below used to answer unconditionally.
+            // **The one door out of `PAUSED`, and it reads the RUN.** W8 Task
+            // 4 fix round 2. This arm used to be two, each guarded on a
+            // `TaskKind` -- `Pause` at W8 Task 3, `LoopUntil` at Task 4 fix
+            // round 1 -- with everything else falling to the trailing arm and
+            // stalling for ever. `super::resume_paused` asks
+            // `TaskRun::resume_with`, which `Command::PauseRun` is required to
+            // carry, so there is no list of pausing kinds here to be missing
+            // from. See `executor::Resume`.
             //
-            // It cannot be folded into the `Running` arm above: `descend` is
-            // reached at `RUNNING` and enters the pause, this is reached at
-            // `PAUSED` and leaves it, and a single door would have to branch on
+            // It cannot be folded into the `Running` arm below: `descend` is
+            // reached at `RUNNING` and ENTERS the pause, this is reached at
+            // `PAUSED` and LEAVES it, and a single door would have to branch on
             // the state anyway.
-            Some(RunState::Paused)
-                if matches!(plan.tasks[task].kind, crate::executor::plan::TaskKind::Pause { .. }) =>
-            {
-                return Some(super::pause::resume(plan, state, ix, task, now))
-            }
-            // W8 Task 4. The second construct that pauses, and it leaves the
-            // state a different way: a `Pause` resumes into a TERMINAL and a
-            // `LoopUntil` resumes into another `RUNNING`. That difference is
-            // visible in the execution's own history and is measured -- the
-            // golden's 18 `PAUSED` executions split 12 that carry a `RESTARTED`
-            // (all `Pause`) and 6 that do not (all `LoopUntil`) -- which is why
-            // `advance`'s `pause_mark` has an arm for this command and not just
-            // for the state.
-            Some(RunState::Paused)
-                if matches!(
-                    plan.tasks[task].kind,
-                    crate::executor::plan::TaskKind::LoopUntil { .. }
-                ) =>
-            {
-                return Some(super::loop_until::resume(state, ix, now))
-            }
+            Some(RunState::Paused) => return Some(super::resume_paused(state, ix, now)),
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.
             Some(RunState::Running) => return Some(descend(plan, state, ix, task, now)),
             Some(s) if s.is_terminal() => {}
             // `Submitted` (handed to a worker, not picked up), `Retrying`
-            // (waiting for its own delay), `Paused` on anything this executor
-            // does NOT drive as a pause, and `Restarted` are all "in flight,
-            // not the executor's turn". So is a run with no history at all,
-            // which cannot happen and is not worth a branch of its own.
+            // (waiting for its own delay) and `Restarted` are "in flight, not
+            // the executor's turn". So is a run with no history at all, which
+            // is `Command::RestartLoop`'s thrown-away descendant and has an arm
+            // of its own above.
             //
-            // **`Paused` left this arm for `TaskKind::Pause` at W8 Task 3 and
-            // stayed in it for everything else.** `LoopUntil` is still planned
-            // opaque, so nothing can put one of its runs into `PAUSED` today;
-            // if something does, waiting is still the answer that matches the
-            // artifact — a `PAUSED` run blocks its sequence until
-            // `ExecutionService.resume` moves it. `Restarted` is untouched and
-            // still reaches nothing: 0 of the golden's 840 run histories hold
-            // it.
+            // **`Paused` is NOT in this arm any more, for any kind.** It left
+            // for `TaskKind::Pause` at W8 Task 3, for `TaskKind::LoopUntil` at
+            // W8 Task 4 fix round 1, and for EVERY kind at fix round 2 — the
+            // arm above is unguarded, because `TaskRun::resume_with` answers
+            // for the run rather than a list answering for the kind. **This
+            // comment said "`LoopUntil` is still planned opaque, so nothing can
+            // put one of its runs into `PAUSED` today", which its own task
+            // commit had already falsified**, and it is one of three found by
+            // asking of each corrected claim whether it has a program-checked
+            // twin.
+            //
+            // `Restarted` is untouched and still reaches nothing: 0 of the
+            // golden's 840 run histories hold it.
             _ => return Some(Step::Waiting),
         }
     }

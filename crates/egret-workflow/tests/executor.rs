@@ -5031,9 +5031,13 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          W3a does not implement as well (`Subflow`, an `ExecutionUpdatableTask`, \
          `finally:`, an opaque `WorkingDirectory`). Being inside the vocabulary \
          is necessary and not sufficient -- and **W8 Task 2's 16 (237 -> 253) \
-         bank nothing at all**, which is the third measured example: `Pause` \
-         and `LoopUntil` are still planned opaque, so no command in this crate \
-         emits either new variant"
+         bank nothing at all**, which is the third measured example: when Task \
+         2 added `PAUSED` and `RESTARTED` both constructs that emit them were \
+         still planned opaque, so nothing in this crate emitted either variant. \
+         **Both producers exist now** -- `Pause` at W8 Task 3 (8 banked) and \
+         `LoopUntil` at W8 Task 4 (1) -- and the sentence is kept in the past \
+         tense it was always about, because the claim it supports is what Task \
+         2's SIXTEEN bought on the day, which is still nothing"
     );
     assert_eq!(
         missing,

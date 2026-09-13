@@ -72,8 +72,8 @@ use super::subflow;
 use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, RunIx,
-    RunState, TaskKind, TaskRun, Tick,
+    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, Resume,
+    RunIx, RunState, TaskKind, TaskRun, Tick,
 };
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -1349,7 +1349,7 @@ pub(super) async fn load_with(
 
     let rows = sqlx::query(
         "SELECT id, run_ix, task_ix, parent_ix, value, rendered, rendered_run_if, \
-                history, attempts, not_before_ms \
+                history, attempts, not_before_ms, resume_with \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
     )
     .bind(execution_id)
@@ -1379,6 +1379,17 @@ pub(super) async fn load_with(
             history: parse_states(id, &r.get::<serde_json::Value, _>("history"))?,
             attempts: parse_attempts(id, &r.get::<serde_json::Value, _>("attempts"))?,
             not_before: r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            // **The instant is NOT in this column** -- it is `not_before_ms`,
+            // read one line up, so there is one clock rather than two that can
+            // disagree. Migration 0141's `workflow_task_runs_resume_bound_
+            // matches` is what makes the pairing structural; a row that
+            // violates it cannot be written, so a `Some` discriminant with no
+            // deadline here is storage corruption rather than a state.
+            resume_with: parse_resume(
+                id,
+                r.get::<Option<String>, _>("resume_with").as_deref(),
+                r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            )?,
         });
     }
 
@@ -1683,6 +1694,7 @@ async fn persist(
                         claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
                         ended_seq = $10, \
                         created_seq = COALESCE($12, created_seq), \
+                        resume_with = $13, \
                         updated_at = now() \
                   WHERE execution_id = $8 AND run_ix = $9 \
                     AND ($11::timestamptz IS NULL OR claimed_at = $11)",
@@ -1718,6 +1730,12 @@ async fn persist(
             // `retry::reopen_due` needs (a run that is running again must not
             // keep a right endpoint).
             .bind(marks.created.get(&ix).copied())
+            // A plain assignment, like `ended_seq` and unlike `created_seq`:
+            // the state's value IS the answer, including when it goes back to
+            // `NULL` because `Command::RestartLoop` took the run out of
+            // `PAUSED`. A `COALESCE` here would leave a stale discriminant
+            // beside a NULL deadline, which migration 0141 refuses.
+            .bind(run.resume_with.as_ref().map(Resume::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -1750,8 +1768,8 @@ async fn persist(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
                     rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-                    created_seq, ended_seq) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                    created_seq, ended_seq, resume_with) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             )
             .bind(execution_id)
             .bind(ix as i32)
@@ -1768,6 +1786,11 @@ async fn persist(
             .bind(run.not_before.map(|t| t.0))
             .bind(marks.created.get(&ix).copied())
             .bind(marks.ended.get(&ix).copied())
+            // Always `NULL` on an INSERT today -- `Command::CreateRun` cannot
+            // pause a run it is creating -- and bound anyway, because a column
+            // this writer never mentions is a column the next author has to
+            // discover.
+            .bind(run.resume_with.as_ref().map(Resume::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -1828,6 +1851,34 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
             })
             .collect(),
     )
+}
+
+/// [`Resume`] from migration 0141's discriminant and the run's own deadline.
+///
+/// The two halves are checked against each other rather than trusted: 0141's
+/// CHECK pairs them at write time, so a mismatch read back here is the storage
+/// being wrong -- which is `WorkerError::Corrupt`'s whole class, and the one
+/// class `oracle-exec/driver.rs` reports as `Broken` rather than swallowing as
+/// an ordinary divergence.
+fn parse_resume(owner: Uuid, wire: Option<&str>, at: Option<Tick>) -> Result<Option<Resume>> {
+    let corrupt = |what: String| worker_err(WorkerError::Corrupt(owner, what));
+    Ok(match (wire, at) {
+        (None, _) => None,
+        (Some("NEVER"), None) => Some(Resume::Never),
+        (Some("ITERATE"), Some(at)) => Some(Resume::Iterate { at }),
+        (Some(s), Some(at)) if s.starts_with("TERMINAL:") => Some(Resume::Terminal {
+            at,
+            state: from_wire(&s["TERMINAL:".len()..])
+                .ok_or_else(|| worker_err(WorkerError::UnknownState(owner, s.to_string())))?,
+        }),
+        (Some(s), at) => {
+            return Err(corrupt(format!(
+                "resume_with {s:?} with not_before_ms {:?}: migration 0141 pairs the \
+                 discriminant with the deadline and this row has neither pairing",
+                at.map(|t| t.0)
+            )))
+        }
+    })
 }
 
 fn parse_states(owner: Uuid, v: &serde_json::Value) -> Result<Vec<RunState>> {
@@ -1898,6 +1949,7 @@ mod tests {
             history: vec![state],
             attempts: Vec::<_Attempt>::new(),
             not_before: None,
+            resume_with: None,
         };
         let state = ExecutionState {
             runs: vec![

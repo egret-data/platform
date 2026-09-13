@@ -59,7 +59,7 @@
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::retry::parse_duration;
-use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
+use crate::executor::state::{ExecutionState, Resume, RunIx, RunState, Tick};
 
 use super::{plus, Step};
 
@@ -86,54 +86,40 @@ pub(crate) fn drive(
         // process on a surprising row is a worse failure than one that stalls.
         return Step::Waiting;
     };
-    let until = match deadline(plan, state, run, task, started) {
+    // **The terminal is resolved HERE, once, and carried on the command.** It
+    // used to be re-derived on every round by a `resume` in this module, from
+    // the same `(plan, attempt_started_at, rendered)` -- which was correct and
+    // was also the second of the two sites W8 Task 4 fix round 2 collapsed.
+    // Nothing it read can change while the run is paused: the attempt does not
+    // reopen, and a `pauseDuration:` the caller has not rendered never gets
+    // here at all (`Bound::NotRenderedYet` waits instead of pausing).
+    let resume = match deadline(plan, state, run, task, started) {
         Bound::NotRenderedYet => return Step::Waiting,
-        Bound::Unbounded => None,
-        Bound::Until(at, _) => Some(at),
+        Bound::Unbounded => Resume::Never,
+        Bound::Until(at, state) => Resume::Terminal { at, state },
     };
-    Step::Commands(vec![Command::PauseRun { run, until }])
+    Step::Commands(vec![Command::PauseRun { run, resume }])
 }
 
-/// What a `PAUSED` run wants, which is nothing at all until its bound elapses.
-///
-/// Returns the command for the round the wait ends in, or [`Step::Waiting`].
-///
-/// **The execution's own `RESTARTED` is NOT emitted here**, and neither is the
-/// `PAUSED` [`drive`] would otherwise owe. Both are
-/// [`advance`](crate::executor::advance)'s, for one reason that is measured
-/// rather than stylistic: a `Parallel` of two `Pause`es enters both in the SAME
-/// command batch, and a per-run emission writes `PAUSED` twice into a history
-/// no golden execution ever repeats a state in. `advance` sees the whole batch
-/// and this function sees one run, so only `advance` can answer once for it —
-/// see its `pause_mark` for the rule and for what is and is not measured about
-/// it. `two_pauses_in_one_parallel_resume_independently` is what made this
-/// module's first shape fail.
-pub(crate) fn resume(
-    plan: &Plan,
-    state: &ExecutionState,
-    run: RunIx,
-    task: TaskIx,
-    now: Tick,
-) -> Step {
-    let Some(started) = state.runs[run].attempt_started_at() else {
-        return Step::Waiting;
-    };
-    let Bound::Until(at, ends_with) = deadline(plan, state, run, task, started) else {
-        // Unbounded, or an expression the caller has not answered. **Neither
-        // may resume**, and they are the same answer for different reasons: an
-        // unbounded pause waits for a human this executor has no message from,
-        // and an unrendered one has no bound to compare `now` against. Reading
-        // either as "due" is the over-acceptance this module exists to refuse.
-        return Step::Waiting;
-    };
-    if now < at {
-        return Step::Waiting;
-    }
-    Step::Commands(vec![Command::SetRunState {
-        run,
-        state: ends_with,
-    }])
-}
+// **`resume` used to live here and is now
+// [`flowable::resume_paused`](super::resume_paused).** W8 Task 4 fix round 2.
+//
+// It re-derived this pause's bound and terminal on every round while
+// `loop_until` had a near-copy beside it, and each was reached through its own
+// `TaskKind`-keyed guard in two different walks. Both are gone: the answer is
+// decided once, by [`drive`] above, and carried on
+// [`Command::PauseRun`](crate::executor::Command::PauseRun) as a
+// [`Resume`]. What that buys is not tidiness — see [`Resume`] for the silent
+// stall it makes unrepresentable.
+//
+// **The `RESTARTED` this pause's end owes the execution is still not emitted
+// per run**, and that is unchanged and still measured:
+// [`advance`](crate::executor::advance)'s `pause_mark` answers once per
+// command batch, because a `Parallel` of two `Pause`es enters both in ONE
+// batch and a per-run emission writes `PAUSED` twice into a history no golden
+// execution ever repeats a state in.
+// `two_pauses_in_one_parallel_resume_independently` is what made this
+// module's first shape fail.
 
 /// When this pause ends, and what it ends as.
 enum Bound {
