@@ -443,6 +443,25 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// [`claim`]'s reason: without a total order the rows come back in whatever
 /// the scan produced, and at `LIMIT 1` that decides *which* execution is
 /// woken rather than merely in what order.
+/// # It will never wake a `PAUSED` run, and the ratchet cannot tell you
+///
+/// **W8 Task 2.** The gate below is `r.state = 'RETRYING' OR (r.state =
+/// 'RETRIED' AND …)`. A bounded `Pause` parks a run with a `not_before_ms` and
+/// a state of `'PAUSED'`, which matches neither — so in the **product** a
+/// bounded pause would never resume, however correct `advance()` was.
+///
+/// **This is the half the oracle is blind to, and it is blind for a reason that
+/// is a property of the instrument.** `oracle-exec/driver.rs`'s `pass_time`
+/// selects on `not_before_ms` alone, with no state term anywhere in its SQL,
+/// and then calls `worker::resume` directly. It never runs this query. So the
+/// driver reaches the same runs through a different door and a green ratchet
+/// says nothing about this predicate at all — the shape W4's item 15 named, a
+/// property proved about a path no deployment takes.
+///
+/// `executor::retry::reopen_due` is the pure-side twin and its blindness is the
+/// **opposite**: the driver does reach it, so it fails loudly. Recorded on both
+/// because one sentence about "the ratchet cannot see it" is wrong about one of
+/// them.
 pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
     sqlx::query_scalar(
         "SELECT r.execution_id \

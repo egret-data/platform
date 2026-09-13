@@ -2989,6 +2989,190 @@ fn the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_
 ///
 /// **The `--self-test` assertion is a positive control, not a formality.** A
 /// self-test that ran *no* cases exits 0 and looks exactly like one where every
+/// **Cross-check 1 of 2: `handler_surface.py`'s `RUN_STATE` against the enum it
+/// copies** — W8 Task 2 fix round 1.
+///
+/// `RUN_STATE` is a hand-written Python copy of [`RunState::ALL`], and W8 Task 2
+/// found it two variants stale. **The fix shipped in that same commit corrected
+/// the copy and left the mechanism that hid the staleness completely intact**:
+/// `the_handler_surface_generator_checks_itself_and_its_artifact` compares the
+/// SCRIPT against its ARTIFACT, so a `RUN_STATE` that disagrees with the enum
+/// regenerates a self-consistent `handler-surface.txt` and stays green. Nothing
+/// in the repository compared copy against enum.
+///
+/// This is that comparison, and it is the cheaper half of the pair with
+/// [`the_two_state_vocabularies_agree`]. It parses the literal out of the
+/// script rather than importing Python, because the failure being guarded is
+/// *the literal*, and re-deriving it any other way would be guarding something
+/// else.
+///
+/// **Both directions**, because a one-directional check acquits a copy that has
+/// lost a member — which is exactly the direction this defect went.
+#[test]
+fn handler_surfaces_run_state_copy_matches_the_enum() {
+    let script = include_str!("../oracle-exec/handler_surface.py");
+    let start = script.find("RUN_STATE = {").expect(
+        "handler_surface.py must still define RUN_STATE; if it was renamed, this \
+                 cross-check has to move with it rather than be deleted",
+    );
+    let end = start
+        + script[start..]
+            .find('}')
+            .expect("RUN_STATE's literal must be brace-delimited");
+    let body = &script[start..end];
+    let copied: BTreeSet<&str> = body
+        .split('"')
+        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+        .collect();
+    let held: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+
+    // The parser is checked before its output is trusted: a `split('"')` that
+    // matched nothing would make `copied` empty and every `missing` assertion
+    // below would still pass on a `held` of any size.
+    assert_eq!(
+        copied.len(),
+        held.len(),
+        "handler_surface.py's RUN_STATE holds {} state(s), RunState::ALL holds \
+         {}. Copy = {copied:?}, enum = {held:?}",
+        copied.len(),
+        held.len()
+    );
+    assert!(
+        copied.len() >= 9,
+        "the RUN_STATE literal parsed to {copied:?}, which is too small to be \
+         the real one -- the parser above has stopped matching and this test is \
+         no longer checking anything"
+    );
+    let missing_from_copy: Vec<&&str> = held.difference(&copied).collect();
+    let extra_in_copy: Vec<&&str> = copied.difference(&held).collect();
+    assert!(
+        missing_from_copy.is_empty() && extra_in_copy.is_empty(),
+        "handler_surface.py's RUN_STATE has drifted from RunState::ALL. \
+         In the enum and not the copy: {missing_from_copy:?}. In the copy and \
+         not the enum: {extra_in_copy:?}. Update the literal AND re-run \
+         `python3 handler_surface.py`, because the classification of which \
+         entries are blocked by 'a state RunState cannot hold' moves with it"
+    );
+}
+
+/// **Cross-check 2 of 2: `executor::RunState` against `models::State`** — W8
+/// Task 2 fix round 1.
+///
+/// Two state vocabularies, two independent spellings —
+/// [`RunState::wire`](egret_workflow::executor::RunState::wire) hand-written,
+/// `models::State` through `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` —
+/// and until now **nothing compared them**. W8 Task 2 reported that as a
+/// theoretical gap; it is not theoretical:
+///
+/// - it produced the `RUN_STATE` defect in Task 2's own commit, and
+/// - a second undetected instance was already in the tree —
+///   `worker/subflow.rs`'s doc asserted `State.Type.isFailed()` was
+///   `FAILED || KILLED` for several packages while `models::State::is_failed`
+///   sat five files away with the **correct** `matches!(self, Self::Failed)`.
+///   The contradiction was falsifiable without decompiling anything, and
+///   nothing went red.
+///
+/// Three properties, each two-sided:
+///
+/// 1. every `RunState` variant's wire spelling is a `models::State` that
+///    round-trips to the same string;
+/// 2. `RunState::is_terminal` and `models::State::is_terminated` agree on every
+///    shared member — **both ways**, so neither a widened nor a narrowed
+///    `is_terminal` survives;
+/// 3. the variants `models::State` has and `RunState` does not are exactly the
+///    ones this crate says are missing, so a variant added to one and forgotten
+///    in the other fails here rather than in a reader's head.
+#[test]
+fn the_two_state_vocabularies_agree() {
+    use egret_workflow::models::State;
+
+    let held: BTreeSet<String> = RunState::ALL.iter().map(|s| s.wire().to_string()).collect();
+
+    // 1. Every RunState wire spelling is a models::State, spelled identically.
+    for s in RunState::ALL {
+        let json = format!("\"{}\"", s.wire());
+        let parsed: State = serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!(
+                "RunState::{s:?} spells itself {:?}, which `models::State` does not \
+                 accept ({e}). The two vocabularies have diverged",
+                s.wire()
+            )
+        });
+        let back = serde_json::to_string(&parsed).expect("State serialises");
+        assert_eq!(
+            back, json,
+            "RunState::{s:?} and models::State::{parsed:?} do not agree on the \
+             wire spelling"
+        );
+
+        // 2. and the terminality judgement, both directions.
+        assert_eq!(
+            s.is_terminal(),
+            parsed.is_terminated(),
+            "RunState::{s:?}.is_terminal() = {}, models::State::{parsed:?}\
+             .is_terminated() = {}. Kestra has ONE `State.Type.isTerminated()`; \
+             two answers means one of these two files is wrong about the \
+             artifact",
+            s.is_terminal(),
+            parsed.is_terminated()
+        );
+    }
+
+    // 3. What models::State has and RunState does not, named rather than
+    //    counted -- and asserted as a SET, so gaining a variant on either side
+    //    without the other fails here.
+    let all_seventeen = [
+        "CREATED",
+        "SUBMITTED",
+        "RUNNING",
+        "PAUSED",
+        "RESTARTED",
+        "KILLING",
+        "SUCCESS",
+        "WARNING",
+        "FAILED",
+        "KILLED",
+        "CANCELLED",
+        "QUEUED",
+        "RETRYING",
+        "RETRIED",
+        "SKIPPED",
+        "BREAKPOINT",
+        "RESUBMITTED",
+    ];
+    for name in all_seventeen {
+        serde_json::from_str::<State>(&format!("\"{name}\"")).unwrap_or_else(|e| {
+            panic!("models::State must still hold {name}, Kestra's own State.Type ({e})")
+        });
+    }
+    let missing: BTreeSet<String> = all_seventeen
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|s| !held.contains(s))
+        .collect();
+    assert_eq!(
+        missing,
+        BTreeSet::from([
+            "BREAKPOINT".to_string(),
+            "CANCELLED".to_string(),
+            "KILLING".to_string(),
+            "QUEUED".to_string(),
+            "RESUBMITTED".to_string(),
+            "WARNING".to_string(),
+        ]),
+        "the six of Kestra's seventeen that `RunState` does not hold. Two of \
+         them -- WARNING and CANCELLED -- are the golden's remaining \
+         unrepresentable pair; the other four never appear in it at all. \
+         Adding a variant to `RunState` moves this set, and adding one to \
+         `models::State` without adding it here moves the list above"
+    );
+    assert_eq!(
+        held.len() + missing.len(),
+        17,
+        "the two sets must partition Kestra's seventeen with nothing left over"
+    );
+}
+
 /// case fired, so the count is read out of its own output and required to be a
 /// whole number of whole successes.
 #[test]
@@ -4545,6 +4729,128 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          entries whose trace uses each. `oracle-exec/README.md` names the owner \
          of each; `RETRIED` left this table at Task 7, `SKIPPED` at W3c, and \
          `PAUSED` (18) and `RESTARTED` (12) at W8 Task 2"
+    );
+}
+
+/// **The golden's three populations, recursed and un-recursed, both pinned** —
+/// W8 Task 2 fix round 1.
+///
+/// Task 2 published *"0 of the golden's 604 attempt histories"* while claiming
+/// the census was *"walked recursively through `spawned`"*. **604 is the
+/// un-recursed count; recursed it is 878.** The claim's truth value did not
+/// move — `PAUSED` is in 0 attempts either way — but the number was wrong, and
+/// it was wrong in the arm the control did not cover: the control reproduced
+/// `oracle-exec/README.md`'s **run** table (840/828/639/…), which is the
+/// recursed run figure and was right, and said nothing about attempts.
+///
+/// So this pins **both** numbers for **all three** populations. The failure it
+/// exists to catch is not "someone miscounted" but *"someone counted one arm
+/// recursively and another arm not, and reported one sentence about both"* —
+/// which is only visible when the pair is asserted side by side.
+///
+/// `RunState`'s `Paused` and `Restarted` docs quote 408/840/878; if any of
+/// those moves, this fails and names which.
+#[test]
+fn the_golden_populations_are_derived_recursed_and_unrecursed() {
+    fn count(entries: &[GoldenEntry], recurse: bool) -> (usize, usize, usize, usize, usize) {
+        let (mut execs, mut runs, mut atts) = (0usize, 0usize, 0usize);
+        let (mut paused_atts, mut restarted_runs) = (0usize, 0usize);
+        fn sub(
+            execution: &[String],
+            runs_in: &[GoldenRun],
+            spawned: &[GoldenSpawned],
+            recurse: bool,
+            execs: &mut usize,
+            runs: &mut usize,
+            atts: &mut usize,
+            paused_atts: &mut usize,
+            restarted_runs: &mut usize,
+        ) {
+            if !execution.is_empty() {
+                *execs += 1;
+            }
+            for r in runs_in {
+                *runs += 1;
+                if r.state.iter().any(|s| s == "RESTARTED") {
+                    *restarted_runs += 1;
+                }
+                for a in &r.attempts {
+                    *atts += 1;
+                    if a.iter().any(|s| s == "PAUSED") {
+                        *paused_atts += 1;
+                    }
+                }
+            }
+            if recurse {
+                for sp in spawned {
+                    sub(
+                        &sp.execution,
+                        &sp.runs,
+                        &sp.spawned,
+                        recurse,
+                        execs,
+                        runs,
+                        atts,
+                        paused_atts,
+                        restarted_runs,
+                    );
+                }
+            }
+        }
+        for e in entries.iter().filter(|e| e.verdict == Verdict::Runs) {
+            sub(
+                &e.execution,
+                &e.runs,
+                &e.spawned,
+                recurse,
+                &mut execs,
+                &mut runs,
+                &mut atts,
+                &mut paused_atts,
+                &mut restarted_runs,
+            );
+        }
+        (execs, runs, atts, paused_atts, restarted_runs)
+    }
+
+    let g = golden();
+    let flat = count(&g, false);
+    let deep = count(&g, true);
+    println!(
+        "golden populations: un-recursed (execs, runs, attempts) = ({}, {}, {}); \
+         recursed = ({}, {}, {})",
+        flat.0, flat.1, flat.2, deep.0, deep.1, deep.2
+    );
+    assert_eq!(
+        (flat.0, flat.1, flat.2),
+        (266, 570, 604),
+        "the UN-recursed populations. 604 is the attempt figure W8 Task 2 \
+         published while claiming a recursive walk; it is kept here so the two \
+         can never be confused again"
+    );
+    assert_eq!(
+        (deep.0, deep.1, deep.2),
+        (408, 840, 878),
+        "the RECURSED populations, which are the ones `RunState::Paused` and \
+         `RunState::Restarted` quote. 840 is also the figure \
+         `oracle-exec/README.md`'s run-history table is over, which is the \
+         control that the recursion is the same one that table used"
+    );
+    // The two claims the numbers above are in service of, so the count and the
+    // claim cannot drift apart -- and stated as counts, not booleans, so a
+    // broken walk that visited nothing would fail rather than pass.
+    assert_eq!(
+        (deep.3, deep.4),
+        (0, 0),
+        "`PAUSED` must appear in no attempt history and `RESTARTED` in no run \
+         history, over the RECURSED population. `apply`'s rule 1 would put \
+         `Paused` on the open attempt, which is why the first producer needs \
+         something other than a plain `SetRunState`"
+    );
+    assert!(
+        deep.2 > flat.2 && deep.1 > flat.1 && deep.0 > flat.0,
+        "sanity: recursing must find MORE of all three, or the walk is not \
+         recursing and both assertions above would be measuring the same thing"
     );
 }
 

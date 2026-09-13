@@ -288,7 +288,7 @@ pub enum RunState {
     /// histories, `PAUSED` is in 18 and **ends none of them**; over the 840 run
     /// histories it is in 20 and ends none.
     ///
-    /// **And it appears in 0 of the golden's 604 attempt histories.** That is
+    /// **And it appears in 0 of the golden's 878 attempt histories.** That is
     /// not a detail: [`apply`]'s rule 1 pushes any non-terminal `SetRunState`
     /// onto the open attempt, so the first producer of this variant will push a
     /// state Kestra never records unless it emits something other than a plain
@@ -316,7 +316,7 @@ pub enum RunState {
     ///
     /// **Execution-only is measured, not assumed**: `RESTARTED` appears in 12
     /// of the golden's 408 execution histories and in **0** of its 840 run
-    /// histories and **0** of its 604 attempt histories. Every one of the 12 is
+    /// histories and **0** of its 878 attempt histories. Every one of the 12 is
     /// a `Pause` that was resumed, and the shape is always
     /// `CREATED RUNNING PAUSED RESTARTED RUNNING …`. The six remaining `PAUSED`
     /// executions carry no `RESTARTED` at all — those are `LoopUntil`'s, which

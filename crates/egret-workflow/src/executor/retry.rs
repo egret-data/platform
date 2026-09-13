@@ -427,6 +427,26 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
 /// (`DefaultExecutor.java:561`, the execution-delay loop) whose output is
 /// re-submitted for processing rather than merged into the cycle that scheduled
 /// it.
+/// # It takes only `RETRYING`, and a `PAUSED` run with a deadline is the next caller
+///
+/// **W8 Task 2, recorded here because this is the function that has to change
+/// and Task 7's `Files:` does not name this file.** The predicate below is
+/// `history.last() == Some(&RunState::Retrying)`. A bounded `Pause` is the same
+/// shape — a run parked with a [`TaskRun::not_before`](super::TaskRun) that
+/// comes due — and all twelve baselined `Pause` entries are bounded
+/// (`pauseDuration:` nine, `timeout:` three), so whoever emits
+/// [`RunState::Paused`](super::RunState) must widen this arm or the run parks
+/// for ever.
+///
+/// **Unlike `worker::claim::due_retries`, the ratchet WILL catch this one, and
+/// the two blindnesses are not the same.** The oracle's driver reaches here:
+/// `driver::pass_time` moves the clock, calls `worker::resume`, which reaches
+/// `claim::settle` and then [`advance`](super::advance), which calls this
+/// function on the first line of its body. So a `Paused` run this arm does not
+/// reopen becomes a stalled execution and a red ratchet the moment a producer
+/// exists. `due_retries` is the one the ratchet cannot see, because its gate is
+/// SQL the driver never runs — `pass_time` selects on `not_before_ms` with no
+/// state term at all. One sentence covering both would be wrong about this one.
 pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     let due: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {

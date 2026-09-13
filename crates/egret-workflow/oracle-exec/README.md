@@ -1614,7 +1614,7 @@ other's state. Nothing in the crate emits either one: `build_plan` still plans
 `golden.json` rather than inferred:
 
 - `PAUSED` is in **18** of the 408 execution histories and **20** of the 840 run
-  histories, and **0** of the 604 attempt histories — a paused run's attempt
+  histories, and **0** of the 878 attempt histories — a paused run's attempt
   reads `["CREATED","RUNNING","SUCCESS"]` while the run itself reads
   `["CREATED","RUNNING","PAUSED","SUCCESS"]`
   (`valids/flow-concurrency-cancel-pause`). The first producer of the variant

@@ -184,6 +184,28 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     // `… FAILED RETRYING …`, never `… RETRYING FAILED …`.
     work.extend(retry::scan(plan, state, now));
 
+    // # `not_running_yet` is Kestra's `isCreated()`, and it is narrower by `RESTARTED`
+    //
+    // **W8 Task 2, and its population is 12 rather than 0.** Kestra's
+    // `State.Type.isCreated()` is `CREATED || RESTARTED`, and
+    // `ExecutorService.handleRestart` maps a `RESTARTED` execution straight to
+    // `RUNNING` — which is exactly what the arm below does for `CREATED`. All
+    // twelve of the golden's `RESTARTED` execution histories read
+    // `CREATED RUNNING PAUSED RESTARTED RUNNING …`, so the transition this arm
+    // would have to make is measured, not hypothetical.
+    //
+    // It is left narrow because nothing emits `SetExecutionState { Restarted }`
+    // yet, and a branch no test can drive is the over-acceptance this programme
+    // forbids. **Whoever emits it must widen this comparison**, or a resumed
+    // execution never re-enters `RUNNING` and every one of those twelve
+    // diverges on its execution history.
+    //
+    // The sibling rule — `apply`'s rule 2, which clears a run's renders on
+    // re-entering `CREATED` — is narrow for a *different* reason and the two
+    // must not be quoted with one sentence: there the population really is
+    // **0 of 840 run histories**, because `RESTARTED` is execution-only in this
+    // corpus. Mutating rule 2 to include `Restarted` survives the whole suite;
+    // mutating this one will not, once a producer exists.
     let not_running_yet = state.history.last() == Some(&RunState::Created);
     let has_a_run = !state.runs.is_empty();
     let terminating = matches!(
