@@ -709,19 +709,36 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.errors.is_empty() {
         return Some("errors");
     }
-    // **Any `behavior:`, literal or expression, and fix round 2 MEASURED why.**
+    // **Any `behavior:`, literal or expression, and rounds 2-3 MEASURED why.**
     // Fix round 1 narrowed this to literals on the theory that an expression
-    // always fails at resume; five runs per form against the pinned artifact
-    // say otherwise. `behavior: FAIL`, `behavior: "{{ 'FAIL' }}"` and
-    // `behavior: "{{inputs.behavior}}"` with `FAIL` posted each gave `FAILED`
-    // with one task run, 5/5. The same three with `RESUME` -- and
-    // `"{{ vars.b }}"` -- gave `SUCCESS` with two. **The artifact honours the
-    // VALUE, in every form it is written in**, so "an expression fails" was a
+    // always fails at resume. It does not. Re-measured on the pinned artifact
+    // with a FRESH, never-reused flow id for every execution -- round 2's runs
+    // were contaminated by flow-id reuse, where `execution.inputs` still reads
+    // the posted value so "the input landed" cannot say which SOURCE ran --
+    // the corpus's own expression form `"{{inputs.behavior}}"` gives, 3 runs
+    // each:
+    //
+    //     FAIL -> FAILED/1     RESUME -> SUCCESS/2
+    //     WARN -> WARNING/2    CANCEL -> CANCELLED/1
+    //
+    // Four DIFFERENT executions, which is `PauseTest.java:374-380`'s own
+    // semantics. **For a value INSIDE the `Behavior` enum the artifact honours
+    // it, in every form it is written in** -- so "an expression fails" was a
     // rule about a class the corpus's one instance never exercised.
     //
-    // It is a gap for the reason it always was: `behavior:` is four-valued, and
-    // `WARN` and `CANCEL` mean `WARNING` and `CANCELLED`, neither of which
-    // [`RunState`](crate::executor::RunState) holds. **A dynamic one cannot
+    // **The sentence stops at the enum, and round 2's did not.** Outside it the
+    // artifact does not terminate at all: `NOPE`, lower-case `fail` and an
+    // undefined `{{inputs.nosuch}}` each leave the execution `RUNNING` past
+    // 120s. Round 2's grid was form x {`FAIL`, `RESUME`} and every cell
+    // rendered to a valid constant, so it could not see that edge and the
+    // conclusion drawn from it was wider than the grid.
+    //
+    // It is a gap for the reason it always was, and the measurement above is
+    // what confirms that reason rather than replacing it: `behavior:` is
+    // four-valued and the artifact really does produce all four terminals, two
+    // of which -- `WARNING` and `CANCELLED` -- are not in
+    // [`RunState`](crate::executor::RunState) at all. A fifth outcome, the
+    // non-terminal hang on an out-of-enum value, is not representable either. **A dynamic one cannot
     // even be classified here** -- its value is known at render time and this
     // decision is taken at plan time -- so the whole task stays opaque, which
     // is the only answer that cannot over-accept. The entry becomes bankable

@@ -662,34 +662,59 @@ that stopped there would have called the row unable to discriminate when the
 corpus in fact contains `{"param": false}`.
 
 ```
-proven discriminating 17   proven non-discriminating 1   unprobed 19
+proven discriminating 18   proven non-discriminating 0   unprobed 19
 ```
 
-- **17** rows are proven falsifiable by measurement.
-- **1** is proven *not* falsifiable, and finding it is the reason the probe
-  exists: `valids/pause-behavior`. On v2.0.0-rc13 all four documented behaviours
-  — `FAIL`, `RESUME`, `WARN`, `CANCEL` — produce the identical execution
-  (`FAILED`, 1 task run, histories
-  `CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED`).
+*(This block is a verbatim copy of `runnable.txt`'s own generated line. It read
+`17 … 1` until W8 Task 3 fix round 3 corrected `probe.json`; the generator emits
+`18 … 0` now, and `--rewrite-runnable` reproduces it.)*
 
-  **The cause is not that `behavior` is unimplemented on this artifact**, and an
-  earlier revision of this file said so, which would have sent whoever
-  implements `pause` hunting for a feature that is already there. Published with
-  **literal** values on a fresh `rc13`, the same flow gives `RESUME → SUCCESS`
-  with 2 task runs, `WARN → WARNING` with 2, `FAIL → FAILED` with 1, `CANCEL →
-  CANCELLED` with 1, and the property omitted → `SUCCESS` with 2 — the
-  checkout's semantics reproduced exactly, `PauseTest.java:374-380` included.
+- **18** rows are proven falsifiable by measurement.
+- **0** are proven *not* falsifiable. **This bullet read `1` and named
+  `valids/pause-behavior` until W8 Task 3 fix round 3, and every sentence under
+  it was false.** It is corrected here AND in `probe.json`, because
+  `runnable.txt` is a pure function of `corpus.json` + `probe.json` through
+  `--rewrite-runnable`: prose beside a falsehood does not stop a regeneration
+  re-emitting it, and this one was re-emitted at `runnable.txt:722-723` for
+  three packages.
 
-  What fails is narrower. The corpus flow writes
-  `behavior: "{{ inputs.behavior }}"`, and **rendering a Pebble expression into
-  a `Property<Behavior>` fails at resume time and takes the task down with it**,
-  for every value including the one that would have failed anyway. The execution
-  document does record `inputs: {"behavior": "FAIL"}`, so the input landed; the
-  task dies rendering it.
+  The claim was that all four documented behaviours — `FAIL`, `RESUME`, `WARN`,
+  `CANCEL` — produce the identical `FAILED`/1 execution, diagnosed as a Pebble
+  expression failing to render into `Property<Behavior>` at resume.
+  **Re-measured on the same pinned digest with a FRESH, never-reused flow id for
+  every single execution, 3 runs each**, the expression form gives four
+  *different* executions:
 
-  So that row's `agrees` is a coincidence in the **strong** sense — the flow
-  never reaches the `FAIL` behaviour at all — and Task 2 builds this flow's
-  golden from what the pinned image did.
+  | posted | state | task runs |
+  |---|---|---|
+  | `FAIL` | `FAILED` | 1 |
+  | `RESUME` | `SUCCESS` | 2 |
+  | `WARN` | `WARNING` | 2 |
+  | `CANCEL` | `CANCELLED` | 1 |
+
+  That is exactly what `PauseTest.java:374-380` asserts, so there is **no drift
+  at this seam at all** and `EXECUTION_DRIFT` is now empty.
+
+  **The contaminant was FLOW-ID REUSE, and the old control could not exclude
+  it.** Publishing a different source under the same `(namespace, flowId)`
+  leaves `execution.inputs` still reading the posted value — so *"the execution
+  document records `inputs: {"behavior": "FAIL"}`, the input landed"* establishes
+  that the INPUT arrived and says nothing about **which source ran**. Variant
+  probing does precisely that reuse.
+
+  **The harvest is structurally immune, which is why the golden is
+  reproducible.** All **275** corpus flows that execute have a unique
+  `(namespace, flow_id)` — the three duplicated ids are all 422-rejected and
+  never run — and `stability.json`'s 5 rounds name **2** unstable traces,
+  `valids/retry-failed-task-duration` and `valids/waitfor-max-duration`, neither
+  a `Pause`. `valids/pause-behavior`'s golden is `behavior: FAIL` working.
+
+  **One thing the grid could not see, recorded rather than generalised over.**
+  Every cell above renders to a *valid* enum constant. Outside the enum the
+  artifact does not terminate: `NOPE`, lower-case `fail` and an undefined
+  `{{inputs.nosuch}}` each leave the execution **`RUNNING` past 120 s**. No
+  corpus flow writes one, so nothing here can score it — it is named so that
+  "the artifact honours the value" is never read wider than the enum.
 - **19** are unprobed because no alternative input is documented for the flow —
   there is nothing to swap in. Seventeen of them carry a `taskruns`, `task_at`
   or `task_states` assertion that a branch flip would move, so they are strong;
@@ -6482,6 +6507,11 @@ the mechanisms are the subject and the constructs are the examples. **They must
 not be merged** — merging them would lose the only thing a reader can act on,
 which is what a future package would have to change to make each one visible.
 
+**Count the MECHANISMS, not the rows.** W8 Task 3 fix round 3 adds a sixth row,
+*an out-of-enum `behavior:`*, and it is still five mechanisms: that row shares
+`backfill`'s — **no population** — and is listed for what it would otherwise
+license somebody to over-claim, not because it is a new way of being blind.
+
 | construct | corpus | golden entries | what the ratchet holds | **the mechanism of the blindness** |
 |---|---|---|---|---|
 | **webhook** | 15 flows, 15 declarations | 14 — 11 matching, 3 baselined | nothing | **The harness never sends the request.** `harvest.py` contains the string `executions/webhook` **exactly once**, and that once is the *reason* `valids/webhook-inputs` is excluded from the corpus ("Executed only through POST /executions/webhook/…"). The trigger is not invisible to a discovery walk; it is **never invoked**, and the one corpus flow that can only be started that way has **no golden entry at all** |
@@ -6489,6 +6519,7 @@ which is what a future package would have to change to make each one visible.
 | **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
 | **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
+| **an out-of-enum `behavior:`** (W8 Task 3 fix round 3) | **0 corpus flows**; measured on probes only | 0 | nothing | **No population, and the behaviour is a HANG rather than a state.** A `Pause` whose `behavior:` renders to something outside `RESUME`/`WARN`/`FAIL`/`CANCEL` -- `NOPE`, lower-case `fail`, an undefined `{{inputs.nosuch}}` -- leaves the execution `RUNNING` past 120 s, non-terminal, with the pause run still `RUNNING`. Every one of the four enum values terminates, and terminates differently (`FAILED`/1, `SUCCESS`/2, `WARNING`/2, `CANCELLED`/1). The corpus's single `Pause` `behavior:` posts `FAIL`, so nothing here can score this edge; it is listed because the sentence *"the artifact honours the value"* is true **inside the enum only**, and W8 Task 3 fix round 2 wrote it without that qualifier from a grid whose every cell was a valid constant |
 
 **Both sides are blind, and the second half is egret's.** Even if Kestra's
 trigger-fired executions reached the golden, nothing on egret's side of this
