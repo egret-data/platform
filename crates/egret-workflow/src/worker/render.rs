@@ -68,7 +68,7 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use super::claim::ExecutionCtx;
-use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind};
+use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
 use crate::runners::RenderContext;
 
@@ -533,19 +533,59 @@ impl Surface {
             let Some(last) = r.history.last().copied() else {
                 continue;
             };
-            if !last.is_terminal() {
-                continue;
-            }
             let Some(task) = plan.tasks.get(r.task) else {
                 continue;
             };
+            // **The one output a RUNNING task publishes, and W8 Task 4 is why
+            // the rule above now has an exception.**
+            //
+            // A `LoopUntil` writes `{iterationCount: n}` onto its own taskrun
+            // *before* each iteration's children are created --
+            // `ExecutorService.saveFlowableOutput` at creation (Kestra's
+            // `INITIAL_LOOP_VALUE`, which is `1`, not `0`) and
+            // `taskOutputService.saveOutputs(taskRun, waitFor.outputs(previous))`
+            // at every pause. So `{{ outputs.<loop>.iterationCount }}` resolves
+            // for a loop that has not terminated, and the corpus is built on
+            // that: `valids/waitfor-nested` runs `format: "{{ outputs.loop_1
+            // .iterationCount }}"` inside `loop_1` and exits when that value
+            // reaches 3, and `valids/loop-until-restart` writes the same
+            // expression. Without this arm both children fail on an undefined
+            // name -- `runners::env` is `UndefinedBehavior::Strict` -- and the
+            // nested flow never terminates at all.
+            //
+            // **It is `n`, not `n - 1`, and `valids/waitfor-nested` is the row
+            // that decides it.** Its three loops each exit on
+            // `outputs.<child>.value | number >= 3` where the child returned the
+            // loop's own `iterationCount`, and each ran exactly **three**
+            // iterations (2 `PAUSED` in each loop run, 26 across the execution
+            // -- 2 + 3x2 + 9x2, one per nested restart). A 0-based counter
+            // reaches 3 on the fourth iteration, or never.
+            //
+            // `tasks` is deliberately NOT given the same exception: nothing in
+            // the corpus reads `tasks.<id>.state` for a running task, and
+            // widening a second name on one construct's evidence is the shape
+            // this package keeps paying for.
+            if let crate::executor::TaskKind::LoopUntil { .. } = task.kind {
+                outputs.insert(
+                    task.id.clone(),
+                    json!({
+                        "iterationCount":
+                            crate::executor::loop_iteration(state, ix)
+                    }),
+                );
+            }
+            if !last.is_terminal() {
+                continue;
+            }
             // `None` becomes `{}`: measured on the artifact, an expression
             // cannot tell "no Output object" from an empty one — see the module
             // doc's table.
-            outputs.insert(
-                task.id.clone(),
-                self.own.get(&ix).cloned().unwrap_or_else(|| json!({})),
-            );
+            if !matches!(task.kind, crate::executor::TaskKind::LoopUntil { .. }) {
+                outputs.insert(
+                    task.id.clone(),
+                    self.own.get(&ix).cloned().unwrap_or_else(|| json!({})),
+                );
+            }
             tasks.insert(task.id.clone(), json!({"state": last.wire()}));
         }
         cx.insert("outputs", Value::Object(outputs));
@@ -902,12 +942,32 @@ pub(super) fn render_expressions(
     surface: &Surface,
     plan: &Plan,
     state: &mut ExecutionState,
+    now: Tick,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
             expression_of(plan, state.runs[ix].task).is_some()
                 && state.runs[ix].history.last() == Some(&renders_at(plan, state.runs[ix].task))
                 && state.runs[ix].rendered.is_none()
+                // **A `LoopUntil` has a third gate and the other four kinds do
+                // not** -- W8 Task 4. `RUNNING` is when an `If` is asked, and a
+                // `LoopUntil` is `RUNNING` for its whole body as well, so the
+                // state alone would evaluate the condition before the children
+                // that its `outputs.<child>.…` names have run. The predicate is
+                // the executor's own, not a copy: see
+                // `executor::flowable::loop_until::condition_is_asked` for why
+                // rendering early is a terminal the artifact does not produce
+                // rather than a harmless extra evaluation.
+                && (!matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    crate::executor::TaskKind::LoopUntil { .. }
+                ) || crate::executor::loop_condition_is_asked(
+                    plan,
+                    state,
+                    ix,
+                    state.runs[ix].task,
+                    now,
+                ))
         })
         .collect();
     if pending.is_empty() {
@@ -958,6 +1018,11 @@ fn fail(state: &mut ExecutionState, ix: RunIx) {
 fn expression_of(plan: &Plan, task: usize) -> Option<String> {
     match &plan.tasks.get(task)?.kind {
         TaskKind::If { condition, .. } => Some(condition.clone()),
+        // W8 Task 4. Unlike the other four this one is asked MANY times for one
+        // run -- once per iteration -- which is what
+        // `Command::RestartLoop` clearing `rendered` arranges, and what Kestra
+        // spells `runContext.render(this.condition).skipCache()`.
+        TaskKind::LoopUntil { condition, .. } => Some(condition.clone()),
         TaskKind::Switch { value, .. } => Some(value.clone()),
         TaskKind::Loop { values, .. } => Some(values.clone()),
         TaskKind::Pause {

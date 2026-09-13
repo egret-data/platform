@@ -120,6 +120,22 @@ fn walk(
             {
                 return Some(super::pause::resume(plan, state, ix, task, now))
             }
+            // W8 Task 4. The second construct that pauses, and it leaves the
+            // state a different way: a `Pause` resumes into a TERMINAL and a
+            // `LoopUntil` resumes into another `RUNNING`. That difference is
+            // visible in the execution's own history and is measured -- the
+            // golden's 18 `PAUSED` executions split 12 that carry a `RESTARTED`
+            // (all `Pause`) and 6 that do not (all `LoopUntil`) -- which is why
+            // `advance`'s `pause_mark` has an arm for this command and not just
+            // for the state.
+            Some(RunState::Paused)
+                if matches!(
+                    plan.tasks[task].kind,
+                    crate::executor::plan::TaskKind::LoopUntil { .. }
+                ) =>
+            {
+                return Some(super::loop_until::resume(state, ix, now))
+            }
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.

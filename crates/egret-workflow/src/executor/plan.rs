@@ -119,7 +119,12 @@ impl Plan {
             TaskKind::Runnable { .. } | TaskKind::Executable { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
-            | TaskKind::Loop { tasks, .. } => tasks.clone(),
+            | TaskKind::Loop { tasks, .. }
+            // W8 Task 4. A `LoopUntil`'s children ARE in the plan and are its
+            // own `tasks:` -- unlike a `Loop`'s, which are planned here and
+            // then run in a different execution, and unlike a `Pause`'s, which
+            // a planned `Pause` never has.
+            | TaskKind::LoopUntil { tasks, .. } => tasks.clone(),
             TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
             TaskKind::Switch { cases, default, .. } => cases
                 .iter()
@@ -508,6 +513,46 @@ pub enum TaskKind {
     Pause {
         duration: Option<String>,
     },
+    /// `io.kestra.plugin.core.flow.LoopUntil`, and its alias
+    /// `io.kestra.plugin.core.flow.WaitFor` — W8 Task 4.
+    ///
+    /// It runs `tasks` as a **sequential** list (it is an `AbstractBranch`, and
+    /// `LoopUntil.tasksTree` builds `GraphUtils.sequential`), and when every
+    /// child has terminated without failing it asks one question: go round
+    /// again, or stop. Going round again is a `PAUSED` of `interval`, after
+    /// which every run under this one is thrown away and re-created — which is
+    /// what makes the construct different from a `Sequential` and is why
+    /// mapping it to one would have produced a plausible-looking wrong trace.
+    ///
+    /// # Every field here is a LITERAL, and `build_plan` cannot read anything
+    /// else
+    ///
+    /// Kestra renders all five through a `RunContext`
+    /// (`Property<Duration>`, `Property<Integer>`, `Property<Boolean>`).
+    /// [`build_plan`] is pure, so it reads literals — and a `LoopUntil`
+    /// declaring an expression for any of them is planned opaque instead, by
+    /// [`loop_until_gap`], exactly as a `Pause` with a `behavior:` is. That is
+    /// measured unreachable from this corpus by
+    /// `every_corpus_loop_until_bound_is_a_literal`, so the fallback is a
+    /// stated limit rather than a guess.
+    ///
+    /// `condition` is the author's expression and is **unrendered**, like an
+    /// [`If`](TaskKind::If)'s: the caller renders it and writes the answer into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered). It is the one
+    /// field that has to stay a `String`.
+    LoopUntil {
+        tasks: Vec<TaskIx>,
+        condition: String,
+        /// `checkFrequency.interval`, Kestra's `@Builder.Default` of `PT1M`
+        /// when the author wrote none.
+        interval: std::time::Duration,
+        /// `checkFrequency.maxIterations`. `None` is Kestra's "unlimited".
+        max_iterations: Option<i64>,
+        /// `checkFrequency.maxDuration`. `None` is Kestra's "unlimited".
+        max_duration: Option<std::time::Duration>,
+        /// `failOnMaxReached`, Kestra's `@Builder.Default` of `false`.
+        fail_on_max_reached: bool,
+    },
 }
 
 /// One node of a [`TaskKind::Dag`]: a task and the sibling nodes it waits for.
@@ -670,6 +715,12 @@ const LOOP_TYPE: &str = "loop";
 const SUBFLOW_TYPE: &str = "subflow";
 /// `io.kestra.plugin.core.flow.Pause`, in the same canonical spelling. W8.
 const PAUSE_TYPE: &str = "pause";
+/// Two canonical names, ONE construct: `LoopUntil.java` registers
+/// `io.kestra.plugin.core.flow.WaitFor` as an alias on itself, so
+/// `models::kind_for` maps both spellings to one `models::TaskKind::LoopUntil`
+/// and the pair below is what this builder matches on. W8 Task 4 Step 0.
+const LOOP_UNTIL_TYPE: &str = "loopuntil";
+const WAIT_FOR_TYPE: &str = "waitfor";
 
 /// The first property of this `Pause` that [`build_plan`] does not reproduce,
 /// or `None` for a plain wait.
@@ -1159,10 +1210,110 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 };
             }
         }
+        // W8 Task 4. The two spellings are one arm because they are one Kestra
+        // class; see `LOOP_UNTIL_TYPE`.
+        (ModelKind::LoopUntil(lu), Some(LOOP_UNTIL_TYPE) | Some(WAIT_FOR_TYPE)) => {
+            if loop_until_gap(lu).is_none() {
+                // `condition` is `@NotNull` in Java and there is nothing to
+                // loop until without one -- the same shape and the same
+                // refusal as an `If` with no `condition`, which
+                // `spec::validate` also reports as
+                // `loop_until_condition_required`.
+                let condition = lu
+                    .condition
+                    .as_ref()
+                    .map(|c| c.source().to_string())
+                    .ok_or_else(|| PlanError {
+                        message: format!(
+                            "loopUntil '{}' has no condition to loop until",
+                            task.id
+                        ),
+                    })?;
+                let cf = lu.check_frequency.as_ref();
+                // No `errors:` is flattened, because W1's `models::LoopUntil`
+                // has no such field -- Kestra's `AbstractBranch` does, and the
+                // omission is W1's rather than this task's. Nothing in the
+                // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
+                // stays the empty slice every caller already handles.
+                let children = flatten_list(out, &lu.tasks, depth + 1)?;
+                out[ix].kind = TaskKind::LoopUntil {
+                    tasks: children,
+                    condition,
+                    interval: cf
+                        .and_then(|c| c.interval.as_ref())
+                        .and_then(|p| super::retry::parse_duration(p.source()))
+                        .unwrap_or(DEFAULT_CHECK_INTERVAL),
+                    max_iterations: cf
+                        .and_then(|c| c.max_iterations.as_ref())
+                        .and_then(|p| p.source().trim().parse::<i64>().ok()),
+                    max_duration: cf
+                        .and_then(|c| c.max_duration.as_ref())
+                        .and_then(|p| super::retry::parse_duration(p.source())),
+                    fail_on_max_reached: lu
+                        .fail_on_max_reached
+                        .as_ref()
+                        .and_then(|p| p.source().trim().parse::<bool>().ok())
+                        .unwrap_or(false),
+                };
+            }
+        }
         _ => {}
     }
 
     Ok(ix)
+}
+
+/// `LoopUntil.CheckFrequency.interval`'s Java default --
+/// `@Builder.Default private Property<Duration> interval =
+/// Property.ofValue(Duration.ofMinutes(1));`.
+///
+/// It is a minute, and nothing in this corpus takes it: all nine comparable
+/// `LoopUntil`/`WaitFor` flows write an `interval:` of their own (three `PT1S`,
+/// six `PT0.2S`). Recorded as a constant with the citation rather than inlined,
+/// because a default nobody exercises is exactly the kind of figure that goes
+/// stale silently.
+const DEFAULT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The first property of a `LoopUntil` this executor cannot read, or `None` if
+/// it can read all of them -- [`pause_gap`]'s shape, for the same reason.
+///
+/// [`build_plan`] is pure, so every bound has to be a literal. Kestra renders
+/// each of them through a `RunContext`, so an author may legally write
+/// `maxIterations: "{{ inputs.n }}"` -- and a builder that quietly read that as
+/// "no limit" would turn a bounded loop into an unbounded one, which is the
+/// worst direction the ratchet cannot see (such an execution never settles, so
+/// it is `Broken` rather than a mismatch). Planning the task opaque instead
+/// produces a visibly wrong trace, which is the answer `AllowFailure`,
+/// `WorkingDirectory` and a gapped `Pause` already get.
+///
+/// `condition:` is deliberately NOT in here: it is unrendered by design and the
+/// caller renders it, exactly as an `If`'s is.
+///
+/// The order decides only which name a warning prints; the decision is the same
+/// for any non-`None`.
+pub fn loop_until_gap(l: &crate::models::LoopUntil) -> Option<&'static str> {
+    let cf = l.check_frequency.as_ref();
+    if let Some(p) = cf.and_then(|c| c.interval.as_ref()) {
+        if super::retry::parse_duration(p.source()).is_none() {
+            return Some("checkFrequency.interval");
+        }
+    }
+    if let Some(p) = cf.and_then(|c| c.max_duration.as_ref()) {
+        if super::retry::parse_duration(p.source()).is_none() {
+            return Some("checkFrequency.maxDuration");
+        }
+    }
+    if let Some(p) = cf.and_then(|c| c.max_iterations.as_ref()) {
+        if p.source().trim().parse::<i64>().is_err() {
+            return Some("checkFrequency.maxIterations");
+        }
+    }
+    if let Some(p) = l.fail_on_max_reached.as_ref() {
+        if p.source().trim().parse::<bool>().is_err() {
+            return Some("failOnMaxReached");
+        }
+    }
+    None
 }
 
 /// Kestra's `concurrent`, as far as a builder with no `RunContext` can read it.

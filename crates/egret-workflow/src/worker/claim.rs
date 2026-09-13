@@ -1481,6 +1481,33 @@ impl Marks {
         for ix in before.runs.len()..after.runs.len() {
             self.created.entry(ix).or_insert(seq);
         }
+        // **A run whose history got SHORTER was replaced, not re-entered, and
+        // its left endpoint moves** — W8 Task 4.
+        //
+        // `Command::RestartLoop` resets every run under a `LoopUntil` to a
+        // fresh `[CREATED]` because a `RunIx` cannot be deleted; Kestra removes
+        // those taskruns outright and `resolveWaitForNext` builds new ones, so
+        // on the artifact the next iteration's child carries a NEW `startDate`.
+        // `valids/waitfor-nested` is what measures it: `loop_1_return` is
+        // recorded `before` `loop_2`, and both of those endpoints are the third
+        // iteration's. Keeping the first iteration's `created` would make the
+        // pair `overlapping`, which is a different relation and a mismatch.
+        //
+        // **The discriminator is the history LENGTH, not "re-entered
+        // `CREATED`"**, and that is deliberate: `retry::reopen_due` also puts a
+        // run back into `CREATED`, by APPENDING, and its left endpoint must not
+        // move — this struct's own doc records why (`normalise.py`'s `relation`
+        // reads the first `startDate` of a retried run). A reset truncates; a
+        // retry appends; nothing else changes a run's history backwards.
+        for (ix, run) in after.runs.iter().enumerate() {
+            let shorter = before
+                .runs
+                .get(ix)
+                .is_some_and(|b| run.history.len() < b.history.len());
+            if shorter {
+                self.created.insert(ix, seq);
+            }
+        }
         for (ix, run) in after.runs.iter().enumerate() {
             let was = before
                 .runs
@@ -1564,7 +1591,7 @@ fn drive(
         }
 
         let snapshot = state.clone();
-        if render::render_expressions(surface, plan, state) == Pass::Rendered {
+        if render::render_expressions(surface, plan, state, now) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -1660,6 +1687,7 @@ async fn persist(
                         rendered_run_if = $5, not_before_ms = $6, \
                         claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
                         ended_seq = $10, \
+                        created_seq = COALESCE($12, created_seq), \
                         updated_at = now() \
                   WHERE execution_id = $8 AND run_ix = $9 \
                     AND ($11::timestamptz IS NULL OR claimed_at = $11)",
@@ -1685,6 +1713,16 @@ async fn persist(
             // `state.endDate`, the run's LAST termination.
             .bind(marks.ended.get(&ix).copied())
             .bind(lease.map(|l| l.claimed_at))
+            // **`COALESCE` here and NOT on `ended_seq` above, and the asymmetry
+            // is the two fields' rules rather than caution** — W8 Task 4.
+            // `Marks` is built per `settle`, so it holds a `created` entry only
+            // for a run this settle created or RESET; every other run must keep
+            // the column it already has, which a bare `$12` would null. The
+            // right endpoint has no such case: `marks.ended` is `None` exactly
+            // when nothing terminated, and the plain assignment is what
+            // `retry::reopen_due` needs (a run that is running again must not
+            // keep a right endpoint).
+            .bind(marks.created.get(&ix).copied())
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;

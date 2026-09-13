@@ -505,6 +505,29 @@ impl RunState {
 /// `a_run_if_is_re_asked_on_every_attempt` holds it, and
 /// `no_corpus_flow_has_both_a_retry_and_a_run_if` derives why no golden entry
 /// can.
+/// Whether `ix` is a descendant of `ancestor`, at any depth — Kestra's
+/// `ExecutionService.isDescendantOf`, walking the same `parentTaskRunId` chain.
+///
+/// It terminates for any state, cyclic or not: a run's `parent` is fixed at
+/// creation to a run that already existed, so parent indices strictly decrease
+/// and the walk is bounded by `ix` itself. That is the same argument
+/// `flowable::descend` records for having no depth guard, and the `> ix` break
+/// below is what makes it true of a state a caller stored and read back rather
+/// than only of one this executor built.
+fn is_descendant_of(state: &ExecutionState, ix: usize, ancestor: RunIx) -> bool {
+    let mut cur = state.runs[ix].parent;
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        if p >= ix {
+            return false;
+        }
+        cur = state.runs[p].parent;
+    }
+    false
+}
+
 pub fn apply(state: &mut ExecutionState, cmd: &Command) {
     match cmd {
         Command::CreateRun {
@@ -559,6 +582,35 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             if let Some(t) = until {
                 r.not_before = Some(*t);
             }
+        }
+        // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
+        // halves are the two loops below. See `Command::RestartLoop`.
+        Command::RestartLoop { run } => {
+            let descendants: Vec<usize> = (0..state.runs.len())
+                .filter(|&ix| is_descendant_of(state, ix, *run))
+                .collect();
+            for ix in descendants {
+                let r = &mut state.runs[ix];
+                r.history = vec![RunState::Created];
+                r.attempts.clear();
+                r.rendered = None;
+                r.rendered_run_if = None;
+                r.not_before = None;
+            }
+            let r = &mut state.runs[*run];
+            // `RUNNING` on the run and NOT on the attempt -- the same
+            // separation `PauseRun` makes, and for the same measurement: the
+            // golden holds ONE attempt per `LoopUntil` run whatever its
+            // iteration count.
+            r.history.push(RunState::Running);
+            // The condition is re-rendered every iteration. Kestra re-renders
+            // it too -- `runContext.render(this.condition).skipCache()`, and
+            // `skipCache()` is in the artifact's source for exactly this
+            // reason -- so a cached answer would decide iteration k+1 from
+            // iteration k's outputs, which is the same over-acceptance
+            // `apply`'s rule 2 closes for a retried `runIf:`.
+            r.rendered = None;
+            r.not_before = None;
         }
         // The run's own history always takes the state. The attempt takes it
         // only while the attempt is still open, and that is a **rule** rather

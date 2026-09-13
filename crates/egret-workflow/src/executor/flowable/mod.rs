@@ -16,6 +16,7 @@
 pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod loop_;
+pub(crate) mod loop_until;
 pub(crate) mod parallel;
 pub(crate) mod pause;
 pub(crate) mod sequential;
@@ -360,6 +361,12 @@ pub(crate) fn descend(
         // never returns `Done` at all -- the terminal is
         // `pause::resume`'s, one clock move later.
         TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
+        // W8 Task 4. It DOES go through the `Done` mapping below, unlike the
+        // `Pause` above: a `LoopUntil` terminates in the round its last
+        // iteration ends, and the `Step::Commands` it returns instead is a
+        // `PauseRun` that must not be mapped either -- which is what the match
+        // below already gets right for every other flowable.
+        TaskKind::LoopUntil { .. } => loop_until::drive(plan, state, run, task, now),
     };
     match step {
         Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),

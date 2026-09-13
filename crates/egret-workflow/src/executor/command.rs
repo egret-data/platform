@@ -102,6 +102,57 @@ pub enum Command {
         run: RunIx,
         until: Option<Tick>,
     },
+    /// Start the next iteration of a [`LoopUntil`](super::TaskKind::LoopUntil)
+    /// run: put it back into `RUNNING` and throw away every run beneath it.
+    /// W8 Task 4.
+    ///
+    /// # It is Kestra's `ExecutionService.retryWaitFor`, and both halves are
+    /// that method's
+    ///
+    /// ```java
+    /// if (taskRun.getId().equals(flowableTaskRunId)) {
+    ///     return taskRun.resetAttempts().incrementIteration();
+    /// }
+    /// if (isDescendantOf(taskRun, flowableTaskRunId, byId)) {
+    ///     return null;                       // removed from taskRunList
+    /// }
+    /// ```
+    ///
+    /// **The descendants are REMOVED there and RESET here, and the difference
+    /// is representational rather than semantic.** A `RunIx` is a position in
+    /// `ExecutionState::runs` and a `run_ix` column, so a run cannot be
+    /// deleted without renumbering every run after it; resetting it to a fresh
+    /// `CREATED` with no attempts produces the same thing the artifact's record
+    /// holds, because the next iteration re-creates exactly the same children
+    /// in the same order. The golden is what says so: `valids/waitfor-nested`'s
+    /// `loop_1` ran **three** iterations and its child `loop_1_return` appears
+    /// **once**, reading `CREATED SUBMITTED RUNNING SUCCESS` with one attempt —
+    /// the last iteration's taskrun, with no trace of the two before it.
+    ///
+    /// **The loop's own run is NOT reset**, and that is the same method:
+    /// `resetAttempts()` keeps the state histories and only rewinds `current`,
+    /// which is why a `LoopUntil` run reads `CREATED RUNNING PAUSED RUNNING
+    /// PAUSED RUNNING <terminal>` in the golden — one `CREATED`, never two.
+    /// This command pushes the `RUNNING` onto the run's history and
+    /// deliberately **not** onto its attempt, for [`Command::PauseRun`]'s
+    /// reason: Kestra drops the attempt and builds a new one per iteration, so
+    /// the record holds exactly one attempt reading `CREATED RUNNING
+    /// <terminal>`, and pushing a second `RUNNING` onto a kept attempt would
+    /// invent a history the golden does not have.
+    ///
+    /// # What a reset clears, and the one thing it cannot
+    ///
+    /// History (back to `[CREATED]`), attempts, both render slots and
+    /// `not_before`. It cannot clear a descendant's stored **outputs**, which
+    /// live in a column and not in [`ExecutionState`] — harmless for every run
+    /// that is re-created (the next handler result overwrites them) and a
+    /// stated gap for one that is not. Nothing in this corpus reaches it: the
+    /// shape needed is a branch inside a `LoopUntil` whose taken side changes
+    /// between iterations, and no corpus `LoopUntil` contains an `If` or a
+    /// `Switch` at all.
+    RestartLoop {
+        run: RunIx,
+    },
     SetRunState {
         run: RunIx,
         state: RunState,

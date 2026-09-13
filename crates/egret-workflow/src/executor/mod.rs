@@ -89,6 +89,27 @@ pub use flowable::branch::is_truthy;
 /// that `valids/retry-expo`'s `PT0.25s` depends on. One parser, two callers.
 pub use retry::parse_duration;
 
+/// Which iteration a [`TaskKind::LoopUntil`] run is in — Kestra's
+/// `iterationCount`, 1-based.
+///
+/// Public for [`iteration_values`]'s reason, and the second caller is the one
+/// that matters: `worker::render` puts this number in front of the loop's
+/// children as `{{ outputs.<loop>.iterationCount }}`, which three corpus flows
+/// are written around. Two derivations of "which iteration is this" — one for
+/// the decision, one for the expression the decision is made from — is the
+/// shape that lets a loop exit on a number no child ever saw.
+pub use flowable::loop_until::iteration as loop_iteration;
+
+/// Whether a [`TaskKind::LoopUntil`] run's `condition:` is being asked this
+/// round — the gate `worker::render`'s tier B shares with the executor.
+///
+/// Public for the same reason, and the sharing is the point: Kestra evaluates a
+/// `LoopUntil`'s condition in exactly one place behind exactly two guards, and
+/// a render tier with its own opinion about when would fail runs on an
+/// expression the artifact never evaluated. See
+/// [`flowable::loop_until::condition_is_asked`].
+pub use flowable::loop_until::condition_is_asked as loop_condition_is_asked;
+
 use flowable::{sequential, Step};
 
 /// Decide what this execution does next.
@@ -277,6 +298,19 @@ pub fn advance(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
 fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     if work.iter().any(|c| matches!(c, Command::PauseRun { .. })) {
         return Some(RunState::Paused);
+    }
+    // **A `LoopUntil` ending a pause owes `RUNNING`, not `RESTARTED`** -- W8
+    // Task 4, and it is measured rather than chosen. Of the golden's 18
+    // `PAUSED` execution histories, 12 carry a `RESTARTED` and read
+    // `CREATED RUNNING PAUSED RESTARTED RUNNING ...`; the other 6 carry none at
+    // all and read `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING ...`. The
+    // first 12 are every `Pause` that was resumed and the last 6 are every
+    // `LoopUntil` that iterated, so the two constructs leave `PAUSED` by
+    // different doors and the command each emits is what separates them.
+    // Reading the command rather than the run's kind keeps this function what
+    // its doc says it is: a report of decisions the flowables already took.
+    if work.iter().any(|c| matches!(c, Command::RestartLoop { .. })) {
+        return Some(RunState::Running);
     }
     // "This batch ends a pause" is read as "it sets the state of a run that is
     // `PAUSED` right now", which is exact: `Command::PauseRun` is the only
@@ -566,6 +600,12 @@ mod tests {
             ("valids/switch", &[("parent-seq", "FIRST")][..]),
             ("valids/loop-serial", &[][..]),
             ("valids/subflow-parent", &[][..]),
+            // W8 Task 4. `valids/waitfor`'s condition is truthy on its first
+            // iteration, so it is the one corpus `LoopUntil` that terminates
+            // without ever pausing -- which is what lets this fixture, whose
+            // clock never moves, assert the discriminator on it directly
+            // rather than through a panicking arm.
+            ("valids/waitfor", &[("waitfor", "true")][..]),
         ] {
             let plan = plan_of(corpus_id);
             let state = run_to_fixpoint_rendering(&plan, RunState::Success, renders);
@@ -576,7 +616,8 @@ mod tests {
                     | TaskKind::Dag { .. }
                     | TaskKind::If { .. }
                     | TaskKind::Switch { .. }
-                    | TaskKind::Loop { .. } => {
+                    | TaskKind::Loop { .. }
+                    | TaskKind::LoopUntil { .. } => {
                         flowables += 1;
                         assert_eq!(
                             wire(&run.history),
@@ -1223,6 +1264,14 @@ mod tests {
             TaskKind::If { condition, .. } => Some(condition.clone()),
             TaskKind::Switch { value, .. } => Some(value.clone()),
             TaskKind::Loop { values, .. } => Some(values.clone()),
+            // W8 Task 4. This fixture's copy is deliberately WITHOUT the
+            // children-executed gate `worker::render` applies: it supplies a
+            // literal from a table rather than evaluating anything, so an early
+            // render here cannot fail a run, and leaving the gate out keeps the
+            // fixture from having a second opinion about the executor's own
+            // predicate. The gate is asserted where it matters, in
+            // `tests/worker.rs`.
+            TaskKind::LoopUntil { condition, .. } => Some(condition.clone()),
             _ => None,
         }
     }
@@ -3032,11 +3081,13 @@ mod tests {
             )
         };
 
+        // **Two rows, not four: `WaitFor` and `LoopUntil` left this loop at W8
+        // Task 4**, which gave them a `plan::TaskKind::LoopUntil` and flattened
+        // their children. They are still driven below, by the classifier probe,
+        // where they now declare the `LoopUntil` arm and the `Descends` tier.
         for ty in [
             "io.kestra.plugin.core.flow.AllowFailure",
             "io.kestra.plugin.core.flow.WorkingDirectory",
-            "io.kestra.plugin.core.flow.WaitFor",
-            "io.kestra.plugin.core.flow.LoopUntil",
         ] {
             let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
             assert_eq!(
@@ -3172,7 +3223,16 @@ mod tests {
                 K::Subflow(_) => PlannedAs::Executable,
                 K::Pause(p) if pause_gap(p).is_none() => PlannedAs::Waits,
                 K::Pause(_) => PlannedAs::Opaque,
-                K::LoopUntil(_) | K::AllowFailure(_) | K::WorkingDirectory(_) => PlannedAs::Opaque,
+                // W8 Task 4: `LoopUntil` moved out of the opaque tier. Like
+                // `Pause`, its tier depends on the task's CONTENT -- a bound
+                // this pure builder cannot read plans it opaque instead
+                // (`loop_until_gap`), and both sides of that predicate are
+                // probed below.
+                K::LoopUntil(l) if crate::executor::plan::loop_until_gap(l).is_none() => {
+                    PlannedAs::Descends
+                }
+                K::LoopUntil(_) => PlannedAs::Opaque,
+                K::AllowFailure(_) | K::WorkingDirectory(_) => PlannedAs::Opaque,
                 K::Leaf { .. } => PlannedAs::Opaque,
             }
         }
@@ -3192,7 +3252,8 @@ mod tests {
                 | TaskKind::If { .. }
                 | TaskKind::Switch { .. }
                 | TaskKind::Dag { .. }
-                | TaskKind::Loop { .. } => PlannedAs::Descends,
+                | TaskKind::Loop { .. }
+                | TaskKind::LoopUntil { .. } => PlannedAs::Descends,
                 TaskKind::Pause { .. } => PlannedAs::Waits,
             }
         }
@@ -3250,8 +3311,13 @@ mod tests {
         // asymmetry this test's own doc records one tier up.
         let pause_plain = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n";
         let pause_with_behavior = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n    behavior: FAIL\n";
+        // The other side of `loop_until_gap`, for the reason both sides of
+        // `pause_gap` are probed: a list holding one outcome leaves the other
+        // classified by nothing. `maxIterations:` is an expression here, which
+        // a pure `build_plan` cannot read, so the task is planned opaque.
+        let loop_until_unreadable = "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    type: io.kestra.plugin.core.flow.LoopUntil\n    condition: \"{{ true }}\"\n    checkFrequency:\n      maxIterations: \"{{ inputs.n }}\"\n    tasks:\n      - id: inner\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n";
 
-        let probes: [(&str, String); 14] = [
+        let probes: [(&str, String); 15] = [
             (
                 "AllowFailure",
                 branch("io.kestra.plugin.core.flow.AllowFailure"),
@@ -3260,9 +3326,10 @@ mod tests {
                 "WorkingDirectory",
                 branch("io.kestra.plugin.core.flow.WorkingDirectory"),
             ),
-            // Kestra's alias; egret's model has no row for it, so it is a
-            // `Leaf`. See the paragraph above.
-            ("Leaf", branch("io.kestra.plugin.core.flow.WaitFor")),
+            // Kestra's alias, and since W8 Task 4 egret's model has a row for
+            // it: BOTH spellings must declare `LoopUntil`, which is the
+            // assertion the fix had to satisfy. See the paragraph above.
+            ("LoopUntil", branch("io.kestra.plugin.core.flow.WaitFor")),
             ("LoopUntil", branch("io.kestra.plugin.core.flow.LoopUntil")),
             (
                 "Sequential",
@@ -3276,6 +3343,7 @@ mod tests {
             ("Subflow", subflow_src.to_string()),
             ("Pause", pause_plain.to_string()),
             ("Pause", pause_with_behavior.to_string()),
+            ("LoopUntil", loop_until_unreadable.to_string()),
             ("Leaf", leaf_src.to_string()),
         ];
         let mut arms_probed: BTreeSet<&'static str> = BTreeSet::new();

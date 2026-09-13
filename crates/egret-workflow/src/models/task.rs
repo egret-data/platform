@@ -407,6 +407,37 @@ pub struct LoopUntil {
     pub tasks: Vec<Task>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<Property<String>>,
+    // W8 Task 4. Both were silently DROPPED before this task -- serde ignores
+    // an unknown key, so `checkFrequency:` and `failOnMaxReached:` round-tripped
+    // out of every `LoopUntil` the model parsed -- and both decide how many
+    // iterations the artifact runs, so neither can stay dropped now that
+    // `executor::plan` has a `TaskKind::LoopUntil`.
+    //
+    // `Option` rather than Java's `@Builder.Default`: the default belongs in
+    // `build_plan`, which is the one place that also knows the PLAN's answer
+    // for an absent field. Writing Kestra's defaults back out here would put
+    // a `checkFrequency:` into the serialised form of every flow that had
+    // none -- the same rule `Task::serialize` already applies to `runIf:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_on_max_reached: Option<Property<bool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_frequency: Option<CheckFrequency>,
+}
+
+// kestra: `LoopUntil.CheckFrequency`. Three fields, all `Property<…>` in Java
+// and all optional here for the reason above. `interval` is `@NotNull` with
+// `@Builder.Default Property.ofValue(Duration.ofMinutes(1))`, which is a bean
+// default rather than a parse rule, so an absent one is `None` here and
+// becomes `PT1M` in `build_plan`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckFrequency {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<Property<i32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_duration: Option<Property<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<Property<String>>,
 }
 
 // kestra: Subflow.java. Kept to the interface's field list
@@ -732,21 +763,22 @@ impl Serialize for Task {
 /// task; it is applied here to every real control-flow class name found by
 /// reading `core/src/main/java/io/kestra/plugin/core/flow/`, including the
 /// two names (`loop`, `loopuntil`) the plan's own reading missed.
-/// **Class names -- not the aliases Kestra registers for them, and that is a
-/// live gap.** `io.kestra.plugin.core.flow.WaitFor` is an alias on `LoopUntil`
+/// **Class names -- plus the ONE alias Kestra registers, which W8 Task 4
+/// added.** `io.kestra.plugin.core.flow.WaitFor` is an alias on `LoopUntil`
 /// rather than a class of its own (`oracle-exec/task-kinds.json`: `alias_of`
-/// `LoopUntil`, same file, same line), so reading the directory could not
-/// produce the name and `kind_for` below has no `"waitfor"` row. A `WaitFor`
-/// therefore falls to `TaskKind::Leaf` with its `tasks:` inside the opaque
+/// `LoopUntil`; `LoopUntil.java`'s own `@Plugin(aliases = …)` is the
+/// declaration), so reading the directory could not produce the name and
+/// `kind_for` below had no `"waitfor"` row until Task 4. While it had none a
+/// `WaitFor` fell to `TaskKind::Leaf` with its `tasks:` inside the opaque
 /// `spec`, where `children()` cannot see them -- so `spec::validate`,
 /// `publish::resolve_all` and `worker::claim`, which all walk `children()`,
-/// walk none of them. Measured at W8 Task 1 fix round 4 and re-measured at
+/// walked none of them. Measured at W8 Task 1 fix round 4 and re-measured at
 /// round 5, where the identical flow spelled `LoopUntil` validated its nested
 /// task and the `WaitFor` one did not. **7 of the corpus's 10 flows of that
-/// construct use the spelling with no row.** Not fixed here -- this is
-/// production dispatch and both rounds were doc-only; the plan's Task 4 Step 0
-/// owns the decision, and `spec::validate`'s `KESTRA_FLOW_CONTROL` is missing
-/// the same name for the same reason.
+/// construct use the alias spelling**, so the gap covered the majority of the
+/// population. Fixed in `kind_for` below, which is where the authority lives:
+/// `spec::validate`'s `KESTRA_FLOW_CONTROL` is a claim held against it and
+/// gained the same name in the same commit.
 /// The canonical (lower-cased, prefix-stripped) short name for a task
 /// `type` string, if it uses either spelling this crate accepts for a
 /// Kestra `io.kestra.plugin.core.flow.*` class -- the FQCN itself, or the
@@ -756,8 +788,10 @@ impl Serialize for Task {
 /// Shared by `kind_for` below (which `TaskKind` variant a canonical name
 /// maps to) and `crate::spec::validate` (which canonical names are Kestra
 /// flow-control classes this crate has NOT ported to a `TaskKind` variant --
-/// `Pause` and `WaitFor` today, the second measured at W8 Task 1 fix round 4
-/// -- and so must warn about rather than silently falling
+/// **none today**: `Pause` gained one at W8 Task 3 and `WaitFor` gained one at
+/// W8 Task 4, so the two tables are now equal and the constant is a
+/// specification rather than a lookup -- and so must warn about rather than
+/// silently falling
 /// through to `Leaf`, indistinguishable from an ordinary task). `pub(crate)`
 /// rather than re-exported: it's an implementation detail of dispatch, not
 /// part of this module's public interface, but `spec` is a sibling of
@@ -780,7 +814,23 @@ fn kind_for(r#type: &str, rest: serde_json::Value) -> Result<TaskKind, serde_jso
         Some("switch") => TaskKind::Switch(serde_json::from_value(rest)?),
         Some("dag") => TaskKind::Dag(serde_json::from_value(rest)?),
         Some("loop") => TaskKind::Loop(serde_json::from_value(rest)?),
-        Some("loopuntil") => TaskKind::LoopUntil(serde_json::from_value(rest)?),
+        // **`waitfor` and `loopuntil` share ONE row, because they are one
+        // class.** `LoopUntil.java` carries `@Plugin(aliases =
+        // "io.kestra.plugin.core.flow.WaitFor")` -- an alias registered ON
+        // `LoopUntil`, not a second class -- so `io.kestra.plugin.core.flow.
+        // WaitFor` and `…LoopUntil` are the same task type to the artifact and
+        // must be the same `TaskKind` here. W8 Task 4 Step 0; before it
+        // `"waitfor"` had no row anywhere in this crate and fell to
+        // [`TaskKind::Leaf`], which cost two things, both measured at W8 Task 1
+        // fix rounds 4 and 5: a `Leaf` has no `children()`, so `spec::validate`,
+        // `publish::resolve_all` and `worker::claim` walked none of a
+        // `WaitFor`'s nested tasks; and `spec::validate`'s `is_runnable_child`
+        // is `matches!(kind, Leaf)`, so a `WaitFor` child of a
+        // `WorkingDirectory` PUBLISHED where the identical `LoopUntil` child
+        // was refused with `working_directory_child_not_runnable`. That
+        // over-acceptance closes here rather than in the validator: this row is
+        // the authority both of those read through.
+        Some("loopuntil") | Some("waitfor") => TaskKind::LoopUntil(serde_json::from_value(rest)?),
         Some("subflow") => TaskKind::Subflow(serde_json::from_value(rest)?),
         Some("allowfailure") => TaskKind::AllowFailure(serde_json::from_value(rest)?),
         Some("workingdirectory") => TaskKind::WorkingDirectory(serde_json::from_value(rest)?),

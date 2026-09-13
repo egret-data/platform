@@ -166,13 +166,22 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
 /// by `pause` — so it is stated by a running program rather than left to be
 /// remembered.
 ///
-/// **`waitfor` is in NEITHER, and that is the live gap Task 4 owns.**
-/// `io.kestra.plugin.core.flow.WaitFor` is Kestra's alias for `LoopUntil`;
-/// `kind_for` has no row for it, so it reaches `Leaf`, and a `WaitFor` child of
-/// a `WorkingDirectory` publishes clean where the identical `LoopUntil` child
-/// is refused. Since `is_runnable_child` no longer consults this table, the
-/// fix is a `kind_for` arm — and the guard below then forces the row here too,
-/// so a one-table edit cannot pass.
+/// **`waitfor` was in NEITHER, and W8 Task 4 closed it — in `kind_for`, with
+/// this table following.** `io.kestra.plugin.core.flow.WaitFor` is Kestra's
+/// alias for `LoopUntil` (`LoopUntil.java`'s `@Plugin(aliases = …)`), and
+/// while `kind_for` had no row for it a `WaitFor` reached `Leaf`, so a
+/// `WaitFor` child of a `WorkingDirectory` published clean where the identical
+/// `LoopUntil` child was refused with `working_directory_child_not_runnable`.
+/// Since `is_runnable_child` is `matches!(kind, Leaf)` and consults this table
+/// no longer, the fix was a `kind_for` arm — which the equality guard below
+/// then forced back into this table, so the one-table edit could not have
+/// passed. **That is what made Step 0 a decision rather than a patch**: the
+/// two tables are one fact with two spellings, and the authority is `kind_for`.
+///
+/// **The publish hole is closed and the class is now empty.** Of the 70
+/// distinct `type:` strings in the corpus, the names that reach `Leaf` through
+/// `canonical_flow_type` are `Sleep` and `WorkingDirectoryTest$LocalFiles`,
+/// both `RunnableTask` at the pin and correctly accepted. There is no third.
 ///
 /// `#[cfg(test)]` because a production constant nothing reads is a lie about
 /// where the authority lives; the authority is `kind_for`, and this is the
@@ -190,6 +199,11 @@ const KESTRA_FLOW_CONTROL: &[&str] = &[
     "allowfailure",
     "workingdirectory",
     "pause",
+    // W8 Task 4. Kestra's alias on `LoopUntil`, not a class of its own, which
+    // is why reading `core/src/main/java/io/kestra/plugin/core/flow/` could
+    // never have produced it and why it was missing from both tables for five
+    // packages.
+    "waitfor",
 ];
 
 /// Whether a task may be a child of a [`TaskKind::WorkingDirectory`] --
@@ -212,16 +226,22 @@ const KESTRA_FLOW_CONTROL: &[&str] = &[
 /// far as this crate can tell, which is the fail-open direction. See the
 /// caller for why that is the right way round for a refusal.
 ///
-/// **The member of that fail-open class this crate gets WRONG is
-/// `io.kestra.plugin.core.flow.WaitFor`** -- a real Kestra flowable with no
-/// `KESTRA_FLOW_CONTROL` row, because it is `LoopUntil`'s alias rather than
-/// its own class (see that table's doc). It therefore takes the `is_none_or`
-/// branch below and is accepted as a child, where the `LoopUntil` spelling of
-/// the very same construct is refused by the typed-variant arm. Latent: every
-/// `WorkingDirectory` child in the corpus is a
-/// `WorkingDirectoryTest$LocalFiles`, so no golden entry can show it. Measured
-/// at W8 Task 1 fix round 5 and deliberately not fixed there -- the table is
-/// production and that round was doc-only.
+/// **The member of that fail-open class this crate got WRONG was
+/// `io.kestra.plugin.core.flow.WaitFor`, and W8 Task 4 closed it.** It is a
+/// real Kestra flowable that had no row in either table, because it is
+/// `LoopUntil`'s alias rather than its own class (see that table's doc), so it
+/// reached `TaskKind::Leaf` and was accepted as a child where the `LoopUntil`
+/// spelling of the very same construct was refused by the typed-variant arm.
+/// Measured at W8 Task 1 fix round 5 and deliberately not fixed there -- the
+/// table is production and that round was doc-only. It is fixed at the
+/// authority instead: `models::kind_for` now maps both spellings to
+/// `TaskKind::LoopUntil`, so `matches!(kind, Leaf)` is false for both and the
+/// two spellings are refused identically.
+/// `a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one` is
+/// the instrument, and it drives BOTH spellings so a fix that reached only one
+/// of them fails. Latent until then: every `WorkingDirectory` child in the
+/// corpus is a `WorkingDirectoryTest$LocalFiles`, so **no golden entry can
+/// show it** and the ratchet cannot judge this line either way.
 fn is_runnable_child(task: &Task) -> bool {
     matches!(task.kind, TaskKind::Leaf { .. })
 }
@@ -1566,11 +1586,13 @@ mod tests {
     /// package that ARE `RunnableTask`s, so both are legitimate children -- and
     /// a spelling test would refuse a flow Kestra accepts.
     ///
-    /// **The member this list does not contain is a `WaitFor`**, which this
-    /// rule also allows and should not. Named rather than added: an assertion
-    /// inside a test called `..._is_allowed` would defend the wrong answer, and
-    /// the measurement already has a home -- `KESTRA_FLOW_CONTROL`'s doc above,
-    /// and the declared-arm probe in `executor`'s test module.
+    /// **The member this list did not contain was a `WaitFor`**, which this
+    /// rule also allowed and should not have. It was named rather than added,
+    /// because an assertion inside a test called `..._is_allowed` would defend
+    /// the wrong answer; W8 Task 4 closed it and put the assertion in a test of
+    /// its own,
+    /// `a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one`,
+    /// below.
     #[test]
     fn a_runnable_that_merely_lives_in_kestras_flow_package_is_allowed() {
         for ty in [
@@ -1590,6 +1612,77 @@ mod tests {
                     .iter()
                     .any(|e| e.code == "working_directory_child_not_runnable"),
                 "{ty} is a runnable task and must be allowed as a child"
+            );
+        }
+    }
+
+    /// **The over-acceptance W8 Task 4 Step 0 closed, driven from BOTH
+    /// spellings.**
+    ///
+    /// `io.kestra.plugin.core.flow.WaitFor` and
+    /// `io.kestra.plugin.core.flow.LoopUntil` are one Kestra class -- the first
+    /// is an `@Plugin(aliases = ...)` on the second -- so a
+    /// `WorkingDirectory` must refuse both or accept both. Before Task 4 it
+    /// accepted the alias and refused the class name, because `kind_for` had a
+    /// row for one and not the other and `is_runnable_child` is
+    /// `matches!(kind, Leaf)`.
+    ///
+    /// **Both spellings are asserted, and that is the point of the test rather
+    /// than thoroughness**: a fix applied to one table, or to one spelling,
+    /// leaves this red. The `core.` alias forms are driven too, because
+    /// `canonical_flow_type` accepts both prefixes and a row that worked only
+    /// for the FQCN would be a second half-fix.
+    #[test]
+    fn a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one() {
+        for ty in [
+            "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
+            "core.waitfor",
+            "core.loopuntil",
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+                 tasks:\n      - id: child\n        type: {ty}\n        \
+                 condition: \"{{{{ true }}}}\"\n        tasks:\n          - id: inner\n            \
+                 type: io.kestra.plugin.core.log.Log\n            message: hi\n"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let r = validate(&f);
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.code == "working_directory_child_not_runnable"),
+                "{ty} is a Kestra flowable and must be refused as a \
+                 `WorkingDirectory` child: {r:?}"
+            );
+        }
+    }
+
+    /// The subtree a `Leaf`-typed `WaitFor` used to hide.
+    ///
+    /// `walk_task` recurses through `Task::children()`, and a `Leaf` has none
+    /// -- so while `WaitFor` reached `Leaf` its nested tasks were validated by
+    /// nothing at all. The instrument is a nested task that is INVALID on its
+    /// own (a `Sequential` with no `tasks:`), asserted to be reported under
+    /// both spellings: the finding can only appear if the walk descended.
+    #[test]
+    fn a_waitfor_subtree_is_validated_because_walk_task_descends_through_children() {
+        for ty in [
+            "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    type: {ty}\n    \
+                 condition: \"{{{{ true }}}}\"\n    tasks:\n      - id: empty\n        \
+                 type: core.sequential\n"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let r = validate(&f);
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.code == "sequential_tasks_required"),
+                "{ty}: the nested `Sequential` must be reached by `walk_task`: {r:?}"
             );
         }
     }
@@ -2675,9 +2768,11 @@ mod tests {
     /// make the direction vacuous), and the probe direction independently
     /// exercises every name it claims to have found.
     ///
-    /// **Task 4 must add `"waitfor"` to BOTH.** A `kind_for` arm alone fixes
-    /// the publish-side over-acceptance (a `WaitFor` child of a
-    /// `WorkingDirectory`), and this test then refuses the half-edit.
+    /// **W8 Task 4 added `"waitfor"` to BOTH, and this test is why it had to
+    /// be both.** The `kind_for` arm is what fixes the publish-side
+    /// over-acceptance (a `WaitFor` child of a `WorkingDirectory`); this test
+    /// refused the half-edit, exactly as its previous revision predicted it
+    /// would. The tables now hold **12** names each.
     #[test]
     fn the_two_control_flow_tables_name_the_same_types() {
         use crate::models::{canonical_flow_type, TaskKind};
