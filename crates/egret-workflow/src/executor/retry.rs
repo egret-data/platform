@@ -11,7 +11,8 @@
 //! "cannot use the 'timeout' property as it's only relevant for runnable
 //! tasks" for every non-`RunnableTask`, with `Pause` the single exception. So
 //! the only `timeout:` an `advance()` will ever enforce is a `Pause`'s, and
-//! `Pause` is W8's. W4's worker owns the rest. What W3a Task 7 *does* own of
+//! `Pause` is W8's — **W8 Task 3 shipped it**, in
+//! [`flowable::pause`](super::flowable::pause) rather than here. W4's worker owns the rest. What W3a Task 7 *does* own of
 //! the elapsed-time rules is [`RetryPolicy::max_duration`], which is below.
 //!
 //! # The two behaviours, and the instant each is measured from
@@ -427,26 +428,39 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
 /// (`DefaultExecutor.java:561`, the execution-delay loop) whose output is
 /// re-submitted for processing rather than merged into the cycle that scheduled
 /// it.
-/// # It takes only `RETRYING`, and a `PAUSED` run with a deadline is the next caller
+/// # It takes only `RETRYING`, and W8 Task 2's predicted `PAUSED` caller never arrived
 ///
-/// **W8 Task 2, recorded here because this is the function that has to change
-/// and Task 7's `Files:` does not name this file.** The predicate below is
-/// `history.last() == Some(&RunState::Retrying)`. A bounded `Pause` is the same
-/// shape — a run parked with a [`TaskRun::not_before`](super::TaskRun) that
-/// comes due — and all twelve baselined `Pause` entries are bounded
-/// (`pauseDuration:` nine, `timeout:` three), so whoever emits
+/// **The prediction was WRONG and is kept because being wrong is the useful
+/// part.** It read: *"A bounded `Pause` is the same shape — a run parked with a
+/// [`TaskRun::not_before`](super::TaskRun) that comes due — so whoever emits
 /// [`RunState::Paused`](super::RunState) must widen this arm or the run parks
-/// for ever.
+/// for ever."* W8 Task 3 emitted `Paused`, banked eight entries, and **this arm
+/// is byte-unchanged**.
 ///
-/// **Unlike `worker::claim::due_retries`, the ratchet WILL catch this one, and
-/// the two blindnesses are not the same.** The oracle's driver reaches here:
-/// `driver::pass_time` moves the clock, calls `worker::resume`, which reaches
-/// `claim::settle` and then [`advance`](super::advance), which calls this
-/// function on the first line of its body. So a `Paused` run this arm does not
-/// reopen becomes a stalled execution and a red ratchet the moment a producer
-/// exists. `due_retries` is the one the ratchet cannot see, because its gate is
-/// SQL the driver never runs — `pass_time` selects on `not_before_ms` with no
-/// state term at all. One sentence covering both would be wrong about this one.
+/// The two shapes part at [`RunState::Created`](super::RunState). This function
+/// reopens a retry by putting the run back into `CREATED`, which starts a NEW
+/// attempt — measured, `valids/retry-failed-task-attempts` has four. A pause
+/// that ends does the opposite: its attempt was never closed, and all twelve
+/// resumed golden entries read run `CREATED RUNNING PAUSED <terminal>` over
+/// attempt `CREATED RUNNING <terminal>`, one attempt taking the terminal
+/// straight from the `RUNNING` it was left at. Reopening a pause here would
+/// give it a second attempt and mismatch every one of the twelve.
+///
+/// So `flowable::sequential::walk` asks
+/// [`flowable::pause::resume`](super::flowable::pause) at the `PAUSED` run
+/// instead — which is also where the decision belongs, because the terminal
+/// depends on WHICH bound elapsed and only the plan knows that.
+///
+/// **What the paragraph got right is worth keeping too**: the ratchet WOULD
+/// have caught the mistake. `driver::pass_time` moves the clock, calls
+/// `worker::resume`, which reaches `claim::settle` and then
+/// [`advance`](super::advance), which calls this function on the first line of
+/// its body — so a `Paused` run nothing reopens is a stalled execution and a
+/// red ratchet. `worker::claim::due_retries` is the one the ratchet cannot see,
+/// because its gate is SQL the driver never runs — `pass_time` selects on
+/// `not_before_ms` with no state term at all — and **that one is a live defect
+/// now** rather than a prediction: eight banked entries depend on a pause
+/// ending, and in the product none of them would.
 pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     let due: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {

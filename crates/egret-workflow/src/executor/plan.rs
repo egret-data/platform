@@ -184,8 +184,14 @@ pub struct PlanTask {
     /// unreachable from this corpus by
     /// `every_corpus_retry_is_written_in_literals`.
     pub retry: Option<RetryPolicy>,
-    /// **Still always `None`, and after Task 7 there is only one reason
-    /// left.** The `Property<Duration>` half of this comment is the only place
+    /// **`None` for every kind but one since W8 Task 3**, which is the task the
+    /// last paragraph below was addressed to: a [`TaskKind::Pause`] carries the
+    /// `timeout:` its author wrote, parsed as an ISO-8601 literal, and
+    /// [`super::flowable::pause`] ends the pause `FAILED` when it elapses.
+    /// Everything below is the record of why it was `None` for EVERY kind, and
+    /// stays true of every other one.
+    ///
+    /// The `Property<Duration>` half of this comment is the only place
     /// it is true — `Task.java:59` really is `protected Property<Duration>
     /// timeout;` — but it is not the reason, because W3a never enforces this
     /// field at all. Measured: in this artifact `timeout:` is enforced by the
@@ -197,7 +203,12 @@ pub struct PlanTask {
     /// "cannot use the 'timeout' property as it's only relevant for runnable
     /// tasks", with `Pause` the single exception. So the only `timeout:`
     /// `advance()` will ever enforce is a `Pause`'s, and W4's worker owns the
-    /// rest.
+    /// rest. **W8 Task 3 is where that exception stopped being a prediction**,
+    /// and it is worth 1 of its 8 banked entries on its own
+    /// (`valids/pause-timeout`): `every_corpus_pause_timeout_is_a_literal`
+    /// derives that all three corpus declarations are literals a pure builder
+    /// can read, and `the_bound_that_was_written_decides_the_terminal` pins
+    /// what one decides.
     pub timeout: Option<Duration>,
     /// This task's own `errors:`.
     ///
@@ -219,9 +230,14 @@ pub struct PlanTask {
     /// **The types that really are left out are `Loop` and every opaque one,
     /// and only one of those is a gap.** `AllowFailure`, `LoopUntil` (and
     /// `WaitFor`, which is Kestra's alias for it and **not** egret's — see
-    /// [`build_plan`]), `Pause` and `WorkingDirectory` are planned
+    /// [`build_plan`]) and `WorkingDirectory` are planned
     /// [`TaskKind::Runnable`], so their children
     /// get no run and a field on them would indeed be unreadable.
+    /// **`Pause` was the fourth name in that list until W8 Task 3**, which gave
+    /// it [`TaskKind::Pause`] — and a `Pause`'s `errors:` is still unreadable
+    /// here, for a different reason that must not be merged with the one above:
+    /// the field is not missing, the whole TASK is opaque, because
+    /// [`pause_gap`] plans any `Pause` declaring one back to a `Runnable`.
     /// **This sentence omitted `LoopUntil`**, which is opaque for the same
     /// reason as the other two typed ones and stalls nine baselined entries;
     /// W8 Task 1 swept every list in this crate that claims to enumerate the
@@ -796,7 +812,13 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// `LoopUntil` (`WaitFor` is Kestra's alias for it; egret's model does not
 /// carry the alias — see below) too, even
 /// though each would "work" if mapped to
-/// [`TaskKind::Sequential`]. `AllowFailure` turns a child's failure into
+/// [`TaskKind::Sequential`]. **W8 Task 3 applies it to a `Pause` too, but per
+/// TASK rather than per type**: a `Pause` that is a plain wait is a
+/// [`TaskKind::Pause`], and one declaring any of the four properties this
+/// executor does not reproduce is a `Runnable` — see [`pause_gap`], which is
+/// the single predicate both this builder and `spec::validate`'s
+/// `not_yet_enforced` warning ask, so a flow warned at publish is exactly a
+/// flow planned opaque here. `AllowFailure` turns a child's failure into
 /// `WARNING`, which `RunState` cannot hold; `WorkingDirectory` hands its whole
 /// subtree to one worker; `LoopUntil` runs its `tasks:` **repeatedly** until a
 /// condition holds, and a `Sequential` would run them exactly once and record
@@ -808,9 +830,11 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// `models::TaskKind` variants this `match` has no arm for** — a fourth kind of
 /// opacity exists below them, where a flowable Kestra has and `kind_for` does
 /// not reaches `ModelKind::Leaf` with its children inside an opaque `spec`.
-/// `Pause` is the one such type with baselined entries. `Subflow` used to be in
-/// this list and left it at W6 Task 3: it is a [`TaskKind::Executable`] now,
-/// which is a different thing from opaque — the executor runs it itself. The
+/// `Pause` WAS the one such type with baselined entries and left this tier at
+/// W8 Task 3, which gave it a `models::TaskKind::Pause`; `Subflow` left it at
+/// W6 Task 3 for [`TaskKind::Executable`], which is a different thing from
+/// opaque — the executor runs it itself. So the fourth tier holds `WaitFor`
+/// alone, plus every ordinary leaf. The
 /// enumeration is derived by
 /// `executor::tests::every_other_flowable_stays_opaque`; this prose agrees with
 /// that test and not the other way round.
@@ -820,7 +844,7 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
 /// `Some("loopuntil")` and has no row for `"waitfor"`; neither does
 /// `spec::validate`'s `KESTRA_FLOW_CONTROL`. So
 /// `io.kestra.plugin.core.flow.WaitFor` parses to `ModelKind::Leaf` with its
-/// `tasks:` inside the opaque `spec`, exactly like `Pause` — the alias is
+/// `tasks:` inside the opaque `spec`, as `Pause` did until W8 Task 3 — the alias is
 /// Kestra's and egret's model does not have it. Every sentence in this crate
 /// saying `build_plan` plans `WaitFor` opaque stays **true**, because both
 /// tiers are planned [`TaskKind::Runnable`] and the plan is byte-identical
