@@ -32,10 +32,16 @@
 --
 -- `task_runs.history` is `jsonb` and a CHECK over it would be a poor instrument.
 -- It is not needed: migration 0134 also gives this table `state text NOT NULL`,
--- the run's CURRENT state as a scalar, written on every INSERT and on every
--- UPDATE in `claim::settle` from the same `RunState::wire()` that produces
--- `'PAUSED'`. So this constraint reads an ordinary column, and the hole is
--- closed **in the schema** rather than guarded at the read.
+-- and that column is not a parallel record of the state -- **it IS
+-- `history.last()`**. `claim::persist` computes it as
+--
+--     let state = run.history.last().copied().unwrap_or(Created).wire();
+--
+-- in the same expression that serialises `history`, bound into the same
+-- statement, inside the same transaction. So the two cannot drift, and a CHECK
+-- over `state` is exactly a CHECK over the value
+-- `executor::flowable::resume_paused` actually reads. The hole is closed **in
+-- the schema** rather than guarded at the read.
 --
 -- # One-way, and that direction is measured rather than cautious
 --
