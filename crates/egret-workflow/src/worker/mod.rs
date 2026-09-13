@@ -511,7 +511,7 @@ pub enum WorkerError {
     /// comment said the arm was unreachable — *"the claim never takes one
     /// (`type_id IS NOT NULL`), so reaching that arm is a corruption rather
     /// than a case"* — and that is false of shipped code: `build_plan` plans
-    /// `AllowFailure`, `WorkingDirectory` and `WaitFor`/`LoopUntil` as
+    /// `AllowFailure`, `WorkingDirectory` and `LoopUntil` as
     /// **opaque `Runnable`s**,
     /// which sets `type_id`, while `models::TaskKind` for the same task is a
     /// **flowable** — so `claim::leaf`'s `Leaf` arm cannot match and it answers
@@ -519,6 +519,18 @@ pub enum WorkerError {
     /// comparable entries reached it, and
     /// every one of them is a construct nothing in W3b implements rather than a
     /// row that has gone wrong.
+    ///
+    /// **`LoopUntil` only, and this list read `WaitFor`/`LoopUntil` until W8
+    /// Task 1 fix round 5.** Kestra's `WaitFor` alias is not egret's:
+    /// `models::kind_for` has no `"waitfor"` row, so a `WaitFor` reaches
+    /// `models::TaskKind::Leaf`, `claim::leaf` returns **`Some`** for it, and
+    /// the refusal is `NoHandler` — the `Pause` case the paragraph below
+    /// describes, reached by the same argument. The count of three is
+    /// unaffected; the membership is, and **7 of the corpus's 10 flows of that
+    /// construct use the `WaitFor` spelling**, so the population this arm is
+    /// argued from contains none of them. Measured at fix round 4 and
+    /// re-measured at round 5; the model divergence is the plan's Task 4
+    /// Step 0.
     ///
     /// **Exactly three constructs, and the predicate is "not a `Leaf`" — not
     /// "no handler".** Those are two different refusals and this doc briefly

@@ -180,6 +180,24 @@ enum KestraFlowControl {
 /// later task. Package per the programme spec's table (row W8: "pause/resume
 /// ... W8").
 ///
+/// **Complete by CLASS, incomplete by NAME -- and the lookup below keys on
+/// the name.** `io.kestra.plugin.core.flow.WaitFor` is not a class in that
+/// directory: it is an alias registered on `LoopUntil`, and
+/// `oracle-exec/task-kinds.json` resolves it exactly so (`alias_of`
+/// `LoopUntil`, same file, same line, `FlowableTask`). So *"every class is
+/// listed"* stays true while `"waitfor"` has no row -- and `is_runnable_child`
+/// below looks the canonical NAME up, so the gap is live. Measured at W8
+/// Task 1 fix round 5: a `WaitFor` child of a `WorkingDirectory` **publishes
+/// clean** (its only finding is the fail-closed `not_yet_enforced` warning)
+/// while the **identical** `LoopUntil` child is refused with
+/// `working_directory_child_not_runnable`. The maintenance rule above --
+/// *"add a row when Kestra's `flow/` package grows a new CLASS"* -- does not
+/// cover a class that grows an ALIAS, which is what happened. Owned by the
+/// plan's Task 4 Step 0, which must add this row and not only a
+/// `models::kind_for` one: giving `kind_for` the row closes this for free
+/// through the typed-variant arm below, whereas handling the two tiers
+/// separately leaves it open.
+///
 /// Staleness in this table is asymmetric, and only one direction is
 /// dangerous. If `TaskKind` later grows a variant for something marked
 /// `Unported` here (say, a future `TaskKind::Pause`) and this row is never
@@ -224,6 +242,17 @@ const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
 /// third-party plugin, `io.kestra.plugin.core.flow.Sleep` -- is runnable as
 /// far as this crate can tell, which is the fail-open direction. See the
 /// caller for why that is the right way round for a refusal.
+///
+/// **The member of that fail-open class this crate gets WRONG is
+/// `io.kestra.plugin.core.flow.WaitFor`** -- a real Kestra flowable with no
+/// `KESTRA_FLOW_CONTROL` row, because it is `LoopUntil`'s alias rather than
+/// its own class (see that table's doc). It therefore takes the `is_none_or`
+/// branch below and is accepted as a child, where the `LoopUntil` spelling of
+/// the very same construct is refused by the typed-variant arm. Latent: every
+/// `WorkingDirectory` child in the corpus is a
+/// `WorkingDirectoryTest$LocalFiles`, so no golden entry can show it. Measured
+/// at W8 Task 1 fix round 5 and deliberately not fixed there -- the table is
+/// production and that round was doc-only.
 fn is_runnable_child(task: &Task) -> bool {
     match &task.kind {
         TaskKind::Leaf { .. } => canonical_flow_type(&task.r#type).is_none_or(|canonical| {
@@ -1555,6 +1584,12 @@ mod tests {
     /// spelling. `Sleep` and `PurgeFlows` are the two classes in that Java
     /// package that ARE `RunnableTask`s, so both are legitimate children -- and
     /// a spelling test would refuse a flow Kestra accepts.
+    ///
+    /// **The member this list does not contain is a `WaitFor`**, which this
+    /// rule also allows and should not. Named rather than added: an assertion
+    /// inside a test called `..._is_allowed` would defend the wrong answer, and
+    /// the measurement already has a home -- `KESTRA_FLOW_CONTROL`'s doc above,
+    /// and the declared-arm probe in `executor`'s test module.
     #[test]
     fn a_runnable_that_merely_lives_in_kestras_flow_package_is_allowed() {
         for ty in [

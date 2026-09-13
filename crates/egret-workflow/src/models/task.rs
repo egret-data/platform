@@ -674,6 +674,21 @@ impl Serialize for Task {
 /// task; it is applied here to every real control-flow class name found by
 /// reading `core/src/main/java/io/kestra/plugin/core/flow/`, including the
 /// two names (`loop`, `loopuntil`) the plan's own reading missed.
+/// **Class names -- not the aliases Kestra registers for them, and that is a
+/// live gap.** `io.kestra.plugin.core.flow.WaitFor` is an alias on `LoopUntil`
+/// rather than a class of its own (`oracle-exec/task-kinds.json`: `alias_of`
+/// `LoopUntil`, same file, same line), so reading the directory could not
+/// produce the name and `kind_for` below has no `"waitfor"` row. A `WaitFor`
+/// therefore falls to `TaskKind::Leaf` with its `tasks:` inside the opaque
+/// `spec`, where `children()` cannot see them -- so `spec::validate`,
+/// `publish::resolve_all` and `worker::claim`, which all walk `children()`,
+/// walk none of them. Measured at W8 Task 1 fix round 4 and re-measured at
+/// round 5, where the identical flow spelled `LoopUntil` validated its nested
+/// task and the `WaitFor` one did not. **7 of the corpus's 10 flows of that
+/// construct use the spelling with no row.** Not fixed here -- this is
+/// production dispatch and both rounds were doc-only; the plan's Task 4 Step 0
+/// owns the decision, and `spec::validate`'s `KESTRA_FLOW_CONTROL` is missing
+/// the same name for the same reason.
 /// The canonical (lower-cased, prefix-stripped) short name for a task
 /// `type` string, if it uses either spelling this crate accepts for a
 /// Kestra `io.kestra.plugin.core.flow.*` class -- the FQCN itself, or the
@@ -683,7 +698,8 @@ impl Serialize for Task {
 /// Shared by `kind_for` below (which `TaskKind` variant a canonical name
 /// maps to) and `crate::spec::validate` (which canonical names are Kestra
 /// flow-control classes this crate has NOT ported to a `TaskKind` variant --
-/// `Pause` today -- and so must warn about rather than silently falling
+/// `Pause` and `WaitFor` today, the second measured at W8 Task 1 fix round 4
+/// -- and so must warn about rather than silently falling
 /// through to `Leaf`, indistinguishable from an ordinary task). `pub(crate)`
 /// rather than re-exported: it's an implementation detail of dispatch, not
 /// part of this module's public interface, but `spec` is a sibling of

@@ -97,6 +97,15 @@
 //! opaque `TaskKind::Runnable`s, so a `Pause` carrying a `timeout:` is
 //! claimable by this worker.
 //!
+//! **This is a PLAN-level list and stays true for both spellings, but only
+//! `Pause` and `LoopUntil` are `models::TaskKind` flowables.** `WaitFor` is
+//! Kestra's alias for `LoopUntil` and not egret's: `models::kind_for` has no
+//! `"waitfor"` row, so like `Pause` it reaches `models::TaskKind::Leaf`.
+//! Nothing above changes -- `build_plan` plans it opaque either way, which is
+//! all this module reads -- and the distinction is recorded because W8 Task 1
+//! fix round 5 found two doc comments in `worker/` that drew the model-level
+//! conclusion from the plan-level fact and got it backwards.
+//!
 //! Three of the four baselined entries that declare a `timeout:`
 //! are exactly that — `valids/pause-timeout`,
 //! `valids/pause-timeout-allow-failure`,

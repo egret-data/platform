@@ -228,7 +228,7 @@ struct Leaf<'a> {
 /// say the opposite — *"the claim never takes one (`type_id IS NOT NULL`), so
 /// reaching that arm is a corruption rather than a case"* — and the corpus
 /// says otherwise: `build_plan` plans `AllowFailure`, `WorkingDirectory` and
-/// `WaitFor`/`LoopUntil` opaque, which gives them a `type_id` and therefore
+/// `LoopUntil` opaque, which gives them a `type_id` and therefore
 /// makes them claimable, while `models::TaskKind` for the same task is a
 /// **flowable** — so the `Leaf` arm below cannot match and this returns `None`.
 /// Forty-odd comparable entries
@@ -246,6 +246,19 @@ struct Leaf<'a> {
 /// **all 21 entries holding an executed top-level `Subflow`
 /// were in this population for that reason and none is now**. So: 40-odd, of
 /// which 21 left at W6 Task 3.
+///
+/// **`LoopUntil` only — Kestra's `WaitFor` alias is not egret's.** This list
+/// read `WaitFor`/`LoopUntil` until W8 Task 1 fix round 5. `models::kind_for`
+/// has no `"waitfor"` row, so a `WaitFor` reaches `models::TaskKind::Leaf` and
+/// **this function returns `Some`** for it — an ordinary leaf with an opaque
+/// `spec`, by exactly the argument the next paragraph makes for `Pause`, and
+/// stopped by the same later gate, [`WorkerError::NoHandler`]. The **count**
+/// survives — three constructs still reach the `None` arm — but the
+/// **membership** does not, and that is the half a reader uses: **7 of the
+/// corpus's 10 flows of that construct take the `WaitFor` spelling**, so
+/// someone following this list to find a `WaitFor` among the 40-odd finds
+/// none. Fix round 4 measured the model kind and fix round 5 re-measured it;
+/// the model divergence itself is the plan's Task 4 Step 0.
 ///
 /// **`Pause` is NOT one of those three, and W8 Task 1's first attempt put it
 /// among them.**

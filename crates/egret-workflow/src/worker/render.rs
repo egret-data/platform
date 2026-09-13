@@ -570,7 +570,13 @@ impl Surface {
                     // renderer sees), and the four opaque flowables
                     // (`AllowFailure`, `WorkingDirectory`, `WaitFor`/`LoopUntil`,
                     // `Pause`) are OUT, because they are planned `Runnable` and
-                    // so their `type_id` is populated.
+                    // so their `type_id` is populated. (Two of those four --
+                    // `Pause`, and `WaitFor` as opposed to `LoopUntil` -- are
+                    // not `models::TaskKind` flowables at all, because
+                    // `kind_for` has no row for either; it changes nothing
+                    // here, since the conclusion is drawn from the PLAN kind,
+                    // which is `Runnable` for all of them. W8 Task 1 fix
+                    // round 5.)
                     //
                     // **Latent, and the reason is nameable rather than
                     // incidental**: only two corpus flows write `{{task.type}}`
