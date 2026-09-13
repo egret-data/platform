@@ -1621,9 +1621,9 @@ number from the right file.)* Going the other way,
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
 unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`, W3c added
-`SKIPPED`, and W8 Task 2 added `PAUSED` and `RESTARTED`**, so the enum has
-eleven and **2 of the 13 remain unrepresentable**:
-`WARNING`, `CANCELLED`. Each is recorded here rather than
+`SKIPPED`, W8 Task 2 added `PAUSED` and `RESTARTED`, and W8 Task 5 added
+`WARNING`**, so the enum has twelve and **1 of the 13 remains
+unrepresentable**: `CANCELLED`. Each is recorded here rather than
 worked around in the normaliser, because a normaliser that quietly maps an
 unrepresentable state onto a representable one is a normaliser that hides the gap
 it was built to expose.
@@ -1701,7 +1701,7 @@ task that owns it:
 
 | state | `runs` entries | owner |
 |---|---|---|
-| `WARNING` | 10 | **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key** (it declares `allowFailure: true` and a 3-attempt `retry: {type: constant, interval: PT0.100S, maxAttempts: 3}`) — and it ended with the word "Unclaimed", the owner the cell had just overturned. **Two** of the ten declare `warningOnRetry`: `valids/retry-success` and `valids/allow-failure-with-retry`. (Fix round 1's replacement said "`allowFailure:` and nothing else" and "`retry-success`'s alone", losing the `retry:` and the second declarer — a transcription that lost a member, inside the commit whose headline is a transcription that lost a member. Corrected in fix round 2) |
+| `WARNING` | 10 | **`RunState::Warning` exists since W8 Task 5**; the rest of this cell is the attribution that preceded it and is what the split still rests on. **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key** (it declares `allowFailure: true` and a 3-attempt `retry: {type: constant, interval: PT0.100S, maxAttempts: 3}`) — and it ended with the word "Unclaimed", the owner the cell had just overturned. **Two** of the ten declare `warningOnRetry`: `valids/retry-success` and `valids/allow-failure-with-retry`. (Fix round 1's replacement said "`allowFailure:` and nothing else" and "`retry-success`'s alone", losing the `retry:` and the second declarer — a transcription that lost a member, inside the commit whose headline is a transcription that lost a member. Corrected in fix round 2) |
 | `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's |
 
 `SKIPPED` was a fifth row, 4 entries, credited first to `disabled: true` (wrong)
@@ -3196,7 +3196,7 @@ owner is how a suppression list starts.
 | `ExecutionUpdatableTask` | **23** over-submitted runs at Task 5 and at Task 6 (19 at Task 3, across 16 baselined entries — the entry count has not been re-derived since) | `Labels`, `SetVariables`, `UnsetVariables`, `Exit` | **unclaimed** |
 | `Subflow` | 22 baselined `runs` entries, **25** over-submitted runs after Task 6 (22 after Task 4, 18 before it) | `io.kestra.plugin.core.flow.Subflow` | **unclaimed — the word does not appear in the plan** |
 | ~~`LoopUntil`, and its alias `WaitFor`~~ — **taken by W8 Task 4** | ~~**3** + **6** over-submitted runs~~ — **0**, and the two spellings are one `models::TaskKind` now | `io.kestra.plugin.core.flow.{LoopUntil,WaitFor}` | **W8 Task 4**, one entry banked (`valids/waitfor-nested`). The 9 over-submitted runs are gone: a `plan::TaskKind::LoopUntil` gets no `type_id`, so no worker claims it — and the SEPARATE fact Task 4 closed is that `WaitFor` never reached this tier at all. `models::kind_for` had no row for the alias, so it parsed to `Leaf` and its `tasks:` sat inside an opaque `spec` where `children()` could not see them; **seven of the ten corpus flows of this construct use that spelling.** Both now map to `TaskKind::LoopUntil`, which also closes the one publish egret accepted that the artifact refuses (a `WaitFor` child of a `WorkingDirectory`) |
-| `WARNING` | 10 golden `runs` entries | `AllowFailure`, the `allowFailure:` flag, `retry.warningOnRetry` and an `Exit` | **W8 for 8 of the 10, unclaimed for 2** — corrected at W8 Task 1, and this cell had said Task 7's and then unclaimed. The 8 are the allow\* axis's (`AllowFailure` ×3, `allowFailure:` ×5) and the programme spec §9 has always given `allowFailure` to W8; the 2 that stay unclaimed are `valids/retry-success` (`warningOnRetry` alone — Task 7 reads it into `RetryPolicy` and does nothing with it) and `valids/exit` (an `Exit`, this table's `ExecutionUpdatableTask` row). See the residual table's `allowFailure` paragraph for the derivation by entry name |
+| ~~`WARNING`~~ — **taken by W8 Task 5** | 10 golden `runs` entries | `AllowFailure`, the `allowFailure:` flag, `retry.warningOnRetry` and an `Exit` | **`RunState::Warning` exists since W8 Task 5 and SEVEN of the row's twelve baselined entries banked with it.** What remains is the `AllowFailure` FLOWABLE (4 entries, still planned opaque) and `valids/waitfor-child-task-warning` (an `OutputValues` child with no handler — measured, not argued). The cell below is the pre-Task-5 attribution and is kept because its derivation is still what the split rests on. It was **W8 for 8 of the 10, unclaimed for 2** — corrected at W8 Task 1, and this cell had said Task 7's and then unclaimed. The 8 are the allow\* axis's (`AllowFailure` ×3, `allowFailure:` ×5) and the programme spec §9 has always given `allowFailure` to W8; the 2 that stay unclaimed are `valids/retry-success` (`warningOnRetry` alone — Task 7 reads it into `RetryPolicy` and does nothing with it) and `valids/exit` (an `Exit`, this table's `ExecutionUpdatableTask` row). See the residual table's `allowFailure` paragraph for the derivation by entry name |
 | a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
 | ~~the replay a `CREATE_NEW_EXECUTION` retry starts~~ — **taken by W6 Task 4, all 4 banked** | ~~4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned`~~ | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6 Task 4.** It is the third kind of sub-execution and `ExecutionState` had no field for any of them; it has one now — `metadata`, Kestra's own `ExecutionMetadata`, stored by migration 0139. `worker::replay::spawn_due` is the other half of the artifact's execution-delay loop |
@@ -5777,19 +5777,24 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **176** |
-| baselined — egret does not reproduce it yet | **118** |
+| matching | **183** |
+| baselined — egret does not reproduce it yet | **111** |
 
 ```text
-  matching  176 = 153 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 118 = 113 of the 266 `runs` +  5 of the 28 `refused`
+  matching  183 = 160 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 111 = 106 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-118 is simultaneously the mismatching count, the size of `baseline.txt` and the
+111 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
+
+**176 → 183 at W8 Task 5**, one construct with seven instances: the
+`allowFailure:`/`allowWarning:` FLAG, which is not the `AllowFailure` flowable.
+The `refused` half is unchanged again: no corpus flow is refused for writing
+either flag, and `models::Task` reading them changes no publish verdict.
 
 **175 → 176 at W8 Task 4**, one entry: `valids/waitfor-nested`. The `refused`
 half is unchanged for the same reason Task 3's was — the only `LoopUntil`-family
@@ -6096,7 +6101,7 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-118 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+111 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
@@ -6106,8 +6111,8 @@ exhaustive and named.
 | 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
-| 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8** — see the paragraph on its two owners below |
-| 4 | `Pause` → `PAUSED` | W8 — and **not one of the four is held by the wait**; see below |
+| 5 | `AllowFailure` / `allowFailure:` → `WARNING` | **W8 Task 5 banked seven of its twelve**; the five that remain are held by the FLOWABLE and not by the flag — see the paragraph below |
+| 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
 | 8 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below |
 | 5 | `sla:` | W8 |
@@ -6119,9 +6124,14 @@ remain are held by three things, none of which is the construct.** SIX have an
 `io.kestra.plugin.core.output.OutputValues` child and `driver.rs`'s registry
 ships four handlers, none of them that one — so their bodies cannot run at all,
 which is the strict/upper-bound separator for this row rather than a failure of
-it. (One of the six, `valids/waitfor-child-task-warning`, is held twice: its
-other child is an `allowFailure: true` `Fail` whose run is `WARNING`, which is
-the `AllowFailure` row's.) `valids/loopuntil-failed-flowable` differs on ONE
+it. (One of the six, `valids/waitfor-child-task-warning`, was held twice: its
+other child is an `allowFailure: true` `Fail` whose run is `WARNING`, which was
+the `AllowFailure` row's. **W8 Task 5 closed that half and the entry is still
+baselined**, which is the measurement that turns *held twice* from a claim into
+a fact: the `WARNING` child is byte-identical to the golden now and
+`childTaskRunExecuted` lets it through, so the loop reaches the `OutputValues`
+child for the first time and stalls there. The entry is reproduced strictly
+further than it was.) `valids/loopuntil-failed-flowable` differs on ONE
 field — its condition is `{{ outputs.loop.iterationCount < "5" }}`, Pebble
 widens both operands of a relational operator to `Number` and throws on a
 `String`, minijinja orders across kinds and answers `True`, so the loop succeeds
@@ -6190,27 +6200,30 @@ declarers already matching — written out under *States and constructs no W3a
 task claims* above and derived by
 `the_cancelled_state_never_comes_from_a_concurrency_limit`.
 
-**The `Pause` row was 12 and is 4, and it is the first row this table has
-LOWERED where the remainder is held by something other than the construct the
-row names.** W8 Task 3 banked eight; `advance()` drives the wait, its bound and
-its resume, and the four that remain each declare a *property* of `Pause` that
+**The `Pause` row was 12, then 4, and is 3** — and it was the first row this
+table LOWERED where the remainder is held by something other than the construct
+the row names. W8 Task 3 banked eight and W8 Task 5 banked the ninth,
+`valids/pause-timeout-allow-failure`, which is the entry this row was recorded
+as over-claiming. `advance()` drives the wait, its bound and its resume, and the
+three that remain each declare a *property* of `Pause` that
 `executor::plan::pause_gap` refuses to plan, so the whole task stays an opaque
 `TaskKind::Runnable` — `AllowFailure`'s and `WorkingDirectory`'s rule, applied
 per task rather than per type:
 
 | entry | what holds it |
 |---|---|
-| `valids/pause-behavior` | `behavior:`. **Not a defect and not about expressions** — fix round 2 measured the artifact honouring the value in every form (see *Drift at the execution seam*), so its `FAILED`/1 golden is `behavior: FAIL` working, `FAIL` being what `corpus.json` posts. It is held by the construct being four-valued: `WARN` and `CANCEL` mean `WARNING` and `CANCELLED`, neither in `RunState`. A dynamic one cannot even be classified at plan time, where `pause_gap` decides. It banks when `RunState` gains those two, which is the `AllowFailure` row's work |
+| `valids/pause-behavior` | `behavior:`. **Not a defect and not about expressions** — fix round 2 measured the artifact honouring the value in every form (see *Drift at the execution seam*), so its `FAILED`/1 golden is `behavior: FAIL` working, `FAIL` being what `corpus.json` posts. It is held by the construct being four-valued: `WARN` and `CANCEL` mean `WARNING` and `CANCELLED`, and `RunState` holds `WARNING` since W8 Task 5 and not `CANCELLED`. A dynamic one cannot even be classified at plan time, where `pause_gap` decides — so half the vocabulary arriving moved nothing. It banks when `RunState` gains `CANCELLED` too |
 | `valids/pause_on_pause` | `onPause:`. Its golden records the sub-task as a run with `parent: null` — a **sibling** of the pause, `overlapping` it |
 | `valids/pause-errors-finally-after-execution` | `errors:` on the `Pause`, plus `finally:` and a flow-level `afterExecution:` — two rows above that are **unclaimed**. Its pause run re-enters `RUNNING` (`CREATED RUNNING PAUSED RUNNING FAILED`) to drive the handler |
-| `valids/pause-timeout-allow-failure` | the only one of the four that IS planned `TaskKind::Pause`, and it is held one layer out: `allowFailure: true` turns the timeout's `FAILED` into `WARNING`. That is the `AllowFailure` row's cause, counted here only because this table attributes by declaration |
+| ~~`valids/pause-timeout-allow-failure`~~ — **banked, W8 Task 5** | the only one of the four that WAS planned `TaskKind::Pause`, and it was held one layer out: `allowFailure: true` turns the timeout's `FAILED` into `WARNING`. That was the `AllowFailure` row's cause, counted here only because this table attributes by declaration. `ExecutorService.java:937` is the line — `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))` — so the flags reach a `timeout:` bound and NOT a `pauseDuration:` one, which is why `valids/pause-delay` is untouched by them |
 
 **The row is not deleted**, unlike the five below, and the difference is worth
-stating: a deleted row means the construct holds nothing. `Pause` still holds
-three of these four, in the narrow sense that a `Pause` property is what stops
-them. It is the fourth, `pause-timeout-allow-failure`, that this row
-over-claims — and it is left counted here because the alternative is a table
-whose rows silently disagree with the needle that derives them.
+stating: a deleted row means the construct holds nothing. `Pause` holds all
+three of the entries left, in the narrow sense that a `Pause` property is what
+stops each. **The one it over-claimed is gone**: this paragraph used to argue
+that `pause-timeout-allow-failure` was counted here only because the table
+attributes by declaration, and W8 Task 5 supplied the variant that banked it
+rather than leaving the argument standing.
 
 **The `Loop` row was 37, then 21, then 20, and is 19; the label moved with the
 number.** The 20 → 19 is `valids/loop-with-subflow` at W6 Task 3.
@@ -6228,11 +6241,37 @@ somebody had.
 The programme spec §9 gives `allowFailure` to W8; this table gave its 12
 baselined entries to **unclaimed**, through the `WARNING` row of *States and
 constructs no W3a task claims*. One of the two had to be wrong, and it was this
-one: the W8 measurement finds all 12 reach — the construct is what holds every
-one of them — and **6 are bankable by W8 alone**, which makes it the cheapest
-set in the whole W8 row rather than an orphan. Six of the twelve run to
-completion today and differ from the golden on **one symbol**, the final
-terminal. "Unclaimed" is corrected here rather than §9 being lowered.
+one. W8 Task 1 corrected it here rather than lowering §9, and **W8 Task 5
+settled it by measurement**: seven of the twelve bank.
+
+**The estimate that came with the correction was "6 are bankable" and "six of
+the twelve run to completion today and differ from the golden on one symbol".
+Both halves are corrected here.** Measured by unbaselining all twelve and
+reading the ratchet's own diff: **eight** run to completion, not six, and
+**seven** bank. The twelfth of the eight,
+`valids/waitfor-child-task-warning`, is the one this table already called *held
+twice* — and W8 Task 5 turned that from a claim into a measurement. With the
+flag implemented its `allow_failure` child is
+`["CREATED","SUBMITTED","RUNNING","WARNING"]` over an attempt of
+`["CREATED","RUNNING","FAILED"]`, byte-identical to the golden, and
+`childTaskRunExecuted` lets it through — so the loop reaches its SECOND child
+for the first time, an `io.kestra.plugin.core.output.OutputValues` with no
+handler, and the execution stalls at `["CREATED","RUNNING"]`. It is reproduced
+strictly further than before and still mismatches.
+
+**The five that remain are the `AllowFailure` FLOWABLE's, and it is a different
+construct from the flag.** `io.kestra.plugin.core.flow.AllowFailure` is a class
+that `extends Sequential`; `build_plan` still plans it opaque, so its children
+get no runs at all and all four of its declarers — `valids/allow-failure`,
+`valids/allow-failure-with-retry`, `valids/finally-allowfailure` and
+`valids/retry-with-flowable-errors` — stall in the flowable rather than differ
+on a terminal. Two of the four are held by `finally:` as well, and
+`valids/retry-with-flowable-errors` by `io.kestra.plugin.core.kv.Set`. The
+fifth is `valids/waitfor-child-task-warning`, above. **This row's label is now
+wrong for every entry left under it**, and it is kept rather than renamed
+because the needle that derives it matches the flowable's FQCN and the flag's
+literal alike; whoever implements the flowable should split the row rather than
+lower it.
 
 The `WARNING` population splits, and the split is derived rather than asserted:
 **10 golden entries hold `WARNING` and 8 of them are the allow\* axis's** —
@@ -6242,9 +6281,30 @@ The `WARNING` population splits, and the split is derived rather than asserted:
 `valids/waitfor-child-task-warning` on the `allowFailure:` flag. **The other two
 are not W8's and stay unclaimed**: `valids/retry-success` (`warningOnRetry`
 alone) and `valids/exit` (an `Exit`, the `ExecutionUpdatableTask` row's). So
-`RunState::Warning` arriving banks neither of those two, and two of the eight
-need no new variant at all — `allowWarning: true` maps `WARNING → SUCCESS`, so
-their golden terminal is `SUCCESS`.
+`RunState::Warning` arriving banks neither of those two.
+
+**The sentence that used to end this paragraph was wrong twice and W8 Task 5's
+Step 1 is what falsified it.** It read *"and two of the eight need no new
+variant at all — `allowWarning: true` maps `WARNING → SUCCESS`, so their golden
+terminal is `SUCCESS`"*. (1) **None of the eight** needs no new variant: the
+eight are by construction the golden entries that HOLD a `WARNING` symbol, and
+an entry holding one cannot be reproduced by an enum that lacks it. (2) The
+entries that need no new variant are **three**, they are
+`valids/task-allow-warning-{runnable,flowable,executable-flow}`, and none of
+them is in the eight — their goldens hold no `WARNING` at all. (3) The reason is
+not that "the existing enum expresses the mapping". Measured on the pinned
+artifact, `io.kestra.core.models.flows.State$Type.fail(Task)` is a
+CONSTRUCTION out of two booleans with **no source state**: `isAllowFailure()`
+false → `FAILED`, true + `isAllowWarning()` → `SUCCESS`, true alone →
+`WARNING`, and `isAllowWarning()` is not read at all when `isAllowFailure()` is
+false. There is no `WARNING` to map *from*. All three flows write BOTH flags,
+the incoming state is `FAILED`, and `SUCCESS` is reached in one step with no
+`WARNING` written to any history — which is exactly why
+`valids/task-allow-warning-executable-flow`'s golden run reads
+`["CREATED","RUNNING","FAILED","SUCCESS"]` with nothing between the two
+terminals. See `src/executor/allow_failure.rs`'s module doc for the bytecode
+and for the second spelling, which is a real conversion and is the only one
+that can move a stored `WARNING`.
 
 **`disabled: true` and `runIf:` are not rows here and both are implemented.** A
 row is an attribution to the thing that *holds* an entry, not to a construct the
@@ -8858,11 +8918,12 @@ byte-unchanged, so the twelve are the same twelve.
   `a_subflow_inside_an_errors_list_is_reached_and_spawned` with
   `task "handler" is planned Executable but is not a Subflow of the execution's own source`.
   The gap is written at the point of use rather than only in a report.
-- **`allowFailure` / `allowWarning`**, which `models::Task` does not carry and
-  `RunState` has no `Warning` for. `guess_state` implements only the
-  `transmitFailed` half of `ExecutableUtils.guessState` and says so; the two
+- ~~**`allowFailure` / `allowWarning`**~~ — **closed by W8 Task 5.** This read
+  *"which `models::Task` does not carry and `RunState` has no `Warning` for.
+  `guess_state` implements only the `transmitFailed` half of
+  `ExecutableUtils.guessState` and says so; the two
   `task-allow-*-executable-flow` entries are what that costs and both stay
-  baselined.
+  baselined."* All three halves changed in one commit and both entries bank.
 
 # W6 Task 4 — the `CREATE_NEW_EXECUTION` replay, and the two facts that end a chain
 
@@ -9346,10 +9407,12 @@ defect the oracle could not see, because the corpus holds one `Pause`
 
 **`behavior:` is a whole gap again**, for the reason it had before the round
 went looking for a narrower one: it is four-valued, and `WARN`/`CANCEL` mean
-`WARNING`/`CANCELLED`, neither of which `RunState` holds. A dynamic one cannot
-even be *classified* at plan time, where `pause_gap` decides — its value is
-known at render time. The entry becomes bankable when `RunState` gains those two
-states, which is the `AllowFailure` row's work.
+`WARNING`/`CANCELLED`. `RunState` holds `WARNING` since **W8 Task 5** and still
+does not hold `CANCELLED`; **half the vocabulary arriving moved nothing**,
+because `pause_gap` refuses the whole task whenever a `behavior:` is written,
+whatever value it holds. A dynamic one cannot even be *classified* at plan time,
+where `pause_gap` decides — its value is known at render time. The entry becomes
+bankable when `RunState` gains `CANCELLED` too.
 
 **Kept from fix round 1, all of it re-verified:** the two unreachable
 `spec::validate` arms stay deleted, `the_two_control_flow_tables_name_the_same_types`

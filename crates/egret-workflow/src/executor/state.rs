@@ -340,14 +340,22 @@ pub struct Attempt {
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
 ///
-/// **Their absence is not inert, and W8 Task 4 fix round 3 hands one instance
-/// to Task 5.** Because there is no `Warning` variant, a `WARNING` child does
-/// not reach `is_terminal()` at all — `worker::from_wire` cannot decode it —
-/// so `flowable::loop_until::children_executed` answers *no* for ever and the
-/// loop pauses to its bound. `valids/waitfor-child-task-warning` is that flow
-/// and it is **already banked**. Task 5 owns `allowWarning`'s
-/// `WARNING -> SUCCESS`; see `children_executed`'s doc for which side of the
-/// predicate the mapping has to land on.
+/// **That absence was not inert, and W8 Task 4 fix round 3 handed the instance
+/// to Task 5.** While there was no `Warning` variant, a `WARNING` child did not
+/// reach `is_terminal()` at all — `worker::from_wire` could not decode it — so
+/// `flowable::loop_until::children_executed` answered *no* for ever and the
+/// loop paused to its bound. `valids/waitfor-child-task-warning` is that flow,
+/// and this sentence said it was **already banked**, which in this crate's
+/// vocabulary means the opposite of what it meant: a banked entry is one the
+/// ratchet finds MATCHING, and the entry is in `baseline.txt`.
+/// `loop_until.rs`'s copy of the same paragraph had it right (*"already in
+/// `baseline.txt`"*) and this one was read from it.
+///
+/// **W8 Task 5 closed both halves and the entry is still baselined.** Its
+/// `WARNING` child is byte-identical to the golden and `children_executed`
+/// lets it through, so the loop reaches its SECOND child for the first time —
+/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalls
+/// there. Measured by unbaselining it, not inferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
@@ -635,20 +643,33 @@ impl RunState {
 /// terminal. That is why the rule is stated here with its counter-example
 /// rather than left as an invariant somebody later discovers is not one.
 ///
-/// **W6 measured a SECOND `Subflow` shape this rule is wrong for, and left the
-/// rule alone because nothing reachable can express it.** When a `Subflow`'s
-/// child terminates, Kestra writes the CHILD's state onto the parent run and
-/// then, if `ExecutableUtils.guessState` disagrees, writes that too -- and the
-/// attempt takes **both**. Measured on the pinned artifact,
+/// **W6 measured a SECOND `Subflow` shape this rule is wrong for and left the
+/// rule alone because nothing reachable could express it; W8 Task 5 made it
+/// reachable and fixed it with a COMMAND rather than by widening this rule.**
+/// When a `Subflow`'s child terminates, Kestra writes the CHILD's state onto
+/// the parent run and then, if `ExecutableUtils.guessState` disagrees, writes
+/// that too -- and the attempt takes **both**, because
+/// `ExecutableUtils.subflowExecutionResult` rebuilds the attempt from the
+/// parent taskrun's whole `State`. Measured on the pinned artifact,
 /// `egret.probe/probe-notransmit-parent` (`transmitFailed: false` over a child
 /// that FAILS) gives a run AND an attempt each reading
 /// `["CREATED","RUNNING","FAILED","SUCCESS"]`, and the golden holds the same
 /// shape for `valids/task-allow-failure-executable-flow` (`... FAILED,
-/// WARNING`). Neither is reachable here: [`RunState`] has no `Warning`,
-/// `models::Task` carries neither `allowFailure` nor `allowWarning`, and **no
-/// corpus `Subflow` writes `transmitFailed: false`** -- re-derived over all 25
+/// WARNING`).
+///
+/// **What made it unreachable was three things at once and all three are
+/// gone**: [`RunState`] had no `Warning`, `models::Task` carried neither
+/// `allowFailure` nor `allowWarning`, and **no corpus `Subflow` writes
+/// `transmitFailed: false`** -- the last is still true, re-derived over all 25
 /// declarers by `tests/executor.rs`'s
-/// `no_corpus_subflow_turns_transmit_failed_off`.
+/// `no_corpus_subflow_turns_transmit_failed_off`, and the other two changed at
+/// W8 Task 5, so `allowWarning:` reaches the shape by a different road.
+///
+/// **The rule below is unchanged, and that is the decision.**
+/// [`Command::CompleteRun`] carries the second state and pushes it onto the
+/// attempt whether or not the attempt has closed; widening this rule instead
+/// would be wrong for every retry, whose attempts each end `FAILED` with a
+/// `RETRYING` that must not join them.
 /// `worker::subflow::guess_state` records the same boundary from the other
 /// side.
 ///

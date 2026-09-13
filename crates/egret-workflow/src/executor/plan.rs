@@ -800,15 +800,19 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     //
     // It is a gap for the reason it always was, and the measurement above is
     // what confirms that reason rather than replacing it: `behavior:` is
-    // four-valued and the artifact really does produce all four terminals, two
-    // of which -- `WARNING` and `CANCELLED` -- are not in
-    // [`RunState`](crate::executor::RunState) at all. A fifth outcome, the
+    // four-valued and the artifact really does produce all four terminals, of
+    // which `CANCELLED` is not in
+    // [`RunState`](crate::executor::RunState) at all. (`WARNING` was the other
+    // one until W8 Task 5 added `RunState::Warning`; **one of the two arriving
+    // is not enough**, because `pause_gap` refuses the whole task whenever a
+    // `behavior:` is written, whatever value it holds.) A fifth outcome, the
     // non-terminal hang on an out-of-enum value, is not representable either. **A dynamic one cannot
     // even be classified here** -- its value is known at render time and this
     // decision is taken at plan time -- so the whole task stays opaque, which
     // is the only answer that cannot over-accept. The entry becomes bankable
-    // when `RunState` gains the two states, which is the `AllowFailure` row's
-    // work and not this one's.
+    // when `RunState` gains `CANCELLED` as well -- W8 Task 5 supplied
+    // `WARNING`, which is half of it, and moved nothing here for the reason
+    // above.
     if p.behavior.is_some() {
         return Some("behavior");
     }

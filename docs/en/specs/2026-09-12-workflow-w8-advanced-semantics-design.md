@@ -16,7 +16,7 @@ that construct* — not *the flow declares it*:
 |---|---|---|---|---|
 | `Pause` | 12 | 20 | **12** | **7** |
 | `LoopUntil` / `WaitFor` | 9 | 10 | **9** | **3** &rarr; **1 measured** [^lu] |
-| `allowFailure` / `AllowFailure` | 12 | 15 | **12** | **6** |
+| `allowFailure` / `AllowFailure` | 12 | 15 | **12** | ~~**6**~~ &rarr; **7 measured** [^af] |
 | `sla:` | 5 | 6 | **7** | **2** |
 | `WorkingDirectory` | 4 | 15 | **4** | **0 measured, 1 candidate** |
 | flow `concurrency:` | 6 | 13 | **0** | **0** |
@@ -71,6 +71,15 @@ The residual table counts **5**; the cause is **7**. Two entries are held by an
 `sla:` in a **different flow** — a parent whose child declares one — which a
 per-flow needle **structurally cannot see**. A declaration count and a cause count
 can differ in *both* directions, and this is the direction nobody had looked for.
+
+[^af]: **7, measured at W8 Task 5**, and the twelfth entry is the finding:
+    `valids/waitfor-child-task-warning` was recorded as *held twice*, and
+    unbaselining it turned that into a measurement — its `WARNING` child is
+    byte-identical to the golden now, `childTaskRunExecuted` lets it through,
+    and the loop reaches an `io.kestra.plugin.core.output.OutputValues` child no
+    handler exists for and stalls. The other four that stay are the
+    `AllowFailure` FLOWABLE's, a different construct that is still planned
+    opaque.
 
 [^lu]: **Corrected by W8 Task 4, which implemented the construct and then
     measured it.** The `3` was the number of entries spelled `LoopUntil` rather
@@ -148,9 +157,41 @@ say what the oracle could not otherwise reproduce, and treat any change to
 `allowWarning:` maps `WARNING → SUCCESS`, which the existing enum already
 expresses.
 
+> **W8 Task 5 measured all three figures and two of them were wrong.**
+> **Seven** bank, not six, and the seventh is `valids/pause-timeout-allow-failure`
+> — which this table counts under `Pause` because it attributes by declaration,
+> so the two rows do not double-count it; the arithmetic of the package's 18 is
+> unchanged. **Three** need no new state, not two, and they are
+> `valids/task-allow-warning-{runnable,flowable,executable-flow}` — **none of
+> which is one of the eight** golden entries the residual table derives for this
+> construct, because those eight are by construction the entries that HOLD a
+> `WARNING` symbol and an entry holding one cannot be reproduced without the
+> variant.
+>
+> **And the reason given is not the mechanism.** Measured on the pinned artifact
+> with `javap -p -c`, `State$Type.fail(Task)` is a CONSTRUCTION out of two
+> booleans with no source state — `isAllowFailure()` false → FAILED, true +
+> `isAllowWarning()` → SUCCESS, true alone → WARNING — and it does not read
+> `isAllowWarning()` at all when `isAllowFailure()` is false. There is no
+> `WARNING` to map *from*. The three flows above write BOTH flags, so the answer
+> is SUCCESS in one step and no `WARNING` is ever written to a history. A second
+> spelling, two sequential `if`s in `WorkerTaskProcessor` /
+> `Execution.guessFinalState` / `ExecutableUtils.guessState`, IS a conversion
+> keyed on an existing state, and it is the only one that can map a stored
+> `WARNING` under `allowWarning:` alone. See
+> `crates/egret-workflow/src/executor/allow_failure.rs`.
+
 It is also **assigned twice in two documents**: W8 in the programme spec §9, and
 **"unclaimed" in the residual table**. One of those is wrong and the package must
 say which rather than inheriting both.
+
+> **Settled: the residual table was the loser, and it was corrected at W8 Task 1
+> rather than §9 being lowered.** W8 Task 5 re-checked both documents and the
+> correction is in place: `oracle-exec/README.md`'s residual table now reads
+> **W8** for this row, and the programme spec §9 is unchanged. The ruling is
+> derived rather than administrative — all twelve entries reach the construct
+> and seven of them bank inside W8 alone, which is the cheapest set in the
+> package; a row whose entries a package can bank is not unclaimed.
 
 ## 5. What W8 unlocks for W6, measured rather than assumed
 

@@ -69,12 +69,13 @@
 //!   catch block (`ExecutableUtils.java:305-309`), which is what produces its
 //!   golden attempt of `["CREATED","FAILED"]` beside a run of
 //!   `["CREATED","RUNNING","FAILED"]`.
-//! * **`allowFailure`/`allowWarning` are unrepresentable** — `models::Task`
-//!   carries neither and `RunState` has no `Warning` — so [`guess_state`]
-//!   implements only the `transmitFailed` half of
-//!   `ExecutableUtils.guessState`. `valids/task-allow-failure-executable-flow`
-//!   and `valids/task-allow-warning-executable-flow` are the two entries that
-//!   costs, and both stay baselined.
+//! * ~~**`allowFailure`/`allowWarning` are unrepresentable**~~ — **W8 Task 5.**
+//!   `models::Task` carries both and `RunState` has `Warning`, so
+//!   [`guess_state`] implements `ExecutableUtils.guessState` whole rather than
+//!   its `transmitFailed` half. `valids/task-allow-failure-executable-flow` and
+//!   `valids/task-allow-warning-executable-flow` are the two entries it used to
+//!   cost and **both bank**. `transmitFailed: false` is still unreachable from
+//!   the corpus and still implemented.
 //! * **`revision`, `labels`, `inheritLabels`, `scheduleDate` and
 //!   `restartBehavior` are not on `models::Subflow`** (W1's curation), so
 //!   nothing here can honour them. `valids/task-flow-inherited-labels` and
@@ -666,7 +667,8 @@ async fn on_child_terminal_inner(
     .await
 }
 
-/// `ExecutableUtils.guessState`, restricted to the half egret can represent.
+/// `ExecutableUtils.guessState` — **whole since W8 Task 5**, except for the
+/// trigger set, which is narrowed for a reason that is not about the flags.
 ///
 /// Java's is
 /// ```text
@@ -676,11 +678,24 @@ async fn on_child_terminal_inner(
 /// } else return SUCCESS;
 /// ```
 ///
-/// **Two of its inputs do not exist here and that is stated rather than
-/// approximated**: `models::Task` carries no `allowFailure` and no
-/// `allowWarning`, so the two `allow*` branches are unreachable, and
-/// [`RunState`] has no `Warning`. The trigger set therefore narrows from
-/// `{FAILED, PAUSED, KILLED, WARNING}` to `{Failed, Killed}`.
+/// The two-line body is [`crate::executor::allow_failure::soften`], which is
+/// the same expression written once for all four sites that read the flags.
+///
+/// **The two inputs this paragraph used to call non-existent now exist.** It
+/// read: *"`models::Task` carries no `allowFailure` and no `allowWarning`, so
+/// the two `allow*` branches are unreachable, and [`RunState`] has no
+/// `Warning`"*. W8 Task 5 added all three, and the two golden entries that cost
+/// — `valids/task-allow-{failure,warning}-executable-flow` — bank.
+///
+/// **The trigger set is still `{Failed, Killed}` and that is a DIFFERENT
+/// narrowing**, one this task did not touch: `PAUSED` and `WARNING` are in
+/// Java's disjunction as states of a **child EXECUTION**, and a child execution
+/// reaches this function only when it has terminated. `PAUSED` is not terminal
+/// at all; a child execution ending `WARNING` needs something inside it to
+/// produce one, which for a `Subflow`'s child means the same flags one level
+/// down and no corpus flow writes that. Neither is representable as a
+/// `child_state` this function can be handed, so the set is what the caller can
+/// supply rather than a subset anybody chose.
 ///
 /// **Two corrections W8 Task 2 owes this paragraph, both from the decompiled
 /// artifact** (`/app/kestra` in `kestra/kestra@sha256:28f59bf1…`):
@@ -699,9 +714,11 @@ async fn on_child_terminal_inner(
 ///   `State.Type.isTerminated()` does not list `PAUSED`, which is exactly what
 ///   W8 Task 2 measured off the pinned artifact. So the trigger set stays
 ///   narrow because a paused child never gets here at all, not because nothing
-///   can be paused. `Warning` is still W8's and still unreachable.
+///   can be paused. `Warning` was still W8's and still unreachable then; it is
+///   W8 Task 5's and is neither now, though the trigger set is unchanged for
+///   the reason above.
 ///
-/// The cost is two golden entries, named in this module's doc.
+/// The cost WAS two golden entries, named in this module's doc; both bank.
 ///
 /// **`transmitFailed: false` is measured and unreachable from the corpus**:
 /// `egret.probe/probe-notransmit-parent` on the artifact gives
