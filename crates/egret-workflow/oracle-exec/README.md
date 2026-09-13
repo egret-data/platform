@@ -3109,6 +3109,7 @@ owner is how a suppression list starts.
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
 | ~~the replay a `CREATE_NEW_EXECUTION` retry starts~~ — **taken by W6 Task 4, all 4 banked** | ~~4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned`~~ | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6 Task 4.** It is the third kind of sub-execution and `ExecutionState` had no field for any of them; it has one now — `metadata`, Kestra's own `ExecutionMetadata`, stored by migration 0139. `worker::replay::spawn_due` is the other half of the artifact's execution-delay loop |
 | `afterExecution:` | **10** baselined entries | `Flow.afterExecution` | **unclaimed — new at Task 8.** W1's `Flow::after_execution` parses and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors` and nothing else, so those tasks are in no plan. It is `finally:`'s sibling and unclaimed for the same reason |
+| `{{ task.type }}` on a flowable | **0 baselined entries, and that is the finding** — a divergence this corpus cannot show | `worker::render`'s `task` context: `TaskKind::Runnable { type_id } => Some(..), _ => None`, where Kestra's `task.type` is always the FQCN. The divergence set is exactly `{Sequential, Parallel, If, Switch, Loop, Dag, Subflow}` — `Subflow` is IN it (`Executable` since W6) and the four opaque flowables are OUT (planned `Runnable`, so populated) | **unclaimed, and deliberately not fixed at W8 Task 1.** Only `valids/logs` and `valids/disable-simple` write `{{task.type}}` and both write it on a `core.log.Log` leaf, so no golden entry and no assertion can fail on it. The element of the class this corpus does not contain is **a `{{ task.type }}` on a flowable**. Found by the predicate sweep; recorded here and beside `render.rs`'s match rather than only in a task report |
 | `sla:` | **5** baselined entries | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8** (programme spec). W1 ports it as a data shape and says so; nothing evaluates one, and the row is here because a reader of the residual baseline had no way to learn that from this file |
 
 **The `flow concurrency:` row is the fourth this table has deleted rather than
@@ -7655,8 +7656,12 @@ below it, still said *twelve*.** Correcting a table does not correct the prose
 under it. Worse, **the Vietnamese spec had no §1.1 at all**: the correction was
 written in one language and the reference copy carried the uncorrected claim with
 no marker. Both are fixed at the source, and its kill row is corrected too — it
-said the flow-id matches *"declare no runnable task at all"*, and a `Subflow` is
-planned, opaquely, as a runnable.
+said the flow-id matches *"declare no runnable task at all"*, and a `Subflow`
+**was** planned, opaquely, as a runnable. (Present tense — *"is planned"* — until
+W8 Task 1 fix round 3. It was true when W4 wrote it and W6 Task 3 made it false;
+a stale twin inside the section that exists to retire stale twins is the
+self-referential form of the defect, and the W4 spec's kill row carried the same
+clause.)
 
 **The dispositions differ by file, and deliberately.** The rows in *this
 statement* are corrected **in place**, because this section is not a record —

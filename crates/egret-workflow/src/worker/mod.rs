@@ -535,7 +535,10 @@ pub enum WorkerError {
     /// `claim`'s insert writes `type_id` only for a `Runnable`, and its
     /// `WHERE type_id IS NOT NULL` therefore never takes one. The arm survives
     /// on the three constructs above; the 40-odd was measured with `Subflow` in
-    /// the set and is not re-derived here.
+    /// the set and is not re-derived here — but the subtrahend is:
+    /// `tests/executor.rs` derives that **all 21 entries holding an executed
+    /// top-level `Subflow` were in this population for that reason and none is
+    /// now**, so read it as *40-odd, of which 21 left at W6 Task 3*.
     ///
     /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
     /// that run, the execution stalls, and the differential oracle's driver

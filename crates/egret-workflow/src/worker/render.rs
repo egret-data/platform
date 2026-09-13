@@ -562,6 +562,27 @@ impl Surface {
                 // variable -- so leaving it out failed 20 entries whose only
                 // expression was that.
                 if let Some(t) = plan.tasks.get(r.task) {
+                    // **`task.type` is `null` for every kind `build_plan`
+                    // descends into, and Kestra's is always the FQCN.** The
+                    // divergence set is exactly `{Sequential, Parallel, If,
+                    // Switch, Loop, Dag, Subflow}` -- note both ends of it:
+                    // `Subflow` is in (it is `Executable`, not a flowable the
+                    // renderer sees), and the four opaque flowables
+                    // (`AllowFailure`, `WorkingDirectory`, `WaitFor`/`LoopUntil`,
+                    // `Pause`) are OUT, because they are planned `Runnable` and
+                    // so their `type_id` is populated.
+                    //
+                    // **Latent, and the reason is nameable rather than
+                    // incidental**: only two corpus flows write `{{task.type}}`
+                    // (`valids/logs`, `valids/disable-simple`) and both write it
+                    // on a `core.log.Log` leaf, so no golden entry can fail on
+                    // it and no assertion here could either. The element of the
+                    // class this corpus does not contain is **a `{{ task.type }}`
+                    // on a flowable**. Recorded here and in
+                    // `oracle-exec/README.md`'s unclaimed table rather than only
+                    // in a completed task's report, because a finding that lives
+                    // in a report is a finding that has to be rediscovered.
+                    // Found by W8 Task 1's predicate sweep; not fixed by it.
                     cx.insert(
                         "task",
                         json!({

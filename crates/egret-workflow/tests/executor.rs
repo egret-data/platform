@@ -4818,6 +4818,23 @@ fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
     // The control, and the reason the zero is a measurement: `behavior: CANCEL`
     // is the only `concurrency:` setting that can cancel anything. Both flows
     // that write it are named, so this can never silently become an empty loop.
+    //
+    // **The population here is DECLARERS, and the class the control argues
+    // about is "executions a CANCEL limit could have cancelled".** Those are
+    // not the same set, and two corpus entries sit in the gap:
+    // `valids/flow-concurrency-subflow` runs a `Subflow` of
+    // `valids/flow-concurrency-cancel`, so a SECOND execution runs under that
+    // CANCEL limit while declaring none itself (golden
+    // `CREATED RUNNING SUCCESS`, not baselined); and
+    // `valids/trigger-flow-listener-with-concurrency-limit` listens on
+    // `trigger-flow-with-concurrency-limit`'s `QUEUED`/`RUNNING`/`SUCCESS`.
+    // Neither would be seen by the scan below. **The conclusion survives
+    // because it does not rest on this scan**: the first assertion above pins
+    // the whole `CANCELLED` set by name, over every entry, so a cancel landing
+    // on a non-declarer would have been caught there. The two are named here so
+    // the gap is a known one rather than an unexamined one -- and the listener
+    // is a second witness for the `QUEUED` zero, since the corpus contains a
+    // trigger that watches for `QUEUED` and never saw one.
     let mut declarers: Vec<String> = Vec::new();
     let mut cancel_limits: Vec<String> = Vec::new();
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {

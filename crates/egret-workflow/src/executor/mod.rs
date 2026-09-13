@@ -2933,6 +2933,50 @@ mod tests {
             );
         }
 
+        // **m3: this test is called "the derivation" in three shipped docs, and
+        // until W8 Task 1 fix round 3 it was four literal strings in a `for`.**
+        // A new typed `models::TaskKind` variant with no `build_plan` arm would
+        // be opaque, absent from the loop above, and invisible to exactly the
+        // sweep method that found the stale lists. The match below is the
+        // derivation the name claims: it is **exhaustive over
+        // `models::TaskKind`**, so adding a variant is a COMPILE error here and
+        // whoever adds it must classify it. `Leaf` is the second tier -- a
+        // Kestra flowable `kind_for` does not model (`Pause`) lands there and is
+        // opaque for a different reason, which is why it answers `false` too.
+        fn build_plan_descends_into(kind: &crate::models::TaskKind) -> bool {
+            use crate::models::TaskKind as K;
+            match kind {
+                K::Sequential(_)
+                | K::Parallel(_)
+                | K::If(_)
+                | K::Switch(_)
+                | K::Dag(_)
+                | K::Loop(_)
+                | K::Subflow(_) => true,
+                K::LoopUntil(_) | K::AllowFailure(_) | K::WorkingDirectory(_) => false,
+                K::Leaf { .. } => false,
+            }
+        }
+
+        // And it is asserted against `build_plan` rather than left as a table:
+        // for every probe above, the classifier and the builder must agree.
+        for ty in [
+            "io.kestra.plugin.core.flow.AllowFailure",
+            "io.kestra.plugin.core.flow.WorkingDirectory",
+            "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
+            "io.kestra.plugin.core.flow.Sequential",
+        ] {
+            let flow = crate::spec::parse(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let plan = build_plan(&branch(ty)).unwrap_or_else(|e| panic!("{ty}: {e}"));
+            assert_eq!(
+                build_plan_descends_into(&flow.tasks[0].kind),
+                plan.tasks.len() > 1,
+                "{ty}: the exhaustive classifier and `build_plan` disagree about \
+                 whether this kind is descended into"
+            );
+        }
+
         let plan = build_plan(&branch("io.kestra.plugin.core.flow.Sequential"))
             .expect("the control must plan");
         assert_eq!(

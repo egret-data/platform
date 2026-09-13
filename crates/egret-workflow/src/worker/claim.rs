@@ -240,6 +240,12 @@ struct Leaf<'a> {
 /// `WHERE type_id IS NOT NULL` therefore cannot take one. The arm is still a
 /// case — the **three** named above are still opaque — but the count was
 /// measured with `Subflow` in the set and has not been re-derived since.
+/// **The subtrahend is already in this crate**, which is better than a figure a
+/// reader must distrust: `tests/executor.rs`'s `ENTRIES_LEFT_UNFINISHED` doc
+/// (*"21 left at Task 3 and they were the whole of `Subflow`"*) records that
+/// **all 21 entries holding an executed top-level `Subflow`
+/// were in this population for that reason and none is now**. So: 40-odd, of
+/// which 21 left at W6 Task 3.
 ///
 /// **`Pause` is NOT one of those three, and W8 Task 1's first attempt put it
 /// among them.**
@@ -252,9 +258,12 @@ struct Leaf<'a> {
 /// reasoning for it was wrong until W8 Task 1 fix round 2 (it said the refusal
 /// came *before* the budget; the budget is applied first), so it is cited here
 /// as agreeing, not as the authority. Swapping one false member for another is
-/// the same defect twice; the two refusals are different refusals. It is
-/// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
-/// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
+/// the same defect twice; the two refusals are different refusals.
+///
+/// **The arm this function's `None` reaches** — to say it after a paragraph
+/// about `Pause`, whose whole point is that it does NOT reach it — is
+/// [`WorkerError::NotALeaf`], which aborts the tick for that run exactly as an
+/// unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
     fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
