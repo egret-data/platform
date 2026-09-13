@@ -3110,61 +3110,42 @@ fn handler_surfaces_run_state_copy_matches_the_enum() {
     );
 }
 
-/// **Cross-check 2 of 2: `executor::RunState` against `models::State`** — W8
-/// Task 2 fix round 1.
-///
-/// Two state vocabularies, two independent spellings —
-/// [`RunState::wire`](egret_workflow::executor::RunState::wire) hand-written,
-/// `models::State` through `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` —
-/// and until now **nothing compared them**. W8 Task 2 reported that as a
-/// theoretical gap; it is not theoretical:
-///
-/// - it produced the `RUN_STATE` defect in Task 2's own commit, and
-/// - a second undetected instance was already in the tree —
-///   `worker/subflow.rs`'s doc asserted `State.Type.isFailed()` was
-///   `FAILED || KILLED` for several packages while `models::State::is_failed`
-///   sat five files away with the **correct** `matches!(self, Self::Failed)`.
-///   The contradiction was falsifiable without decompiling anything, and
-///   nothing went red.
-///
-/// Three properties, each two-sided:
-///
-/// 1. every `RunState` variant's wire spelling is a `models::State` that
-///    round-trips to the same string;
-/// 2. `RunState::is_terminal` and `models::State::is_terminated` agree on every
-///    shared member — **both ways**, so neither a widened nor a narrowed
-///    `is_terminal` survives;
-/// 3. the variants `models::State` has and `RunState` does not are exactly the
-///    ones this crate says are missing.
-///
-/// # The third claim did not hold in fix round 1, and this is what makes it hold
-///
-/// Round 1 said *"a variant added to one and forgotten in the other fails
-/// here"*. **For `models::State` that was false**: adding an 18th variant
-/// survived the whole lib + executor suite, because `State` has no `ALL` and no
-/// exhaustive `match` anywhere, so the seventeen names below were a list the
-/// test carried rather than a list the type forced.
-///
-/// [`every_models_state_variant_is_accounted_for`] is the missing half, and it
-/// is a **compile-time** check rather than an assertion: an exhaustive `match`
-/// over `State` that maps each variant to its wire spelling. A new variant
-/// stops this test crate compiling until it is named there, which is stronger
-/// than any assertion could be and is the same mechanism `RunState::slot` uses
-/// on the other side.
-///
-/// **This is the shape refused for M10 and it is refused here too**: a guard
-/// whose stated scope exceeds its reach. The scope is now the reach.
-/// **Every `models::State` variant is accounted for, enforced by the compiler.**
+/// **Every `models::State` variant is accounted for — the arm by the compiler,
+/// the row by the enum's own source.**
 ///
 /// The gap [`the_two_state_vocabularies_agree`] had in fix round 1: its
 /// seventeen-name list was carried by the test, so an 18th variant added to
 /// `models::State` changed nothing and nothing went red. `State` has no `ALL`
-/// and no exhaustive `match` in the crate, so there was no mechanism to widen.
+/// and no exhaustive `match` anywhere in PRODUCTION — measured, not assumed:
+/// with an 18th variant added, `cargo check --lib` compiles clean and the only
+/// `error[E0004]` in the whole crate comes from `--tests`, i.e. from here.
 ///
-/// This `match` is exhaustive, so **a new variant is a compile error in this
-/// test crate** until somebody names it and decides which side it belongs on.
-/// The returned wire spelling is then checked against serde's, so the arm
-/// cannot be added with the wrong string either.
+/// # Two halves, because the first one alone over-claimed
+///
+/// 1. **The ARM is forced by the compiler.** `wire_of`'s `match` is exhaustive,
+///    so a new variant stops this test crate compiling until somebody names it
+///    and decides which side it belongs on.
+/// 2. **The ROW is forced by parsing `models/state.rs`.** Nothing in stable
+///    Rust can enumerate a variant a test cannot name — there is no `ALL`, no
+///    derive, and `std::mem::variant_count` is nightly — so `all` below is
+///    compared against the variant list parsed out of the enum's own source,
+///    the same mechanism `handler_surfaces_run_state_copy_matches_the_enum`
+///    uses on the Python copy, with the same parser-sanity arm so an empty
+///    parse cannot acquit.
+///
+/// **Half 1 alone was a guard that over-claimed, and mutation is what caught
+/// it.** `State::Invented => "TYPO_NOT_WHAT_SERDE_SAYS"` **compiled and passed
+/// all three guards**: the arm was forced, the row was not, and the serde
+/// comparison only ever runs over rows — so the variant existed, its spelling
+/// was wrong, and everything was green. With half 2 the same mutation dies, and
+/// so does the quieter one that adds a variant with a *correct* arm and no row.
+///
+/// **What this licenses, exactly**: *an added variant cannot pass unnoticed,
+/// and a row's spelling cannot disagree with serde's*. It does **not** license
+/// *"the arm is correct"* in any wider sense — `wire_of` is checked against
+/// `serde` and nothing checks either against Kestra, so a shared error in both
+/// would pass. That is written down because fix round 2 drew the wider
+/// conclusion from the narrower measurement.
 ///
 /// It is a `fn` rather than a bare `match` so that the exhaustiveness is a
 /// property of a signature and not of a statement somebody can delete a line
@@ -3228,19 +3209,106 @@ fn every_models_state_variant_is_accounted_for() {
     let names: BTreeSet<&str> = all.iter().copied().map(wire_of).collect();
     assert_eq!(
         names.len(),
-        17,
-        "seventeen distinct spellings; `all` above must list every variant the \
-         exhaustive `match` accepts, and two variants sharing a spelling would \
-         hide one of them"
+        all.len(),
+        "two variants share a wire spelling, which would hide one of them"
+    );
+
+    // **The row, forced by the enum's own source** -- see this test's doc. The
+    // compiler forces the ARM; nothing in stable Rust forces this ARRAY, so it
+    // is checked against the variant list parsed out of `models/state.rs`, the
+    // same mechanism `handler_surfaces_run_state_copy_matches_the_enum` uses on
+    // the Python copy.
+    let source = include_str!("../src/models/state.rs");
+    let body = source
+        .split_once("pub enum State {")
+        .expect(
+            "models/state.rs must still declare `pub enum State {`; if it was \
+             renamed this guard has to move with it rather than be deleted",
+        )
+        .1
+        .split_once("\n}")
+        .expect("the enum body must be brace-terminated")
+        .0;
+    let declared: BTreeSet<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty() && !l.starts_with("//") && !l.starts_with("#[") && l.ends_with(',')
+        })
+        .map(|l| l.trim_end_matches(',').to_string())
+        .collect();
+    // The parser is checked before its output is trusted: an empty or tiny
+    // parse would make the set comparison below vacuous.
+    assert!(
+        declared.len() >= 9,
+        "the enum-body parser produced {declared:?}, too small to be the real \
+         variant list -- it has stopped matching and this guard is checking \
+         nothing"
+    );
+    let rows: BTreeSet<String> = all.iter().map(|s| format!("{s:?}")).collect();
+    assert_eq!(
+        rows, declared,
+        "`all` above and `models::State`'s declared variants have diverged. \
+         The compiler forces an ARM in `wire_of` for a new variant but nothing \
+         forces a ROW here, so a variant added with a correct arm and no row \
+         would never be serde-checked -- which is exactly how a `wire_of` arm \
+         spelt TYPO_NOT_WHAT_SERDE_SAYS passed in fix round 2"
     );
     assert_eq!(
         all.len(),
         17,
-        "if the exhaustive `match` grew an arm, this array has to grow with it \
-         -- the compiler forces the arm, this forces the row"
+        "Kestra's `State.Type` has seventeen members; if this moves, the \
+         artifact moved and every table quoting seventeen moves with it"
     );
 }
 
+/// **Cross-check 2 of 2: `executor::RunState` against `models::State`** — W8
+/// Task 2 fix round 1.
+///
+/// Two state vocabularies, two independent spellings —
+/// [`RunState::wire`](egret_workflow::executor::RunState::wire) hand-written,
+/// `models::State` through `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` —
+/// and until now **nothing compared them**. W8 Task 2 reported that as a
+/// theoretical gap; it is not theoretical:
+///
+/// - it produced the `RUN_STATE` defect in Task 2's own commit, and
+/// - a second undetected instance was already in the tree —
+///   `worker/subflow.rs`'s doc asserted `State.Type.isFailed()` was
+///   `FAILED || KILLED` for several packages while `models::State::is_failed`
+///   sat five files away with the **correct** `matches!(self, Self::Failed)`.
+///   The contradiction was falsifiable without decompiling anything, and
+///   nothing went red.
+///
+/// Three properties, each two-sided:
+///
+/// 1. every `RunState` variant's wire spelling is a `models::State` that
+///    round-trips to the same string;
+/// 2. `RunState::is_terminal` and `models::State::is_terminated` agree on every
+///    shared member — **both ways**, so neither a widened nor a narrowed
+///    `is_terminal` survives;
+/// 3. the variants `models::State` has and `RunState` does not are exactly the
+///    ones this crate says are missing.
+///
+/// # The third claim did not hold in fix round 1, and this is what makes it hold
+///
+/// Round 1 said *"a variant added to one and forgotten in the other fails
+/// here"*. **For `models::State` that was false**: adding an 18th variant
+/// survived the whole lib + executor suite, because `State` has no `ALL` and no
+/// exhaustive `match` anywhere, so the seventeen names below were a list the
+/// test carried rather than a list the type forced.
+///
+/// [`every_models_state_variant_is_accounted_for`] is the missing half. **This
+/// test still does not cover that direction and no longer claims to**: its
+/// `all_seventeen` is a literal, so an 18th `models::State` variant is
+/// invisible here, and the round-1 sentence saying it *"moves the list above"*
+/// was measured false — the test reports `ok`.
+///
+/// **This is the shape refused for M10, and refusing it took two more rounds
+/// than it should have.** Round 1 shipped a guard whose stated scope exceeded
+/// its reach; round 2's replacement did it again one level down — the compiler
+/// forced the arm, nothing forced the row, and a deliberately mis-spelt arm
+/// passed. Each claim here is now written against the mechanism that actually
+/// enforces it, with the direction it cannot see named beside it.
 #[test]
 fn the_two_state_vocabularies_agree() {
     use egret_workflow::models::State;
@@ -3322,8 +3390,11 @@ fn the_two_state_vocabularies_agree() {
         "the six of Kestra's seventeen that `RunState` does not hold. Two of \
          them -- WARNING and CANCELLED -- are the golden's remaining \
          unrepresentable pair; the other four never appear in it at all. \
-         Adding a variant to `RunState` moves this set, and adding one to \
-         `models::State` without adding it here moves the list above"
+         Adding a variant to `RunState` moves this set. It does NOT move when \
+         `models::State` gains one: `all_seventeen` above is a literal this \
+         test carries, so an 18th variant is invisible here and is caught by \
+         `every_models_state_variant_is_accounted_for` instead -- the claim \
+         that it moved `the list above` was measured false in fix round 2"
     );
     assert_eq!(
         held.len() + missing.len(),
