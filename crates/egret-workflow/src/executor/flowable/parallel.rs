@@ -253,18 +253,39 @@ pub(crate) fn drive_concurrent(
             // its bound has elapsed. Without this arm a `Pause` inside a
             // `Parallel` or a `Dag` pauses and is never asked again.
             //
-            // **No corpus flow reaches it** -- the corpus `Pause`es that sit
-            // under a `Parallel`, a `Dag` or a `Loop` are all unbounded and
-            // none is in `golden.json`
+            // **W8 Task 4 fix round 1 added the `LoopUntil` half, and shipping
+            // without it was this package's one Critical.** The guard was
+            // keyed on `TaskKind::Pause`, so a `PAUSED` `LoopUntil` fell to
+            // `_ => continue` and stalled at `CREATED RUNNING PAUSED` for ever
+            // -- under a `Dag` as well, because `Dag` drives through this same
+            // function. **The guard is keyed on the KIND and the hazard is a
+            // new STATE**, which is why a sweep over "what reads `RunState`"
+            // and a sweep over "what the new variant reaches" both walk past
+            // it; `a_loop_until_inside_a_parallel_or_a_dag_iterates_like_one_
+            // inside_a_sequential` drives all three containers with one word
+            // different, and the `Sequential` row is the control that passed
+            // throughout.
+            //
+            // **No corpus flow reaches the `Pause` half** -- the corpus
+            // `Pause`es that sit under a `Parallel`, a `Dag` or a `Loop` are
+            // all unbounded and none is in `golden.json`
             // (`the_corpus_pauses_that_sit_inside_another_flowable_are_named`).
-            // It is here rather than left out because the alternative is not "a
-            // guard nobody sees fail" but a stall, and
-            // `two_pauses_in_one_parallel_resume_independently` drives it.
-            Some(RunState::Paused)
-                if matches!(plan.tasks[task].kind, crate::executor::plan::TaskKind::Pause { .. }) =>
-            {
-                super::pause::resume(plan, state, ix, task, now)
-            }
+            // **Nor does any reach the `LoopUntil` half**: no corpus
+            // `LoopUntil` is nested in a `Parallel` or a `Dag` (the containment
+            // runs the other way -- `valids/loopuntil-failed-flowable` puts a
+            // `Dag` INSIDE a `LoopUntil`). Both are here because the
+            // alternative is not "a guard nobody sees fail" but a stall.
+            Some(RunState::Paused) => match plan.tasks[task].kind {
+                crate::executor::plan::TaskKind::Pause { .. } => {
+                    super::pause::resume(plan, state, ix, task, now)
+                }
+                crate::executor::plan::TaskKind::LoopUntil { .. } => {
+                    super::loop_until::resume(state, ix, now)
+                }
+                // Every other kind: `PAUSED` is somebody else's, exactly as it
+                // is in `sequential::walk`'s trailing arm.
+                _ => continue,
+            },
             _ => continue,
         };
         match step {

@@ -61,7 +61,7 @@ use crate::executor::plan::{Plan, TaskIx};
 use crate::executor::retry::parse_duration;
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::Step;
+use super::{plus, Step};
 
 /// What one `Pause` run wants, at the round it is `RUNNING`.
 ///
@@ -201,16 +201,4 @@ fn deadline(
         Some(d) => Bound::Until(plus(started, d), RunState::Failed),
         None => Bound::Unbounded,
     }
-}
-
-/// `started + d`, in [`Tick`]s.
-///
-/// Saturating rather than wrapping: `valids/pause-kill-delay` writes `PT1M` and
-/// nothing in the corpus comes near the bound, but a `P100000D` an author can
-/// write would wrap an `i64` of milliseconds into the PAST, and a deadline
-/// behind `now` is a pause that resumes itself on the round it begins — the one
-/// failure this module is written to make impossible.
-fn plus(started: Tick, d: std::time::Duration) -> Tick {
-    let millis = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
-    Tick(started.0.saturating_add(millis))
 }

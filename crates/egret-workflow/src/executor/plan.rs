@@ -1219,10 +1219,7 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                 .as_ref()
                 .map(|c| c.source().to_string())
                 .ok_or_else(|| PlanError {
-                    message: format!(
-                        "loopUntil '{}' has no condition to loop until",
-                        task.id
-                    ),
+                    message: format!("loopUntil '{}' has no condition to loop until", task.id),
                 })?;
             let cf = lu.check_frequency.as_ref();
             // No `errors:` is flattened, because W1's `models::LoopUntil`

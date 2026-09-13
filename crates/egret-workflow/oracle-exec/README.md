@@ -6554,13 +6554,23 @@ license somebody to over-claim, not because it is a new way of being blind.
 | **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
 | **an out-of-enum `behavior:`** (W8 Task 3 fix round 3) | **0 corpus flows**; measured on probes only | 0 | nothing | **No population, and the behaviour is a HANG rather than a state.** A `Pause` whose `behavior:` renders to something outside `RESUME`/`WARN`/`FAIL`/`CANCEL` -- `NOPE`, lower-case `fail`, an undefined `{{inputs.nosuch}}` -- leaves the execution `RUNNING` past 120 s, non-terminal, with the pause run still `RUNNING`. Every one of the four enum values terminates, and terminates differently (`FAILED`/1, `SUCCESS`/2, `WARNING`/2, `CANCELLED`/1). The corpus's single `Pause` `behavior:` posts `FAIL`, so nothing here can score this edge; it is listed because the sentence *"the artifact honours the value"* is true **inside the enum only**, and W8 Task 3 fix round 2 wrote it without that qualifier from a grid whose every cell was a valid constant |
 
-**W8 Task 4 found something this table does not have a shape for, and it is
-left here as a note rather than forced into a sixth row.** Every mechanism above
-is a reason the ratchet **cannot speak** for a construct — no population, no
-request, no link, no golden entry. `valids/loop-until-restart` is the opposite:
-the golden entry exists, the ratchet compares it, and **its value is a function
-of the artifact's SCHEDULER rather than of the flow**, so a correct
-implementation is baselined against it for ever. Its `LoopUntil` is bounded by
+#### A LATENCY-DEPENDENT GOLDEN — a different category, not a sixth mechanism
+
+**W8 Task 4 fix round 1 rules on this, and the ruling is sharper than the one
+the task first wrote.** Every mechanism in the table above is a reason the
+ratchet **cannot speak** for a construct: no population, no request, no link, no
+golden entry. `valids/loop-until-restart` is the opposite — **the ratchet speaks
+and is wrong.** The golden entry exists, is compared, and **its value is a
+function of the artifact's SCHEDULER rather than of the flow**, so a correct
+implementation is baselined against it for ever.
+
+Its **cause** is the fifth mechanism's — the harness compresses time — and its
+**effect is the opposite of the fifth's**: there, a flow the artifact never
+finished produced no golden entry at all and an over-acceptance was invisible in
+both directions; here a golden entry exists and **permanently cannot be
+reproduced by any implementation**. Calling it a sixth blindness would file an
+unbankable entry under "the ratchet cannot see it" and lose the only thing a
+reader can act on, which is that **there is nothing to fix**. Its `LoopUntil` is bounded by
 `maxDuration: PT3S` with `interval: PT1S`, Kestra's `reachedMaximums` compares
 the loop taskrun's creation plus the bound against `Instant.now()`, and on the
 captured round its two `PT1S` pauses took **1.17 s and 1.92 s** — so its third
@@ -6571,10 +6581,12 @@ construct and not the entry**: `valids/waitfor-max-duration`, the same shape at
 `PT5S`/`PT0.2S`, is one of only **two** corpus flows whose normalised trace
 **Kestra itself** could not reproduce across five rounds, so it has no golden
 entry at all. The finer the interval, the more of the iteration count is
-latency. Whether that is a sixth mechanism, or a second KIND of thing that needs
-a table of its own, is W8 Task 7's to rule on with the coverage statement; it is
-written down here because a finding that lives only in a task report is a
-finding that has to be rediscovered. `handler_surface.py` carries it as a
+latency. **The wording for W8 Task 7's coverage statement is therefore
+*a latency-dependent golden*, listed apart from the five blindness mechanisms
+and not among them** — the class is "entries no implementation can bank", whose
+other members are named in `baseline.txt` rather than here. It is written down
+at all because a finding that lives only in a task report is a finding that has
+to be rediscovered. `handler_surface.py` carries it as a
 `clock` blocker so the ceiling does not name the entry as bankable.
 
 **Both sides are blind, and the second half is egret's.** Even if Kestra's

@@ -103,7 +103,7 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
-use super::{aggregate, sequential, Step};
+use super::{aggregate, plus, sequential, Step};
 
 /// Which iteration a `LoopUntil` run is in — Kestra's `iterationCount`,
 /// 1-based, `0` before the loop has started.
@@ -133,11 +133,7 @@ pub fn iteration(state: &ExecutionState, run: RunIx) -> usize {
 /// aggregate — one iteration and `FAILED`, which is exactly its golden.
 /// A version that asked "are they all terminal" instead would pause and loop a
 /// failing body until its limit.
-pub(crate) fn children_executed(
-    state: &ExecutionState,
-    run: RunIx,
-    tasks: &[TaskIx],
-) -> bool {
+pub(crate) fn children_executed(state: &ExecutionState, run: RunIx, tasks: &[TaskIx]) -> bool {
     tasks.iter().all(|&task| {
         super::run_of(state, Some(run), task)
             .and_then(|ix| super::latest(state, ix))
@@ -327,13 +323,4 @@ pub fn condition_is_asked(
     };
     children_executed(state, run, tasks)
         && !reached_maximums(state, run, *max_iterations, *max_duration, now)
-}
-
-/// `at + d`, in [`Tick`]s — [`pause::plus`](super::pause)'s rule, and saturating
-/// for its reason: a `P100000D` an author can write would wrap an `i64` of
-/// milliseconds into the past, and a deadline behind `now` is a loop that never
-/// waits and a bound that fires on the round it is set.
-fn plus(at: Tick, d: std::time::Duration) -> Tick {
-    let millis = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
-    Tick(at.0.saturating_add(millis))
 }

@@ -25,6 +25,24 @@ use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
+/// `at + d`, in [`Tick`]s — the one definition, shared by
+/// [`pause`] and [`loop_until`].
+///
+/// **Saturating rather than wrapping**, and that is the whole reason it is a
+/// function: a `P100000D` an author can legally write overflows an `i64` of
+/// milliseconds into the PAST, and a deadline behind `now` is a wait that ends
+/// on the round it begins — a pause that resumes itself, or a loop that never
+/// waits and whose bound fires immediately.
+///
+/// It was written twice, byte for byte, until W8 Task 4 fix round 1. Two copies
+/// of one saturation rule are two chances for one of them to stop saturating,
+/// which is exactly the shape `retry::parse_duration`'s single-parser note
+/// records one module over.
+pub(crate) fn plus(at: Tick, d: std::time::Duration) -> Tick {
+    let millis = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    Tick(at.0.saturating_add(millis))
+}
+
 /// What one task list wants from the caller.
 ///
 /// Three answers, not two, because "nothing to emit" and "finished" are

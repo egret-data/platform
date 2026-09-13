@@ -309,7 +309,10 @@ fn pause_mark(state: &ExecutionState, work: &[Command]) -> Option<RunState> {
     // different doors and the command each emits is what separates them.
     // Reading the command rather than the run's kind keeps this function what
     // its doc says it is: a report of decisions the flowables already took.
-    if work.iter().any(|c| matches!(c, Command::RestartLoop { .. })) {
+    if work
+        .iter()
+        .any(|c| matches!(c, Command::RestartLoop { .. }))
+    {
         return Some(RunState::Running);
     }
     // "This batch ends a pause" is read as "it sets the state of a run that is
@@ -6792,11 +6795,59 @@ tasks:
         outcome: RunState,
         answers: &[&str],
     ) -> (ExecutionState, Tick, usize) {
+        run_loop_until_with_slack(plan, outcome, answers, 0)
+    }
+
+    /// [`run_loop_until`], with the driver's OWN millisecond of slack.
+    ///
+    /// **`oracle-exec/driver.rs::pass_time` does not land on a deadline, it
+    /// lands one millisecond past one** — `.bind(shortfall + 1)`, "because
+    /// `Tick` is integral milliseconds and `reopen_due`'s predicate is
+    /// `not_before <= now`, so landing exactly on the boundary would depend on
+    /// a rounding this driver does not control". Every other fixture in this
+    /// file lands exactly on it.
+    ///
+    /// For every rule in this module but one that difference is invisible,
+    /// because the comparisons are `now < at` and a deadline reached is a
+    /// deadline reached. **`maxDuration` is the exception**, because its
+    /// comparison is against a bound the pauses do not divide evenly: with
+    /// `PT3S` and `PT1S` the slack accumulates, and `created + 3000 < now` is
+    /// first true at iteration **5** on the exact clock and at iteration **4**
+    /// on the driver's. Both are this implementation; the parameter is what
+    /// lets one test say so instead of two artifacts disagreeing.
+    fn run_loop_until_with_slack(
+        plan: &Plan,
+        outcome: RunState,
+        answers: &[&str],
+        slack: i64,
+    ) -> (ExecutionState, Tick, usize) {
         let mut state = ExecutionState::new(plan);
         let mut now = T0;
         let mut asked = 0usize;
         for _ in 0..1000 {
             if !round_at(plan, &mut state, now).is_empty() {
+                continue;
+            }
+            // W3c's tier 2a, with the same identity short-circuit
+            // `run_to_fixpoint_rendering_run_if` uses: a `runIf:` with no `{{`
+            // renders to itself, which is how a literal `runIf: "false"` needs
+            // no table here. It goes FIRST, because Kestra decides a `runIf:`
+            // before it resolves anything else about the task.
+            let unrendered_run_if = (0..state.runs.len()).find(|&ix| {
+                plan.tasks[state.runs[ix].task].run_if.is_some()
+                    && state.runs[ix].history.last() == Some(&RunState::Created)
+                    && state.runs[ix].rendered_run_if.is_none()
+            });
+            if let Some(ix) = unrendered_run_if {
+                let source = plan.tasks[state.runs[ix].task]
+                    .run_if
+                    .clone()
+                    .expect("filtered on Some above");
+                assert!(
+                    !source.contains("{{"),
+                    "this fixture renders a `runIf:` only by identity; '{source}' needs a table"
+                );
+                state.runs[ix].rendered_run_if = Some(source);
                 continue;
             }
             let unrendered = (0..state.runs.len()).find(|&ix| {
@@ -6839,7 +6890,7 @@ tasks:
                 .filter(|t| *t > now)
                 .min()
             {
-                Some(next) => now = next,
+                Some(next) => now = Tick(next.0 + slack),
                 None => return (state, now, asked),
             }
         }
@@ -6889,6 +6940,154 @@ tasks:
             ["CREATED", "RUNNING", "SUCCESS"],
             "and the execution never entered PAUSED"
         );
+    }
+
+    /// **A `LoopUntil` inside a `Parallel` or a `Dag` must iterate, and until
+    /// fix round 1 it stalled at its first `PAUSED` for ever.**
+    ///
+    /// `parallel::drive_concurrent`'s `Some(PAUSED)` arm was guarded on
+    /// `TaskKind::Pause`, so a `PAUSED` `LoopUntil` fell to `_ => continue` and
+    /// nothing ever asked it whether its interval had elapsed. **`Dag` shares
+    /// `drive_concurrent`**, so it was two constructs and not one.
+    ///
+    /// This is the hazard W8's plan states in writing — *a new non-terminal
+    /// state breaks a predicate somewhere* — and the reason six enumeration
+    /// methods missed it is on the face of it: **the guard is keyed on
+    /// `TaskKind`, not on state**, so a sweep over "what reads `RunState`" and
+    /// a sweep over "what the new variant reaches" both walk past it.
+    ///
+    /// **The `Sequential` row is the control**, and it is not decoration: it is
+    /// the same loop, the same bounds and the same fixture, one word different,
+    /// and it passed throughout. Without it this test would also pass against a
+    /// build where nothing iterates at all.
+    #[test]
+    fn a_loop_until_inside_a_parallel_or_a_dag_iterates_like_one_inside_a_sequential() {
+        // Written out per container rather than assembled, because the one
+        // shape difference -- a `Dag` nests its children under `- task:` --
+        // is exactly the kind of thing a clever re-indent gets wrong while
+        // still producing a flow that parses into something ELSE.
+        let seq = "id: lu\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+             type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      - id: loop\n        \
+             type: io.kestra.plugin.core.flow.LoopUntil\n        condition: \"{{ done }}\"\n        \
+             checkFrequency:\n          interval: PT1S\n          maxIterations: 2\n        \
+             tasks:\n          - id: body\n            \
+             type: io.kestra.plugin.core.debug.Return\n            format: x\n";
+        let par = seq.replace("flow.Sequential", "flow.Parallel");
+        let dag = "id: lu\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+             type: io.kestra.plugin.core.flow.Dag\n    tasks:\n      - task:\n          \
+             id: loop\n          type: io.kestra.plugin.core.flow.LoopUntil\n          \
+             condition: \"{{ done }}\"\n          checkFrequency:\n            \
+             interval: PT1S\n            maxIterations: 2\n          tasks:\n            \
+             - id: body\n              type: io.kestra.plugin.core.debug.Return\n              \
+             format: x\n";
+
+        for (label, src) in [
+            ("Sequential", seq.to_string()),
+            ("Parallel", par),
+            ("Dag", dag.to_string()),
+        ] {
+            let plan = build_plan(&src).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let (state, now, asked) = run_loop_until(&plan, RunState::Success, &["false"]);
+            let loop_run = (0..state.runs.len())
+                .find(|&ix| {
+                    matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::LoopUntil { .. }
+                    )
+                })
+                .unwrap_or_else(|| panic!("{label}: no LoopUntil run"));
+            assert_eq!(
+                wire(&state.runs[loop_run].history),
+                ["CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+                "{label}: three iterations under `maxIterations: 2`, exactly as the \
+                 `Sequential` control. A guard keyed on `TaskKind::Pause` leaves this \
+                 at `CREATED RUNNING PAUSED` for ever"
+            );
+            assert_eq!(now, Tick(2000), "{label}: two pauses of PT1S");
+            assert_eq!(asked, 2, "{label}");
+        }
+    }
+
+    /// **A `LoopUntil` with no `checkFrequency.interval:` waits Kestra's
+    /// `@Builder.Default` of ONE MINUTE**, and nothing else in this crate can
+    /// say so.
+    ///
+    /// `CheckFrequency.interval` is `@NotNull @Builder.Default
+    /// Property.ofValue(Duration.ofMinutes(1))` — a bean default rather than a
+    /// parse rule, so an absent key is `None` in `models` and becomes
+    /// [`DEFAULT_CHECK_INTERVAL`](crate::executor::plan) in `build_plan`.
+    ///
+    /// **Every one of the ten corpus flows of this construct writes an
+    /// `interval:`**, so the default is unreachable from the corpus and every
+    /// other fixture in this file supplies one too — which is the operand hole
+    /// fix round 1 closes: the two-sided pairs on the truthiness operator, and
+    /// the pause-timing assertions built on `PT1S`, all say where the deadline
+    /// is COMPUTED and nothing about where the interval came FROM. Mutating the
+    /// constant to 7 s survived the whole suite.
+    #[test]
+    fn a_loop_until_with_no_interval_waits_kestras_default_minute() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      maxIterations: 1\n",
+            ONE_RETURN,
+        ))
+        .expect("it plans");
+        let (state, now, _) = run_loop_until(&plan, RunState::Success, &["false"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+            "two iterations under `maxIterations: 1`"
+        );
+        assert_eq!(
+            now,
+            Tick(60_000),
+            "and the ONE pause between them is `PT1M` — Kestra's `CheckFrequency` \
+             default, not this executor's invention"
+        );
+    }
+
+    /// **A `SKIPPED` child still counts as executed**, so a loop whose body was
+    /// skipped by a falsy `runIf:` asks its condition and iterates.
+    ///
+    /// Kestra's `childTaskRunExecuted` filters on `isTerminatedNoFail()`, which
+    /// is `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`
+    /// (`State.java:292`) — **`SKIPPED` is in it**, and of that set `RunState`
+    /// can hold `SUCCESS`, `RETRIED` and `SKIPPED`.
+    ///
+    /// **This is the discriminating row for a rule nothing else in this file
+    /// could tell apart.** `a_failed_body_ends_a_loop_until_without_asking_the_
+    /// condition` rules out the WIDER reading (`is_terminated()`, which would
+    /// loop a failing body to its limit) and every other fixture here supplies
+    /// a `SUCCESS` child — so the NARROWER reading, `matches!(s, Success)`,
+    /// agreed with all of them. Mutating to it survived the whole suite until
+    /// this test existed, and it is production-reachable rather than
+    /// hypothetical: a falsy `runIf:` on a loop's child is the shape, and W3c
+    /// already ships `runIf:`.
+    #[test]
+    fn a_skipped_child_still_counts_as_executed_and_the_loop_iterates() {
+        let plan = build_plan(&loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 2\n",
+            "      - id: body\n        type: io.kestra.plugin.core.debug.Return\n        \
+             format: x\n        runIf: \"false\"\n",
+        ))
+        .expect("it plans");
+        let (state, now, asked) = run_loop_until(&plan, RunState::Success, &["false"]);
+        assert_eq!(
+            wire(&state.runs[1].history),
+            ["CREATED", "SKIPPED"],
+            "the body is skipped, with no attempt of its own — W3c's shape"
+        );
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"],
+            "and the loop still runs its three iterations: `SKIPPED` is \
+             `isTerminatedNoFail`, so `childTaskRunExecuted` is satisfied"
+        );
+        assert_eq!(
+            asked, 2,
+            "the condition is asked on every iteration but the last"
+        );
+        assert_eq!(now, Tick(2000));
     }
 
     /// **A falsy condition pauses for `interval` and starts the body again**,
@@ -7048,11 +7247,40 @@ tasks:
                 "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
                 "RUNNING", "PAUSED", "RUNNING", "FAILED"
             ],
-            "FIVE iterations: the bound is `created + PT3S < now`, strictly, so the \
-             iteration that ends AT T+3000 has not reached it and the one at T+4000 \
-             is the first that has. A `<=` reading stops one earlier"
+            "FIVE iterations on a clock that lands exactly on each deadline: the \
+             bound is `created + PT3S < now`, strictly, so the iteration that ends \
+             AT T+3000 has not reached it and the one at T+4000 is the first that \
+             has. A `<=` reading stops one earlier"
         );
         assert_eq!(now, Tick(4000), "four pauses of PT1S");
+
+        // **And FOUR on the driver's clock, which is the number
+        // `valids/loop-until-restart` is baselined at.** Same bounds, same
+        // condition, one millisecond of slack per pause -- `pass_time` binds
+        // `shortfall + 1`. The slack accumulates against a bound the interval
+        // does not divide evenly, so `created + 3000 < now` is first true at
+        // T+3003 instead of T+4000.
+        //
+        // **This assertion exists because two of this task's own artifacts
+        // disagreed about that number and nothing in the repo adjudicated
+        // it**: the ratchet prints traces and not counts, so "four" and "five"
+        // could both be written down and neither be checked. They are both
+        // this implementation, on two clocks, and now one test says so.
+        let (driver, now, _) = run_loop_until_with_slack(&plan, RunState::Success, &["false"], 1);
+        assert_eq!(
+            wire(&driver.runs[0].history),
+            [
+                "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
+                "RUNNING", "FAILED"
+            ],
+            "FOUR iterations on `pass_time`'s clock -- the trace the ratchet compares \
+             against `valids/loop-until-restart`'s golden of three"
+        );
+        assert_eq!(
+            now,
+            Tick(3003),
+            "three pauses of PT1S, each one millisecond long"
+        );
     }
 
     /// **A loop with no maximum and a falsy condition never stops**, which is
@@ -7373,7 +7601,9 @@ tasks:
             let mut i = 0;
             while let Some(open) = src[i..].find("{{") {
                 let start = i + open + 2;
-                let Some(len) = src[start..].find("}}") else { break };
+                let Some(len) = src[start..].find("}}") else {
+                    break;
+                };
                 let region = &src[start..start + len];
                 let mut j = 0;
                 let rb = region.as_bytes();
@@ -7433,11 +7663,7 @@ tasks:
             "outputs",
             serde_json::json!({"loop": {"iterationCount": 1}}),
         );
-        let rendered = crate::render_str(
-            "{{ outputs.loop.iterationCount < \"5\" }}",
-            &cx,
-        )
-        .expect(
+        let rendered = crate::render_str("{{ outputs.loop.iterationCount < \"5\" }}", &cx).expect(
             "egret's renderer ANSWERS this, and the artifact throws -- if this \
              becomes an error, `valids/loopuntil-failed-flowable` is bankable and \
              `oracle-exec/baseline.txt` says so",
@@ -7509,11 +7735,14 @@ tasks:
                     with_retry.push(format!("{id}:{task_id} (flow-level retry:)"));
                 }
             }
-            fn walk(task: &crate::models::Task, under_retry: bool, id: &str, out: &mut Vec<String>) {
+            fn walk(
+                task: &crate::models::Task,
+                under_retry: bool,
+                id: &str,
+                out: &mut Vec<String>,
+            ) {
                 let under = under_retry || task.retry.is_some();
-                if under
-                    && matches!(task.kind, crate::models::TaskKind::LoopUntil(_))
-                {
+                if under && matches!(task.kind, crate::models::TaskKind::LoopUntil(_)) {
                     out.push(format!("{id}:{} (task-level retry:)", task.id));
                 }
                 for child in task.children().into_iter().chain(task.error_children()) {
@@ -7532,9 +7761,7 @@ tasks:
     }
 
     /// Every `LoopUntil`/`WaitFor` in a flow, at any depth, with its task id.
-    fn corpus_loop_untils(
-        flow: &crate::models::Flow,
-    ) -> Vec<(String, &crate::models::LoopUntil)> {
+    fn corpus_loop_untils(flow: &crate::models::Flow) -> Vec<(String, &crate::models::LoopUntil)> {
         fn walk<'a>(
             task: &'a crate::models::Task,
             out: &mut Vec<(String, &'a crate::models::LoopUntil)>,
