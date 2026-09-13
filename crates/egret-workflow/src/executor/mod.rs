@@ -5116,6 +5116,180 @@ tasks:
         .expect("the probe plans")
     }
 
+    // ----------------------------------------------------------------------
+    // W8 Task 5: `allowFailure:` / `allowWarning:` are read off the TASK
+    // ----------------------------------------------------------------------
+
+    /// A softened flowable FIRST and an unsoftened one after it, so
+    /// `plan.tasks[0]` and `plan.tasks[task]` disagree.
+    const TWO_BLOCKS: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: soft
+    type: io.kestra.plugin.core.flow.Sequential
+    allowFailure: true
+    tasks:
+      - id: a
+        type: io.kestra.plugin.core.execution.Fail
+  - id: plain
+    type: io.kestra.plugin.core.flow.Sequential
+    tasks:
+      - id: b
+        type: io.kestra.plugin.core.execution.Fail
+"#;
+
+    /// [`TWO_BLOCKS`] without the unsoftened half — the control for what the
+    /// EXECUTION does when its only failure is softened.
+    const ONE_SOFT_BLOCK: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: soft
+    type: io.kestra.plugin.core.flow.Sequential
+    allowFailure: true
+    tasks:
+      - id: a
+        type: io.kestra.plugin.core.execution.Fail
+"#;
+
+    /// [`ONE_SOFT_BLOCK`] with the OTHER flag — `allowWarning:` and no
+    /// `allowFailure:`, the combination no corpus flow writes.
+    const WARN_ONLY_BLOCK: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: soft
+    type: io.kestra.plugin.core.flow.Sequential
+    allowWarning: true
+    tasks:
+      - id: a
+        type: io.kestra.plugin.core.execution.Fail
+"#;
+
+    /// The run history of the task with this id, by name rather than by index.
+    fn history_of(plan: &Plan, state: &ExecutionState, id: &str) -> Vec<&'static str> {
+        let ix = plan
+            .tasks
+            .iter()
+            .position(|t| t.id == id)
+            .unwrap_or_else(|| panic!("{id} is in the plan"));
+        state
+            .runs
+            .iter()
+            .find(|r| r.task == ix)
+            .map(|r| wire(&r.history))
+            .unwrap_or_else(|| panic!("{id} has a run"))
+    }
+
+    /// **Two flowables in one flow, one carrying `allowFailure: true` and one
+    /// carrying nothing, both failing** — the row that says the flags are read
+    /// off the task being terminated rather than off anything else.
+    ///
+    /// # Why this fixture exists, measured rather than argued
+    ///
+    /// Every corpus flow that declares an `allowFailure:` on a flowable
+    /// declares it on the flow's **first** task, so `plan.tasks[task]` and
+    /// `plan.tasks[0]` are the same expression on all of them. Mutation M7 —
+    /// `let t = &plan.tasks[0];` in [`flowable::descend`] — therefore **survived
+    /// the whole crate suite, 843 lib + 54 oracle tests at 0 failures, with the
+    /// ratchet green and unmoved at 111**. That is the operand rule this
+    /// package keeps paying for: *a two-sided mutation pair on an OPERATOR says
+    /// nothing about where the OPERAND came from*, and the seven ratchet
+    /// entries that pin this mapping pin the operator only.
+    ///
+    /// The competing rules, named before the rows: **(a)** the flags come from
+    /// the task whose run is being terminated; **(b)** they come from the
+    /// flow's first task; **(c)** they are a property of the flow. `soft` and
+    /// `plain` below disagree under (a) and agree under both (b) and (c), and
+    /// they are in this ORDER on purpose — with `soft` first, (b) and (c) both
+    /// soften `plain` too, so one assertion separates (a) from both.
+    ///
+    /// # What else it pins
+    ///
+    /// **A `WARNING` sibling does not stop a `Sequential`.** `soft` ends
+    /// `WARNING` and `plain` is created and driven anyway, which is
+    /// [`current_list`](flowable::current_list)'s rule (`Current::Tasks` unless
+    /// a child is `Failed`) and `State.Type.isFailed()` being `this == FAILED`
+    /// alone. Had `WARNING` counted as a failure the walk would have stopped at
+    /// `soft` and this test would see one flowable run where it sees two.
+    #[test]
+    fn the_allow_flags_are_read_off_the_task_being_terminated() {
+        let plan = build_plan(TWO_BLOCKS).expect("the probe plans");
+        let state = run_to_fixpoint(&plan, RunState::Failed);
+        assert_eq!(
+            (
+                history_of(&plan, &state, "soft"),
+                history_of(&plan, &state, "a")
+            ),
+            (
+                vec!["CREATED", "RUNNING", "WARNING"],
+                vec!["CREATED", "SUBMITTED", "RUNNING", "FAILED"]
+            ),
+            "the flowable that WROTE `allowFailure: true` is softened, and its \
+             child -- which wrote nothing -- is not. The child is the second \
+             half on purpose: a rule that softened the whole subtree would move \
+             it too"
+        );
+        assert_eq!(
+            (
+                history_of(&plan, &state, "plain"),
+                history_of(&plan, &state, "b")
+            ),
+            (
+                vec!["CREATED", "RUNNING", "FAILED"],
+                vec!["CREATED", "SUBMITTED", "RUNNING", "FAILED"]
+            ),
+            "and the flowable that wrote NOTHING ends FAILED, though the flow's \
+             first task wrote `allowFailure: true`. This is the assertion \
+             mutation M7 dies on"
+        );
+        assert_eq!(
+            wire(&state.history).last().copied(),
+            Some("FAILED"),
+            "the execution aggregates KILLED > FAILED > WARNING, so one \
+             softened child beside one unsoftened one is FAILED -- the control \
+             for the test below, where the only failure IS softened"
+        );
+    }
+
+    /// The control the test above needs: with the unsoftened flowable removed,
+    /// the execution really does take `WARNING`.
+    ///
+    /// **Without it, `FAILED` above is ambiguous** — it is the right answer for
+    /// an [`flowable::aggregate`] that ranks `Warning` correctly AND for one
+    /// that ignores `Warning` entirely, because `plain`'s `FAILED` dominates
+    /// either way.
+    #[test]
+    fn an_execution_whose_only_failure_is_softened_ends_warning() {
+        let plan = build_plan(ONE_SOFT_BLOCK).expect("the probe plans");
+        let state = run_to_fixpoint(&plan, RunState::Failed);
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "WARNING"],
+            "one softened failure and nothing else"
+        );
+    }
+
+    /// `allowWarning:` **alone** changes nothing, at the flowable site as at
+    /// every other — `State$Type.fail`'s bytecode does not read
+    /// `isAllowWarning()` when `isAllowFailure()` is false (`ifeq 26` at offset
+    /// 4), and spelling B's first `if` is predicated on `allowFailure` too.
+    ///
+    /// **No corpus flow writes it**: all three `allowWarning:` declarers write
+    /// `allowFailure: true` beside it, so the ratchet cannot score this row and
+    /// this assertion is its whole instrument. It is also what makes
+    /// `the_allow_flags_are_read_off_the_task_being_terminated` mean what it
+    /// says — without it, an implementation that read `allow_warning` where it
+    /// should read `allow_failure` would pass everything above.
+    #[test]
+    fn allow_warning_alone_softens_nothing() {
+        let plan = build_plan(WARN_ONLY_BLOCK).expect("the probe plans");
+        let state = run_to_fixpoint(&plan, RunState::Failed);
+        assert_eq!(
+            wire(&state.history),
+            ["CREATED", "RUNNING", "FAILED"],
+            "`allowWarning: true` with no `allowFailure:` leaves a FAILED alone"
+        );
+    }
+
     /// **A falsy `runIf:` creates the run and then does not execute it**, which
     /// is the whole of W3c and is *not* what `disabled:` does.
     ///
@@ -7371,13 +7545,49 @@ tasks:
         // condition and iterates to its limit. `SKIPPED` is
         // `a_skipped_child_still_counts_as_executed_and_the_loop_iterates`,
         // which needs a `runIf:` and so has a fixture of its own.
-        for go in [RunState::Success, RunState::Retried] {
+        // **`Warning` is the sixth row, added by W8 Task 5**, which is what
+        // `children_executed`'s doc asks for by name: *"Re-run
+        // `the_five_terminals_split_...` with the new variant as a sixth row --
+        // a fixture answers only the question it was built for, and this one
+        // was built for five."* It is `isTerminatedNoFail`'s FIRST member on
+        // the artifact, so a `WARNING` child must let the loop through.
+        //
+        // **It is the whole instrument for that arm.** Adding `RunState::Warning`
+        // to the `!matches!` exclusion below survives the entire workspace
+        // suite otherwise -- measured, mutation M11 -- because the one corpus
+        // flow that reaches it, `valids/waitfor-child-task-warning`, is
+        // baselined on an `OutputValues` child no handler exists for and so
+        // mismatches whatever this predicate answers.
+        for go in [RunState::Success, RunState::Retried, RunState::Warning] {
             let (state, now, asked) = run_loop_until(&plan, go, &["false"]);
             assert_eq!(
                 wire(&state.runs[0].history),
                 [
-                    "CREATED", "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "PAUSED",
-                    "RUNNING", "PAUSED", "RUNNING", "PAUSED", "RUNNING", "SUCCESS"
+                    "CREATED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RUNNING",
+                    "PAUSED",
+                    "RUNNING",
+                    // **The loop's OWN terminal is its children's aggregate**,
+                    // so a `WARNING` body ends the loop `WARNING` where a
+                    // `RETRIED` one ends it `SUCCESS`: `guessFinalState` ranks
+                    // `WARNING` and has no arm for `RETRIED` at all. Writing
+                    // `SUCCESS` on all three rows would have been a fixture
+                    // that could not tell those two apart -- and it would have
+                    // had to, since W8 Task 5 is the commit that gave
+                    // `aggregate` a `Warning` rank.
+                    if go == RunState::Warning {
+                        "WARNING"
+                    } else {
+                        "SUCCESS"
+                    }
                 ],
                 "{go:?} is `isTerminatedNoFail`, so the loop iterates to \
                  `iterationCount > maxIterations` — six iterations under a limit of \
