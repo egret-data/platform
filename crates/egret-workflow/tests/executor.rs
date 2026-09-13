@@ -3229,21 +3229,51 @@ fn every_models_state_variant_is_accounted_for() {
         .split_once("\n}")
         .expect("the enum body must be brace-terminated")
         .0;
-    let declared: BTreeSet<String> = body
+    // **Every content line, not every line that ends in a comma** -- fix round
+    // 4. The first version of this filter required `l.ends_with(',')`, and
+    // Rust does not require a trailing comma on the LAST variant. So
+    // `Invented` appended with no comma was dropped by the parser, `declared`
+    // stayed at seventeen, and round 2's exact escape came back: arm forced,
+    // row absent, spelling unchecked, everything green. Trailing punctuation
+    // is now stripped instead of required.
+    let content: Vec<&str> = body
         .lines()
         .map(str::trim)
-        .filter(|l| {
-            !l.is_empty() && !l.starts_with("//") && !l.starts_with("#[") && l.ends_with(',')
-        })
-        .map(|l| l.trim_end_matches(',').to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("#["))
         .collect();
-    // The parser is checked before its output is trusted: an empty or tiny
-    // parse would make the set comparison below vacuous.
+    let declared: BTreeSet<String> = content
+        .iter()
+        .map(|l| l.trim_end_matches(',').trim().to_string())
+        .collect();
+
+    // **The parser is checked as a SET, not against a floor** -- fix round 4.
+    // `declared.len() >= 9` was the wrong shape twice over: seventeen variants
+    // minus one is still nine, so it structurally could not see a *dropped*
+    // variant, and dropping is the **acquitting** direction -- the only one
+    // that matters. What is asserted instead is that the parse is TOTAL: every
+    // content line in the enum body yielded exactly one variant. A line the
+    // filter silently skips makes these two disagree.
+    assert_eq!(
+        declared.len(),
+        content.len(),
+        "the enum-body parser yielded {} name(s) from {} content line(s), so it \\
+         skipped or merged at least one. Lines: {content:?}. Parsed: \\
+         {declared:?}",
+        declared.len(),
+        content.len()
+    );
+    let malformed: Vec<&String> = declared
+        .iter()
+        .filter(|v| {
+            !v.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
     assert!(
-        declared.len() >= 9,
-        "the enum-body parser produced {declared:?}, too small to be the real \
-         variant list -- it has stopped matching and this guard is checking \
-         nothing"
+        malformed.is_empty(),
+        "the enum-body parser produced {malformed:?}, which are not Rust \\
+         variant names -- it is matching something other than the enum body \\
+         and this guard is checking nothing"
     );
     let rows: BTreeSet<String> = all.iter().map(|s| format!("{s:?}")).collect();
     assert_eq!(
@@ -3346,8 +3376,16 @@ fn the_two_state_vocabularies_agree() {
     }
 
     // 3. What models::State has and RunState does not, named rather than
-    //    counted -- and asserted as a SET, so gaining a variant on either side
-    //    without the other fails here.
+    //    counted.
+    //
+    //    **It is NOT symmetric, and the claim that it was is withdrawn** --
+    //    fix round 4, the third instance of a correction made where it was
+    //    found and left standing everywhere else. `all_seventeen` below is a
+    //    literal this test carries: gaining a variant on the `RunState` side
+    //    moves `held` and fails here, and gaining one on the `models::State`
+    //    side moves NOTHING here. That direction is
+    //    `every_models_state_variant_is_accounted_for`'s, and only since fix
+    //    round 3.
     let all_seventeen = [
         "CREATED",
         "SUBMITTED",
