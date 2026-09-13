@@ -7441,8 +7441,25 @@ tasks:
         assert_eq!(
             now,
             Tick(3003),
-            "three pauses of PT1S, each one millisecond long"
+            "three pauses of PT1S, each one millisecond long. **This pins the \
+             driver's synthetic constant, not the mechanism**, and the caveat is \
+             worth more than the number: the real `pass_time` lands at LEAST a \
+             millisecond late, because its `now` is wall-derived and the DB work \
+             between two settles takes real time. `slack: 1` is the floor of \
+             that, which is the version of the clock a pure fixture can \
+             reproduce"
         );
+        // **And the bound on how much any of it matters, measured rather than
+        // assumed** (W8 Task 4 fix round 2, carried forward from the review):
+        // dropping `pass_time`'s `+ 1` entirely leaves the ratchet at
+        // **118 / 118 / 0 broken**. *No golden entry's verdict depends on the
+        // millisecond.* The shapes at risk were enumerated rather than sampled
+        // -- `valids/loop-until-restart` and `valids/waitfor-child-task-warning`
+        // (a `maxDuration` the interval does not divide evenly) and the banked
+        // `valids/retry-new-execution-{flow,task}-duration` (a `RetryPolicy`
+        // `maxDuration` against an accumulating origin) -- and not one flips.
+        // So the four-versus-five split this test records is a property of the
+        // DRIVER's arithmetic and not of anything the oracle scores.
     }
 
     /// **A loop with no maximum and a falsy condition never stops**, which is
