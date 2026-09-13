@@ -1,0 +1,53 @@
+-- Workflow W8 Task 4 fix round 3: **the stall was not removed, it MOVED.**
+--
+-- Fix round 2 made "a paused run that nothing will ever resume" unrepresentable
+-- in the type system: `Command::PauseRun` cannot be constructed without a
+-- `Resume`, so `executor::flowable::resume_paused`'s `None` arm is unreachable
+-- through `advance()`. That argument covers exactly one of the two ways a
+-- `TaskRun` is built. The other is `worker::claim`, which reads the row back
+-- out of THIS table -- and migration 0141 left `resume_with` nullable with two
+-- CHECKs that are both predicated on `resume_with` itself:
+--
+--     resume_with IS NULL OR resume_with IN (...)          -- the vocabulary
+--     resume_with IS NULL OR (... AND not_before_ms ...)   -- the pairing
+--
+-- **Both are vacuously true when the column is NULL**, so
+-- `state = 'PAUSED' AND resume_with IS NULL` was a row Postgres accepted.
+-- `parse_resume` maps it to `None`, `resume_paused` returns `Step::Waiting`,
+-- and the run never leaves `PAUSED` -- **byte for byte the stall fix round 2
+-- deleted, re-entered through storage instead of through a missing
+-- `TaskKind` list arm.** The type system closed the writer; nothing closed the
+-- reader.
+--
+-- # Why it was invisible, and why "unreachable" was the wrong word
+--
+-- No merged code has ever written a `PAUSED` row: `TaskKind::Pause` became
+-- plan-visible at `b7ba1f60`, which is branch-only. **That is a fact about the
+-- branch, not about the schema.** The moment this branch merges, the producer
+-- ships and the accepting shape is one truncated write, one hand-edited row or
+-- one future `Command` away. A constraint is the only thing that makes it a
+-- fact about the schema.
+--
+-- # The state IS readable from a CHECK -- it is not only in `history`
+--
+-- `task_runs.history` is `jsonb` and a CHECK over it would be a poor instrument.
+-- It is not needed: migration 0134 also gives this table `state text NOT NULL`,
+-- the run's CURRENT state as a scalar, written on every INSERT and on every
+-- UPDATE in `claim::settle` from the same `RunState::wire()` that produces
+-- `'PAUSED'`. So this constraint reads an ordinary column, and the hole is
+-- closed **in the schema** rather than guarded at the read.
+--
+-- # One-way, and that direction is measured rather than cautious
+--
+-- The converse -- `resume_with IS NOT NULL` implies `state = 'PAUSED'` -- is
+-- FALSE against live behaviour and is deliberately not written here.
+-- `Command::SetRunState` moves a bounded pause to its terminal without
+-- clearing `resume_with` (only `Command::RestartLoop` clears it), so
+-- `state = 'SUCCESS'` beside `resume_with = 'TERMINAL:SUCCESS'` is the
+-- ordinary resting shape of every `valids/pause-delay`-like run. Writing the
+-- biconditional refuses that row and fails the gate; the mutation that does so
+-- is MD1 in the round's report.
+ALTER TABLE workflow.task_runs
+  ADD CONSTRAINT workflow_task_runs_paused_names_its_resumer CHECK (
+    state <> 'PAUSED' OR resume_with IS NOT NULL
+  );

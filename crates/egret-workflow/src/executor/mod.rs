@@ -7028,6 +7028,150 @@ tasks:
         }
     }
 
+    /// **Every `PAUSED` run carries the [`Resume`] that will end it** — the
+    /// invariant [`flowable::resume_paused`](crate::executor::flowable) cites
+    /// by name and which, until fix round 3, **did not exist**.
+    ///
+    /// `resume_paused`'s doc said of its `None` arm: *"`Waiting` on `None` is
+    /// unreachable rather than defensive … `every_paused_run_names_its_resumer`
+    /// is what keeps it unreachable."* No test of that name had been written —
+    /// the arm that stalls a run for ever was defended by a **citation** rather
+    /// than by a program, which is the same class as a stale figure and harder
+    /// to see, because a name that reads like a test is indistinguishable from
+    /// one until it is searched for. This is that program.
+    ///
+    /// **The observation count is asserted per shape, and that is the point.**
+    /// An invariant driven over fixtures that never pause holds *vacuously*, so
+    /// a driver that broke would pass this silently. Each shape must be seen to
+    /// reach `PAUSED` at least once, or the harness failed rather than the
+    /// invariant held.
+    ///
+    /// It is checked after **every** round and not on the final state:
+    /// [`Command::RestartLoop`] clears `resume_with` in the same batch it
+    /// pushes `RUNNING`, so an iterating `LoopUntil` is never `PAUSED` at a
+    /// fixed point and a final-state check would observe nothing at all.
+    ///
+    /// The mutation is **MH1** — [`Command::PauseRun`] storing `None` instead
+    /// of the [`Resume`] it was handed, which is precisely the row migration
+    /// 0142 refuses at the other end of the round trip.
+    #[test]
+    fn every_paused_run_names_its_resumer() {
+        /// The invariant itself, returning how many `PAUSED` runs it saw so the
+        /// caller can refuse a vacuous pass.
+        fn observe(label: &str, plan: &Plan, state: &ExecutionState) -> usize {
+            let mut seen = 0;
+            for ix in 0..state.runs.len() {
+                if state.runs[ix].history.last() == Some(&RunState::Paused) {
+                    seen += 1;
+                    assert!(
+                        state.runs[ix].resume_with.is_some(),
+                        "{label}: run {ix} ('{}') is PAUSED naming no resumer — \
+                         `flowable::resume_paused` answers `Waiting` to this run for \
+                         ever, which is byte for byte the stall fix round 2 deleted",
+                        plan.tasks[state.runs[ix].task].id
+                    );
+                }
+            }
+            seen
+        }
+
+        let under_parallel = "id: lu\nnamespace: io.kestra.tests\ntasks:\n  - id: outer\n    \
+             type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: loop\n        \
+             type: io.kestra.plugin.core.flow.LoopUntil\n        condition: \"{{ done }}\"\n        \
+             checkFrequency:\n          interval: PT1S\n          maxIterations: 3\n        \
+             tasks:\n          - id: body\n            \
+             type: io.kestra.plugin.core.debug.Return\n            format: x\n";
+        let loop_props = "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+                          interval: PT1S\n      maxIterations: 3\n";
+
+        // **All four producers of `PAUSED`, not one.** `Resume` has three
+        // variants and each is reached by a different construct: `Terminal`
+        // twice (the two bounds choose different terminals), `Never` once, and
+        // `Iterate` from the loop — under both walks, because `sequential::walk`
+        // and `parallel::drive_concurrent` reach `resume_paused` separately.
+        let shapes = [
+            (
+                "a Pause bounded by pauseDuration",
+                pause_flow("    pauseDuration: PT1S\n"),
+            ),
+            ("a Pause bounded by timeout", pause_flow("    timeout: PT1S\n")),
+            ("an unbounded Pause", pause_flow("")),
+            (
+                "a LoopUntil under a Sequential",
+                loop_until_flow(loop_props, ONE_RETURN),
+            ),
+            ("a LoopUntil under a Parallel", under_parallel.to_string()),
+        ];
+
+        for (label, src) in &shapes {
+            let plan = build_plan(src).unwrap_or_else(|e| panic!("{label}: {e}"));
+            let mut state = ExecutionState::new(&plan);
+            let mut now = T0;
+            let mut seen = 0usize;
+            for _ in 0..1000 {
+                seen += observe(label, &plan, &state);
+                if !round_at(&plan, &mut state, now).is_empty() {
+                    continue;
+                }
+                let unrendered = (0..state.runs.len()).find(|&ix| {
+                    state.runs[ix].history.last() == Some(&RunState::Running)
+                        && state.runs[ix].rendered.is_none()
+                        && crate::executor::loop_condition_is_asked(
+                            &plan,
+                            &state,
+                            ix,
+                            state.runs[ix].task,
+                            now,
+                        )
+                });
+                if let Some(ix) = unrendered {
+                    // Always falsy: this fixture wants the loop to ITERATE, and
+                    // a loop that stops on its first answer never pauses.
+                    state.runs[ix].rendered = Some("false".to_string());
+                    continue;
+                }
+                let in_flight = (0..state.runs.len()).find(|&ix| {
+                    matches!(
+                        plan.tasks[state.runs[ix].task].kind,
+                        TaskKind::Runnable { .. }
+                    ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                });
+                if let Some(ix) = in_flight {
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: RunState::Success,
+                        },
+                    );
+                    continue;
+                }
+                match state
+                    .runs
+                    .iter()
+                    .filter_map(|r| r.not_before)
+                    .filter(|t| *t > now)
+                    .min()
+                {
+                    Some(next) => now = next,
+                    // An unbounded pause ends here, with the state it stalls
+                    // in — so it is observed once more before the shape is
+                    // dropped, which is the only round it is ever `PAUSED` at.
+                    None => {
+                        seen += observe(label, &plan, &state);
+                        break;
+                    }
+                }
+            }
+            assert!(
+                seen > 0,
+                "{label}: {seen} PAUSED observation(s) — this shape never reached a \
+                 pause, so the invariant above held vacuously and this test is \
+                 measuring the driver rather than the executor"
+            );
+        }
+    }
+
     /// **A `LoopUntil` inside a `Parallel` or a `Dag` must iterate, and until
     /// fix round 1 it stalled at its first `PAUSED` for ever.**
     ///
