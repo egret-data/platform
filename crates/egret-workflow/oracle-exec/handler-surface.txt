@@ -370,10 +370,8 @@ Two rules, and they are deliberately different:
   blocked several times over -- so they do not sum to the bucket:
 
        23  handler    io.kestra.plugin.core.output.OutputValues
-       18  state      PAUSED, which RunState cannot hold
        16  construct  finally:
        12  construct  io.kestra.plugin.core.flow.Pause
-       12  state      RESTARTED, which RunState cannot hold
        10  construct  afterExecution:
        10  state      WARNING, which RunState cannot hold
         8  construct  allowFailure:
@@ -401,7 +399,7 @@ Two rules, and they are deliberately different:
 
        32  a missing handler
        83  a construct no W3b task owns
-       29  a state RunState cannot hold
+       13  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
   `an unreachable ordered pair` and `an output the handler cannot

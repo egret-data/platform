@@ -430,10 +430,16 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.Subflow",
 }
 
-# `executor::RunState::ALL`, which is 9 of the golden's 13 states.  A trace
+# `executor::RunState::ALL`, which is 11 of the golden's 13 states.  A trace
 # carrying anything else cannot be represented, whatever the handler does.
+# PAUSED and RESTARTED joined it at W8 Task 2; the two that remain outside are
+# WARNING and CANCELLED.  This set is a COPY of the Rust enum and so can
+# disagree with it -- `tests/executor.rs`'s
+# `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` is the one
+# that derives the vocabulary from `RunState::ALL` itself.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
-             "RETRYING", "RETRIED", "KILLED", "SKIPPED"}
+             "RETRYING", "RETRIED", "KILLED", "SKIPPED",
+             "PAUSED", "RESTARTED"}
 
 # Expression markers that read something only a task that RAN can produce.
 # The plan's Step 2 names these three.  They are kept apart in the report
