@@ -15,13 +15,6 @@
 //! | `timeout: PT1S` | start + 1 s | `FAILED` | `valids/pause-timeout` |
 //! | neither | never | none — it stays `PAUSED` | `valids/pause-test` and six more |
 //!
-//! **And one thing that is not a bound at all overrides the terminal**: a
-//! `behavior:` written as an EXPRESSION, which on the pinned artifact fails at
-//! the moment the pause ends and takes the task down whichever bound elapsed.
-//! `valids/pause-behavior` is that entry and its golden is byte-identical to
-//! `valids/pause-timeout`'s but for the id. See
-//! [`TaskKind::Pause::dynamic_behavior`](crate::executor::TaskKind::Pause).
-//!
 //! Both are measured off the golden rather than read from Kestra's docs.
 //! `valids/pause-delay`'s run is `["CREATED","RUNNING","PAUSED","SUCCESS"]` and
 //! `valids/pause-timeout`'s is `["CREATED","RUNNING","PAUSED","FAILED"]`, and
@@ -57,10 +50,8 @@
 //!
 //! # What is NOT here
 //!
-//! `onPause:`, a `Pause`'s own `tasks:`, its `errors:` — and a **literal**
-//! `behavior:`, whose `WARNING` and `CANCELLED` terminals `RunState` cannot
-//! hold and which no corpus flow writes. A `Pause` declaring any of them is
-//! not a [`TaskKind::Pause`] at all —
+//! `behavior:`, `onPause:`, a `Pause`'s own `tasks:` and its `errors:`. A
+//! `Pause` declaring any of them is not a [`TaskKind::Pause`] at all —
 //! [`plan::pause_gap`](crate::executor::plan) keeps it an opaque
 //! `TaskKind::Runnable`, so it reaches this module never rather than reaching
 //! it and being ignored.
@@ -181,11 +172,7 @@ fn deadline(
     task: TaskIx,
     started: Tick,
 ) -> Bound {
-    let crate::executor::plan::TaskKind::Pause {
-        duration,
-        dynamic_behavior,
-    } = &plan.tasks[task].kind
-    else {
+    let crate::executor::plan::TaskKind::Pause { duration } = &plan.tasks[task].kind else {
         // Unreachable for the same reason `drive`'s missing attempt is: both
         // callers match on this kind before they get here.
         return Bound::Unbounded;
@@ -205,35 +192,14 @@ fn deadline(
             },
         };
         return match parse_duration(text) {
-            Some(d) => Bound::Until(plus(started, d), ends_with(RunState::Success, *dynamic_behavior)),
+            Some(d) => Bound::Until(plus(started, d), RunState::Success),
             None => Bound::Unbounded,
         };
     }
 
     match plan.tasks[task].timeout {
-        Some(d) => Bound::Until(plus(started, d), ends_with(RunState::Failed, *dynamic_behavior)),
+        Some(d) => Bound::Until(plus(started, d), RunState::Failed),
         None => Bound::Unbounded,
-    }
-}
-
-/// The terminal a resume reaches, after the artifact's `behavior:` defect.
-///
-/// **A dynamic `behavior:` overrides the bound and always FAILS**, because on
-/// this artifact the failure happens at the moment the pause ends rather than
-/// in place of the wait: the pause still waits, still records `PAUSED`, and
-/// then dies rendering the property. See
-/// [`TaskKind::Pause::dynamic_behavior`](crate::executor::TaskKind::Pause) for
-/// the measurement.
-///
-/// It is a separate function rather than an `if` at each call site because the
-/// two arms above choose DIFFERENT defaults — `SUCCESS` for a `pauseDuration:`
-/// and `FAILED` for a `timeout:` — and a rule written twice is a rule that can
-/// disagree with itself. `the_dynamic_behavior_defect_overrides_either_bound`
-/// drives both arms.
-fn ends_with(bound_says: RunState, dynamic_behavior: bool) -> RunState {
-    match dynamic_behavior {
-        true => RunState::Failed,
-        false => bound_says,
     }
 }
 

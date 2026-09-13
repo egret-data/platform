@@ -507,37 +507,6 @@ pub enum TaskKind {
     /// a plausible-looking wrong one.
     Pause {
         duration: Option<String>,
-        /// **The author wrote a `behavior:` as an EXPRESSION, and on this
-        /// artifact that kills the task.** W8 Task 3 fix round 1.
-        ///
-        /// This is not a behaviour egret implements; it is a DEFECT egret
-        /// reproduces, and the distinction is the whole reason the field is
-        /// named after its cause rather than its effect. Measured on the
-        /// pinned image and recorded in `oracle-exec/README.md` under
-        /// *Drift at the execution seam*: published with a **literal**
-        /// `behavior:`, rc13 does exactly what `PauseTest.java:374-380`
-        /// asserts — `RESUME → SUCCESS` with 2 task runs, `WARN → WARNING`,
-        /// `FAIL → FAILED`, `CANCEL → CANCELLED`, and the property omitted
-        /// → `SUCCESS` with 2. Published with an **expression**, all four
-        /// documented values produce the *identical* execution: `FAILED`,
-        /// one task run, `CREATED RUNNING PAUSED RESTARTED RUNNING FAILED`.
-        /// The execution document records the input, so the input landed;
-        /// rendering it into `Property<Behavior>` fails at the moment the
-        /// pause ends and takes the task down with it.
-        ///
-        /// So a `Pause` with this set ends **`FAILED`** whichever bound
-        /// elapsed — see [`super::flowable::pause`] — and its successor is
-        /// never created, which is exactly `valids/pause-behavior`'s golden.
-        /// That golden is **byte-identical to `valids/pause-timeout`'s but
-        /// for the id**, which is what makes the entry bankable with no new
-        /// state and no new command.
-        ///
-        /// **A LITERAL `behavior:` is a different construct and is NOT here**:
-        /// two of the four terminals it can produce, `WARNING` and
-        /// `CANCELLED`, are not in [`RunState`](crate::executor::RunState) at
-        /// all, so [`pause_gap`] keeps such a task opaque. No corpus flow
-        /// writes one.
-        dynamic_behavior: bool,
     },
 }
 
@@ -733,19 +702,6 @@ const PAUSE_TYPE: &str = "pause";
 ///
 /// The order decides only which name a warning prints; the decision is the
 /// same for any non-`None`.
-/// Whether this property source reaches Kestra's template engine at all.
-///
-/// **`{`, not `{{`, and that is Kestra's own short-circuit** —
-/// `VariableRenderer.java:76-79` returns the source unchanged when it holds no
-/// `{`, which is the line that decides whether a Pebble evaluation happens and
-/// therefore whether one can throw. `models::Property`'s
-/// `a_source_without_an_expression_renders_to_itself` and
-/// `a_lone_brace_still_goes_through_the_engine` pin both sides of it; this is
-/// the same predicate read at plan time, where there is no `RenderContext`.
-fn is_dynamic(source: &str) -> bool {
-    source.contains('{')
-}
-
 pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.tasks.is_empty() {
         return Some("tasks");
@@ -753,24 +709,25 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     if !p.errors.is_empty() {
         return Some("errors");
     }
-    // **A LITERAL `behavior:` only.** W8 Task 3 fix round 1 narrowed this, and
-    // the earlier reading was a fixture answering a question it was not built
-    // for: the blocker was *"`WARNING` and `CANCELLED` are not in `RunState`"*,
-    // which is true of a literal `RESUME`/`WARN`/`FAIL`/`CANCEL` and says
-    // nothing about an expression. Measured over the corpus's **31**
-    // `behavior:` lines, exactly **one** sits on a `Pause`
-    // (`valids/pause-behavior`) and it is an expression; the other 30 are
-    // `concurrency:`, `retry:` and `sla:`. So the property that blocked the
-    // entry belongs to a class element this corpus does not contain.
+    // **Any `behavior:`, literal or expression, and fix round 2 MEASURED why.**
+    // Fix round 1 narrowed this to literals on the theory that an expression
+    // always fails at resume; five runs per form against the pinned artifact
+    // say otherwise. `behavior: FAIL`, `behavior: "{{ 'FAIL' }}"` and
+    // `behavior: "{{inputs.behavior}}"` with `FAIL` posted each gave `FAILED`
+    // with one task run, 5/5. The same three with `RESUME` -- and
+    // `"{{ vars.b }}"` -- gave `SUCCESS` with two. **The artifact honours the
+    // VALUE, in every form it is written in**, so "an expression fails" was a
+    // rule about a class the corpus's one instance never exercised.
     //
-    // A dynamic one is REPRODUCED rather than refused -- see
-    // [`TaskKind::Pause::dynamic_behavior`] -- because the artifact's own
-    // answer to it is a failure, not a behaviour.
-    if p
-        .behavior
-        .as_ref()
-        .is_some_and(|b| !is_dynamic(b.source()))
-    {
+    // It is a gap for the reason it always was: `behavior:` is four-valued, and
+    // `WARN` and `CANCEL` mean `WARNING` and `CANCELLED`, neither of which
+    // [`RunState`](crate::executor::RunState) holds. **A dynamic one cannot
+    // even be classified here** -- its value is known at render time and this
+    // decision is taken at plan time -- so the whole task stays opaque, which
+    // is the only answer that cannot over-accept. The entry becomes bankable
+    // when `RunState` gains the two states, which is the `AllowFailure` row's
+    // work and not this one's.
+    if p.behavior.is_some() {
         return Some("behavior");
     }
     if p.on_pause.is_some() {
@@ -1182,10 +1139,6 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
                     .and_then(|t| super::retry::parse_duration(t.source()));
                 out[ix].kind = TaskKind::Pause {
                     duration: pause.pause_duration.as_ref().map(|d| d.source().to_string()),
-                    dynamic_behavior: pause
-                        .behavior
-                        .as_ref()
-                        .is_some_and(|b| is_dynamic(b.source())),
                 };
             }
         }

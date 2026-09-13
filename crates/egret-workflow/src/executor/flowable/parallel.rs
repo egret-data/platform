@@ -207,17 +207,33 @@ pub(crate) fn drive_concurrent(
     // discards anything else. Measured at W8 Task 3 fix round 1: **none of the
     // three can return [`Step::Done`] today** -- [`open`] returns `Commands` or
     // `Waiting` and its only delegating arm, `loop_::open`, does the same;
-    // [`descend`] maps `Done` into a `SetRunState` before it returns; and
-    // `pause::resume` returns `Commands` or `Waiting`. So the `if let` was
-    // dropping `Waiting` and nothing else, which is correct -- a sibling with
-    // nothing to ask for must not stop the siblings that have.
+    // `pause::resume` returns `Commands` or `Waiting`; and [`descend`] returns
+    // `Done` from none of its paths.
     //
-    // It is written as an exhaustive `match` anyway, because the fact above is
-    // a property of three OTHER functions and nothing here would notice if one
-    // of them changed. **Not `unreachable!()`**: a panic arm nobody can drive
-    // is the guard this crate has twice paid for (`descend`'s deleted depth
-    // guard says so in as many words). A correct arm costs the same line and
-    // cannot be wrong.
+    // **That last clause was stated imprecisely in fix round 1 and the fix
+    // round 2 re-review caught it.** It read *"`descend` maps `Done` into a
+    // `SetRunState` before it returns"*, which is true of the arms that fall
+    // through to its trailing `match` and NOT of the two that `return` early --
+    // `TaskKind::Executable`, `TaskKind::Loop` and `TaskKind::Runnable` return
+    // `Waiting` directly, and `TaskKind::Pause` returns `pause::drive`'s value
+    // directly, neither of them touching the mapping. The conclusion survives
+    // because those early returns are themselves `Waiting` or `Commands`, but
+    // it needs both halves and the round-1 wording only had one.
+    //
+    // So the `if let` was dropping `Waiting` and nothing else, which is correct
+    // -- a sibling with nothing to ask for must not stop the siblings that
+    // have. It is written as an exhaustive `match` anyway, because the fact
+    // above is a property of three OTHER functions and nothing here would
+    // notice if one of them changed.
+    //
+    // **The `Done` arm is DEAD CODE, not a guard, and the difference matters
+    // here.** A guard is a branch that fires on a condition; this one cannot
+    // fire at all. It earns its line only by making the drop explicit rather
+    // than implicit -- and it is deliberately not `unreachable!()`, because a
+    // panic arm nobody can drive is what this crate has twice paid for
+    // (`descend`'s deleted depth guard says so in as many words). No test
+    // drives it and none can without faking a `Step` the real callees never
+    // produce, which would pin the fake rather than the seam.
     let mut cmds = Vec::new();
     for (&task, run) in children.iter().zip(&runs) {
         let Some(ix) = *run else { continue };
