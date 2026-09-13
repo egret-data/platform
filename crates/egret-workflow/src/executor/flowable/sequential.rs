@@ -103,6 +103,13 @@ fn walk(
         };
 
         match state.runs[ix].history.last() {
+            // W8 Task 4. A run `Command::RestartLoop` threw away, reached by
+            // the walk in list order — which is the whole point of it being
+            // reached here rather than refilled in bulk. See
+            // `Command::RecreateRun`.
+            None => {
+                return Some(Step::Commands(vec![Command::RecreateRun { run: ix }]));
+            }
             Some(RunState::Created) => return Some(open(plan, state, ix, task, now)),
             // W8 Task 3. A `PAUSED` run is the ONE non-terminal state the
             // executor still owns: nothing else is going to move it, because no

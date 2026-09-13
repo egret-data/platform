@@ -779,9 +779,10 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 175, 119),
-        "294 = 175 matching + 119 baselined, the total beside its parts. It read \
-         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries"
+        (294, 176, 118),
+        "294 = 176 matching + 118 baselined, the total beside its parts. It read \
+         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries and \
+         W8 Task 4 banked `valids/waitfor-nested`"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -2235,10 +2236,13 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
 // `trigger_execution_id` and is deliberately invisible to `spawned`.
-/// **580 through W8 Task 2, 587 now.** The eight entries W8 Task 3 banked
-/// carry 7 top-level ordered pairs between them; none carries a `spawned`, so
-/// the nested figure below is unchanged.
-const EGRET_TOP_LEVEL_PAIRS: usize = 587;
+/// **580 through W8 Task 2, 587 after W8 Task 3, 613 now.** Task 3's eight
+/// entries carried 7 top-level ordered pairs between them; W8 Task 4's +26 is
+/// not a bank at all but a CONSTRUCT: `LoopUntil`'s nine entries used to stall
+/// at their loop run, and a run that never terminates has no right endpoint and
+/// so contributes no pair. Their bodies run now, banked or not. Neither task
+/// moves the nested figure -- no `LoopUntil` entry carries a `spawned`.
+const EGRET_TOP_LEVEL_PAIRS: usize = 613;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2323,7 +2327,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (265, 102, 367),
+        (286, 102, 388),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2331,7 +2335,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (612, 125, 737),
+        (591, 125, 716),
         "and the pairs a change to which it does not: they live on baselined \
          entries, which mismatch whatever the pair says. Flipping all 744 leaves \
          the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
@@ -2700,22 +2704,27 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // bigger per entry than Task 3's: three executions of one flow, each with one
 // run, and the run histories are five states long
 // (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
-/// **433 through W8 Task 2, 419 now** -- the 14 run terminals carried by the
-/// eight entries W8 Task 3 banked, which leave the un-falsifiable half for the
-/// reported half. 840 is unchanged, because banking moves a run across the line
-/// rather than creating one.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 419;
+/// **433 through W8 Task 2, 419 after W8 Task 3, 412 now** -- Task 3's 14 run
+/// terminals plus the 7 `valids/waitfor-nested` carries, which leave the
+/// un-falsifiable half for the reported half. 840 is unchanged, because banking
+/// moves a run across the line rather than creating one.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 412;
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
-/// **165 through W8 Task 2, 157 now** -- the eight `Pause` entries W8 Task 3
-/// banked, none of which carries a sub-execution, so the fall is exactly eight.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 157;
-/// **1703 through W8 Task 2, 1647 now** -- 56 run-history tokens on the eight
-/// banked entries.
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1647;
-/// **665 through W8 Task 2, 617 now** -- 48 execution-history tokens on the
-/// eight banked entries, i.e. six apiece: every one of them reads
-/// `CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>`.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 617;
+/// **165 through W8 Task 2, 157 after W8 Task 3, 156 now** -- the eight `Pause`
+/// entries W8 Task 3 banked and the one `LoopUntil` entry W8 Task 4 banked,
+/// none of which carries a sub-execution, so each fall is exactly the count.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 156;
+/// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 now** -- 56 run-history
+/// tokens on Task 3's eight, and 37 on `valids/waitfor-nested`, whose seven runs
+/// include three loops reading `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING
+/// SUCCESS`.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1610;
+/// **665 through W8 Task 2, 617 after W8 Task 3, 562 now** -- 48
+/// execution-history tokens on Task 3's eight, i.e. six apiece (every one of
+/// them reads `CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>`), and 55 on
+/// `valids/waitfor-nested` alone, whose execution alternates `PAUSED`/`RUNNING`
+/// 26 times.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 562;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2833,7 +2842,7 @@ const RESTRICTION_REMOVES_ENTRIES: usize = 9;
 /// than after. It was 791 because 12 `Subflow` entries that
 /// stalled at their first run now finish and the runs after them have
 /// endpoints.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 798;
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 824;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3920,18 +3929,27 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 /// **90 through W8 Task 2, 82 now**: all eight `Pause` entries W8 Task 3
 /// banked differed on their execution history (`PAUSED`/`RESTARTED` were never
 /// emitted), so every one of them leaves this count.
-const MISMATCH_ON_EXECUTION: usize = 82;
-/// **112 through W8 Task 2, 104 now** -- the same eight.
-const MISMATCH_ON_RUNS: usize = 104;
-/// **72 through W8 Task 2, 67 now**: five of the eight carry an ordered pair.
-const MISMATCH_ON_ORDER: usize = 67;
+const MISMATCH_ON_EXECUTION: usize = 81;
+/// **112 through W8 Task 2, 104 after W8 Task 3, 103 now** -- the same eight,
+/// then `valids/waitfor-nested`.
+const MISMATCH_ON_RUNS: usize = 103;
+/// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
+/// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
+/// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
+/// `loop_2_return`/`loop_3` and `loop_3_return`/`loop_3_log`, every one of them
+/// a pair between siblings that a bulk reset made `overlapping`. See
+/// `Command::RecreateRun`.
+const MISMATCH_ON_ORDER: usize = 64;
 const MISMATCH_ON_SPAWNED: usize = 15;
-/// **122 through W8 Task 2, 114 now** -- the eight `Pause` entries W8 Task 3
-/// banked. The `refused` half of the golden is untouched: no `Pause` flow is a
-/// refusal except `invalids/workingdirectory-invalid`, which egret still
-/// refuses and for the same reason (`is_runnable_child` answers `false` for a
-/// typed kind, and `models::TaskKind::Pause` is one).
-const MISMATCHING_RUNS_ENTRIES: usize = 114;
+/// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
+/// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
+/// `refused` half of the golden is untouched by either: no `Pause` or
+/// `LoopUntil` flow is a refusal except `invalids/workingdirectory-invalid`,
+/// which egret still refuses and for the same reason (`is_runnable_child`
+/// answers `false` for a typed kind, and `models::TaskKind::Pause` is one --
+/// as, since W8 Task 4, is `models::TaskKind::LoopUntil` for BOTH its
+/// spellings).
+const MISMATCHING_RUNS_ENTRIES: usize = 113;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -3973,7 +3991,21 @@ const MISMATCHING_RUNS_ENTRIES: usize = 114;
 /// unstall are different events and this figure counts the second**, which is
 /// why the two numbers differ by one and why that is worth a sentence rather
 /// than an arithmetic reconciliation.
-const ENTRIES_LEFT_UNFINISHED: usize = 50;
+///
+/// **50 through W8 Task 3, 46 now, and the fall is FOUR where ONE entry
+/// banked.** Same distinction, on a different construct: a `LoopUntil` was
+/// planned `Runnable`, so it got a `type_id`, so the claim took it and
+/// `Registry::run` refused a type nothing handles. All nine entries that reach
+/// the construct stopped stalling for that reason; **five of them started
+/// stalling again one run lower down**, on the
+/// `io.kestra.plugin.core.output.OutputValues` child their bodies now reach,
+/// which is what leaves the net at four. The four that finish are
+/// `valids/waitfor-nested` (banked), `valids/loop-until-restart`,
+/// `valids/loopuntil-failed-flowable` and `valids/waitfor-child-task-warning`
+/// -- the last of those has an `OutputValues` child too and finishes anyway,
+/// because its FIRST child fails and `childTaskRunExecuted` ends the loop
+/// before the second is ever reached.
+const ENTRIES_LEFT_UNFINISHED: usize = 46;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4532,6 +4564,22 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
     ),
     ("valids/sla-subflow", "W8: the same, through a subflow"),
+    // **W8 Task 4: the same class as the four `W2:` rows at the top of this
+    // list, on a new operator.** Kestra renders through Pebble, whose
+    // `OperatorUtils` widens both operands of `<` to `Number` and throws on a
+    // `String`; minijinja orders values across types and answers a boolean. So
+    // the `LoopUntil`'s condition evaluates to `true` here, the loop SUCCEEDS
+    // on its first iteration, and Kestra FAILED the task instead. It is a
+    // RENDERER divergence wearing a loop's name, and it is the corpus's only
+    // number-against-string comparison --
+    // `the_one_corpus_comparison_pebble_refuses_and_minijinja_answers` is what
+    // says so and what would fail if egret ever gained Pebble-strict operators.
+    (
+        "valids/loopuntil-failed-flowable",
+        "W2/W8: `{{ outputs.loop.iterationCount < \"5\" }}` -- Pebble throws on a relational \
+         operator against a quoted operand and minijinja answers `True`, so the loop's condition \
+         is truthy, the loop SUCCEEDS on iteration 1 and Kestra FAILED the task",
+    ),
     // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
     // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
     // the first iteration — succeeds here and runs the other two. Named as a
@@ -4820,7 +4868,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             unplanned + in_an_errors_list,
             over_fed.values().sum::<usize>() + is_a_subflow
         ),
-        (415, 83, 342, 105),
+        (421, 95, 324, 96),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -4828,8 +4876,17 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          and into `flowable` (`valids/switch-impossible`'s `impossible` run: the \
          flow is planned at all now, so its `Switch` is a flowable rather than a \
          task with no plan), and up to the 22 W6 moved out of `fed` and out of \
-         the over-feed at the same time. If it does not, nothing below is a \
-         measurement of anything"
+         the over-feed at the same time, and up to what W8 Task 4 moved by \
+         planning `LoopUntil`/`WaitFor`. **That last one is the finding this \
+         test keeps re-finding, from the other side**: implementing a flowable \
+         SHRINKS the over-feed by its own runs and ENLARGES `fed` by whatever \
+         was nested inside it. Derived over the nine entries that reach the \
+         construct, which hold 27 runs between them: the 9 top-level loop runs \
+         left `fed` and the over-feed together (105 -> 96), all 11 loop runs \
+         plus `loopuntil-failed-flowable`'s nested `Dag` are `flowable` now \
+         (83 -> 95), and the 18 runs that were inside an opaque loop left \
+         `unplanned` (342 -> 324), 15 of them into `fed` (415 -> 421). If any of \
+         this does not hold, nothing below is a measurement of anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -4859,9 +4916,13 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     );
     assert_eq!(
         (flow_then + is_a_subflow, over_fed.len() + 1),
-        (80, 12),
+        (71, 10),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
-         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6"
+         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6 \
+         -- and of which `LoopUntil` (3 runs) and `WaitFor` (6) were two more \
+         types and 9 more runs until W8 Task 4 planned them. 80 -> 71 and \
+         12 -> 10, the same movement the four-bucket assertion above records \
+         from the other side"
     );
 }
 
@@ -5932,9 +5993,19 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
             &["io.kestra.plugin.core.flow.Pause", "core.pause"],
         ),
         ("afterExecution:", 10, &["afterExecution:"]),
+        // **9 through W8 Task 3; 8 since W8 Task 4 banked
+        // `valids/waitfor-nested`.** The eight that remain are not held by the
+        // construct, and `oracle-exec/baseline.txt` names what holds each: six
+        // by an `io.kestra.plugin.core.output.OutputValues` child this crate
+        // ships no handler for, one by a renderer divergence
+        // (`{{ outputs.loop.iterationCount < "5" }}` -- Pebble throws on a
+        // relational operator against a quoted operand and minijinja answers),
+        // and one by `checkFrequency.maxDuration`, whose golden iteration count
+        // carries the artifact's delay-poller latency. This table attributes by
+        // DECLARATION, so all eight still count here.
         (
             "LoopUntil / WaitFor",
-            9,
+            8,
             &[
                 "io.kestra.plugin.core.flow.LoopUntil",
                 "io.kestra.plugin.core.flow.WaitFor",
@@ -6550,7 +6621,7 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (3, 116, 119),
+        (3, 115, 118),
         "the baselined population that declares a `timeout:`, and the rest. It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
@@ -6558,7 +6629,8 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
          either. **W8 Task 3 moved the numerator for the first time**, by \
          banking `valids/pause-timeout` -- a `timeout:` on a `Pause` is \
          `advance()`'s, not the worker's, and this task is where it started \
-         being enforced: {:#?}",
+         being enforced. W8 Task 4's bank moved the DENOMINATOR only: \
+         `valids/waitfor-nested` declares no `timeout:` anywhere: {:#?}",
         declaring
     );
     assert_eq!(

@@ -591,7 +591,12 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 .collect();
             for ix in descendants {
                 let r = &mut state.runs[ix];
-                r.history = vec![RunState::Created];
+                // **Empty, not `[CREATED]`** -- see `Command::RecreateRun` for
+                // the measurement that forced the distinction. Kestra deletes
+                // these taskruns; the walk builds them back one at a time, and
+                // an empty history is what lets each one be built back at the
+                // round it is actually reached.
+                r.history.clear();
                 r.attempts.clear();
                 r.rendered = None;
                 r.rendered_run_if = None;
@@ -633,6 +638,11 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 _ => {}
             }
         }
+        // W8 Task 4. The counterpart of `RestartLoop`'s emptying -- see
+        // `Command::RecreateRun`. It is deliberately unconditional rather than
+        // guarded on the history being empty: `apply` takes no decisions, and
+        // the only emitter asks only for runs whose history is empty.
+        Command::RecreateRun { run } => state.runs[*run].history.push(RunState::Created),
         Command::SetExecutionState { state: s } => state.history.push(*s),
         // Nothing to record. A sub-execution is a different execution with its
         // own `ExecutionState`, and this one holds no field for it -- which is

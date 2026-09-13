@@ -153,6 +153,38 @@ pub enum Command {
     RestartLoop {
         run: RunIx,
     },
+    /// Give a run that [`Command::RestartLoop`] threw away its `CREATED` back.
+    /// W8 Task 4.
+    ///
+    /// # Why "thrown away" is a state and not an inference
+    ///
+    /// Kestra REMOVES a `LoopUntil`'s descendants from `taskRunList` and
+    /// `FlowableUtils.resolveWaitForNext` builds them again **one at a time**,
+    /// in list order, as the previous one terminates — so each re-created child
+    /// carries the `startDate` of the moment the walk reached it, not the
+    /// moment the iteration began. That ordering is compared:
+    /// `valids/waitfor-nested` records `loop_1_return` **before** `loop_2` and
+    /// `loop_3_return` **before** `loop_3_log`, and both endpoints are the last
+    /// iteration's.
+    ///
+    /// A reset that wrote `CREATED` onto every descendant at once would give
+    /// every sibling the SAME left endpoint and turn all three of those pairs
+    /// into `overlapping` — measured, before this command existed. So
+    /// `RestartLoop` empties a descendant's history instead, which is this
+    /// executor's spelling of "removed from `taskRunList`", and the walk emits
+    /// this command when it reaches one. An empty history is not a state a run
+    /// can otherwise be in: [`Command::CreateRun`] pushes `CREATED` in the same
+    /// breath as the run.
+    ///
+    /// It is not a [`Command::SetRunState`] for [`Marks`]'s sake as much as for
+    /// clarity: `worker::claim::Marks` stamps a run's left endpoint when its
+    /// history goes from empty to non-empty, which is exactly "created", and a
+    /// `SetRunState` would have to be told apart from every other one.
+    ///
+    /// [`Marks`]: crate::worker
+    RecreateRun {
+        run: RunIx,
+    },
     SetRunState {
         run: RunIx,
         state: RunState,

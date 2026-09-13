@@ -1481,30 +1481,25 @@ impl Marks {
         for ix in before.runs.len()..after.runs.len() {
             self.created.entry(ix).or_insert(seq);
         }
-        // **A run whose history got SHORTER was replaced, not re-entered, and
-        // its left endpoint moves** — W8 Task 4.
+        // **A run that goes from NO history to a `CREATED` was created now**,
+        // and its left endpoint moves with it — W8 Task 4.
         //
-        // `Command::RestartLoop` resets every run under a `LoopUntil` to a
-        // fresh `[CREATED]` because a `RunIx` cannot be deleted; Kestra removes
-        // those taskruns outright and `resolveWaitForNext` builds new ones, so
-        // on the artifact the next iteration's child carries a NEW `startDate`.
-        // `valids/waitfor-nested` is what measures it: `loop_1_return` is
-        // recorded `before` `loop_2`, and both of those endpoints are the third
-        // iteration's. Keeping the first iteration's `created` would make the
-        // pair `overlapping`, which is a different relation and a mismatch.
+        // An empty history is `Command::RestartLoop`'s spelling of Kestra's
+        // "removed from `taskRunList`", and `Command::RecreateRun` is the walk
+        // building it back — one child per round, in list order, which is what
+        // `valids/waitfor-nested`'s `loop_1_return` **before** `loop_2` and
+        // `loop_3_return` **before** `loop_3_log` measure. An iteration that
+        // re-stamped every sibling at once made all three pairs `overlapping`.
         //
-        // **The discriminator is the history LENGTH, not "re-entered
-        // `CREATED`"**, and that is deliberate: `retry::reopen_due` also puts a
-        // run back into `CREATED`, by APPENDING, and its left endpoint must not
-        // move — this struct's own doc records why (`normalise.py`'s `relation`
-        // reads the first `startDate` of a retried run). A reset truncates; a
-        // retry appends; nothing else changes a run's history backwards.
+        // **A `plain` insert, not `or_insert`**, and the contrast with the loop
+        // above is the whole rule: a retried run re-enters `CREATED` by
+        // APPENDING and must keep its first endpoint (this struct's doc says
+        // why — `normalise.py`'s `relation` reads a retried run's FIRST
+        // `startDate`), while a re-created one has no earlier life to keep.
+        // Nothing but `RestartLoop` empties a history.
         for (ix, run) in after.runs.iter().enumerate() {
-            let shorter = before
-                .runs
-                .get(ix)
-                .is_some_and(|b| run.history.len() < b.history.len());
-            if shorter {
+            let was_removed = before.runs.get(ix).is_some_and(|b| b.history.is_empty());
+            if was_removed && !run.history.is_empty() {
                 self.created.insert(ix, seq);
             }
         }

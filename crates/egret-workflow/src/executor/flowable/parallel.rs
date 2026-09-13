@@ -238,6 +238,13 @@ pub(crate) fn drive_concurrent(
     for (&task, run) in children.iter().zip(&runs) {
         let Some(ix) = *run else { continue };
         let step = match latest(state, ix) {
+            // W8 Task 4, and the same door `sequential::walk` opens for the
+            // same state: a run thrown away by `Command::RestartLoop` is
+            // re-created when the walk reaches it. **No corpus flow reaches
+            // this arm** — no corpus `LoopUntil` contains a `Parallel` or a
+            // `Dag` — and it is here for the reason the `PAUSED` arm below is:
+            // the alternative is not a guard nobody sees fail but a stall.
+            None => Step::Commands(vec![Command::RecreateRun { run: ix }]),
             Some(RunState::Created) => open(plan, state, ix, task, now),
             Some(RunState::Running) => descend(plan, state, ix, task, now),
             // W8 Task 3, and it is the same door `sequential::walk` opens for

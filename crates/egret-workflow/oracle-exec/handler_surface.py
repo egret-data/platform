@@ -445,6 +445,20 @@ W3A_FLOWABLES = {
     # cost something the moment one of those four banked, and the `blocked`
     # guard below is what would say so.
     "io.kestra.plugin.core.flow.Pause",
+    # W8 Task 4, and the pair is ONE Kestra class: `LoopUntil.java` carries
+    # `@Plugin(aliases = "io.kestra.plugin.core.flow.WaitFor")`, so both
+    # spellings now reach `models::TaskKind::LoopUntil` and `build_plan`
+    # flattens the children of either. Both are listed because this set is
+    # keyed by the string a flow writes, and seven of the ten corpus flows of
+    # this construct write the alias.
+    #
+    # **The same per-TASK caveat the `Pause` note above states applies here**:
+    # a `LoopUntil` whose `checkFrequency:` bound is an expression is planned
+    # opaque (`executor::plan::loop_until_gap`) and this set cannot say so. No
+    # corpus flow writes one -- all nine comparable entries write literal
+    # bounds -- so the coarser key costs nothing today.
+    "io.kestra.plugin.core.flow.LoopUntil",
+    "io.kestra.plugin.core.flow.WaitFor",
 }
 
 # `executor::RunState::ALL`, which is 11 of the golden's 13 states.  A trace
@@ -579,6 +593,66 @@ def declared_blockers(entry, flows, kinds):
     if re.search(r"allowFailure:\s*true", raw):
         out.add(("construct", "allowFailure:"))
     pause_gaps(doc, out)
+    loop_until_gaps(doc, raw, out)
+    return out
+
+
+# The two things a `LoopUntil` can carry that W8 Task 4 implemented CORRECTLY
+# and still cannot reproduce.  Both are rows for the same reason the
+# `PAUSE_GAP_KEYS` rows are: the construct itself is ported, so `W3A_FLOWABLES`
+# stops blocking, and without these the two entries land in the CEILING -- a
+# bankable list naming an entry nothing can bank, which this file's own rules
+# call the defect that sends the next task hunting.
+#
+# 1. `checkFrequency.maxDuration`.  `reachedMaximums` compares the loop
+#    taskrun's creation plus the bound against `now`, and the golden's iteration
+#    count therefore carries the ARTIFACT'S delay-poller latency: on the
+#    captured round `valids/loop-until-restart`'s two `PT1S` pauses took 1.17 s
+#    and 1.92 s, putting its third iteration past a `PT3S` bound that
+#    `driver.rs::pass_time` -- which moves the clock to the earliest deadline
+#    and never further -- does not reach until the fourth.  The corroboration
+#    that this is the construct and not the entry: `valids/waitfor-max-duration`
+#    is one of only two corpus flows Kestra itself could not reproduce across
+#    five rounds, so it has no golden entry at all.
+# 2. A relational operator against a QUOTED operand inside an expression.
+#    Pebble's `OperatorUtils` widens both sides to `Number` and throws on a
+#    `String`; minijinja orders values across types and answers a boolean.  The
+#    corpus has exactly one --- `valids/loopuntil-failed-flowable`'s
+#    `{{ outputs.loop.iterationCount < "5" }}`, where the artifact FAILS the
+#    task and egret succeeds --- and the regex is deliberately narrow enough to
+#    match only that shape: `valids/retry-with-flowable-errors` writes
+#    `{{ kv(...) < 2 ? ko : 'It works' }}`, whose operand is a bare number, and
+#    must NOT be blocked by this.
+LOOP_UNTIL_TYPES = {
+    "io.kestra.plugin.core.flow.LoopUntil",
+    "io.kestra.plugin.core.flow.WaitFor",
+    "core.loopuntil",
+    "core.waitfor",
+}
+QUOTED_COMPARISON = re.compile(r"\{\{[^{}]*[<>]=?\s*\\?[\"'][^\"']*\\?[\"']")
+
+
+def loop_until_gaps(node, raw, out):
+    """The `LoopUntil` properties W8 Task 4 ported and cannot reproduce."""
+    if QUOTED_COMPARISON.search(raw):
+        out.add(("render", "a relational operator against a quoted operand; "
+                           "Pebble throws and minijinja answers"))
+
+    def walk(n):
+        if isinstance(n, dict):
+            if n.get("type") in LOOP_UNTIL_TYPES:
+                cf = n.get("checkFrequency")
+                if isinstance(cf, dict) and cf.get("maxDuration"):
+                    out.add(("clock", "checkFrequency.maxDuration; the golden's "
+                                      "iteration count carries the artifact's "
+                                      "delay-poller latency"))
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(node)
     return out
 
 
@@ -775,10 +849,11 @@ def check_inputs(flows, kinds, golden, baseline):
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
-    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 since
-    # W8 Task 3 banked eight `Pause` entries.
-    if len(baseline) != 119:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 119; the split "
+    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
+    # W8 Task 3 banked eight `Pause` entries; 118 since W8 Task 4 banked
+    # `valids/waitfor-nested`.
+    if len(baseline) != 118:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 118; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1412,8 +1487,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 119",
-         "not 119",
+    case("baseline.txt is no longer 118",
+         "not 118",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

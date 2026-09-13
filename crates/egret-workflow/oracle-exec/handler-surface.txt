@@ -314,27 +314,27 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    175  reproduced today, and by nothing the driver removes
+    176  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
      26  not reproduced today, and nothing found here blocks it
-     93  not reproduced today, and blocked -- by cause below
+     92  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 175 + 26 = **201**
-  CEILING, feed retained = 175 + 0 + 26 = 201
+  CEILING, feed removed  = 176 + 26 = **202**
+  CEILING, feed retained = 176 + 0 + 26 = 202
 
-  Today the ratchet matches 175. The two ceilings are the same
+  Today the ratchet matches 176. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **201 is the bound this package should be held to**, because removing
+  **202 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  201 -- reported as a decision, not as progress.
+  202 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
@@ -376,7 +376,6 @@ Two rules, and they are deliberately different:
         8  construct  allowFailure:
         7  construct  flow-level outputs:
         7  construct  io.kestra.plugin.core.execution.Labels
-        6  construct  io.kestra.plugin.core.flow.WaitFor
         5  construct  flow sla:
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
@@ -385,8 +384,8 @@ Two rules, and they are deliberately different:
         4  construct  io.kestra.plugin.core.execution.Exit
         4  construct  io.kestra.plugin.core.flow.AllowFailure
         4  construct  io.kestra.plugin.core.flow.WorkingDirectory
-        3  construct  io.kestra.plugin.core.flow.LoopUntil
         3  state      CANCELLED, which RunState cannot hold
+        2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         2  construct  io.kestra.plugin.core.execution.UnsetVariables
         2  handler    io.kestra.plugin.core.execution.Assert
         2  handler    io.kestra.plugin.core.storage.Write
@@ -394,13 +393,14 @@ Two rules, and they are deliberately different:
         1  construct  Pause errors:
         1  construct  Pause onPause:
         1  handler    io.kestra.plugin.core.kv.Set
+        1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-       93  DISTINCT entries blocked (the rows above overlap)
+       92  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        32  a missing handler
-       75  a construct no W3b task owns
+       67  a construct no W3b task owns
        13  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
@@ -463,7 +463,7 @@ Two rules, and they are deliberately different:
     valids/parallel-disabled-tasks           one `order` pair, same cause
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
 
-    working expectation = 201 - 5 = 196
+    working expectation = 202 - 5 = 197
 
   Two of them deserve a sentence each:
 

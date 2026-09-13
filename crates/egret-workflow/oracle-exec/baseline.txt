@@ -393,6 +393,58 @@
 # `pause_on_pause` were refused at publish step 4 for an unported task type,
 # and the artifact published all five with a 200. Two of them are among the
 # eight banked above; the other three are not comparable at all.
+#
+# Task 4 (`LoopUntil`/`WaitFor`) banked ONE, leaving 118: `valids/waitfor-nested`.
+#
+# **Nine entries reach the construct and this file can say exactly why the
+# other eight are still here, which is the point of the row rather than an
+# excuse for it.**
+#
+#   SIX are held by a handler this crate does not ship, not by the construct:
+#   `waitfor`, `waitfor-no-success`, `waitfor-max-iterations`,
+#   `waitfor-multiple-tasks`, `waitfor-multiple-tasks-failed` and
+#   `waitfor-child-task-warning` each have an
+#   `io.kestra.plugin.core.output.OutputValues` child. `oracle-exec/driver.rs`'s
+#   registry holds four handlers and that is not one of them, so their bodies
+#   cannot run at all and no amount of loop semantics moves them. They are the
+#   strict upper bound on what this task could bank. (`waitfor-child-task-
+#   warning` is held twice over: its other child is an `allowFailure: true`
+#   `Fail` whose run is `WARNING`, which `RunState` cannot hold -- the
+#   `AllowFailure` row's.)
+#
+#   `loopuntil-failed-flowable` differs on ONE field: the loop's terminal.
+#   Its runs, attempts and order pairs are reproduced exactly and its execution
+#   reads `CREATED RUNNING SUCCESS` where the golden reads `CREATED RUNNING
+#   FAILED`. The condition is `{{ outputs.loop.iterationCount < "5" }}` -- a
+#   relational operator over a NUMBER and a STRING. Pebble refuses it and the
+#   exception fails the task; minijinja answers `True` and the loop succeeds.
+#   Measured both ways: `the_one_corpus_comparison_pebble_refuses_and_minijinja
+#   _answers` renders it through egret's own environment, and the artifact's own
+#   trace fails the `loop` taskrun 11 ms after its child succeeded, with no
+#   `PAUSED` -- the only path in `LoopUntil.resolveState` that can do that is
+#   `runContext.render(this.condition)` throwing. It is a RENDERER divergence
+#   wearing a loop's name, and it is the corpus's ONLY number-against-string
+#   comparison.
+#
+#   `loop-until-restart` differs on ONE field too: it runs FOUR iterations
+#   where the golden holds three. Everything else -- both run histories, both
+#   attempt histories, the order pair -- is identical. Its bound is
+#   `maxDuration: PT3S` with `interval: PT1S`, and `reachedMaximums` compares
+#   the loop taskrun's creation plus the bound against `now`. **The golden's
+#   third iteration is past that bound only because of the artifact's
+#   delay-poller latency**: measured on the captured round, its two `PT1S`
+#   pauses took **1.17 s and 1.92 s**, so the third iteration ended at
+#   T+3.33 s. `oracle-exec/driver.rs::pass_time` moves the clock to the
+#   earliest deadline and never further, so egret's third iteration ends at
+#   about T+2.05 s, inside the bound, and a fourth runs. Reproducing the golden
+#   would mean modelling Kestra's poller, not `LoopUntil`.
+#
+#   The corroboration that this is a property of the CONSTRUCT and not of this
+#   entry: `valids/waitfor-max-duration` -- the same shape with `PT5S`/`PT0.2S`
+#   -- is one of only **two** corpus flows whose normalised trace Kestra itself
+#   could not reproduce across five rounds, so it has no golden entry and is
+#   excluded by name (`stability.json`). The finer the interval, the more of the
+#   iteration count is latency.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -504,7 +556,6 @@ valids/waitfor-child-task-warning
 valids/waitfor-max-iterations
 valids/waitfor-multiple-tasks
 valids/waitfor-multiple-tasks-failed
-valids/waitfor-nested
 valids/waitfor-no-success
 valids/webhook-outputs
 valids/webhook-plaintext
