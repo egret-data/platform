@@ -445,6 +445,58 @@
 #   could not reproduce across five rounds, so it has no golden entry and is
 #   excluded by name (`stability.json`). The finer the interval, the more of the
 #   iteration count is latency.
+#
+# W8 Task 6 (`sla:`) banked TWO, 111 -> 109:
+#
+#   flow-concurrency-sla-assert-cancel   EXECUTION_ASSERTION, behavior: CANCEL, assert: "{{ false }}"
+#   sla-execution-condition              EXECUTION_ASSERTION, behavior: CANCEL, driven with the input
+#                                        `corpus.json` posted (`string: CANCEL`), so the first of its
+#                                        two SLAs violates
+#
+# Both golden traces are `["CREATED","CANCELLED"]` with `"runs": []` -- the
+# violation fires at the execution's first settle, before any run exists, which
+# is why neither carries a `RUNNING`.
+#
+# **SEVEN entries are held by an `sla:` and FIVE of them are unbankable by any
+# implementation whatsoever, including a correct one.** That is the asymmetry
+# this row is worth reading for: the residual table counts **5** DECLARERS and
+# the CAUSE count is **7**. `sla-parent-flow` and
+# `flow-concurrency-sla-fail-parent` declare no `sla:` at all -- each calls a
+# `Subflow` whose target declares one -- so a needle that greps one flow's YAML
+# structurally cannot see them. (W8 Task 4 saw the same asymmetry in the other
+# direction: nine entries, three spellings, and six of them held by one missing
+# handler.)
+#
+#   sla-max-duration-fail               MAX_DURATION PT0.5S over a `Sleep: PT2S`
+#   sla-subflow                         MAX_DURATION PT1S over `PT10S`
+#   flow-concurrency-sla-fail-child     MAX_DURATION PT3S over `PT10M`
+#   sla-parent-flow                     its `Subflow` target is `sla-subflow`
+#   flow-concurrency-sla-fail-parent    its `Subflow` target is `flow-concurrency-sla-fail-child`
+#
+# **The reason is the fifth blindness mechanism -- the harness compresses time
+# -- and it is measured rather than quoted.** `MaxDurationSLA.evaluate` needs an
+# interval in which the execution is non-terminal and older than the bound.
+# `oracle-exec/driver.rs`'s registry is `Sleep::capped(Duration::ZERO)`, so the
+# only task these flows have terminates inside the `worker::tick` that started
+# it and writes no `not_before_ms` at all; `pass_time` moves the clock **only**
+# to a registered `not_before_ms`, so it returns `Ok(false)` the first time it
+# is asked and the driver's loop breaks. The window is not entered late and not
+# missed -- it does not exist. Note that the clock DOES move in this harness
+# (`pass_time` binds `shortfall + 1`); what these five lack is a deadline for it
+# to move to. `the_max_duration_window_does_not_exist_in_this_harness` in
+# `tests/executor.rs` is that as a running program, with a control.
+#
+# The two parents are held one level down and nothing else:
+# `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded` measures that
+# each really does spawn its child (the target resolves -- a draft row is
+# enough for `subflow::resolve`), that the child really does run its `Sleep`,
+# and that the child ends SUCCESS. Without that the refusal would be pinned to
+# the wrong mechanism: an unresolvable target FAILS the parent's run, which is
+# the same direction as the golden and would have looked like progress.
+#
+# `valids/sla-max-duration-ok` (PT10S over `PT0.5S`) is the control and it is
+# NOT in this file: it matches, and it would match under a correct MAX_DURATION
+# implementation and under none at all, so it discriminates nothing.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -479,7 +531,6 @@ valids/finally-sequential-error
 valids/finally-sequential-error-first
 valids/flow-concurrency-queue-after-execution
 valids/flow-concurrency-queue-killed-after-execution
-valids/flow-concurrency-sla-assert-cancel
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
 valids/flow-with-array-outputs
@@ -529,7 +580,6 @@ valids/retry-success
 valids/retry-with-flowable-errors
 valids/set-variables
 valids/set-variables-duplicate
-valids/sla-execution-condition
 valids/sla-max-duration-fail
 valids/sla-parent-flow
 valids/sla-subflow

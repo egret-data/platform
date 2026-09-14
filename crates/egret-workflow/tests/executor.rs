@@ -779,10 +779,12 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 183, 111),
-        "294 = 176 matching + 118 baselined, the total beside its parts. It read \
-         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries and \
-         W8 Task 4 banked `valids/waitfor-nested`"
+        (294, 185, 109),
+        "294 = matching + baselined, the total beside its parts. It read \
+         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
+         Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
+         `allowFailure:`/`allowWarning:` entries and W8 Task 6 banked the two \
+         `sla:` `EXECUTION_ASSERTION`s"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -2576,13 +2578,24 @@ fn is_stalled(execution: &[String]) -> bool {
 /// same list the classifier reads — a control that hard-coded its own copy
 /// could pass while the classifier used a different one.
 ///
-/// `SKIPPED`, `CANCELLED` and `RESUBMITTED` are in Kestra's list and not here.
+/// `SKIPPED` and `RESUBMITTED` are in Kestra's list and not here;
+/// **`CANCELLED` joined it at W8 Task 6**.
 /// [`the_terminal_list_covers_every_execution_terminal_the_golden_holds`]
-/// derives why, and it corrected the first answer this doc gave: `SKIPPED` and
-/// `RESUBMITTED` end no golden EXECUTION history, and **`CANCELLED` ends
-/// three** — but this classifier reads EGRET's traces and `RunState` has no
-/// `Cancelled`, so all three would be arms nothing could take.
-const TERMINAL: &[&str] = &["SUCCESS", "FAILED", "KILLED", "WARNING", "RETRIED"];
+/// derives why, and it has now corrected this doc twice. The first answer said
+/// all three ended no golden EXECUTION history; `CANCELLED` ends **three**, and
+/// the second answer was that this classifier reads EGRET's traces, where
+/// `RunState` had no `Cancelled`, so the arm was one nothing could take. W8
+/// Task 6 added the variant and with it a producer, so the arm is reachable and
+/// the omission would have called three entries stalled — the guard in that
+/// test is what said so, in the commit that added the variant.
+const TERMINAL: &[&str] = &[
+    "SUCCESS",
+    "FAILED",
+    "KILLED",
+    "WARNING",
+    "RETRIED",
+    "CANCELLED",
+];
 
 /// **The positive control for `matched_while_stalled`.**
 ///
@@ -2642,12 +2655,14 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
 /// which is exactly the kind of remembered fact this programme keeps getting
 /// wrong and the reason the population is derived here instead.
 ///
-/// **It is still not in [`TERMINAL`], and now for a measured reason rather than
-/// a mistaken one.** [`is_stalled`] classifies EGRET's traces, never the
-/// golden's, and `RunState` has no `Cancelled` — so no execution this driver
-/// produces can end there, and an arm for it would be one nothing could take.
-/// That is asserted below rather than asserted about: if `RunState` ever gains
-/// the variant, this test fails and `TERMINAL` has to grow with it.
+/// **It IS in [`TERMINAL`] since W8 Task 6, and the guard that put it there is
+/// the point of this paragraph.** [`is_stalled`] classifies EGRET's traces,
+/// never the golden's, so while `RunState` had no `Cancelled` an arm for it was
+/// one nothing could take — and that was asserted here rather than argued, as
+/// *"if `RunState` ever gains the variant, this test fails and `TERMINAL` has
+/// to grow with it"*. It gained the variant, this test failed, and `TERMINAL`
+/// grew. The assertion below is now the other direction: every state that ends
+/// a golden execution is one egret can produce and one this classifier knows.
 #[test]
 fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
     fn walk(node: &Trace, out: &mut BTreeSet<String>) {
@@ -2677,15 +2692,17 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
          which is what makes `is_stalled`'s omission of it a defect rather \
          than an unused arm"
     );
-    // `CANCELLED` is the one this classifier does not carry, and the reason is
-    // a property of the OTHER side of the comparison.
-    assert!(
-        !RunState::ALL.iter().any(|s| s.wire() == "CANCELLED"),
-        "`RunState` gained a CANCELLED: egret can now end an execution there, \
-         so `TERMINAL` has to carry it or `is_stalled` will call three W8 \
-         entries stalled. Until then the arm is unreachable and is left out"
-    );
-    for state in seen.iter().filter(|s| s.as_str() != "CANCELLED") {
+    // **Every state the golden ends an execution in is now one `RunState` can
+    // hold**, which was false for `CANCELLED` until W8 Task 6 and is the reason
+    // the filter this loop used to carry is gone.
+    for state in seen.iter() {
+        assert!(
+            RunState::ALL.iter().any(|s| s.wire() == state.as_str()),
+            "{state} ends a golden execution and `RunState` cannot hold it; \
+             `is_stalled` reads EGRET's traces, so an arm for it would be one \
+             nothing could take and it must NOT be added to TERMINAL until a \
+             producer exists"
+        );
         assert!(
             TERMINAL.contains(&state.as_str()),
             "{state} ends a golden execution, egret can produce it, and \
@@ -2724,19 +2741,26 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // bigger per entry than Task 3's: three executions of one flow, each with one
 // run, and the run histories are five states long
 // (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
-/// **433 through W8 Task 2, 419 after W8 Task 3, 412 after W8 Task 4, 396
-/// now** -- Task 3's 14 run terminals, the 7 `valids/waitfor-nested` carries,
-/// and W8 Task 5's **16** over its seven banked entries, which leave the
-/// un-falsifiable half for the reported half. 840 is unchanged, because banking
-/// moves a run across the line rather than creating one.
+/// **433 through W8 Task 2, 419 after W8 Task 3, 412 after W8 Task 4, 396 since
+/// W8 Task 5** -- Task 3's 14 run terminals, the 7 `valids/waitfor-nested`
+/// carries, and W8 Task 5's **16** over its seven banked entries, which leave
+/// the un-falsifiable half for the reported half. 840 is unchanged, because
+/// banking moves a run across the line rather than creating one.
+///
+/// **W8 Task 6 banked two entries and did NOT move this number**, which is the
+/// only figure in this group it left alone: both of its entries have `"runs":
+/// []`, so they carried no run terminal to move. A task whose banks are
+/// invisible here is worth a sentence, because the next reader will otherwise
+/// read the unmoved figure as a stale one.
 const TERMINALS_ON_BASELINED_ENTRIES: usize = 396;
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
-/// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149
-/// now** -- the eight `Pause` entries W8 Task 3 banked, the one `LoopUntil`
-/// entry W8 Task 4 banked, and W8 Task 5's seven. None of the sixteen carries a
-/// sub-execution -- `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` has not moved since
-/// W6 Task 4 -- so each fall is exactly the entry count.
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 149;
+/// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
+/// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
+/// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
+/// None of the eighteen carries a sub-execution --
+/// `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` has not moved since W6 Task 4 -- so
+/// each fall is exactly the entry count.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 147;
 /// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
 /// now** -- 56 run-history tokens on Task 3's eight, 37 on
 /// `valids/waitfor-nested` (whose seven runs include three loops reading
@@ -2744,12 +2768,15 @@ const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 149;
 /// Task 5's seven, which is high per entry because three of them retry: a
 /// `task-allow-*-runnable` run history is thirteen tokens long.
 const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1528;
-/// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526
-/// now** -- 48 execution-history tokens on Task 3's eight, i.e. six apiece
-/// (every one of them reads `CREATED RUNNING PAUSED RESTARTED RUNNING
-/// <terminal>`), 55 on `valids/waitfor-nested` alone (whose execution
-/// alternates `PAUSED`/`RUNNING` 26 times), and **36** on W8 Task 5's seven.
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 526;
+/// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
+/// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
+/// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
+/// RUNNING <terminal>`), 55 on `valids/waitfor-nested` alone (whose execution
+/// alternates `PAUSED`/`RUNNING` 26 times), **36** on W8 Task 5's seven, and
+/// **4** on W8 Task 6's two -- two apiece, because `["CREATED","CANCELLED"]` is
+/// the shortest execution history in the golden: the violation fires before the
+/// execution ever reaches `RUNNING`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 522;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -3471,15 +3498,15 @@ fn the_two_state_vocabularies_agree() {
         missing,
         BTreeSet::from([
             "BREAKPOINT".to_string(),
-            "CANCELLED".to_string(),
             "KILLING".to_string(),
             "QUEUED".to_string(),
             "RESUBMITTED".to_string(),
         ]),
-        "the FIVE of Kestra's seventeen that `RunState` does not hold. It was \
-         six until W8 Task 5 added `Warning`. One of them -- CANCELLED -- is \
-         the golden's last unrepresentable state; the other four never appear \
-         in it at all. \
+        "the FOUR of Kestra's seventeen that `RunState` does not hold. It was \
+         six until W8 Task 5 added `Warning` and five until W8 Task 6 added \
+         `Cancelled` -- which was the golden's last unrepresentable state, so \
+         **none of the four left appears in the golden at all** and this set \
+         cannot shrink further from this corpus. \
          Adding a variant to `RunState` moves this set. It does NOT move when \
          `models::State` gains one: `all_seventeen` above is a literal this \
          test carries, so an 18th variant is invisible here and is caught by \
@@ -3662,23 +3689,39 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
     );
 
     // The negative control: an entry for which the same experiment
-    // distinguishes nothing, DERIVED rather than named. W3a's vacuous first
-    // attempt used `valids/minimal2` because its golden carried `SUBMITTED`,
-    // which `RunState` could not represent -- and W3c added `SUBMITTED` to the
-    // enum, so that entry matches now and picking it by name would have made
-    // this control vacuous in its turn. The property is what is wanted: a
-    // golden whose FIRST run's history holds a state `RunState` cannot hold, so
-    // no terminal value could make it match.
-    let held: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+    // distinguishes nothing, DERIVED rather than named -- and **the property it
+    // is derived from has had to change twice, each time because the enum
+    // grew**. W3a's vacuous first attempt named `valids/minimal2`, whose golden
+    // carried `SUBMITTED`; W3c added `SUBMITTED` and the control became "a
+    // golden whose FIRST run's history holds a state `RunState` cannot hold",
+    // which was derived rather than named. **W8 Task 6 emptied that population
+    // too**: `RunState` now holds all thirteen of the golden's states, so no
+    // entry has that property and the `find` returned `None`.
+    //
+    // The property that replaces it is the one the control actually needs, and
+    // it does not depend on the vocabulary at all: **an entry whose run COUNT
+    // egret does not reproduce**. Corrupting one run's terminal cannot make a
+    // trace with the wrong number of runs match, and cannot make it stop
+    // matching, so the experiment is vacuous on it in both directions -- which
+    // is the whole point of a negative control. It is derived from what egret
+    // ACTUALLY produced this run, so it cannot go stale the way a named entry
+    // can; if the population ever empties, the `expect` below fails loudly
+    // rather than quietly acquitting.
     let vacuous = golden()
         .into_iter()
         .find(|e| {
             e.verdict == Verdict::Runs
-                && e.runs
-                    .first()
-                    .is_some_and(|r| r.state.iter().any(|s| !held.contains(s.as_str())))
+                && !e.runs.is_empty()
+                && match evaluate(side, e) {
+                    Outcome::Trace(t) => t.runs.len() != e.runs.len(),
+                    _ => false,
+                }
         })
-        .expect("some golden entry's first run uses a state RunState cannot hold");
+        .expect(
+            "some golden `runs` entry has a run count egret does not reproduce; \
+             if none does, every baselined entry differs only in field VALUES \
+             and this control needs a new property",
+        );
     println!("the vacuity control is {}", vacuous.id);
     let Outcome::Trace(control) = evaluate(side, &vacuous) else {
         panic!("{} produces a trace", vacuous.id)
@@ -3688,7 +3731,8 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
     control.restrict_order_to(&control_expected);
     assert_ne!(
         control, control_expected,
-        "{}'s first run carries a state RunState cannot hold, so it cannot match",
+        "{}'s run COUNT is not the golden's, so it cannot match whatever any \
+         single terminal says",
         vacuous.id
     );
     assert_ne!(
@@ -3951,13 +3995,20 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // field counters fell by however many of the 12 differed on that field.
 // `spawned` fell by exactly one, `valids/loop-with-subflow`, which is the only
 // one of the 12 that carries a sub-execution at all.
-/// **90 through W8 Task 2, 82 now**: all eight `Pause` entries W8 Task 3
-/// banked differed on their execution history (`PAUSED`/`RESTARTED` were never
-/// emitted), so every one of them leaves this count.
-const MISMATCH_ON_EXECUTION: usize = 74;
-/// **112 through W8 Task 2, 104 after W8 Task 3, 103 now** -- the same eight,
-/// then `valids/waitfor-nested`.
-const MISMATCH_ON_RUNS: usize = 96;
+/// **90 through W8 Task 2, 82 after W8 Task 3, 74 after W8 Task 5, 72 now**:
+/// all eight `Pause` entries W8 Task 3 banked differed on their execution
+/// history (`PAUSED`/`RESTARTED` were never emitted), so every one of them left
+/// this count -- and so did W8 Task 6's two, whose golden execution history
+/// `["CREATED","CANCELLED"]` egret could not spell at all until
+/// `RunState::Cancelled` existed.
+const MISMATCH_ON_EXECUTION: usize = 72;
+/// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
+/// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
+/// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
+/// `runs` for an unusual reason: their golden `runs` is **empty**, and egret
+/// used to run the flow's one task, so the field differed by a whole run
+/// rather than by a state.
+const MISMATCH_ON_RUNS: usize = 94;
 /// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
 /// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
 /// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
@@ -3973,8 +4024,9 @@ const MISMATCH_ON_SPAWNED: usize = 15;
 /// which egret still refuses and for the same reason (`is_runnable_child`
 /// answers `false` for a typed kind, and `models::TaskKind::Pause` is one --
 /// as, since W8 Task 4, is `models::TaskKind::LoopUntil` for BOTH its
-/// spellings).
-const MISMATCHING_RUNS_ENTRIES: usize = 106;
+/// spellings). **104 since W8 Task 6**, whose two entries are `runs` entries
+/// and whose flows are not refusals either.
+const MISMATCHING_RUNS_ENTRIES: usize = 104;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -4567,32 +4619,38 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
          the kill path reaches only a task's own expired `timeout:`, so egret completes it",
     ),
     // **W8, through `sla:` alone.** Kestra CANCELLED or KILLED the execution;
-    // egret does not evaluate an `sla:`, so it runs the tasks. This comment
-    // said "`sla:` and flow `concurrency:`, both rows of the residual
-    // baseline", and both halves went at W8 Task 1: every one of the five is an
-    // `sla:`'s, and the `flow concurrency:` row no longer exists -- it was
-    // deleted for attributing `CANCELLED` to a construct that never produces
-    // it. See `the_cancelled_state_never_comes_from_a_concurrency_limit`.
+    // egret ran the tasks. This comment said "`sla:` and flow `concurrency:`,
+    // both rows of the residual baseline", and both halves went at W8 Task 1:
+    // every one of the five was an `sla:`'s, and the `flow concurrency:` row no
+    // longer exists -- it was deleted for attributing `CANCELLED` to a
+    // construct that never produces it. See
+    // `the_cancelled_state_never_comes_from_a_concurrency_limit`.
     //
-    // **Exactly ONE of the five declares a `concurrency:`** --
-    // `valids/flow-concurrency-sla-assert-cancel`. A first draft of this
-    // comment said three, counting flow IDs rather than declarations, which is
-    // the name-versus-declaration confusion in the very sentence announcing
-    // that the confusion was fixed. `valids/flow-concurrency-sla-fail-child`
-    // carries the word in its **id** and writes no `concurrency:` at all; the
-    // other three do not carry it even there.
-    (
-        "valids/flow-concurrency-sla-assert-cancel",
-        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
-         runs the first task",
-    ),
+    // **W8 Task 6 took the five to THREE, and the split is the whole point of
+    // that task.** The two that left --
+    // `valids/flow-concurrency-sla-assert-cancel` and
+    // `valids/sla-execution-condition` -- are the `EXECUTION_ASSERTION`s, and
+    // egret now cancels the execution before any run exists, so it no longer
+    // runs anything Kestra did not. The three that remain are `MAX_DURATION`s
+    // and **no implementation can take them off this list under this harness**:
+    // `driver.rs` builds its registry with `Sleep::capped(Duration::ZERO)`, so
+    // the `Sleep` these flows are built around finishes inside the tick that
+    // started it and the window `MaxDurationSLA.evaluate` measures does not
+    // exist. They are over-acceptances of the HARNESS, not of egret, and that
+    // distinction is why they stay registered rather than being excused.
+    //
+    // **Exactly ONE of the original five declares a `concurrency:`** --
+    // `valids/flow-concurrency-sla-assert-cancel`, which is one of the two that
+    // left. A first draft of this comment said three, counting flow IDs rather
+    // than declarations, which is the name-versus-declaration confusion in the
+    // very sentence announcing that the confusion was fixed.
+    // `valids/flow-concurrency-sla-fail-child` carries the word in its **id**
+    // and writes no `concurrency:` at all; the other three do not carry it even
+    // there.
     (
         "valids/flow-concurrency-sla-fail-child",
-        "W8: `sla:` killed the `Sleep`; egret has no `sla:` and completes it",
-    ),
-    (
-        "valids/sla-execution-condition",
-        "W8: the same `EXECUTION_ASSERTION` CANCEL; Kestra recorded 0 runs",
+        "W8: `MAX_DURATION` killed the `Sleep`; the harness's capped `Sleep` leaves no window for \
+         one, so egret completes it",
     ),
     (
         "valids/sla-max-duration-fail",
@@ -4972,13 +5030,26 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     // Task 3 drafted six; `SUBMITTED` was its own addition, `RETRIED` is Task
     // 7's and `SKIPPED` is W3c's. All are kept here so the "how much did that
     // one state buy" question stays answerable.
+    // **Every tier is `held` MINUS the states that arrived after it**, so each
+    // one has to name every later addition. W8 Task 6 is the first addition
+    // that had to be written into all six lines rather than one: adding
+    // `CANCELLED` to the enum and to none of these filters silently promoted it
+    // into *Task 3's draft of six*, and every tier read three entries too high
+    // (35 -> 38, 229 -> 232, 233 -> 236, 237 -> 240, 253 -> 256). The counts
+    // below are what caught that; a `missing`-only assertion would not have.
     let drafted: BTreeSet<&str> = held
         .iter()
         .copied()
         .filter(|s| {
             !matches!(
                 *s,
-                "SUBMITTED" | "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING"
+                "SUBMITTED"
+                    | "RETRIED"
+                    | "SKIPPED"
+                    | "PAUSED"
+                    | "RESTARTED"
+                    | "WARNING"
+                    | "CANCELLED"
             )
         })
         .collect();
@@ -4988,19 +5059,24 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         .filter(|s| {
             !matches!(
                 *s,
-                "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING"
+                "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
             )
         })
         .collect();
     let through_w3a: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+            )
+        })
         .collect();
     let through_w3c: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED" | "WARNING"))
+        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"))
         .collect();
     // W8 Task 2's tier, which was `held` itself until W8 Task 5 added
     // `WARNING`. It is spelled out rather than left as "everything but the
@@ -5008,7 +5084,15 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     let through_w8_task_2: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "WARNING"))
+        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED"))
+        .collect();
+    // W8 Task 5's tier. `held` itself until W8 Task 6 added `CANCELLED`, which
+    // is the LAST of the golden's thirteen -- so `fits_now` below is now the
+    // whole `runs` population and the two sets are equal.
+    let through_w8_task_5: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "CANCELLED"))
         .collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
@@ -5019,9 +5103,10 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         mut fits_w3a,
         mut fits_w3c,
         mut fits_w8_task_2,
+        mut fits_w8_task_5,
         mut fits_now,
         mut entries,
-    ) = (0, 0, 0, 0, 0, 0, 0usize);
+    ) = (0, 0, 0, 0, 0, 0, 0, 0usize);
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         entries += 1;
@@ -5056,6 +5141,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         if used.iter().all(|s| through_w8_task_2.contains(s.as_str())) {
             fits_w8_task_2 += 1;
         }
+        if used.iter().all(|s| through_w8_task_5.contains(s.as_str())) {
+            fits_w8_task_5 += 1;
+        }
         if used.iter().all(|s| held.contains(s.as_str())) {
             fits_now += 1;
         }
@@ -5066,7 +5154,7 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          RunState holds {}. Entries wholly inside the vocabulary: {fits_drafted} \
          (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_w3a} \
          (Task 7, 8), {fits_w3c} (W3c, 9), {fits_w8_task_2} (W8 Task 2, 11), \
-         {fits_now} (W8 Task 5, 12). Still \
+         {fits_w8_task_5} (W8 Task 5, 12), {fits_now} (W8 Task 6, 13). Still \
          missing, by entries using each: {missing:?}",
         all.len(),
         held.len()
@@ -5084,9 +5172,10 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
             fits_w3a,
             fits_w3c,
             fits_w8_task_2,
+            fits_w8_task_5,
             fits_now
         ),
-        (35, 229, 233, 237, 253, 263),
+        (35, 229, 233, 237, 253, 263, 266),
         "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
          big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
          `RETRIED` population -- and the four entries are exactly the \
@@ -5112,15 +5201,35 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          FLOWABLE, which is a different construct, and one \
          (`valids/waitfor-child-task-warning`) by an `OutputValues` child no \
          handler exists for -- measured, by unbaselining it and watching it \
-         stall at `CREATED RUNNING` with its `WARNING` child already correct"
+         stall at `CREATED RUNNING` with its `WARNING` child already correct. \
+         **W8 Task 6's `CANCELLED` buys the last 3 (263 -> 266), which is the \
+         whole `CANCELLED` population, and TWO of the three bank in that \
+         commit** -- the two `sla:` entries. The third, \
+         `valids/exit-cancelled`, is held by an `Exit`, an \
+         `ExecutionUpdatableTask` this crate does not implement"
     );
     assert_eq!(
         missing,
-        BTreeMap::from([("CANCELLED".to_string(), 3)]),
-        "the state still outside `RunState`, with the number of `runs` \
-         entries whose trace uses each. `oracle-exec/README.md` names the owner \
-         of each; `RETRIED` left this table at Task 7, `SKIPPED` at W3c, and \
-         `PAUSED` (18) and `RESTARTED` (12) at W8 Task 2"
+        BTreeMap::new(),
+        "**W8 Task 6 emptied this map**, and an empty map is exactly the shape \
+         a broken walk also produces -- so it is asserted BESIDE two numbers \
+         that can disagree: `all.len() == 13` above says the walk found \
+         thirteen states, and `fits_now == 266` says every `runs` entry is \
+         wholly inside the enum. `RETRIED` left this table at Task 7, \
+         `SKIPPED` at W3c, `PAUSED` (18) and `RESTARTED` (12) at W8 Task 2, \
+         `WARNING` (10) at W8 Task 5, and `CANCELLED` (3) here"
+    );
+    // The same fact from the other side, and it is what makes the empty map
+    // above falsifiable by something other than itself: the two vocabularies
+    // are now the SAME SET, so a variant removed from `RunState` or a state
+    // added to the golden fails here by name.
+    let held_owned: BTreeSet<String> = held.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        held_owned, all,
+        "`RunState` now holds exactly the golden's vocabulary -- neither more \
+         nor less. `models::State` still holds four Kestra states neither of \
+         these sets has (KILLING, QUEUED, BREAKPOINT, RESUBMITTED); that \
+         direction is `the_two_state_vocabularies_agree`'s"
     );
 }
 
@@ -5599,13 +5708,21 @@ fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
          whole execution history is `CREATED RUNNING SUCCESS`"
     );
 
-    // The third leg: **9** of the 13 declarers are not baselined at all, which
+    // The third leg: **10** of the 13 declarers are not baselined at all, which
     // by the ratchet's other direction means they MATCH with nothing
-    // implemented. It was 7 through W8 Task 2 and the two that moved are
-    // `valids/flow-concurrency-cancel-pause` and `-queue-pause`, banked by W8
-    // Task 3 -- which makes the leg STRONGER rather than weaker, because both
-    // are flows whose entire task list is the `Pause` and whose `concurrency:`
-    // therefore has nothing to contend with.
+    // implemented. It was 7 through W8 Task 2; two moved at W8 Task 3
+    // (`valids/flow-concurrency-cancel-pause` and `-queue-pause`, flows whose
+    // entire task list is the `Pause`, so their `concurrency:` has nothing to
+    // contend with) and the tenth is W8 Task 6's.
+    //
+    // **The tenth is the strongest row this leg has ever had**, and it is worth
+    // naming rather than counting: `valids/flow-concurrency-sla-assert-cancel`
+    // declares `concurrency: {behavior: QUEUE, limit: 1}` AND ends `CANCELLED`,
+    // which is the exact shape a reader would attribute to the limit. It banks
+    // in the commit that implements `sla:` and NOTHING about `concurrency:` --
+    // so the entry's `CANCELLED` is now reproduced, by name, from the other
+    // construct. That is a positive measurement where the rest of this test is
+    // an absence.
     let baseline = baseline();
     let matching: Vec<&String> = declarers
         .iter()
@@ -5613,10 +5730,19 @@ fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
         .collect();
     assert_eq!(
         (declarers.len(), matching.len()),
-        (13, 9),
-        "13 comparable entries declare a flow `concurrency:` and 7 of them \
+        (13, 10),
+        "13 comparable entries declare a flow `concurrency:` and 10 of them \
          already match, which is what makes `reaches 0` a control rather than \
          an assertion about an unimplemented construct: {matching:?}"
+    );
+    assert!(
+        matching.iter().any(|id| {
+            id.as_str() == "valids/flow-concurrency-sla-assert-cancel"
+        }),
+        "the tenth is the one that carries a CANCELLED, and it is the reason \
+         this leg is a measurement rather than an absence -- see the comment \
+         above. If it leaves this set, the argument that the golden's CANCELLED \
+         is the `sla:`'s has lost its positive half"
     );
     // **The contending flow is not itself a declarer, and asserting that it was
     // is how this guard first failed.** `valids/flow-concurrency-parallel-
@@ -6126,9 +6252,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // golden says why the bank was possible: its three `order` pairs are
         // all `overlapping` and its `spawned` is empty, so what `QUEUE` changes
         // -- WHEN the second child execution starts -- lands in no compared
-        // field. The third leg is a control: **9 of the 13 corpus declarers
-        // already MATCH** with nothing implemented -- 7 through W8 Task 2, plus
-        // the two `-pause` ones W8 Task 3 banked.
+        // field. The third leg is a control: **10 of the 13 corpus declarers
+        // already MATCH** with nothing implemented -- 7 through W8 Task 2, the
+        // two `-pause` ones W8 Task 3 banked, and
+        // `valids/flow-concurrency-sla-assert-cancel`, which W8 Task 6 banked
+        // by implementing `sla:` and nothing else. That tenth is the strongest
+        // row the leg has: it is a `QUEUE`-limited flow whose golden ends
+        // CANCELLED, and the CANCELLED is now reproduced from the other
+        // construct by name.
         // `disabled: true` was a row here through Task 8 with 6 entries, and
         // `runIf:` was a row with 7 through W3a's final review. Both are
         // implemented now, so neither holds anything and a row for either would
@@ -6143,7 +6274,23 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // which is what the counts here assert. `afterExecution:`,
         // `ExecutionUpdatableTask`, `finally:`, `Subflow` and `WorkingDirectory`
         // are the five, and every one of them is unclaimed or opaque today.
-        ("sla:", 5, &["\nsla:"]),
+        // **5 until W8 Task 6, 3 now**, and the two that left are the two
+        // `EXECUTION_ASSERTION`s (`valids/flow-concurrency-sla-assert-cancel`,
+        // `valids/sla-execution-condition`). The three left are the
+        // `MAX_DURATION`s, which no implementation can bank under this harness
+        // -- `Sleep::capped(Duration::ZERO)` leaves no interval for
+        // `MaxDurationSLA.evaluate` to measure. See `oracle-exec/README.md`'s
+        // fifth blindness mechanism.
+        //
+        // **This row's count is a DECLARER count and the CAUSE count is
+        // higher**, which is the asymmetry W8 Task 6 records: two more
+        // baselined entries are held by an `sla:` in a DIFFERENT flow
+        // (`valids/sla-parent-flow` and
+        // `valids/flow-concurrency-sla-fail-parent`, each calling a `Subflow`
+        // whose target declares the `MAX_DURATION`), and this needle greps one
+        // flow's own source, so it structurally cannot see them. Both are in
+        // `UNATTRIBUTED` below, by name, with that cause.
+        ("sla:", 3, &["\nsla:"]),
         // **The `CREATE_NEW_EXECUTION retry` row was here with 4 and is
         // removed by W6 Task 4**, under the same rule that removed
         // `disabled: true` and `runIf:`: the construct is implemented
@@ -6702,7 +6849,7 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (2, 109, 111),
+        (2, 107, 109),
         "the baselined population that declares a `timeout:`, and the rest. It \
          was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
          Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
@@ -6711,7 +6858,8 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
          banking `valids/pause-timeout` -- a `timeout:` on a `Pause` is \
          `advance()`'s, not the worker's, and this task is where it started \
          being enforced. W8 Task 4's bank moved the DENOMINATOR only: \
-         `valids/waitfor-nested` declares no `timeout:` anywhere: {:#?}",
+         `valids/waitfor-nested` declares no `timeout:` anywhere, and so did \
+         W8 Task 5's seven and W8 Task 6's two: {:#?}",
         declaring
     );
     assert_eq!(

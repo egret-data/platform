@@ -474,7 +474,7 @@ W3A_FLOWABLES = {
 # and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
              "RETRYING", "RETRIED", "KILLED", "SKIPPED",
-             "PAUSED", "RESTARTED", "WARNING"}
+             "PAUSED", "RESTARTED", "WARNING", "CANCELLED"}
 
 # `State.Type`'s seventeen, i.e. `models::State`.  Used ONLY by the self-test,
 # to pick a state that is real to Kestra and absent from RUN_STATE above --
@@ -859,11 +859,14 @@ def check_inputs(flows, kinds, golden, baseline):
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
     # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
     # W8 Task 3 banked eight `Pause` entries; 118 after W8 Task 4 banked
-    # `valids/waitfor-nested`; 111 since W8 Task 5 banked seven -- the three
+    # `valids/waitfor-nested`; 111 after W8 Task 5 banked seven -- the three
     # `valids/task-allow-warning-*`, the three `valids/task-allow-failure-*`
-    # and `valids/pause-timeout-allow-failure`.
-    if len(baseline) != 111:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 111; the split "
+    # and `valids/pause-timeout-allow-failure`; 109 since W8 Task 6 banked the
+    # two `sla:` entries whose `EXECUTION_ASSERTION` cancels the execution,
+    # `valids/flow-concurrency-sla-assert-cancel` and
+    # `valids/sla-execution-condition`.
+    if len(baseline) != 109:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 109; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1497,8 +1500,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 111",
-         "not 111",
+    case("baseline.txt is no longer 109",
+         "not 109",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a
