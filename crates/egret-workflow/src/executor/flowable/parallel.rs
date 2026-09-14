@@ -148,23 +148,39 @@ pub(crate) fn drive_concurrent(
 
     // Rule 1.
     //
-    // **`SKIPPED` is excluded, and W3c is why.** Through W3a "terminal and not
-    // `SUCCESS`" and "terminated in error" were the same set, because every
-    // state this enum could hold that was terminal and not `SUCCESS` was a
-    // failure. `Skipped` is the first that is not: `State.java:293` lists it in
-    // `isTerminatedNoFail()` beside `SUCCESS`, and `Execution.guessFinalState`
-    // has no arm for it at all. Without this exclusion a falsy `runIf:` on one
-    // branch of a `Parallel` would `fail_the_rest` of its siblings -- egret
-    // failing runs Kestra succeeds, which is the divergence class this
-    // programme forbids. No corpus flow puts a `runIf:` on a `Parallel` or
-    // `Dag` child (`no_corpus_parallel_or_dag_child_declares_a_run_if` derives
-    // that on every run), so this is Kestra's Java stated as a rule rather than
-    // a live measurement, and `a_skipped_branch_does_not_fail_its_siblings` is
-    // what holds it.
-    let ended_badly = runs.iter().flatten().any(|&ix| {
-        latest(state, ix)
-            .is_some_and(|s| s.is_terminal() && !matches!(s, RunState::Success | RunState::Skipped))
-    });
+    // **The predicate is `isFailed()` -- `FAILED` and nothing else -- and it
+    // was an EXCLUSION LIST until W8 Task 5 fix round 2.** It read
+    // `s.is_terminal() && !matches!(s, RunState::Success | RunState::Skipped)`,
+    // which is the same set only while every OTHER terminal is a failure. It
+    // stopped being that twice and nobody noticed either time:
+    //
+    // * `Retried` (Task 7) is `isTerminatedNoFail()`'s, not a failure, and
+    // * `Warning` (W8 Task 5) is `isTerminatedNoFail()`'s FIRST member.
+    //
+    // So a `WARNING` sibling made this `Parallel` `fail_the_rest` -- **egret
+    // failing runs Kestra succeeds**, the divergence class the paragraph this
+    // one replaces already forbade, arriving by the exact route that paragraph
+    // was written about. Reading it as an allow-list is what makes the next
+    // variant inert here instead of a defect: `isFailed()` names what it
+    // includes.
+    //
+    // **Measured on the pinned artifact** (`javap -p -c`,
+    // `io/kestra/core/models/executions/Execution.class`): `lambda$hasFailed$0`,
+    // `lambda$hasFailed$1` and `lambda$hasFailedNoRetry$0` are each
+    // `getState().isFailed()` and nothing else, and `State.Type.isFailed()` is
+    // `this == FAILED`. `findTaskDependingFlowState` is what those gate, and it
+    // is the artifact's whole "a sibling went wrong" switch.
+    //
+    // `SKIPPED` stays out for W3c's reason, unchanged: a falsy `runIf:` on one
+    // branch must not fail the others, and
+    // `no_corpus_parallel_or_dag_child_declares_a_run_if` derives that no
+    // corpus flow can score it. `a_skipped_branch_does_not_fail_its_siblings`
+    // holds that row; `a_warning_branch_does_not_fail_its_siblings` holds this
+    // one, and the oracle cannot score either.
+    let ended_badly = runs
+        .iter()
+        .flatten()
+        .any(|&ix| latest(state, ix) == Some(RunState::Failed));
     if ended_badly {
         let cmds = fail_the_rest(state, &runs);
         if !cmds.is_empty() {

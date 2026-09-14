@@ -93,12 +93,26 @@ pub(crate) fn drive(
                 return false;
             };
             node.depends_on.iter().all(|&dep| {
-                run_for(dep).is_some_and(|ix| {
-                    matches!(
-                        latest(state, ix),
-                        Some(RunState::Success) | Some(RunState::Skipped)
-                    )
-                })
+                // **`isTerminated()`, not "succeeded"** -- W8 Task 5 fix round
+                // 2. Measured on the pinned artifact (`javap -p -c`,
+                // `io/kestra/core/runners/FlowableUtils.class`):
+                // `lambda$resolveDagNexts$3` is
+                // `getState().isTerminated()` and nothing else. A dependency
+                // that FAILED satisfies the dependency gate on the artifact;
+                // the failure is handled one layer out, by
+                // `findTaskDependingFlowState` switching to the `errors:` list,
+                // which here is `parallel::drive_concurrent`'s rule 1.
+                //
+                // It read `Some(Success) | Some(Skipped)` -- an enumeration of
+                // two terminals, which was the same set only while no other
+                // terminal could reach a `Dag` child. `Warning` can since W8
+                // Task 5, and under the FIXED rule 1 above (which no longer
+                // fires on a `WARNING` sibling) that combination **stalls the
+                // DAG for ever**: the dependant is never ready and nothing
+                // fails it. Fixing rule 1 alone would have traded one
+                // divergence for a worse one, which is why these two lines
+                // move together.
+                run_for(dep).is_some_and(|ix| latest(state, ix).is_some_and(RunState::is_terminal))
             })
         },
     )

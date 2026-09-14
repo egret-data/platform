@@ -956,11 +956,23 @@ mod tests {
     ///
     /// The row is added, and so is the thing that makes the omission
     /// impossible rather than merely fixed: **the two lists are asserted to
-    /// PARTITION [`RunState::ALL`]**. A variant added to the enum and to
-    /// neither list now fails here by construction, which is the only version
-    /// of this guard that does not depend on somebody remembering. Counting
-    /// `ALL.len()` alone could not do it — 6 + 6 = 12 is true of the wrong
-    /// twelve too.
+    /// PARTITION [`RunState::ALL`]**. Counting `ALL.len()` alone could not do
+    /// it — 6 + 6 = 12 is true of the wrong twelve too.
+    ///
+    /// **Which of the three asserts catches what, corrected** — fix round 2's
+    /// review measured this and the first version of the paragraph credited
+    /// the wrong line:
+    ///
+    /// | the mistake | what fails |
+    /// |---|---|
+    /// | a variant in NEITHER list | the **coverage** assert (`named == all`) |
+    /// | a variant in BOTH lists | the **pre-existing loops** — it is asserted terminal and non-terminal, and no `is_terminal` can satisfy both |
+    /// | a variant TWICE in ONE list | the **disjointness** assert (`named.len() == 6 + 6`), 12 against 13 |
+    ///
+    /// So the disjointness line never fires for the case its name suggests. It
+    /// is **not** dead: a duplicate inside one list reaches it, and that is a
+    /// real edit — the obvious way to "add" a variant is to copy a neighbouring
+    /// line, and copying without editing the name is what it catches.
     ///
     /// The wire spellings are here for the same reason `run_state_all_holds…`
     /// checks them: a variant whose `wire()` collides with another's is
@@ -1000,9 +1012,10 @@ mod tests {
         }
         // **The two lists PARTITION the enum**, which is what stops the next
         // variant being omitted from both the way `Warning` was omitted from
-        // the first. Disjointness is asserted beside coverage because a
-        // variant in both lists would make the counts agree and the assertions
-        // contradict each other.
+        // the first. Disjointness is asserted beside coverage, and the table
+        // on this test's doc says which of the three asserts each mistake
+        // reaches -- a variant in BOTH lists is caught by the loops above,
+        // not by the line below.
         let named: std::collections::BTreeSet<&str> = TERMINAL
             .iter()
             .chain(NOT_TERMINAL.iter())
@@ -1013,7 +1026,9 @@ mod tests {
         assert_eq!(
             named.len(),
             TERMINAL.len() + NOT_TERMINAL.len(),
-            "a variant is named in BOTH lists"
+            "a variant is named TWICE IN ONE list -- which is what copying a \
+             neighbouring line and forgetting to edit the name produces. A \
+             variant in BOTH lists is caught by the two loops above instead"
         );
         assert_eq!(
             named, all,

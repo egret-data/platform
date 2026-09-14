@@ -135,6 +135,36 @@ MUTATIONS = {
     "M19": ("src/executor/state.rs",
             "                | RunState::Warning\n        )",
             "        )"),
+    # --- fix round 2: the class `RunState::Warning` falsified -------------
+    #
+    # M20/M21 are the second shipped defect and its coupled site. M22/M23 are
+    # the two guard gaps the round-1 fix left behind: one was already covered
+    # and one was not, which is the measurement that makes "one member of a
+    # class is not the class" a fact here rather than a slogan.
+    "M20": ("src/executor/flowable/parallel.rs",
+            ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
+            ".any(|&ix| latest(state, ix).is_some_and(|s| s.is_terminal()\n"
+            "            && !matches!(s, RunState::Success | RunState::Skipped)));"),
+    "M21": ("src/executor/flowable/dag.rs",
+            "run_for(dep).is_some_and(|ix| latest(state, ix).is_some_and(RunState::is_terminal))",
+            "run_for(dep).is_some_and(|ix| {\n"
+            "                    matches!(\n"
+            "                        latest(state, ix),\n"
+            "                        Some(RunState::Success) | Some(RunState::Skipped)\n"
+            "                    )\n"
+            "                })"),
+    "M22": ("src/worker/subflow.rs",
+            "            RunState::Failed | RunState::Killed | RunState::Warning\n        ) {",
+            "            RunState::Failed | RunState::Killed | RunState::Warning | RunState::Skipped\n        ) {"),
+    "M23": ("src/worker/subflow.rs",
+            "            RunState::Failed | RunState::Killed | RunState::Warning\n        ) {",
+            "            RunState::Failed | RunState::Killed | RunState::Warning | RunState::Retried\n        ) {"),
+    # `PAUSED` becomes terminal. The trigger-set omission in `guess_state` is
+    # SOUND ONLY because a paused child never reaches it, and that soundness
+    # rested on this line rather than on anything in `subflow.rs`.
+    "M24": ("src/executor/state.rs",
+            "                | RunState::Warning\n        )",
+            "                | RunState::Warning\n                | RunState::Paused\n        )"),
 }
 
 TARGETS = ["--lib", "--test", "executor"]

@@ -5557,15 +5557,227 @@ tasks:
         assert!(spawns > 0, "the control must spawn");
     }
 
+    /// Drive `advance` to a fixpoint, giving a terminal only to the RUNNABLE
+    /// runs whose task id is listed — W8 Task 5 fix round 2.
+    ///
+    /// **The existing helpers all give every runnable the SAME terminal**, and
+    /// the two rows below need a flow where one branch ends badly and another
+    /// is still in flight. That is exactly the shape `fail_the_rest` acts on,
+    /// so a fixture that could not build it could not test rule 1's guard at
+    /// all. A run whose id is not listed is left `RUNNING` on purpose: the
+    /// question is whether rule 1 reaches in and FAILS it.
+    fn run_to_fixpoint_completing(
+        plan: &Plan,
+        outcomes: &[(&str, RunState)],
+    ) -> (ExecutionState, Vec<Command>) {
+        let mut state = ExecutionState::new(plan);
+        let mut last: Vec<Command> = Vec::new();
+        for _ in 0..1000 {
+            let cmds = advance(plan, &state, T0);
+            if !cmds.is_empty() {
+                last = cmds.clone();
+                for cmd in &cmds {
+                    apply(&mut state, cmd);
+                }
+                continue;
+            }
+            let next = (0..state.runs.len()).find(|&ix| {
+                matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    TaskKind::Runnable { .. }
+                ) && state.runs[ix].history.last() == Some(&RunState::Running)
+                    && outcomes
+                        .iter()
+                        .any(|(id, _)| *id == plan.tasks[state.runs[ix].task].id)
+            });
+            match next {
+                Some(ix) => {
+                    let id = &plan.tasks[state.runs[ix].task].id;
+                    let outcome = outcomes
+                        .iter()
+                        .find(|(t, _)| t == id)
+                        .map(|(_, s)| *s)
+                        .expect("an outcome");
+                    apply(
+                        &mut state,
+                        &Command::SetRunState {
+                            run: ix,
+                            state: outcome,
+                        },
+                    );
+                }
+                None => break,
+            }
+        }
+        (state, last)
+    }
+
+    /// A `Parallel` whose first branch softens its failure to `WARNING` and
+    /// whose second is a bare leaf the driver leaves in flight.
+    const PARALLEL_WARNING_SIBLING: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: par
+    type: io.kestra.plugin.core.flow.Parallel
+    tasks:
+      - id: soft
+        type: io.kestra.plugin.core.flow.Sequential
+        allowFailure: true
+        tasks:
+          - id: boom
+            type: io.kestra.plugin.core.execution.Fail
+      - id: sibling
+        type: io.kestra.plugin.core.debug.Return
+        format: b
+"#;
+
+    /// **A `WARNING` branch does not fail its siblings** — the second shipped
+    /// defect `RunState::Warning` created, and the one that says the variant
+    /// falsified a FAMILY rather than a line.
+    ///
+    /// [`parallel::drive_concurrent`]'s rule 1 read *"terminal and not
+    /// `SUCCESS` or `SKIPPED`"* — an EXCLUSION list, which equals `isFailed()`
+    /// only while every other terminal is a failure. It stopped being that
+    /// twice: `Retried` at Task 7 and `Warning` at W8 Task 5, both members of
+    /// `isTerminatedNoFail()`. So a softened branch made the `Parallel`
+    /// `fail_the_rest` — **egret failing runs Kestra succeeds**, which is the
+    /// class the comment directly above that line already forbade.
+    ///
+    /// Measured on the pinned artifact: `lambda$hasFailed$0`,
+    /// `lambda$hasFailed$1` and `lambda$hasFailedNoRetry$0` in
+    /// `Execution.class` are each `getState().isFailed()` and nothing else.
+    ///
+    /// **The oracle cannot score this** — no corpus flow puts an
+    /// `allowFailure:` inside a `Parallel`, and applying the fix leaves the
+    /// ratchet at 111 — so this row is the whole instrument. `sibling` is left
+    /// **`RUNNING`** rather than completed, because a sibling that has already
+    /// terminated keeps its own state whatever rule 1 does; only a run still in
+    /// flight can be reached by `fail_the_rest`.
+    #[test]
+    fn a_warning_branch_does_not_fail_its_siblings() {
+        let plan = build_plan(PARALLEL_WARNING_SIBLING).expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(&plan, &[("boom", RunState::Failed)]);
+        assert_eq!(
+            history_of(&plan, &state, "soft"),
+            ["CREATED", "RUNNING", "WARNING"],
+            "the control: the branch really did end WARNING, so the row below \
+             is about a WARNING sibling and not about a branch that never \
+             finished"
+        );
+        assert_eq!(
+            history_of(&plan, &state, "sibling"),
+            ["CREATED", "SUBMITTED", "RUNNING"],
+            "still in flight -- rule 1 must not have failed it"
+        );
+        assert!(
+            !state.runs.iter().any(
+                |r| r.history.contains(&RunState::Failed) && plan.tasks[r.task].id == "sibling"
+            ),
+            "no sibling may carry a FAILED that rule 1 wrote"
+        );
+    }
+
+    /// The control the row above needs: rule 1 **does** still fire on a real
+    /// `FAILED` sibling.
+    ///
+    /// Without it, `a_warning_branch_does_not_fail_its_siblings` passes on an
+    /// implementation where rule 1 never fires at all — which is exactly what
+    /// narrowing the predicate could have produced.
+    #[test]
+    fn a_failed_branch_still_fails_its_siblings() {
+        let plan =
+            build_plan(&PARALLEL_WARNING_SIBLING.replace("        allowFailure: true\n", ""))
+                .expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(&plan, &[("boom", RunState::Failed)]);
+        assert_eq!(
+            history_of(&plan, &state, "soft"),
+            ["CREATED", "RUNNING", "FAILED"],
+            "with the flag removed the branch really does FAIL"
+        );
+        assert_eq!(
+            history_of(&plan, &state, "sibling"),
+            ["CREATED", "SUBMITTED", "RUNNING", "FAILED"],
+            "and rule 1 fails the sibling that was still in flight"
+        );
+    }
+
+    /// **A `Dag` node downstream of a `WARNING` dependency still runs** — the
+    /// site coupled to rule 1, and the reason the two move together.
+    ///
+    /// `FlowableUtils.resolveDagNexts`'s dependency filter is
+    /// `getState().isTerminated()` — `lambda$resolveDagNexts$3` in
+    /// `FlowableUtils.class`, measured, one instruction. `dag::drive` spelled
+    /// it `SUCCESS | SKIPPED`, which was the same set only while every other
+    /// terminal had already ended the branch through rule 1.
+    ///
+    /// **Fixing rule 1 alone would have traded one divergence for a worse
+    /// one**: with rule 1 no longer firing on a `WARNING` sibling and the
+    /// dependency gate still demanding `SUCCESS`, a `Dag` whose upstream node
+    /// softens its failure would hang for ever — nothing ready, nothing failed.
+    /// That is what this row and the `ended_badly` change together prevent, and
+    /// why neither is safe to ship without the other.
+    #[test]
+    fn a_dag_node_downstream_of_a_warning_dependency_still_runs() {
+        let plan = build_plan(
+            r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: d
+    type: io.kestra.plugin.core.flow.Dag
+    tasks:
+      - task:
+          id: up
+          type: io.kestra.plugin.core.flow.Sequential
+          allowFailure: true
+          tasks:
+            - id: boom
+              type: io.kestra.plugin.core.execution.Fail
+      - task:
+          id: down
+          type: io.kestra.plugin.core.debug.Return
+          format: b
+        dependsOn:
+          - up
+"#,
+        )
+        .expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(
+            &plan,
+            &[("boom", RunState::Failed), ("down", RunState::Success)],
+        );
+        assert_eq!(
+            history_of(&plan, &state, "up"),
+            ["CREATED", "RUNNING", "WARNING"],
+            "the control: the dependency really did end WARNING"
+        );
+        assert_eq!(
+            history_of(&plan, &state, "down"),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "the dependant is READY on a terminated dependency, whatever \
+             terminal it took -- a `Dag` that hangs here is the worse \
+             divergence the rule-1 fix would otherwise have created"
+        );
+    }
+
     /// **A skipped branch does not fail its siblings** — the guard on
     /// [`parallel::drive_concurrent`]'s rule 1.
     ///
     /// Through W3a, "terminal and not `SUCCESS`" and "terminated in error" were
     /// the same set for every state [`RunState`] could hold. `Skipped` is the
-    /// first that is not: `State.java:293` lists it in `isTerminatedNoFail()`
-    /// beside `SUCCESS`. Without the exclusion, `fail_the_rest` would `FAIL`
-    /// every sibling still in flight the moment one branch's `runIf:` came back
-    /// falsy — egret failing runs Kestra succeeds.
+    /// first that was not: `State.java:293` lists it in `isTerminatedNoFail()`
+    /// beside `SUCCESS`. Without it being excluded, `fail_the_rest` would
+    /// `FAIL` every sibling still in flight the moment one branch's `runIf:`
+    /// came back falsy — egret failing runs Kestra succeeds.
+    ///
+    /// **The rule is no longer an exclusion list, and this row now passes for a
+    /// stronger reason than it used to** — W8 Task 5 fix round 2. `Skipped`
+    /// was patched OUT of a predicate that admitted everything else;
+    /// `Retried` and then `Warning` joined the enum without being patched out,
+    /// and `Warning` shipped as a divergence
+    /// (`a_warning_branch_does_not_fail_its_siblings`). Rule 1 is
+    /// `latest == Some(Failed)` now — Kestra's `isFailed()`, measured — so
+    /// `Skipped` is outside it by construction rather than by an exclusion
+    /// somebody has to remember to extend.
     #[test]
     fn a_skipped_branch_does_not_fail_its_siblings() {
         let plan = build_plan(

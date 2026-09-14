@@ -1282,11 +1282,77 @@ mod tests {
             guess_state(false, RunState::Killed, false, false),
             RunState::Success
         );
-        // Not in Java's trigger set at all, so it is the `else` branch even
-        // with `transmitFailed` on.
+        // **Non-trigger TERMINALS under `transmitFailed: true`** -- the rows
+        // that make WIDENING the trigger set fail rather than pass. Both are
+        // `isTerminatedNoFail()`'s and neither is in Java's disjunction, so
+        // both take the `else` branch and answer `SUCCESS`; adding either to
+        // the `matches!` would make `soften` return the state itself instead.
+        //
+        // `Skipped` was here already and `Retried` was **not** -- W8 Task 5 fix
+        // round 2 measured the difference: a mutation adding `| RunState::Skipped`
+        // to the trigger set dies on the line below, and one adding
+        // `| RunState::Retried` survived the whole suite until this row existed.
+        // One member of a class is not the class.
         assert_eq!(
             guess_state(true, RunState::Skipped, false, false),
             RunState::Success
+        );
+        assert_eq!(
+            guess_state(true, RunState::Retried, false, false),
+            RunState::Success
+        );
+        // And with the flags ON, because `soften` is what the trigger arm
+        // calls: a widened set would return `Retried` here too, and a fixture
+        // that only ever passed `false, false` could not tell a widening from a
+        // `soften` that had stopped being identity on a non-`FAILED` state.
+        assert_eq!(
+            guess_state(true, RunState::Retried, true, true),
+            RunState::Success
+        );
+    }
+
+    /// **A `PAUSED` child cannot reach [`guess_state`], and that is carried by
+    /// code rather than by prose** — W8 Task 5 fix round 2.
+    ///
+    /// Java's trigger set is `isFailed() || isPaused() || KILLED || WARNING`
+    /// and this function omits `isPaused()`. The omission is sound because
+    /// `claim::settle` calls [`on_child_terminal`] behind
+    /// `is.filter(|s| s.is_terminal())`, so the only states this function can
+    /// be HANDED are `RunState::ALL`'s terminals — and `PAUSED` is not one.
+    /// That was true and unpinned: nothing failed if `is_terminal` grew a
+    /// `Paused`, and the doc would then have been quietly wrong in the same way
+    /// the `WARNING` justification was.
+    ///
+    /// **Derived from `RunState::ALL` rather than listed**, and with a positive
+    /// control: a `!contains` alone passes on an implementation where nothing
+    /// is reachable at all, which is the acquitting direction and the only one
+    /// that matters.
+    #[test]
+    fn a_paused_child_cannot_reach_guess_state() {
+        let reachable: Vec<RunState> = RunState::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.is_terminal())
+            .collect();
+        assert!(
+            !reachable.contains(&RunState::Paused),
+            "a PAUSED child execution has not terminated, so `claim::settle`'s \
+             `is.filter(|s| s.is_terminal())` never hands it here -- and this \
+             is what lets `guess_state` omit Java's `isPaused()` disjunct"
+        );
+        for state in [RunState::Failed, RunState::Killed, RunState::Warning] {
+            assert!(
+                reachable.contains(&state),
+                "{state:?} IS in the trigger set and must be reachable -- \
+                 without this the assertion above passes on an `is_terminal` \
+                 that answers false for everything"
+            );
+        }
+        assert_eq!(
+            reachable.len(),
+            6,
+            "six of the twelve `RunState::ALL` are terminal; a bare \
+             `!contains` says nothing about how many"
         );
     }
 
