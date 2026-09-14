@@ -14,7 +14,9 @@
 //! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
-//! - `worker`    — W4 (claim loops, handlers, reaper)
+//! - `worker`    — W3b (the claim loop and the reaper) and W4 (the handlers
+//!   and the runner). W3b's half shipped with no production caller; **W10**
+//!   is the package that calls it from `egret-bin` (spec §9)
 //! - `sla`       — W8 Task 6 (`sla:` evaluation; `EXECUTION_ASSERTION` only)
 //! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
 //!   the flow trigger's window-free arm)
