@@ -512,6 +512,149 @@ async fn a_trashed_flows_executions_are_still_listed() {
     assert_eq!(body["rows"][0]["flow_id"], flow.id.to_string(), "{body}");
 }
 
+// ── The DTO contract W7 consumes ────────────────────────────────────────────
+
+/// Seed one `workflow.task_runs` row, so the key-set test does not have to
+/// drive the worker to get a run to look at.
+async fn insert_task_run(db: &Db, execution: Uuid, run_ix: i32, task_id: &str) {
+    sqlx::query(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+         VALUES ($1, $2, $2, $3, 'io.kestra.plugin.core.log.Log', 'CREATED', \
+                 '[\"CREATED\"]'::jsonb)",
+    )
+    .bind(execution)
+    .bind(run_ix)
+    .bind(task_id)
+    .execute(&db.pool)
+    .await
+    .expect("insert task run");
+}
+
+/// **Every column of the repository row reaches the wire**, named.
+///
+/// Step 2 of this task is a column list, so this asserts the list rather than
+/// a behaviour over it: `TaskRunRow` carries all twenty-two columns and
+/// `ExecutionRow` all of its own minus `source`, and a DTO that quietly
+/// dropped one would be discovered by W7 rather than here.
+///
+/// **This test exists because a mutation survived without it.** Removing
+/// `rendered_run_if` from `TaskRunDto` left the whole suite green and
+/// byte-identical to its control: the gantt test reads six fields, and the
+/// other sixteen were asserted by nothing at all. The key SET is compared,
+/// not a count, so an extra field is as visible as a missing one — a count
+/// would let one field replace another silently.
+#[tokio::test]
+async fn every_repository_column_reaches_the_wire() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read"]).await;
+    let id = insert_execution(&db, ws, None, "a.keys", "f", "RUNNING", at(1)).await;
+    insert_task_run(&db, id, 0, "only").await;
+
+    let app = common::app(&db).await;
+    let detail = common::json(
+        common::get(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}"),
+            user,
+        )
+        .await,
+    )
+    .await;
+
+    // `ExecutionRow`'s columns minus `workspace_id`, plus the detail route's
+    // own two. `source` is here and NOT in the list row below.
+    let want_execution: Vec<&str> = vec![
+        "id",
+        "flow_id",
+        "namespace",
+        "flow_key",
+        "state",
+        "history",
+        "inputs",
+        "seq",
+        "execution_trigger",
+        "trigger_execution_id",
+        "trigger_run_ix",
+        "parent_execution_id",
+        "parent_run_ix",
+        "loop_index",
+        "loop_value",
+        "attempt_number",
+        "origin_offset_ms",
+        "created_at",
+        "updated_at",
+        "source",
+        "runs",
+    ];
+    let got: std::collections::BTreeSet<&str> = detail
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    let want: std::collections::BTreeSet<&str> = want_execution.iter().copied().collect();
+    assert_eq!(got, want, "the detail DTO's key set: {detail}");
+
+    // All twenty-two `task_runs` columns.
+    let want_run: Vec<&str> = vec![
+        "id",
+        "execution_id",
+        "run_ix",
+        "task_ix",
+        "task_id",
+        "type_id",
+        "parent_ix",
+        "value",
+        "rendered",
+        "rendered_run_if",
+        "state",
+        "history",
+        "attempts",
+        "not_before_ms",
+        "claimed_at",
+        "outputs",
+        "message",
+        "created_seq",
+        "ended_seq",
+        "resume_with",
+        "created_at",
+        "updated_at",
+    ];
+    assert_eq!(
+        want_run.len(),
+        22,
+        "the list this test asserts is the list Step 2 names"
+    );
+    let got_run: std::collections::BTreeSet<&str> = detail["runs"][0]
+        .as_object()
+        .expect("one task run")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    let want_run_set: std::collections::BTreeSet<&str> = want_run.iter().copied().collect();
+    assert_eq!(
+        got_run, want_run_set,
+        "the task-run DTO's key set: {detail}"
+    );
+
+    // And the list row: the same execution fields, WITHOUT `source`/`runs`.
+    let page = list(&app, ws, user, "namespace=a.keys").await;
+    let got_list: std::collections::BTreeSet<&str> = page["rows"][0]
+        .as_object()
+        .expect("one row")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    let want_list: std::collections::BTreeSet<&str> = want_execution
+        .iter()
+        .copied()
+        .filter(|k| *k != "source" && *k != "runs")
+        .collect();
+    assert_eq!(got_list, want_list, "the list DTO's key set: {page}");
+}
+
 // ── The gantt row ───────────────────────────────────────────────────────────
 
 /// One row of a rendered gantt chart, computed **from the execution DTO and
