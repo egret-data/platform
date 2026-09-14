@@ -1337,19 +1337,39 @@ the three holes W4 closed, and why this ratchet sees none of them
 Three different mechanisms reaching one verdict.  Merging them would lose the
 useful half twice.
 
-  retry: / the waker (Task 1)
-    25 golden entries declare a `retry:`   14 baselined + 11 matching
-    of the 14, CREATE_NEW_EXECUTION         4   (writes no `not_before` at all)
-              RETRY_FAILED_TASK            10   <- the waker's whole population
-    `due_retries` runs on EVERY tick and selects 0 rows.  `driver::pass_time`
-    is the only thing here that makes a deadline elapse, and it calls
-    `worker::resume` ITSELF in the same call -- so a due retry is consumed
-    inside the call that made it due.  driver.rs's OWN MODULE DOC has said so
-    since W3b ("it changes one timestamp and calls the same `resume` any other
-    caller would"), and this package wrote the opposite for five tasks.
-    Instrumented `wake`: 0 fires over 294 entries, `tests/worker.rs` the
-    positive control on the same build.
-    NOT a hole in retrying: a change on any of the 11 matching entries IS
+  retry: / the waker (Task 1; figures re-derived W8 Task 7)
+    25 golden entries declare a `retry:`    8 baselined + 17 matching
+    of the 8, CREATE_NEW_EXECUTION          0
+              RETRY_FAILED_TASK             8   <- the waker's whole population
+    THIS BLOCK READ `14 baselined + 11 matching`, `of the 14 ... 4 / 10`, and
+    "CREATE_NEW_EXECUTION writes no `not_before` at all".  All four figures and
+    the parenthesis were false.  W6 Task 4 banked the four CREATE_NEW_EXECUTION
+    entries AND gave that arm a `ScheduleRetry` (so it writes a `not_before`
+    after all, read by `due_retries`' `RETRIED` arm); W8 Task 5 banked
+    `valids/task-allow-{warning,failure}-runnable`.  `oracle-exec/README.md`
+    corrected its own copy at W6 Task 4 and this one was missed for two
+    packages -- the branch's `corrected where found, missed elsewhere` again.
+    The numbers above are DERIVED by
+    `tests/executor.rs::the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`,
+    which asserts (8, 17, 25) and names all eight, so this copy is now a
+    restatement of a running program rather than a second opinion.
+    `driver::pass_time` is the only thing here that makes a retry deadline
+    elapse, and it calls `worker::resume` ITSELF in the same call -- so a due
+    retry is consumed inside the call that made it due.  driver.rs's OWN MODULE
+    DOC has said so since W3b ("it changes one timestamp and calls the same
+    `resume` any other caller would"), and this package wrote the opposite for
+    five tasks.
+    Instrumented `wake` over the whole oracle: **0 fires on the retry
+    population, in every run.**  It used to read a flat `0 fires over 294
+    entries` and W8 Task 7 made that half false: widening `due_retries` to name
+    a due `PAUSED` run gave the oracle a second door to the same `resume`, and
+    the instrument now reads **1 fire in one of five runs and 0 in the other
+    four** -- latency-dependent, because it fires only when real wall-clock time
+    crosses a pause's bound before `pass_time` rewinds `created_at`.  The
+    ratchet is **109 in all five** and in a sixth with the arm removed: both
+    doors call the same `worker::resume`, so which one opens changes no trace.
+    `tests/worker.rs` is the positive control on the same build (1 fire).
+    NOT a hole in retrying: a change on any of the 17 matching entries IS
     reported.
 
   timeout: (Task 2)

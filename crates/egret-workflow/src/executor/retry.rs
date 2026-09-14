@@ -468,9 +468,14 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
 /// its body — so a `Paused` run nothing reopens is a stalled execution and a
 /// red ratchet. `worker::claim::due_retries` is the one the ratchet cannot see,
 /// because its gate is SQL the driver never runs — `pass_time` selects on
-/// `not_before_ms` with no state term at all — and **that one is a live defect
-/// now** rather than a prediction: eight banked entries depend on a pause
-/// ending, and in the product none of them would.
+/// `not_before_ms` with no state term at all. **That one WAS a live defect and
+/// W8 Task 7 fixed it**: the gate now carries a `'PAUSED'` arm, driven by
+/// `tests/worker.rs`'s
+/// `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`
+/// and `the_waker_names_exactly_the_states_something_will_move`. The ratchet
+/// reads **109 either way** — measured in both directions with the arm removed
+/// and restored — which is what the sentence above means and why the two tests
+/// had to exist.
 pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     let due: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {

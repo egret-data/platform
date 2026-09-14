@@ -42,9 +42,16 @@
 //! inside a [`settle`](claim) whose `now` is fixed for the transaction. A retry
 //! on a run with **no concurrently-live sibling** therefore sat `RETRYING` for
 //! ever. [`wake`] is the statement that re-reads the clock: it names the
-//! executions holding a due retry and hands each to [`resume`], and [`tick`]
-//! calls it **ahead of** the claim so the run it reopens is claimed by the same
-//! tick. See [`claim`]'s module doc for the two-clocks rule the predicate rests
+//! executions holding a **due deadline that something will act on** and hands
+//! each to [`resume`], and [`tick`] calls it **ahead of** the claim so the run
+//! it reopens is claimed by the same tick.
+//!
+//! **It is not only about retries, and the name is the older half.** W8 Task 7
+//! added the third arm: a bounded `Pause` or a `LoopUntil` parks its run
+//! `PAUSED` with a deadline and is no more claimable than a `RETRYING` one, so
+//! without that arm a bounded wait never ended in the product however correct
+//! `advance()` was. See [`due_retries`] for what each arm may name and for why
+//! the differential oracle scores none of it. See [`claim`]'s module doc for the two-clocks rule the predicate rests
 //! on, and `tests/worker.rs`'s
 //! `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
 //! for the property — which the differential oracle cannot see, because its

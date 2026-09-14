@@ -6111,7 +6111,14 @@ async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: 
 /// touches Postgres, and the executor's own
 /// `every_paused_run_names_its_resumer` proves only that *this* executor does
 /// not write such a row — not that the column refuses one. The oracle is blind
-/// twice over: no merged code has ever written a `PAUSED` row at all.
+/// for the ordinary reason instead: it drives `advance()`, which cannot build a
+/// `Command::PauseRun` without a `Resume`, so the row this CHECK refuses is one
+/// no execution it runs can produce. **That sentence read "no merged code has
+/// ever written a `PAUSED` row at all", which W8 Task 3 had already falsified
+/// in the commit before it** — `flowable::pause` emits `PauseRun`,
+/// `claim::persist` writes `history.last().wire()`, and eight golden entries
+/// store `'PAUSED'` on the way through. What is true is narrower and is the
+/// half that matters: nothing writes one with a NULL `resume_with`.
 ///
 /// Both directions, because a one-sided test passes against a CHECK that
 /// refuses everything.
@@ -6221,8 +6228,14 @@ async fn a_paused_row_that_names_no_resumer_cannot_be_stored(pool: sqlx::PgPool)
     assert!(
         refused.is_err(),
         "`TERMINAL:CANCELLED` is not in the vocabulary -- 0143 added one \
-         discriminant, not an escape hatch. `CANCELLED` is the state `RunState` \
-         still does not hold, so this row is also the marker for whoever adds it"
+         discriminant, not an escape hatch. **This message read \"`CANCELLED` is \
+         the state `RunState` still does not hold\"**, which W8 Task 6 falsified \
+         two tasks later: `RunState::Cancelled` is slot 12 of `RunState::ALL` \
+         and `is_terminal` lists it. The row is still refused, and the reason is \
+         now the narrower one -- no `Pause` bound resolves to `CANCELLED`, \
+         because `pause::deadline` produces SUCCESS, FAILED and (under \
+         `allowFailure:`) WARNING and nothing else. A `sla:` CANCEL cancels the \
+         EXECUTION and never a pause's bound"
     );
 }
 
