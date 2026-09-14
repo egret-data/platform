@@ -7226,13 +7226,22 @@ CTE. **Scope a refusal to what was measured, and name the route for the rest.**
   produce **no `CANCELLED` at all**. So flow concurrency stranded nothing: it
   reaches **0** baselined entries and the ratchet cannot score it either way.
 * **`allowFailure:`'s double assignment was settled, and the residual table was
-  the loser.** `valids/waitfor-child-task-warning` was counted under BOTH the
-  `AllowFailure` row and the `LoopUntil`/`WaitFor` row. W8 Task 5 closed the
-  `allowFailure` half — the `WARNING` child is byte-identical to the golden now
-  — **and the entry is still baselined**, which is what turned *held twice* from
-  a claim into a fact: it now stalls on the `OutputValues` child instead, i.e.
-  it is reproduced strictly further than it was and is the `LoopUntil` row's
-  alone. **§9 needed no change**; the residual table did.
+  the loser.** The construct was **assigned twice in two documents**: to W8 in
+  the programme spec's §9, and to *"unclaimed"* in this file's residual table.
+  One of those had to be wrong and the package had to say which rather than
+  inherit both. It is the residual table, **corrected at W8 Task 1 rather than
+  §9 being lowered** — and the ruling is derived rather than administrative: all
+  twelve entries reach the construct and **seven bank inside W8 alone**, which
+  is the cheapest set in the package, and a row whose entries a package can bank
+  is not unclaimed. **§9 needed no change.**
+
+  *(A separate fact, often quoted with it and not the same one: one entry,
+  `valids/waitfor-child-task-warning`, was **held twice** — by the `AllowFailure`
+  row and by the `LoopUntil`/`WaitFor` row. W8 Task 5 closed the `allowFailure`
+  half, the `WARNING` child is byte-identical to the golden now, **and the entry
+  is still baselined** — which is what turned *held twice* from a claim into a
+  measurement: it stalls on the `OutputValues` child instead, reproduced
+  strictly further than it was, and is the `LoopUntil` row's alone.)*
 
 #### W8 Task 7 — a defect in the product that the ratchet scores in neither direction
 
