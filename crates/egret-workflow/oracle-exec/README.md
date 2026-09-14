@@ -7240,9 +7240,20 @@ CTE. **Scope a refusal to what was measured, and name the route for the rest.**
 `state = 'RETRYING' OR (state = 'RETRIED' AND …)` from W4 Task 1. A bounded
 `Pause` parks its run `'PAUSED'` with a `not_before_ms`, so **in the product a
 bounded wait never ended**, however correct `advance()` was — and W8 gave that
-state three producers (`Pause` at Task 3, `LoopUntil`/`WaitFor` at Task 4, and
-`Restarted` beside them at Task 2), which is what turned Task 2's prediction into
-a live defect. Task 7 added the `'PAUSED'` arm.
+state **two** producers, `Pause` at Task 3 and `LoopUntil`/`WaitFor` at Task 4,
+which is what turned Task 2's prediction into a live defect. Task 7 added the
+`'PAUSED'` arm.
+
+**Two, not three**, and the third was checked rather than counted.
+`RunState::Restarted` is the other non-terminal state W8 Task 2 added and is
+often named beside these, but **nothing can put a RUN in it carrying a live
+deadline**: `pause_mark` pushes it onto the **execution**'s history and nothing
+pushes it onto a run's — 0 of the golden's 840 run histories against 12
+execution histories that do — and `Command::RestartLoop`, the one command that
+ends a `LoopUntil`'s wait, clears `not_before` and `resume_with` in the same arm
+and pushes `RUNNING`. A state with no producer of due rows is not a gap in the
+gate, and `the_waker_names_exactly_the_states_something_will_move` asserts it
+rather than leaving it to be re-argued.
 
 **Neither the defect nor the fix moves anything here, and that was measured in
 both directions rather than argued.** `driver.rs`'s `pass_time` selects on
@@ -7831,9 +7842,9 @@ reason.**
 
 *The predicate.* `due_retries`' gate read `state = 'RETRYING' OR (state =
 'RETRIED' AND …)`, so it **would never wake a `PAUSED` run**. W8 gave that state
-three producers — `Pause` at Task 3, `LoopUntil`/`WaitFor` at Task 4, `Restarted`
-beside them at Task 2 — and eight banked golden entries depend on a bounded wait
-ending, so this was a live defect in the product and not a prediction. Every one
+two producers — `Pause` at Task 3 and `LoopUntil`/`WaitFor` at Task 4;
+`RunState::Restarted` is **not** a third, and the W8 section says why — and
+eight banked golden entries depend on a bounded wait ending, so this was a live defect in the product and not a prediction. Every one
 of those eight ends its wait through `driver::pass_time`, which selects on
 `not_before_ms` with **no state term anywhere in its SQL** and then calls
 `worker::resume` itself, so the driver reaches the same runs through a different
