@@ -10291,3 +10291,8 @@ and after, id list **`3c290eeab650320a1a9d7b5fb5d92d75`**, ratchet **109** — a
 disagreed and did not. Both halves of the hoisted term are invisible to the
 oracle; the instruments are `tests/worker.rs`'s, and that is the finding, not an
 aside.
+
+The gate after part 2: **259 result lines / 3513 passed / 0 failed / 5
+ignored**, exit 0, against `35d20de6`'s 259 / 3507 / 0 / 5, reconciled by a
+test-NAME-SET diff of **6 added and 0 removed** over the whole task.
+`sql_starrocks_live` reports **8 passed in 0.77 s**.
