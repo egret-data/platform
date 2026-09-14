@@ -2359,10 +2359,12 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
         (b_top, b_nested, b_top + b_nested),
         (580, 125, 705),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 744 leaves \
-         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
-         and at 127 since Task 4's four banks; the claim is `unmoved`, and the \
-         number beside it is a moment"
+         entries, which mismatch whatever the pair says. Flipping all 705 leaves \
+         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
+         127 since Task 4's four banks, and at 109 since W8 banked eighteen; the \
+         claim is `unmoved`, and the number beside it is a moment. **This message \
+         said 744 while the tuple three lines above it said 705** -- the exact \
+         shape this test's own doc warns about, found by W8 Task 7's sweep"
     );
     assert_eq!(
         (

@@ -35,11 +35,13 @@ normalised trace*.
 >   give counts 204 that were inside sub-executions egret never created and were
 >   therefore never fed), and the circular field is gone;
 > - **"the kept 1104 are the whole of what this oracle asserts about
->   serialisation"** is wrong for the second time. **360** are; the other **744**
+>   serialisation"** is wrong for the second time. **399** are; the other **705**
 >   sit on baselined entries and cannot fail, which was as true under W3a as it
 >   is now — and the same is true of every other golden field on a baselined
->   entry, not only of the pairs. *(357/747 until W6 Task 8; the split moves with
->   `baseline.txt`, so every bank moves it.)*;
+>   entry, not only of the pairs. *(357/747 until W6 Task 8, 360/744 until W8;
+>   the split moves with `baseline.txt`, so every bank moves it — which is why
+>   this bullet has now been stale twice and why W8 Task 7 swept all five copies
+>   of it rather than the one it was handed.)*;
 > - **`egret.sql` ships with no oracle coverage at all** — 0 of 345 corpus flows
 >   and 0 of 294 golden entries — and its own suite **fails** without an engine
 >   now; it used to self-skip and report `7 passed; 0 failed; 0 ignored` in
@@ -5701,10 +5703,23 @@ that moved in opposite directions by the same amount so that *the total held*. B
 of those falsify rules this statement has relied on, and they are written out at
 the end of the W6 section rather than here.
 
+**W8 Task 7 re-derived them a fifth time, and the ratchet moved again**: 127
+before W8 Task 1, **109** at this commit, eighteen banked across four
+constructs. Two things make this pass different from the four before it. First,
+the sweep's yield was not stale prose beside a correct figure — it was **one
+family of six numbers copied to five places and maintained in one of them, with
+two of the copies disagreeing with each other**; the W8 section carries it as a
+table with the sites named. Second, W8 Task 7's own change is a **product defect
+the ratchet scores in neither direction** — `claim::due_retries` would never
+wake a `PAUSED` run — measured at **109 with the fix and 109 without it**, which
+is item 15's shape one level in and is why the rule this statement ends with is
+extended there: *a figure is safe only if a running program compares it — and so
+is a **predicate***.
+
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
-retires* at the end and, for the ones W6 moved, in *The figures W6 retires* in
-the W6 section.
+retires* at the end, for the ones W6 moved in *The figures W6 retires* in the W6
+section, and for W8's in *The figures W8 Task 7 retires* in the W8 section.
 
 **The provenance rule below used to be stated for the whole statement and was
 itself stale — the whole-branch review's Important 3.** It read: *"Every **count**
@@ -5731,6 +5746,8 @@ So the rule is restated per family rather than for everything:
 | W6's **artifact measurements** (the cron dialect, DST and late-tick behaviour, the 12/47/**100** nested loops, the 498/499 publish boundary, the `dependsOn` double-fire) | **no** — taken by running Kestra's own code against the pinned digest. Reproduced once each by a second party, which is the strongest thing said about them |
 | W6's **mutation tables** (Task 2's 7 then 11, Task 3's 12, 31/30/1 schedule, 45/45 flow, the webhook's 60/60 against a 0/30 control on the unmutated binary, and Task 8's 5 at 3 runs each plus 1 at 5) | **no** — run by hand, each with its run count and its control beside it, because *a one-run verdict is a coin flip reported as a measurement* |
 | W6's **claim classification** (149 claims → MEASURED 91 / DERIVED 33 / CHOSEN 25) | **no** — a hand audit, after a keyword classifier scoring 70/3/76 was built and thrown away |
+| W8's **eighteen banked entries**, the **six projections** of a baselined entry, and the **`(8, 17, 25)`** retry split | **yes** — `the_residual_baseline_is_attributed_to_a_construct_or_named`, `the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs`, `kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line` and `the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`, on every run. **The prose copies of the six are NOT**, and five of them were stale — see the W8 section |
+| W8 Task 7's **instrumented `wake` over the oracle** (1 fire in one of five runs, 0 in four) | **no** — measured under an `eprintln!` that is not in the tree, over five runs, with `tests/worker.rs` as the positive control on the same build and the ratchet read at **109** in every one |
 
 A figure is safe only if a running program compares it. Everything in rows 2–7
 is a figure a reader must treat as a measurement someone took, not as a fact the
@@ -5900,11 +5917,11 @@ name the defect. They stay baselined for `finally:`.
     at the top level                                       877
     inside `spawned`                                       227
 
-  a change to which the ratchet REPORTS                    360
-    at the top level                                       258
+  a change to which the ratchet REPORTS                    399
+    at the top level                                       297
     inside `spawned`                                       102
-  a change to which it does NOT                            744
-    at the top level                                       619
+  a change to which it does NOT                            705
+    at the top level                                       580
     inside `spawned`                                       125
   ----------------------------------------------------------
   TOTAL                                                   1104
@@ -5939,8 +5956,8 @@ verifying its md5 (`5773748d22d521e6a65afc5e2e2663d1`) after every run:
 
 *(**These three rows are W4-era and are NOT re-run at W6 Task 3 or Task 4.** The
 populations they flip moved with the baseline — 747 → 744 and 357 → 360 at Task
-3, and again at Task 4 — and the `143 mismatching` in the middle row would read
-`127` — so the numbers in the
+3, again at Task 4, and again across W8's eighteen banks to **705 and 399** —
+and the `143 mismatching` in the middle row would read `109` — so the numbers in the
 right-hand column are a record of an experiment on a different tree, not a
 current measurement. They are left as they were run rather than adjusted,
 because an adjusted experimental result is a number no program ever produced;
@@ -5963,18 +5980,41 @@ somebody measured. The same split over the other families, derived by
 
 | family | on a baselined entry, i.e. un-falsifiable | total |
 |---|---|---|
-| run terminals | **445** | 840 |
-| run-history state tokens | **1759** | 3355 |
-| execution-history state tokens | **709** | 1462 |
-| executions (266 entries + their 142 sub-executions) | **177** | 408 |
-| sub-executions | **51** | 142 |
-| kept ordered pairs | **744** | 1104 |
+| run terminals | **396** | 840 |
+| run-history state tokens | **1528** | 3355 |
+| execution-history state tokens | **522** | 1462 |
+| executions (266 entries + their 142 sub-executions) | **147** | 408 |
+| sub-executions | **43** | 142 |
+| kept ordered pairs | **705** | 1104 |
 
-*(All six fell at W6 Task 3, together, because they are six projections of one
-set — what lives on a baselined entry. The twelve entries banked there carry 16
-run terminals, 48 run-history tokens, 42 execution-history tokens, 14 executions,
-2 sub-executions and 3 ordered pairs between them, and every one of those is
-falsifiable now.)*
+*(All six fall together, because they are six projections of one set — what
+lives on a baselined entry. They fell at W6 Task 3 (445 / 1759 / 709 / 177 / 51
+/ 744, the twelve `Subflow` entries carrying 16 run terminals, 48 run-history
+tokens, 42 execution-history tokens, 14 executions, 2 sub-executions and 3
+ordered pairs between them), again at W6 Task 4 over four entries, and again
+across the whole of W8. **The W8 deltas are read off the `const`s' own arcs
+rather than subtracted here**: run terminals `433 → 419 → 412 → 396`
+(**37** over Tasks 3–5, and Task 6 moved it by 0 because both of its entries
+have `"runs": []`); run-history tokens `1703 → 1647 → 1610 → 1528` (**175**);
+execution-history tokens `665 → 617 → 562 → 526 → 522` (**143**); executions
+`165 → 157 → 156 → 149 → 147` (**18**); ordered pairs `744 → 705` (**39**); and
+sub-executions `43 → 43`, **0**, because **not one of the eighteen carries a
+sub-execution**.)*
+
+**This table was two packages stale, it is the fourth copy of these six numbers
+in this file, and it DISAGREED with the third.** Item 2 carried
+`744 / 433 / 1703 / 665 / 165 / 43` and this table carried
+`744 / 445 / 1759 / 709 / 177 / 51` — the same six projections of the same set,
+differing in five places, because item 2 was re-derived at W6 Task 8 and this
+one was left at W6 Task 3. **Two copies of one figure that disagree with each
+other and with the program are the strongest available argument for the rule**:
+the six live as `const`s in `tests/executor.rs` whose doc comments carry the
+whole W8 arc and were updated by every task that moved them, and as prose here,
+in item 2, in the block above and in this file's opening blockquote —
+**maintained in exactly one of the five places, and inconsistent among the other
+four.** The rule that finds this is *sweep the POPULATION a figure belongs to* —
+every site quoting any of the six — rather than the sentence that prompted the
+sweep; see the W8 section's own retirement table.
 
 The run-terminal row is the same 840 the fed table classifies, so the two
 sections are talking about one set of runs. Nothing here is a *new* weakness —
@@ -6137,10 +6177,14 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-111 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
-derives this from the baselined flows' own YAML on every run and fails if a row
-moves; **the rows overlap and this is not a partition**, but the remainder is
-exhaustive and named.
+**109 entries** — it read `111` until W8 Task 7, two banks behind.
+`the_residual_baseline_is_attributed_to_a_construct_or_named` derives the rows
+from the baselined flows' own YAML on every run and fails if one moves; **the
+rows overlap and this is not a partition**, but the remainder is exhaustive and
+named. **The total is the one thing that test does not assert** — it `println!`s
+`baseline.len()` — so this heading is prose sitting beside a derivation, which
+is exactly the class W8 Task 7's sweep went looking for and the reason it was
+found.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
@@ -6460,7 +6504,7 @@ and only one of them ends there for the reason a reader would guess.
 
 | hole | the population, derived | is the predicate reached? | why nothing can move |
 |---|---|---|---|
-| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = **10 baselined + 15 matching** since W6 Task 4 (14 + 11 before it); all 10 remaining baselined ones are `RETRY_FAILED_TASK`, because the **4** `CREATE_NEW_EXECUTION` entries banked. *(This cell read "of the 14, 4 are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all". That is now false in both halves: that arm emits the `ExecutionDelay` the artifact builds for both behaviours, and `due_retries` has a `RETRIED` arm to read it.)* | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
+| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = **8 baselined + 17 matching** since W8 Task 5 (10 + 15 after W6 Task 4, 14 + 11 before it); all **8** remaining baselined ones are `RETRY_FAILED_TASK`, because the **4** `CREATE_NEW_EXECUTION` entries banked at W6 Task 4 and `valids/task-allow-{warning,failure}-runnable` banked at W8 Task 5 — the first `retry:` entries a bank has moved to the matching side since. Derived by `the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`, which asserts `(8, 17, 25)` and names all eight. *(This cell read "of the 14, 4 are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all". That is now false in both halves: that arm emits the `ExecutionDelay` the artifact builds for both behaviours, and `due_retries` has a `RETRIED` arm to read it. It then read `10 baselined + 15 matching` for two more tasks.)* | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows on the retry population** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires on the retry population, with `tests/worker.rs` as the positive control on the same build. **The flat "0 fires over the whole oracle" this cell used to end with is false since W8 Task 7** — the `'PAUSED'` arm it added gives the oracle a second door to the same `resume`, and the instrument reads 1 fire in one of five runs and 0 in the other four, ratchet 109 in all five. See the W8 section |
 | **`timeout:`** (Task 2) | **5** golden entries declare one. **4** are baselined; the **1** matching is `invalids/duplicate-parallel`, a flow Kestra *refused* — so it has no runs at all, and the reportable half of this population is empty for a reason nothing can change. *(W4's spec §1.1 says **4** for this row and is right over **its** population, the baseline; this table counts the golden. Both now name the population they count over, because a reader holding the two documents open sees a contradiction where there is a scope difference — and this file's whole subject is figures that are true under a scope nobody wrote down.)* | **Yes, exactly four times.** Instrumented `worker::timeout::guard` over all 294 entries: the budget was applied `1s`, `1s`, `250ms`, `3600s` — precisely the four declarations — and **expired 0 times** | **No corpus budget is short enough to fire.** Three of the four sit on a `Pause`, a flowable whose `timeout:` is `advance()`'s and which Kestra's own worker ignores (measured on the artifact: a `Sequential` carrying `timeout: PT1S` around a four-second `Sleep` ran to SUCCESS in 4.2 s); the fourth is an **hour** on a `core.log.Log` |
 | **kill** (Task 3) | **5** baselined ids contain `kill`, and **0** of them declare a `timeout:` anywhere in any of `Flow`'s four task lists | **No, zero times.** `Registry::cancel` hangs off the budget expiring, and the row above is why that never happens | **The five named ids are not this path's population at all**, and their own YAML says what they are: `exit-killed` is `Exit` carrying `state: KILLED`, an author-declared terminal rather than a kill anybody performs; `pause-kill-delay` is a bare `Pause`; `flow-concurrency-queue-killed-after-execution` and `flow-concurrency-parallel-subflow-kill-child` declare `concurrency: {behavior: QUEUE, limit: 1}`; and `flow-concurrency-parallel-subflow-kill` declares two `Subflow`s and no `concurrency:` of its own — it is named for what happens to its child. Four of the five are W8 constructs and the fifth is an output. The one runtime kill this corpus *does* hold — `parallel-fail-with-flowable`'s `Sleep`, abandoned by a failed `Parallel` — is `advance()`'s decision, and `advance()` has no worker to tell |
 
@@ -7036,6 +7080,280 @@ reference point every published W1–W6 number is stated against. That cost
 belongs beside the decision, which is why it is written here rather than
 implied.
 
+### W8 — the ratchet moved eighteen, and the last fix is one it cannot score
+
+`127` before W8 Task 1 and **`109`** at this commit. **Eighteen banked**, which
+is exactly what the design spec predicted — **and not by the route it
+predicted**, which is the part a reader can act on and the total is not. The
+per-task movement first, then the eighteen, then the four places the route
+differed, then what the ratchet still cannot speak for.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `4a4ed007` (W6's tip, on `main`) | 127 mismatching, 127 baselined, 0 broken | — |
+| Task 1 | 127 | three corrections before anything was counted; the `concurrency:` row DELETED |
+| Task 2 | 127 | `RunState::Paused` and `RunState::Restarted`, non-terminal, with the partition guarded |
+| Task 3 | **119** | `Pause` — the wait, its bound, and the resume |
+| Task 3 fix round 1 | 118 | a ninth bank, `valids/pause-behavior` |
+| Task 3 fix round 2 | **119** | **the ninth bank WITHDRAWN** — it survived only on an over-accepting predicate |
+| Task 4 | **118** | `LoopUntil` / `WaitFor`; `Command::PauseRun` carries its `Resume` |
+| Task 5 | **111** | `allowFailure:` / `allowWarning:`, and `RunState::Warning` |
+| Task 6 | **109** | `sla:` `EXECUTION_ASSERTION`; `MAX_DURATION` refused by name and recorded unbankable |
+| Task 7 | **109** | `claim::due_retries` wakes a `PAUSED` run — **and the ratchet is 109 with the fix and 109 without it, measured both ways** |
+
+#### The eighteen, by construct
+
+**Each is named rather than counted**, because a package that reports a total
+can be right about the number and wrong about every attribution in it — which is
+what happened twice inside this package and is recorded under *the route* below.
+
+| construct | count | the entries |
+|---|---|---|
+| **`Pause`** (Task 3) | **8** | `valids/pause-delay`, `valids/pause-timeout`, `valids/pause-kill-delay`, `valids/pause-duration-from-input`, `valids/trigger-flow-with-pause`, `valids/flow-trigger-paused-flow`, `valids/flow-concurrency-cancel-pause`, `valids/flow-concurrency-queue-pause` |
+| **`LoopUntil` / `WaitFor`** (Task 4) | **1** | `valids/waitfor-nested` |
+| **`allowFailure:` / `allowWarning:`** (Task 5) | **7** | `valids/task-allow-warning-{runnable,flowable,executable-flow}` (Step 2, no new state); `valids/task-allow-failure-{runnable,flowable,executable-flow}` and `valids/pause-timeout-allow-failure` (Step 3, with `RunState::Warning`) |
+| **`sla:` `EXECUTION_ASSERTION`** (Task 6) | **2** | `valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition` |
+
+**`valids/pause-timeout-allow-failure` is a `Pause` entry that Task 5 banked,
+not Task 3**, and the row it sits in is the one that banked it. Its `timeout:`
+fires and its bound's terminal is `WARNING` rather than `FAILED`, which is
+`allow_failure::fail`'s answer and not `pause::deadline`'s — so counting it
+under `Pause` would credit the wait with a bank the flag made. Migration `0143`
+exists for that one entry's `resume_with = 'TERMINAL:WARNING'`.
+
+**The attribution standard is W6 Task 3's and it was met per construct**: a
+one-line mutation that reverts the construct returns the ratchet to its old
+value **naming exactly the banked ids**. Those mutations are in each task's own
+section below, with a run count and a control beside each verdict; they are
+measurements those tasks took, not something `cargo test` re-runs.
+
+#### The route, not the total — four places the package differed from its own spec
+
+The spec predicted eighteen and eighteen is what happened, and **not one of the
+four constructs landed on its predicted number.** Two errors cancelled.
+
+1. **Task 3 was low by one.** The spec gave `Pause` seven; it banked eight. The
+   eighth is `valids/pause-kill-delay`, and what was missing from the prediction
+   is that `FlowService.java:574` **exempts `Pause` from "a `timeout:` is for
+   runnable tasks only"** — so a `Pause`'s own `timeout:` is honoured where a
+   `Sequential`'s is ignored, which is the opposite of the rule the `timeout:`
+   row of W4's three-holes table states for every other flowable.
+2. **Task 4 was high by two, and the cause is a spelling.** The spec said
+   *"three bankable"* out of nine `LoopUntil`/`WaitFor` entries. One banked.
+   **The *"three"* was a spelling split, not a separator**: six of the nine are
+   held by `driver.rs`'s registry shipping no
+   `io.kestra.plugin.core.output.OutputValues` handler, and those six are
+   **exactly the six whose flows spell the construct `WaitFor`** — so a split
+   that looked like a behavioural classification was a partition on the task
+   type's alias, and the three it named bankable were the three spelled
+   `LoopUntil`. Of those three, one banked, one is `valids/loopuntil-failed-flowable`
+   (a renderer divergence, registered in `STILL_OVER_ACCEPTED_AT_RUNTIME`) and
+   one is `valids/loop-until-restart`, which **no implementation can bank** —
+   see below.
+3. **Task 5 was low by one.** The spec gave `allowFailure:` six; it banked
+   seven, the seventh being the `Pause` entry named above.
+4. **A ninth `Pause` bank was banked and then WITHDRAWN.** Task 3 fix round 1
+   banked `valids/pause-behavior` and fix round 2 took it back out: the entry
+   matched only because the predicate under it accepted more than Kestra does,
+   and **an entry that banks for an unattributed reason is a finding, not a
+   bank.** The ratchet went 119 → 118 → 119 across the two rounds. This is the
+   only place in the programme where `baseline.txt` has moved **up** on purpose,
+   and it is recorded here rather than only in the task's section because a
+   reader reconciling `127 − 18 = 109` will otherwise find a nineteenth removal
+   in the git history with no counterpart.
+
+#### Entries no implementation can bank — listed apart from the five blindnesses
+
+**This is not a sixth way the oracle is blind and must not be filed as one.**
+The five mechanisms in *The constructs the ratchet cannot speak for* are reasons
+the ratchet **cannot speak**. This class is the opposite: the ratchet speaks,
+compares the entry, and **is wrong** — it is **effect 2** of the product under
+*EFFECT is a second axis*, the (a golden entry exists × the irreproducibility
+lives in the GOLDEN) cell. **The blindness count stays at FIVE.**
+
+| entry | why no implementation can bank it | what to do |
+|---|---|---|
+| `valids/loop-until-restart` | **A latency-dependent golden.** `maxDuration: PT3S` with `interval: PT1S`; Kestra's `reachedMaximums` compares the loop taskrun's creation plus the bound against `Instant.now()`, and on the captured round its two `PT1S` pauses took **1.17 s and 1.92 s**, so the third iteration ended at T+3.33 s and was past the bound. The golden holds three iterations. `driver.rs::pass_time` moves the clock to the earliest deadline and never further, so any correct implementation ends its third near T+2.05 s and runs a fourth. **The captured value is a function of the artifact's scheduler rather than of the flow.** Corroborated as a property of the CONSTRUCT rather than of the entry: `valids/waitfor-max-duration`, the same shape at `PT5S`/`PT0.2S`, is one of only **two** corpus flows whose normalised trace **Kestra itself** could not reproduce across five rounds, so it has no golden entry at all | **Nothing.** That is the whole actionable content, and filing this as a blindness is what loses it. `handler_surface.py` carries it as a `clock` blocker so the ceiling does not name it bankable |
+
+**The three `MAX_DURATION` entries are adjacent and are NOT in this class**, and
+the distinction is the reason the class exists. They share the *mechanism* — the
+harness compresses time — and differ on the *effect*: they are **effect 3**, so
+a repair exists and is nameable (uncap `driver.rs`'s `Sleep`, then build a
+monitor keyed on wall-clock time that `advance()` cannot host). *"No
+implementation can bank them"* is true of them only with **"under this
+harness"** attached, and W8 Task 6's refusal is written with that clause and
+with a running program under it — **0 registrars across the four DECLARERS**,
+against a control of **28 of 269** driven flows that do register a deadline.
+**That measurement covers four entries and not six**, and generalising it to all
+of them was W8 Task 6's own error: the two `*-parent` entries declare no `sla:`,
+their `Subflow` run necessarily DOES span steps, and what holds them is a
+**different and stronger** fact — `pass_time`'s `WITH RECURSIVE` joins
+`parent_execution_id` while a subflow child is linked by
+`trigger_execution_id`, so **the clock-advance walk cannot reach the child at
+all**, which would hold even if the child registered a deadline.
+`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded` runs that exact
+CTE. **Scope a refusal to what was measured, and name the route for the rest.**
+
+#### Two corrections this package made that read as lost scope, and are not
+
+* **The `concurrency:` row is DELETED, not lowered.** W8 Task 1 removed it from
+  *States and constructs no W3a task claims*. It is a **correction, not a
+  surrender**: the row attached **3 entries** to flow concurrency through the
+  `CANCELLED` state, and that attribution was wrong for four packages. The
+  golden's three `CANCELLED`s are **two `sla:`s** (`valids/flow-concurrency-sla-assert-cancel`,
+  `valids/sla-execution-condition` — both banked by W8 Task 6) and **one
+  `Exit`** declaring `state: CANCELLED` (`valids/exit-cancelled`, the
+  `ExecutionUpdatableTask` row's, still unclaimed). Not one is a limit's.
+  `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its
+  control is that the two corpus flows writing `concurrency: {behavior: CANCEL}`
+  produce **no `CANCELLED` at all**. So flow concurrency stranded nothing: it
+  reaches **0** baselined entries and the ratchet cannot score it either way.
+* **`allowFailure:`'s double assignment was settled, and the residual table was
+  the loser.** `valids/waitfor-child-task-warning` was counted under BOTH the
+  `AllowFailure` row and the `LoopUntil`/`WaitFor` row. W8 Task 5 closed the
+  `allowFailure` half — the `WARNING` child is byte-identical to the golden now
+  — **and the entry is still baselined**, which is what turned *held twice* from
+  a claim into a fact: it now stalls on the `OutputValues` child instead, i.e.
+  it is reproduced strictly further than it was and is the `LoopUntil` row's
+  alone. **§9 needed no change**; the residual table did.
+
+#### W8 Task 7 — a defect in the product that the ratchet scores in neither direction
+
+`claim::due_retries`, the SQL half of the waker, was gated to
+`state = 'RETRYING' OR (state = 'RETRIED' AND …)` from W4 Task 1. A bounded
+`Pause` parks its run `'PAUSED'` with a `not_before_ms`, so **in the product a
+bounded wait never ended**, however correct `advance()` was — and W8 gave that
+state three producers (`Pause` at Task 3, `LoopUntil`/`WaitFor` at Task 4, and
+`Restarted` beside them at Task 2), which is what turned Task 2's prediction into
+a live defect. Task 7 added the `'PAUSED'` arm.
+
+**Neither the defect nor the fix moves anything here, and that was measured in
+both directions rather than argued.** `driver.rs`'s `pass_time` selects on
+`not_before_ms` with **no state term anywhere in its SQL** and then calls
+`worker::resume` itself, so the oracle reaches the same runs through a different
+door: the ratchet reads **109 with the arm and 109 with it removed**. This is
+item 15's shape one level in — a property proved about a path no deployment
+takes — and it is **item 11**'s subject, where the measurement and the two tests
+that do score it are written out.
+
+**One figure did move, and it is the one this file had recorded as a flat
+zero.** *Instrumented `wake`: 0 fires over the whole oracle* is now false as
+stated: widening the gate gave the oracle a second door to the same `resume`,
+and the instrument reads **1 fire in one of five runs and 0 in the other four**
+— latency-dependent, because it fires only when real wall-clock time crosses a
+pause's bound before `pass_time` rewinds `created_at`. The ratchet is **109 in
+all five**, because both doors call the same `worker::resume` and which one
+opens changes no trace. The **retry** population is untouched: `wake` still
+fires **0** times on it, which is what
+`the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them` is named
+for. A positive control on the same build (`tests/worker.rs`, 1 fire) is what
+makes the zeros mean anything.
+
+#### The figures W8 Task 7 retires, and the population each was hiding in
+
+The rule this statement ends with is *a figure is safe only if a running program
+compares it*, and **W8 Task 7 extends it: so is a PREDICATE.** `due_retries`'
+state gate was a predicate nothing compared, and no figure sweep could have
+found it — W6's Critical was the same class. Swept by concept — *what selects a
+run to act on* — **eleven selectors were examined and one was wrong**:
+`claim::claim`, `claim::due_retries`, `reaper::reap`, `replay::due_run`,
+`spawn::terminated_count`, `worker::subflow`'s parent report,
+`driver.rs::pass_time`, `executor::retry::reopen_due`,
+`flowable::resume_paused`, `sequential::walk` and `parallel::drive_concurrent`.
+Two of the ten correct ones are correct **structurally** rather than by
+vigilance, and they are the pattern: `terminated_count` derives its state list
+from `RunState::ALL` filtered by `is_terminal()`, and `resume_paused` reads the
+RUN's own `resume_with` so there is no list of kinds to be missing from.
+`the_waker_names_exactly_the_states_something_will_move` puts `due_retries` on
+the same footing — it answers for **every** member of `RunState::ALL` and
+asserts its own key set equals `ALL`'s, so a fourteenth variant fails the test
+rather than joining the unnamed majority by omission.
+
+The figure sweep beside it found that **one family of six numbers is copied to
+five places in this file and its suite, maintained in exactly one of them, and
+inconsistent among the other four.** The family is the six projections of *what
+lives on a baselined entry* — run terminals, run-history tokens,
+execution-history tokens, executions, sub-executions and kept ordered pairs. The
+maintained copy is five `const`s plus one assertion tuple in
+`tests/executor.rs`, whose doc comments carry the whole W8 arc
+(`165 → 157 → 156 → 149 → 147` and its four siblings) and were updated by every
+task that moved them.
+
+| site | figures examined | corrected | what it read |
+|---|---|---|---|
+| this file's **opening blockquote** | 2 | **2** | `360` asserted / `744` not → **399 / 705** |
+| *The ordered pairs*' **ASCII block** | 10 | **4** | `360 / 258` and `744 / 619` → **399 / 297** and **705 / 580**; the totals and the two nested counts were right |
+| *The ordered pairs*' **six-family table** | 6 | **6** | `744 / 445 / 1759 / 709 / 177 / 51` → **705 / 396 / 1528 / 522 / 147 / 43** — W6 **Task 3**-era, two packages behind |
+| **item 2** of *What this ratchet does not prove* | 6 | **5** | `744 / 433 / 1703 / 665 / 165 / 43` → **705 / 396 / 1528 / 522 / 147 / 43** — W6 **Task 8**-era; `43` is the one that did not move, because **not one of the eighteen carries a sub-execution** |
+| `kept_ordered_pairs_…`'s own assertion **message** | 1 | **1** | *"Flipping all 744"*, three lines under a tuple asserting `705` |
+| **25** | **18** | | |
+
+**Two of those copies disagreed with each other**, which is the strongest
+argument this file has produced for the rule: item 2 and the six-family table
+are the same six projections of the same set and they differed in five places,
+because one was re-derived at W6 Task 8 and the other at W6 Task 3, and nothing
+compares a copy to a copy.
+
+**And item 2 is where this happened last time too.** Its own parenthesis records
+W6 Task 8 re-deriving all six because they were *"a package behind"*, with the
+diagnosis: *a figure checked under its own name and copied out under a different
+one.* The parenthesis was right and **did not prevent the recurrence** — because
+**a warning written beside a figure does not check the figure**, and because the
+sweep it came from swept the sentence it was handed rather than the population
+the figure belongs to. The rule that finds all five sites in one query is *take
+the maintained copy's NAME and find every site quoting its VALUE*.
+
+One more, in a different population:
+
+| site | figures examined | corrected | what it read |
+|---|---|---|---|
+| *The residual baseline*'s heading | 1 | **1** | `111 entries` → **109 entries**. `the_residual_baseline_is_attributed_to_a_construct_or_named` asserts every row and **`println!`s the total**, so nothing compared it |
+
+And one **claim** rather than a figure, in the W4 three-holes table's `retry:`
+row: `10 baselined + 15 matching` → **8 + 17** (`(8, 17, 25)`, asserted), and
+*"Instrumented `wake`: **0** fires over the whole oracle"* → **0 on the retry
+population**, with the whole-oracle figure now latency-dependent. **3 examined,
+3 corrected** in that row.
+
+Two more populations, reported with their denominators because **a denominator
+equal to its numerator is a sign the sweep only found what it went looking
+for**:
+
+* **the phrase, verbatim, across the whole repository** — `due_retries` appears
+  in **nine** committed files. Seven were examined and **five corrected**:
+  `src/worker/claim.rs`, `src/worker/mod.rs`, `src/executor/retry.rs`,
+  `tests/worker.rs` and `oracle-exec/runnable.txt`. `src/worker/subflow.rs`'s
+  sentence (*"a global scan, so a shipping worker wakes such a retry like any
+  other"*) is **still true and truer**, and `tests/executor.rs`'s is about the
+  retry population, which did not move. The other two are
+  `docs/en/plans/…-w8-advanced-semantics.md` and
+  `docs/en/specs/…-design.md` — **examined and deliberately NOT corrected**:
+  they are the dated plan and design record, the plan's line *is* this task, and
+  the spec's §Risks item 2 is a prediction this package discharged rather than a
+  claim that went stale. Editing them would falsify the record of what was known
+  when. That is a verdict, not a miss, and it is written here so the next sweep
+  does not re-find them as a defect.
+* **data that feeds a generator** — `oracle-exec/runnable.txt`'s retry block is
+  **below `HANDWRITTEN_SENTINEL`**, which `harvest.py --rewrite-runnable`
+  preserves, so the correction cannot be undone by a regeneration. **1 examined,
+  1 corrected.** It had read `14 baselined + 11 matching` with a parenthesis
+  (*"`CREATE_NEW_EXECUTION` writes no `not_before` at all"*) that W6 Task 4 had
+  falsified in both halves — **README corrected its own copy at W6 Task 4 and
+  this one survived two packages**, which is the branch's *corrected where
+  found, missed elsewhere* one more time, in the file this README tells a reader
+  to believe over itself.
+
+And **four predicates stated as prose**, corrected in `src/` and `tests/`:
+`retry.rs`'s *"that one is a live defect now"* (fixed); `worker/mod.rs`'s `wake`
+naming *"a due retry"* (it names a due `PAUSED` run too); `tests/worker.rs`'s
+*"no merged code has ever written a `PAUSED` row at all"* (W8 Task 3 falsified
+it in the commit **before** the one that wrote it); and `tests/worker.rs`'s
+*"`CANCELLED` is the state `RunState` still does not hold"* (W8 Task 6 added it
+two tasks later — the row is still refused, for the narrower reason that
+`pause::deadline` produces `SUCCESS`, `FAILED` and `WARNING` and nothing else).
+**4 examined, 4 corrected**, and all four are the same shape as the figures: a
+sentence that went false without any number changing.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
@@ -7048,14 +7366,14 @@ guard, not a bound on behaviour: it fails when a *comparable* entry moves, and a
 flow nobody wrote is comparable to nothing.
 
 **2. Two thirds of the kept ordered pairs cannot fail — and the pairs are not
-special.** **744** of 1104 today, derived by
+special.** **705** of 1104 today, derived by
 `kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`; the
 flip experiment that demonstrated it was run at **747**, on the W4 tree, and is
 labelled above rather than adjusted. A pair becomes assertable when its entry
 banks, not before. **The same holds of every other golden field on a baselined
 entry**, because `executor_matches_golden` reports only a non-baselined mismatch
-or a baselined match: **433** of 840 run terminals, **1703** of 3355 run-history
-tokens, **665** of 1462 execution-history tokens, **165** of 408 executions and
+or a baselined match: **396** of 840 run terminals, **1528** of 3355 run-history
+tokens, **522** of 1462 execution-history tokens, **147** of 408 executions and
 **43** of 142 sub-executions are un-falsifiable for exactly the same reason. The
 statement used to carry this sentence about the pairs alone, with no
 counterpart, which reads as though the pairs were the weak family. They are the
@@ -7068,8 +7386,21 @@ re-derived them**: 747/461/1807/751/191/53 were the W4-era values, at
 above — so every one of them was **compared by a running program under a name
 this paragraph did not use**. That is the shape: not a figure nobody checked, a
 figure checked under its own name and copied out under a different one. The
-ratio the item is about did not move — 744/1104 is still two thirds — which is
+ratio the item is about did not move — 744/1104 was still two thirds — which is
 exactly why nothing prompted a re-read.)*
+
+*(**And it happened again in W8, in the same item, for the same reason.** Every
+figure above was a package behind a second time when W8 Task 7 swept: 744 / 433
+/ 1703 / 665 / 165 were the W6-era values, at `baseline.txt` = 127, and the
+eighteen entries W8 banked moved five of the six. **43** is the one that did not
+— none of the eighteen carries a sub-execution — which is why the honest count
+is five of six. Each of the five is a `const` in `tests/executor.rs` whose own
+doc comment carries the whole W8 arc and was updated by each task that moved it;
+this prose copy, six hundred lines away, was updated by none of them. **The
+parenthesis above did not prevent the recurrence, and that is the finding**: a
+warning written beside a figure does not check the figure. The rule that would
+have caught it is *sweep the population a figure belongs to, not the sentence
+that quotes it* — here, every name in the provenance table's first row.)*
 
 **3. `egret.sql` reaches zero corpus entries and zero golden entries**, and a
 green ratchet says **nothing whatever** about it.
@@ -7475,6 +7806,41 @@ different fact from a predicate that is never reached, and item 13 is a third
 thing again. The zero was measured correctly either way; only the explanation
 was wrong, and an explanation is what a reader of a coverage statement carries
 away.
+
+**Third, W8 Task 7 found that the predicate itself was wrong, and this
+paragraph's own figures had gone stale — both invisible here for the same
+reason.**
+
+*The predicate.* `due_retries`' gate read `state = 'RETRYING' OR (state =
+'RETRIED' AND …)`, so it **would never wake a `PAUSED` run**. W8 gave that state
+three producers — `Pause` at Task 3, `LoopUntil`/`WaitFor` at Task 4, `Restarted`
+beside them at Task 2 — and eight banked golden entries depend on a bounded wait
+ending, so this was a live defect in the product and not a prediction. Every one
+of those eight ends its wait through `driver::pass_time`, which selects on
+`not_before_ms` with **no state term anywhere in its SQL** and then calls
+`worker::resume` itself, so the driver reaches the same runs through a different
+door: **the ratchet is 109 with the `'PAUSED'` arm and 109 with it removed**,
+measured in both directions rather than argued. That is this item's own shape one
+package on, and it is why the two instruments that DO score it are integration
+tests: `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`
+drives three real pauses with the second elapsing in real time, and
+`the_waker_names_exactly_the_states_something_will_move` asks the predicate about
+**every** member of `RunState::ALL` and asserts its own table's key set equals
+`ALL`'s — so a fourteenth variant fails rather than joining the unnamed majority
+by omission, which is the class no figure sweep can find.
+
+*The figures.* This paragraph's `14` / `10` / `11 matching` were right when W4
+Task 6 derived them and are three packages stale: the derivation asserts
+**`(8, 17, 25)`** — W6 Task 4 banked the four `CREATE_NEW_EXECUTION` entries and
+W8 Task 5 banked `valids/task-allow-{warning,failure}-runnable`. **The paragraph
+that says "it is derived now" is the one that went stale**, which is the sharpest
+available statement of the rule: a citation to a running program is not a copy of
+its output, and only the output is maintained. And the *"fired **zero** times"*
+measurement is now latency-dependent rather than flat — **1 fire in one of five
+runs and 0 in the other four**, on the pause population only; `wake` still fires
+**0** times on the retry population, which is what the test's name asserts. The
+ratchet is 109 in all five, because both doors call the same `worker::resume`
+and which one opens changes no trace.
 
 **12. `advance()` is unchanged by the whole of W3b** — and the sentence that
 used to be here overstated it, so it is restated as measured. `git diff --stat
