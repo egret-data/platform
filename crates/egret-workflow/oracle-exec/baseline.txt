@@ -203,7 +203,23 @@
 # differ on NOTHING ELSE`, `the spawned hole is now 38 of 41` and `nothing
 # executes Command::SpawnExecution until W3b/W6`. It is 16 of the 41 MATCHING,
 # 6 differing only INSIDE `spawned` and 19 on more; the command has an executor
-# and this oracle drives it. The test named in the Task 6 block --
+# and this oracle drives it.
+#   [W8 Task 3 fix round 2: `16 of the 41 MATCHING` is stale and the number is
+#   **22**, derived on every run by
+#   `the_sub_executions_are_compared_and_this_is_what_they_cost`. The drift is
+#   W6 Task 3's `loop-with-subflow` and W6 Task 4's four `retry-new-execution-*`
+#   replays, each of which left the `spawned` hole -- both blocks below record
+#   their own half. The per-task decomposition is deliberately NOT restated
+#   here: a derived split copied into a second file is the defect this whole
+#   paragraph is about, and `README.md`'s coverage statement is the single
+#   authority for it.
+#
+#   `README.md` carried this as *"Not corrected, and the reason is a
+#   constraint: this package may not edit `baseline.txt`, whose md5 is the
+#   reference every published W1-W6 number is stated against."* **W8 Task 3
+#   dissolved that constraint by moving the md5 itself** -- twice for banks and
+#   once for this correction -- so the only thing that was holding it is gone,
+#   and leaving it would have been a stale reason as well as a stale figure.] The test named in the Task 6 block --
 # `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` -- was
 # renamed to `the_sub_executions_are_compared_and_this_is_what_they_cost`.
 # `oracle-exec/README.md`'s coverage statement is the single current authority
@@ -255,7 +271,11 @@
 # `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
 # `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
 # their children; and the two `task-allow-*-executable-flow` on `WARNING`,
-# which `RunState` cannot hold. The `Subflow` row is therefore REMOVED from the
+# which `RunState` could not hold WHEN THIS WAS WRITTEN -- W8 Task 5 added the
+# variant and BOTH of those two banked, so this clause names a cause that no
+# longer holds anything. It is annotated rather than rewritten because the
+# paragraph is W6 Task 3's arithmetic and the seven it counts were seven then.
+# The `Subflow` row is therefore REMOVED from the
 # residual-baseline table rather than lowered from 22 to 10 -- the same rule
 # `disabled: true` and `runIf:` were removed under.
 #
@@ -296,6 +316,222 @@
 # artifact, Kestra cannot replay a loop sub-execution either -- it throws
 # `Can't find taskrun with taskrunId ...` (the LOOP run's, which lives in the
 # parent execution) and the sub-execution ends FAILED with no child.
+#
+# W8 Task 3 fix round 2 WITHDREW a ninth bank, 118 -> 119: `valids/pause-behavior`
+# is baselined again. Fix round 1 banked it by planning a `Pause` with an
+# EXPRESSION `behavior:` to end FAILED whichever bound elapsed -- and that rule
+# is measured false. Five runs per form on the pinned artifact: `FAIL` as a
+# literal, as `{{ 'FAIL' }}` and as `{{inputs.behavior}}` with FAIL posted all
+# give FAILED/1; the same three with RESUME, and `{{ vars.b }}`, all give
+# SUCCESS/2. The artifact honours the VALUE in every form, so this entry's
+# golden is `behavior: FAIL` working -- FAIL being what `corpus.json` posts --
+# and egret matched it only because its rule answered FAILED for the corpus's
+# one instance. `behavior: "{{ 'RESUME' }}"` succeeds on the artifact and egret
+# guaranteed FAILED: a shipped defect the oracle cannot see, because the corpus
+# holds exactly one `Pause` `behavior:` and it is the one value where the two
+# answers agree. See `README.md`, *Drift at the execution seam*, which is where
+# the false claim was made and is corrected.
+#
+# `behavior:` is a whole gap again: four-valued, and `WARN`/`CANCEL` mean
+# `WARNING`/`CANCELLED`, neither in `RunState`. It banks when those two states
+# arrive, which is the `AllowFailure` row's work and not this one's.
+#
+# **BOTH states have arrived -- `WARNING` at W8 Task 5, `CANCELLED` at W8 Task
+# 6 -- and `valids/pause-behavior` did NOT bank.** The ratchet moved 111 -> 109
+# at Task 6 and both ids were `sla:`'s. The prediction above was a claim about
+# the STATE VOCABULARY over an entry held by a PLAN decision: `plan::pause_gap`
+# refuses the whole task whenever a `behavior:` is written, whatever value it
+# holds; a DYNAMIC value cannot be classified at plan time at all, which is
+# where `pause_gap` decides; and the artifact's fifth outcome for a value
+# OUTSIDE the enum is a non-terminal HANG (`RUNNING` past 120 s, measured at W8
+# Task 3), which is not a state any variant could hold. Being inside the
+# vocabulary is necessary and not sufficient -- the fourth population on this
+# oracle to measure that, after `RETRIED`'s four, `SKIPPED`'s four and W8 Task
+# 2's sixteen.
+#
+# W8 Task 3 (`Pause`) banked 8, 127 -> 119 -- the whole of the row
+# `README.md`'s residual table assigned to it is TWELVE, so four are left and
+# each is named below with what holds it.
+#
+#   flow-concurrency-cancel-pause   concurrency: CANCEL never fires with one execution; the pause is the whole flow
+#   flow-concurrency-queue-pause    the same for QUEUE
+#   flow-trigger-paused-flow        pause + a successor, and a flow trigger nothing in the oracle fires
+#   pause-delay                     the base case: pauseDuration: PT1S -> SUCCESS
+#   pause-duration-from-input       pauseDuration: "{{inputs.delay}}" -- the render slot, read at RUNNING
+#   pause-kill-delay                pauseDuration: PT1M; named for a kill nothing in it declares
+#   pause-timeout                   timeout: PT1S -> FAILED, and the successor is never created
+#   trigger-flow-with-pause         a pause between two Logs
+#
+# The plan's estimate for this row was **seven** and the measurement is eight.
+# The extra one is `pause-timeout`: the estimate treated `timeout:` on a
+# flowable as W4's, which is what `FlowService.java:574` says for every
+# non-`RunnableTask` EXCEPT `Pause`, and a `Pause`'s own `timeout:` is
+# `advance()`'s. Reading the exception as the rule cost one entry.
+#
+# **FOUR `Pause` entries are left and not one of them is held by the wait.**
+# Each declares a property `build_plan` refuses to plan -- `executor::plan::
+# pause_gap` -- so the task stays an opaque `TaskKind::Runnable` and its trace
+# is visibly wrong rather than plausibly wrong, which is the rule
+# `AllowFailure` and `WorkingDirectory` are already planned under:
+#
+#   pause-behavior                    `behavior: "{{inputs.behavior}}"`. Its golden is the ARTIFACT'S OWN
+#                                     DEFECT -- rendering a Pebble expression into `Property<Behavior>`
+#                                     fails at resume time and FAILS the task for every value, including
+#                                     the ones that would have succeeded (`README.md`, `EXECUTION_DRIFT`).
+#                                     Reproducing that would be a rule about Java reflection wearing the
+#                                     name of a pause rule, and the two terminals a LITERAL `behavior:`
+#                                     can produce -- `WARNING` and `CANCELLED` -- are not in `RunState`
+#                                     at all, so the construct is unrepresentable either way.
+#                                     **BOTH are in `RunState` now (W8 Tasks 5 and 6) and the entry
+#                                     still does not bank** -- see the block above. What is
+#                                     unrepresentable is the FIFTH outcome, the non-terminal hang on an
+#                                     out-of-enum value; what holds the entry is `pause_gap`.
+#   pause_on_pause                    `onPause:`. Its golden records the sub-task as a run with
+#                                     `parent: null`, a SIBLING of the pause that `overlapping`s it.
+#   pause-errors-finally-after-execution  `errors:` AND `finally:` AND a flow-level `afterExecution:`.
+#                                     Its pause run re-enters RUNNING (`CREATED RUNNING PAUSED RUNNING
+#                                     FAILED`) to drive the handler; `finally:` and `afterExecution:`
+#                                     have no owner in this crate at all.
+#   pause-timeout-allow-failure       the ONLY one of the four that IS planned `TaskKind::Pause`, and it
+#                                     is held one layer out: `allowFailure: true` turns the timeout's
+#                                     FAILED into WARNING, `models::Task` carries no `allowFailure`, and
+#                                     `RunState` has no `Warning`. It is the `AllowFailure` row's, not
+#                                     this one's. **All three clauses went at W8 Task 5**, which added
+#                                     `models::Task::allow_failure`, `RunState::Warning` and the
+#                                     mapping -- and `valids/pause-timeout-allow-failure` BANKED there.
+#                                     The line is kept as W8 Task 3's record of why it was left, and is
+#                                     no longer a statement about HEAD.
+#
+# **A `Pause` with NEITHER `pauseDuration:` nor `timeout:` stays PAUSED for
+# ever, and no line of this file can say so.** Seven corpus flows are written
+# that way -- `pause-test`, `pause_on_resume`, `pause_on_resume_optional`,
+# `loop-pause`, `resume-validate`, `pause_no_tasks`,
+# `follow-dependencies-partial-parent` -- and all seven are `not-standalone` in
+# `corpus.json`, i.e. absent from `golden.json`, because on the pinned artifact
+# each "reached PAUSED and stayed there for the full 90s". A pause that resumed
+# itself after some default would leave every figure in this file unchanged.
+# `an_unbounded_pause_never_resumes_itself` is the only thing that can see it.
+#
+# **Five corpus flows PUBLISH now that did not**, which is a second thing this
+# file cannot show: `flow-concurrency-cancel-pause`, `flow-concurrency-queue-
+# pause`, `follow-dependencies-partial-parent`, `loop-pause` and
+# `pause_on_pause` were refused at publish step 4 for an unported task type,
+# and the artifact published all five with a 200. Two of them are among the
+# eight banked above; the other three are not comparable at all.
+#
+# Task 4 (`LoopUntil`/`WaitFor`) banked ONE, leaving 118: `valids/waitfor-nested`.
+#
+# **Nine entries reach the construct and this file can say exactly why the
+# other eight are still here, which is the point of the row rather than an
+# excuse for it.**
+#
+#   SIX are held by a handler this crate does not ship, not by the construct:
+#   `waitfor`, `waitfor-no-success`, `waitfor-max-iterations`,
+#   `waitfor-multiple-tasks`, `waitfor-multiple-tasks-failed` and
+#   `waitfor-child-task-warning` each have an
+#   `io.kestra.plugin.core.output.OutputValues` child. `oracle-exec/driver.rs`'s
+#   registry holds four handlers and that is not one of them, so their bodies
+#   cannot run at all and no amount of loop semantics moves them. They are the
+#   strict upper bound on what this task could bank. (`waitfor-child-task-
+#   warning` is held twice over: its other child is an `allowFailure: true`
+#   `Fail` whose run is `WARNING`, which `RunState` cannot hold -- the
+#   `AllowFailure` row's.) **The second half went at W8 Task 5**: `RunState`
+#   holds `WARNING`, that child is byte-identical to the golden, and the entry
+#   is held by the `OutputValues` handler ALONE -- measured by unbaselining it
+#   and watching it stall at `CREATED RUNNING`. "Held twice over" is now held
+#   once.
+#
+#   `loopuntil-failed-flowable` differs on ONE field: the loop's terminal.
+#   Its runs, attempts and order pairs are reproduced exactly and its execution
+#   reads `CREATED RUNNING SUCCESS` where the golden reads `CREATED RUNNING
+#   FAILED`. The condition is `{{ outputs.loop.iterationCount < "5" }}` -- a
+#   relational operator over a NUMBER and a STRING. Pebble refuses it and the
+#   exception fails the task; minijinja answers `True` and the loop succeeds.
+#   Measured both ways: `the_one_corpus_comparison_pebble_refuses_and_minijinja
+#   _answers` renders it through egret's own environment, and the artifact's own
+#   trace fails the `loop` taskrun 11 ms after its child succeeded, with no
+#   `PAUSED` -- the only path in `LoopUntil.resolveState` that can do that is
+#   `runContext.render(this.condition)` throwing. It is a RENDERER divergence
+#   wearing a loop's name, and it is the corpus's ONLY number-against-string
+#   comparison.
+#
+#   `loop-until-restart` differs on ONE field too: it runs FOUR iterations
+#   where the golden holds three. Everything else -- both run histories, both
+#   attempt histories, the order pair -- is identical. Its bound is
+#   `maxDuration: PT3S` with `interval: PT1S`, and `reachedMaximums` compares
+#   the loop taskrun's creation plus the bound against `now`. **The golden's
+#   third iteration is past that bound only because of the artifact's
+#   delay-poller latency**: measured on the captured round, its two `PT1S`
+#   pauses took **1.17 s and 1.92 s**, so the third iteration ended at
+#   T+3.33 s. `oracle-exec/driver.rs::pass_time` moves the clock to the
+#   earliest deadline and never further, so egret's third iteration ends at
+#   about T+2.05 s, inside the bound, and a fourth runs. Reproducing the golden
+#   would mean modelling Kestra's poller, not `LoopUntil`.
+#
+#   The corroboration that this is a property of the CONSTRUCT and not of this
+#   entry: `valids/waitfor-max-duration` -- the same shape with `PT5S`/`PT0.2S`
+#   -- is one of only **two** corpus flows whose normalised trace Kestra itself
+#   could not reproduce across five rounds, so it has no golden entry and is
+#   excluded by name (`stability.json`). The finer the interval, the more of the
+#   iteration count is latency.
+#
+# W8 Task 6 (`sla:`) banked TWO, 111 -> 109:
+#
+#   flow-concurrency-sla-assert-cancel   EXECUTION_ASSERTION, behavior: CANCEL, assert: "{{ false }}"
+#   sla-execution-condition              EXECUTION_ASSERTION, behavior: CANCEL, driven with the input
+#                                        `corpus.json` posted (`string: CANCEL`), so the first of its
+#                                        two SLAs violates
+#
+# Both golden traces are `["CREATED","CANCELLED"]` with `"runs": []` -- the
+# violation fires at the execution's first settle, before any run exists, which
+# is why neither carries a `RUNNING`.
+#
+# **SEVEN entries are held by an `sla:` and FIVE of them are unbankable by any
+# implementation GIVEN THIS HARNESS, including a correct one.** (Fix round 2:
+# the qualifier. `whatsoever` stood here while README, `sla.rs` and the design
+# spec were all qualified in fix round 1 -- this copy survived because the
+# phrase WRAPS A LINE BREAK and a line-oriented grep cannot see it. Uncapping
+# `driver.rs`'s `Sleep` moves all five; `permanently` belongs to
+# `valids/loop-until-restart`, whose GOLDEN is the irreproducible part.) That is
+# the asymmetry
+# this row is worth reading for: the residual table counts **5** DECLARERS and
+# the CAUSE count is **7**. `sla-parent-flow` and
+# `flow-concurrency-sla-fail-parent` declare no `sla:` at all -- each calls a
+# `Subflow` whose target declares one -- so a needle that greps one flow's YAML
+# structurally cannot see them. (W8 Task 4 saw the same asymmetry in the other
+# direction: nine entries, three spellings, and six of them held by one missing
+# handler.)
+#
+#   sla-max-duration-fail               MAX_DURATION PT0.5S over a `Sleep: PT2S`
+#   sla-subflow                         MAX_DURATION PT1S over `PT10S`
+#   flow-concurrency-sla-fail-child     MAX_DURATION PT3S over `PT10M`
+#   sla-parent-flow                     its `Subflow` target is `sla-subflow`
+#   flow-concurrency-sla-fail-parent    its `Subflow` target is `flow-concurrency-sla-fail-child`
+#
+# **The reason is the fifth blindness mechanism -- the harness compresses time
+# -- and it is measured rather than quoted.** `MaxDurationSLA.evaluate` needs an
+# interval in which the execution is non-terminal and older than the bound.
+# `oracle-exec/driver.rs`'s registry is `Sleep::capped(Duration::ZERO)`, so the
+# only task these flows have terminates inside the `worker::tick` that started
+# it and writes no `not_before_ms` at all; `pass_time` moves the clock **only**
+# to a registered `not_before_ms`, so it returns `Ok(false)` the first time it
+# is asked and the driver's loop breaks. The window is not entered late and not
+# missed -- it does not exist. Note that the clock DOES move in this harness
+# (`pass_time` binds `shortfall + 1`); what these five lack is a deadline for it
+# to move to. `the_max_duration_window_does_not_exist_in_this_harness` in
+# `tests/executor.rs` is that as a running program, with a control.
+#
+# The two parents are held one level down and nothing else:
+# `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded` measures that
+# each really does spawn its child (the target resolves -- a draft row is
+# enough for `subflow::resolve`), that the child really does run its `Sleep`,
+# and that the child ends SUCCESS. Without that the refusal would be pinned to
+# the wrong mechanism: an unresolvable target FAILS the parent's run, which is
+# the same direction as the golden and would have looked like progress.
+#
+# `valids/sla-max-duration-ok` (PT10S over `PT0.5S`) is the control and it is
+# NOT in this file: it matches, and it would match under a correct MAX_DURATION
+# implementation and under none at all, so it discriminates nothing.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -328,14 +564,10 @@ valids/finally-parallel
 valids/finally-sequential
 valids/finally-sequential-error
 valids/finally-sequential-error-first
-valids/flow-concurrency-cancel-pause
 valids/flow-concurrency-queue-after-execution
 valids/flow-concurrency-queue-killed-after-execution
-valids/flow-concurrency-queue-pause
-valids/flow-concurrency-sla-assert-cancel
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
-valids/flow-trigger-paused-flow
 valids/flow-with-array-outputs
 valids/flow-with-outputs-failed
 valids/full
@@ -361,12 +593,7 @@ valids/output-values
 valids/parallel-disabled-tasks
 valids/parallel-fail-with-flowable
 valids/pause-behavior
-valids/pause-delay
-valids/pause-duration-from-input
 valids/pause-errors-finally-after-execution
-valids/pause-kill-delay
-valids/pause-timeout
-valids/pause-timeout-allow-failure
 valids/pause_on_pause
 valids/primitive-labels-flow
 valids/purge_logs_execution_only
@@ -388,7 +615,6 @@ valids/retry-success
 valids/retry-with-flowable-errors
 valids/set-variables
 valids/set-variables-duplicate
-valids/sla-execution-condition
 valids/sla-max-duration-fail
 valids/sla-parent-flow
 valids/sla-subflow
@@ -397,17 +623,10 @@ valids/sleep-long-after-execution-flowable
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
-valids/task-allow-failure-executable-flow
-valids/task-allow-failure-flowable
-valids/task-allow-failure-runnable
-valids/task-allow-warning-executable-flow
-valids/task-allow-warning-flowable
-valids/task-allow-warning-runnable
 valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate
 valids/task-runif-workingdirectory
-valids/trigger-flow-with-pause
 valids/unset-variables
 valids/variables
 valids/waitfor
@@ -415,7 +634,6 @@ valids/waitfor-child-task-warning
 valids/waitfor-max-iterations
 valids/waitfor-multiple-tasks
 valids/waitfor-multiple-tasks-failed
-valids/waitfor-nested
 valids/waitfor-no-success
 valids/webhook-outputs
 valids/webhook-plaintext

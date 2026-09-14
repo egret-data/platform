@@ -222,6 +222,12 @@ Ba tầng, theo thứ tự, và thứ tự chính là thiết kế:
    tính năng đã khai báo nhưng chưa hiện thực (`concurrency`, `sla`, `checks`, `quotas`, `pause`) báo
    thành **cảnh báo có nêu tên gói sẽ hiện thực chúng**, không bao giờ nhận vào im lặng.
 
+> **`sla` đã được THU HẸP ngày 2026-09-14 (W8 Task 6), còn `pause` thì đã xong từ W8 Task 3.**
+> `EXECUTION_ASSERTION` của `SLA.Type` nay ĐƯỢC đánh giá (`egret-workflow/src/sla.rs`);
+> `MAX_DURATION` thì chưa. Cảnh báo chỉ phát cho luồng có khai `MAX_DURATION`, không
+> phát cho luồng mà `sla:` chỉ gồm assertion — cảnh báo về một tính năng ĐÃ được thi
+> hành gây thiệt cho người dùng y hệt việc nhận vào im lặng, chỉ theo chiều ngược lại.
+
 Kênh cảnh báo của tầng 3 quan trọng hơn vẻ ngoài của nó: không có nó, người dùng viết
 `concurrency: {limit: 1}`, thấy publish xanh, và kết luận hợp lý rằng nó đang được thi hành.
 

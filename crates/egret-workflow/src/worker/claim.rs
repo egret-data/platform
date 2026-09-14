@@ -72,8 +72,8 @@ use super::subflow;
 use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, RunIx,
-    RunState, TaskKind, TaskRun, Tick,
+    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, Resume,
+    RunIx, RunState, TaskKind, TaskRun, Tick,
 };
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -227,12 +227,59 @@ struct Leaf<'a> {
 /// **A non-leaf id answers `None`, and that is a CASE.** This comment used to
 /// say the opposite — *"the claim never takes one (`type_id IS NOT NULL`), so
 /// reaching that arm is a corruption rather than a case"* — and the corpus
-/// says otherwise: `build_plan` plans `Subflow`, `WorkingDirectory` and
-/// `WaitFor` opaque, which gives them a `type_id` and therefore makes them
-/// claimable, while `models::TaskKind` for the same task is a flowable and not
-/// a `Leaf`. Forty-odd comparable entries reach it. It is
-/// [`WorkerError::NotALeaf`] now, which aborts the tick for that run exactly as
-/// an unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
+/// says otherwise: `build_plan` plans `AllowFailure`, `WorkingDirectory` and
+/// `LoopUntil` opaque, which gives them a `type_id` and therefore
+/// makes them claimable, while `models::TaskKind` for the same task is a
+/// **flowable** — so the `Leaf` arm below cannot match and this returns `None`.
+/// Forty-odd comparable entries
+/// reached it when that was measured. **This list named `Subflow` first and
+/// that has been false since W6 Task 3**, which is worse than a stale name
+/// because the list is the whole argument for the arm being reachable: a
+/// `Subflow` is [`crate::executor::TaskKind::Executable`] now, `type_id` below
+/// is written only for a `Runnable`, and the claim's own
+/// `WHERE type_id IS NOT NULL` therefore cannot take one. The arm is still a
+/// case — the **three** named above are still opaque — but the count was
+/// measured with `Subflow` in the set and has not been re-derived since.
+/// **The subtrahend is already in this crate**, which is better than a figure a
+/// reader must distrust: `tests/executor.rs`'s `ENTRIES_LEFT_UNFINISHED` doc
+/// (*"21 left at Task 3 and they were the whole of `Subflow`"*) records that
+/// **all 21 entries holding an executed top-level `Subflow`
+/// were in this population for that reason and none is now**. So: 40-odd, of
+/// which 21 left at W6 Task 3.
+///
+/// **`LoopUntil` only — Kestra's `WaitFor` alias is not egret's.** This list
+/// read `WaitFor`/`LoopUntil` until W8 Task 1 fix round 5. `models::kind_for`
+/// has no `"waitfor"` row, so a `WaitFor` reaches `models::TaskKind::Leaf` and
+/// **this function returns `Some`** for it — an ordinary leaf with an opaque
+/// `spec`, by exactly the argument the next paragraph makes for `Pause`, and
+/// stopped by the same later gate, [`WorkerError::NoHandler`]. The **count**
+/// survives — three constructs still reach the `None` arm — but the
+/// **membership** does not, and that is the half a reader uses: **7 of the
+/// corpus's 10 flows of that construct take the `WaitFor` spelling**, so
+/// someone following this list to find a `WaitFor` among the 40-odd finds
+/// none. Fix round 4 measured the model kind and fix round 5 re-measured it;
+/// the model divergence itself is the plan's Task 4 Step 0.
+///
+/// **`Pause` is NOT one of those three either, and it no longer reaches this
+/// function at all.** W8 Task 1's first attempt put it among the three; W8 Task
+/// 1 fix round 1 corrected that to "it reaches `TaskKind::Leaf` and this
+/// function returns `Some`, and the NEXT gate — [`WorkerError::NoHandler`] —
+/// stops it"; **W8 Task 3 made both readings false.** A `Pause` is
+/// `models::TaskKind::Pause` and `executor::TaskKind::Pause` now, so
+/// `persist`'s `type_id` is `None` for it and the claim's own
+/// `WHERE type_id IS NOT NULL` never takes the run — the same tier a `Subflow`
+/// left this population for at W6 Task 3, reached by the same line of code.
+/// `advance()` drives it instead (`executor::flowable::pause`).
+///
+/// The history is kept rather than replaced with the current sentence because
+/// the two refusals it distinguishes are still two different refusals, and that
+/// distinction is what the next construct to arrive here will need.
+/// `worker::timeout`'s module doc carries the same correction.
+///
+/// **The arm this function's `None` reaches** — to say it after a paragraph
+/// about `Pause`, which reaches neither — is
+/// [`WorkerError::NotALeaf`], which aborts the tick for that run exactly as an
+/// unregistered type does, and [`WorkerError::Corrupt`] is left meaning what
 /// its own doc says.
 fn leaf<'a>(flow: &'a crate::models::Flow, task_id: &str) -> Option<Leaf<'a>> {
     fn walk<'a>(task: &'a crate::models::Task, want: &str) -> Option<Leaf<'a>> {
@@ -341,9 +388,17 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
-/// The executions holding a run whose retry delay has elapsed — a `RETRYING`
-/// one waiting to be reopened, or a `RETRIED` one whose **replay** has not been
+/// The executions holding a run whose **deadline has elapsed and which
+/// something will move** — a `RETRYING` one waiting to be reopened, a `PAUSED`
+/// one waiting to be resumed, or a `RETRIED` one whose **replay** has not been
 /// started yet.
+///
+/// **The name is narrower than the predicate and is kept on purpose.** Since
+/// W8 Task 7 two of the three arms are not retries; `due_retries` is what W4
+/// Task 1 called it and what every doc that cites it — this crate's,
+/// `oracle-exec/README.md`'s and W8's own record — still calls it, so renaming
+/// it would cost a reader the trail for a word. The arms below are the
+/// authority on what it selects; this sentence is, too.
 ///
 /// **The state term is the whole predicate's point** and it is not a tidiness:
 /// `advance()` never CLEARS a `not_before` — `executor::apply`'s
@@ -361,7 +416,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 ///
 /// W6 Task 4. A `CREATE_NEW_EXECUTION` retry leaves the run **`RETRIED`** —
 /// terminal — with a deadline, and `reopen_due` will never touch it: what is
-/// due is a whole new execution, which [`super::replay::spawn_due`] starts from
+/// due is a whole new execution, which `worker::replay::spawn_due` starts from
 /// the settle this waker's `resume` produces. `RETRIED` alone would be the
 /// unbounded case the paragraph above describes, because nothing ever moves a
 /// `RETRIED` run either — so the arm carries both conditions that decide
@@ -384,7 +439,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
 /// drive the two.
 ///
-/// **The clock is [`load_with`]'s, spelled the same way**, so an execution
+/// **The clock is `load_with`'s, spelled the same way**, so an execution
 /// named here is one `retry::reopen_due` will actually reopen — see the module
 /// doc's `not_before` bullet.
 ///
@@ -399,17 +454,176 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// [`claim`]'s reason: without a total order the rows come back in whatever
 /// the scan produced, and at `LIMIT 1` that decides *which* execution is
 /// woken rather than merely in what order.
-pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
+/// # The `PAUSED` arm, and the ratchet cannot score it either way
+///
+/// **W8 Task 2 predicted it, W8 Task 3 made it real, and W8 Task 7 is the one
+/// that fixed it.** The gate below read `r.state = 'RETRYING' OR (r.state =
+/// 'RETRIED' AND …)` from W4 Task 1 until W8 Task 7. A bounded `Pause` parks a
+/// run with a `not_before_ms` and a state of `'PAUSED'`, which matched neither
+/// — so in the **product** a bounded pause never resumed, however correct
+/// `advance()` was. When that sentence was first written it was a prediction
+/// about a construct nothing emitted; `flowable::pause` has emitted it since W8
+/// Task 3, `flowable::loop_until` since Task 4, and eight golden entries depend
+/// on the wait ending.
+///
+/// # What the `PAUSED` arm may name, and why it needs no terms of its own
+///
+/// `'PAUSED'` is added bare, where `'RETRIED'` needed two extra conditions, and
+/// the asymmetry is structural rather than an oversight:
+///
+/// - **The unbounded pause is excluded by a CHECK, not by a term here.**
+///   `Resume::Never` writes no deadline (`executor::apply`'s `PauseRun` arm
+///   takes `not_before` out of the `Resume`), and migration 0141's
+///   `workflow_task_runs_resume_bound_matches` makes `resume_with = 'NEVER'`
+///   beside a non-NULL `not_before_ms` a row Postgres refuses. So the
+///   pre-existing `r.not_before_ms IS NOT NULL` term above already cannot
+///   reach one. **That is the over-acceptance this whole module must not
+///   commit** — seven corpus flows write an unbounded `Pause` and the artifact
+///   leaves every one of them `PAUSED` for the full harvest — and it is
+///   refused in the schema rather than remembered in this `WHERE`. The
+///   assertion at this end is the third arm of
+///   `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`.
+///   **That citation named
+///   `an_unbounded_pause_is_never_named_however_long_its_execution_lives`,
+///   which does not exist** — the identifier occurred exactly once in the whole
+///   tree, in the citation itself. It is the second dangling citation in this
+///   package (W8 Task 4's `every_paused_run_names_its_resumer` was the first,
+///   cited by `resume_paused`'s own doc before it was written), which is why
+///   the round that fixed it also swept every test name cited in a doc comment
+///   across the crate. **A citation is a claim and needs a positive control:
+///   the control here is that the name kept below occurs 7 times in the tree,
+///   not 1.**
+/// - **A `PAUSED` run is never named twice for the same deadline** — but
+///   **only because of the hoisted term below, and the first version of this
+///   bullet was wrong about why.** It said `flowable::resume_paused` moves a due
+///   run on the very settle this waker's `resume` produces, so the run leaves
+///   `PAUSED` and the stale deadline lands in a state this predicate does not
+///   name. That holds *unless `advance()` returns on its first line*, which it
+///   does when the **execution** is terminal. See the section below.
+///
+/// # The execution-terminality term is ONE term over every arm, and the
+/// # exemption is measured
+///
+/// ```sql
+/// AND (r.state = ANY($2) OR NOT (e.state = ANY($2)))
+/// ```
+///
+/// `$2` is the terminal vocabulary, **derived from `RunState::ALL` by
+/// `is_terminal()`** rather than written into the SQL —
+/// `spawn::terminated_count`'s shape, and the only one a fourteenth terminal
+/// variant joins without anybody remembering to.
+///
+/// **Why it exists.** [`advance`](crate::executor::advance) returns
+/// `Vec::new()` on its first line when the execution is terminal, and
+/// `RunState::Paused` and `RunState::Retrying` are both **non**-terminal — so
+/// `claim::sla_terminal` can `CANCEL` an execution that is still holding a
+/// parked bounded `Pause` or a waiting retry. That run keeps its state and its
+/// `not_before_ms`; every tick names it; every tick relocks the execution and
+/// settles it into writing nothing but a new `executions.seq`. **It is the
+/// endless case the `RETRIED` arm needed two extra terms to avoid, reached by a
+/// third road.**
+///
+/// **Why it is ONE term and not one per arm.** W8 Task 7 shipped it on the
+/// `'PAUSED'` arm alone and recorded the `'RETRYING'` twin as a finding; *a
+/// recorded divergence is not a closed one*, and fixing one member of a family
+/// while its sibling stands is this branch's named failure mode in its
+/// structural form. Hoisted, it closes both at once and **is unrepresentable
+/// rather than remembered for whatever arm comes next**.
+///
+/// **Why the `r.state = ANY($2)` half is not a hole.** It exempts an arm whose
+/// RUN state is itself terminal, and today that is exactly one: `'RETRIED'`.
+/// The exemption is **load-bearing and measured, not defensive** — a
+/// `CREATE_NEW_EXECUTION` retry ends **this execution** `RETRIED`, so the whole
+/// population of that arm lives in terminal executions by construction. The
+/// golden says so directly: every `valids/retry-new-execution-*` link reads
+/// execution `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
+/// `["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`. Dropping the
+/// exemption — the naive hoist — is **mutation MX6**.
+///
+/// **I predicted MX6 would take the ratchet from 109 to 113 and name those four
+/// entries. It does not: the ratchet reads 109 under MX6, three runs out of
+/// three.** The prediction was a plausible inference written in the voice of a
+/// measurement, and the reason it is wrong is *this function's own subject*:
+/// the oracle reaches a due replay through `driver::pass_time` → `resume` →
+/// `settle` → `replay::spawn_due`, and **never through this query**. A change
+/// here cannot move the ratchet for the replay entries any more than it can for
+/// the pause entries — the same blindness, one arm further along.
+///
+/// What MX6 **does** kill, 3 of 3 runs, is
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists` and
+/// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
+/// — **both W6 Task 4's, both written long before this term existed**, so
+/// unlike the guard tests of this round they are assertions that **predate what
+/// they prove**. That is the strongest available evidence the exemption is
+/// load-bearing rather than defensive, and it is stronger than the ratchet
+/// figure I had claimed.
+///
+/// **And the exemption is a proxy for the real rule, soundly.** The guard is
+/// about consumers *inside* `advance()`: `'RETRYING'` is consumed by
+/// `retry::reopen_due` and `'PAUSED'` by `flowable::resume_paused`, both inside
+/// it, while `'RETRIED'` is consumed by `worker::replay::spawn_due`, which runs
+/// in the settle **outside** `advance()` and is therefore unaffected by its
+/// early return. Keying on *"the run's own state is terminal"* implies that:
+/// `advance()` moves no terminal run, so an arm whose run state is terminal
+/// **must** have its consumer outside `advance()`. The proxy cannot drift from
+/// the rule it stands for.
+///
+/// `a_terminal_execution_hides_every_arm_except_the_replay` is the 3×2 table —
+/// `RETRYING`/`PAUSED`/`RETRIED` × terminal/non-terminal execution — and
+/// `a_paused_run_in_a_terminal_execution_is_never_named` drives the pause half
+/// end to end.
+///
+/// # `RESTARTED` is NOT here, and that was measured rather than assumed
+///
+/// It is the other non-terminal state W8 Task 2 added, so the question has to
+/// be answered rather than skipped. Nothing can put a run in it carrying a
+/// live deadline: `RunState::Restarted` is pushed by `pause_mark` onto the
+/// **execution**'s history and by nothing onto a run's — `0` of the golden's
+/// 840 run histories hold it, against 12 execution histories that do — and the
+/// one command that ends a `LoopUntil`'s wait, `Command::RestartLoop`, clears
+/// `not_before` and `resume_with` in the same arm and pushes `RUNNING`. A
+/// state with no producer of due rows is not a gap in this gate.
+/// `the_waker_names_exactly_the_states_something_will_move` is the row that
+/// says so, and it enumerates `RunState::ALL` so a fourteenth variant cannot be
+/// answered by omission.
+///
+/// # Neither the fix nor the defect is visible to the ratchet
+///
+/// **The oracle is blind here for a reason that is a property of the
+/// instrument.** `oracle-exec/driver.rs`'s `pass_time` selects on
+/// `not_before_ms` alone, with no state term anywhere in its SQL, and then
+/// calls `worker::resume` directly. It never runs this query. So the driver
+/// reaches the same runs through a different door: the eight pause entries
+/// banked green with this gate narrow, and they stay green now it is wide.
+/// That is the shape W4's item 15 named — a property proved about a path no
+/// deployment takes — and it is why this fix ships with an integration test
+/// and no baseline movement.
+///
+/// `executor::retry::reopen_due` is the pure-side twin and its blindness is the
+/// **opposite**: the driver does reach it, so a narrowing there fails loudly.
+/// Recorded on both because one sentence about "the ratchet cannot see it" is
+/// wrong about one of them.
+///
+/// # Exported for the same reason [`wake`] is
+///
+/// `pub` so a test can measure the **selection** rather than the settle. The
+/// vocabulary row above hand-writes a `task_runs.state` for each member of
+/// `RunState::ALL`; going through [`wake`] would resume each one and
+/// `claim::persist` recomputes `state` from `history.last()`, so the fixture
+/// would erase the very column under test before the next read.
+pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
     sqlx::query_scalar(
         "SELECT r.execution_id \
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
           WHERE (r.state = 'RETRYING' \
+                 OR r.state = 'PAUSED' \
                  OR (r.state = 'RETRIED' \
                      AND e.parent_run_ix IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
                                       WHERE c.parent_execution_id = e.id \
                                         AND c.parent_run_ix IS NULL))) \
+            AND (r.state = ANY($2) OR NOT (e.state = ANY($2))) \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
@@ -420,6 +634,17 @@ pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> 
           LIMIT $1",
     )
     .bind(limit)
+    // **Derived from `RunState::ALL`, not listed** -- `spawn::terminated_count`'s
+    // shape, and the only one that survives a fourteenth variant. A hand-written
+    // `('SUCCESS','FAILED',...)` in the SQL above would be a second copy of
+    // `is_terminal` that no compiler and no test compares to the first.
+    .bind(
+        RunState::ALL
+            .iter()
+            .filter(|s| s.is_terminal())
+            .map(|s| s.wire())
+            .collect::<Vec<_>>(),
+    )
     .fetch_all(exec)
     .await
     .map_err(db_err)
@@ -844,13 +1069,35 @@ pub async fn apply_outcome(
             format!("negative run_ix {}", claimed.run_ix),
         ))
     })?;
-    apply(
-        &mut state,
-        &Command::SetRunState {
+    // **The `allowFailure:`/`allowWarning:` door for a RUNNABLE, and it is the
+    // worker's rather than `advance()`'s** -- W8 Task 5. The artifact puts it
+    // in the same place, `WorkerTaskProcessor`'s nominal path, between the
+    // handler's answer and `taskRun.withState(state)`; `advance()` is pure over
+    // `(plan, state, now)` and never sees a handler's outcome, so it could not
+    // hold this even if the division of labour were free to move.
+    //
+    // Only the RUN's state moves. The attempt already carries the handler's own
+    // terminal and keeps it, which is exactly what
+    // `valids/task-allow-failure-runnable`'s golden holds: a run ending
+    // `WARNING` over three attempts that all end `FAILED`.
+    let terminal =
+        crate::executor::allow_failure::for_runnable(&ctx.plan, &state, run, outcome.state, now);
+    // `SetRunState` while the two agree, so every run nobody wrote a flag on
+    // takes exactly the path it took before this task; `CompleteRun` only where
+    // they differ, because the attempt must keep the handler's own terminal.
+    let cmd = if terminal == outcome.state {
+        Command::SetRunState {
             run,
-            state: outcome.state,
-        },
-    );
+            state: terminal,
+        }
+    } else {
+        Command::CompleteRun {
+            run,
+            run_state: terminal,
+            attempt: outcome.state,
+        }
+    };
+    apply(&mut state, &cmd);
     settle(
         conn,
         &ctx,
@@ -864,6 +1111,21 @@ pub async fn apply_outcome(
         }),
     )
     .await
+}
+
+/// **Whether an execution reaching `s` tells its parent** — the predicate the
+/// two links below are gated on, named so that something other than a comment
+/// can assert it.
+///
+/// It is `is_terminal` and the indirection is the point: `worker::subflow`'s
+/// [`guess_state`](super::subflow) omits Java's `isPaused()` disjunct from its
+/// trigger set, and that omission is sound **only because** a `PAUSED` child
+/// never reaches it. That "only because" lived in prose on both sides until W8
+/// Task 5 fix round 3. `a_paused_child_cannot_reach_guess_state` calls this
+/// function, so a change to the filter here breaks a test rather than a
+/// paragraph.
+pub(super) fn notifies_parent(s: RunState) -> bool {
+    s.is_terminal()
 }
 
 /// The lease a writer holds, and the run it releases.
@@ -920,6 +1182,21 @@ pub(super) async fn settle(
     // same thing across a transaction boundary as it does inside one.
     let mut seq = ctx.seq + 1;
     marks.observe(before, state, seq);
+    // **`ExecutorService.handleExecutionChangedSLA`, and it is here for the
+    // same reason it is there**: the artifact evaluates it on every execution
+    // message, immediately BEFORE `executorService.process(executor)`
+    // (`ExecutionEventMessageHandler.java:244`). `drive` below is `process`, so
+    // this is that edge. An execution the SLA terminates is terminal when
+    // `advance()` is first asked, and `advance()` returns nothing for a
+    // terminal execution -- which is what produces the golden's
+    // `["CREATED","CANCELLED"]` with no runs, rather than a `RUNNING` that has
+    // to be taken back.
+    if let Some(terminal) = sla_terminal(&surface, ctx, state) {
+        let snapshot = state.clone();
+        seq += 1;
+        apply(state, &Command::SetExecutionState { state: terminal });
+        marks.observe(&snapshot, state, seq);
+    }
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
@@ -948,7 +1225,7 @@ pub(super) async fn settle(
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
-        if let Some(terminal) = is.filter(|s| s.is_terminal()) {
+        if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
             spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
             // The other kind of link. `on_execution_terminal` reads
             // `parent_execution_id` and this reads `trigger_execution_id`, and
@@ -1278,7 +1555,7 @@ pub(super) async fn load_with(
 
     let rows = sqlx::query(
         "SELECT id, run_ix, task_ix, parent_ix, value, rendered, rendered_run_if, \
-                history, attempts, not_before_ms \
+                history, attempts, not_before_ms, resume_with \
            FROM workflow.task_runs WHERE execution_id = $1 ORDER BY run_ix",
     )
     .bind(execution_id)
@@ -1308,6 +1585,17 @@ pub(super) async fn load_with(
             history: parse_states(id, &r.get::<serde_json::Value, _>("history"))?,
             attempts: parse_attempts(id, &r.get::<serde_json::Value, _>("attempts"))?,
             not_before: r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            // **The instant is NOT in this column** -- it is `not_before_ms`,
+            // read one line up, so there is one clock rather than two that can
+            // disagree. Migration 0141's `workflow_task_runs_resume_bound_
+            // matches` is what makes the pairing structural; a row that
+            // violates it cannot be written, so a `Some` discriminant with no
+            // deadline here is storage corruption rather than a state.
+            resume_with: parse_resume(
+                id,
+                r.get::<Option<String>, _>("resume_with").as_deref(),
+                r.get::<Option<i64>, _>("not_before_ms").map(Tick),
+            )?,
         });
     }
 
@@ -1410,6 +1698,28 @@ impl Marks {
         for ix in before.runs.len()..after.runs.len() {
             self.created.entry(ix).or_insert(seq);
         }
+        // **A run that goes from NO history to a `CREATED` was created now**,
+        // and its left endpoint moves with it — W8 Task 4.
+        //
+        // An empty history is `Command::RestartLoop`'s spelling of Kestra's
+        // "removed from `taskRunList`", and `Command::RecreateRun` is the walk
+        // building it back — one child per round, in list order, which is what
+        // `valids/waitfor-nested`'s `loop_1_return` **before** `loop_2` and
+        // `loop_3_return` **before** `loop_3_log` measure. An iteration that
+        // re-stamped every sibling at once made all three pairs `overlapping`.
+        //
+        // **A `plain` insert, not `or_insert`**, and the contrast with the loop
+        // above is the whole rule: a retried run re-enters `CREATED` by
+        // APPENDING and must keep its first endpoint (this struct's doc says
+        // why — `normalise.py`'s `relation` reads a retried run's FIRST
+        // `startDate`), while a re-created one has no earlier life to keep.
+        // Nothing but `RestartLoop` empties a history.
+        for (ix, run) in after.runs.iter().enumerate() {
+            let was_removed = before.runs.get(ix).is_some_and(|b| b.history.is_empty());
+            if was_removed && !run.history.is_empty() {
+                self.created.insert(ix, seq);
+            }
+        }
         for (ix, run) in after.runs.iter().enumerate() {
             let was = before
                 .runs
@@ -1459,6 +1769,92 @@ impl Marks {
 /// Bounded by [`MAX_ROUNDS`]: a caller that does not converge has found a cycle
 /// or a render that keeps re-arming, and both must be loud rather than spin
 /// with a transaction open.
+/// **The state a violated `ExecutionChangedSLA` puts this execution into**, or
+/// `None` — `ExecutorService.handleExecutionChangedSLA` plus the state half of
+/// `processViolation`, over [`crate::sla`]'s decision.
+///
+/// # Why it is here and not in `advance()`
+///
+/// `EXECUTION_ASSERTION`'s `assert:` is `runContext.render`ed
+/// (`ExecutionAssertionSLA.evaluate`), and the corpus depends on that:
+/// `valids/sla-execution-condition`'s is `{{inputs.string != 'CANCEL'}}`.
+/// [`advance`](crate::executor::advance) is pure over `(plan, state, now)` and
+/// has no renderer and no access to `inputs`, so evaluating an SLA there would
+/// mean widening its contract. It does not need to be there: the decision is a
+/// function of the flow and the render surface, both of which this `settle`
+/// already holds, and Kestra takes it outside `process` too. **A change to
+/// `advance()`'s contract is a finding, not a step**, and this is the finding
+/// ruled on rather than taken.
+///
+/// # Kestra has FOUR guards, this has three, and the fourth is closed
+/// elsewhere — W8 Task 6 fix round 1
+///
+/// `handleExecutionChangedSLA` returns early on
+/// `flow == null || ListUtils.isEmpty(flow.getSla()) ||
+/// executor.getExecution().getKind() == ExecutionKind.LOOP ||
+/// executor.getExecution().getState().isTerminated()`. Three of the four are
+/// here, **in Kestra's order**, and the fourth is not a guard in this crate at
+/// all:
+///
+/// 1. **the flow parses and its `sla:` is non-empty** — `flow == null ||
+///    isEmpty(getSla())`. Read off [`Surface::flow`], which `Surface::load`
+///    already parsed: W8 Task 6 parsed `ctx.source` a SECOND time here, on
+///    every settle of every execution, and 339 of the corpus's 345 flows paid
+///    for a parse only to be told they have no `sla:`. An unparseable source
+///    yields `None` rather than an error — this execution is already running
+///    and `ctx.plan` was built from that same source, so failing it here would
+///    be a new failure mode for every flow that declares no `sla:`.
+/// 2. **the execution is not terminated** — what makes this idempotent across
+///    the many `settle`s one execution has: the violation fires once,
+///    terminates the execution, and every later call returns here.
+/// 3. `violation.behavior()` — `NONE` changes no state
+///    ([`crate::sla::state_for`]).
+///
+/// # The fourth guard is `ExecutionKind.LOOP`, and egret closes it at the source
+///
+/// Kestra runs a `Loop` iteration as a sub-execution **of the same flow**, so
+/// the flow-level `sla:` is right there and the guard is what stops it being
+/// evaluated once per iteration. egret does not: `worker::spawn::sub_flow_source`
+/// synthesises a *different* flow from the loop body. **It did not clear
+/// `sla:`**, so the parent's SLA was inherited by every iteration and this
+/// function would have evaluated it there — an over-acceptance no corpus flow
+/// reaches (none declares both an `sla:` and a `Loop`) and the ratchet cannot
+/// see. Fix round 1 clears it beside `triggers:`, so the condition is
+/// **unrepresentable** rather than guarded. See
+/// `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`.
+///
+/// **Fix round 2 corrects the reason this paragraph gave.** It said *"egret has
+/// no `ExecutionKind`"*. It has one — [`crate::models::ExecutionKind`], with a
+/// `Loop` variant, read by `trigger::flow` — and what is true is narrower:
+/// **`workflow.executions` has no `kind` column.** The correction matters
+/// because the false version implied no alternative existed, and one did: a
+/// loop iteration's row carries a non-NULL `loop_index`, which
+/// [`Surface::load`] already selects, so this function COULD have asked. The
+/// clear at the source is a choice between two available sites and not a
+/// last resort.
+fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -> Option<RunState> {
+    let flow = surface.flow()?;
+    if flow.sla.is_empty() {
+        return None;
+    }
+    if state.history.last().is_some_and(|s| s.is_terminal()) {
+        return None;
+    }
+    // `run: None` -- an execution-level render with no run of its own, which is
+    // exactly what `Surface::context`'s `Option<RunIx>` was left open for.
+    // Kestra builds it the same way: `runContextFactory.of(flow, execution)`,
+    // no taskrun.
+    let cx = surface.context(&ctx.plan, state, None);
+    // `Err` is a render that will not resolve, and the artifact treats that as
+    // a VIOLATION rather than as a skip -- see `crate::sla`'s module doc for
+    // the bytecode, and for the assertion W8 Task 6 shipped saying the
+    // opposite.
+    let violation = crate::sla::first_execution_changed_violation(flow, &mut |p| {
+        p.render(&cx).map_err(|e| e.to_string())
+    })?;
+    crate::sla::state_for(violation.behavior)
+}
+
 fn drive(
     ctx: &ExecutionCtx,
     surface: &Surface,
@@ -1493,7 +1889,7 @@ fn drive(
         }
 
         let snapshot = state.clone();
-        if render::render_expressions(surface, plan, state) == Pass::Rendered {
+        if render::render_expressions(surface, plan, state, now) == Pass::Rendered {
             *seq += 1;
             marks.observe(&snapshot, state, *seq);
             continue;
@@ -1589,6 +1985,8 @@ async fn persist(
                         rendered_run_if = $5, not_before_ms = $6, \
                         claimed_at = CASE WHEN $7 THEN NULL ELSE claimed_at END, \
                         ended_seq = $10, \
+                        created_seq = COALESCE($12, created_seq), \
+                        resume_with = $13, \
                         updated_at = now() \
                   WHERE execution_id = $8 AND run_ix = $9 \
                     AND ($11::timestamptz IS NULL OR claimed_at = $11)",
@@ -1614,6 +2012,22 @@ async fn persist(
             // `state.endDate`, the run's LAST termination.
             .bind(marks.ended.get(&ix).copied())
             .bind(lease.map(|l| l.claimed_at))
+            // **`COALESCE` here and NOT on `ended_seq` above, and the asymmetry
+            // is the two fields' rules rather than caution** — W8 Task 4.
+            // `Marks` is built per `settle`, so it holds a `created` entry only
+            // for a run this settle created or RESET; every other run must keep
+            // the column it already has, which a bare `$12` would null. The
+            // right endpoint has no such case: `marks.ended` is `None` exactly
+            // when nothing terminated, and the plain assignment is what
+            // `retry::reopen_due` needs (a run that is running again must not
+            // keep a right endpoint).
+            .bind(marks.created.get(&ix).copied())
+            // A plain assignment, like `ended_seq` and unlike `created_seq`:
+            // the state's value IS the answer, including when it goes back to
+            // `NULL` because `Command::RestartLoop` took the run out of
+            // `PAUSED`. A `COALESCE` here would leave a stale discriminant
+            // beside a NULL deadline, which migration 0141 refuses.
+            .bind(run.resume_with.as_ref().map(Resume::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -1646,8 +2060,8 @@ async fn persist(
                 "INSERT INTO workflow.task_runs \
                    (execution_id, run_ix, task_ix, task_id, type_id, parent_ix, value, \
                     rendered, rendered_run_if, state, history, attempts, not_before_ms, \
-                    created_seq, ended_seq) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
+                    created_seq, ended_seq, resume_with) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
             )
             .bind(execution_id)
             .bind(ix as i32)
@@ -1664,6 +2078,11 @@ async fn persist(
             .bind(run.not_before.map(|t| t.0))
             .bind(marks.created.get(&ix).copied())
             .bind(marks.ended.get(&ix).copied())
+            // Always `NULL` on an INSERT today -- `Command::CreateRun` cannot
+            // pause a run it is creating -- and bound anyway, because a column
+            // this writer never mentions is a column the next author has to
+            // discover.
+            .bind(run.resume_with.as_ref().map(Resume::wire))
             .execute(&mut *conn)
             .await
             .map_err(db_err)?;
@@ -1724,6 +2143,34 @@ fn attempts_json(attempts: &[Attempt]) -> serde_json::Value {
             })
             .collect(),
     )
+}
+
+/// [`Resume`] from migration 0141's discriminant and the run's own deadline.
+///
+/// The two halves are checked against each other rather than trusted: 0141's
+/// CHECK pairs them at write time, so a mismatch read back here is the storage
+/// being wrong -- which is `WorkerError::Corrupt`'s whole class, and the one
+/// class `oracle-exec/driver.rs` reports as `Broken` rather than swallowing as
+/// an ordinary divergence.
+fn parse_resume(owner: Uuid, wire: Option<&str>, at: Option<Tick>) -> Result<Option<Resume>> {
+    let corrupt = |what: String| worker_err(WorkerError::Corrupt(owner, what));
+    Ok(match (wire, at) {
+        (None, _) => None,
+        (Some("NEVER"), None) => Some(Resume::Never),
+        (Some("ITERATE"), Some(at)) => Some(Resume::Iterate { at }),
+        (Some(s), Some(at)) if s.starts_with("TERMINAL:") => Some(Resume::Terminal {
+            at,
+            state: from_wire(&s["TERMINAL:".len()..])
+                .ok_or_else(|| worker_err(WorkerError::UnknownState(owner, s.to_string())))?,
+        }),
+        (Some(s), at) => {
+            return Err(corrupt(format!(
+                "resume_with {s:?} with not_before_ms {:?}: migration 0141 pairs the \
+                 discriminant with the deadline and this row has neither pairing",
+                at.map(|t| t.0)
+            )))
+        }
+    })
 }
 
 fn parse_states(owner: Uuid, v: &serde_json::Value) -> Result<Vec<RunState>> {
@@ -1794,6 +2241,7 @@ mod tests {
             history: vec![state],
             attempts: Vec::<_Attempt>::new(),
             not_before: None,
+            resume_with: None,
         };
         let state = ExecutionState {
             runs: vec![

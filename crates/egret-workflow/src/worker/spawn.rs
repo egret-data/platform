@@ -541,9 +541,41 @@ fn transmit_failed(ctx: &claim::ExecutionCtx, task: TaskIx) -> Result<bool> {
 }
 
 /// `State.Type.isTerminatedInError()` — `FAILED || KILLED || CANCELLED`
-/// (`State.java:296`), of which [`RunState`] has the first two.
+/// (`State.java:296`), **all three of which [`RunState`] has since W8 Task 6**.
+///
+/// It is spelled as Kestra's literal list rather than as
+/// `is_terminal() && !is_terminated_no_fail()` so that a reader can diff it
+/// against the Java line by line.
+///
+/// # The guard this doc claimed, which did not exist
+///
+/// This paragraph said `state::tests::no_fail_is_a_subset_of_terminal` *"asserts
+/// the two spellings agree, which is what makes keeping both safe."* **It does
+/// not, and never called this function.** It compares
+/// `is_terminal() && !is_terminated_no_fail()` against a **literal set written
+/// in its own body**, so it pins one spelling against a third copy and says
+/// nothing about this one. Measured: **MX1** — drop `RunState::Cancelled` here,
+/// leaving `Failed | Killed` — **survived 3 of 3 runs**, 1036 passed, a result
+/// line byte-identical to the control.
+///
+/// **A wrong assertion is worse than none**, because it converts an unguarded
+/// predicate into a defended one, and this package has already paid for that
+/// class twice. [`tests::the_two_spellings_of_terminated_in_error_agree`] is
+/// the guard now: it calls **this function** for every member of
+/// `RunState::ALL` and compares it to the derived predicate, so a variant added
+/// to one spelling and not the other fails rather than diverging quietly.
+///
+/// **Not shipped today**, and the bound is worth stating rather than leaving a
+/// reader to infer: W8 Task 6's `sub_flow_source` clears `sla:` from a
+/// synthesised loop body, so no iteration of this corpus can end `CANCELLED`
+/// and `transmitFailed` has never been asked about one. The scenario is one
+/// package away — give a `Loop` child a `CANCELLED` terminal and the unguarded
+/// version reports **SUCCESS** for a cancelled iteration.
 fn terminated_in_error(state: RunState) -> bool {
-    matches!(state, RunState::Failed | RunState::Killed)
+    matches!(
+        state,
+        RunState::Failed | RunState::Killed | RunState::Cancelled
+    )
 }
 
 /// **The state the loop run reads for an iteration that ended `RETRIED`, and
@@ -630,6 +662,41 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
     // `triggers:` into it would put a schedule on a row that is one iteration
     // of one run.
     flow.triggers = Vec::new();
+    // **And the flow-level `sla:` is the parent execution's, not an
+    // iteration's** -- W8 Task 6 fix round 1, and it closes a real
+    // over-acceptance rather than tidying.
+    //
+    // Kestra runs an iteration as a sub-execution of the SAME flow and guards
+    // the evaluation site instead: `handleExecutionChangedSLA` returns early on
+    // `getKind() == ExecutionKind.LOOP`.
+    //
+    // **W8 Task 6 fix round 2 corrects the reason given here.** It read *"egret
+    // has no `ExecutionKind`"*, and that is **false**:
+    // [`crate::models::ExecutionKind`] exists, has a `Loop` variant, and
+    // `trigger::flow` reads it for `ExecutionKind.isNormal`. The true statement
+    // is narrower -- **`workflow.executions` has no `kind` column**, so an
+    // execution egret creates does not carry one and `claim::settle` cannot ask
+    // Kestra's question in Kestra's words.
+    //
+    // **And the narrower truth does not leave the reader without an
+    // alternative, which the false one implied.** A loop iteration IS
+    // identifiable there: its row has a non-NULL `loop_index`, which
+    // `render::Surface::load` already SELECTs. So both sites were available and
+    // this is a choice between them, not the only option. It is made here
+    // because a field that is not carried cannot be read by the next consumer
+    // either, which is the rule `triggers:` above is cleared under -- the same
+    // reason `state::Resume` is a field rather than two `TaskKind` lists.
+    //
+    // Without this line a flow with an `EXECUTION_ASSERTION` and a `Loop` had
+    // its SLA evaluated once per iteration by `claim::sla_terminal`, cancelling
+    // iterations Kestra runs.
+    //
+    // **No corpus flow declares both**, so the ratchet is silent in both
+    // directions and `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`
+    // is the whole instrument. It is a clear rather than a guard for the reason
+    // `triggers:` above is: a field that is not there cannot be read by the
+    // next consumer either.
+    flow.sla = Vec::new();
     serde_norway::to_string(&flow).map_err(|e| {
         worker_err(WorkerError::Corrupt(
             owner,
@@ -739,6 +806,69 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The guard [`terminated_in_error`]'s doc claimed and did not have.**
+    ///
+    /// Two spellings of one Java predicate is one chance for them to disagree,
+    /// and the assertion that was cited for it —
+    /// `state::tests::no_fail_is_a_subset_of_terminal` — **never calls this
+    /// function**. It compares `is_terminal() && !is_terminated_no_fail()`
+    /// against a literal set written in its own body, which pins one spelling
+    /// to a third copy of the list and leaves this one free. **MX1** (drop
+    /// `RunState::Cancelled`, leaving `Failed | Killed`) survived that suite
+    /// **3 of 3 runs** with a result line byte-identical to the control.
+    ///
+    /// This calls `terminated_in_error` itself, over **every** member of
+    /// `RunState::ALL` rather than over the three that happen to be true today,
+    /// so the failure it reports is *which variant* disagrees and in *which
+    /// direction*. A variant added to one spelling and not the other fails
+    /// here; so does MX1.
+    ///
+    /// **This test postdates the defect it proves and cannot be evidence that
+    /// the defect was ever caught** — it is written because MX1 showed nothing
+    /// caught it. The honest claim is the narrow one: MX1 died 3/3 *after* this
+    /// existed and survived 3/3 before.
+    #[test]
+    fn the_two_spellings_of_terminated_in_error_agree() {
+        let mut disagreeing: Vec<String> = Vec::new();
+        for s in RunState::ALL {
+            let literal = terminated_in_error(*s);
+            let derived = s.is_terminal() && !s.is_terminated_no_fail();
+            if literal != derived {
+                disagreeing.push(format!(
+                    "{}: terminated_in_error={literal}, \
+                     is_terminal() && !is_terminated_no_fail()={derived}",
+                    s.wire()
+                ));
+            }
+        }
+        assert!(
+            disagreeing.is_empty(),
+            "`State.Type.isTerminatedInError()` is `FAILED || KILLED || \
+             CANCELLED` (`State.java:296`) and this crate holds it twice -- \
+             literally in `worker::spawn::terminated_in_error`, derivably in \
+             `RunState`. They disagree on:\n  {}",
+            disagreeing.join("\n  ")
+        );
+
+        // **The positive control.** Every row above is an equality, and an
+        // implementation answering `false` to both sides would satisfy all
+        // thirteen. Naming the three that must be TRUE is what stops that, and
+        // it is the same list `no_fail_is_a_subset_of_terminal` checks from the
+        // other side -- the difference being that this one reached it through
+        // the function.
+        let in_error: std::collections::BTreeSet<&str> = RunState::ALL
+            .iter()
+            .filter(|s| terminated_in_error(**s))
+            .map(|s| s.wire())
+            .collect();
+        assert_eq!(
+            in_error,
+            std::collections::BTreeSet::from(["CANCELLED", "FAILED", "KILLED"]),
+            "and the three, by name, read OUT of the function rather than \
+             compared to a literal beside it"
+        );
+    }
 
     fn vals(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -922,6 +1052,55 @@ mod tests {
              `transmitFailed` loop on the first failure with two values never \
              started, which is `valids/loop-failed`'s measured shape"
         );
+    }
+
+    /// **A `Loop` iteration does not inherit the parent's flow-level `sla:`**
+    /// — W8 Task 6 fix round 1, and the instrument for a defect the ratchet
+    /// cannot see.
+    ///
+    /// Kestra's `handleExecutionChangedSLA` returns early on
+    /// `getKind() == ExecutionKind.LOOP`, because there an iteration IS a
+    /// sub-execution of the same flow. [`sub_flow_source`] synthesises a
+    /// different flow instead, and it copied everything it did not explicitly
+    /// clear — so before this fix the parent's `EXECUTION_ASSERTION` was
+    /// evaluated once per iteration by `claim::sla_terminal`, cancelling
+    /// iterations the artifact runs.
+    ///
+    /// **No corpus flow declares both an `sla:` and a `Loop`**, which is why
+    /// this is a hand-built fixture rather than a corpus derivation, and why
+    /// the ratchet is silent in both directions. The control is `tasks:`: the
+    /// body still arrives, so "the field is gone" is not "the synthesis broke".
+    #[test]
+    fn no_flow_level_sla_is_inherited_by_a_loop_sub_execution() {
+        let source = "id: f\nnamespace: a.b\nsla:\n  - id: a\n    \
+                      type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    \
+                      assert: \"{{ false }}\"\ntasks:\n  - id: lp\n    \
+                      type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    \
+                      tasks:\n      - id: body\n        \
+                      type: io.kestra.plugin.core.log.Log\n        message: x\n";
+        let parent = crate::spec::parse(source).expect("the fixture parses");
+        assert_eq!(
+            parent.sla.len(),
+            1,
+            "the fixture must carry an `sla:` -- otherwise the assertion below \
+             passes on a flow that never had one"
+        );
+
+        let sub = sub_flow_source(source, "lp", Uuid::nil()).expect("the body synthesises");
+        let reparsed = crate::spec::parse(&sub).expect("the sub-flow re-parses");
+        assert!(
+            reparsed.sla.is_empty(),
+            "a `Loop` iteration is not the execution the flow-level `sla:` is \
+             about; carrying it evaluates the SLA once per iteration. Got {:?}",
+            reparsed.sla
+        );
+        assert_eq!(
+            reparsed.tasks.len(),
+            1,
+            "and the body still arrives -- the control that separates \
+             `sla:` being cleared from the synthesis being broken"
+        );
+        assert_eq!(reparsed.tasks[0].id, "body");
     }
 
     /// Every corpus flow that holds a `Loop` — the sub-flow this module

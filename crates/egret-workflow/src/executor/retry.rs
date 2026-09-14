@@ -11,7 +11,8 @@
 //! "cannot use the 'timeout' property as it's only relevant for runnable
 //! tasks" for every non-`RunnableTask`, with `Pause` the single exception. So
 //! the only `timeout:` an `advance()` will ever enforce is a `Pause`'s, and
-//! `Pause` is W8's. W4's worker owns the rest. What W3a Task 7 *does* own of
+//! `Pause` is W8's — **W8 Task 3 shipped it**, in
+//! [`flowable::pause`](super::flowable::pause) rather than here. W4's worker owns the rest. What W3a Task 7 *does* own of
 //! the elapsed-time rules is [`RetryPolicy::max_duration`], which is below.
 //!
 //! # The two behaviours, and the instant each is measured from
@@ -427,6 +428,54 @@ pub(super) fn scan(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Comman
 /// (`DefaultExecutor.java:561`, the execution-delay loop) whose output is
 /// re-submitted for processing rather than merged into the cycle that scheduled
 /// it.
+/// # It takes only `RETRYING`, and W8 Task 2's predicted `PAUSED` caller never arrived
+///
+/// **The prediction was WRONG and is kept because being wrong is the useful
+/// part.** It read: *"A bounded `Pause` is the same shape — a run parked with a
+/// [`TaskRun::not_before`](super::TaskRun) that comes due — so whoever emits
+/// [`RunState::Paused`](super::RunState) must widen this arm or the run parks
+/// for ever."* W8 Task 3 emitted `Paused`, banked eight entries, and **this arm
+/// is byte-unchanged**.
+///
+/// The two shapes part at [`RunState::Created`](super::RunState). This function
+/// reopens a retry by putting the run back into `CREATED`, which starts a NEW
+/// attempt — measured, `valids/retry-failed-task-attempts` has four. A pause
+/// that ends does the opposite: its attempt was never closed, and all twelve
+/// resumed golden entries read run `CREATED RUNNING PAUSED <terminal>` over
+/// attempt `CREATED RUNNING <terminal>`, one attempt taking the terminal
+/// straight from the `RUNNING` it was left at. Reopening a pause here would
+/// give it a second attempt and mismatch every one of the twelve.
+///
+/// So `flowable::sequential::walk` asks
+/// [`flowable::resume_paused`](super::flowable::resume_paused) at the `PAUSED`
+/// run instead — which is also where the decision belongs.
+///
+/// **The REASON given here was falsified by W8 Task 4 fix round 2, so it is
+/// rewritten rather than repointed.** It read *"the terminal depends on WHICH
+/// bound elapsed and only the plan knows that"*. `resume_paused(state, run,
+/// now)` takes **no plan at all** and therefore cannot key on the bound. The
+/// bound is read once, in the round the pause is ENTERED
+/// ([`flowable::pause::drive`](super::flowable::pause)), and the terminal it
+/// chose is carried on `Command::PauseRun` as a
+/// [`Resume`](crate::executor::Resume). A `PAUSED` run holds the **answer**,
+/// not the question — which is the whole reason the two `TaskKind`-keyed
+/// guards could be deleted.
+///
+/// **What the paragraph got right is worth keeping too**: the ratchet WOULD
+/// have caught the mistake. `driver::pass_time` moves the clock, calls
+/// `worker::resume`, which reaches `claim::settle` and then
+/// [`advance`](super::advance), which calls this function on the first line of
+/// its body — so a `Paused` run nothing reopens is a stalled execution and a
+/// red ratchet. `worker::claim::due_retries` is the one the ratchet cannot see,
+/// because its gate is SQL the driver never runs — `pass_time` selects on
+/// `not_before_ms` with no state term at all. **That one WAS a live defect and
+/// W8 Task 7 fixed it**: the gate now carries a `'PAUSED'` arm, driven by
+/// `tests/worker.rs`'s
+/// `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`
+/// and `the_waker_names_exactly_the_states_something_will_move`. The ratchet
+/// reads **109 either way** — measured in both directions with the arm removed
+/// and restored — which is what the sentence above means and why the two tests
+/// had to exist.
 pub(super) fn reopen_due(plan: &Plan, state: &ExecutionState, now: Tick) -> Vec<Command> {
     let due: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {

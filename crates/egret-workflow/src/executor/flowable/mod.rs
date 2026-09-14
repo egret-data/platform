@@ -16,12 +16,111 @@
 pub(crate) mod branch;
 pub(crate) mod dag;
 pub(crate) mod loop_;
+pub(crate) mod loop_until;
 pub(crate) mod parallel;
+pub(crate) mod pause;
 pub(crate) mod sequential;
 
 use crate::executor::command::Command;
 use crate::executor::plan::{Plan, TaskIx, TaskKind};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
+
+/// `at + d`, in [`Tick`]s — the one definition, shared by
+/// [`pause`] and [`loop_until`].
+///
+/// **Saturating rather than wrapping**, and that is the whole reason it is a
+/// function: a `P100000D` an author can legally write overflows an `i64` of
+/// milliseconds into the PAST, and a deadline behind `now` is a wait that ends
+/// on the round it begins — a pause that resumes itself, or a loop that never
+/// waits and whose bound fires immediately.
+///
+/// It was written twice, byte for byte, until W8 Task 4 fix round 1. Two copies
+/// of one saturation rule are two chances for one of them to stop saturating,
+/// which is exactly the shape `retry::parse_duration`'s single-parser note
+/// records one module over.
+pub(crate) fn plus(at: Tick, d: std::time::Duration) -> Tick {
+    let millis = i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
+    Tick(at.0.saturating_add(millis))
+}
+
+/// What a `PAUSED` run wants — **the one place this executor leaves `PAUSED`,
+/// and it reads the RUN rather than the kind.** W8 Task 4 fix round 2.
+///
+/// There were two: `sequential::walk` and `parallel::drive_concurrent` each
+/// carried a `matches!(plan.tasks[task].kind, …)` list behind a catch-all, so
+/// a construct missing from either list paused and was never asked again.
+/// [`Resume`](crate::executor::Resume) records the answer when the pause is entered, so nothing here
+/// needs to know which kinds pause — and a kind that pauses cannot be missing
+/// from a list, because there is no list.
+///
+/// # The terminal is resolved ONCE, at pause time — and what that rests on
+///
+/// This function re-derives nothing. It reads a [`Resume`](crate::executor::Resume) that
+/// [`pause::drive`] computed in the round the pause was **entered**, from
+/// `(plan, attempt_started_at, rendered)`, and hands back the terminal that
+/// bound chose. Before W8 Task 4 fix round 2 the bound was recomputed on
+/// **every** round instead.
+///
+/// **That is safe only because `pause::Bound::NotRenderedYet` waits rather
+/// than pauses**, and the dependency is load-bearing: a `pauseDuration:` that
+/// is an expression the caller has not rendered yet makes `drive` return
+/// [`Step::Waiting`] *without* emitting a [`Command::PauseRun`] at all, so no
+/// run is ever parked carrying a terminal derived from an unrendered bound.
+/// Give that arm any other answer — pause with `Resume::Never`, pause with a
+/// default duration — and this function becomes **wrong rather than merely
+/// stale**: the render that arrives one round later can no longer change the
+/// terminal, because nothing re-reads the plan after the run is `PAUSED`.
+/// Nothing else in the pause path restores that property, and the two sites
+/// are in different modules, so the next change to `deadline`'s arms must come
+/// back here.
+///
+/// **`Waiting` on `None` is unreachable rather than defensive.**
+/// [`RunState::Paused`] is pushed by exactly one command,
+/// [`Command::PauseRun`], and that command cannot be constructed without a
+/// [`Resume`](crate::executor::Resume). It is `Waiting` and not a panic for the reason every other
+/// "cannot happen" in this executor is: `advance()` is handed state a caller
+/// stored and read back, and a state machine that aborts the process on a
+/// surprising row is a worse failure than one that stalls.
+///
+/// **`every_paused_run_names_its_resumer` is what keeps it unreachable — and
+/// until W8 Task 4 fix round 3 that sentence cited a test that did not
+/// exist.** It does now, and it is only half the guard: it proves this
+/// *executor* never writes such a run. The other half is at the far end of the
+/// round trip, where `worker::claim` reads a `TaskRun` back out of Postgres —
+/// migration **0142**'s `workflow_task_runs_paused_names_its_resumer`, because
+/// migration 0141's two CHECKs are both predicated on `resume_with` itself and
+/// so are vacuously true when it is NULL. `state = 'PAUSED'` beside
+/// `resume_with IS NULL` was an accepted row, `parse_resume` mapped it to
+/// `None`, and this arm stalled it for ever: **the fix round 2 defect,
+/// unrepresentable in the type system and still representable in the
+/// database.** `a_paused_row_that_names_no_resumer_cannot_be_stored` is that
+/// half.
+pub(crate) fn resume_paused(state: &ExecutionState, run: RunIx, now: Tick) -> Step {
+    let Some(resume) = state.runs[run].resume_with else {
+        return Step::Waiting;
+    };
+    let Some(at) = resume.at() else {
+        // `Resume::Never`. **Neither a bound this executor holds nor a clock
+        // it can move ends this**, and reading it as "due" is the
+        // over-acceptance the variant exists to refuse: an unbounded `Pause`
+        // that resumed itself would leave every figure in `baseline.txt`
+        // unchanged, because none of the seven corpus flows written that way
+        // reaches `golden.json` at all.
+        return Step::Waiting;
+    };
+    if now < at {
+        return Step::Waiting;
+    }
+    match resume {
+        crate::executor::Resume::Never => Step::Waiting,
+        crate::executor::Resume::Terminal { state: s, .. } => {
+            Step::Commands(vec![Command::SetRunState { run, state: s }])
+        }
+        crate::executor::Resume::Iterate { .. } => {
+            Step::Commands(vec![Command::RestartLoop { run }])
+        }
+    }
+}
 
 /// What one task list wants from the caller.
 ///
@@ -153,6 +252,27 @@ pub(crate) fn aggregate(
         match latest(state, ix) {
             Some(RunState::Killed) => return RunState::Killed,
             Some(RunState::Failed) => out = RunState::Failed,
+            // **W8 Task 5, and its position in the chain is the artifact's
+            // priority order, not an accident of where it was pasted.**
+            // `Execution.guessFinalState`'s single pass is
+            // `KILLED > FAILED > CANCELLED > WARNING > PAUSED`
+            // (`Execution.java:774-789`), so a `WARNING` child loses to a
+            // `FAILED` sibling and beats a `SUCCESS` one -- which the `!=`
+            // guards are: they upgrade `Success` and refuse to downgrade
+            // anything above.
+            //
+            // **`CANCELLED` arrived at W8 Task 6 and it went ABOVE this arm,
+            // which is where Task 5's comment said it belonged.** The Java's
+            // own conditions are the guards written out: `CANCELLED` is taken
+            // unless the running answer is already `KILLED` or `FAILED`, and
+            // `WARNING` unless it is already any of those three. Nothing in the
+            // corpus supplies a `CANCELLED` run -- see `RunState::Cancelled`
+            // for the derivation -- so `cancelled_outranks_warning_and_loses_to_failed`
+            // is the row that supplies it.
+            Some(RunState::Cancelled) if out != RunState::Failed => out = RunState::Cancelled,
+            Some(RunState::Warning) if out != RunState::Failed && out != RunState::Cancelled => {
+                out = RunState::Warning
+            }
             _ => {}
         }
     }
@@ -349,9 +469,45 @@ pub(crate) fn descend(
             branch::drive_switch(plan, state, run, cases, default, errors, now)
         }
         TaskKind::Loop { .. } => return Step::Waiting,
+        // W8 Task 3. It is neither `Waiting` (there is a command to emit, and
+        // the executor is the only thing that can emit it) nor a list to walk:
+        // the whole of a `Pause` is the transition into `PAUSED`, which
+        // `pause::drive` decides from the plan and the clock alone.
+        //
+        // Its `Step` is returned WITHOUT going through the `Done` mapping
+        // below, because a pause does not terminate in the round it starts and
+        // never returns `Done` at all -- the terminal is
+        // [`resume_paused`]'s, one clock move later.
+        TaskKind::Pause { .. } => return pause::drive(plan, state, run, task),
+        // W8 Task 4. It DOES go through the `Done` mapping below, unlike the
+        // `Pause` above: a `LoopUntil` terminates in the round its last
+        // iteration ends, and the `Step::Commands` it returns instead is a
+        // `PauseRun` that must not be mapped either -- which is what the match
+        // below already gets right for every other flowable.
+        TaskKind::LoopUntil { .. } => loop_until::drive(plan, state, run, task, now),
     };
     match step {
-        Step::Done(s) => Step::Commands(vec![Command::SetRunState { run, state: s }]),
+        // **The single door `allowFailure:`/`allowWarning:` go through for a
+        // flowable** -- W8 Task 5. In the artifact the mapping is the tail of
+        // `Execution.guessFinalState`, which every `FlowableTask.resolveState`
+        // calls with its own `isAllowFailure()`/`isAllowWarning()`; here every
+        // one of those calls has already come back as a `Step::Done`, so one
+        // application covers `Sequential`, `Parallel`, `Dag`, `If`, `Switch`
+        // and `LoopUntil` alike -- including `If`/`Switch`'s no-branch answer,
+        // which Java routes through `guessFinalState(null, ...)` rather than
+        // around it.
+        //
+        // It is NOT applied to the top-level list: `advance` drives
+        // `plan.roots` with no parent run and turns its `Done` into a
+        // `SetExecutionState`, and Kestra's flow-level call is
+        // `guessFinalState(flow)` -- `(false, false)`, a flow has no task
+        // flags. That asymmetry is why this lives here and not in
+        // [`aggregate`].
+        Step::Done(s) => {
+            let t = &plan.tasks[task];
+            let state = crate::executor::allow_failure::soften(s, t.allow_failure, t.allow_warning);
+            Step::Commands(vec![Command::SetRunState { run, state }])
+        }
         other => other,
     }
 }

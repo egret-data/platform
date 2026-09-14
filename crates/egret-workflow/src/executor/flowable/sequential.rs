@@ -103,16 +103,52 @@ fn walk(
         };
 
         match state.runs[ix].history.last() {
+            // W8 Task 4. A run `Command::RestartLoop` threw away, reached by
+            // the walk in list order — which is the whole point of it being
+            // reached here rather than refilled in bulk. See
+            // `Command::RecreateRun`.
+            None => {
+                return Some(Step::Commands(vec![Command::RecreateRun { run: ix }]));
+            }
             Some(RunState::Created) => return Some(open(plan, state, ix, task, now)),
+            // **The one door out of `PAUSED`, and it reads the RUN.** W8 Task
+            // 4 fix round 2. This arm used to be two, each guarded on a
+            // `TaskKind` -- `Pause` at W8 Task 3, `LoopUntil` at Task 4 fix
+            // round 1 -- with everything else falling to the trailing arm and
+            // stalling for ever. `super::resume_paused` asks
+            // `TaskRun::resume_with`, which `Command::PauseRun` is required to
+            // carry, so there is no list of pausing kinds here to be missing
+            // from. See `executor::Resume`.
+            //
+            // It cannot be folded into the `Running` arm below: `descend` is
+            // reached at `RUNNING` and ENTERS the pause, this is reached at
+            // `PAUSED` and LEAVES it, and a single door would have to branch on
+            // the state anyway.
+            Some(RunState::Paused) => return Some(super::resume_paused(state, ix, now)),
             // A flowable the executor drives: descend, and terminate it when
             // its own children are done. A `Runnable` is `Waiting` — the worker
             // holds it and there is nothing to decide until it lands.
             Some(RunState::Running) => return Some(descend(plan, state, ix, task, now)),
             Some(s) if s.is_terminal() => {}
-            // `Submitted` (handed to a worker, not picked up) and `Retrying`
-            // (waiting for its own delay) are both "in flight, not the
-            // executor's turn". So is a run with no history at all, which
-            // cannot happen and is not worth a branch of its own.
+            // `Submitted` (handed to a worker, not picked up), `Retrying`
+            // (waiting for its own delay) and `Restarted` are "in flight, not
+            // the executor's turn". So is a run with no history at all, which
+            // is `Command::RestartLoop`'s thrown-away descendant and has an arm
+            // of its own above.
+            //
+            // **`Paused` is NOT in this arm any more, for any kind.** It left
+            // for `TaskKind::Pause` at W8 Task 3, for `TaskKind::LoopUntil` at
+            // W8 Task 4 fix round 1, and for EVERY kind at fix round 2 — the
+            // arm above is unguarded, because `TaskRun::resume_with` answers
+            // for the run rather than a list answering for the kind. **This
+            // comment said "`LoopUntil` is still planned opaque, so nothing can
+            // put one of its runs into `PAUSED` today", which its own task
+            // commit had already falsified**, and it is one of three found by
+            // asking of each corrected claim whether it has a program-checked
+            // twin.
+            //
+            // `Restarted` is untouched and still reaches nothing: 0 of the
+            // golden's 840 run histories hold it.
             _ => return Some(Step::Waiting),
         }
     }

@@ -956,16 +956,25 @@ CHECKOUT_DRIFT = {
 # to be recorded -- it was a comment on one probe row and nothing a later task
 # could enumerate.
 EXECUTION_DRIFT = {
-    "valids/pause-behavior":
-        "MEASURED on rc13: LITERAL behavior values work perfectly -- RESUME -> SUCCESS "
-        "with 2 task runs, WARN -> WARNING with 2, FAIL -> FAILED with 1, "
-        "CANCEL -> CANCELLED with 1, exactly what PauseTest.java:374-380 asserts.  "
-        "What fails is rendering a PEBBLE EXPRESSION into `Property<Behavior>`: this "
-        "flow writes `behavior: \"{{inputs.behavior}}\"`, and every input value then "
-        "produces the same FAILED/1 execution, silently, at resume time.  So the "
-        "difference is not in Pause's semantics; it is in resolving a dynamic property "
-        "at the moment the pause ends.  Task 2 must not build this flow's golden from "
-        "the checkout's semantics, and Task 7 must not read it as Pause behaviour.",
+    # EMPTY since W8 Task 3 fix round 3.  The bucket stays -- it is the only
+    # place an execution-seam divergence could be recorded, and CHECKOUT_DRIFT
+    # still holds publish-time refusals only -- but the single entry it ever
+    # carried has been withdrawn.
+    #
+    # It claimed `valids/pause-behavior` drifts: literal `behavior` values
+    # working while a Pebble expression fails at resume.  Re-measured with a
+    # fresh, never-reused flow id per execution (3 runs each), the EXPRESSION
+    # form gives FAIL -> FAILED/1, RESUME -> SUCCESS/2, WARN -> WARNING/2,
+    # CANCEL -> CANCELLED/1 -- which is exactly what `PauseTest.java:374-380`
+    # asserts.  There is no drift at this seam; the earlier reading was
+    # contaminated by flow-id reuse, where `execution.inputs` still records the
+    # posted value so "the input landed" cannot say which SOURCE ran.
+    #
+    # Outside the `Behavior` enum the artifact does something this table would
+    # be the right home for if a corpus flow reached it: `NOPE`, lower-case
+    # `fail` and an undefined `{{inputs.nosuch}}` each leave the execution
+    # RUNNING past 120s, non-terminal.  No corpus flow writes one, so the
+    # bucket stays empty rather than gaining a row nothing can exercise.
 }
 
 REFUSED_BY_BOTH = {
@@ -1443,22 +1452,24 @@ def assert_clean(entries):
 # Why a row still cannot discriminate after every documented alternative was
 # executed.  Written only where the harvest itself showed the cause.
 NON_DISCRIMINATING_NOTES = {
-    "valids/pause-behavior":
-        "MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, "
-        "CANCEL -- produce the identical execution (FAILED, 1 task run, histories "
-        "CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that "
-        "`behavior` is unimplemented on this artifact: published with LITERAL values on a "
-        "fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, "
-        "FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- "
-        "the checkout's semantics reproduced exactly.  What fails is narrower: this corpus "
-        "flow writes `behavior: \"{{ inputs.behavior }}\"`, and rendering a Pebble "
-        "expression into a `Property<Behavior>` fails at resume time and takes the task "
-        "down with it, for EVERY value including the one that would have failed anyway.  "
-        "The execution document does record `inputs: {\"behavior\": \"FAIL\"}`, so the "
-        "input landed -- the task dies rendering it.  So this row's `agrees` is a "
-        "coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at "
-        "all.  Task 2 builds this flow's golden from what the pinned image did, and "
-        "whoever implements `pause` must not read this as a missing feature.",
+    # EMPTY since W8 Task 3 fix round 3, and empty is the honest state rather
+    # than an omission.  Its one entry was `valids/pause-behavior`, asserting
+    # that all four documented `behavior` values produce the identical
+    # FAILED/1 execution and diagnosing a Pebble-render failure.  Both halves
+    # are FALSE -- re-measured on the same pinned digest with a fresh,
+    # never-reused flow id per execution, 3 runs each: FAIL -> FAILED/1,
+    # RESUME -> SUCCESS/2, WARN -> WARNING/2, CANCEL -> CANCELLED/1.
+    #
+    # The note is DELETED rather than corrected because its consumer is gone:
+    # this table is read only on the non-discriminating branch, and that row
+    # discriminates now.  A note nothing can print is the shape this table's
+    # own key-validation guard was added for.
+    #
+    # **Why it had to be edited HERE and not annotated elsewhere:**
+    # `runnable.txt` is a pure function of `corpus.json` + `probe.json` through
+    # `--rewrite-runnable`, and this table feeds the same generator.  Prose
+    # beside a falsehood does not stop a regeneration re-emitting it; only
+    # correcting the input does.
 }
 
 

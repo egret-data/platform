@@ -49,6 +49,14 @@ pub struct Trigger {
     pub when: Option<Property<String>>,
     pub disabled: bool,
     pub labels: Vec<Label>,
+    /// **Parsed, serialised, and read by nothing** — W8 Task 2 fix round 2's
+    /// type-directed sweep found it: this is the only state-typed field in the
+    /// crate with no consumer. `trigger::flow::run` filters on
+    /// [`states`](Self::states) and never on this, so a flow declaring
+    /// `stopAfter:` round-trips it faithfully and is not stopped by it. Kestra
+    /// disables the trigger once the source execution reaches one of these
+    /// states. Recorded rather than implemented: no corpus flow declares it,
+    /// so nothing here could judge an implementation.
     pub stop_after: Vec<State>,
     pub log_to_file: bool,
     pub fail_on_trigger_error: bool,

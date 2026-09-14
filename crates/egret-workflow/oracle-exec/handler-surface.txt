@@ -314,31 +314,31 @@ Two rules, and they are deliberately different:
   file, with the entry named and the reason given; a ceiling that is too
   high costs nothing at all, which is why it would not be a ceiling.
 
-    167  reproduced today, and by nothing the driver removes
+    185  reproduced today, and by nothing the driver removes
       0  reproduced today ONLY because the feed supplies a terminal
          for a task type W3b has no handler for
-     26  not reproduced today, and nothing found here blocks it
-    101  not reproduced today, and blocked -- by cause below
+     27  not reproduced today, and nothing found here blocks it
+     82  not reproduced today, and blocked -- by cause below
   -----
     294  TOTAL, the comparable entries
 
-  CEILING, feed removed  = 167 + 26 = **193**
-  CEILING, feed retained = 167 + 0 + 26 = 193
+  CEILING, feed removed  = 185 + 27 = **212**
+  CEILING, feed retained = 185 + 0 + 27 = 212
 
-  Today the ratchet matches 167. The two ceilings are the same
+  Today the ratchet matches 185. The two ceilings are the same
   quantity under the two answers Task 5 may give to `does the driver
   still feed a terminal for a task type it has no handler for?`. They are
   NOT the same set with a different name, and the composition is printed
   above so a reader cannot take one for the other.
 
-  **193 is the bound this package should be held to**, because removing
+  **212 is the bound this package should be held to**, because removing
   the feed is the stated intent of Task 5 step 4. If Task 5 keeps the
   feed for unhandled types it must say so, and then the bound is
-  193 -- reported as a decision, not as progress.
+  212 -- reported as a decision, not as progress.
 
   The 0 at risk, with the type whose terminal is fed:
 
-  The 26 nothing here blocks:
+  The 27 nothing here blocks:
     invalids/loop-switch-failed
     valids/all-flowable
     valids/dag
@@ -361,6 +361,7 @@ Two rules, and they are deliberately different:
     valids/retry-failed-flow-duration
     valids/retry-flowable-parallel
     valids/retry-subflow
+    valids/retry-success
     valids/sla-parent-flow
     valids/subflow-parent-retry
     valids/subflow-secret-output-parent
@@ -370,38 +371,36 @@ Two rules, and they are deliberately different:
   blocked several times over -- so they do not sum to the bucket:
 
        23  handler    io.kestra.plugin.core.output.OutputValues
-       18  state      PAUSED, which RunState cannot hold
        16  construct  finally:
-       12  construct  io.kestra.plugin.core.flow.Pause
-       12  state      RESTARTED, which RunState cannot hold
        10  construct  afterExecution:
-       10  state      WARNING, which RunState cannot hold
-        8  construct  allowFailure:
         7  construct  flow-level outputs:
         7  construct  io.kestra.plugin.core.execution.Labels
-        6  construct  flow concurrency:
-        6  construct  io.kestra.plugin.core.flow.WaitFor
-        5  construct  flow sla:
         5  construct  io.kestra.plugin.core.execution.SetVariables
         5  handler    io.kestra.plugin.core.log.PurgeLogs
         5  refusal    egret over-accepts it -- W1's validation, not a handler
         4  construct  io.kestra.plugin.core.execution.Exit
         4  construct  io.kestra.plugin.core.flow.AllowFailure
         4  construct  io.kestra.plugin.core.flow.WorkingDirectory
-        3  construct  io.kestra.plugin.core.flow.LoopUntil
-        3  state      CANCELLED, which RunState cannot hold
+        3  construct  flow concurrency:
+        3  construct  flow sla:
+        2  clock      checkFrequency.maxDuration; the golden's iteration count carries the artifact's delay-poller latency
         2  construct  io.kestra.plugin.core.execution.UnsetVariables
         2  handler    io.kestra.plugin.core.execution.Assert
         2  handler    io.kestra.plugin.core.storage.Write
+        1  construct  Pause behavior:
+        1  construct  Pause errors:
+        1  construct  Pause onPause:
+        1  construct  allowFailure:
         1  handler    io.kestra.plugin.core.kv.Set
+        1  render     a relational operator against a quoted operand; Pebble throws and minijinja answers
     -----
-      101  DISTINCT entries blocked (the rows above overlap)
+       82  DISTINCT entries blocked (the rows above overlap)
 
   The four causes the plan names, and where each landed:
 
        32  a missing handler
-       83  a construct no W3b task owns
-       29  a state RunState cannot hold
+       58  a construct no W3b task owns
+        0  a state RunState cannot hold
         5  an over-acceptance -- W1's validation
 
   `an unreachable ordered pair` and `an output the handler cannot
@@ -448,12 +447,12 @@ Two rules, and they are deliberately different:
         here: BANKABLE
     valids/retry-success
         W3a : WARNING, which RunState cannot hold
-        here: blocked: state/WARNING, which RunState cannot hold
+        here: BANKABLE
     valids/subflow-secret-output-child
         W3a : a SECRET output; no encryption key
         here: blocked: construct/flow-level outputs:
 
-  5 of the thirteen are bankable by this file's rules and carry a W3a
+  6 of the thirteen are bankable by this file's rules and carry a W3a
   cause this file cannot re-derive. They are the shortfall between the
   ceiling and what W3b should EXPECT:
 
@@ -462,8 +461,9 @@ Two rules, and they are deliberately different:
     valids/if                                three `order` pairs, same cause
     valids/parallel-disabled-tasks           one `order` pair, same cause
     valids/retry-failed-flow-duration        maxDuration with no elapsed time
+    valids/retry-success                     WARNING, which RunState cannot hold
 
-    working expectation = 193 - 5 = 188
+    working expectation = 212 - 6 = 206
 
   Two of them deserve a sentence each:
 

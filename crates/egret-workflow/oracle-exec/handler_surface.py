@@ -428,12 +428,61 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.Switch",
     "io.kestra.plugin.core.flow.Loop",
     "io.kestra.plugin.core.flow.Subflow",
+    # W8 Task 3, the same shape a third time: `build_plan` gives a plain
+    # bounded-or-unbounded `Pause` a `TaskKind::Pause`, `advance()` drives the
+    # whole of it, and `claim::persist` writes it no `task_runs.type_id` -- so
+    # like `Subflow` it is not a `W3B_HANDLERS` entry and no worker ever claims
+    # it.
+    #
+    # **A `Pause` that declares `behavior:`, `onPause:`, its own `tasks:` or an
+    # `errors:` is NOT this**, and this set cannot say so: it is keyed by TYPE
+    # and that distinction is per TASK (`executor::plan::pause_gap`). The four
+    # entries it concerns are all still baselined and all still blocked --
+    # `pause-behavior`, `pause_on_pause`,
+    # `pause-errors-finally-after-execution` by `finally:`/`afterExecution:`
+    # rows that already exist, and `pause-timeout-allow-failure` by its
+    # `allowFailure:` row -- so the coarser key costs nothing today. It would
+    # cost something the moment one of those four banked, and the `blocked`
+    # guard below is what would say so.
+    "io.kestra.plugin.core.flow.Pause",
+    # W8 Task 4, and the pair is ONE Kestra class: `LoopUntil.java` carries
+    # `@Plugin(aliases = "io.kestra.plugin.core.flow.WaitFor")`, so both
+    # spellings now reach `models::TaskKind::LoopUntil` and `build_plan`
+    # flattens the children of either. Both are listed because this set is
+    # keyed by the string a flow writes, and seven of the ten corpus flows of
+    # this construct write the alias.
+    #
+    # **The same per-TASK caveat the `Pause` note above states applies here**:
+    # a `LoopUntil` whose `checkFrequency:` bound is an expression is planned
+    # opaque (`executor::plan::loop_until_gap`) and this set cannot say so. No
+    # corpus flow writes one -- all nine comparable entries write literal
+    # bounds -- so the coarser key costs nothing today.
+    "io.kestra.plugin.core.flow.LoopUntil",
+    "io.kestra.plugin.core.flow.WaitFor",
 }
 
-# `executor::RunState::ALL`, which is 9 of the golden's 13 states.  A trace
+# `executor::RunState::ALL`, which is 12 of the golden's 13 states.  A trace
 # carrying anything else cannot be represented, whatever the handler does.
+# PAUSED and RESTARTED joined it at W8 Task 2 and WARNING at W8 Task 5; the one
+# that remains outside is CANCELLED.  This set is a COPY of the Rust enum and so can
+# disagree with it -- and it DID, by two variants, until W8 Task 2.  The guard
+# is `tests/executor.rs`'s `handler_surfaces_run_state_copy_matches_the_enum`,
+# which parses this literal and compares it to `RunState::ALL` in both
+# directions.  It is NOT
+# `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`, which this
+# comment used to name: that one derives the vocabulary from `RunState::ALL`
+# and never reads this file, so it stayed green through the whole staleness.
 RUN_STATE = {"CREATED", "SUBMITTED", "RUNNING", "SUCCESS", "FAILED",
-             "RETRYING", "RETRIED", "KILLED", "SKIPPED"}
+             "RETRYING", "RETRIED", "KILLED", "SKIPPED",
+             "PAUSED", "RESTARTED", "WARNING", "CANCELLED"}
+
+# `State.Type`'s seventeen, i.e. `models::State`.  Used ONLY by the self-test,
+# to pick a state that is real to Kestra and absent from RUN_STATE above --
+# see `blocker_rule_too_wide` for why that choice cannot be a literal.
+KESTRA_STATES = {"CREATED", "SUBMITTED", "RUNNING", "PAUSED", "RESTARTED",
+                 "KILLING", "SUCCESS", "WARNING", "FAILED", "KILLED",
+                 "CANCELLED", "QUEUED", "RETRYING", "RETRIED", "SKIPPED",
+                 "BREAKPOINT", "RESUBMITTED"}
 
 # Expression markers that read something only a task that RAN can produce.
 # The plan's Step 2 names these three.  They are kept apart in the report
@@ -492,8 +541,15 @@ def run_blockers(entry, flows, kinds):
     Run-driven: it asks what Kestra actually ran, not what the flow happens to
     declare.  A construct declared and never exercised does not block a trace
     that never shows it -- and that distinction is load-bearing, because
-    `valids/sla-max-duration-ok` declares an `sla:` nothing evaluates and
-    reproduces anyway.
+    `valids/sla-max-duration-ok` declares an `sla:` that never fires (PT10S over
+    a PT0.5S sleep) and reproduces anyway.
+
+    The clause used to read "an `sla:` nothing evaluates".  W8 Task 6 made that
+    false for one of `SLA.Type`'s two subtypes -- `EXECUTION_ASSERTION` is
+    evaluated now -- and false in a way that would have mattered here, because
+    the example is precisely an entry whose blocker rule must NOT fire.  The
+    reason it reproduces was never "nothing evaluates an sla", it was "this
+    sla is not violated", and that is what the sentence says now.
     """
     out = set()
     fid = entry["id"]
@@ -551,6 +607,102 @@ def declared_blockers(entry, flows, kinds):
         out.add(("construct", "CREATE_NEW_EXECUTION retry"))
     if re.search(r"allowFailure:\s*true", raw):
         out.add(("construct", "allowFailure:"))
+    pause_gaps(doc, out)
+    loop_until_gaps(doc, raw, out)
+    return out
+
+
+# The two things a `LoopUntil` can carry that W8 Task 4 implemented CORRECTLY
+# and still cannot reproduce.  Both are rows for the same reason the
+# `PAUSE_GAP_KEYS` rows are: the construct itself is ported, so `W3A_FLOWABLES`
+# stops blocking, and without these the two entries land in the CEILING -- a
+# bankable list naming an entry nothing can bank, which this file's own rules
+# call the defect that sends the next task hunting.
+#
+# 1. `checkFrequency.maxDuration`.  `reachedMaximums` compares the loop
+#    taskrun's creation plus the bound against `now`, and the golden's iteration
+#    count therefore carries the ARTIFACT'S delay-poller latency: on the
+#    captured round `valids/loop-until-restart`'s two `PT1S` pauses took 1.17 s
+#    and 1.92 s, putting its third iteration past a `PT3S` bound that
+#    `driver.rs::pass_time` -- which moves the clock to the earliest deadline
+#    and never further -- does not reach until the fourth.  The corroboration
+#    that this is the construct and not the entry: `valids/waitfor-max-duration`
+#    is one of only two corpus flows Kestra itself could not reproduce across
+#    five rounds, so it has no golden entry at all.
+# 2. A relational operator against a QUOTED operand inside an expression.
+#    Pebble's `OperatorUtils` widens both sides to `Number` and throws on a
+#    `String`; minijinja orders values across types and answers a boolean.  The
+#    corpus has exactly one --- `valids/loopuntil-failed-flowable`'s
+#    `{{ outputs.loop.iterationCount < "5" }}`, where the artifact FAILS the
+#    task and egret succeeds --- and the regex is deliberately narrow enough to
+#    match only that shape: `valids/retry-with-flowable-errors` writes
+#    `{{ kv(...) < 2 ? ko : 'It works' }}`, whose operand is a bare number, and
+#    must NOT be blocked by this.
+LOOP_UNTIL_TYPES = {
+    "io.kestra.plugin.core.flow.LoopUntil",
+    "io.kestra.plugin.core.flow.WaitFor",
+    "core.loopuntil",
+    "core.waitfor",
+}
+QUOTED_COMPARISON = re.compile(r"\{\{[^{}]*[<>]=?\s*\\?[\"'][^\"']*\\?[\"']")
+
+
+def loop_until_gaps(node, raw, out):
+    """The `LoopUntil` properties W8 Task 4 ported and cannot reproduce."""
+    if QUOTED_COMPARISON.search(raw):
+        out.add(("render", "a relational operator against a quoted operand; "
+                           "Pebble throws and minijinja answers"))
+
+    def walk(n):
+        if isinstance(n, dict):
+            if n.get("type") in LOOP_UNTIL_TYPES:
+                cf = n.get("checkFrequency")
+                if isinstance(cf, dict) and cf.get("maxDuration"):
+                    out.add(("clock", "checkFrequency.maxDuration; the golden's "
+                                      "iteration count carries the artifact's "
+                                      "delay-poller latency"))
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(node)
+    return out
+
+
+PAUSE_TYPES = {"io.kestra.plugin.core.flow.Pause", "core.pause"}
+
+# The four `Pause` properties `executor::plan::pause_gap` refuses to plan, in
+# its own order.  A `Pause` declaring any of them is planned an opaque
+# `TaskKind::Runnable`, so it is exactly as blocked as an unported construct --
+# and `W3A_FLOWABLES` above CANNOT say so, because that set is keyed by task
+# TYPE and this is a property of one task.
+#
+# Without these rows the four entries concerned land in "nothing found here
+# blocks it", i.e. in the CEILING, which is the one direction this file's own
+# rules call a defect: a ceiling that is too low hides work, and a bankable
+# list naming an entry nothing can bank is what sends the next task hunting.
+PAUSE_GAP_KEYS = ("tasks", "errors", "behavior", "onPause")
+
+
+def pause_gaps(node, out):
+    """Every `Pause` property in this document that `build_plan` will not plan.
+
+    Walks the parsed doc rather than the raw text on purpose: `behavior:` is
+    also a `concurrency:` key (`behavior: CANCEL`), and a regex over the source
+    would blame six flows that declare no `Pause` at all.
+    """
+    if isinstance(node, dict):
+        if node.get("type") in PAUSE_TYPES:
+            for k in PAUSE_GAP_KEYS:
+                if node.get(k):
+                    out.add(("construct", f"Pause {k}:"))
+        for v in node.values():
+            pause_gaps(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            pause_gaps(v, out)
     return out
 
 
@@ -712,9 +864,16 @@ def check_inputs(flows, kinds, golden, baseline):
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
     # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
-    # since W6 Task 4 banked the four `retry-new-execution-*` replays.
-    if len(baseline) != 127:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 127; the split "
+    # after W6 Task 4 banked the four `retry-new-execution-*` replays; 119 after
+    # W8 Task 3 banked eight `Pause` entries; 118 after W8 Task 4 banked
+    # `valids/waitfor-nested`; 111 after W8 Task 5 banked seven -- the three
+    # `valids/task-allow-warning-*`, the three `valids/task-allow-failure-*`
+    # and `valids/pause-timeout-allow-failure`; 109 since W8 Task 6 banked the
+    # two `sla:` entries whose `EXECUTION_ASSERTION` cancels the execution,
+    # `valids/flow-concurrency-sla-assert-cancel` and
+    # `valids/sla-execution-condition`.
+    if len(baseline) != 109:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 109; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1348,8 +1507,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 127",
-         "not 127",
+    case("baseline.txt is no longer 109",
+         "not 109",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a
@@ -1398,10 +1557,23 @@ def self_test():
         #
         # The victim is DERIVED, not named: the first matching `runs` entry with
         # a run. Naming one is how the old case rotted.
+        #
+        # **The STATE it is given is derived too, and W8 Task 5 is why.** This
+        # line appended the literal `"WARNING"` until then, and `RunState`
+        # gained `Warning` in that task -- so the mutation became a no-op, the
+        # guard stayed silent, and the self-test failed for the right reason
+        # rather than passing a case it was no longer exercising. A literal here
+        # rots on the very event the guard exists to notice. What is appended
+        # now is a state Kestra really has that `RUN_STATE` really lacks, chosen
+        # at run time; `_SENTINEL` is the fallback for the day `RUN_STATE`
+        # holds all seventeen, because a case that cannot mutate is worse than
+        # one that mutates artificially.
+        outside = sorted(KESTRA_STATES - RUN_STATE)
         m = copy.deepcopy(golden)
         victim = next(e for e in m
                       if e["verdict"] == "runs" and e["id"] not in baseline and e.get("runs"))
-        victim["runs"][0]["state"] = list(victim["runs"][0]["state"]) + ["WARNING"]
+        victim["runs"][0]["state"] = list(victim["runs"][0]["state"]) + [
+            outside[0] if outside else "_SENTINEL"]
         run(golden_=m)
     case("a blocker rule that fires on an entry egret already reproduces",
          "the blocker rules are wrong",

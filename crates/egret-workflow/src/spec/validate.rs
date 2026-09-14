@@ -111,10 +111,33 @@ pub struct ValidationReport {
 /// * **`timeout` is enforced by W4 Task 2**, in `worker::timeout`, around
 ///   `Registry::run` — which is where the artifact enforces it too.
 ///
-/// Both rows are gone. The five that remain were re-checked the same way:
-/// `concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
-/// reader outside this validator, and `triggers` is W6's. `oracle-exec/README.md`'s
-/// unclaimed table records the same status for flow `concurrency:` and `sla:`.
+/// Both rows are gone. **`sla` is the third row to be re-checked and the
+/// FIRST to be narrowed rather than kept or deleted** — W8 Task 6. It said
+/// *"`concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
+/// reader outside this validator"*, and half of that is now false: `crate::sla`
+/// reads `Flow::sla` and `worker::claim::settle` acts on it. But only half —
+/// `SLA.Type` has two subtypes and they are two different mechanisms in the
+/// artifact (see [`crate::sla`]), of which `EXECUTION_ASSERTION` is enforced
+/// and `MAX_DURATION` is not. So the row stays and its PREDICATE narrows:
+/// [`FeaturePresence::sla`] is now *declares a `MAX_DURATION`*, and a flow
+/// whose `sla:` is assertions only publishes without the warning, because for
+/// that flow the warning would be false. Warning about an enforced feature is
+/// the mirror of the divergence `plan::pause_gap` refuses — *"a publish that
+/// says yes over an executor that says no"* — and it costs a user the same
+/// way: they read the warning and work around a rule that is already working.
+///
+/// The three that remain un-narrowed were re-checked the same way:
+/// `concurrency`, `checks` and `quotas` have W1 model shapes and no reader
+/// outside this validator, and `triggers` is W6's.
+/// `oracle-exec/README.md`'s unclaimed table records the same split for
+/// `sla:`. **It no longer has a row for flow `concurrency:` and that does not
+/// change this one**: W8 Task 1
+/// deleted that row because the construct holds no baselined entry under the
+/// execution oracle, which is a statement about what the RATCHET can score and
+/// not about whether this validator must warn. A flow declaring `concurrency:`
+/// still gets no enforcement, so the warning here stays exactly as it was —
+/// the two tables answer different questions, and conflating them is how a
+/// deleted row turns into a silently dropped warning.
 ///
 /// `the_not_yet_enforced_list_is_pinned_in_both_directions` is what makes a
 /// wrong row fail from now on — the reported finding was not only that the row
@@ -133,69 +156,70 @@ const NOT_YET_ENFORCED: &[(&str, &str)] = &[
 /// `RunnableTask` that just runs and produces an output, like `Sleep` or
 /// `PurgeFlows`, which live in the same Java package but are *not* listed
 /// here) has a `TaskKind` variant in this crate.
-#[derive(Debug, Clone, Copy)]
-enum KestraFlowControl {
-    /// Ported -- ordinary structural/semantic checks apply, same as any
-    /// other `TaskKind` variant.
-    Ported,
-    /// Not ported: falls through to `TaskKind::Leaf`, which is
-    /// indistinguishable from an ordinary task -- so whatever control-flow
-    /// behaviour it declared (a manual-approval gate, for `Pause`) silently
-    /// does not happen. Must warn, naming the package that will port it.
-    Unported { package: &'static str },
-}
 
-/// Every class under `kestra/core/src/main/java/io/kestra/plugin/core/flow/`
-/// (checked at the pinned `96893b589`) whose whole purpose is to change
-/// control flow, and whether this crate has ported it to a `TaskKind`
-/// variant. Both the ported AND unported classes are listed -- not just
-/// `pause` -- so this table is the single place a reviewer checks when
-/// `TaskKind` grows a new variant (flip that entry to `Ported`) or Kestra's
-/// `flow/` package grows a new class (add a row).
+/// Every canonical name this crate treats as Kestra control flow — the
+/// SPECIFICATION half of a two-table equality guard, and **not a production
+/// lookup any more**. W8 Task 3 fix round 1.
 ///
-/// Fix round 1, finding 1 first added this table keyed to a `find(...)`
-/// lookup: `walk_task` warned only when a `Leaf` task's canonical type had a
-/// row here. That was fail-OPEN -- it reproduced the exact bug it was meant
-/// to fix, one layer up: `Pause` warned because someone had already noticed
-/// it and added a row, but a class Kestra adds tomorrow (or a typo of an
-/// existing one) fell straight through in silence, same as `Pause` did
-/// before round 1. Fix round 2 made the CHECK fail-closed instead (anything
-/// spelled like Kestra's control-flow namespace that reaches `Leaf` warns
-/// unconditionally -- see the `TaskKind::Leaf` arm in `walk_task`) and
-/// demoted this table to supplying only the package name for an entry that
-/// has one; a miss still warns, just without naming a package.
+/// # What it used to do, and why it stopped
 ///
-/// `Sequential`/`Parallel`/`If`/`Switch`/`Dag`/`Loop`/`LoopUntil`/`Subflow`/
-/// `AllowFailure`/`WorkingDirectory` are `TaskKind` variants (Task 2).
-/// `Pause` (`Pause.java`) is a manual-approval / scheduled-resume gate with
-/// no variant -- Task 2's own report flagged it ("a real `FlowableTask` ...
-/// I did *not* port ... in case a later task expects it") and this is that
-/// later task. Package per the programme spec's table (row W8: "pause/resume
-/// ... W8").
+/// Two callers read it: `is_runnable_child`, which refused a `Leaf` whose
+/// canonical name had a row, and `walk_task`, which read a row's package name
+/// into the `not_yet_enforced` message. **Both arms are unreachable now**, for
+/// one reason: `models::kind_for` dispatches every name below to a typed
+/// `TaskKind` variant, so no task carrying one of them can reach `Leaf` at all.
+/// Measured — the two name sets are identical, 11 each, difference empty in
+/// both directions — and both dead arms are deleted rather than commented,
+/// which is what this crate did with the two `isRetrying` guards W3a measured
+/// unreachable.
 ///
-/// Staleness in this table is asymmetric, and only one direction is
-/// dangerous. If `TaskKind` later grows a variant for something marked
-/// `Unported` here (say, a future `TaskKind::Pause`) and this row is never
-/// updated to `Ported`, that is HARMLESS: `kind_for` in `task.rs` would
-/// dispatch that canonical name to the new variant before `walk_task` ever
-/// reaches the `TaskKind::Leaf` arm, so this row becomes dead documentation,
-/// never a wrong warning. The dangerous direction -- a real unported class
-/// with no row, or no table at all -- is the one the fail-closed check
-/// below now covers regardless of this table's contents. Silence is what
-/// made fix round 2 necessary; this table is not allowed to be the only
-/// thing standing between a new Kestra class and silence again.
-const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
-    ("sequential", KestraFlowControl::Ported),
-    ("parallel", KestraFlowControl::Ported),
-    ("if", KestraFlowControl::Ported),
-    ("switch", KestraFlowControl::Ported),
-    ("dag", KestraFlowControl::Ported),
-    ("loop", KestraFlowControl::Ported),
-    ("loopuntil", KestraFlowControl::Ported),
-    ("subflow", KestraFlowControl::Ported),
-    ("allowfailure", KestraFlowControl::Ported),
-    ("workingdirectory", KestraFlowControl::Ported),
-    ("pause", KestraFlowControl::Unported { package: "W8" }),
+/// # So what is it FOR
+///
+/// It is the list a reviewer checks when Kestra's `flow/` package grows a
+/// class, and `the_two_control_flow_tables_name_the_same_types` is what stops
+/// it drifting from `kind_for` in silence. That equality is a **new invariant
+/// this task created** — before W8 Task 3 the two tables genuinely differed,
+/// by `pause` — so it is stated by a running program rather than left to be
+/// remembered.
+///
+/// **`waitfor` was in NEITHER, and W8 Task 4 closed it — in `kind_for`, with
+/// this table following.** `io.kestra.plugin.core.flow.WaitFor` is Kestra's
+/// alias for `LoopUntil` (`LoopUntil.java`'s `@Plugin(aliases = …)`), and
+/// while `kind_for` had no row for it a `WaitFor` reached `Leaf`, so a
+/// `WaitFor` child of a `WorkingDirectory` published clean where the identical
+/// `LoopUntil` child was refused with `working_directory_child_not_runnable`.
+/// Since `is_runnable_child` is `matches!(kind, Leaf)` and consults this table
+/// no longer, the fix was a `kind_for` arm — which the equality guard below
+/// then forced back into this table, so the one-table edit could not have
+/// passed. **That is what made Step 0 a decision rather than a patch**: the
+/// two tables are one fact with two spellings, and the authority is `kind_for`.
+///
+/// **The publish hole is closed and the class is now empty.** Of the 70
+/// distinct `type:` strings in the corpus, the names that reach `Leaf` through
+/// `canonical_flow_type` are `Sleep` and `WorkingDirectoryTest$LocalFiles`,
+/// both `RunnableTask` at the pin and correctly accepted. There is no third.
+///
+/// `#[cfg(test)]` because a production constant nothing reads is a lie about
+/// where the authority lives; the authority is `kind_for`, and this is the
+/// claim held against it.
+#[cfg(test)]
+const KESTRA_FLOW_CONTROL: &[&str] = &[
+    "sequential",
+    "parallel",
+    "if",
+    "switch",
+    "dag",
+    "loop",
+    "loopuntil",
+    "subflow",
+    "allowfailure",
+    "workingdirectory",
+    "pause",
+    // W8 Task 4. Kestra's alias on `LoopUntil`, not a class of its own, which
+    // is why reading `core/src/main/java/io/kestra/plugin/core/flow/` could
+    // never have produced it and why it was missing from both tables for five
+    // packages.
+    "waitfor",
 ];
 
 /// Whether a task may be a child of a [`TaskKind::WorkingDirectory`] --
@@ -217,15 +241,25 @@ const KESTRA_FLOW_CONTROL: &[(&str, KestraFlowControl)] = &[
 /// third-party plugin, `io.kestra.plugin.core.flow.Sleep` -- is runnable as
 /// far as this crate can tell, which is the fail-open direction. See the
 /// caller for why that is the right way round for a refusal.
+///
+/// **The member of that fail-open class this crate got WRONG was
+/// `io.kestra.plugin.core.flow.WaitFor`, and W8 Task 4 closed it.** It is a
+/// real Kestra flowable that had no row in either table, because it is
+/// `LoopUntil`'s alias rather than its own class (see that table's doc), so it
+/// reached `TaskKind::Leaf` and was accepted as a child where the `LoopUntil`
+/// spelling of the very same construct was refused by the typed-variant arm.
+/// Measured at W8 Task 1 fix round 5 and deliberately not fixed there -- the
+/// table is production and that round was doc-only. It is fixed at the
+/// authority instead: `models::kind_for` now maps both spellings to
+/// `TaskKind::LoopUntil`, so `matches!(kind, Leaf)` is false for both and the
+/// two spellings are refused identically.
+/// `a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one` is
+/// the instrument, and it drives BOTH spellings so a fix that reached only one
+/// of them fails. Latent until then: every `WorkingDirectory` child in the
+/// corpus is a `WorkingDirectoryTest$LocalFiles`, so **no golden entry can
+/// show it** and the ratchet cannot judge this line either way.
 fn is_runnable_child(task: &Task) -> bool {
-    match &task.kind {
-        TaskKind::Leaf { .. } => canonical_flow_type(&task.r#type).is_none_or(|canonical| {
-            !KESTRA_FLOW_CONTROL
-                .iter()
-                .any(|(name, _)| *name == canonical)
-        }),
-        _ => false,
-    }
+    matches!(task.kind, TaskKind::Leaf { .. })
 }
 
 /// Which of `NOT_YET_ENFORCED`'s features this flow actually declares.
@@ -240,6 +274,13 @@ fn is_runnable_child(task: &Task) -> bool {
 #[derive(Debug, Default)]
 struct FeaturePresence {
     concurrency: bool,
+    /// **Declares a `MAX_DURATION`**, not "declares an `sla:`" — W8 Task 6.
+    ///
+    /// See [`NOT_YET_ENFORCED`]'s doc: `EXECUTION_ASSERTION` is enforced from
+    /// W8 Task 6 and `MAX_DURATION` is not, so the flow-level question this
+    /// warning answers is no longer the same as "is the key present".
+    /// `an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does`
+    /// is the pair that pins it.
     sla: bool,
     checks: bool,
     quotas: bool,
@@ -255,7 +296,14 @@ pub fn validate(flow: &Flow) -> ValidationReport {
 
     let features = FeaturePresence {
         concurrency: flow.concurrency.is_some(),
-        sla: !flow.sla.is_empty(),
+        // **The narrowing, and it is the whole of it** -- W8 Task 6. `matches!`
+        // over the variant rather than a text needle: a flow can write either
+        // subtype, both, or the same subtype twice, and only the presence of a
+        // `MAX_DURATION` makes "not yet enforced" a true sentence.
+        sla: flow
+            .sla
+            .iter()
+            .any(|s| matches!(s, Sla::MaxDuration { .. })),
         checks: !flow.checks.is_empty(),
         quotas: !flow.quotas.is_empty(),
         triggers: !flow.triggers.is_empty(),
@@ -1150,6 +1198,26 @@ fn walk_task(
                 });
             }
         }
+        // W8 Task 3. `tasks:` is NOT required -- `valids/pause-delay` writes
+        // none and the artifact published it with a 200 -- so the only check
+        // here is the honesty one: a `Pause` whose `behavior:`, `onPause:`,
+        // `tasks:` or `errors:` this executor does not reproduce must SAY so,
+        // which is the same thing the blanket row in `KESTRA_FLOW_CONTROL` used
+        // to say about every `Pause`.
+        TaskKind::Pause(p) => {
+            if let Some(property) = crate::executor::pause_gap(p) {
+                report.warnings.push(Finding {
+                    code: "not_yet_enforced",
+                    message: format!(
+                        "task '{}' is a pause with '{property}', which egret parses but does \
+                         not run: the pause itself waits, and '{property}' is ignored. \
+                         Enforcement lands in W8",
+                        task.id
+                    ),
+                    path: format!("{path}.{property}"),
+                });
+            }
+        }
         TaskKind::WorkingDirectory(w) => {
             if w.tasks.is_empty() {
                 report.errors.push(Finding {
@@ -1226,33 +1294,32 @@ fn walk_task(
         // rule is "neither a control-flow variant nor a registered type",
         // not "starts with `core.`".
         TaskKind::Leaf { .. } if registry::known_type(&task.r#type).is_none() => {
-            if let Some(canonical) = canonical_flow_type(&task.r#type) {
-                let package = KESTRA_FLOW_CONTROL
-                    .iter()
-                    .find_map(|(name, status)| match status {
-                        KestraFlowControl::Unported { package } if *name == canonical => {
-                            Some(*package)
-                        }
-                        _ => None,
-                    });
-                let message = match package {
-                    Some(package) => format!(
-                        "task '{}' has type '{}', a Kestra control-flow type this crate has not \
-                         ported to a typed task kind yet; it currently runs as an inert no-op \
-                         instead of doing what it declares. Enforcement lands in {package}",
-                        task.id, task.r#type
-                    ),
-                    None => format!(
+            if canonical_flow_type(&task.r#type).is_some() {
+                // **No `KESTRA_FLOW_CONTROL` lookup, and the arm that did one
+                // is GONE.** W8 Task 3 fix round 1. It named the package that
+                // would port an `Unported` row, and since W8 Task 3 ported
+                // `pause` — the last one — every row is ported, so that arm
+                // could not be reached and the `Unported` variant could not be
+                // constructed. Deleted rather than left behind an
+                // `#[allow(dead_code)]`, which is what this crate did with the
+                // two `isRetrying` guards W3a measured unreachable: a branch
+                // nobody can drive is a branch nobody can check.
+                //
+                // The FAIL-CLOSED design it existed inside is untouched and is
+                // the half that matters: anything spelled like Kestra
+                // control flow that reaches `Leaf` and is not a registered
+                // type warns, whether or not a table has a row for it. That
+                // test is `canonical_flow_type(...).is_some()`, right here,
+                // and it never read the table.
+                report.warnings.push(Finding {
+                    code: "not_yet_enforced",
+                    message: format!(
                         "task '{}' has type '{}', which is spelled like a Kestra control-flow \
                          task (a `io.kestra.plugin.core.flow.*` FQCN or its `core.` alias) but \
                          egret does not implement it yet; it currently runs as an inert no-op \
                          instead of doing what it declares",
                         task.id, task.r#type
                     ),
-                };
-                report.warnings.push(Finding {
-                    code: "not_yet_enforced",
-                    message,
                     path: path.clone(),
                 });
             } else {
@@ -1548,6 +1615,14 @@ mod tests {
     /// spelling. `Sleep` and `PurgeFlows` are the two classes in that Java
     /// package that ARE `RunnableTask`s, so both are legitimate children -- and
     /// a spelling test would refuse a flow Kestra accepts.
+    ///
+    /// **The member this list did not contain was a `WaitFor`**, which this
+    /// rule also allowed and should not have. It was named rather than added,
+    /// because an assertion inside a test called `..._is_allowed` would defend
+    /// the wrong answer; W8 Task 4 closed it and put the assertion in a test of
+    /// its own,
+    /// `a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one`,
+    /// below.
     #[test]
     fn a_runnable_that_merely_lives_in_kestras_flow_package_is_allowed() {
         for ty in [
@@ -1567,6 +1642,77 @@ mod tests {
                     .iter()
                     .any(|e| e.code == "working_directory_child_not_runnable"),
                 "{ty} is a runnable task and must be allowed as a child"
+            );
+        }
+    }
+
+    /// **The over-acceptance W8 Task 4 Step 0 closed, driven from BOTH
+    /// spellings.**
+    ///
+    /// `io.kestra.plugin.core.flow.WaitFor` and
+    /// `io.kestra.plugin.core.flow.LoopUntil` are one Kestra class -- the first
+    /// is an `@Plugin(aliases = ...)` on the second -- so a
+    /// `WorkingDirectory` must refuse both or accept both. Before Task 4 it
+    /// accepted the alias and refused the class name, because `kind_for` had a
+    /// row for one and not the other and `is_runnable_child` is
+    /// `matches!(kind, Leaf)`.
+    ///
+    /// **Both spellings are asserted, and that is the point of the test rather
+    /// than thoroughness**: a fix applied to one table, or to one spelling,
+    /// leaves this red. The `core.` alias forms are driven too, because
+    /// `canonical_flow_type` accepts both prefixes and a row that worked only
+    /// for the FQCN would be a second half-fix.
+    #[test]
+    fn a_waitfor_child_of_a_working_directory_is_refused_like_a_loopuntil_one() {
+        for ty in [
+            "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
+            "core.waitfor",
+            "core.loopuntil",
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: wd\n    type: core.workingdirectory\n    \
+                 tasks:\n      - id: child\n        type: {ty}\n        \
+                 condition: \"{{{{ true }}}}\"\n        tasks:\n          - id: inner\n            \
+                 type: io.kestra.plugin.core.log.Log\n            message: hi\n"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let r = validate(&f);
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.code == "working_directory_child_not_runnable"),
+                "{ty} is a Kestra flowable and must be refused as a \
+                 `WorkingDirectory` child: {r:?}"
+            );
+        }
+    }
+
+    /// The subtree a `Leaf`-typed `WaitFor` used to hide.
+    ///
+    /// `walk_task` recurses through `Task::children()`, and a `Leaf` has none
+    /// -- so while `WaitFor` reached `Leaf` its nested tasks were validated by
+    /// nothing at all. The instrument is a nested task that is INVALID on its
+    /// own (a `Sequential` with no `tasks:`), asserted to be reported under
+    /// both spellings: the finding can only appear if the walk descended.
+    #[test]
+    fn a_waitfor_subtree_is_validated_because_walk_task_descends_through_children() {
+        for ty in [
+            "io.kestra.plugin.core.flow.WaitFor",
+            "io.kestra.plugin.core.flow.LoopUntil",
+        ] {
+            let f = parse(&format!(
+                "id: f\nnamespace: a.b\ntasks:\n  - id: outer\n    type: {ty}\n    \
+                 condition: \"{{{{ true }}}}\"\n    tasks:\n      - id: empty\n        \
+                 type: core.sequential\n"
+            ))
+            .unwrap_or_else(|e| panic!("{ty}: {e:?}"));
+            let r = validate(&f);
+            assert!(
+                r.errors
+                    .iter()
+                    .any(|e| e.code == "sequential_tasks_required"),
+                "{ty}: the nested `Sequential` must be reached by `walk_task`: {r:?}"
             );
         }
     }
@@ -1878,7 +2024,11 @@ mod tests {
             ],
             "a row added here is a claim that egret does NOT enforce that \
              feature; a row removed is a claim that it now does. Both need the \
-             evidence this constant's doc carries"
+             evidence this constant's doc carries. **A row can also NARROW** -- \
+             `sla` did at W8 Task 6 -- and that moves `FeaturePresence`, not \
+             this list, which is why \
+             `an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does` \
+             exists beside this test rather than inside it"
         );
 
         // NEGATIVE: the two features that ARE enforced must not warn. A flow
@@ -1923,6 +2073,69 @@ mod tests {
         );
     }
 
+    /// **The `sla` row narrowed rather than went** — W8 Task 6, and both halves
+    /// are asserted because either alone is satisfiable by a mistake.
+    ///
+    /// `SLA.Type`'s two subtypes are two different mechanisms in the artifact
+    /// and only one of them is enforced here, so *"`sla` is declared and not
+    /// enforced"* stopped being a question about the KEY and became a question
+    /// about the VARIANT. A validator that kept warning on every `sla:` would
+    /// tell the author of an `EXECUTION_ASSERTION` flow to work around a rule
+    /// that already works; one that stopped warning altogether would hide the
+    /// `MAX_DURATION` gap. The pair below is what separates them.
+    #[test]
+    fn an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does() {
+        let assertion_only = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
+             behavior: CANCEL\n    assert: \"{{ false }}\"\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&assertion_only);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "sla"),
+            "an `EXECUTION_ASSERTION` IS enforced -- `crate::sla` evaluates it \
+             and `worker::claim::settle` acts on it -- so warning here would be \
+             a false sentence in a user-visible message: {:?}",
+            r.warnings
+        );
+        assert!(r.errors.is_empty(), "{r:?}");
+
+        let has_max_duration = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
+             behavior: CANCEL\n    assert: \"{{ false }}\"\n  - id: d\n    \
+             type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1S\ntasks:\n  \
+             - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&has_max_duration);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "sla"),
+            "a `MAX_DURATION` beside an enforced assertion must still warn -- \
+             nothing in this crate evaluates one, and the flow above is the \
+             MIXED case, which is the one a per-key predicate gets wrong: {:?}",
+            r.warnings
+        );
+        assert!(r.errors.is_empty(), "{r:?}");
+
+        // And the degenerate mixed case in the other order, so the `any` above
+        // is not passing on declaration order.
+        let reversed = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: d\n    type: MAX_DURATION\n    \
+             behavior: FAIL\n    duration: PT1S\n  - id: a\n    \
+             type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{ false }}\"\n\
+             tasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        assert!(validate(&reversed)
+            .warnings
+            .iter()
+            .any(|w| w.code == "not_yet_enforced" && w.path == "sla"));
+    }
+
     #[test]
     fn a_dag_cycle_is_an_error() {
         let f = parse(
@@ -1945,30 +2158,88 @@ mod tests {
 
     // -- Fix round 1 --
 
-    /// Finding 1 (CRITICAL): `Pause` has no `TaskKind` variant, so it falls
-    /// through to `Leaf` and is indistinguishable from an ordinary task --
-    /// previously invisible to validation entirely. A user pasting a Kestra
-    /// flow whose `Pause` is a manual-approval gate must be told it does not
-    /// gate anything yet, not shown a green publish.
+    /// Finding 1 (CRITICAL), **as W8 Task 3 left it.** The original test asserted
+    /// that a `Pause` warns unconditionally, because it had no `TaskKind`
+    /// variant and nothing ran it: a user pasting a Kestra flow whose `Pause` is
+    /// a manual-approval gate had to be told it gates nothing.
+    ///
+    /// It gates now. `executor::build_plan` runs the wait — bounded by
+    /// `pauseDuration:`/`timeout:`, unbounded otherwise, which is what the
+    /// pinned artifact does with each — so a blanket warning would be the
+    /// OPPOSITE lie, telling a user that a feature which works does not.
+    ///
+    /// What survives is the half that is still true, and the test now asserts
+    /// both directions of it because only the pair can fail for the right
+    /// reason: a `Pause` carrying one of the four properties `build_plan` does
+    /// not reproduce still warns and still names W8, and a plain one does not
+    /// warn at all. `executor::pause_gap` is the single predicate both this and
+    /// `build_plan` ask, so a flow warned here is exactly a flow planned opaque
+    /// there.
     #[test]
-    fn pause_falls_through_to_leaf_and_warns_naming_its_package() {
+    fn a_pause_warns_only_for_the_properties_egret_does_not_run() {
         for spelling in ["io.kestra.plugin.core.flow.Pause", "core.pause"] {
-            let yaml =
-                format!("id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n");
-            let f = parse(&yaml).unwrap();
-            let r = validate(&f);
-            let w = r
-                .warnings
-                .iter()
-                .find(|w| w.code == "not_yet_enforced" && w.path == "tasks.gate")
-                .unwrap_or_else(|| {
-                    panic!("{spelling}: no unported-control-flow warning for 'gate': {r:?}")
-                });
-            assert!(w.message.contains("W8"), "{spelling}: {}", w.message);
-            assert!(
-                r.errors.is_empty(),
-                "{spelling}: an unported control-flow type is a warning, not an error: {r:?}"
-            );
+            // Silent: both shapes this executor reproduces.
+            for (label, props) in [("unbounded", ""), ("bounded", "    pauseDuration: PT1S\n")] {
+                let yaml = format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n{props}"
+                );
+                let r = validate(&parse(&yaml).unwrap());
+                assert!(
+                    !r.warnings
+                        .iter()
+                        .any(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate")),
+                    "{spelling}/{label}: a pause egret runs must not be reported as \
+                     unenforced: {r:?}"
+                );
+                assert!(r.errors.is_empty(), "{spelling}/{label}: {r:?}");
+            }
+
+            // Loud: the four it does not.
+            for (property, props) in [
+                ("behavior", "    behavior: FAIL\n"),
+                (
+                    "onPause",
+                    "    onPause:\n      id: hi\n      type: io.kestra.plugin.core.log.Log\n      message: hi\n",
+                ),
+                (
+                    "tasks",
+                    "    tasks:\n      - id: after\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+                (
+                    "errors",
+                    "    errors:\n      - id: oops\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n",
+                ),
+            ] {
+                // NOT a `\`-continued literal: Rust's line continuation eats
+                // the next line's leading whitespace, and the first draft of
+                // this test lost the four spaces that make `pauseDuration:` a
+                // property of `gate` rather than a second mapping key. YAML
+                // refused it and the failure named a column, not a cause.
+                let yaml = format!(
+                    "id: f\nnamespace: a.b\ntasks:\n  - id: gate\n    type: {spelling}\n    pauseDuration: PT1S\n{props}"
+                );
+                let f = parse(&yaml).unwrap_or_else(|e| panic!("{spelling}/{property}: {e:?}"));
+                let r = validate(&f);
+                let w = r
+                    .warnings
+                    .iter()
+                    .find(|w| w.code == "not_yet_enforced" && w.path.starts_with("tasks.gate"))
+                    .unwrap_or_else(|| {
+                        panic!("{spelling}/{property}: no warning for 'gate': {r:?}")
+                    });
+                assert!(
+                    w.message.contains(property),
+                    "{spelling}/{property}: the warning must name the property that is \
+                     ignored, not merely the task: {}",
+                    w.message
+                );
+                assert!(w.message.contains("W8"), "{spelling}/{property}: {}", w.message);
+                assert!(
+                    r.errors.is_empty(),
+                    "{spelling}/{property}: an unenforced property is a warning, not an \
+                     error: {r:?}"
+                );
+            }
         }
     }
 
@@ -2566,6 +2837,102 @@ mod tests {
         );
     }
 
+    /// **The two control-flow tables name the same types, in both
+    /// directions.** W8 Task 3 fix round 1.
+    ///
+    /// This invariant did not exist before W8 Task 3 — the tables genuinely
+    /// differed, by `pause` — and that task both created it and depends on it:
+    /// `is_runnable_child`'s `Leaf` arm and `walk_task`'s package-name arm were
+    /// deleted as unreachable, and *unreachable* is true only while `kind_for`
+    /// dispatches every name `KESTRA_FLOW_CONTROL` holds. A guard that states
+    /// it is what keeps the deletion safe, rather than a comment that says it
+    /// was safe once.
+    ///
+    /// **Both directions, and they fail for different edits:**
+    ///
+    /// * *table ⊆ `kind_for`* is driven by a PROBE per name — a real flow, run
+    ///   through the real parser — asserting the task does not reach `Leaf`.
+    ///   A row added here alone fails this half.
+    /// * *`kind_for` ⊆ table* is read out of `models/task.rs`'s source, because
+    ///   `kind_for` is a private `match` on string literals and nothing in Rust
+    ///   can enumerate its arms. An arm added there alone fails this half.
+    ///
+    /// The source parse is the weaker instrument and is guarded twice: it must
+    /// find the arms it expects (a regex that silently matched nothing would
+    /// make the direction vacuous), and the probe direction independently
+    /// exercises every name it claims to have found.
+    ///
+    /// **W8 Task 4 added `"waitfor"` to BOTH, and this test is why it had to
+    /// be both.** The `kind_for` arm is what fixes the publish-side
+    /// over-acceptance (a `WaitFor` child of a `WorkingDirectory`); this test
+    /// refused the half-edit, exactly as its previous revision predicted it
+    /// would. The tables now hold **12** names each.
+    #[test]
+    fn the_two_control_flow_tables_name_the_same_types() {
+        use crate::models::{canonical_flow_type, TaskKind};
+
+        // ---- direction 1: every row reaches a typed kind, by probe ---------
+        let mut not_typed = Vec::new();
+        for name in super::KESTRA_FLOW_CONTROL {
+            // The canonical name is what `kind_for` dispatches on, and
+            // `core.<name>` is the alias spelling `canonical_flow_type`
+            // reduces. Probing through the real parser rather than calling
+            // `kind_for` (which is private) is also the stronger test: it goes
+            // through the same path a published flow does.
+            let yaml = format!("id: t\ntype: core.{name}\n");
+            let task: crate::models::Task = serde_norway::from_str(&yaml)
+                .unwrap_or_else(|e| panic!("{name}: probe does not parse: {e}"));
+            assert_eq!(
+                canonical_flow_type(&task.r#type).as_deref(),
+                Some(*name),
+                "{name}: the probe does not canonicalise to the row it is probing"
+            );
+            if matches!(task.kind, TaskKind::Leaf { .. }) {
+                not_typed.push(*name);
+            }
+        }
+        assert!(
+            not_typed.is_empty(),
+            "these KESTRA_FLOW_CONTROL rows reach `TaskKind::Leaf`, so `kind_for` \
+             has no arm for them: {not_typed:?}. Either add the arm, or the two \
+             deletions W8 Task 3 made in this file (`is_runnable_child`'s `Leaf` \
+             arm and `walk_task`'s package-name arm) stop being unreachable and \
+             have to come back"
+        );
+
+        // ---- direction 2: every `kind_for` arm has a row, by source --------
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/models/task.rs"))
+                .expect("read models/task.rs");
+        let body = {
+            let from = src.find("fn kind_for(").expect("kind_for still exists");
+            let rest = &src[from..];
+            &rest[..rest.find("\n}\n").expect("kind_for has an end")]
+        };
+        let dispatched: std::collections::BTreeSet<&str> = body
+            .split("Some(\"")
+            .skip(1)
+            .filter_map(|chunk| chunk.split('"').next())
+            .collect();
+        assert_eq!(
+            dispatched.len(),
+            super::KESTRA_FLOW_CONTROL.len(),
+            "the source walk found {} dispatched name(s) and the table holds {}. \
+             A walk that found NOTHING would make the assertion below vacuous, \
+             which is why the count is checked before the sets are: {dispatched:?}",
+            dispatched.len(),
+            super::KESTRA_FLOW_CONTROL.len()
+        );
+        let listed: std::collections::BTreeSet<&str> =
+            super::KESTRA_FLOW_CONTROL.iter().copied().collect();
+        assert_eq!(
+            dispatched, listed,
+            "`models::kind_for` and `KESTRA_FLOW_CONTROL` name different types. \
+             `kind_for` is the authority and this table is the claim held \
+             against it; whichever moved, both must"
+        );
+    }
+
     /// Finding 2: nothing enforces that `registry::TASK_TYPES` and
     /// `KESTRA_FLOW_CONTROL` are disjoint. If a future edit ever registers a
     /// leaf type whose `r#type` canonicalises onto a `KESTRA_FLOW_CONTROL`
@@ -2582,9 +2949,7 @@ mod tests {
         for spec in registry::TASK_TYPES {
             if let Some(canonical) = canonical_flow_type(spec.r#type) {
                 assert!(
-                    !super::KESTRA_FLOW_CONTROL
-                        .iter()
-                        .any(|(name, _)| *name == canonical),
+                    !super::KESTRA_FLOW_CONTROL.contains(&canonical.as_str()),
                     "registry type '{}' canonicalises to '{canonical}', which collides with a \
                      KESTRA_FLOW_CONTROL row -- registering it would silence the \
                      unported-control-flow warning for that class",

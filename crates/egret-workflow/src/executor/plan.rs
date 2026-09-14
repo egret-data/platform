@@ -119,7 +119,12 @@ impl Plan {
             TaskKind::Runnable { .. } | TaskKind::Executable { .. } => Vec::new(),
             TaskKind::Sequential { tasks }
             | TaskKind::Parallel { tasks, .. }
-            | TaskKind::Loop { tasks, .. } => tasks.clone(),
+            | TaskKind::Loop { tasks, .. }
+            // W8 Task 4. A `LoopUntil`'s children ARE in the plan and are its
+            // own `tasks:` -- unlike a `Loop`'s, which are planned here and
+            // then run in a different execution, and unlike a `Pause`'s, which
+            // a planned `Pause` never has.
+            | TaskKind::LoopUntil { tasks, .. } => tasks.clone(),
             TaskKind::If { then_, else_, .. } => then_.iter().chain(else_).copied().collect(),
             TaskKind::Switch { cases, default, .. } => cases
                 .iter()
@@ -128,6 +133,11 @@ impl Plan {
                 .copied()
                 .collect(),
             TaskKind::Dag { nodes } => nodes.iter().map(|n| n.task).collect(),
+            // A planned `Pause` has none: `build_plan` only assigns this kind
+            // to a `Pause` whose `tasks:` is empty (`pause_gap`), so an empty
+            // list here is the whole truth rather than a walk this kind is
+            // missing.
+            TaskKind::Pause { .. } => Vec::new(),
         }
     }
 }
@@ -179,8 +189,14 @@ pub struct PlanTask {
     /// unreachable from this corpus by
     /// `every_corpus_retry_is_written_in_literals`.
     pub retry: Option<RetryPolicy>,
-    /// **Still always `None`, and after Task 7 there is only one reason
-    /// left.** The `Property<Duration>` half of this comment is the only place
+    /// **`None` for every kind but one since W8 Task 3**, which is the task the
+    /// last paragraph below was addressed to: a [`TaskKind::Pause`] carries the
+    /// `timeout:` its author wrote, parsed as an ISO-8601 literal, and
+    /// [`super::flowable::pause`] ends the pause `FAILED` when it elapses.
+    /// Everything below is the record of why it was `None` for EVERY kind, and
+    /// stays true of every other one.
+    ///
+    /// The `Property<Duration>` half of this comment is the only place
     /// it is true — `Task.java:59` really is `protected Property<Duration>
     /// timeout;` — but it is not the reason, because W3a never enforces this
     /// field at all. Measured: in this artifact `timeout:` is enforced by the
@@ -192,7 +208,12 @@ pub struct PlanTask {
     /// "cannot use the 'timeout' property as it's only relevant for runnable
     /// tasks", with `Pause` the single exception. So the only `timeout:`
     /// `advance()` will ever enforce is a `Pause`'s, and W4's worker owns the
-    /// rest.
+    /// rest. **W8 Task 3 is where that exception stopped being a prediction**,
+    /// and it is worth 1 of its 8 banked entries on its own
+    /// (`valids/pause-timeout`): `every_corpus_pause_timeout_is_a_literal`
+    /// derives that all three corpus declarations are literals a pure builder
+    /// can read, and `the_bound_that_was_written_decides_the_terminal` pins
+    /// what one decides.
     pub timeout: Option<Duration>,
     /// This task's own `errors:`.
     ///
@@ -212,9 +233,46 @@ pub struct PlanTask {
     /// it would conclude the `If`/`Switch`/`Dag` arms do not exist.
     ///
     /// **The types that really are left out are `Loop` and every opaque one,
-    /// and only one of those is a gap.** `AllowFailure`, `Pause` and
-    /// `WorkingDirectory` are planned [`TaskKind::Runnable`], so their children
-    /// get no run and a field on them would indeed be unreadable. **`Loop` is
+    /// and only one of those is a gap.** `AllowFailure`, `LoopUntil` (and
+    /// `WaitFor`, which is Kestra's alias for it and **not** egret's — see
+    /// [`build_plan`]) and `WorkingDirectory` are planned
+    /// [`TaskKind::Runnable`], so their children
+    /// get no run and a field on them would indeed be unreadable.
+    /// **`Pause` was the fourth name in that list until W8 Task 3**, which gave
+    /// it [`TaskKind::Pause`] — and a `Pause`'s `errors:` is still unreadable
+    /// here, for a different reason that must not be merged with the one above:
+    /// the field is not missing, the whole TASK is opaque, because
+    /// [`pause_gap`] plans any `Pause` declaring one back to a `Runnable`.
+    /// **This sentence omitted `LoopUntil`**, which is opaque for the same
+    /// reason as the other two typed ones and stalls nine baselined entries;
+    /// W8 Task 1 swept every list in this crate that claims to enumerate the
+    /// opaque types against `every_other_flowable_stays_opaque`, which is the
+    /// derivation. **Eight lists — seven prose and the derivation they are
+    /// checked against — and all seven prose lists disagreed**: three omit
+    /// `LoopUntil` and four still name `Subflow`, which stopped being
+    /// opaque at W6 Task 3. This sentence first read "six disagreed … only
+    /// `worker::timeout`'s module doc had it right", and then "none correct",
+    /// which contradicted itself — the eighth list is the derivation and it is
+    /// correct by construction. `worker::timeout` was the one list the sweep
+    /// never re-read, and it names `Subflow` too. **The sweep's
+    /// own headline was an instance of the class it was sweeping for.**
+    ///
+    /// **The mechanism is worth more than the instance, because it is ordinary:
+    /// `grep` prints LINES and a prose list WRAPS.** `Subflow` ended
+    /// `timeout.rs`'s line 95 and every needle the sweep searched for —
+    /// `WorkingDirectory`, `AllowFailure`, `Pause` — sat on line 96, so the
+    /// match printed line 96 and the list's first member was never on screen.
+    /// Nothing was truncated; the line was 79 characters. A needle set drawn
+    /// from the members you expect cannot see a member you do not.
+    ///
+    /// **And the structural half predicts WHICH list will be wrong**:
+    /// `worker::timeout` is the only list-bearing file the sweep did not edit,
+    /// so the one list it merely *classified* is the one that was wrong. The
+    /// asymmetry is why that is not a coincidence — **a transcription that
+    /// loses a member can acquit a wrong list, and only the acquittal is
+    /// consequential.** Losing a legitimate member instead convicts a correct
+    /// list, which costs a second look and nothing else. Re-read the lists you
+    /// are not changing first. **`Loop` is
     /// not opaque** — it has a [`TaskKind::Loop`] — and `models::Loop` has no
     /// `errors` field, so **four** corpus flows' lists are invisible here:
     /// `valids/all-flowable`, `valids/finally-loop`,
@@ -238,6 +296,20 @@ pub struct PlanTask {
     /// the two spellings reach the same answer everywhere this executor can
     /// look.
     pub errors: Vec<TaskIx>,
+    /// This task's `allowFailure:` and `allowWarning:` — W8 Task 5.
+    ///
+    /// **Carried for every kind, flowable and `Runnable` alike, exactly like
+    /// [`PlanTask::run_if`]**, and for the same reason: they are `Task.java`'s
+    /// fields, not any one flowable's, and the artifact reads them at four
+    /// different sites that between them cover both. See
+    /// [`crate::executor::allow_failure`] for the sites and for the two
+    /// spellings the artifact gives the same table.
+    ///
+    /// Plain `bool`s rather than `Option<bool>`: `Task.java`'s own default is
+    /// `false` and `models::Task` has already collapsed an absent key onto it,
+    /// so there is no third state to carry.
+    pub allow_failure: bool,
+    pub allow_warning: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,6 +482,91 @@ pub enum TaskKind {
         tasks: Vec<TaskIx>,
         concurrency_limit: u32,
     },
+    /// `io.kestra.plugin.core.flow.Pause` — W8 Task 3.
+    ///
+    /// **A flowable the executor drives that takes no children in the plan**,
+    /// which is a shape none of the arms above has. It is not
+    /// [`Runnable`](TaskKind::Runnable) (no worker ever sees it, and no `Pause`
+    /// run in the golden carries `SUBMITTED` — 20 of them, derived by
+    /// `no_pause_run_in_the_golden_passes_through_submitted`), it is not
+    /// [`Executable`](TaskKind::Executable) (it spawns nothing), and it does
+    /// not descend.
+    ///
+    /// # `duration` is the author's `pauseDuration:`, unrendered
+    ///
+    /// Same rule as [`If::condition`](TaskKind::If): [`advance`](super::advance)
+    /// is pure, so the caller renders it into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered) and `advance`
+    /// reads the answer. It is read at `RUNNING`, like an `If`'s condition and
+    /// unlike a `Loop`'s `values` — the pause has to be a run with an open
+    /// attempt before there is anything to measure the wait from.
+    /// `valids/pause-duration-from-input` is the corpus flow that needs it
+    /// (`pauseDuration: "{{inputs.delay}}"`).
+    ///
+    /// `None` means the author wrote no `pauseDuration:` at all, which is NOT
+    /// the same as "not rendered yet" and is why this is an `Option<String>`
+    /// rather than a `String`.
+    ///
+    /// # `timeout` is on [`PlanTask::timeout`], not here
+    ///
+    /// It is `Task.java`'s field, carried by every kind, and a `Pause` is the
+    /// one place `advance()` enforces it — Kestra's own validator says
+    /// `timeout:` is "only relevant for runnable tasks" **with `Pause` the
+    /// single exception** (`FlowService.java:574`). See
+    /// [`super::flowable::pause`] for which of the two bounds ends the pause
+    /// and with which state.
+    ///
+    /// # What a `Pause` planned this way does NOT carry
+    ///
+    /// `tasks:`, `errors:`, `behavior:` and `onPause:`. A `Pause` declaring any
+    /// of them is planned an opaque [`Runnable`](TaskKind::Runnable) instead —
+    /// see [`pause_gap`] — under the rule [`build_plan`] already applies to
+    /// `AllowFailure` and `WorkingDirectory`: an unimplemented flowable
+    /// produces a visibly wrong trace and stays honestly baselined, rather than
+    /// a plausible-looking wrong one.
+    Pause {
+        duration: Option<String>,
+    },
+    /// `io.kestra.plugin.core.flow.LoopUntil`, and its alias
+    /// `io.kestra.plugin.core.flow.WaitFor` — W8 Task 4.
+    ///
+    /// It runs `tasks` as a **sequential** list (it is an `AbstractBranch`, and
+    /// `LoopUntil.tasksTree` builds `GraphUtils.sequential`), and when every
+    /// child has terminated without failing it asks one question: go round
+    /// again, or stop. Going round again is a `PAUSED` of `interval`, after
+    /// which every run under this one is thrown away and re-created — which is
+    /// what makes the construct different from a `Sequential` and is why
+    /// mapping it to one would have produced a plausible-looking wrong trace.
+    ///
+    /// # Every field here is a LITERAL, and `build_plan` cannot read anything
+    /// else
+    ///
+    /// Kestra renders all five through a `RunContext`
+    /// (`Property<Duration>`, `Property<Integer>`, `Property<Boolean>`).
+    /// [`build_plan`] is pure, so it reads literals — and a `LoopUntil`
+    /// declaring an expression for any of them is planned opaque instead, by
+    /// [`loop_until_gap`], exactly as a `Pause` with a `behavior:` is. That is
+    /// measured unreachable from this corpus by
+    /// `every_corpus_loop_until_bound_is_a_literal`, so the fallback is a
+    /// stated limit rather than a guess.
+    ///
+    /// `condition` is the author's expression and is **unrendered**, like an
+    /// [`If`](TaskKind::If)'s: the caller renders it and writes the answer into
+    /// [`TaskRun::rendered`](crate::executor::TaskRun::rendered). It is the one
+    /// field that has to stay a `String`.
+    LoopUntil {
+        tasks: Vec<TaskIx>,
+        condition: String,
+        /// `checkFrequency.interval`, Kestra's `@Builder.Default` of `PT1M`
+        /// when the author wrote none.
+        interval: std::time::Duration,
+        /// `checkFrequency.maxIterations`. `None` is Kestra's "unlimited".
+        max_iterations: Option<i64>,
+        /// `checkFrequency.maxDuration`. `None` is Kestra's "unlimited".
+        max_duration: Option<std::time::Duration>,
+        /// `failOnMaxReached`, Kestra's `@Builder.Default` of `false`.
+        fail_on_max_reached: bool,
+    },
 }
 
 /// One node of a [`TaskKind::Dag`]: a task and the sibling nodes it waits for.
@@ -486,8 +643,14 @@ pub enum RetryDelay {
     /// choice is not free in general — `valids/retry-random` is bounded by
     /// `maxAttempts: 3` with `maxDuration: PT15S` against a worst case of
     /// 3 × 0.5 s, so it cannot be reached there.
-    /// `a_random_retry_delay_is_inside_kestras_own_bounds` pins the bounds so a
-    /// later task that wants a real RNG has the assertion already written.
+    /// **This cited `a_random_retry_delay_is_inside_kestras_own_bounds` as
+    /// pinning the bounds "so a later task that wants a real RNG has the
+    /// assertion already written". No test of that name exists** — found by W8
+    /// Task 7's final round's citation sweep. What does exist and does pin the
+    /// bounds is
+    /// [`the_exponential_delay_doubles_and_the_random_one_stays_inside_its_bounds`](super::tests),
+    /// in `executor/mod.rs`; the sentence above promised a later task an
+    /// assertion under a name it would not have found.
     Random {
         min_interval: Duration,
         max_interval: Duration,
@@ -570,6 +733,113 @@ const SWITCH_TYPE: &str = "switch";
 const LOOP_TYPE: &str = "loop";
 /// `io.kestra.plugin.core.flow.Subflow`, in the same canonical spelling. W6.
 const SUBFLOW_TYPE: &str = "subflow";
+/// `io.kestra.plugin.core.flow.Pause`, in the same canonical spelling. W8.
+const PAUSE_TYPE: &str = "pause";
+/// Two canonical names, ONE construct: `LoopUntil.java` registers
+/// `io.kestra.plugin.core.flow.WaitFor` as an alias on itself, so
+/// `models::kind_for` maps both spellings to one `models::TaskKind::LoopUntil`
+/// and the pair below is what this builder matches on. W8 Task 4 Step 0.
+const LOOP_UNTIL_TYPE: &str = "loopuntil";
+const WAIT_FOR_TYPE: &str = "waitfor";
+
+/// The first property of this `Pause` that [`build_plan`] does not reproduce,
+/// or `None` for a plain wait.
+///
+/// **One rule, two readers.** [`build_plan`] uses it to decide whether a
+/// `Pause` becomes a [`TaskKind::Pause`] or stays an opaque
+/// [`TaskKind::Runnable`], and `spec::validate` uses it to decide whether the
+/// author still gets the `not_yet_enforced` warning that a `Pause` used to get
+/// unconditionally. Two copies of this predicate would be two answers to "is
+/// this pause reproduced", and a publish that says yes over an executor that
+/// says no is exactly the over-acceptance this programme forbids.
+///
+/// Each of the four is a real construct with a measured trace this executor
+/// does not produce, and the order is declaration order in `Pause.java`:
+///
+/// * `tasks:` — the list a pause runs **after** it is resumed. No baselined
+///   corpus entry writes one, so a rule here would be a rule nothing can
+///   exercise.
+/// * `errors:` — `valids/pause-errors-finally-after-execution` writes one, and
+///   its golden run history is `CREATED RUNNING PAUSED RUNNING FAILED`: the
+///   pause re-enters `RUNNING` to drive the handler. Nothing else in this
+///   corpus has that shape.
+/// * `behavior:` — `RESUME`/`WARN`/`FAIL`/`CANCEL` at the moment the pause
+///   ends. This read *"two of the four terminals it can produce, `WARNING` and
+///   `CANCELLED`, are not in `RunState` at all, so the construct is
+///   unrepresentable here"*; **both are in it now** (W8 Task 5 and W8 Task 6),
+///   and the entry did **not** bank — see the measurement in the comment on
+///   [`pause_gap`]'s `behavior:` arm. What holds it is a fifth outcome the
+///   artifact produces for an out-of-enum value, and the fact that a DYNAMIC
+///   value cannot be classified at plan time at all, which is where this
+///   decision is taken.
+/// * `onPause:` — a single task run when the pause begins.
+///   `valids/pause_on_pause`'s golden records it as a run with `parent: null`,
+///   i.e. a SIBLING of the pause rather than a child, `overlapping` it.
+///
+/// The order decides only which name a warning prints; the decision is the
+/// same for any non-`None`.
+pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
+    if !p.tasks.is_empty() {
+        return Some("tasks");
+    }
+    if !p.errors.is_empty() {
+        return Some("errors");
+    }
+    // **Any `behavior:`, literal or expression, and rounds 2-3 MEASURED why.**
+    // Fix round 1 narrowed this to literals on the theory that an expression
+    // always fails at resume. It does not. Re-measured on the pinned artifact
+    // with a FRESH, never-reused flow id for every execution -- round 2's runs
+    // were contaminated by flow-id reuse, where `execution.inputs` still reads
+    // the posted value so "the input landed" cannot say which SOURCE ran --
+    // the corpus's own expression form `"{{inputs.behavior}}"` gives, 3 runs
+    // each:
+    //
+    //     FAIL -> FAILED/1     RESUME -> SUCCESS/2
+    //     WARN -> WARNING/2    CANCEL -> CANCELLED/1
+    //
+    // Four DIFFERENT executions, which is `PauseTest.java:374-380`'s own
+    // semantics. **For a value INSIDE the `Behavior` enum the artifact honours
+    // it, in every form it is written in** -- so "an expression fails" was a
+    // rule about a class the corpus's one instance never exercised.
+    //
+    // **The sentence stops at the enum, and round 2's did not.** Outside it the
+    // artifact does not terminate at all: `NOPE`, lower-case `fail` and an
+    // undefined `{{inputs.nosuch}}` each leave the execution `RUNNING` past
+    // 120s. Round 2's grid was form x {`FAIL`, `RESUME`} and every cell
+    // rendered to a valid constant, so it could not see that edge and the
+    // conclusion drawn from it was wider than the grid.
+    //
+    // It is a gap for the reason it always was, and the measurement above is
+    // what confirms that reason rather than replacing it: `behavior:` is
+    // four-valued and the artifact really does produce all four terminals.
+    //
+    // **This comment carried a PREDICTION and W8 Task 6 measured it false.** It
+    // said *"the entry becomes bankable when `RunState` gains `CANCELLED` as
+    // well -- W8 Task 5 supplied `WARNING`, which is half of it"*. W8 Task 6
+    // supplied the other half, the vocabulary is complete, and
+    // `valids/pause-behavior` did **not** bank: that task's ratchet moved
+    // 111 -> 109 and both ids were `sla:`'s. The prediction was a claim about
+    // the STATE VOCABULARY over an entry held by a PLAN decision -- this one.
+    // Two things still hold it, and neither is a missing variant:
+    //
+    // * a fifth outcome, the non-terminal HANG the artifact produces for a
+    //   value outside the enum (`NOPE`, lower-case `fail`, an undefined
+    //   `{{inputs.nosuch}}` -- each leaves the execution `RUNNING` past 120 s),
+    //   which is not a terminal and so not representable by any variant; and
+    // * **a dynamic value cannot even be classified here** -- it is known at
+    //   render time and this decision is taken at plan time.
+    //
+    // So the whole task stays opaque, which is the only answer that cannot
+    // over-accept. Being inside the vocabulary is necessary and not sufficient,
+    // and this is the fourth entry-population on this branch to measure that.
+    if p.behavior.is_some() {
+        return Some("behavior");
+    }
+    if p.on_pause.is_some() {
+        return Some("onPause");
+    }
+    None
+}
 
 /// Build a [`Plan`] from a flow's YAML source, or refuse it.
 ///
@@ -661,12 +931,50 @@ const SUBFLOW_TYPE: &str = "subflow";
 /// [`TaskKind::Runnable`], which produces a visibly wrong trace — the parent is
 /// there and its children are not — and so stays honestly baselined.
 ///
-/// That opacity is applied to `AllowFailure` and `WorkingDirectory` too, even
-/// though both `extend Sequential` in Java and would "work" if mapped to
-/// [`TaskKind::Sequential`]. `AllowFailure` turns a child's failure into
-/// `WARNING`, which `RunState` cannot hold; `WorkingDirectory` hands its whole
-/// subtree to one worker. Mapping either would trade a visible mismatch for a
+/// That opacity is applied to `AllowFailure` and `WorkingDirectory`, even
+/// though each would "work" if mapped to
+/// [`TaskKind::Sequential`]: the first turns a child's failure into `WARNING`,
+/// which `RunState` cannot hold, and the second hands its whole subtree to one
+/// worker. Mapping either would trade a visible mismatch for a
 /// plausible-looking wrong trace, which is the worse of the two.
+///
+/// **Two more types were in that list and are not any more, and both left it
+/// per TASK rather than per type.** A `Pause` that is a plain wait is a
+/// [`TaskKind::Pause`] (W8 Task 3) and a `LoopUntil` whose bounds this pure
+/// builder can read is a [`TaskKind::LoopUntil`] (W8 Task 4); one that declares
+/// something the executor does not reproduce is still a `Runnable` — see
+/// [`pause_gap`] and [`loop_until_gap`], each of which is the single predicate
+/// both this builder and `spec::validate`'s `not_yet_enforced` warning ask, so
+/// a flow warned at publish is exactly a flow planned opaque here.
+///
+/// **A fourth kind of opacity exists below all of this**, where a flowable
+/// Kestra has and `kind_for` does not reaches `ModelKind::Leaf` with its
+/// children inside an opaque `spec`. Three types have left it: `Subflow` at W6
+/// Task 3 for [`TaskKind::Executable`] (a different thing from opaque — the
+/// executor runs it itself), `Pause` at W8 Task 3, and **`WaitFor` at W8 Task
+/// 4**. So that tier now holds no Kestra flowable at all, only ordinary leaves.
+/// The enumeration is derived by
+/// `executor::tests::every_other_flowable_stays_opaque`; this prose agrees with
+/// that test and not the other way round.
+///
+/// **`WaitFor` was in the fourth tier and not in the three, W8 Task 1 fix
+/// round 4 measured it, and W8 Task 4 closed it.** `models::kind_for` matched
+/// `Some("loopuntil")` and had no row for `"waitfor"`; neither did
+/// `spec::validate`'s `KESTRA_FLOW_CONTROL`. So
+/// `io.kestra.plugin.core.flow.WaitFor` parsed to `ModelKind::Leaf` with its
+/// `tasks:` inside the opaque `spec`, as `Pause` did until W8 Task 3 — and
+/// seven of the ten corpus flows of the construct use that spelling.
+/// **Every sentence in this crate saying `build_plan` plans `WaitFor` opaque
+/// was TRUE while it was wrong about which tier**, because both tiers were
+/// planned [`TaskKind::Runnable`] and the plan was byte-identical either way;
+/// the derivation above could not see it for the same reason. The probe that
+/// found it is the one that DECLARES which `models::TaskKind` arm it means to
+/// reach. The model divergence was real below the plan — a `Leaf` has no
+/// `children()`, a `LoopUntil` does, and `children()` is what `spec::validate`,
+/// `publish::resolve_all` and `worker::claim` walk — and **no corpus entry
+/// could show it**, which is why the instrument that closed it is a pair of
+/// `spec::validate` tests and not the ratchet: deleting the `"waitfor"` row
+/// today leaves the ratchet green at 118.
 pub fn build_plan(source: &str) -> Result<Plan, PlanError> {
     let flow = crate::spec::parse(source).map_err(|e| PlanError {
         message: match (e.line, e.column) {
@@ -790,6 +1098,8 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
         retry: super::retry::policy_of(task.retry.as_ref()),
         timeout: None,
         errors: Vec::new(),
+        allow_failure: task.allow_failure,
+        allow_warning: task.allow_warning,
     });
 
     // Kestra dispatches on the wire `type`, and so does this -- through the
@@ -910,10 +1220,133 @@ fn flatten_one(out: &mut Vec<PlanTask>, task: &Task, depth: usize) -> Result<Tas
             };
             out[ix].errors = flatten_list(out, &dag.errors, depth + 1)?;
         }
+        // W8 Task 3. A `Pause` this executor reproduces carries its
+        // `pauseDuration:` unrendered and its `timeout:` parsed; one that
+        // declares anything else falls through to the opaque `Runnable` this
+        // function already assigned above, which is the same answer
+        // `AllowFailure` and `WorkingDirectory` get and for the same reason.
+        //
+        // **`timeout:` is read HERE and nowhere else in `advance()`'s half of
+        // the crate**, and it is a literal parse rather than a render for the
+        // reason [`PlanTask::retry`] gives about durations: `build_plan` is
+        // pure. `every_corpus_pause_timeout_is_a_literal` re-derives from all
+        // 345 flows that no corpus `timeout:` on a `Pause` is an expression, so
+        // the fallback is measured unreachable rather than assumed.
+        (ModelKind::Pause(pause), Some(PAUSE_TYPE)) => {
+            if pause_gap(pause).is_none() {
+                out[ix].timeout = task
+                    .timeout
+                    .as_ref()
+                    .and_then(|t| super::retry::parse_duration(t.source()));
+                out[ix].kind = TaskKind::Pause {
+                    duration: pause
+                        .pause_duration
+                        .as_ref()
+                        .map(|d| d.source().to_string()),
+                };
+            }
+        }
+        // W8 Task 4. The two spellings are one arm because they are one Kestra
+        // class; see `LOOP_UNTIL_TYPE`.
+        (ModelKind::LoopUntil(lu), Some(LOOP_UNTIL_TYPE) | Some(WAIT_FOR_TYPE))
+            if loop_until_gap(lu).is_none() =>
+        {
+            // `condition` is `@NotNull` in Java and there is nothing to
+            // loop until without one -- the same shape and the same
+            // refusal as an `If` with no `condition`, which
+            // `spec::validate` also reports as
+            // `loop_until_condition_required`.
+            let condition = lu
+                .condition
+                .as_ref()
+                .map(|c| c.source().to_string())
+                .ok_or_else(|| PlanError {
+                    message: format!("loopUntil '{}' has no condition to loop until", task.id),
+                })?;
+            let cf = lu.check_frequency.as_ref();
+            // No `errors:` is flattened, because W1's `models::LoopUntil`
+            // has no such field -- Kestra's `AbstractBranch` does, and the
+            // omission is W1's rather than this task's. Nothing in the
+            // corpus writes one on a `LoopUntil`, so `plan.tasks[ix].errors`
+            // stays the empty slice every caller already handles.
+            let children = flatten_list(out, &lu.tasks, depth + 1)?;
+            out[ix].kind = TaskKind::LoopUntil {
+                tasks: children,
+                condition,
+                interval: cf
+                    .and_then(|c| c.interval.as_ref())
+                    .and_then(|p| super::retry::parse_duration(p.source()))
+                    .unwrap_or(DEFAULT_CHECK_INTERVAL),
+                max_iterations: cf
+                    .and_then(|c| c.max_iterations.as_ref())
+                    .and_then(|p| p.source().trim().parse::<i64>().ok()),
+                max_duration: cf
+                    .and_then(|c| c.max_duration.as_ref())
+                    .and_then(|p| super::retry::parse_duration(p.source())),
+                fail_on_max_reached: lu
+                    .fail_on_max_reached
+                    .as_ref()
+                    .and_then(|p| p.source().trim().parse::<bool>().ok())
+                    .unwrap_or(false),
+            };
+        }
         _ => {}
     }
 
     Ok(ix)
+}
+
+/// `LoopUntil.CheckFrequency.interval`'s Java default --
+/// `@Builder.Default private Property<Duration> interval =
+/// Property.ofValue(Duration.ofMinutes(1));`.
+///
+/// It is a minute, and nothing in this corpus takes it: all nine comparable
+/// `LoopUntil`/`WaitFor` flows write an `interval:` of their own (three `PT1S`,
+/// six `PT0.2S`). Recorded as a constant with the citation rather than inlined,
+/// because a default nobody exercises is exactly the kind of figure that goes
+/// stale silently.
+const DEFAULT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The first property of a `LoopUntil` this executor cannot read, or `None` if
+/// it can read all of them -- [`pause_gap`]'s shape, for the same reason.
+///
+/// [`build_plan`] is pure, so every bound has to be a literal. Kestra renders
+/// each of them through a `RunContext`, so an author may legally write
+/// `maxIterations: "{{ inputs.n }}"` -- and a builder that quietly read that as
+/// "no limit" would turn a bounded loop into an unbounded one, which is the
+/// worst direction the ratchet cannot see (such an execution never settles, so
+/// it is `Broken` rather than a mismatch). Planning the task opaque instead
+/// produces a visibly wrong trace, which is the answer `AllowFailure`,
+/// `WorkingDirectory` and a gapped `Pause` already get.
+///
+/// `condition:` is deliberately NOT in here: it is unrendered by design and the
+/// caller renders it, exactly as an `If`'s is.
+///
+/// The order decides only which name a warning prints; the decision is the same
+/// for any non-`None`.
+pub fn loop_until_gap(l: &crate::models::LoopUntil) -> Option<&'static str> {
+    let cf = l.check_frequency.as_ref();
+    if let Some(p) = cf.and_then(|c| c.interval.as_ref()) {
+        if super::retry::parse_duration(p.source()).is_none() {
+            return Some("checkFrequency.interval");
+        }
+    }
+    if let Some(p) = cf.and_then(|c| c.max_duration.as_ref()) {
+        if super::retry::parse_duration(p.source()).is_none() {
+            return Some("checkFrequency.maxDuration");
+        }
+    }
+    if let Some(p) = cf.and_then(|c| c.max_iterations.as_ref()) {
+        if p.source().trim().parse::<i64>().is_err() {
+            return Some("checkFrequency.maxIterations");
+        }
+    }
+    if let Some(p) = l.fail_on_max_reached.as_ref() {
+        if p.source().trim().parse::<bool>().is_err() {
+            return Some("failOnMaxReached");
+        }
+    }
+    None
 }
 
 /// Kestra's `concurrent`, as far as a builder with no `RunContext` can read it.

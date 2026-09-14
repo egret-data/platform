@@ -144,6 +144,103 @@ pub struct TaskRun {
     pub history: Vec<RunState>,
     pub attempts: Vec<Attempt>,
     pub not_before: Option<Tick>,
+    /// **Who ends this run's wait** — `None` for a run that has never been
+    /// paused. W8 Task 4 fix round 2, and it is a field rather than a rule.
+    ///
+    /// See [`Resume`] for the defect it closes. Written only by
+    /// [`Command::PauseRun`](super::Command::PauseRun) and cleared only by
+    /// [`Command::RestartLoop`](super::Command::RestartLoop), which is the one
+    /// command that takes a run out of `PAUSED` without terminating it.
+    pub resume_with: Option<Resume>,
+}
+
+/// **How a `PAUSED` run leaves `PAUSED`.** W8 Task 4 fix round 2.
+///
+/// # The defect this exists to make unrepresentable
+///
+/// [`RunState::Paused`] is a unit variant and
+/// [`Command::PauseRun`](super::Command::PauseRun) recorded no owner, so
+/// "which construct ends this wait" lived in **two hand-written lists of
+/// `TaskKind`s** — one in [`sequential::walk`](super::flowable::sequential),
+/// one in [`parallel::drive_concurrent`](super::flowable::parallel) — each
+/// behind a catch-all answering *wait* for everything else.
+///
+/// **Measured, not feared**: a real `PauseRun` applied to a run of any third
+/// kind leaves it at `["CREATED","SUBMITTED","RUNNING","PAUSED"]` for ever —
+/// 20 rounds past its deadline, **0 commands emitted** — under `Sequential`,
+/// `Parallel` *and* `Dag`, while a `Pause` in the same fixture moves. Nothing
+/// failed. W8 Task 4 shipped exactly that defect once (a `LoopUntil` under a
+/// `Parallel`) and fix round 1 repaired the instance by adding a row to both
+/// lists, **which is the same shape again**.
+///
+/// Carrying the answer on the command is what changes the shape: the resume
+/// side reads the RUN and never the kind, the two lists collapse to one site,
+/// and a construct that pauses **cannot fail to say who resumes it**, because
+/// it is a field the compiler requires and not a list to remember.
+///
+/// **This changes `advance()`'s command vocabulary**, which the W8 plan's
+/// Global Constraints call a contract change and therefore a finding rather
+/// than a step. It is ruled in scope for fix round 2 on the same standard that
+/// opened `src/models/`: say exactly what it buys. It buys the deletion of a
+/// silent-stall class that three enumeration methods and two review rounds did
+/// not see, and `advance()` stays pure over `(plan, state, now)`.
+///
+/// # The deadline is carried here and stored once
+///
+/// Both bounded variants carry the instant the wait ends;
+/// [`apply`](super::apply) writes it to [`TaskRun::not_before`], which is the
+/// one field `worker::claim::reopen_due` and `oracle-exec/driver.rs::pass_time`
+/// read — both with no state term at all. Migration 0141 stores only the
+/// discriminant, so there is one clock rather than two that can disagree, and
+/// its CHECK makes the pairing structural: `Never` has no deadline and the
+/// others must have one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// **Nothing this executor holds ends this wait** — a `Pause` with neither
+    /// `pauseDuration:` nor `timeout:`.
+    ///
+    /// Measured on the pinned artifact: seven corpus flows are written that
+    /// way and every one of them "reached PAUSED and stayed there for the full
+    /// 90s", because such a pause ends only on an explicit resume and a
+    /// standalone harvest issues none. **None of the seven is in
+    /// `golden.json`**, so a `Pause` that resumed itself by some default would
+    /// leave every figure in `baseline.txt` unchanged — which is why this is a
+    /// variant with a name rather than a `None` that reads like an omission.
+    Never,
+    /// At `at`, put the run into `state` — a bounded `Pause`.
+    ///
+    /// The terminal is decided by WHICH bound was written and is resolved once,
+    /// when the pause is entered: `pauseDuration:` ends `SUCCESS` and
+    /// `timeout:` ends `FAILED` (`valids/pause-delay` and
+    /// `valids/pause-timeout`, two otherwise identical flows).
+    Terminal { at: Tick, state: RunState },
+    /// At `at`, start the next iteration — a `LoopUntil`.
+    ///
+    /// It resumes into another `RUNNING` rather than into a terminal, which is
+    /// visible in the execution's own history: of the golden's 18 `PAUSED`
+    /// executions, 12 carry a `RESTARTED` (all `Pause`) and 6 do not (all
+    /// `LoopUntil`).
+    Iterate { at: Tick },
+}
+
+impl Resume {
+    /// The instant this wait ends, or `None` for [`Resume::Never`].
+    pub fn at(&self) -> Option<Tick> {
+        match self {
+            Resume::Never => None,
+            Resume::Terminal { at, .. } | Resume::Iterate { at } => Some(*at),
+        }
+    }
+
+    /// The discriminant migration 0141 stores. The instant is NOT in it — see
+    /// this enum's doc.
+    pub fn wire(&self) -> String {
+        match self {
+            Resume::Never => "NEVER".to_string(),
+            Resume::Iterate { .. } => "ITERATE".to_string(),
+            Resume::Terminal { state, .. } => format!("TERMINAL:{}", state.wire()),
+        }
+    }
 }
 
 impl TaskRun {
@@ -191,7 +288,7 @@ pub struct Attempt {
 /// One type for both, so the vocabulary it has to cover is the union of both.
 ///
 /// **That union is 13 states**, measured over `golden.json`; this enum holds
-/// **9** of them. Every number in this paragraph is derived on every run by
+/// **11** of them. Every number in this paragraph is derived on every run by
 /// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`,
 /// which is what stops it becoming a count written beside a derivation — it was
 /// one from Task 3 until Task 7 had to move it.
@@ -204,15 +301,64 @@ pub struct Attempt {
 /// Measured over the 266 `runs` entries, by how many are wholly inside the
 /// vocabulary: **35** for the six the plan drafted, **229** once Task 3 added
 /// `Submitted`, **233** once Task 7 added `Retried`, **237** once W3c added
-/// `Skipped`. `Submitted` is the addition that made the sequential slice
+/// `Skipped`, **253** once W8 Task 2 added `Paused` and `Restarted`.
+/// `Submitted` is the addition that made the sequential slice
 /// reachable at all; `Retried` buys exactly the four `retry-new-execution-*`
 /// entries, none of which can bank, because the replacement execution a
 /// `CREATE_NEW_EXECUTION` retry starts is not representable here at all.
 ///
-/// The four still missing, with the number of `runs` entries whose trace uses
-/// each: `PAUSED` 18, `RESTARTED` 12, `WARNING` 10, `CANCELLED` 3.
+/// **W8 Task 2's 16 buy nothing either, and that is stated rather than left to
+/// a green ratchet to imply.** Being inside the vocabulary is necessary and not
+/// sufficient — `SKIPPED`'s four and `RETRIED`'s four are the two earlier
+/// measured examples — and **on the day Task 2 shipped** nothing in this crate
+/// emitted either new variant: the constructs that do were `Pause` and
+/// `LoopUntil`, both planned opaque by
+/// [`build_plan`](super::plan::build_plan) at that commit. The variants were
+/// added together because those two constructs need the **same** one, so
+/// splitting them across packages would have blocked each on the other's state.
+///
+/// **That paragraph is kept in the past tense it was always about.** Its claim
+/// is what Task 2's sixteen bought *on the day*, which is still nothing; its
+/// present-tense form — *"both still planned opaque"* — went on being read as a
+/// fact about HEAD and was false from W8 Task 3 onward. It is one of five
+/// claims of that class the Task 4 fix-round-2 sweep corrected, and the
+/// instrument that finds them is a question rather than a grep: **does this
+/// claim have a program-checked twin?** This one's twins are
+/// `a_pause_enters_paused_without_putting_it_on_the_attempt` and
+/// `a_falsy_condition_pauses_for_the_interval_and_runs_the_body_again`, one per
+/// producer.
+///
+/// **Both producers exist now** — `Pause` at W8 Task 3 (eight banked entries)
+/// and `LoopUntil` at W8 Task 4 (one) — and they leave the state by different
+/// doors, which is what `advance`'s `pause_mark` has three arms for: a resumed
+/// `Pause` owes the execution `RESTARTED` and a resumed `LoopUntil` owes it
+/// `RUNNING`. Measured: of the golden's 18 `PAUSED` execution histories, 12
+/// carry a `RESTARTED` and 6 do not, and the 6 are exactly `LoopUntil`'s.
+///
+/// **`WARNING` arrived at W8 Task 5 and `CANCELLED` at W8 Task 6, which is the
+/// LAST of the golden's thirteen**: the vocabulary this enum holds and the
+/// vocabulary the golden uses are now the same set, and
+/// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`
+/// is what says so rather than this sentence.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
+///
+/// **That absence was not inert, and W8 Task 4 fix round 3 handed the instance
+/// to Task 5.** While there was no `Warning` variant, a `WARNING` child did not
+/// reach `is_terminal()` at all — `worker::from_wire` could not decode it — so
+/// `flowable::loop_until::children_executed` answered *no* for ever and the
+/// loop paused to its bound. `valids/waitfor-child-task-warning` is that flow,
+/// and this sentence said it was **already banked**, which in this crate's
+/// vocabulary means the opposite of what it meant: a banked entry is one the
+/// ratchet finds MATCHING, and the entry is in `baseline.txt`.
+/// `loop_until.rs`'s copy of the same paragraph had it right (*"already in
+/// `baseline.txt`"*) and this one was read from it.
+///
+/// **W8 Task 5 closed both halves and the entry is still baselined.** Its
+/// `WARNING` child is byte-identical to the golden and `children_executed`
+/// lets it through, so the loop reaches its SECOND child for the first time —
+/// an `io.kestra.plugin.core.output.OutputValues` with no handler — and stalls
+/// there. Measured by unbaselining it, not inferred.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
     Created,
@@ -260,6 +406,164 @@ pub enum RunState {
     /// `valids/task-runif-executionupdating` is that case measured — two of its
     /// five runs are `SKIPPED` and the execution ends `SUCCESS`.
     Skipped,
+    /// **Non-terminal**, and the state `Pause` and `LoopUntil` both stop in —
+    /// W8 Task 2, which is what took this enum from 9 of the golden's 13 states
+    /// to 10.
+    ///
+    /// **Non-terminal is measured on the pinned artifact, not inferred from the
+    /// name.** `State.Type.isTerminated()` is `FAILED || WARNING || SUCCESS ||
+    /// KILLED || CANCELLED || RETRIED || SKIPPED || RESUBMITTED` — eight
+    /// members, and `PAUSED` is not one of them; nor is it in
+    /// `isTerminatedNoFail()` or `isTerminatedInError()`. Decompiled from
+    /// `/app/kestra` in `kestra/kestra@sha256:28f59bf1…` (class-file v69,
+    /// Corretto 25), `io/kestra/core/models/flows/State.java`,
+    /// `State.Type.isTerminated()`. The same file gives `isPaused()` as
+    /// `this == PAUSED` and `canBeRestarted()` as `isFailed() || isPaused()`.
+    ///
+    /// **The golden agrees from the other side**: over the 408 execution
+    /// histories, `PAUSED` is in 18 and **ends none of them**; over the 840 run
+    /// histories it is in 20 and ends none.
+    ///
+    /// **And it appears in 0 of the golden's 878 attempt histories** — derived
+    /// on every run by
+    /// `tests/executor.rs::the_golden_populations_are_derived_recursed_and_unrecursed`,
+    /// which pins 408/840/878 beside the un-recursed 266/570/604 because
+    /// **this number was published as 604 for one round**: that is the same
+    /// walk with recursion off, and the sentence around it said "recursively".
+    /// That is
+    /// not a detail: [`apply`]'s rule 1 pushes any non-terminal `SetRunState`
+    /// onto the open attempt, so the first producer of this variant will push a
+    /// state Kestra never records unless it emits something other than a plain
+    /// `SetRunState`. `valids/flow-concurrency-cancel-pause` is the shape —
+    /// run `["CREATED","RUNNING","PAUSED","SUCCESS"]`, attempt
+    /// `["CREATED","RUNNING","SUCCESS"]`.
+    ///
+    /// **W8 Task 3 is that producer, and it took the OTHER answer**: rather
+    /// than a rule inside [`apply`] excluding this variant from rule 1, the
+    /// pause emits a [`Command::PauseRun`](super::Command) — a command that
+    /// writes the run's history and deliberately not the attempt's. `apply`
+    /// therefore still contains no decision, which is what its own doc
+    /// promises, and the exclusion is visible at the call site rather than
+    /// buried in a `!= Paused`. The measurement above is what that command's
+    /// doc cites.
+    ///
+    /// [`apply`]: self::apply
+    Paused,
+    /// **Non-terminal, execution-only, and it is Kestra's word for "created
+    /// again"** — W8 Task 2, which is what took this enum from 10 of the
+    /// golden's 13 states to **11**.
+    ///
+    /// `State.Type.isCreated()` is `this == CREATED || this == RESTARTED`, so
+    /// in the artifact `RESTARTED` is a member of the *created* class rather
+    /// than a terminal, and `isTerminated()` does not list it. It is written by
+    /// `ExecutionService.markAs` — `return newState == CANCELLED ?
+    /// withState(CANCELLED) : withState(RESTARTED)` — which is the tail of
+    /// `ExecutionService.resume`, i.e. **what a resumed pause leaves on the
+    /// execution**; `ExecutorService.handleRestart` then maps it straight back
+    /// to `RUNNING`. Both decompiled from the pinned digest.
+    ///
+    /// **Execution-only is measured, not assumed**: `RESTARTED` appears in 12
+    /// of the golden's 408 execution histories and in **0** of its 840 run
+    /// histories and **0** of its 878 attempt histories — all three derived by
+    /// `the_golden_populations_are_derived_recursed_and_unrecursed`, not
+    /// written here. Every one of the 12 is
+    /// a `Pause` that was resumed, and the shape is always
+    /// `CREATED RUNNING PAUSED RESTARTED RUNNING …`. The six remaining `PAUSED`
+    /// executions carry no `RESTARTED` at all — those are `LoopUntil`'s, which
+    /// re-enters `RUNNING` directly.
+    ///
+    /// **[`apply`]'s rule 2 is therefore narrower than Kestra's `isCreated()`
+    /// and deliberately stays so.** That rule clears a run's renders when the
+    /// run re-enters `CREATED`; Kestra would count `RESTARTED` as a re-creation
+    /// too. Widening it would be a guard on a path 0 of 840 run histories
+    /// takes.
+    ///
+    /// [`apply`]: self::apply
+    Restarted,
+    /// **The terminal `allowFailure: true` leaves behind, and it is terminal in
+    /// the BENIGN half** — W8 Task 5, which is what took this enum from 11 of
+    /// the golden's 13 states to **12**. `CANCELLED` was the one that
+    /// remained, and W8 Task 6 added it: the enum is complete.
+    ///
+    /// **Terminal, and on which side of `isTerminatedNoFail` it falls is
+    /// measured rather than inferred from the name.** Decompiled from
+    /// `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`: `isTerminated()` is
+    /// `FAILED || WARNING || SUCCESS || KILLED || CANCELLED || RETRIED ||
+    /// SKIPPED || RESUBMITTED` and `isTerminatedNoFail()` is
+    /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`. So `WARNING`
+    /// is terminal AND not a failure, which is two separate facts and both of
+    /// them move something here: [`RunState::is_terminal`] gains it, and
+    /// `flowable::loop_until::children_executed` — whose predicate is
+    /// `isTerminatedNoFail` — must count a `WARNING` child as executed rather
+    /// than stall on it.
+    ///
+    /// **It has exactly one producer and that is what keeps it from
+    /// over-accepting.** `crate::executor::allow_failure::soften` is the only
+    /// expression in this crate that returns it, and it returns it only for
+    /// `(Failed, allow_failure = true, allow_warning = false)`. No handler can
+    /// report it — `worker::from_wire` will now decode the wire spelling, but
+    /// nothing egret runs emits one — and no aggregate invents one: a
+    /// `WARNING` in [`flowable::aggregate`](super::flowable::aggregate) can
+    /// only have come from a child run that already held it.
+    ///
+    /// **The golden's `WARNING` population is 10 run histories**, and this
+    /// variant arriving banks four of them: `valids/task-allow-failure-`
+    /// `{runnable,flowable,executable-flow}` and
+    /// `valids/pause-timeout-allow-failure`. The other six are held by
+    /// something else, entry by entry, in `oracle-exec/README.md`'s residual
+    /// table — four by the `AllowFailure` FLOWABLE, which is a different
+    /// construct from the `allowFailure:` flag and is still planned opaque, one
+    /// (`valids/waitfor-child-task-warning`) by an
+    /// `io.kestra.plugin.core.output.OutputValues` child `driver.rs` ships no
+    /// handler for, and one (`valids/retry-success`) by `warningOnRetry`.
+    Warning,
+    /// **The terminal a violated `sla:` leaves on the EXECUTION** — W8 Task 6,
+    /// which is what took this enum from 12 of the golden's 13 states to all
+    /// **13**. Nothing is left outside it.
+    ///
+    /// **Terminal, and terminal in the FAILING half — both halves measured.**
+    /// Decompiled from `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`: `isTerminated()` is `FAILED ||
+    /// WARNING || SUCCESS || KILLED || CANCELLED || RETRIED || SKIPPED ||
+    /// RESUBMITTED` — so it is terminal; `isTerminatedNoFail()` is `WARNING ||
+    /// SUCCESS || RETRIED || SKIPPED || RESUBMITTED` — so it is **not** benign;
+    /// and `isTerminatedInError()` is `FAILED || KILLED || CANCELLED` — so it is
+    /// an error. Those are three predicates and not one, and each of them has a
+    /// consumer in this crate that had to gain the row: [`is_terminal`], the
+    /// new [`is_terminated_no_fail`] (which `flowable::loop_until::
+    /// children_executed` reads), and `worker::spawn::terminated_in_error`.
+    /// **That triple is the shape W8 Task 5 fix round 2 paid for** — adding
+    /// `Warning` to `is_terminal` alone left a family of sibling predicates
+    /// wrong — so this variant's arms were written by enumerating the family
+    /// first. `flowable::aggregate`'s priority chain is the fourth consumer and
+    /// is not a terminality predicate at all:
+    /// `Execution.guessFinalState`'s single pass is `KILLED > FAILED >
+    /// CANCELLED > WARNING > PAUSED` (`Execution.java:774-789`), so this
+    /// variant sits **between** `Failed` and `Warning` there.
+    ///
+    /// **It has exactly one producer, and it is an EXECUTION state rather than
+    /// a run state.** [`crate::sla`]'s `EXECUTION_ASSERTION` with `behavior:
+    /// CANCEL` emits `SetExecutionState { Cancelled }`; nothing emits a
+    /// `SetRunState { Cancelled }` and no handler can report one. A *run* can
+    /// still hold it, by one road only — a child execution that ends
+    /// `CANCELLED` is reported to the parent's `Subflow` run
+    /// (`worker::subflow::on_child_terminal`) or to a `Loop`'s
+    /// (`worker::spawn::on_execution_terminal`) — and **no corpus entry takes
+    /// that road**: the only two flows whose `sla:` can cancel
+    /// (`valids/sla-execution-condition`,
+    /// `valids/flow-concurrency-sla-assert-cancel`) are named as a `Subflow`
+    /// target by nothing. The predicates above are therefore correct on an
+    /// input the corpus cannot supply, which is why each carries a unit row
+    /// that supplies it.
+    ///
+    /// **The golden's `CANCELLED` population is 3 execution histories and 0 run
+    /// histories**, and this variant arriving banks two of them:
+    /// `valids/sla-execution-condition` and
+    /// `valids/flow-concurrency-sla-assert-cancel`. The third,
+    /// `valids/exit-cancelled`, is an `Exit` — `oracle-exec/README.md`'s
+    /// `ExecutionUpdatableTask` row — and stays baselined.
+    Cancelled,
 }
 
 impl RunState {
@@ -289,6 +593,10 @@ impl RunState {
         RunState::Retried,
         RunState::Killed,
         RunState::Skipped,
+        RunState::Paused,
+        RunState::Restarted,
+        RunState::Warning,
+        RunState::Cancelled,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -303,6 +611,10 @@ impl RunState {
             RunState::Retried => 6,
             RunState::Killed => 7,
             RunState::Skipped => 8,
+            RunState::Paused => 9,
+            RunState::Restarted => 10,
+            RunState::Warning => 11,
+            RunState::Cancelled => 12,
         }
     }
 
@@ -318,6 +630,10 @@ impl RunState {
             RunState::Retried => "RETRIED",
             RunState::Killed => "KILLED",
             RunState::Skipped => "SKIPPED",
+            RunState::Paused => "PAUSED",
+            RunState::Restarted => "RESTARTED",
+            RunState::Warning => "WARNING",
+            RunState::Cancelled => "CANCELLED",
         }
     }
 
@@ -334,6 +650,51 @@ impl RunState {
                 | RunState::Retried
                 | RunState::Killed
                 | RunState::Skipped
+                // W8 Task 5. `State.Type.isTerminated()` lists `WARNING`
+                // second, beside `FAILED`; `isTerminatedNoFail()` lists it
+                // first, beside `SUCCESS`. Both readings matter and they are
+                // not the same predicate -- see `RunState::Warning`.
+                | RunState::Warning
+                // W8 Task 6. `isTerminated()` lists `CANCELLED` fifth;
+                // `isTerminatedNoFail()` does NOT list it, which is what
+                // `is_terminated_no_fail` below is for.
+                | RunState::Cancelled
+        )
+    }
+
+    /// True where `State.Type.isTerminatedNoFail()` is true for the same name —
+    /// **terminal AND not an error**, which is a different question from
+    /// [`is_terminal`](RunState::is_terminal) and has its own consumer.
+    ///
+    /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`, decompiled
+    /// from `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`. Of those five this enum holds
+    /// four; `RESUBMITTED` is not a `RunState` and never will be from this
+    /// corpus (it appears in 0 golden histories).
+    ///
+    /// # Why it exists, and it is a structural answer to a measured class of bug
+    ///
+    /// `flowable::loop_until::children_executed` spelled this predicate as
+    /// *the complement of `Failed | Killed` inside the terminals this enum
+    /// holds*. A complement is right only for the enum it was written against:
+    /// W8 Task 5's `Warning` happened to fall on the side that complement gave
+    /// it, and W8 Task 6's `Cancelled` does **not** — it is terminal, it is not
+    /// no-fail, and the complement would have called it executed. Writing
+    /// Kestra's predicate down once, as a positive list with the same partition
+    /// guard [`is_terminal`](RunState::is_terminal) has, is what stops the
+    /// third variant repeating it. `the_two_state_vocabularies_agree` in
+    /// `tests/executor.rs` cross-checks every variant of this against
+    /// `models::State::is_terminated_no_fail`, which is a second, independently
+    /// written copy of the same Java.
+    ///
+    /// **It implies terminality and that is asserted rather than assumed**: all
+    /// five Java members are in `isTerminated()`, so
+    /// `is_terminated_no_fail() => is_terminal()` holds for every variant, and
+    /// `no_fail_is_a_subset_of_terminal` is the row that says so.
+    pub fn is_terminated_no_fail(self) -> bool {
+        matches!(
+            self,
+            RunState::Success | RunState::Warning | RunState::Retried | RunState::Skipped
         )
     }
 }
@@ -375,20 +736,33 @@ impl RunState {
 /// terminal. That is why the rule is stated here with its counter-example
 /// rather than left as an invariant somebody later discovers is not one.
 ///
-/// **W6 measured a SECOND `Subflow` shape this rule is wrong for, and left the
-/// rule alone because nothing reachable can express it.** When a `Subflow`'s
-/// child terminates, Kestra writes the CHILD's state onto the parent run and
-/// then, if `ExecutableUtils.guessState` disagrees, writes that too -- and the
-/// attempt takes **both**. Measured on the pinned artifact,
+/// **W6 measured a SECOND `Subflow` shape this rule is wrong for and left the
+/// rule alone because nothing reachable could express it; W8 Task 5 made it
+/// reachable and fixed it with a COMMAND rather than by widening this rule.**
+/// When a `Subflow`'s child terminates, Kestra writes the CHILD's state onto
+/// the parent run and then, if `ExecutableUtils.guessState` disagrees, writes
+/// that too -- and the attempt takes **both**, because
+/// `ExecutableUtils.subflowExecutionResult` rebuilds the attempt from the
+/// parent taskrun's whole `State`. Measured on the pinned artifact,
 /// `egret.probe/probe-notransmit-parent` (`transmitFailed: false` over a child
 /// that FAILS) gives a run AND an attempt each reading
 /// `["CREATED","RUNNING","FAILED","SUCCESS"]`, and the golden holds the same
 /// shape for `valids/task-allow-failure-executable-flow` (`... FAILED,
-/// WARNING`). Neither is reachable here: [`RunState`] has no `Warning`,
-/// `models::Task` carries neither `allowFailure` nor `allowWarning`, and **no
-/// corpus `Subflow` writes `transmitFailed: false`** -- re-derived over all 25
+/// WARNING`).
+///
+/// **What made it unreachable was three things at once and all three are
+/// gone**: [`RunState`] had no `Warning`, `models::Task` carried neither
+/// `allowFailure` nor `allowWarning`, and **no corpus `Subflow` writes
+/// `transmitFailed: false`** -- the last is still true, re-derived over all 25
 /// declarers by `tests/executor.rs`'s
-/// `no_corpus_subflow_turns_transmit_failed_off`.
+/// `no_corpus_subflow_turns_transmit_failed_off`, and the other two changed at
+/// W8 Task 5, so `allowWarning:` reaches the shape by a different road.
+///
+/// **The rule below is unchanged, and that is the decision.**
+/// [`Command::CompleteRun`] carries the second state and pushes it onto the
+/// attempt whether or not the attempt has closed; widening this rule instead
+/// would be wrong for every retry, whose attempts each end `FAILED` with a
+/// `RETRYING` that must not join them.
 /// `worker::subflow::guess_state` records the same boundary from the other
 /// side.
 ///
@@ -415,6 +789,29 @@ impl RunState {
 /// `a_run_if_is_re_asked_on_every_attempt` holds it, and
 /// `no_corpus_flow_has_both_a_retry_and_a_run_if` derives why no golden entry
 /// can.
+/// Whether `ix` is a descendant of `ancestor`, at any depth — Kestra's
+/// `ExecutionService.isDescendantOf`, walking the same `parentTaskRunId` chain.
+///
+/// It terminates for any state, cyclic or not: a run's `parent` is fixed at
+/// creation to a run that already existed, so parent indices strictly decrease
+/// and the walk is bounded by `ix` itself. That is the same argument
+/// `flowable::descend` records for having no depth guard, and the `> ix` break
+/// below is what makes it true of a state a caller stored and read back rather
+/// than only of one this executor built.
+fn is_descendant_of(state: &ExecutionState, ix: usize, ancestor: RunIx) -> bool {
+    let mut cur = state.runs[ix].parent;
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        if p >= ix {
+            return false;
+        }
+        cur = state.runs[p].parent;
+    }
+    false
+}
+
 pub fn apply(state: &mut ExecutionState, cmd: &Command) {
     match cmd {
         Command::CreateRun {
@@ -430,6 +827,7 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
             history: vec![RunState::Created],
             attempts: Vec::new(),
             not_before: None,
+            resume_with: None,
         }),
         Command::StartRun { run, at } => {
             let r = &mut state.runs[*run];
@@ -455,6 +853,82 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         Command::ScheduleRetry { run, not_before } => {
             state.runs[*run].not_before = Some(*not_before);
         }
+        // `PAUSED` on the RUN's history and deliberately not on the attempt --
+        // see `Command::PauseRun` for the 0-of-878 measurement that makes this
+        // a command of its own rather than a `SetRunState`. `until` is written
+        // to `not_before` because that is the one field the environment reads
+        // to decide the clock has to move (`oracle-exec/driver.rs::pass_time`),
+        // and an unbounded pause writes none: the run is left with whatever
+        // `not_before` it already had, which for a `Pause` is always `None`
+        // because nothing else ever sets one on a run this executor drives.
+        Command::PauseRun { run, resume } => {
+            let r = &mut state.runs[*run];
+            r.history.push(RunState::Paused);
+            // **The deadline comes OUT of the `Resume`, so the two cannot
+            // disagree.** It used to be a separate `until` field beside it,
+            // which is two ways to say "this wait is unbounded" and one of them
+            // silently winning. `Resume::Never` writes none, which is what
+            // keeps the environment's clock from ever being asked to move for
+            // a pause that waits on a human -- see `Command::PauseRun`.
+            r.not_before = resume.at();
+            r.resume_with = Some(*resume);
+        }
+        // W8 Task 5 -- the run and the attempt take DIFFERENT states, or the
+        // same one after the attempt has closed. See `Command::CompleteRun`
+        // for the two artifact shapes that need it and for why widening the
+        // `SetRunState` arm below instead would be wrong for every retry.
+        Command::CompleteRun {
+            run,
+            run_state,
+            attempt,
+        } => {
+            let r = &mut state.runs[*run];
+            r.history.push(*run_state);
+            if let Some(a) = r.attempts.last_mut() {
+                a.history.push(*attempt);
+            }
+        }
+        // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
+        // halves are the two loops below. See `Command::RestartLoop`.
+        Command::RestartLoop { run } => {
+            let descendants: Vec<usize> = (0..state.runs.len())
+                .filter(|&ix| is_descendant_of(state, ix, *run))
+                .collect();
+            for ix in descendants {
+                let r = &mut state.runs[ix];
+                // **Empty, not `[CREATED]`** -- see `Command::RecreateRun` for
+                // the measurement that forced the distinction. Kestra deletes
+                // these taskruns; the walk builds them back one at a time, and
+                // an empty history is what lets each one be built back at the
+                // round it is actually reached.
+                r.history.clear();
+                r.attempts.clear();
+                r.rendered = None;
+                r.rendered_run_if = None;
+                r.not_before = None;
+                r.resume_with = None;
+            }
+            let r = &mut state.runs[*run];
+            // `RUNNING` on the run and NOT on the attempt -- the same
+            // separation `PauseRun` makes, and for the same measurement: the
+            // golden holds ONE attempt per `LoopUntil` run whatever its
+            // iteration count.
+            r.history.push(RunState::Running);
+            // The condition is re-rendered every iteration. Kestra re-renders
+            // it too -- `runContext.render(this.condition).skipCache()`, and
+            // `skipCache()` is in the artifact's source for exactly this
+            // reason -- so a cached answer would decide iteration k+1 from
+            // iteration k's outputs, which is the same over-acceptance
+            // `apply`'s rule 2 closes for a retried `runIf:`.
+            r.rendered = None;
+            r.not_before = None;
+            // **Cleared with the deadline, not left behind.** The run is not
+            // waiting on anything any more, and migration 0141's
+            // `workflow_task_runs_resume_bound_matches` pairs the discriminant
+            // with `not_before_ms` -- so a stale `ITERATE` beside a NULL
+            // deadline is not merely untidy, it is a row Postgres refuses.
+            r.resume_with = None;
+        }
         // The run's own history always takes the state. The attempt takes it
         // only while the attempt is still open, and that is a **rule** rather
         // than bookkeeping -- see the block comment below.
@@ -476,6 +950,11 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
                 _ => {}
             }
         }
+        // W8 Task 4. The counterpart of `RestartLoop`'s emptying -- see
+        // `Command::RecreateRun`. It is deliberately unconditional rather than
+        // guarded on the history being empty: `apply` takes no decisions, and
+        // the only emitter asks only for runs whose history is empty.
+        Command::RecreateRun { run } => state.runs[*run].history.push(RunState::Created),
         Command::SetExecutionState { state: s } => state.history.push(*s),
         // Nothing to record. A sub-execution is a different execution with its
         // own `ExecutionState`, and this one holds no field for it -- which is
@@ -537,6 +1016,232 @@ mod tests {
     fn a_skipped_run_is_terminal() {
         assert!(RunState::Skipped.is_terminal());
         assert_eq!(RunState::Skipped.wire(), "SKIPPED");
+    }
+
+    /// **Neither state W8 Task 2 added is terminal, and the control is the
+    /// other nine.**
+    ///
+    /// One-sided would be worthless here: `is_terminal` is an allow-list, so a
+    /// pair of `assert!(!…)` passes on an implementation that answers `false`
+    /// for everything. Both directions are asserted against Kestra's own
+    /// `State.Type.isTerminated()`, decompiled from `/app/kestra` in
+    /// `kestra/kestra@sha256:28f59bf1…`:
+    ///
+    /// ```text
+    /// return this == FAILED || this == WARNING || this == SUCCESS
+    ///     || this == KILLED || this == CANCELLED || this == RETRIED
+    ///     || this == SKIPPED || this == RESUBMITTED;
+    /// ```
+    ///
+    /// ~~Five~~ ~~SIX~~ **SEVEN** of those eight are members of this enum and
+    /// every one of them is asserted true; the six non-members of the list are
+    /// asserted false. So a `Paused` quietly added to `is_terminal` fails, and
+    /// so does a `Success` quietly removed. Only `RESUBMITTED` is left outside,
+    /// and it appears in 0 golden histories.
+    ///
+    /// # It said FIVE while the enum held six, and the totality assertion is
+    /// the fix
+    ///
+    /// W8 Task 5 added `Warning`, which `State.Type.isTerminated()` lists
+    /// **second**, and did not add it here — so **the guard named for
+    /// terminality was silent about the terminal that task introduced**.
+    /// Measured in fix round 1: deleting `| RunState::Warning` from
+    /// [`RunState::is_terminal`] kills **8 tests and not this one**.
+    ///
+    /// The row is added, and so is the thing that makes the omission
+    /// impossible rather than merely fixed: **the two lists are asserted to
+    /// PARTITION [`RunState::ALL`]**. Counting `ALL.len()` alone could not do
+    /// it — 7 + 6 = 13 is true of the wrong thirteen too. **W8 Task 6 is the
+    /// first variant to arrive with the partition already in place, and it is
+    /// what made the omission visible at compile-run time rather than at review
+    /// time**: `Cancelled` added to the enum and to neither list fails the
+    /// coverage assert before any oracle runs.
+    ///
+    /// **Which of the three asserts catches what, corrected** — fix round 2's
+    /// review measured this and the first version of the paragraph credited
+    /// the wrong line:
+    ///
+    /// | the mistake | what fails |
+    /// |---|---|
+    /// | a variant in NEITHER list | the **coverage** assert (`named == all`) |
+    /// | a variant in BOTH lists | the **pre-existing loops** — it is asserted terminal and non-terminal, and no `is_terminal` can satisfy both |
+    /// | a variant TWICE in ONE list | the **disjointness** assert (`named.len() == 7 + 6`), 12 against 13 |
+    ///
+    /// So the disjointness line never fires for the case its name suggests. It
+    /// is **not** dead: a duplicate inside one list reaches it, and that is a
+    /// real edit — the obvious way to "add" a variant is to copy a neighbouring
+    /// line, and copying without editing the name is what it catches.
+    ///
+    /// The wire spellings are here for the same reason `run_state_all_holds…`
+    /// checks them: a variant whose `wire()` collides with another's is
+    /// invisible to the golden.
+    #[test]
+    fn neither_paused_nor_restarted_is_terminal() {
+        // `State.Type.isTerminated()`'s members that this enum holds. `Warning`
+        // is the sixth, added in W8 Task 5 fix round 1; `Cancelled` is the
+        // seventh and last, added in W8 Task 6 -- see this test's doc.
+        const TERMINAL: [RunState; 7] = [
+            RunState::Success,
+            RunState::Failed,
+            RunState::Warning,
+            RunState::Killed,
+            RunState::Cancelled,
+            RunState::Retried,
+            RunState::Skipped,
+        ];
+        const NOT_TERMINAL: [RunState; 6] = [
+            RunState::Created,
+            RunState::Submitted,
+            RunState::Running,
+            RunState::Retrying,
+            RunState::Paused,
+            RunState::Restarted,
+        ];
+        for state in TERMINAL {
+            assert!(
+                state.is_terminal(),
+                "{state:?} is in State.Type.isTerminated() and must stay terminal"
+            );
+        }
+        for state in NOT_TERMINAL {
+            assert!(
+                !state.is_terminal(),
+                "{state:?} is NOT in State.Type.isTerminated() -- a run in it is \
+                 still the executor's business"
+            );
+        }
+        // **The two lists PARTITION the enum**, which is what stops the next
+        // variant being omitted from both the way `Warning` was omitted from
+        // the first. Disjointness is asserted beside coverage, and the table
+        // on this test's doc says which of the three asserts each mistake
+        // reaches -- a variant in BOTH lists is caught by the loops above,
+        // not by the line below.
+        let named: std::collections::BTreeSet<&str> = TERMINAL
+            .iter()
+            .chain(NOT_TERMINAL.iter())
+            .map(|s| s.wire())
+            .collect();
+        let all: std::collections::BTreeSet<&str> =
+            RunState::ALL.iter().map(|s| s.wire()).collect();
+        assert_eq!(
+            named.len(),
+            TERMINAL.len() + NOT_TERMINAL.len(),
+            "a variant is named TWICE IN ONE list -- which is what copying a \
+             neighbouring line and forgetting to edit the name produces. A \
+             variant in BOTH lists is caught by the two loops above instead"
+        );
+        assert_eq!(
+            named, all,
+            "every RunState variant must be on exactly one side of \
+             State.Type.isTerminated(); this fails for a variant added to the \
+             enum and to neither list -- which is how `Warning` slipped past \
+             this guard in the commit that introduced it"
+        );
+        assert_eq!(RunState::Paused.wire(), "PAUSED");
+        assert_eq!(RunState::Restarted.wire(), "RESTARTED");
+        assert_eq!(
+            RunState::ALL.len(),
+            13,
+            "the golden's vocabulary is 13 and this enum now holds ALL of it \
+             (11 until W8 Task 5 added `Warning`, 12 until W8 Task 6 added \
+             `Cancelled`), and \
+             `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
+             is what derives that rather than this line"
+        );
+    }
+
+    /// **`isTerminatedNoFail` is a SUBSET of `isTerminated`, over every
+    /// variant** -- the relation Java's two lists have and the one a
+    /// hand-written pair can lose.
+    ///
+    /// Both directions are exercised, so it is not an assertion an
+    /// answer-`false`-to-everything implementation passes: the subset arm is
+    /// checked on all thirteen, and the four variants that are terminal and
+    /// NOT no-fail are named, which is what would fail if
+    /// [`RunState::is_terminated_no_fail`] were widened to the whole terminal
+    /// set.
+    #[test]
+    fn no_fail_is_a_subset_of_terminal() {
+        for s in RunState::ALL {
+            if s.is_terminated_no_fail() {
+                assert!(
+                    s.is_terminal(),
+                    "{s:?} is in State.Type.isTerminatedNoFail() and every one \
+                     of those five is also in isTerminated()"
+                );
+            }
+        }
+        let failing: std::collections::BTreeSet<&str> = RunState::ALL
+            .iter()
+            .filter(|s| s.is_terminal() && !s.is_terminated_no_fail())
+            .map(|s| s.wire())
+            .collect();
+        assert_eq!(
+            failing,
+            std::collections::BTreeSet::from(["CANCELLED", "FAILED", "KILLED"]),
+            "`isTerminated() && !isTerminatedNoFail()` is exactly \
+             `State.Type.isTerminatedInError()` -- `FAILED || KILLED || \
+             CANCELLED` (`State.java:296`) -- and `worker::spawn::\
+             terminated_in_error` spells that list out by hand. **This message \
+             said \"this is the assertion that would notice\" and it would \
+             NOT**: the comparison below is against a LITERAL written here, so \
+             it pins one spelling to a third copy and never calls the other \
+             function at all. Dropping `Cancelled` from `terminated_in_error` \
+             survived this test 3 of 3 runs. \
+             `worker::spawn::tests::the_two_spellings_of_terminated_in_error_agree` \
+             is the one that notices, because it calls it"
+        );
+    }
+
+    /// **`Paused` enters `walk`'s waiting arm rather than its terminal arm**,
+    /// driven rather than asserted about.
+    ///
+    /// [`RunState::is_terminal`] is read by `flowable::is_terminal`, which is
+    /// read by `sequential::walk`; this is the only one of the three a caller
+    /// can drive with a hand-built state, and driving it is what makes the
+    /// difference between "the predicate says false" and "the executor waits".
+    ///
+    /// The control is the row above it: the SAME fixture with the run in
+    /// `Success` retires that child and moves on, so a `walk` that answered
+    /// `Waiting` for everything fails here.
+    #[test]
+    fn a_paused_run_makes_its_sequence_wait() {
+        use crate::executor::flowable::{sequential, Step};
+
+        let plan = crate::executor::build_plan(
+            "id: f\nnamespace: n\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: x\n  - id: b\n    type: io.kestra.plugin.core.log.Log\n    message: y\n",
+        )
+        .expect("the fixture flow must plan");
+        let roots = plan.roots.clone();
+
+        let mut state = ExecutionState::new(&plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: roots[0],
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 0,
+                at: Tick(0),
+            },
+        );
+
+        for (set, expect_waiting) in [(RunState::Paused, true), (RunState::Success, false)] {
+            let mut s = state.clone();
+            apply(&mut s, &Command::SetRunState { run: 0, state: set });
+            let step = sequential::drive(&plan, &s, &roots, &[], None, Tick(1));
+            assert_eq!(
+                matches!(step, Step::Waiting),
+                expect_waiting,
+                "with run 0 in {set:?} the sequence should {}; got {step:?}",
+                if expect_waiting { "wait" } else { "move on" }
+            );
+        }
     }
 
     /// **A skip writes the state AND the attempt Kestra records with it.**

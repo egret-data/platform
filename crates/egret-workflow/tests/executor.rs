@@ -779,8 +779,12 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
     let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
     assert_eq!(
         (golden.len(), matching.len(), baselined.len()),
-        (294, 167, 127),
-        "294 = 167 matching + 127 baselined, the total beside its parts"
+        (294, 185, 109),
+        "294 = matching + baselined, the total beside its parts. It read \
+         167/127 through W8 Task 2; W8 Task 3 banked eight `Pause` entries, W8 \
+         Task 4 banked `valids/waitfor-nested`, W8 Task 5 banked seven \
+         `allowFailure:`/`allowWarning:` entries and W8 Task 6 banked the two \
+         `sla:` `EXECUTION_ASSERTION`s"
     );
 
     // ---- the sixteen, by name and by derivation ----------------------------
@@ -851,9 +855,27 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
          counts. A scanner that read nothing would report every census below as \
          zero and look exactly like the truth"
     );
+    // **Twelve until W8 Task 5, fourteen now** -- and the set is asserted
+    // rather than the count precisely so that a fifteenth cannot arrive
+    // silently. Both new members are `Subflow`s whose `allow*` flags move the
+    // terminal their failing child transmits -- to `SUCCESS` for
+    // `…-warning-…`, to `WARNING` for `…-failure-…` -- so they joined the
+    // matching side without anything about `Subflow` itself changing. The
+    // coverage statement's 16 is W6 Task 3's and stays 16: neither is one of
+    // its twelve.
+    let fourteen: BTreeSet<String> = twelve
+        .union(
+            &[
+                "valids/task-allow-warning-executable-flow".to_string(),
+                "valids/task-allow-failure-executable-flow".to_string(),
+            ]
+            .into(),
+        )
+        .cloned()
+        .collect();
     assert_eq!(
-        sub_runs_matching, twelve,
-        "the twelve `Subflow` banks, DERIVED: every golden entry that declares a \
+        sub_runs_matching, fourteen,
+        "the `Subflow` banks, DERIVED: every golden entry that declares a \
          `Subflow`, that Kestra ran, and that egret now reproduces. If this set \
          grows, the coverage statement's 16 is stale and must be re-derived -- \
          which is the point of asserting the set rather than the count"
@@ -867,7 +889,7 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
         "THE TRAP, asserted rather than avoided: one `Subflow`-declaring entry \
          matches and is NOT a W6 bank. Kestra refused it, egret refuses it too, \
          and it has matched since long before this package -- so `matching AND \
-         declares a Subflow` is 13, and the twelve is the `runs` half"
+         declares a Subflow` is 15, and the fourteen above is the `runs` half"
     );
     assert_eq!(
         (
@@ -876,11 +898,13 @@ fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
             sub_refused_matching.len(),
             sub_baselined.len()
         ),
-        (23, 12, 1, 10),
-        "23 `Subflow`-declaring golden entries = 12 banked + 1 refusal that \
-         always matched + 10 still baselined. The design spec's 22 was the \
-         BASELINED count before this package (22 = 12 + 10), which is a \
-         different population from this one"
+        (23, 14, 1, 8),
+        "23 `Subflow`-declaring golden entries = 14 reproduced + 1 refusal that \
+         always matched + 8 still baselined. It read `12 + 1 + 10` until W8 \
+         Task 5 moved both `valids/task-allow-{{failure,warning}}-executable-flow` \
+         across on their `allow*` flags. The design spec's 22 was the BASELINED count before \
+         this package (22 = 12 + 10), which is a different population from this \
+         one"
     );
     assert_eq!(
         cne_matching, four,
@@ -2234,7 +2258,13 @@ const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
 // `Subflow` run now finish, so the runs after it exist and have endpoints.
 // The nested figure does not move -- a `Subflow` child is linked by
 // `trigger_execution_id` and is deliberately invisible to `spawned`.
-const EGRET_TOP_LEVEL_PAIRS: usize = 580;
+/// **580 through W8 Task 2, 587 after W8 Task 3, 613 now.** Task 3's eight
+/// entries carried 7 top-level ordered pairs between them; W8 Task 4's +26 is
+/// not a bank at all but a CONSTRUCT: `LoopUntil`'s nine entries used to stall
+/// at their loop run, and a run that never terminates has no right endpoint and
+/// so contributes no pair. Their bodies run now, banked or not. Neither task
+/// moves the nested figure -- no `LoopUntil` entry carries a `spawned`.
+const EGRET_TOP_LEVEL_PAIRS: usize = 621;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -2319,7 +2349,7 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (258, 102, 360),
+        (297, 102, 399),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
          that match, so any change to one makes its entry a REGRESSION. W6 Task \
          3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
@@ -2327,12 +2357,14 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (619, 125, 744),
+        (580, 125, 705),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 744 leaves \
-         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
-         and at 127 since Task 4's four banks; the claim is `unmoved`, and the \
-         number beside it is a moment"
+         entries, which mismatch whatever the pair says. Flipping all 705 leaves \
+         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, at \
+         127 since Task 4's four banks, and at 109 since W8 banked eighteen; the \
+         claim is `unmoved`, and the number beside it is a moment. **This message \
+         said 744 while the tuple three lines above it said 705** -- the exact \
+         shape this test's own doc warns about, found by W8 Task 7's sweep"
     );
     assert_eq!(
         (
@@ -2548,13 +2580,24 @@ fn is_stalled(execution: &[String]) -> bool {
 /// same list the classifier reads — a control that hard-coded its own copy
 /// could pass while the classifier used a different one.
 ///
-/// `SKIPPED`, `CANCELLED` and `RESUBMITTED` are in Kestra's list and not here.
+/// `SKIPPED` and `RESUBMITTED` are in Kestra's list and not here;
+/// **`CANCELLED` joined it at W8 Task 6**.
 /// [`the_terminal_list_covers_every_execution_terminal_the_golden_holds`]
-/// derives why, and it corrected the first answer this doc gave: `SKIPPED` and
-/// `RESUBMITTED` end no golden EXECUTION history, and **`CANCELLED` ends
-/// three** — but this classifier reads EGRET's traces and `RunState` has no
-/// `Cancelled`, so all three would be arms nothing could take.
-const TERMINAL: &[&str] = &["SUCCESS", "FAILED", "KILLED", "WARNING", "RETRIED"];
+/// derives why, and it has now corrected this doc twice. The first answer said
+/// all three ended no golden EXECUTION history; `CANCELLED` ends **three**, and
+/// the second answer was that this classifier reads EGRET's traces, where
+/// `RunState` had no `Cancelled`, so the arm was one nothing could take. W8
+/// Task 6 added the variant and with it a producer, so the arm is reachable and
+/// the omission would have called three entries stalled — the guard in that
+/// test is what said so, in the commit that added the variant.
+const TERMINAL: &[&str] = &[
+    "SUCCESS",
+    "FAILED",
+    "KILLED",
+    "WARNING",
+    "RETRIED",
+    "CANCELLED",
+];
 
 /// **The positive control for `matched_while_stalled`.**
 ///
@@ -2614,12 +2657,14 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
 /// which is exactly the kind of remembered fact this programme keeps getting
 /// wrong and the reason the population is derived here instead.
 ///
-/// **It is still not in [`TERMINAL`], and now for a measured reason rather than
-/// a mistaken one.** [`is_stalled`] classifies EGRET's traces, never the
-/// golden's, and `RunState` has no `Cancelled` — so no execution this driver
-/// produces can end there, and an arm for it would be one nothing could take.
-/// That is asserted below rather than asserted about: if `RunState` ever gains
-/// the variant, this test fails and `TERMINAL` has to grow with it.
+/// **It IS in [`TERMINAL`] since W8 Task 6, and the guard that put it there is
+/// the point of this paragraph.** [`is_stalled`] classifies EGRET's traces,
+/// never the golden's, so while `RunState` had no `Cancelled` an arm for it was
+/// one nothing could take — and that was asserted here rather than argued, as
+/// *"if `RunState` ever gains the variant, this test fails and `TERMINAL` has
+/// to grow with it"*. It gained the variant, this test failed, and `TERMINAL`
+/// grew. The assertion below is now the other direction: every state that ends
+/// a golden execution is one egret can produce and one this classifier knows.
 #[test]
 fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
     fn walk(node: &Trace, out: &mut BTreeSet<String>) {
@@ -2649,15 +2694,17 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
          which is what makes `is_stalled`'s omission of it a defect rather \
          than an unused arm"
     );
-    // `CANCELLED` is the one this classifier does not carry, and the reason is
-    // a property of the OTHER side of the comparison.
-    assert!(
-        !RunState::ALL.iter().any(|s| s.wire() == "CANCELLED"),
-        "`RunState` gained a CANCELLED: egret can now end an execution there, \
-         so `TERMINAL` has to carry it or `is_stalled` will call three W8 \
-         entries stalled. Until then the arm is unreachable and is left out"
-    );
-    for state in seen.iter().filter(|s| s.as_str() != "CANCELLED") {
+    // **Every state the golden ends an execution in is now one `RunState` can
+    // hold**, which was false for `CANCELLED` until W8 Task 6 and is the reason
+    // the filter this loop used to carry is gone.
+    for state in seen.iter() {
+        assert!(
+            RunState::ALL.iter().any(|s| s.wire() == state.as_str()),
+            "{state} ends a golden execution and `RunState` cannot hold it; \
+             `is_stalled` reads EGRET's traces, so an arm for it would be one \
+             nothing could take and it must NOT be added to TERMINAL until a \
+             producer exists"
+        );
         assert!(
             TERMINAL.contains(&state.as_str()),
             "{state} ends a golden execution, egret can produce it, and \
@@ -2696,11 +2743,42 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // bigger per entry than Task 3's: three executions of one flow, each with one
 // run, and the run histories are five states long
 // (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 433;
+/// **433 through W8 Task 2, 419 after W8 Task 3, 412 after W8 Task 4, 396 since
+/// W8 Task 5** -- Task 3's 14 run terminals, the 7 `valids/waitfor-nested`
+/// carries, and W8 Task 5's **16** over its seven banked entries, which leave
+/// the un-falsifiable half for the reported half. 840 is unchanged, because
+/// banking moves a run across the line rather than creating one.
+///
+/// **W8 Task 6 banked two entries and did NOT move this number**, which is the
+/// only figure in this group it left alone: both of its entries have `"runs":
+/// []`, so they carried no run terminal to move. A task whose banks are
+/// invisible here is worth a sentence, because the next reader will otherwise
+/// read the unmoved figure as a stale one.
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 396;
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 165;
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1703;
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 665;
+/// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149 after
+/// W8 Task 5, 147 now** -- the eight `Pause` entries W8 Task 3 banked, the one
+/// `LoopUntil` entry W8 Task 4 banked, W8 Task 5's seven and W8 Task 6's two.
+/// None of the eighteen carries a sub-execution --
+/// `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` has not moved since W6 Task 4 -- so
+/// each fall is exactly the entry count.
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 147;
+/// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
+/// now** -- 56 run-history tokens on Task 3's eight, 37 on
+/// `valids/waitfor-nested` (whose seven runs include three loops reading
+/// `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING SUCCESS`), and **82** on W8
+/// Task 5's seven, which is high per entry because three of them retry: a
+/// `task-allow-*-runnable` run history is thirteen tokens long.
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1528;
+/// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526 after
+/// W8 Task 5, 522 now** -- 48 execution-history tokens on Task 3's eight, i.e.
+/// six apiece (every one of them reads `CREATED RUNNING PAUSED RESTARTED
+/// RUNNING <terminal>`), 55 on `valids/waitfor-nested` alone (whose execution
+/// alternates `PAUSED`/`RUNNING` 26 times), **36** on W8 Task 5's seven, and
+/// **4** on W8 Task 6's two -- two apiece, because `["CREATED","CANCELLED"]` is
+/// the shortest execution history in the golden: the violation fires before the
+/// execution ever reaches `RUNNING`.
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 522;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -2812,10 +2890,13 @@ const RESTRICTION_REMOVES: usize = 85;
 /// statement's *"80 pairs across 6 entries"*, which was printed and not
 /// asserted until W4 Task 6. It is 85 across 9 since W6 Task 3.
 const RESTRICTION_REMOVES_ENTRIES: usize = 9;
-/// 771 through W5; **791 since W6 Task 3**, because 12 `Subflow` entries that
+/// 771 through W5; 791 at W6 Task 3; **798 since W8 Task 3**, whose eight
+/// banked `Pause` entries carry seven ordered pairs between them — the same
+/// seven `EGRET_TOP_LEVEL_PAIRS` gained, counted before the restriction rather
+/// than after. It was 791 because 12 `Subflow` entries that
 /// stalled at their first run now finish and the runs after them have
 /// endpoints.
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 791;
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 832;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -3044,6 +3125,403 @@ fn the_handler_surface_generator_checks_itself_and_its_artifact() {
     );
 }
 
+/// **Cross-check 1 of 2: `handler_surface.py`'s `RUN_STATE` against the enum it
+/// copies** — W8 Task 2 fix round 1.
+///
+/// `RUN_STATE` is a hand-written Python copy of [`RunState::ALL`], and W8 Task 2
+/// found it two variants stale. **The fix shipped in that same commit corrected
+/// the copy and left the mechanism that hid the staleness completely intact**:
+/// `the_handler_surface_generator_checks_itself_and_its_artifact` compares the
+/// SCRIPT against its ARTIFACT, so a `RUN_STATE` that disagrees with the enum
+/// regenerates a self-consistent `handler-surface.txt` and stays green. Nothing
+/// in the repository compared copy against enum.
+///
+/// This is that comparison, and it is the cheaper half of the pair with
+/// [`the_two_state_vocabularies_agree`]. It parses the literal out of the
+/// script rather than importing Python, because the failure being guarded is
+/// *the literal*, and re-deriving it any other way would be guarding something
+/// else.
+///
+/// **Both directions**, because a one-directional check acquits a copy that has
+/// lost a member — which is exactly the direction this defect went.
+#[test]
+fn handler_surfaces_run_state_copy_matches_the_enum() {
+    let script = include_str!("../oracle-exec/handler_surface.py");
+    let start = script.find("RUN_STATE = {").expect(
+        "handler_surface.py must still define RUN_STATE; if it was renamed, this \
+                 cross-check has to move with it rather than be deleted",
+    );
+    let end = start
+        + script[start..]
+            .find('}')
+            .expect("RUN_STATE's literal must be brace-delimited");
+    let body = &script[start..end];
+    let copied: BTreeSet<&str> = body
+        .split('"')
+        .filter(|t| !t.is_empty() && t.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+        .collect();
+    let held: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+
+    // The parser is checked before its output is trusted: a `split('"')` that
+    // matched nothing would make `copied` empty and every `missing` assertion
+    // below would still pass on a `held` of any size.
+    assert_eq!(
+        copied.len(),
+        held.len(),
+        "handler_surface.py's RUN_STATE holds {} state(s), RunState::ALL holds \
+         {}. Copy = {copied:?}, enum = {held:?}",
+        copied.len(),
+        held.len()
+    );
+    assert!(
+        copied.len() >= 9,
+        "the RUN_STATE literal parsed to {copied:?}, which is too small to be \
+         the real one -- the parser above has stopped matching and this test is \
+         no longer checking anything"
+    );
+    let missing_from_copy: Vec<&&str> = held.difference(&copied).collect();
+    let extra_in_copy: Vec<&&str> = copied.difference(&held).collect();
+    assert!(
+        missing_from_copy.is_empty() && extra_in_copy.is_empty(),
+        "handler_surface.py's RUN_STATE has drifted from RunState::ALL. \
+         In the enum and not the copy: {missing_from_copy:?}. In the copy and \
+         not the enum: {extra_in_copy:?}. Update the literal AND re-run \
+         `python3 handler_surface.py`, because the classification of which \
+         entries are blocked by 'a state RunState cannot hold' moves with it"
+    );
+}
+
+/// **Every `models::State` variant is accounted for — the arm by the compiler,
+/// the row by the enum's own source.**
+///
+/// The gap [`the_two_state_vocabularies_agree`] had in fix round 1: its
+/// seventeen-name list was carried by the test, so an 18th variant added to
+/// `models::State` changed nothing and nothing went red. `State` has no `ALL`
+/// and no exhaustive `match` anywhere in PRODUCTION — measured, not assumed:
+/// with an 18th variant added, `cargo check --lib` compiles clean and the only
+/// `error[E0004]` in the whole crate comes from `--tests`, i.e. from here.
+///
+/// # Two halves, because the first one alone over-claimed
+///
+/// 1. **The ARM is forced by the compiler.** `wire_of`'s `match` is exhaustive,
+///    so a new variant stops this test crate compiling until somebody names it
+///    and decides which side it belongs on.
+/// 2. **The ROW is forced by parsing `models/state.rs`.** Nothing in stable
+///    Rust can enumerate a variant a test cannot name — there is no `ALL`, no
+///    derive, and `std::mem::variant_count` is nightly — so `all` below is
+///    compared against the variant list parsed out of the enum's own source,
+///    the same mechanism `handler_surfaces_run_state_copy_matches_the_enum`
+///    uses on the Python copy, with the same parser-sanity arm so an empty
+///    parse cannot acquit.
+///
+/// **Half 1 alone was a guard that over-claimed, and mutation is what caught
+/// it.** `State::Invented => "TYPO_NOT_WHAT_SERDE_SAYS"` **compiled and passed
+/// all three guards**: the arm was forced, the row was not, and the serde
+/// comparison only ever runs over rows — so the variant existed, its spelling
+/// was wrong, and everything was green. With half 2 the same mutation dies, and
+/// so does the quieter one that adds a variant with a *correct* arm and no row.
+///
+/// **What this licenses, exactly**: *an added variant cannot pass unnoticed,
+/// and a row's spelling cannot disagree with serde's*. It does **not** license
+/// *"the arm is correct"* in any wider sense — `wire_of` is checked against
+/// `serde` and nothing checks either against Kestra, so a shared error in both
+/// would pass. That is written down because fix round 2 drew the wider
+/// conclusion from the narrower measurement.
+///
+/// It is a `fn` rather than a bare `match` so that the exhaustiveness is a
+/// property of a signature and not of a statement somebody can delete a line
+/// from without noticing.
+#[test]
+fn every_models_state_variant_is_accounted_for() {
+    use egret_workflow::models::State;
+
+    /// Exhaustive on purpose. Adding a variant to `models::State` fails to
+    /// compile here.
+    fn wire_of(s: State) -> &'static str {
+        match s {
+            State::Created => "CREATED",
+            State::Submitted => "SUBMITTED",
+            State::Running => "RUNNING",
+            State::Paused => "PAUSED",
+            State::Restarted => "RESTARTED",
+            State::Killing => "KILLING",
+            State::Success => "SUCCESS",
+            State::Warning => "WARNING",
+            State::Failed => "FAILED",
+            State::Killed => "KILLED",
+            State::Cancelled => "CANCELLED",
+            State::Queued => "QUEUED",
+            State::Retrying => "RETRYING",
+            State::Retried => "RETRIED",
+            State::Skipped => "SKIPPED",
+            State::Breakpoint => "BREAKPOINT",
+            State::Resubmitted => "RESUBMITTED",
+        }
+    }
+
+    let all = [
+        State::Created,
+        State::Submitted,
+        State::Running,
+        State::Paused,
+        State::Restarted,
+        State::Killing,
+        State::Success,
+        State::Warning,
+        State::Failed,
+        State::Killed,
+        State::Cancelled,
+        State::Queued,
+        State::Retrying,
+        State::Retried,
+        State::Skipped,
+        State::Breakpoint,
+        State::Resubmitted,
+    ];
+    // The arm's string and serde's must agree, or the exhaustive match could be
+    // widened with a spelling nothing else uses.
+    for s in all {
+        assert_eq!(
+            serde_json::to_string(&s).expect("State serialises"),
+            format!("\"{}\"", wire_of(s)),
+            "{s:?}'s arm in `wire_of` disagrees with its serde spelling"
+        );
+    }
+    let names: BTreeSet<&str> = all.iter().copied().map(wire_of).collect();
+    assert_eq!(
+        names.len(),
+        all.len(),
+        "two variants share a wire spelling, which would hide one of them"
+    );
+
+    // **The row, forced by the enum's own source** -- see this test's doc. The
+    // compiler forces the ARM; nothing in stable Rust forces this ARRAY, so it
+    // is checked against the variant list parsed out of `models/state.rs`, the
+    // same mechanism `handler_surfaces_run_state_copy_matches_the_enum` uses on
+    // the Python copy.
+    let source = include_str!("../src/models/state.rs");
+    let body = source
+        .split_once("pub enum State {")
+        .expect(
+            "models/state.rs must still declare `pub enum State {`; if it was \
+             renamed this guard has to move with it rather than be deleted",
+        )
+        .1
+        .split_once("\n}")
+        .expect("the enum body must be brace-terminated")
+        .0;
+    // **Every content line, not every line that ends in a comma** -- fix round
+    // 4. The first version of this filter required `l.ends_with(',')`, and
+    // Rust does not require a trailing comma on the LAST variant. So
+    // `Invented` appended with no comma was dropped by the parser, `declared`
+    // stayed at seventeen, and round 2's exact escape came back: arm forced,
+    // row absent, spelling unchecked, everything green. Trailing punctuation
+    // is now stripped instead of required.
+    let content: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with("#["))
+        .collect();
+    let declared: BTreeSet<String> = content
+        .iter()
+        .map(|l| l.trim_end_matches(',').trim().to_string())
+        .collect();
+
+    // **The parser is checked as a SET, not against a floor** -- fix round 4.
+    // `declared.len() >= 9` was the wrong shape twice over: seventeen variants
+    // minus one is still nine, so it structurally could not see a *dropped*
+    // variant, and dropping is the **acquitting** direction -- the only one
+    // that matters. What is asserted instead is that the parse is TOTAL: every
+    // content line in the enum body yielded exactly one variant. A line the
+    // filter silently skips makes these two disagree.
+    assert_eq!(
+        declared.len(),
+        content.len(),
+        "the enum-body parser yielded {} name(s) from {} content line(s), so it \\
+         skipped or merged at least one. Lines: {content:?}. Parsed: \\
+         {declared:?}",
+        declared.len(),
+        content.len()
+    );
+    let malformed: Vec<&String> = declared
+        .iter()
+        .filter(|v| {
+            !v.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .collect();
+    assert!(
+        malformed.is_empty(),
+        "the enum-body parser produced {malformed:?}, which are not Rust \\
+         variant names -- it is matching something other than the enum body \\
+         and this guard is checking nothing"
+    );
+    let rows: BTreeSet<String> = all.iter().map(|s| format!("{s:?}")).collect();
+    assert_eq!(
+        rows, declared,
+        "`all` above and `models::State`'s declared variants have diverged. \
+         The compiler forces an ARM in `wire_of` for a new variant but nothing \
+         forces a ROW here, so a variant added with a correct arm and no row \
+         would never be serde-checked -- which is exactly how a `wire_of` arm \
+         spelt TYPO_NOT_WHAT_SERDE_SAYS passed in fix round 2"
+    );
+    assert_eq!(
+        all.len(),
+        17,
+        "Kestra's `State.Type` has seventeen members; if this moves, the \
+         artifact moved and every table quoting seventeen moves with it"
+    );
+}
+
+/// **Cross-check 2 of 2: `executor::RunState` against `models::State`** — W8
+/// Task 2 fix round 1.
+///
+/// Two state vocabularies, two independent spellings —
+/// [`RunState::wire`](egret_workflow::executor::RunState::wire) hand-written,
+/// `models::State` through `#[serde(rename_all = "SCREAMING_SNAKE_CASE")]` —
+/// and until now **nothing compared them**. W8 Task 2 reported that as a
+/// theoretical gap; it is not theoretical:
+///
+/// - it produced the `RUN_STATE` defect in Task 2's own commit, and
+/// - a second undetected instance was already in the tree —
+///   `worker/subflow.rs`'s doc asserted `State.Type.isFailed()` was
+///   `FAILED || KILLED` for several packages while `models::State::is_failed`
+///   sat five files away with the **correct** `matches!(self, Self::Failed)`.
+///   The contradiction was falsifiable without decompiling anything, and
+///   nothing went red.
+///
+/// Three properties, each two-sided:
+///
+/// 1. every `RunState` variant's wire spelling is a `models::State` that
+///    round-trips to the same string;
+/// 2. `RunState::is_terminal` and `models::State::is_terminated` agree on every
+///    shared member — **both ways**, so neither a widened nor a narrowed
+///    `is_terminal` survives;
+/// 3. the variants `models::State` has and `RunState` does not are exactly the
+///    ones this crate says are missing.
+///
+/// # The third claim did not hold in fix round 1, and this is what makes it hold
+///
+/// Round 1 said *"a variant added to one and forgotten in the other fails
+/// here"*. **For `models::State` that was false**: adding an 18th variant
+/// survived the whole lib + executor suite, because `State` has no `ALL` and no
+/// exhaustive `match` anywhere, so the seventeen names below were a list the
+/// test carried rather than a list the type forced.
+///
+/// [`every_models_state_variant_is_accounted_for`] is the missing half. **This
+/// test still does not cover that direction and no longer claims to**: its
+/// `all_seventeen` is a literal, so an 18th `models::State` variant is
+/// invisible here, and the round-1 sentence saying it *"moves the list above"*
+/// was measured false — the test reports `ok`.
+///
+/// **This is the shape refused for M10, and refusing it took two more rounds
+/// than it should have.** Round 1 shipped a guard whose stated scope exceeded
+/// its reach; round 2's replacement did it again one level down — the compiler
+/// forced the arm, nothing forced the row, and a deliberately mis-spelt arm
+/// passed. Each claim here is now written against the mechanism that actually
+/// enforces it, with the direction it cannot see named beside it.
+#[test]
+fn the_two_state_vocabularies_agree() {
+    use egret_workflow::models::State;
+
+    let held: BTreeSet<String> = RunState::ALL.iter().map(|s| s.wire().to_string()).collect();
+
+    // 1. Every RunState wire spelling is a models::State, spelled identically.
+    for s in RunState::ALL {
+        let json = format!("\"{}\"", s.wire());
+        let parsed: State = serde_json::from_str(&json).unwrap_or_else(|e| {
+            panic!(
+                "RunState::{s:?} spells itself {:?}, which `models::State` does not \
+                 accept ({e}). The two vocabularies have diverged",
+                s.wire()
+            )
+        });
+        let back = serde_json::to_string(&parsed).expect("State serialises");
+        assert_eq!(
+            back, json,
+            "RunState::{s:?} and models::State::{parsed:?} do not agree on the \
+             wire spelling"
+        );
+
+        // 2. and the terminality judgement, both directions.
+        assert_eq!(
+            s.is_terminal(),
+            parsed.is_terminated(),
+            "RunState::{s:?}.is_terminal() = {}, models::State::{parsed:?}\
+             .is_terminated() = {}. Kestra has ONE `State.Type.isTerminated()`; \
+             two answers means one of these two files is wrong about the \
+             artifact",
+            s.is_terminal(),
+            parsed.is_terminated()
+        );
+    }
+
+    // 3. What models::State has and RunState does not, named rather than
+    //    counted.
+    //
+    //    **It is NOT symmetric, and the claim that it was is withdrawn** --
+    //    fix round 4, the third instance of a correction made where it was
+    //    found and left standing everywhere else. `all_seventeen` below is a
+    //    literal this test carries: gaining a variant on the `RunState` side
+    //    moves `held` and fails here, and gaining one on the `models::State`
+    //    side moves NOTHING here. That direction is
+    //    `every_models_state_variant_is_accounted_for`'s, and only since fix
+    //    round 3.
+    let all_seventeen = [
+        "CREATED",
+        "SUBMITTED",
+        "RUNNING",
+        "PAUSED",
+        "RESTARTED",
+        "KILLING",
+        "SUCCESS",
+        "WARNING",
+        "FAILED",
+        "KILLED",
+        "CANCELLED",
+        "QUEUED",
+        "RETRYING",
+        "RETRIED",
+        "SKIPPED",
+        "BREAKPOINT",
+        "RESUBMITTED",
+    ];
+    for name in all_seventeen {
+        serde_json::from_str::<State>(&format!("\"{name}\"")).unwrap_or_else(|e| {
+            panic!("models::State must still hold {name}, Kestra's own State.Type ({e})")
+        });
+    }
+    let missing: BTreeSet<String> = all_seventeen
+        .iter()
+        .map(|s| s.to_string())
+        .filter(|s| !held.contains(s))
+        .collect();
+    assert_eq!(
+        missing,
+        BTreeSet::from([
+            "BREAKPOINT".to_string(),
+            "KILLING".to_string(),
+            "QUEUED".to_string(),
+            "RESUBMITTED".to_string(),
+        ]),
+        "the FOUR of Kestra's seventeen that `RunState` does not hold. It was \
+         six until W8 Task 5 added `Warning` and five until W8 Task 6 added \
+         `Cancelled` -- which was the golden's last unrepresentable state, so \
+         **none of the four left appears in the golden at all** and this set \
+         cannot shrink further from this corpus. \
+         Adding a variant to `RunState` moves this set. It does NOT move when \
+         `models::State` gains one: `all_seventeen` above is a literal this \
+         test carries, so an 18th variant is invisible here and is caught by \
+         `every_models_state_variant_is_accounted_for` instead -- the claim \
+         that it moved `the list above` was measured false in fix round 2"
+    );
+    assert_eq!(
+        held.len() + missing.len(),
+        17,
+        "the two sets must partition Kestra's seventeen with nothing left over"
+    );
+}
+
 /// The happens-before predicate, strict on both sides — `normalise.py`'s, over
 /// the logical `executions.seq` instead of timestamps.
 #[test]
@@ -3213,23 +3691,39 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
     );
 
     // The negative control: an entry for which the same experiment
-    // distinguishes nothing, DERIVED rather than named. W3a's vacuous first
-    // attempt used `valids/minimal2` because its golden carried `SUBMITTED`,
-    // which `RunState` could not represent -- and W3c added `SUBMITTED` to the
-    // enum, so that entry matches now and picking it by name would have made
-    // this control vacuous in its turn. The property is what is wanted: a
-    // golden whose FIRST run's history holds a state `RunState` cannot hold, so
-    // no terminal value could make it match.
-    let held: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+    // distinguishes nothing, DERIVED rather than named -- and **the property it
+    // is derived from has had to change twice, each time because the enum
+    // grew**. W3a's vacuous first attempt named `valids/minimal2`, whose golden
+    // carried `SUBMITTED`; W3c added `SUBMITTED` and the control became "a
+    // golden whose FIRST run's history holds a state `RunState` cannot hold",
+    // which was derived rather than named. **W8 Task 6 emptied that population
+    // too**: `RunState` now holds all thirteen of the golden's states, so no
+    // entry has that property and the `find` returned `None`.
+    //
+    // The property that replaces it is the one the control actually needs, and
+    // it does not depend on the vocabulary at all: **an entry whose run COUNT
+    // egret does not reproduce**. Corrupting one run's terminal cannot make a
+    // trace with the wrong number of runs match, and cannot make it stop
+    // matching, so the experiment is vacuous on it in both directions -- which
+    // is the whole point of a negative control. It is derived from what egret
+    // ACTUALLY produced this run, so it cannot go stale the way a named entry
+    // can; if the population ever empties, the `expect` below fails loudly
+    // rather than quietly acquitting.
     let vacuous = golden()
         .into_iter()
         .find(|e| {
             e.verdict == Verdict::Runs
-                && e.runs
-                    .first()
-                    .is_some_and(|r| r.state.iter().any(|s| !held.contains(s.as_str())))
+                && !e.runs.is_empty()
+                && match evaluate(side, e) {
+                    Outcome::Trace(t) => t.runs.len() != e.runs.len(),
+                    _ => false,
+                }
         })
-        .expect("some golden entry's first run uses a state RunState cannot hold");
+        .expect(
+            "some golden `runs` entry has a run count egret does not reproduce; \
+             if none does, every baselined entry differs only in field VALUES \
+             and this control needs a new property",
+        );
     println!("the vacuity control is {}", vacuous.id);
     let Outcome::Trace(control) = evaluate(side, &vacuous) else {
         panic!("{} produces a trace", vacuous.id)
@@ -3239,7 +3733,8 @@ async fn a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to()
     control.restrict_order_to(&control_expected);
     assert_ne!(
         control, control_expected,
-        "{}'s first run carries a state RunState cannot hold, so it cannot match",
+        "{}'s run COUNT is not the golden's, so it cannot match whatever any \
+         single terminal says",
         vacuous.id
     );
     assert_ne!(
@@ -3502,11 +3997,38 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
 // field counters fell by however many of the 12 differed on that field.
 // `spawned` fell by exactly one, `valids/loop-with-subflow`, which is the only
 // one of the 12 that carries a sub-execution at all.
-const MISMATCH_ON_EXECUTION: usize = 90;
-const MISMATCH_ON_RUNS: usize = 112;
-const MISMATCH_ON_ORDER: usize = 72;
+/// **90 through W8 Task 2, 82 after W8 Task 3, 74 after W8 Task 5, 72 now**:
+/// all eight `Pause` entries W8 Task 3 banked differed on their execution
+/// history (`PAUSED`/`RESTARTED` were never emitted), so every one of them left
+/// this count -- and so did W8 Task 6's two, whose golden execution history
+/// `["CREATED","CANCELLED"]` egret could not spell at all until
+/// `RunState::Cancelled` existed.
+const MISMATCH_ON_EXECUTION: usize = 72;
+/// **112 through W8 Task 2, 104 after W8 Task 3, 103 after W8 Task 4, 96 after
+/// W8 Task 5, 94 now** -- the same eight, then `valids/waitfor-nested`, then
+/// the seven `allow*` entries, then W8 Task 6's two. The last pair differ on
+/// `runs` for an unusual reason: their golden `runs` is **empty**, and egret
+/// used to run the flow's one task, so the field differed by a whole run
+/// rather than by a state.
+const MISMATCH_ON_RUNS: usize = 94;
+/// **72 through W8 Task 2, 67 after W8 Task 3, 64 now**: five of Task 3's eight
+/// carry an ordered pair, and W8 Task 4 closed THREE on one entry --
+/// `valids/waitfor-nested`'s `loop_1_return`/`loop_2`,
+/// `loop_2_return`/`loop_3` and `loop_3_return`/`loop_3_log`, every one of them
+/// a pair between siblings that a bulk reset made `overlapping`. See
+/// `Command::RecreateRun`.
+const MISMATCH_ON_ORDER: usize = 57;
 const MISMATCH_ON_SPAWNED: usize = 15;
-const MISMATCHING_RUNS_ENTRIES: usize = 122;
+/// **122 through W8 Task 2, 114 after W8 Task 3, 113 now** -- the eight `Pause`
+/// entries Task 3 banked and the one `LoopUntil` entry Task 4 did. The
+/// `refused` half of the golden is untouched by either: no `Pause` or
+/// `LoopUntil` flow is a refusal except `invalids/workingdirectory-invalid`,
+/// which egret still refuses and for the same reason (`is_runnable_child`
+/// answers `false` for a typed kind, and `models::TaskKind::Pause` is one --
+/// as, since W8 Task 4, is `models::TaskKind::LoopUntil` for BOTH its
+/// spellings). **104 since W8 Task 6**, whose two entries are `runs` entries
+/// and whose flows are not refusals either.
+const MISMATCHING_RUNS_ENTRIES: usize = 104;
 /// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
 /// classifier.**
 ///
@@ -3536,8 +4058,43 @@ const MISMATCHING_RUNS_ENTRIES: usize = 122;
 /// something else -- five registered in `STILL_OVER_ACCEPTED_AT_RUNTIME`, two
 /// held by `state::apply`'s attempt rule (`valids/retry-subflow`,
 /// `valids/subflow-parent-retry`) and two by the missing `WARNING`
-/// (`valids/task-allow-{failure,warning}-executable-flow`).
-const ENTRIES_LEFT_UNFINISHED: usize = 59;
+/// (`valids/task-allow-{{failure,warning}}-executable-flow`).
+/// **59 through W8 Task 2, 50 now, and the fall is NINE where eight entries
+/// banked.** The eight `Pause` entries W8 Task 3 banked were all stalling for
+/// the same reason -- a `Pause` was planned `Runnable`, so it got a `type_id`,
+/// so the claim took it, so `Registry::run` refused a type nothing handles and
+/// the tick aborted with the run leased and unmoved. The ninth is
+/// `valids/pause-timeout-allow-failure`, which is planned `TaskKind::Pause` too
+/// and therefore FINISHES now: its pause times out, the run ends `FAILED`, and
+/// the entry mismatches on `WARNING` rather than stalling. **A bank and an
+/// unstall are different events and this figure counts the second**, which is
+/// why the two numbers differ by one and why that is worth a sentence rather
+/// than an arithmetic reconciliation.
+///
+/// **50 through W8 Task 3, 46 now, and the fall is FOUR where ONE entry
+/// banked.** Same distinction, on a different construct: a `LoopUntil` was
+/// planned `Runnable`, so it got a `type_id`, so the claim took it and
+/// `Registry::run` refused a type nothing handles. All nine entries that reach
+/// the construct stopped stalling for that reason; **five of them started
+/// stalling again one run lower down**, on the
+/// `io.kestra.plugin.core.output.OutputValues` child their bodies now reach,
+/// which is what leaves the net at four. The four that finish are
+/// `valids/waitfor-nested` (banked), `valids/loop-until-restart`,
+/// `valids/loopuntil-failed-flowable` and `valids/waitfor-child-task-warning`
+/// -- the last of those has an `OutputValues` child too and finishes anyway,
+/// because its FIRST child fails and `childTaskRunExecuted` ends the loop
+/// before the second is ever reached.
+///
+/// **46 through W8 Task 4, 47 now, and the entry that joined is the last one
+/// named above** — W8 Task 5. `valids/waitfor-child-task-warning`'s first child
+/// is an `allowFailure: true` `Fail`, so its run is `WARNING` rather than
+/// `FAILED` now, `isTerminatedNoFail` counts it as executed, and the loop goes
+/// on to the `OutputValues` child it used to stop short of. **A bank moving a
+/// count the other way is not a regression**: the entry is reproduced strictly
+/// further than it was, and what it stalls on is a missing handler that was
+/// always going to be its blocker — `handler_surface.py` carries that blocker
+/// row, and the paragraph above is the reasoning it falsifies.
+const ENTRIES_LEFT_UNFINISHED: usize = 47;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -4063,27 +4620,61 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "W4: a `Sleep` still in flight when its sibling failed the `Parallel`. Kestra FAILED it; \
          the kill path reaches only a task's own expired `timeout:`, so egret completes it",
     ),
-    // **W8: `sla:` and flow `concurrency:`**, both rows of the residual
-    // baseline. Kestra CANCELLED or KILLED the execution; egret has neither
-    // construct, so it runs the tasks.
-    (
-        "valids/flow-concurrency-sla-assert-cancel",
-        "W8: an `EXECUTION_ASSERTION` sla with `behavior: CANCEL`. Kestra recorded 0 runs; egret \
-         runs the first task",
-    ),
+    // **W8, through `sla:` alone.** Kestra CANCELLED or KILLED the execution;
+    // egret ran the tasks. This comment said "`sla:` and flow `concurrency:`,
+    // both rows of the residual baseline", and both halves went at W8 Task 1:
+    // every one of the five was an `sla:`'s, and the `flow concurrency:` row no
+    // longer exists -- it was deleted for attributing `CANCELLED` to a
+    // construct that never produces it. See
+    // `the_cancelled_state_never_comes_from_a_concurrency_limit`.
+    //
+    // **W8 Task 6 took the five to THREE, and the split is the whole point of
+    // that task.** The two that left --
+    // `valids/flow-concurrency-sla-assert-cancel` and
+    // `valids/sla-execution-condition` -- are the `EXECUTION_ASSERTION`s, and
+    // egret now cancels the execution before any run exists, so it no longer
+    // runs anything Kestra did not. The three that remain are `MAX_DURATION`s
+    // and **no implementation can take them off this list under this harness**:
+    // `driver.rs` builds its registry with `Sleep::capped(Duration::ZERO)`, so
+    // the `Sleep` these flows are built around finishes inside the tick that
+    // started it and the window `MaxDurationSLA.evaluate` measures does not
+    // exist. They are over-acceptances of the HARNESS, not of egret, and that
+    // distinction is why they stay registered rather than being excused.
+    //
+    // **Exactly ONE of the original five declares a `concurrency:`** --
+    // `valids/flow-concurrency-sla-assert-cancel`, which is one of the two that
+    // left. A first draft of this comment said three, counting flow IDs rather
+    // than declarations, which is the name-versus-declaration confusion in the
+    // very sentence announcing that the confusion was fixed.
+    // `valids/flow-concurrency-sla-fail-child` carries the word in its **id**
+    // and writes no `concurrency:` at all; the other three do not carry it even
+    // there.
     (
         "valids/flow-concurrency-sla-fail-child",
-        "W8: `sla:` killed the `Sleep`; egret has no `sla:` and completes it",
-    ),
-    (
-        "valids/sla-execution-condition",
-        "W8: the same `EXECUTION_ASSERTION` CANCEL; Kestra recorded 0 runs",
+        "W8: `MAX_DURATION` killed the `Sleep`; the harness's capped `Sleep` leaves no window for \
+         one, so egret completes it",
     ),
     (
         "valids/sla-max-duration-fail",
         "W8: `MAX_DURATION` killed the `Sleep`; egret completes it",
     ),
     ("valids/sla-subflow", "W8: the same, through a subflow"),
+    // **W8 Task 4: the same class as the four `W2:` rows at the top of this
+    // list, on a new operator.** Kestra renders through Pebble, whose
+    // `OperatorUtils` widens both operands of `<` to `Number` and throws on a
+    // `String`; minijinja orders values across types and answers a boolean. So
+    // the `LoopUntil`'s condition evaluates to `true` here, the loop SUCCEEDS
+    // on its first iteration, and Kestra FAILED the task instead. It is a
+    // RENDERER divergence wearing a loop's name, and it is the corpus's only
+    // number-against-string comparison --
+    // `the_one_corpus_comparison_pebble_refuses_and_minijinja_answers` is what
+    // says so and what would fail if egret ever gained Pebble-strict operators.
+    (
+        "valids/loopuntil-failed-flowable",
+        "W2/W8: `{{ outputs.loop.iterationCount < \"5\" }}` -- Pebble throws on a relational \
+         operator against a quoted operand and minijinja answers `True`, so the loop's condition \
+         is truthy, the loop SUCCEEDS on iteration 1 and Kestra FAILED the task",
+    ),
     // **Unclaimed: a `Loop`'s own `outputs:`.** `advance()` does not implement
     // them, so a loop whose `outputs:` fails to render — Kestra FAILED it at
     // the first iteration — succeeds here and runs the other two. Named as a
@@ -4372,7 +4963,7 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
             unplanned + in_an_errors_list,
             over_fed.values().sum::<usize>() + is_a_subflow
         ),
-        (424, 74, 342, 114),
+        (421, 95, 324, 96),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
          to the 10 runs Task 7's `errors:` support moved out of `unplanned` and \
          into `fed`, which is derived above rather than folded into these \
@@ -4380,8 +4971,17 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          and into `flowable` (`valids/switch-impossible`'s `impossible` run: the \
          flow is planned at all now, so its `Switch` is a flowable rather than a \
          task with no plan), and up to the 22 W6 moved out of `fed` and out of \
-         the over-feed at the same time. If it does not, nothing below is a \
-         measurement of anything"
+         the over-feed at the same time, and up to what W8 Task 4 moved by \
+         planning `LoopUntil`/`WaitFor`. **That last one is the finding this \
+         test keeps re-finding, from the other side**: implementing a flowable \
+         SHRINKS the over-feed by its own runs and ENLARGES `fed` by whatever \
+         was nested inside it. Derived over the nine entries that reach the \
+         construct, which hold 27 runs between them: the 9 top-level loop runs \
+         left `fed` and the over-feed together (105 -> 96), all 11 loop runs \
+         plus `loopuntil-failed-flowable`'s nested `Dag` are `flowable` now \
+         (83 -> 95), and the 18 runs that were inside an opaque loop left \
+         `unplanned` (342 -> 324), 15 of them into `fed` (415 -> 421). If any of \
+         this does not hold, nothing below is a measurement of anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -4411,9 +5011,13 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     );
     assert_eq!(
         (flow_then + is_a_subflow, over_fed.len() + 1),
-        (89, 12),
+        (71, 10),
         "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
-         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6"
+         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6 \
+         -- and of which `LoopUntil` (3 runs) and `WaitFor` (6) were two more \
+         types and 9 more runs until W8 Task 4 planned them. 80 -> 71 and \
+         12 -> 10, the same movement the four-bucket assertion above records \
+         from the other side"
     );
 }
 
@@ -4428,22 +5032,83 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
     // Task 3 drafted six; `SUBMITTED` was its own addition, `RETRIED` is Task
     // 7's and `SKIPPED` is W3c's. All are kept here so the "how much did that
     // one state buy" question stays answerable.
+    // **Every tier is `held` MINUS the states that arrived after it**, so each
+    // one has to name every later addition. W8 Task 6 is the first addition
+    // that had to be written into all six lines rather than one: adding
+    // `CANCELLED` to the enum and to none of these filters silently promoted it
+    // into *Task 3's draft of six*, and every tier read three entries too high
+    // (35 -> 38, 229 -> 232, 233 -> 236, 237 -> 240, 253 -> 256). The counts
+    // below are what caught that; a `missing`-only assertion would not have.
     let drafted: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "SUBMITTED" | "RETRIED" | "SKIPPED"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "SUBMITTED"
+                    | "RETRIED"
+                    | "SKIPPED"
+                    | "PAUSED"
+                    | "RESTARTED"
+                    | "WARNING"
+                    | "CANCELLED"
+            )
+        })
         .collect();
     let through_task_6: BTreeSet<&str> = held
         .iter()
         .copied()
-        .filter(|s| !matches!(*s, "RETRIED" | "SKIPPED"))
+        .filter(|s| {
+            !matches!(
+                *s,
+                "RETRIED" | "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+            )
+        })
         .collect();
-    let through_w3a: BTreeSet<&str> = held.iter().copied().filter(|s| *s != "SKIPPED").collect();
+    let through_w3a: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| {
+            !matches!(
+                *s,
+                "SKIPPED" | "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"
+            )
+        })
+        .collect();
+    let through_w3c: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "PAUSED" | "RESTARTED" | "WARNING" | "CANCELLED"))
+        .collect();
+    // W8 Task 2's tier, which was `held` itself until W8 Task 5 added
+    // `WARNING`. It is spelled out rather than left as "everything but the
+    // newest" so that the chain below keeps one column per addition.
+    let through_w8_task_2: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "WARNING" | "CANCELLED"))
+        .collect();
+    // W8 Task 5's tier. `held` itself until W8 Task 6 added `CANCELLED`, which
+    // is the LAST of the golden's thirteen -- so `fits_now` below is now the
+    // whole `runs` population and the two sets are equal.
+    let through_w8_task_5: BTreeSet<&str> = held
+        .iter()
+        .copied()
+        .filter(|s| !matches!(*s, "CANCELLED"))
+        .collect();
 
     let mut all: BTreeSet<String> = BTreeSet::new();
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut fits_drafted, mut fits_task_6, mut fits_w3a, mut fits_now, mut entries) =
-        (0, 0, 0, 0, 0usize);
+    let (
+        mut fits_drafted,
+        mut fits_task_6,
+        mut fits_w3a,
+        mut fits_w3c,
+        mut fits_w8_task_2,
+        mut fits_w8_task_5,
+        mut fits_now,
+        mut entries,
+    ) = (0, 0, 0, 0, 0, 0, 0, 0usize);
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         entries += 1;
@@ -4472,6 +5137,15 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         if used.iter().all(|s| through_w3a.contains(s.as_str())) {
             fits_w3a += 1;
         }
+        if used.iter().all(|s| through_w3c.contains(s.as_str())) {
+            fits_w3c += 1;
+        }
+        if used.iter().all(|s| through_w8_task_2.contains(s.as_str())) {
+            fits_w8_task_2 += 1;
+        }
+        if used.iter().all(|s| through_w8_task_5.contains(s.as_str())) {
+            fits_w8_task_5 += 1;
+        }
         if used.iter().all(|s| held.contains(s.as_str())) {
             fits_now += 1;
         }
@@ -4481,8 +5155,9 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
         "state vocabulary: the golden uses {} states over {entries} `runs` entries; \
          RunState holds {}. Entries wholly inside the vocabulary: {fits_drafted} \
          (Task 3's draft of 6), {fits_task_6} (through Task 6, 7), {fits_w3a} \
-         (Task 7, 8), {fits_now} (W3c, 9). Still missing, by entries using each: \
-         {missing:?}",
+         (Task 7, 8), {fits_w3c} (W3c, 9), {fits_w8_task_2} (W8 Task 2, 11), \
+         {fits_w8_task_5} (W8 Task 5, 12), {fits_now} (W8 Task 6, 13). Still \
+         missing, by entries using each: {missing:?}",
         all.len(),
         held.len()
     );
@@ -4493,8 +5168,16 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          state table is derived from these"
     );
     assert_eq!(
-        (fits_drafted, fits_task_6, fits_w3a, fits_now),
-        (35, 229, 233, 237),
+        (
+            fits_drafted,
+            fits_task_6,
+            fits_w3a,
+            fits_w3c,
+            fits_w8_task_2,
+            fits_w8_task_5,
+            fits_now
+        ),
+        (35, 229, 233, 237, 253, 263, 266),
         "what each addition to `RunState` bought. `SUBMITTED` (Task 3) is the \
          big one: 35 -> 229. `RETRIED` (Task 7) buys 4, which is the whole \
          `RETRIED` population -- and the four entries are exactly the \
@@ -4504,19 +5187,173 @@ fn the_state_vocabulary_this_enum_holds_is_derived_from_the_golden() {
          **none of them banks**: every one of the four is held by a construct \
          W3a does not implement as well (`Subflow`, an `ExecutionUpdatableTask`, \
          `finally:`, an opaque `WorkingDirectory`). Being inside the vocabulary \
-         is necessary and not sufficient"
+         is necessary and not sufficient -- and **W8 Task 2's 16 (237 -> 253) \
+         bank nothing at all**, which is the third measured example: when Task \
+         2 added `PAUSED` and `RESTARTED` both constructs that emit them were \
+         still planned opaque, so nothing in this crate emitted either variant. \
+         **Both producers exist now** -- `Pause` at W8 Task 3 (8 banked) and \
+         `LoopUntil` at W8 Task 4 (1) -- and the sentence is kept in the past \
+         tense it was always about, because the claim it supports is what Task \
+         2's SIXTEEN bought on the day, which is still nothing. **W8 Task 5's \
+         `WARNING` buys 10 (253 -> 263), which is the whole `WARNING` \
+         population, and SEVEN of the twelve entries this package's \
+         `allowFailure:` row held bank in that commit** -- the first addition \
+         to this enum that banks most of what it buys. The FIVE it does not \
+         reach are the ones held by something else: four by the `AllowFailure` \
+         FLOWABLE, which is a different construct, and one \
+         (`valids/waitfor-child-task-warning`) by an `OutputValues` child no \
+         handler exists for -- measured, by unbaselining it and watching it \
+         stall at `CREATED RUNNING` with its `WARNING` child already correct. \
+         **W8 Task 6's `CANCELLED` buys the last 3 (263 -> 266), which is the \
+         whole `CANCELLED` population, and TWO of the three bank in that \
+         commit** -- the two `sla:` entries. The third, \
+         `valids/exit-cancelled`, is held by an `Exit`, an \
+         `ExecutionUpdatableTask` this crate does not implement"
     );
     assert_eq!(
         missing,
-        BTreeMap::from([
-            ("CANCELLED".to_string(), 3),
-            ("PAUSED".to_string(), 18),
-            ("RESTARTED".to_string(), 12),
-            ("WARNING".to_string(), 10),
-        ]),
-        "the four states still outside `RunState`, with the number of `runs` \
-         entries whose trace uses each. `oracle-exec/README.md` names the owner \
-         of each; `RETRIED` left this table at Task 7 and `SKIPPED` at W3c"
+        BTreeMap::new(),
+        "**W8 Task 6 emptied this map**, and an empty map is exactly the shape \
+         a broken walk also produces -- so it is asserted BESIDE two numbers \
+         that can disagree: `all.len() == 13` above says the walk found \
+         thirteen states, and `fits_now == 266` says every `runs` entry is \
+         wholly inside the enum. `RETRIED` left this table at Task 7, \
+         `SKIPPED` at W3c, `PAUSED` (18) and `RESTARTED` (12) at W8 Task 2, \
+         `WARNING` (10) at W8 Task 5, and `CANCELLED` (3) here"
+    );
+    // The same fact from the other side, and it is what makes the empty map
+    // above falsifiable by something other than itself: the two vocabularies
+    // are now the SAME SET, so a variant removed from `RunState` or a state
+    // added to the golden fails here by name.
+    let held_owned: BTreeSet<String> = held.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        held_owned, all,
+        "`RunState` now holds exactly the golden's vocabulary -- neither more \
+         nor less. `models::State` still holds four Kestra states neither of \
+         these sets has (KILLING, QUEUED, BREAKPOINT, RESUBMITTED); that \
+         direction is `the_two_state_vocabularies_agree`'s"
+    );
+}
+
+/// **The golden's three populations, recursed and un-recursed, both pinned** —
+/// W8 Task 2 fix round 1.
+///
+/// Task 2 published *"0 of the golden's 604 attempt histories"* while claiming
+/// the census was *"walked recursively through `spawned`"*. **604 is the
+/// un-recursed count; recursed it is 878.** The claim's truth value did not
+/// move — `PAUSED` is in 0 attempts either way — but the number was wrong, and
+/// it was wrong in the arm the control did not cover: the control reproduced
+/// `oracle-exec/README.md`'s **run** table (840/828/639/…), which is the
+/// recursed run figure and was right, and said nothing about attempts.
+///
+/// So this pins **both** numbers for **all three** populations. The failure it
+/// exists to catch is not "someone miscounted" but *"someone counted one arm
+/// recursively and another arm not, and reported one sentence about both"* —
+/// which is only visible when the pair is asserted side by side.
+///
+/// `RunState`'s `Paused` and `Restarted` docs quote 408/840/878; if any of
+/// those moves, this fails and names which.
+#[test]
+fn the_golden_populations_are_derived_recursed_and_unrecursed() {
+    fn count(entries: &[GoldenEntry], recurse: bool) -> (usize, usize, usize, usize, usize) {
+        let (mut execs, mut runs, mut atts) = (0usize, 0usize, 0usize);
+        let (mut paused_atts, mut restarted_runs) = (0usize, 0usize);
+        fn sub(
+            execution: &[String],
+            runs_in: &[GoldenRun],
+            spawned: &[GoldenSpawned],
+            recurse: bool,
+            execs: &mut usize,
+            runs: &mut usize,
+            atts: &mut usize,
+            paused_atts: &mut usize,
+            restarted_runs: &mut usize,
+        ) {
+            if !execution.is_empty() {
+                *execs += 1;
+            }
+            for r in runs_in {
+                *runs += 1;
+                if r.state.iter().any(|s| s == "RESTARTED") {
+                    *restarted_runs += 1;
+                }
+                for a in &r.attempts {
+                    *atts += 1;
+                    if a.iter().any(|s| s == "PAUSED") {
+                        *paused_atts += 1;
+                    }
+                }
+            }
+            if recurse {
+                for sp in spawned {
+                    sub(
+                        &sp.execution,
+                        &sp.runs,
+                        &sp.spawned,
+                        recurse,
+                        execs,
+                        runs,
+                        atts,
+                        paused_atts,
+                        restarted_runs,
+                    );
+                }
+            }
+        }
+        for e in entries.iter().filter(|e| e.verdict == Verdict::Runs) {
+            sub(
+                &e.execution,
+                &e.runs,
+                &e.spawned,
+                recurse,
+                &mut execs,
+                &mut runs,
+                &mut atts,
+                &mut paused_atts,
+                &mut restarted_runs,
+            );
+        }
+        (execs, runs, atts, paused_atts, restarted_runs)
+    }
+
+    let g = golden();
+    let flat = count(&g, false);
+    let deep = count(&g, true);
+    println!(
+        "golden populations: un-recursed (execs, runs, attempts) = ({}, {}, {}); \
+         recursed = ({}, {}, {})",
+        flat.0, flat.1, flat.2, deep.0, deep.1, deep.2
+    );
+    assert_eq!(
+        (flat.0, flat.1, flat.2),
+        (266, 570, 604),
+        "the UN-recursed populations. 604 is the attempt figure W8 Task 2 \
+         published while claiming a recursive walk; it is kept here so the two \
+         can never be confused again"
+    );
+    assert_eq!(
+        (deep.0, deep.1, deep.2),
+        (408, 840, 878),
+        "the RECURSED populations, which are the ones `RunState::Paused` and \
+         `RunState::Restarted` quote. 840 is also the figure \
+         `oracle-exec/README.md`'s run-history table is over, which is the \
+         control that the recursion is the same one that table used"
+    );
+    // The two claims the numbers above are in service of, so the count and the
+    // claim cannot drift apart -- and stated as counts, not booleans, so a
+    // broken walk that visited nothing would fail rather than pass.
+    assert_eq!(
+        (deep.3, deep.4),
+        (0, 0),
+        "`PAUSED` must appear in no attempt history and `RESTARTED` in no run \
+         history, over the RECURSED population. `apply`'s rule 1 would put \
+         `Paused` on the open attempt, which is why the first producer needs \
+         something other than a plain `SetRunState`"
+    );
+    assert!(
+        deep.2 > flat.2 && deep.1 > flat.1 && deep.0 > flat.0,
+        "sanity: recursing must find MORE of all three, or the walk is not \
+         recursing and both assertions above would be measuring the same thing"
     );
 }
 
@@ -4627,6 +5464,315 @@ fn the_skipped_state_comes_from_runif_and_never_from_disabled() {
          of them produces a SKIPPED anywhere. `valids/working-directory` is a \
          seventh corpus flow with the flag and has no golden entry -- it is one \
          of the 22 `task-type-not-in-image` rejections"
+    );
+}
+
+/// **`CANCELLED` never comes from a flow `concurrency:` limit** — the fourth
+/// run of the rule `the_skipped_state_comes_from_runif_and_never_from_disabled`
+/// established, and the third time the trigger was a state credited to the
+/// wrong construct.
+///
+/// `oracle-exec/README.md` labelled the residual baseline's `flow
+/// concurrency:` row `→ CANCELLED` in two places, and the programme spec built
+/// a W8 package on it. It is false in exactly the shape `disabled:`/`SKIPPED`
+/// was: the state really is in the golden, three times, and **not one of the
+/// three is a concurrency limit's**. A row is then reachable-looking for a
+/// reason that has nothing to do with the construct it names.
+///
+/// Three halves, because only the third is a control:
+///
+/// - every entry whose trace holds `CANCELLED` is named here, with what
+///   produces it — an `sla:` whose `behavior: CANCEL`, or an
+///   `io.kestra.plugin.core.execution.Exit` declaring `state: CANCELLED`;
+/// - **no** such entry is produced by a `concurrency:` limit, asserted as the
+///   positive form: each of the three declares a CANCEL-behaviour producer that
+///   is not one;
+/// - and the control that makes the zero a measurement rather than an absence:
+///   **`behavior: CANCEL` is the only `concurrency:` configuration that could
+///   ever cancel, two corpus flows write it, and neither produces a `CANCELLED`
+///   anywhere in its trace.** Without this half the test would pass on a corpus
+///   that simply contained no cancelling limit, which is a different fact and a
+///   much weaker one.
+///
+/// # `QUEUED` never occurs — and what that does and does not cover
+///
+/// **`QUEUED` occurs zero times in `golden.json`.** It is in `harvest.py`'s
+/// `STATE_TYPES` — the vocabulary the harvester validates every captured state
+/// against — and `normalise.py`'s rule 4 keeps history state sequences
+/// **verbatim**, so a queued run would have survived into the golden had one
+/// ever happened. Zero is therefore not "we could not see it"; it is *it did
+/// not happen*.
+///
+/// **But it can only see `QUEUE` behaviour, and fix round 1 over-claimed from
+/// it.** That version said the zero proved "no concurrency limit ever fired at
+/// all". The conclusion is true; the stated evidence did not reach it. The 13
+/// declarers are **10 `QUEUE`, 2 `CANCEL`, 1 `FAIL`**, and it takes one
+/// instrument per behaviour:
+///
+/// - the **10 `QUEUE`** are the `QUEUED` zero above;
+/// - the **2 `CANCEL`** are the `CANCELLED` control below — `flow-concurrency-cancel`
+///   and `…-cancel-pause` are the only flows writing `behavior: CANCEL` and
+///   neither golden holds a `CANCELLED`;
+/// - the **1 `FAIL`** (`valids/flow-concurrency-fail`) is covered by neither,
+///   and **a count of `FAILED` could not cover it** — the golden holds 609 of
+///   them for other reasons. What covers it is that this flow is one of the
+///   **7 declarers that already MATCH**, asserted below: egret implements no
+///   concurrency at all, so an entry it reproduces exactly is an entry whose
+///   limit did not fire.
+///
+/// The three legs are kept as the **mechanism** — they say *why* no limit ever
+/// fired, which no count can: the harness drives flows serially, the single
+/// self-contending flow is banked, and 7 of 13 declarers already match.
+///
+/// **What this evidence does not contain**, named rather than generalised over:
+/// it says nothing about whether Kestra's `concurrency: {behavior: CANCEL}`
+/// cancels *in general* — it cannot, because `harvest.py` drives flows strictly
+/// serially (`for i, rec in enumerate(wanted, 1): execute_once(...)`, each
+/// awaited to termination) and so never contends a `limit: 1`. The claim is the
+/// narrow one the ratchet needs: **under this oracle** the state is never a
+/// limit's, so a row attributing it to one strands its entries.
+///
+/// The one contended population the corpus does hold —
+/// `valids/flow-concurrency-parallel-subflow-kill`, whose `Parallel` starts two
+/// `Subflow`s of the same limited flow at once — is asserted below to be
+/// **banked**, and its golden shows why a `QUEUE` that really did fire would
+/// still be invisible: all three of its `order` pairs are `overlapping` and its
+/// `spawned` is empty, so *when* the second child execution starts is in no
+/// compared field.
+#[test]
+fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
+    // **The primary evidence, first: `QUEUED` never occurs.** Every state string
+    // anywhere in the golden -- execution histories, run histories, attempt
+    // histories, sub-executions -- counted, so this cannot pass by looking in
+    // the wrong place. `QUEUE` is a limit's DEFAULT behaviour and `QUEUED` is
+    // the only state it produces; `harvest.py`'s `STATE_TYPES` carries the name
+    // and `normalise.py` keeps histories verbatim, so one would have survived.
+    let mut states: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for st in t
+                .execution
+                .iter()
+                .chain(t.runs.iter().flat_map(|r| r.state.iter()))
+                .chain(t.runs.iter().flat_map(|r| r.attempts.iter().flatten()))
+            {
+                *states.entry(st.clone()).or_default() += 1;
+            }
+            stack.extend(t.spawned.iter());
+        }
+    }
+    assert_eq!(
+        states.get("QUEUED"),
+        None,
+        "a `QUEUED` appeared in the golden, so a concurrency limit DID fire \
+         under this oracle and the whole zero has to be re-derived. States \
+         seen: {states:?}"
+    );
+    // The two-sided half: the walk above must really be finding states, or the
+    // assertion is over an empty map and says nothing.
+    assert!(
+        states.get("RUNNING").copied().unwrap_or(0) > 1000 && states.contains_key("CANCELLED"),
+        "the state walk found nothing to speak of, so the `QUEUED` assertion \
+         above was vacuous: {states:?}"
+    );
+
+    let mut cancelled: Vec<String> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let trace = Trace::from(entry);
+        let mut stack: Vec<&Trace> = vec![&trace];
+        let mut saw = false;
+        while let Some(t) = stack.pop() {
+            if t.execution.iter().any(|s| s == "CANCELLED") {
+                saw = true;
+            }
+            for run in &t.runs {
+                if run.state.iter().any(|s| s == "CANCELLED")
+                    || run.attempts.iter().flatten().any(|s| s == "CANCELLED")
+                {
+                    saw = true;
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if saw {
+            cancelled.push(entry.id.clone());
+        }
+    }
+
+    cancelled.sort();
+    assert_eq!(
+        cancelled,
+        [
+            "valids/exit-cancelled",
+            "valids/flow-concurrency-sla-assert-cancel",
+            "valids/sla-execution-condition",
+        ],
+        "every golden entry whose trace holds CANCELLED, by name. \
+         `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
+         counts them (3); this says WHICH, which is the whole question"
+    );
+
+    // The positive half: each of the three declares a CANCEL-behaviour producer
+    // that is not a concurrency limit.
+    for id in &cancelled {
+        let source = corpus_source(id);
+        let sla_cancel = source.contains("\nsla:") && source.contains("behavior: CANCEL");
+        let exit_cancel = source.contains("io.kestra.plugin.core.execution.Exit")
+            && source.contains("state: CANCELLED");
+        assert!(
+            sla_cancel || exit_cancel,
+            "{id}: holds a CANCELLED and declares neither an `sla:` with \
+             `behavior: CANCEL` nor an `Exit` with `state: CANCELLED`. The \
+             attribution has moved and every table naming an owner for this \
+             state must move with it"
+        );
+    }
+    assert_eq!(
+        cancelled
+            .iter()
+            .filter(|id| corpus_source(id).contains("\nsla:"))
+            .count(),
+        2,
+        "two of the three are an `sla:`'s; the third is `valids/exit-cancelled`, \
+         an `ExecutionUpdatableTask`. Counted so that a corpus in which all \
+         three became one construct's could not pass the loop above unnoticed"
+    );
+
+    // The control, and the reason the zero is a measurement: `behavior: CANCEL`
+    // is the only `concurrency:` setting that can cancel anything. Both flows
+    // that write it are named, so this can never silently become an empty loop.
+    //
+    // **The population here is DECLARERS, and the class the control argues
+    // about is "executions a CANCEL limit could have cancelled".** Those are
+    // not the same set, and two corpus entries sit outside the scan below --
+    // **for two DIFFERENT reasons, which the wording this comment carried
+    // until W8 Task 1 fix round 4 merged into one by saying both "sit in the
+    // gap":**
+    //
+    // * `valids/flow-concurrency-subflow` runs a `Subflow` of
+    //   `valids/flow-concurrency-cancel`, so a SECOND execution runs under
+    //   that CANCEL limit while declaring none itself (golden
+    //   `CREATED RUNNING SUCCESS`, not baselined). It is in the gap of the
+    //   class named above, exactly.
+    // * `valids/trigger-flow-listener-with-concurrency-limit` listens on
+    //   `trigger-flow-with-concurrency-limit`'s `QUEUED`/`RUNNING`/`SUCCESS`.
+    //   That flow declares **`behavior: QUEUE`**, not `CANCEL`, so the
+    //   listener is **not** in the gap of "executions a CANCEL limit could
+    //   have cancelled" -- no CANCEL limit is anywhere near it. It is in the
+    //   gap of a wider class, "executions related to a limit", and it earns
+    //   its place in this comment as the `QUEUED` witness, which is what the
+    //   sentence below already says it is.
+    //
+    // The wording came verbatim from the review that raised this, so it is a
+    // conflation adopted rather than one invented -- and adopting a sentence
+    // without re-deriving it is the error this task has recorded six times.
+    //
+    // Neither entry would be seen by the scan below. **The conclusion survives
+    // because it does not rest on this scan**: the first assertion above pins
+    // the whole `CANCELLED` set by name, over every entry, so a cancel landing
+    // on a non-declarer would have been caught there. The two are named here so
+    // the gap is a known one rather than an unexamined one -- and the listener
+    // is a second witness for the `QUEUED` zero, since the corpus contains a
+    // trigger that watches for `QUEUED` and never saw one.
+    let mut declarers: Vec<String> = Vec::new();
+    let mut cancel_limits: Vec<String> = Vec::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let source = corpus_source(&entry.id);
+        if !source.contains("\nconcurrency:") {
+            continue;
+        }
+        declarers.push(entry.id.clone());
+        if source.contains("behavior: CANCEL") && !source.contains("\nsla:") {
+            cancel_limits.push(entry.id.clone());
+            assert!(
+                !cancelled.contains(&entry.id),
+                "{}: declares `concurrency: {{behavior: CANCEL}}` AND holds a \
+                 CANCELLED. This corpus can no longer tell a limit's cancel \
+                 from an `sla:`'s, and the attribution must be re-derived by \
+                 hand",
+                entry.id
+            );
+        }
+    }
+    declarers.sort();
+    cancel_limits.sort();
+    assert_eq!(
+        cancel_limits,
+        [
+            "valids/flow-concurrency-cancel",
+            "valids/flow-concurrency-cancel-pause"
+        ],
+        "the control's own population, named so it cannot silently become \
+         empty: two comparable golden entries declare a limit whose behaviour \
+         is CANCEL, and neither cancels. `valids/flow-concurrency-cancel`'s \
+         whole execution history is `CREATED RUNNING SUCCESS`"
+    );
+
+    // The third leg: **10** of the 13 declarers are not baselined at all, which
+    // by the ratchet's other direction means they MATCH with nothing
+    // implemented. It was 7 through W8 Task 2; two moved at W8 Task 3
+    // (`valids/flow-concurrency-cancel-pause` and `-queue-pause`, flows whose
+    // entire task list is the `Pause`, so their `concurrency:` has nothing to
+    // contend with) and the tenth is W8 Task 6's.
+    //
+    // **The tenth is the strongest row this leg has ever had**, and it is worth
+    // naming rather than counting: `valids/flow-concurrency-sla-assert-cancel`
+    // declares `concurrency: {behavior: QUEUE, limit: 1}` AND ends `CANCELLED`,
+    // which is the exact shape a reader would attribute to the limit. It banks
+    // in the commit that implements `sla:` and NOTHING about `concurrency:` --
+    // so the entry's `CANCELLED` is now reproduced, by name, from the other
+    // construct. That is a positive measurement where the rest of this test is
+    // an absence.
+    let baseline = baseline();
+    let matching: Vec<&String> = declarers
+        .iter()
+        .filter(|id| !baseline.contains(*id))
+        .collect();
+    assert_eq!(
+        (declarers.len(), matching.len()),
+        (13, 10),
+        "13 comparable entries declare a flow `concurrency:` and 10 of them \
+         already match, which is what makes `reaches 0` a control rather than \
+         an assertion about an unimplemented construct: {matching:?}"
+    );
+    assert!(
+        matching
+            .iter()
+            .any(|id| { id.as_str() == "valids/flow-concurrency-sla-assert-cancel" }),
+        "the tenth is the one that carries a CANCELLED, and it is the reason \
+         this leg is a measurement rather than an absence -- see the comment \
+         above. If it leaves this set, the argument that the golden's CANCELLED \
+         is the `sla:`'s has lost its positive half"
+    );
+    // **The contending flow is not itself a declarer, and asserting that it was
+    // is how this guard first failed.** `valids/flow-concurrency-parallel-
+    // subflow-kill` writes no `concurrency:` at all: its `Parallel` starts two
+    // `Subflow`s of `-child`, and it is `-child` that carries the limit. The
+    // pair is asserted as a pair for that reason -- a scan of declarers alone
+    // cannot see the only contention this corpus creates.
+    assert!(
+        matching.contains(&&"valids/flow-concurrency-parallel-subflow-kill-child".to_string()),
+        "the corpus's ONLY limited-and-contended flow, banked by W6 Task 3"
+    );
+    let contender = "valids/flow-concurrency-parallel-subflow-kill";
+    assert!(
+        !corpus_source(contender).contains("\nconcurrency:")
+            && corpus_source(contender).contains("io.kestra.plugin.core.flow.Parallel")
+            && !baseline.contains(contender),
+        "the flow that CREATES the contention -- two `Subflow`s of `-child` \
+         from one `Parallel`, so `limit: 1` really does fire -- declares no \
+         limit of its own and is banked. It matches anyway, because what QUEUE \
+         changes (when the second child execution starts) is in no compared \
+         field: its three `order` pairs are all `overlapping` and its \
+         `spawned` is empty"
+    );
+
+    println!(
+        "CANCELLED: {cancelled:?}; concurrency declarers: {}, already matching: {}",
+        declarers.len(),
+        matching.len()
     );
 }
 
@@ -5010,10 +6156,14 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         //
         // The remaining 10 are all held by something else, and lowering the
         // number instead would have kept six of them attributed to a construct
-        // that works. Four are absorbed by rows that stayed (`flow
-        // concurrency:` once, `Loop` once, `AllowFailure` twice); the other six
-        // are named one by one in `UNATTRIBUTED` below, which is where the
-        // honest attribution for each of them lives.
+        // that works. **Three** are absorbed by rows that stayed (`Loop` once,
+        // `AllowFailure` twice) and the other **seven** are named one by one in
+        // `UNATTRIBUTED` below, which is where the honest attribution for each
+        // of them lives. This sentence said "four" and "six" and named `flow
+        // concurrency:` as the fourth absorber; W8 Task 1 deleted that row for
+        // being an attribution to a construct that holds nothing, and its one
+        // entry -- `valids/flow-concurrency-sla-fail-parent` -- became the
+        // seventh name below. The fourth absorber was itself the misattribution.
         ("finally:", 16, &["finally:"]),
         (
             "ExecutionUpdatableTask",
@@ -5027,22 +6177,44 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         ),
         (
             "AllowFailure / allowFailure:",
-            12,
+            5,
             &[
                 "io.kestra.plugin.core.flow.AllowFailure",
                 "core.allowfailure",
                 "allowFailure: true",
             ],
         ),
+        // **12 through W8 Task 2, 4 through W8 Task 4, 3 now.** W8 Task 3
+        // banked eight and the three that remain are held by three DIFFERENT
+        // properties of the construct rather than by the wait:
+        // `pause-behavior` by `behavior:`, `pause_on_pause` by `onPause:`, and
+        // `pause-errors-finally-after-execution` by `errors:`/`finally:`/
+        // `afterExecution:`. The fourth was `pause-timeout-allow-failure`, held
+        // by `allowFailure:` turning FAILED into a `WARNING` `RunState` cannot
+        // hold -- which was the `AllowFailure` row's cause and not this one's,
+        // and was counted here only because this table attributes by
+        // declaration. **W8 Task 5 supplied the variant and banked it**, so the
+        // row this one over-claimed is gone rather than argued about.
+        // `oracle-exec/baseline.txt` names all three with what holds each.
         (
             "Pause",
-            12,
+            3,
             &["io.kestra.plugin.core.flow.Pause", "core.pause"],
         ),
         ("afterExecution:", 10, &["afterExecution:"]),
+        // **9 through W8 Task 3; 8 since W8 Task 4 banked
+        // `valids/waitfor-nested`.** The eight that remain are not held by the
+        // construct, and `oracle-exec/baseline.txt` names what holds each: six
+        // by an `io.kestra.plugin.core.output.OutputValues` child this crate
+        // ships no handler for, one by a renderer divergence
+        // (`{{ outputs.loop.iterationCount < "5" }}` -- Pebble throws on a
+        // relational operator against a quoted operand and minijinja answers),
+        // and one by `checkFrequency.maxDuration`, whose golden iteration count
+        // carries the artifact's delay-poller latency. This table attributes by
+        // DECLARATION, so all eight still count here.
         (
             "LoopUntil / WaitFor",
-            9,
+            8,
             &[
                 "io.kestra.plugin.core.flow.LoopUntil",
                 "io.kestra.plugin.core.flow.WaitFor",
@@ -5050,11 +6222,46 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
                 "core.waitfor",
             ],
         ),
-        // 7 through W5; `valids/flow-concurrency-parallel-subflow-kill-child`
-        // banked at W6 Task 3, because what its `concurrency: {behavior:
-        // QUEUE}` changes is WHEN its own child starts and its trace does not
-        // record that.
-        ("flow concurrency:", 6, &["\nconcurrency:"]),
+        // **`flow concurrency:` was a row here with 7 through W5 and 6 through
+        // W6, and W8 Task 1 REMOVES it rather than lowering it to 0.** Fourth
+        // run of the same rule, and the third time the trigger was a state
+        // credited to the wrong construct: the row's label in
+        // `oracle-exec/README.md` was `concurrency:` -> `CANCELLED`, and
+        // `the_cancelled_state_never_comes_from_a_concurrency_limit` derives
+        // that `CANCELLED` occurs in exactly three golden entries of which
+        // **two are an `sla:`'s and one is an `Exit`'s**. Not one is a limit's.
+        // That is `disabled:`/`SKIPPED` again: a row looks reachable because
+        // the state really is there, for another reason.
+        //
+        // The row is deleted rather than lowered because a row attributes an
+        // entry to the construct that HOLDS it, and this one holds nothing --
+        // five of its six are counted, unmoved, by rows above (`Pause` twice,
+        // `afterExecution:` twice, `sla:` once) and the sixth is
+        // `valids/flow-concurrency-sla-fail-parent`, which moves to
+        // `UNATTRIBUTED` below with the cause that really holds it: an `sla:`
+        // in its CHILD. That is exactly where `valids/sla-parent-flow` already
+        // sits, for exactly that reason.
+        //
+        // **And the zero has a mechanism rather than being a zero.**
+        // `oracle-exec/harvest.py`'s trace loop is strictly serial -- `for i,
+        // rec in enumerate(wanted, 1): execute_once(...)`, each awaited to
+        // termination -- so a `limit: 1` is never contended by the harness.
+        // That alone would not settle it, because a single flow can contend
+        // with itself: `valids/flow-concurrency-parallel-subflow-kill` starts
+        // two `Subflow`s of the same limited flow from one `Parallel`, and it
+        // is the corpus's ONLY contended population. **W6 Task 3 banked it**,
+        // along with `-child` and `valids/flow-concurrency-subflow`, and its
+        // golden says why the bank was possible: its three `order` pairs are
+        // all `overlapping` and its `spawned` is empty, so what `QUEUE` changes
+        // -- WHEN the second child execution starts -- lands in no compared
+        // field. The third leg is a control: **10 of the 13 corpus declarers
+        // already MATCH** with nothing implemented -- 7 through W8 Task 2, the
+        // two `-pause` ones W8 Task 3 banked, and
+        // `valids/flow-concurrency-sla-assert-cancel`, which W8 Task 6 banked
+        // by implementing `sla:` and nothing else. That tenth is the strongest
+        // row the leg has: it is a `QUEUE`-limited flow whose golden ends
+        // CANCELLED, and the CANCELLED is now reproduced from the other
+        // construct by name.
         // `disabled: true` was a row here through Task 8 with 6 entries, and
         // `runIf:` was a row with 7 through W3a's final review. Both are
         // implemented now, so neither holds anything and a row for either would
@@ -5069,7 +6276,23 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // which is what the counts here assert. `afterExecution:`,
         // `ExecutionUpdatableTask`, `finally:`, `Subflow` and `WorkingDirectory`
         // are the five, and every one of them is unclaimed or opaque today.
-        ("sla:", 5, &["\nsla:"]),
+        // **5 until W8 Task 6, 3 now**, and the two that left are the two
+        // `EXECUTION_ASSERTION`s (`valids/flow-concurrency-sla-assert-cancel`,
+        // `valids/sla-execution-condition`). The three left are the
+        // `MAX_DURATION`s, which no implementation can bank under this harness
+        // -- `Sleep::capped(Duration::ZERO)` leaves no interval for
+        // `MaxDurationSLA.evaluate` to measure. See `oracle-exec/README.md`'s
+        // fifth blindness mechanism.
+        //
+        // **This row's count is a DECLARER count and the CAUSE count is
+        // higher**, which is the asymmetry W8 Task 6 records: two more
+        // baselined entries are held by an `sla:` in a DIFFERENT flow
+        // (`valids/sla-parent-flow` and
+        // `valids/flow-concurrency-sla-fail-parent`, each calling a `Subflow`
+        // whose target declares the `MAX_DURATION`), and this needle greps one
+        // flow's own source, so it structurally cannot see them. Both are in
+        // `UNATTRIBUTED` below, by name, with that cause.
+        ("sla:", 3, &["\nsla:"]),
         // **The `CREATE_NEW_EXECUTION retry` row was here with 4 and is
         // removed by W6 Task 4**, under the same rule that removed
         // `disabled: true` and `runIf:`: the construct is implemented
@@ -5098,8 +6321,17 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
     // Every baselined entry that declares none of them, with what holds it.
     // Sorted, because the derivation walks `baseline()` -- a `BTreeSet`.
     //
-    // **There are 29, and this comment said "eleven of the thirteen" until W3b
-    // Task 7's sweep.** W3b Task 5 added sixteen rows here in one commit and
+    // **There are 36, this comment said 29, and the paragraph below it says a
+    // number here would be a third place to be wrong. Both of those were true
+    // at once until W8 Task 1's sweep.** The 29 went stale at W6 and nothing
+    // caught it, because the derivation compares the LIST and never the count
+    // -- which is precisely the argument the paragraph below makes for not
+    // writing one. It is kept, corrected, only because the sentence it opens is
+    // a history that has earned its place; the derivation remains the authority
+    // and this number is not read by anything.
+    //
+    // This comment said "eleven of the thirteen" until W3b
+    // Task 7's sweep. W3b Task 5 added sixteen rows here in one commit and
     // left the sentence above them describing the list before it did -- the
     // same stale-twin shape the README carried, one file over. There were
     // fourteen before that: `valids/switch-impossible` is banked by the
@@ -5156,6 +6388,17 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/sla-parent-flow",
             "`sla:` in its child `valids/sla-subflow`, which egret does not              implement, so the child SUCCEEDS and the parent transmits it",
+        ),
+        // **Moved here by W8 Task 1, from the `flow concurrency:` row that was
+        // deleted above.** It declares a `concurrency:` and that is not what
+        // holds it: its golden is `CREATED RUNNING FAILED`, never `CANCELLED`,
+        // and the FAILED comes from `MAX_DURATION` in its child. Identical in
+        // shape and cause to `valids/sla-parent-flow` two entries up, which is
+        // why it sits beside it -- a per-flow needle over `sla:` structurally
+        // cannot see either of them.
+        (
+            "valids/flow-concurrency-sla-fail-parent",
+            "`sla:` in its child `valids/flow-concurrency-sla-fail-child`,              which egret does not implement, so the child SUCCEEDS and              `transmitFailed` carries a SUCCESS Kestra never had up to it",
         ),
         (
             "valids/subflow-secret-output-parent",
@@ -5408,9 +6651,12 @@ fn the_step_bound_dominates_the_widest_golden_entry() {
 ///    path and it returns the budget's outcome; the refusal goes to `tracing`,
 ///    and `golden.json` holds no failure message in any case.
 ///
-/// The five "kill"-named ids are still enumerated, because the spec's number
-/// came from them and a reader will look: none of them declares a `timeout:` on
-/// anything, so none is reachable by leg 1 either.
+/// The "kill"-named ids are still enumerated, because the spec's number came
+/// from them and a reader will look: none of them declares a `timeout:` on
+/// anything, so none is reachable by leg 1 either. **The list is a moving one
+/// and that is the point** -- five at W5, three at W8 Task 2, two now -- and
+/// every departure has been an entry banked for a reason that had nothing to do
+/// with killing anything. See the assertion below for each.
 #[tokio::test]
 async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_not_its_population() {
     let baseline = baseline();
@@ -5426,14 +6672,17 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
         vec![
             "valids/exit-killed".to_string(),
             "valids/flow-concurrency-queue-killed-after-execution".to_string(),
-            "valids/pause-kill-delay".to_string(),
         ],
-        "the baselined ids whose name contains `kill`. It was FIVE through W5; \
-         W6 Task 3 banked two of them -- `valids/flow-concurrency-parallel-subflow-kill` \
-         and its `-child` -- and neither is a kill at all: the name is the \
-         Java test's, the flows declare `concurrency:` with `behavior: QUEUE`, and \
-         what QUEUE changes is WHEN a child starts, which a parent's trace does \
-         not record"
+        "the baselined ids whose name contains `kill`. It was FIVE through W5, \
+         THREE through W8 Task 2 and is TWO now, and not one departure was a \
+         kill. W6 Task 3 banked `valids/flow-concurrency-parallel-subflow-kill` \
+         and its `-child`: the name is the Java test's, the flows declare \
+         `concurrency:` with `behavior: QUEUE`, and what QUEUE changes is WHEN \
+         a child starts, which a parent's trace does not record. W8 Task 3 \
+         banked `valids/pause-kill-delay`, which is a bare `Pause` with \
+         `pauseDuration: PT1M` and no `kill` anywhere in it -- it is named for \
+         a Java test that kills the execution from OUTSIDE, which a standalone \
+         harvest never does, so its golden is the pause simply elapsing"
     );
 
     // Not one of them declares a `timeout:` anywhere, so leg 1 excludes every
@@ -5536,9 +6785,20 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
 /// direction, and that is a property of the corpus rather than of the fix.
 /// Instrumenting `worker::timeout::guard` and running the whole 294-entry
 /// oracle agreed from the other side — the budget was applied exactly **4**
-/// times (`1s`, `1s`, `250ms`, `3600s`, i.e. these four declarations) and
+/// times (`1s`, `1s`, `250ms`, `3600s`, i.e. those four declarations) and
 /// **expired 0** times, with `tests/worker.rs`'s own property as the positive
 /// control for the instrument on the same build.
+///
+/// **That measurement was taken at W4 and W8 Task 3 invalidates three quarters
+/// of it, which is worth stating rather than leaving to a reader to notice.**
+/// Three of the four applications were `Pause`es, and a `Pause` is a
+/// `TaskKind::Pause` now: `claim::persist` writes it no `type_id`, the claim's
+/// `WHERE type_id IS NOT NULL` never takes it, and `cancel::guarded` is
+/// therefore never reached for one. The budget is applied **once** on this
+/// build, to `valids/full`'s hour-long `core.log.Log`. The figure has not been
+/// re-instrumented here — this test measures DECLARATIONS, not applications —
+/// so it is corrected as a claim rather than restated as a new measurement, and
+/// whoever needs the application count must instrument it again.
 #[test]
 fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet() {
     fn walk(task: &egret_workflow::models::Task, out: &mut Vec<(String, String, String)>) {
@@ -5591,11 +6851,17 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (4, 123, 127),
+        (2, 107, 109),
         "the baselined population that declares a `timeout:`, and the rest. It \
-         was (4, 139, 143) through W5: W6 Task 3 banked 12 and W6 Task 4 banked \
-         4, and not one of the 16 declares a `timeout:` anywhere, so the \
-         numerator has not moved through either: {:#?}",
+         was (4, 139, 143) through W5 and (4, 123, 127) through W8 Task 2: W6 \
+         Task 3 banked 12 and W6 Task 4 banked 4, and not one of the 16 \
+         declares a `timeout:` anywhere, so the numerator did not move through \
+         either. **W8 Task 3 moved the numerator for the first time**, by \
+         banking `valids/pause-timeout` -- a `timeout:` on a `Pause` is \
+         `advance()`'s, not the worker's, and this task is where it started \
+         being enforced. W8 Task 4's bank moved the DENOMINATOR only: \
+         `valids/waitfor-nested` declares no `timeout:` anywhere, and so did \
+         W8 Task 5's seven and W8 Task 6's two: {:#?}",
         declaring
     );
     assert_eq!(
@@ -5603,10 +6869,12 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
         vec![
             "valids/full".to_string(),
             "valids/pause-errors-finally-after-execution".to_string(),
-            "valids/pause-timeout".to_string(),
-            "valids/pause-timeout-allow-failure".to_string(),
         ],
-        "and they are these four, by name"
+        "and they are these TWO, by name. `valids/pause-timeout` was the fourth \
+         and W8 Task 3 banked it; `valids/pause-timeout-allow-failure` was the \
+         third and W8 Task 5 banked it, which is the second time a `timeout:` \
+         has left this list and the first time `allowFailure:` decided what the \
+         bound's terminal was"
     );
 
     // **Which of them a WORKER budget could ever apply to**, split by the
@@ -5620,11 +6888,14 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     assert_eq!(
         by_type,
         BTreeMap::from([
-            ("io.kestra.plugin.core.flow.Pause".to_string(), 3),
+            ("io.kestra.plugin.core.flow.Pause".to_string(), 1),
             ("io.kestra.plugin.core.log.Log".to_string(), 1),
         ]),
-        "three `Pause`es — a flowable's timeout, which is `advance()`'s and \
-         which Kestra's worker ignores — and one runnable"
+        "ONE `Pause` — a flowable's timeout, which is `advance()`'s and which \
+         Kestra's worker ignores — and one runnable. It was three until W8 Task \
+         3 banked `valids/pause-timeout` by ENFORCING one of them, and two \
+         until W8 Task 5 banked `valids/pause-timeout-allow-failure` by \
+         enforcing the same bound with `allowFailure:` deciding its terminal"
     );
 
     // The runnable one, and the budget it asks for. `Handlers` is the registry
@@ -5785,7 +7056,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         .partition(|id| baseline.contains(id.as_str()));
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
-        (10, 15, 25),
+        (8, 17, 25),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -5801,13 +7072,15 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/retry-success",
             "valids/retry-with-flowable-errors",
             "valids/subflow-parent-retry",
-            "valids/task-allow-failure-runnable",
-            "valids/task-allow-warning-runnable",
         ],
-        "the ten, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
-         and W6 Task 4 banked the four `retry-new-execution-*` entries out of \
-         the list -- which is the whole of the difference between fourteen and \
-         ten"
+        "the EIGHT, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
+         W6 Task 4 banked the four `retry-new-execution-*` entries out of the \
+         list -- which is the whole of the difference between fourteen and ten \
+         -- and W8 Task 5 took BOTH `valids/task-allow-{{warning,failure}}-runnable` \
+         out of it, the first `retry:` entries a bank has moved to the matching \
+         side since. Their three attempts all still fail; what moved is the \
+         run's own terminal after the last of them, which is exactly why the \
+         softening is gated on `shouldBeRetried`"
     );
 
     // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
@@ -5824,7 +7097,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (0, 10, 10),
+        (0, 8, 8),
         "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
          because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
          assertion under this used to name them; the successor is the matching \
@@ -5851,11 +7124,15 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             matching_new_execution.len(),
             matching.len()
         ),
-        (11, 4, 15),
+        (13, 4, 17),
         "the matching half, split the same way. It was (11, 0, 11): every \
          matching entry declared the behaviour that writes a `not_before`, and \
          W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \
-         is the FIRST time the ratchet speaks for that behaviour at all. \
+         is the FIRST time the ratchet speaks for that behaviour at all. W8 \
+         Task 5 moved a twelfth and a thirteenth `RETRY_FAILED_TASK` one \
+         across, `valids/task-allow-{{warning,failure}}-runnable`, whose `retry:` \
+         is exactly what gates their `allowFailure:` -- the first two failures \
+         are retried and only the third is softened. \
          failed_task: {matching_failed_task:?}; new_execution: \
          {matching_new_execution:?}"
     );
@@ -5993,6 +7270,188 @@ fn no_subflow_run_in_the_golden_passes_through_submitted() {
          once), which is why `planning_the_loop_removed_forty_spurious_submitted_emissions` \
          -- whose reconstruction excludes a loop body, because Task 5's builder \
          had no plan for one -- counts 22 and not 25"
+    );
+}
+
+/// **The same measurement for `Pause`, and it is W8 Task 3's reason for
+/// giving it a `TaskKind` of its own: no `Pause` run in the golden carries
+/// `SUBMITTED` either.**
+///
+/// A `Pause` planned [`TaskKind::Runnable`] gets a `SUBMITTED` from
+/// `flowable::start` and a `type_id` from `claim::persist`, and each alone
+/// mismatches every entry this task banks — the first on the run history, the
+/// second by making the run claimable so `Registry::run` refuses it and the
+/// execution stalls with no trace at all.
+///
+/// The population is asserted beside the property for the reason
+/// `no_subflow_run_in_the_golden_passes_through_submitted` asserts its own: a
+/// walk that reached no `Pause` run would satisfy the `SUBMITTED` half while
+/// measuring nothing, and this crate has paid for that shape more than once.
+#[test]
+fn no_pause_run_in_the_golden_passes_through_submitted() {
+    fn pause_ids(source: &str) -> BTreeSet<String> {
+        fn walk(t: &egret_workflow::models::Task, out: &mut BTreeSet<String>) {
+            if matches!(t.kind, egret_workflow::models::TaskKind::Pause(_)) {
+                out.insert(t.id.clone());
+            }
+            for c in t.children().into_iter().chain(t.error_children()) {
+                walk(c, out);
+            }
+        }
+        let mut out = BTreeSet::new();
+        let Ok(flow) = egret_workflow::spec::parse(source) else {
+            return out;
+        };
+        for list in [
+            &flow.tasks,
+            &flow.errors,
+            &flow.finally_,
+            &flow.after_execution,
+        ] {
+            for t in list {
+                walk(t, &mut out);
+            }
+        }
+        out
+    }
+
+    let (mut runs, mut entries, mut paused) = (0usize, 0usize, 0usize);
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let ids = pause_ids(&corpus_source(&entry.id));
+        if ids.is_empty() {
+            continue;
+        }
+        let trace = Trace::from(entry);
+        let mut here = 0usize;
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for run in &t.runs {
+                if !ids.contains(&run.task) {
+                    continue;
+                }
+                here += 1;
+                assert!(
+                    !run.state.iter().any(|s| s == "SUBMITTED"),
+                    "{}: `Pause` run {:?} reads {:?} in the golden. If this ever \
+                     carries SUBMITTED, `TaskKind::Pause` is the wrong shape and \
+                     `Pause` belongs back among the opaque kinds",
+                    entry.id,
+                    run.task,
+                    run.state
+                );
+                assert!(
+                    !run.attempts.iter().flatten().any(|s| s == "PAUSED"),
+                    "{}: `Pause` attempt of {:?} carries PAUSED, which is the one \
+                     thing `Command::PauseRun` exists to prevent",
+                    entry.id,
+                    run.task
+                );
+                if run.state.iter().any(|s| s == "PAUSED") {
+                    paused += 1;
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if here > 0 {
+            entries += 1;
+        }
+        runs += here;
+    }
+    assert_eq!(
+        (runs, paused, entries),
+        (12, 12, 12),
+        "the population this claim rests on: twelve golden entries declare a \
+         `Pause`, each contributes exactly one `Pause` run, and every one of the \
+         twelve reaches PAUSED. The three numbers are asserted together because \
+         they can only agree by being right — a walk that found no runs gives \
+         (0, 0, 0) and a `PAUSED` count below the run count would mean a golden \
+         `Pause` that never paused"
+    );
+}
+
+/// **The `Pause`es the oracle is structurally blind to, named and counted.**
+///
+/// Seven corpus flows declare a `Pause` bounded by neither `pauseDuration:` nor
+/// `timeout:`. On the pinned artifact each one "reached PAUSED and stayed there
+/// for the full 90s" — `corpus.json` says so in as many words, once per flow —
+/// so none of them is in `golden.json` and **no line of `baseline.txt` can move
+/// because of what egret does with an unbounded pause, in either direction**.
+///
+/// That is the shape of the over-acceptance W8 Task 3 most risks: a `Pause`
+/// that resumed itself after some default would leave the ratchet exactly where
+/// it is. `executor::tests::an_unbounded_pause_never_resumes_itself` is the
+/// only instrument that can see it; this test is what says so with a running
+/// program instead of a sentence, and it fails the moment one of the seven
+/// acquires a bound or a golden entry.
+#[test]
+fn the_unbounded_pauses_are_absent_from_the_golden_and_the_ratchet_cannot_see_them() {
+    fn unbounded(source: &str) -> bool {
+        fn walk(t: &egret_workflow::models::Task) -> bool {
+            let here = match &t.kind {
+                egret_workflow::models::TaskKind::Pause(p) => {
+                    p.pause_duration.is_none() && t.timeout.is_none()
+                }
+                _ => false,
+            };
+            here || t.children().into_iter().chain(t.error_children()).any(walk)
+        }
+        let Ok(flow) = egret_workflow::spec::parse(source) else {
+            return false;
+        };
+        flow.tasks
+            .iter()
+            .chain(&flow.errors)
+            .chain(&flow.finally_)
+            .chain(&flow.after_execution)
+            .any(walk)
+    }
+
+    let found: Vec<String> = corpus()
+        .iter()
+        .filter(|e| unbounded(&corpus_source(&e.id)))
+        .map(|e| e.id.clone())
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "valids/follow-dependencies-partial-parent",
+            "valids/loop-pause",
+            "valids/pause-test",
+            "valids/pause_no_tasks",
+            "valids/pause_on_resume",
+            "valids/pause_on_resume_optional",
+            "valids/resume-validate",
+        ],
+        "the seven corpus flows whose `Pause` has no bound at all"
+    );
+
+    let in_golden: BTreeSet<String> = golden().iter().map(|e| e.id.clone()).collect();
+    let comparable: Vec<&String> = found.iter().filter(|id| in_golden.contains(*id)).collect();
+    assert!(
+        comparable.is_empty(),
+        "an unbounded `Pause` flow has a golden entry ({comparable:?}), so the \
+         oracle CAN now see what egret does with one — which is good news and \
+         makes every claim in `flowable::pause`'s header about this blindness \
+         stale"
+    );
+    // The control, so the emptiness above is not the emptiness of a broken
+    // walk: the BOUNDED pauses are in the golden, all twelve of them.
+    let bounded_in_golden = golden()
+        .iter()
+        .filter(|e| {
+            e.verdict == Verdict::Runs
+                && corpus_source(&e.id).contains("core.flow.Pause")
+                && !found.contains(&e.id)
+        })
+        .count();
+    assert_eq!(
+        bounded_in_golden, 12,
+        "twelve `Pause` entries ARE comparable; a zero here would mean the \
+         emptiness above proves nothing. `Verdict::Runs` is part of the filter \
+         and the first draft left it out, which counted THIRTEEN: \
+         `invalids/workingdirectory-invalid` declares a `Pause` too and is a \
+         golden entry, but it is a REFUSAL with no trace at all, so counting it \
+         among `Pause` traces would be counting a flow nobody ran"
     );
 }
 
@@ -6239,5 +7698,535 @@ fn the_corpus_subflow_graph_has_no_cycle_and_no_deep_chain() {
          what overflowed a stack when the cycle was measured (it did so before \
          16 links), so nothing in the corpus reaches the hazard \
          `worker::subflow`'s cycle guard leaves open"
+    );
+}
+
+// --------------------------------------------------------------------------
+// W8 Task 6: the `MAX_DURATION` refusal, as a running program
+// --------------------------------------------------------------------------
+
+/// The three corpus flows whose own `sla:` is a `MAX_DURATION`, with the bound
+/// each declares in milliseconds.
+///
+/// Derived-with-a-literal on purpose: the ids and the bounds are read back out
+/// of `corpus/` by [`the_max_duration_declarations_are_exactly_these`], so this
+/// table cannot silently disagree with the YAML, and it is spelled out here so
+/// a reader of the refusal has the numbers in front of them.
+const MAX_DURATION_FLOWS: &[(&str, i64)] = &[
+    ("valids/sla-max-duration-fail", 500),
+    ("valids/sla-subflow", 1_000),
+    ("valids/flow-concurrency-sla-fail-child", 3_000),
+    // `valids/sla-max-duration-ok`'s bound is PT10S over a `PT0.5S` sleep. It
+    // is the CONTROL and it is deliberately in this list: it is the one
+    // `MAX_DURATION` flow that MATCHES, and it matches for a reason that has
+    // nothing to do with the SLA -- it would match under a correct
+    // implementation and under none at all, so it discriminates nothing. Having
+    // it here is what stops "the three baselined ones" being read as "the
+    // `MAX_DURATION` population".
+    ("valids/sla-max-duration-ok", 10_000),
+];
+
+/// **The `MAX_DURATION` population is read off the corpus, not remembered.**
+///
+/// Four flows in 345 declare one, and the two `*-parent` entries that are ALSO
+/// held by a `MAX_DURATION` declare no `sla:` at all — which is the asymmetry
+/// [`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`] measures
+/// and this test is the other half of: a per-flow needle sees exactly these
+/// four and cannot see those two.
+#[test]
+fn the_max_duration_declarations_are_exactly_these() {
+    let mut found: Vec<(String, i64)> = Vec::new();
+    for entry in corpus() {
+        let source = corpus_source(&entry.id);
+        if !source.contains("type: MAX_DURATION") {
+            continue;
+        }
+        // `duration: PT…` on the line after, in any order relative to
+        // `behavior:`; the corpus writes both orders and a parser that assumed
+        // one would silently find three flows.
+        let iso = source
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("duration: ").map(str::to_string))
+            .unwrap_or_else(|| panic!("{} declares a MAX_DURATION with no duration:", entry.id));
+        let ms = iso_millis(&iso)
+            .unwrap_or_else(|| panic!("{}: {iso:?} is not an ISO-8601 duration", entry.id));
+        found.push((entry.id.clone(), ms));
+    }
+    found.sort();
+    let mut expected: Vec<(String, i64)> = MAX_DURATION_FLOWS
+        .iter()
+        .map(|(id, ms)| ((*id).to_string(), *ms))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "the corpus's whole `MAX_DURATION` population, with each bound read \
+         back out of the YAML. `MAX_DURATION_FLOWS` is what the refusal is \
+         stated against, so it must be derivable"
+    );
+    // The needle's blind spot, asserted rather than described: neither entry
+    // held by a MAX_DURATION *in another flow* is in the list above.
+    for parent in [
+        "valids/sla-parent-flow",
+        "valids/flow-concurrency-sla-fail-parent",
+    ] {
+        assert!(
+            !corpus_source(parent).contains("sla:"),
+            "{parent} is held by a `MAX_DURATION` and declares no `sla:` of its \
+             own -- that is why the DECLARER count (4) and the CAUSE count (5) \
+             differ, and why a per-flow grep is the wrong instrument for the \
+             second"
+        );
+        assert!(
+            baseline().contains(parent),
+            "{parent} is still baselined; if it banks, the cause count moves \
+             and this whole section has to be re-derived"
+        );
+    }
+}
+
+/// `PT…S` to milliseconds, for the three shapes the corpus writes
+/// (`PT0.5S`, `PT1S`, `PT3S`, `PT10S`). Deliberately tiny: a real ISO parser
+/// lives in `executor::parse_duration` and is not reachable from an integration
+/// test, and a wrong answer here fails
+/// [`the_max_duration_declarations_are_exactly_these`] loudly rather than
+/// quietly.
+fn iso_millis(iso: &str) -> Option<i64> {
+    let secs: f64 = iso.strip_prefix("PT")?.strip_suffix('S')?.parse().ok()?;
+    Some((secs * 1000.0).round() as i64)
+}
+
+/// **The `MAX_DURATION` window does not exist in this harness** — the
+/// measurement behind W8 Task 6's refusal, and the reason five golden entries
+/// are unbankable by any implementation **given this harness** (fix round 2's
+/// qualifier: uncapping `driver.rs`'s `Sleep` moves all five, so "whatsoever"
+/// promised more than the sentence below delivers).
+///
+/// # The claim, stated precisely enough to survive a reader who knows the clock
+/// moves
+///
+/// `MaxDurationSLA.evaluate` compares `Duration.between(execution.startDate,
+/// Instant.now())` against the bound, so it needs an interval in which the
+/// execution is **non-terminal** and **older than the bound**. Two facts about
+/// `oracle-exec/driver.rs` remove it:
+///
+/// 1. the registry is `Sleep::capped(Duration::ZERO)`, and `Sleep::run` is
+///    synchronous inside one `worker::tick` — so the only task these flows have
+///    reaches its terminal inside the tick that started it, and writes **no**
+///    `not_before_ms`;
+/// 2. `driver::pass_time` is the only thing in this harness that advances an
+///    execution's clock, and its query selects on `r.not_before_ms IS NOT NULL`
+///    — so with no deadline registered it returns `Ok(false)` the first time it
+///    is asked and the driver's loop breaks.
+///
+/// **The clock really does move in this harness**, which is why the first fact
+/// alone is not the answer: `pass_time` rewinds `executions.created_at` by
+/// `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline
+/// it is given. What these flows lack is a deadline for it to move *to*. The
+/// window is not entered late and not missed — there is no instant at which it
+/// could be evaluated.
+///
+/// # This is true of the FOUR DECLARERS, and the two parents have a different
+/// and stronger reason — W8 Task 6 fix round 1
+///
+/// Everything above and everything asserted below is measured over the four
+/// flows that **declare** a `MAX_DURATION`. `valids/sla-parent-flow` and
+/// `valids/flow-concurrency-sla-fail-parent` are not among them: they declare
+/// none, they are absent from the registrar control printed below, and the
+/// sentence *"no run of these flows is ever in flight across a step"* is
+/// **false** for them — a `Subflow` run necessarily spans steps, which is the
+/// whole of how it waits for its child. Generalising the four's measurement to
+/// all five was W8 Task 6's error and fix round 1's narrowing.
+///
+/// Their mechanism is asserted separately, in
+/// [`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`], and it is
+/// the better fact: `pass_time`'s `WITH RECURSIVE` walks
+/// `parent_execution_id`, a subflow child is linked by `trigger_execution_id`,
+/// and so the clock-advance walk **cannot reach the child at all** — which
+/// would hold even if the child registered a deadline.
+///
+/// # What is asserted, and why the zero is not asserted alone
+///
+/// The load-bearing assertion is a **zero** — no deadline is ever registered —
+/// and a zero is what a broken query returns too. So it is asserted beside a
+/// **control derived from the same query on the same rows**: the driven corpus
+/// contains flows that DO register a deadline, they are named, and the count is
+/// positive. A query that found nothing would fail on that half.
+#[tokio::test]
+async fn the_max_duration_window_does_not_exist_in_this_harness() {
+    // The corpus has already been driven, and every row it wrote is still
+    // there: `egret_side` TRUNCATEs once, inside its `OnceCell`, before the
+    // first entry runs. Awaiting it here is what orders this test after that.
+    let _ = egret_side().await;
+    let db = common::db().await.expect("the oracle needs DATABASE_URL");
+
+    let rows: Vec<(String, i64, i64, Option<f64>)> = sqlx::query_as(
+        "SELECT e.flow_key, \
+                count(*)::bigint AS runs, \
+                count(r.not_before_ms)::bigint AS deadlines, \
+                max(EXTRACT(EPOCH FROM (r.updated_at - e.created_at)) * 1000)::float8 \
+                  AS elapsed_ms \
+           FROM workflow.executions e \
+           JOIN workflow.task_runs r ON r.execution_id = e.id \
+          GROUP BY e.flow_key",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the deadline census");
+
+    let by_flow: BTreeMap<&str, (i64, i64, Option<f64>)> = rows
+        .iter()
+        .map(|(k, runs, deadlines, elapsed)| (k.as_str(), (*runs, *deadlines, *elapsed)))
+        .collect();
+
+    // ---- the control, first: the zero below has to be falsifiable ----------
+    let registrars: Vec<&str> = rows
+        .iter()
+        .filter(|(_, _, deadlines, _)| *deadlines > 0)
+        .map(|(k, ..)| k.as_str())
+        .collect();
+    println!(
+        "flows that registered at least one `not_before_ms` under the driver: \
+         {} of {} -- {registrars:?}",
+        registrars.len(),
+        rows.len()
+    );
+    assert!(
+        registrars.len() >= 5,
+        "the same query, over the same rows, must find flows that DO register a \
+         deadline -- otherwise the zeroes below are a broken query rather than a \
+         measurement. Found {registrars:?}"
+    );
+
+    // ---- the measurement ---------------------------------------------------
+    for (id, bound_ms) in MAX_DURATION_FLOWS {
+        let key = id.strip_prefix("valids/").expect("corpus ids are prefixed");
+        let (runs, deadlines, elapsed) = by_flow
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| panic!("{id} produced no task_runs at all"));
+        println!(
+            "{id}: bound {bound_ms} ms, {runs} run(s), {deadlines} deadline(s), \
+             elapsed at the last run write {elapsed:?} ms"
+        );
+        assert_eq!(
+            deadlines, 0,
+            "{id}: a capped `Sleep` registers no `not_before_ms`, so \
+             `driver::pass_time` has nothing to move the clock TO and returns \
+             `Ok(false)` on its first call. This is the whole of why the \
+             `MAX_DURATION` window does not exist -- not that it is missed"
+        );
+        let elapsed = elapsed.expect("a row that has runs has an elapsed");
+        assert!(
+            elapsed < *bound_ms as f64,
+            "{id}: the execution's last run row was written {elapsed} ms after \
+             the execution was created, and the bound is {bound_ms} ms. This is \
+             wall-clock rather than a logical clock, and the margin is two \
+             orders of magnitude on an idle machine -- if it ever fails, the \
+             answer is NOT to loosen it: it would mean the driver really did \
+             leave a window open and the refusal has to be re-derived"
+        );
+    }
+
+    // ---- and the run shape, which is the structural half -------------------
+    //
+    // "No run is ever in flight across a step" is what makes the elapsed figure
+    // above irrelevant to the answer rather than merely comfortable. A `Sleep`
+    // that reached PAUSED, or RETRYING, or was left RUNNING, would be a run the
+    // executor had to come back to -- and coming back is the only thing that
+    // puts a second evaluation point after the first.
+    let sleeps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT e.flow_key, r.history::text \
+           FROM workflow.executions e JOIN workflow.task_runs r ON r.execution_id = e.id \
+          WHERE r.task_id = 'sleep' AND e.flow_key = ANY($1) \
+          ORDER BY e.flow_key",
+    )
+    .bind(
+        MAX_DURATION_FLOWS
+            .iter()
+            .map(|(id, _)| id.trim_start_matches("valids/").to_string())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the sleep runs");
+    // **SIX, not four**, and the two extra are the evidence rather than noise:
+    // `sla-subflow` and `flow-concurrency-sla-fail-child` each ran TWICE in
+    // this corpus -- once as their own golden entry and once as the child
+    // `valids/sla-parent-flow` / `valids/flow-concurrency-sla-fail-parent`
+    // spawned. Both copies go straight through, which is the same fact one
+    // level down and is what
+    // `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`
+    // measures from the other side.
+    assert_eq!(
+        sleeps.len(),
+        6,
+        "one `sleep` run per `MAX_DURATION` flow, plus the second run of each \
+         of the two that are also a `Subflow` TARGET: {sleeps:?}"
+    );
+    for (flow, history) in &sleeps {
+        assert_eq!(
+            history, "[\"CREATED\", \"SUBMITTED\", \"RUNNING\", \"SUCCESS\"]",
+            "{flow}: the capped `Sleep` goes straight through. A `PAUSED` or a \
+             `RETRYING` here would be a run the executor comes back to, which \
+             is the only shape that gives this harness a second instant to \
+             evaluate an SLA at"
+        );
+    }
+}
+
+/// **The two `*-parent` entries are held one level down, and by a child that
+/// RAN** — W8 Task 6, and it is the measurement that keeps the refusal pinned
+/// to the right mechanism.
+///
+/// `valids/sla-parent-flow` and `valids/flow-concurrency-sla-fail-parent`
+/// declare no `sla:`. Each calls a `Subflow` whose target declares a
+/// `MAX_DURATION`, and on the artifact the child FAILED and the parent's run
+/// FAILED with it. egret's parent run SUCCEEDS.
+///
+/// **There are two ways to get a mismatch there and only one of them is the
+/// `sla:`.** The other is that the target does not resolve at all: `publish`
+/// refuses every corpus flow containing an `io.kestra.plugin.core.flow.Sleep`
+/// (the spec registry has no row for it), so both children are **draft-only**
+/// in `workflow.flows`, and a reader who stopped at the publish report would
+/// conclude the parent never spawned anything. That reading is wrong and the
+/// direction matters: `worker::subflow::spawn_one` FAILS the parent's run for
+/// an unresolvable target, which is the same direction as the golden and would
+/// have looked like the `sla:` working.
+///
+/// So this asserts what actually happened: the target resolves (`subflow::
+/// resolve` selects any non-deleted, non-disabled row, draft or live), a child
+/// execution exists, it ran its `Sleep`, and it ended **SUCCESS** — which is
+/// the capped `Sleep` again, one level down.
+#[tokio::test]
+async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
+    let _ = egret_side().await;
+    let db = common::db().await.expect("the oracle needs DATABASE_URL");
+
+    for (parent, child) in [
+        ("sla-parent-flow", "sla-subflow"),
+        (
+            "flow-concurrency-sla-fail-parent",
+            "flow-concurrency-sla-fail-child",
+        ),
+    ] {
+        // A subflow child is linked by `trigger_execution_id`, never by
+        // `parent_execution_id` -- migration 0138's CHECK makes carrying both
+        // unrepresentable -- so this is the only walk that finds one.
+        let children: Vec<(String, String)> = sqlx::query_as(
+            "SELECT c.flow_key, c.state \
+               FROM workflow.executions p \
+               JOIN workflow.executions c ON c.trigger_execution_id = p.id \
+              WHERE p.flow_key = $1 \
+              ORDER BY c.created_at",
+        )
+        .bind(parent)
+        .fetch_all(&db.pool)
+        .await
+        .expect("walk the trigger link");
+
+        assert_eq!(
+            children,
+            vec![(child.to_string(), "SUCCESS".to_string())],
+            "{parent} must have spawned exactly one child, {child}, and that \
+             child must have SUCCEEDED. A child that is absent would mean the \
+             target did not resolve -- a different cause with the same \
+             direction as the golden -- and a child that FAILED would mean \
+             something other than the capped `Sleep` is holding this entry"
+        );
+
+        // …and the child really ran its task, rather than resolving to an empty
+        // execution: the `Sleep` is the whole of what a `MAX_DURATION` would
+        // have had time to kill.
+        let sleeps: Vec<(String,)> = sqlx::query_as(
+            "SELECT r.state FROM workflow.executions e \
+               JOIN workflow.task_runs r ON r.execution_id = e.id \
+              WHERE e.trigger_execution_id IS NOT NULL AND e.flow_key = $1",
+        )
+        .bind(child)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read the child's runs");
+        assert_eq!(
+            sleeps,
+            vec![("SUCCESS".to_string(),)],
+            "{child}, as spawned by {parent}, ran exactly one task and it \
+             succeeded"
+        );
+
+        // **The PREMISE the SUCCESS above rests on, named and asserted** --
+        // W8 Task 6 fix round 1. "The child ended SUCCESS because its capped
+        // `Sleep` succeeded" is the whole story only if the `Sleep` is the
+        // child's ONLY failure road; that came from reading the YAML, not from
+        // this test, and an unasserted premise is how a merely COMPATIBLE
+        // explanation becomes a believed one.
+        let tasks: Vec<(String,)> = sqlx::query_as(
+            "SELECT r.task_id FROM workflow.executions e \
+               JOIN workflow.task_runs r ON r.execution_id = e.id \
+              WHERE e.trigger_execution_id IS NOT NULL AND e.flow_key = $1",
+        )
+        .bind(child)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read the child's task ids");
+        assert_eq!(
+            tasks,
+            vec![("sleep".to_string(),)],
+            "{child} has exactly ONE task and it is the `Sleep`, so its SUCCESS \
+             cannot have come from anywhere else"
+        );
+
+        // **And the fifth entry's mechanism, which is STRONGER than the other
+        // four's and is a DIFFERENT fact** -- W8 Task 6 fix round 1.
+        //
+        // For the three declarers, the reason `pass_time` cannot move the clock
+        // is that no deadline is registered. For the two PARENTS there is a
+        // reason that would hold even if one were: `pass_time`'s `WITH
+        // RECURSIVE` walks `e.parent_execution_id`, and a subflow child is
+        // linked by `trigger_execution_id` -- migration 0138's
+        // `workflow_executions_one_link_kind` makes carrying both
+        // unrepresentable. **The clock-advance walk cannot reach the child at
+        // all.** This runs that exact CTE and asserts it returns only the
+        // parent.
+        let reachable: Vec<(String,)> = sqlx::query_as(
+            "WITH RECURSIVE tree AS ( \
+                 SELECT id, flow_key FROM workflow.executions WHERE flow_key = $1 \
+                 UNION ALL \
+                 SELECT e.id, e.flow_key FROM workflow.executions e \
+                   JOIN tree t ON e.parent_execution_id = t.id \
+             ) SELECT DISTINCT flow_key FROM tree ORDER BY flow_key",
+        )
+        .bind(parent)
+        .fetch_all(&db.pool)
+        .await
+        .expect("walk pass_time's own tree");
+        assert_eq!(
+            reachable,
+            vec![(parent.to_string(),)],
+            "`driver::pass_time`'s recursive CTE joins `parent_execution_id`, \
+             so the subflow child {child} is not in the tree it moves the clock \
+             for -- even a child that DID register a `not_before_ms` could not \
+             be reached"
+        );
+
+        assert!(
+            baseline().contains(&format!("valids/{parent}")),
+            "valids/{parent} is still baselined -- this test describes why, and \
+             if it banks the description is stale"
+        );
+    }
+}
+
+/// **W8 Task 7 final round: the two `EXECUTION_ASSERTION` banks are
+/// DISCRIMINATING, driven rather than argued.**
+///
+/// Both banked entries end `["CREATED","CANCELLED"]` with **0 runs** and they
+/// are the corpus's only two `EXECUTION_ASSERTION` declarers, so *"violate
+/// every `EXECUTION_ASSERTION` unconditionally"* banks both of them **byte for
+/// byte**. The ratchet cannot tell that implementation from the right one, and
+/// the attribution mutation for W8 Task 6 cannot either: reverting the feature
+/// makes both entries mismatch under either reading.
+///
+/// `corpus.json` records what closes it. `valids/sla-execution-condition`
+/// declares `inputs.string` as a `SELECT` over `PASS`/`CANCEL`/`LABEL` and the
+/// harvest drove exactly one of the three — `CANCEL` — leaving **two
+/// `inputs_alternatives` unused**, each with Kestra's own test method beside it:
+///
+/// | input | `inputs_from` | what must happen |
+/// |---|---|---|
+/// | `CANCEL` | `SLATestCase.java:62 executionConditionSLAShouldCancel()` | the golden: `CANCELLED`, 0 runs |
+/// | `LABEL` | `SLATestCase.java:86 executionConditionSLAShouldLabel()` | the **`NONE`**-behaviour SLA is violated, which changes no state |
+/// | *(none — `defaults: PASS`)* | `SLATestCase.java:56 executionConditionSLAShouldPass()` | **neither** assertion is violated |
+///
+/// **`PASS` is the row that does the work.** An implementation that violates
+/// unconditionally cancels it; a correct one runs the flow. `LABEL` is the
+/// second half and is a different question — there the assertion **is**
+/// violated and the behaviour is `NONE`, so it separates *"violated"* from
+/// *"cancelled"*, which `PASS` alone cannot.
+///
+/// # Why this is a test and not a bank
+///
+/// There is no golden entry to bank: `harvest.py` posts one input set per flow,
+/// so the artifact's answers for `PASS` and `LABEL` were never captured and
+/// **the ratchet cannot move by one entry here, in either direction**. The
+/// authority for the two expectations is Kestra's own test *names*, recorded in
+/// `corpus.json`'s `inputs_from` by the harvest — which is weaker than a
+/// captured trace and is said so rather than dressed up. What this test
+/// establishes is the discrimination: the same `src/sla.rs` that banks the two
+/// entries also declines to cancel the two inputs that must not be cancelled,
+/// and that discrimination used to live only in `sla.rs`'s own truthy/falsy
+/// unit tables, where nothing connected it to the banked entries.
+///
+/// `egret_side()` is awaited first and its result discarded, purely to
+/// serialise behind its one-time `TRUNCATE workflow.executions CASCADE`; this
+/// test then seeds its own workspace and drives its own executions.
+#[tokio::test]
+async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_did_not_drive() {
+    let _ = egret_side().await;
+
+    let db = common::db()
+        .await
+        .expect("this drives a REAL executor and needs DATABASE_URL");
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = corpus_source("valids/sla-execution-condition");
+    let reg = driver::registry();
+
+    // (label, inputs, must the execution end CANCELLED?, how many runs)
+    let cases: [(&str, serde_json::Value, bool, usize); 3] = [
+        (
+            "CANCEL (the golden's own input)",
+            serde_json::json!({"string": "CANCEL"}),
+            true,
+            0,
+        ),
+        (
+            "PASS (the SELECT's default, undriven)",
+            serde_json::json!({}),
+            false,
+            1,
+        ),
+        (
+            "LABEL (violated, behaviour NONE, undriven)",
+            serde_json::json!({"string": "LABEL"}),
+            false,
+            1,
+        ),
+    ];
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (label, inputs, expect_cancelled, expect_runs) in cases {
+        let t = match driver::run(&db.pool, ws, &reg, &source, inputs.clone()).await {
+            driver::Ran::Trace(t) => *t,
+            driver::Ran::Refused(msg) => {
+                wrong.push(format!("{label}: egret REFUSED the flow: {msg}"));
+                continue;
+            }
+            driver::Ran::Broken(msg) => {
+                wrong.push(format!("{label}: the driver broke: {msg}"));
+                continue;
+            }
+        };
+        let last = t.execution.last().cloned().unwrap_or_default();
+        let cancelled = last == "CANCELLED";
+        if cancelled != expect_cancelled || t.runs.len() != expect_runs {
+            wrong.push(format!(
+                "{label}: expected cancelled={expect_cancelled} with {expect_runs} run(s), \
+                 got cancelled={cancelled} with {} run(s); execution {:?}, runs {:?}",
+                t.runs.len(),
+                t.execution,
+                t.runs
+                    .iter()
+                    .map(|r| (&r.task, &r.state))
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the `EXECUTION_ASSERTION` banks are not discriminating -- an \
+         implementation that violated every assertion unconditionally would \
+         produce the golden's CANCELLED for all three of these:\n  {}",
+        wrong.join("\n  ")
     );
 }

@@ -124,8 +124,9 @@ pub(crate) fn drive(
 /// would finish branch one before creating anything in branch two.
 ///
 /// **4. Terminate when every child run has.** The state is Kestra's
-/// `Execution.guessFinalState` priority order, narrowed to what [`RunState`]
-/// can hold: `KILLED` beats `FAILED` beats `SUCCESS`.
+/// `Execution.guessFinalState` priority order, which [`RunState`] can now hold
+/// in full: `KILLED` beats `FAILED` beats `CANCELLED` beats `WARNING` beats the
+/// `SUCCESS` it starts from.
 pub(crate) fn drive_concurrent(
     plan: &Plan,
     state: &ExecutionState,
@@ -148,23 +149,72 @@ pub(crate) fn drive_concurrent(
 
     // Rule 1.
     //
-    // **`SKIPPED` is excluded, and W3c is why.** Through W3a "terminal and not
-    // `SUCCESS`" and "terminated in error" were the same set, because every
-    // state this enum could hold that was terminal and not `SUCCESS` was a
-    // failure. `Skipped` is the first that is not: `State.java:293` lists it in
-    // `isTerminatedNoFail()` beside `SUCCESS`, and `Execution.guessFinalState`
-    // has no arm for it at all. Without this exclusion a falsy `runIf:` on one
-    // branch of a `Parallel` would `fail_the_rest` of its siblings -- egret
-    // failing runs Kestra succeeds, which is the divergence class this
-    // programme forbids. No corpus flow puts a `runIf:` on a `Parallel` or
-    // `Dag` child (`no_corpus_parallel_or_dag_child_declares_a_run_if` derives
-    // that on every run), so this is Kestra's Java stated as a rule rather than
-    // a live measurement, and `a_skipped_branch_does_not_fail_its_siblings` is
-    // what holds it.
-    let ended_badly = runs.iter().flatten().any(|&ix| {
-        latest(state, ix)
-            .is_some_and(|s| s.is_terminal() && !matches!(s, RunState::Success | RunState::Skipped))
-    });
+    // **The predicate is `isFailed()` -- `FAILED` and nothing else -- and it
+    // was an EXCLUSION LIST until W8 Task 5 fix round 2.** It read
+    // `s.is_terminal() && !matches!(s, RunState::Success | RunState::Skipped)`,
+    // which is the same set only while every OTHER terminal is a failure. It
+    // stopped being that twice and nobody noticed either time:
+    //
+    // * `Retried` (Task 7) is `isTerminatedNoFail()`'s, not a failure, and
+    // * `Warning` (W8 Task 5) is `isTerminatedNoFail()`'s FIRST member.
+    //
+    // So a `WARNING` sibling made this `Parallel` `fail_the_rest` -- **egret
+    // failing runs Kestra succeeds**, the divergence class the paragraph this
+    // one replaces already forbade, arriving by the exact route that paragraph
+    // was written about. Reading it as an allow-list is what makes the next
+    // variant inert here instead of a defect: `isFailed()` names what it
+    // includes.
+    //
+    // **Which Java predicate this IS, corrected** -- the first version of this
+    // comment named three lambdas and said all three were
+    // `getState().isFailed()` and nothing else, which is false for one of them
+    // and shipped three times inside the round that wrote it (here, the
+    // report, and the new test's doc).
+    //
+    // `findTaskDependingFlowState` calls TWO predicates, in order
+    // (`javap -p -c io/kestra/core/models/executions/Execution.class`):
+    //
+    // | bci | call | lambda | what it is |
+    // |---|---|---|---|
+    // | 110 | `hasFailed(List, TaskRun)` | `lambda$hasFailed$1` | `getState().isFailed()`, four instructions |
+    // | 120 | `hasFailedNoRetry(List, TaskRun)` | `lambda$hasFailedNoRetry$0` | `isFailed() && shouldNotBeRetried(...)`, **bci 0-24 with a branch** |
+    //
+    // **This line is `hasFailed`, the one at bci 110**, and that one really is
+    // `isFailed()` alone. `State.Type.isFailed()` is `this == FAILED`.
+    //
+    // **The retry clause is the SECOND gate and it belongs to the CALLER, not
+    // here** -- corrected at W8 Task 5 fix round 4, which found that fix round
+    // 3's account of it was wrong.
+    //
+    // Round 3 wrote *"`fail_the_rest` does NOT have that clause ... registered
+    // as a divergence"*. The clause was never missing from this rule: it is
+    // [`current_list`](super::current_list)'s `Current::RetryPending`, whose
+    // `failed.iter().all(will_retry)` is the exact complement of
+    // `hasFailedNoRetry`'s `anyMatch`, and [`drive`] above returns
+    // `Step::Waiting` on it **before** `drive_concurrent` is ever called. A
+    // `Parallel` child mid-retry therefore never reaches this line, which is
+    // why probe RP -- adding the clause here -- changed nothing and survived.
+    //
+    // **What round 3 measured was real and the diagnosis was one layer off.**
+    // The path that skipped the gate was [`dag::drive`](super::dag::drive):
+    // with an empty `errors:` it called `drive_concurrent` directly, never
+    // asking `current_list` at all. That is where the gate went, and
+    // `a_dag_node_awaiting_a_retry_does_not_fail_its_siblings` is the row that
+    // holds it. The lesson is the shape of the error, not the line: **"this
+    // predicate lacks a clause" and "one CALLER of it skips the gate" produce
+    // the same symptom and have different fixes**, and a probe that adds the
+    // clause to the predicate cannot tell them apart -- it survives under both.
+    //
+    // `SKIPPED` stays out for W3c's reason, unchanged: a falsy `runIf:` on one
+    // branch must not fail the others, and
+    // `no_corpus_parallel_or_dag_child_declares_a_run_if` derives that no
+    // corpus flow can score it. `a_skipped_branch_does_not_fail_its_siblings`
+    // holds that row; `a_warning_branch_does_not_fail_its_siblings` holds this
+    // one, and the oracle cannot score either.
+    let ended_badly = runs
+        .iter()
+        .flatten()
+        .any(|&ix| latest(state, ix) == Some(RunState::Failed));
     if ended_badly {
         let cmds = fail_the_rest(state, &runs);
         if !cmds.is_empty() {
@@ -200,21 +250,96 @@ pub(crate) fn drive_concurrent(
     }
 
     // Rule 3.
+    //
+    // # Every `Step` is accounted for, and none is dropped by an `if let`
+    //
+    // The three arms below used `if let Step::Commands(inner)`, which silently
+    // discards anything else. Measured at W8 Task 3 fix round 1: **none of the
+    // three can return [`Step::Done`] today** -- [`open`] returns `Commands` or
+    // `Waiting` and its only delegating arm, `loop_::open`, does the same;
+    // [`resume_paused`](super::resume_paused) returns `Commands` or `Waiting`;
+    // and [`descend`] returns
+    // `Done` from none of its paths.
+    //
+    // **That last clause was stated imprecisely in fix round 1 and the fix
+    // round 2 re-review caught it.** It read *"`descend` maps `Done` into a
+    // `SetRunState` before it returns"*, which is true of the arms that fall
+    // through to its trailing `match` and NOT of the two that `return` early --
+    // `TaskKind::Executable`, `TaskKind::Loop` and `TaskKind::Runnable` return
+    // `Waiting` directly, and `TaskKind::Pause` returns `pause::drive`'s value
+    // directly, neither of them touching the mapping. The conclusion survives
+    // because those early returns are themselves `Waiting` or `Commands`, but
+    // it needs both halves and the round-1 wording only had one.
+    //
+    // So the `if let` was dropping `Waiting` and nothing else, which is correct
+    // -- a sibling with nothing to ask for must not stop the siblings that
+    // have. It is written as an exhaustive `match` anyway, because the fact
+    // above is a property of three OTHER functions and nothing here would
+    // notice if one of them changed.
+    //
+    // **The `Done` arm is DEAD CODE, not a guard, and the difference matters
+    // here.** A guard is a branch that fires on a condition; this one cannot
+    // fire at all. It earns its line only by making the drop explicit rather
+    // than implicit -- and it is deliberately not `unreachable!()`, because a
+    // panic arm nobody can drive is what this crate has twice paid for
+    // (`descend`'s deleted depth guard says so in as many words). No test
+    // drives it and none can without faking a `Step` the real callees never
+    // produce, which would pin the fake rather than the seam.
     let mut cmds = Vec::new();
     for (&task, run) in children.iter().zip(&runs) {
         let Some(ix) = *run else { continue };
-        match latest(state, ix) {
-            Some(RunState::Created) => {
-                if let Step::Commands(inner) = open(plan, state, ix, task, now) {
-                    cmds.extend(inner);
-                }
-            }
-            Some(RunState::Running) => {
-                if let Step::Commands(inner) = descend(plan, state, ix, task, now) {
-                    cmds.extend(inner);
-                }
-            }
-            _ => {}
+        let step = match latest(state, ix) {
+            // W8 Task 4, and the same door `sequential::walk` opens for the
+            // same state: a run thrown away by `Command::RestartLoop` is
+            // re-created when the walk reaches it. **No corpus flow reaches
+            // this arm**, because no corpus `LoopUntil` sits INSIDE a
+            // `Parallel` or a `Dag` — the containment runs the other way, and
+            // `valids/loopuntil-failed-flowable` is the one instance of it.
+            // It is here for the reason the `PAUSED` arm below is: the
+            // alternative is not a guard nobody sees fail but a stall.
+            //
+            // **This sentence said "no corpus `LoopUntil` CONTAINS a
+            // `Parallel` or a `Dag`" and was false the day it was written** —
+            // thirty lines above the identical one fix round 1 corrected, and
+            // missed by that round for the reason the whole branch keeps
+            // paying: a text edit fixes the sentence it is looking at. Both
+            // instances are compared by a program now
+            // (`the_corpus_pauses_that_sit_inside_another_flowable_are_named`),
+            // which is the only thing that makes the third instance fail
+            // rather than wait to be found.
+            None => Step::Commands(vec![Command::RecreateRun { run: ix }]),
+            Some(RunState::Created) => open(plan, state, ix, task, now),
+            Some(RunState::Running) => descend(plan, state, ix, task, now),
+            // **The same one door `sequential::walk` opens**, and for the
+            // same reason it is one door: a `PAUSED` run is the only
+            // non-terminal state no worker is holding, so somebody has to ask
+            // it every round whether its wait is over. W8 Task 4 fix round 2
+            // replaced a `TaskKind`-keyed guard here -- which stalled anything
+            // not on its list, measured under `Parallel` AND `Dag`, both of
+            // which drive through this function -- with
+            // `super::resume_paused`, which reads `TaskRun::resume_with`.
+            //
+            // **No corpus flow reaches this arm** and both halves of that are
+            // derived rather than remembered: every corpus `Pause` under
+            // another flowable is unbounded and absent from `golden.json`, and
+            // no corpus `LoopUntil` sits inside a `Parallel` or a `Dag` at all
+            // -- the containment runs the other way, `valids/loopuntil-failed-
+            // flowable` putting a `Dag` INSIDE a `LoopUntil`. Both are asserted
+            // by `the_corpus_pauses_that_sit_inside_another_flowable_are_named`.
+            // The arm is here because the alternative is not a guard nobody
+            // sees fail, it is a stall.
+            Some(RunState::Paused) => super::resume_paused(state, ix, now),
+            _ => continue,
+        };
+        match step {
+            Step::Commands(inner) => cmds.extend(inner),
+            // In flight with nothing to ask for. Its siblings still might, so
+            // this keeps walking rather than returning.
+            Step::Waiting => {}
+            // Unreachable today -- see the block above -- and this is
+            // `descend`'s own mapping, so a child list that finished takes its
+            // terminal rather than being swallowed.
+            Step::Done(s) => cmds.push(Command::SetRunState { run: ix, state: s }),
         }
     }
     if !cmds.is_empty() {
@@ -280,22 +405,46 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
         .collect()
 }
 
-/// Kestra's `Execution.guessFinalState`, narrowed to the states [`RunState`]
-/// can hold.
+/// Kestra's `Execution.guessFinalState`, over the runs a branch created.
 ///
 /// Java's priority is `KILLED > FAILED > CANCELLED > WARNING > PAUSED`, over a
 /// single pass that breaks on `KILLED`
-/// (`core/src/main/java/io/kestra/core/models/executions/Execution.java:769`).
-/// `CANCELLED`, `WARNING` and `PAUSED` are three of the six states this enum
-/// still cannot represent — they belong to flow concurrency, `AllowFailure` and
-/// `Pause`, none of which is Task 4's — so what is left of the order here is
-/// `KILLED`, then `FAILED`, then the `SUCCESS` it starts from.
-fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
+/// (`core/src/main/java/io/kestra/core/models/executions/Execution.java:774-789`).
+///
+/// # This is the SECOND copy of that pass and it was two variants behind the
+/// first — W8 Task 6
+///
+/// [`super::aggregate`] is the other, and this one carried only `KILLED` and
+/// `FAILED` because the doc it inherited said `WARNING` and `CANCELLED` were
+/// *"states this enum cannot represent"*. That was true when it was written and
+/// **stopped being true at W8 Task 5**, which added `RunState::Warning` and
+/// updated [`super::aggregate`]'s chain without touching this one — so a
+/// `Parallel`/`Dag` branch with a `WARNING` child answered `SUCCESS` where the
+/// artifact answers `WARNING`. That is not a state this corpus can put under a
+/// branch (`valids/task-allow-failure-flowable` and its three siblings are
+/// baselined on the `AllowFailure` FLOWABLE, a different construct), so no
+/// figure moved in either direction and nothing could have noticed; it was
+/// found by W8 Task 6 enumerating **every** consumer of a terminality
+/// judgement before adding `Cancelled` to any of them, which is the method W8
+/// Task 5 fix round 2 bought.
+///
+/// Both variants are here now and the two copies agree, asserted by
+/// `the_two_guess_final_state_copies_agree`.
+///
+/// `PAUSED` is still left out, for a reason that is a property of the CALLER
+/// rather than of this order: rule 4 runs this only when every child run is
+/// terminal, and `PAUSED` is not. It sits below `WARNING` in the priority
+/// anyway.
+pub(crate) fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
     let mut out = RunState::Success;
     for &ix in runs {
         match latest(state, ix) {
             Some(RunState::Killed) => return RunState::Killed,
             Some(RunState::Failed) => out = RunState::Failed,
+            Some(RunState::Cancelled) if out != RunState::Failed => out = RunState::Cancelled,
+            Some(RunState::Warning) if out != RunState::Failed && out != RunState::Cancelled => {
+                out = RunState::Warning
+            }
             _ => {}
         }
     }

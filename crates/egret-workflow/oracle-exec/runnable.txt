@@ -719,8 +719,8 @@ argued.
                 no alternative input is documented for this flow
   unprobed      valids/parallel-fail-with-flowable
                 no alternative input is documented for this flow
-  CANNOT        valids/pause-behavior
-                all 3 documented alternative(s) satisfy this row's assertions too: {"behavior": "RESUME"}, {"behavior": "WARN"}, {"behavior": "CANCEL"}  MEASURED: on v2.0.0-rc13 all four documented behaviours -- FAIL, RESUME, WARN, CANCEL -- produce the identical execution (FAILED, 1 task run, histories CREATED/RUNNING/PAUSED/RESTARTED/RUNNING/FAILED).  The cause is NOT that `behavior` is unimplemented on this artifact: published with LITERAL values on a fresh rc13 the same flow gives RESUME -> SUCCESS/2 task runs, WARN -> WARNING/2, FAIL -> FAILED/1, CANCEL -> CANCELLED/1, and the property omitted -> SUCCESS/2 -- the checkout's semantics reproduced exactly.  What fails is narrower: this corpus flow writes `behavior: "{{ inputs.behavior }}"`, and rendering a Pebble expression into a `Property<Behavior>` fails at resume time and takes the task down with it, for EVERY value including the one that would have failed anyway.  The execution document does record `inputs: {"behavior": "FAIL"}`, so the input landed -- the task dies rendering it.  So this row's `agrees` is a coincidence in the STRONG sense: the flow never reaches the FAIL behaviour at all.  Task 2 builds this flow's golden from what the pinned image did, and whoever implements `pause` must not read this as a missing feature.
+  discriminates valids/pause-behavior
+                with {"behavior": "RESUME"}: state SUCCESS != FAILED; taskruns 2 != 1  CORRECTED by W8 Task 3 fix rounds 2-3 -- this row previously read differs=false with "all four documented behaviours produce the identical execution (FAILED, 1 task run)", and that is FALSE. The reading was contaminated by FLOW-ID REUSE: publishing a different source under the same ns/flow_id leaves `execution.inputs` reading the posted value, so "the input landed" does not establish WHICH SOURCE RAN. Re-measured on the same pinned digest with a FRESH, never-reused flow id for every single execution, 3 runs each: FAIL -> FAILED/1, RESUME -> SUCCESS/2, WARN -> WARNING/2, CANCEL -> CANCELLED/1 -- four DIFFERENT executions, which is PauseTest.java:374-380's own semantics and not a drift. There is no Pebble-render failure: the artifact honours the value for every member of the Behavior enum, written literally or as an expression. OUTSIDE the enum it does not terminate at all -- `NOPE`, lower-case `fail` and an undefined `{{inputs.nosuch}}` each leave the execution RUNNING past 120s. The HARVEST is structurally immune to the contaminant: all 275 corpus flows that execute have a unique (namespace, flow_id) -- the 3 duplicate ids are 422-rejected and never run -- and stability.json's 5 rounds name 2 unstable traces, neither a Pause. So valids/pause-behavior's golden is reproducible and this row's basis was never the golden.
   unprobed      valids/pause-duration-from-input
                 no alternative input is documented for this flow
   unprobed      valids/primitive-labels-flow
@@ -742,7 +742,7 @@ argued.
   unprobed      valids/task-runif-workingdirectory
                 no alternative input is documented for this flow
 
-  proven discriminating 17   proven non-discriminating 1   unprobed 19
+  proven discriminating 18   proven non-discriminating 0   unprobed 19
 
   `unprobed` means no ALTERNATIVE input is documented for that flow, so
   there is nothing to swap in.  Such a row is not claimed to discriminate.
@@ -1337,19 +1337,42 @@ the three holes W4 closed, and why this ratchet sees none of them
 Three different mechanisms reaching one verdict.  Merging them would lose the
 useful half twice.
 
-  retry: / the waker (Task 1)
-    25 golden entries declare a `retry:`   14 baselined + 11 matching
-    of the 14, CREATE_NEW_EXECUTION         4   (writes no `not_before` at all)
-              RETRY_FAILED_TASK            10   <- the waker's whole population
-    `due_retries` runs on EVERY tick and selects 0 rows.  `driver::pass_time`
-    is the only thing here that makes a deadline elapse, and it calls
-    `worker::resume` ITSELF in the same call -- so a due retry is consumed
-    inside the call that made it due.  driver.rs's OWN MODULE DOC has said so
-    since W3b ("it changes one timestamp and calls the same `resume` any other
-    caller would"), and this package wrote the opposite for five tasks.
-    Instrumented `wake`: 0 fires over 294 entries, `tests/worker.rs` the
-    positive control on the same build.
-    NOT a hole in retrying: a change on any of the 11 matching entries IS
+  retry: / the waker (Task 1; figures re-derived W8 Task 7)
+    25 golden entries declare a `retry:`    8 baselined + 17 matching
+    of the 8, CREATE_NEW_EXECUTION          0
+              RETRY_FAILED_TASK             8   <- the waker's whole population
+    THIS BLOCK READ `14 baselined + 11 matching`, `of the 14 ... 4 / 10`, and
+    "CREATE_NEW_EXECUTION writes no `not_before` at all".  All four figures and
+    the parenthesis were false.  W6 Task 4 banked the four CREATE_NEW_EXECUTION
+    entries AND gave that arm a `ScheduleRetry` (so it writes a `not_before`
+    after all, read by `due_retries`' `RETRIED` arm); W8 Task 5 banked
+    `valids/task-allow-{warning,failure}-runnable`.  `oracle-exec/README.md`
+    corrected its own copy at W6 Task 4 and this one was missed for two
+    packages -- the branch's `corrected where found, missed elsewhere` again.
+    The numbers above are DERIVED by
+    `tests/executor.rs::the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`,
+    which asserts (8, 17, 25) and names all eight, so this copy is now a
+    restatement of a running program rather than a second opinion.
+    `driver::pass_time` is the only thing here that makes a retry deadline
+    elapse, and it calls `worker::resume` ITSELF in the same call -- so a due
+    retry is consumed inside the call that made it due.  driver.rs's OWN MODULE
+    DOC has said so since W3b ("it changes one timestamp and calls the same
+    `resume` any other caller would"), and this package wrote the opposite for
+    five tasks.
+    Instrumented `wake` over the whole oracle.  It used to read a flat `0 fires over 294
+    entries` and W8 Task 7 made that half false: widening `due_retries` to name
+    a due `PAUSED` run gave the oracle a second door to the same `resume`, and
+    the instrument now reads **1 fire in one of five runs and 0 in the other
+    four** -- latency-dependent, because it fires only when real wall-clock time
+    crosses a pause's bound before `pass_time` rewinds `created_at`.  The
+    ratchet is **109 in all five** and in a sixth with the arm removed: both
+    doors call the same `worker::resume`, so which one opens changes no trace.
+    `tests/worker.rs` is the positive control on the same build (1 fire).
+    The instrument printed an execution id only, so THE ONE FIRE IS NOT
+    ATTRIBUTED to an entry and is not claimed to be.  What IS known is the
+    change: only the `'PAUSED'` arm moved, the `RETRYING`/`RETRIED` selection is
+    byte-identical, so the retry mechanism above is untouched.
+    NOT a hole in retrying: a change on any of the 17 matching entries IS
     reported.
 
   timeout: (Task 2)

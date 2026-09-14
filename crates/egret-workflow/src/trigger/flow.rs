@@ -719,6 +719,25 @@ pub fn evaluate(
         return Outcome::Refused(Refusal::TriggerDisabled);
     }
 
+    // # This is the one place `PAUSED` is live in production today
+    //
+    // **W8 Task 2 fix round 2, and the sweeps that found it took five methods.**
+    // `models::FlowTrigger`'s `default_flow_trigger_states()` is
+    // `terminatedTypes() + [PAUSED]`, so a flow trigger that declares no
+    // `states:` fires on a source execution in `PAUSED` — and this line is
+    // what honours that. Neither of W8 Task 2's first four sweeps reached this
+    // file: they were gated on a state NAME or on a judgement FORM, and this
+    // line carries neither an `is_terminal` nor a `State::` literal.
+    //
+    // **No code change was needed and that is measured, not assumed.** This
+    // plane is `models::State`, which has held `Paused` since W1; adding
+    // `executor::RunState::Paused` does not reach it. What does not exist yet is
+    // the bridge: `SourceExecution` has **no production constructor** — every
+    // one is in this file's own tests — so nothing converts an executor
+    // `RunState::Paused` into a `models::State::Paused` for this predicate to
+    // see. Whoever builds that bridge owns the question of whether a paused
+    // EXECUTION should fire a listener before it resumes; Kestra's answer is
+    // yes, which is why `PAUSED` is in the default list at all.
     if !listener.states.contains(&source.state) {
         return Outcome::Refused(Refusal::StateNotListed(source.state));
     }

@@ -371,17 +371,27 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// **`RefKind::Subflow` resolutions `publish` made inside a publish that
 /// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
 ///
-/// One per `core.subflow` task in the 16 flows that reach a live version, and
-/// zero from anywhere else: no corpus flow declares an `egret.*` type (so no
-/// other `RefKind` is reachable at all), and none of the 16 declares a
+/// One per `core.subflow` task in the [`LIVE`] flows that reach a live version,
+/// and zero from anywhere else: no corpus flow declares an `egret.*` type (so
+/// no other `RefKind` is reachable at all), and none of them declares a
 /// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
-const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 18;
+///
+/// **18 through W8 Task 2, 19 now, and the pair below moved together**: exactly
+/// one of the five flows W8 Task 3's `TaskKind::Pause` lets publish declares a
+/// `core.subflow`, `valids/follow-dependencies-partial-parent`. Its lookup did
+/// not appear — it was already being made — it moved out of
+/// [`SUBFLOW_LOOKUPS_ON_REFUSED`], which is why the total is 22 before and
+/// after and why the two constants must be read as one measurement.
+const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 19;
 
 /// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
 /// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
 /// refused the flow. Counted apart because a lookup on a flow nobody can
 /// publish is not evidence the reference resolution shipped.
-const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 4;
+///
+/// **4 through W8 Task 2, 3 now** — see [`SUBFLOW_LOOKUPS_ON_PUBLISHED`]; the
+/// one that left is the same flow that stopped being refused.
+const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 3;
 
 /// Count and assert the reference lookups, so the claim about how big this
 /// task's genuinely-new surface is has a running program behind it rather than
@@ -609,27 +619,52 @@ const PARSE_REFUSED: usize = 5;
 const CREATE_REFUSED: usize = 4;
 
 /// How many corpus flows reach a **live version**.
-const LIVE: usize = 16;
+///
+/// **16 through W8 Task 2, 21 now, and the five are named rather than
+/// counted**: `valids/flow-concurrency-cancel-pause`,
+/// `valids/flow-concurrency-queue-pause`,
+/// `valids/follow-dependencies-partial-parent`, `valids/loop-pause` and
+/// `valids/pause_on_pause`. Every one of them is a flow whose only non-control
+/// task was a `Pause`, which W8 Task 3 made a typed `models::TaskKind` — so it
+/// is dispatched before any `Leaf` arm exists to consult
+/// `registry::known_type`, exactly as a `Subflow` is, and publish step 4 no
+/// longer refuses it.
+///
+/// **That is an over-refusal closing, not a new acceptance.** The pinned
+/// artifact published all five with a 200 (`corpus.json`'s `publish_status`),
+/// so egret refusing them was a divergence this programme forbids in the
+/// direction the ratchet cannot see: a flow nobody can publish never reaches
+/// `golden.json` at all.
+const LIVE: usize = 21;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
-/// finding, and the reason `LIVE` is 16 and not 295.
+/// finding, and the reason [`LIVE`] is 21 and not 295.
+///
+/// (It read *"the reason `LIVE` is 16 and not 295"* until W8 Task 3 fix round
+/// 1 — **three lines below `const LIVE: usize = 21;`, in the same doc block
+/// that task had just rewritten.** A fact corrected where it was found and
+/// left standing three lines away is this branch's named failure mode; it is
+/// a `[LIVE]` link now, so the number cannot be restated here at all.)
 ///
 /// `registry::known_type` is an allow-list of the eight `egret.*` types plus
 /// `core.http`/`core.slack`/`core.log`, and the corpus is Kestra's: every leaf
 /// in it is an `io.kestra.plugin.core.*` (or `io.kestra.core.*`) FQCN, and a
 /// `TaskKind::Leaf` whose type is not in the table is `InvalidInput` at
-/// publish step 4. The 16 that DO reach a version are exactly the corpus flows
-/// whose every task is control flow or a `core.subflow` — a `Subflow` is a
-/// typed `TaskKind`, dispatched before any `Leaf` arm exists to consult the
-/// registry, so it never meets the allow-list at all.
+/// publish step 4. The [`LIVE`] flows that DO reach a version are exactly the
+/// corpus flows whose every task is control flow, a `core.subflow` or — since
+/// W8 Task 3 — a `core.pause`: each is a typed `TaskKind`, dispatched before
+/// any `Leaf` arm exists to consult the registry, so none meets the allow-list
+/// at all.
 ///
 /// **This is not a hole in the product**; egret's publish refusing an unported
 /// Kestra plugin is exactly the behaviour W1 built the table for. It is a
 /// statement about what the ORACLE can drive through the product's publish
 /// path, and it is why a `Subflow` at run time has to resolve against the
 /// draft row rather than a live version.
-const UNKNOWN_TYPE_REFUSED: usize = 301;
+/// **301 through W8 Task 2, 296 now** — the same five flows [`LIVE`] names,
+/// and nothing else moved in either direction.
+const UNKNOWN_TYPE_REFUSED: usize = 296;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
@@ -1139,6 +1174,31 @@ mod w6_subflow_link {
     /// produce, so "no children found" cannot be the only thing asserted.
     #[sqlx::test(migrations = "../../migrations")]
     async fn a_subflow_child_is_invisible_to_the_query_that_builds_spawned(pool: PgPool) {
+        // # This call cannot fire once any `#[sqlx::test]` in this binary has run
+        //
+        // **Pre-existing, not W8's, and it corrupts mutation runs** — recorded
+        // by W8 Task 2 fix round 2 because this is where the plant happens.
+        //
+        // `assert_database_url_is_exported()` returns early when `DATABASE_URL`
+        // is present in the PROCESS environment, and `#[sqlx::test]` calls
+        // `dotenvy::dotenv()` unconditionally, which puts `.env`'s value there.
+        // This test is itself a `#[sqlx::test]`. So in a run where nobody
+        // exported the variable, whichever DB-gated test wins the race sees a
+        // planted value and **passes**, while the ones that lose fail — and
+        // because test order inside a binary is not deterministic, **which one
+        // fails rotates between runs**.
+        //
+        // The consequence worth writing down: a mutation run made without
+        // exporting `DATABASE_URL` collects **exactly one rotating red for
+        // free**, and a free red is a red that can be mistaken for a kill. Every
+        // mutation verdict in W8 Task 2 was taken with the variable exported and
+        // against a 0-failing control for that reason.
+        //
+        // **Owner: `egret-test-db`**, not this driver and not W8 — the fix is
+        // for `assert_database_url_is_exported` to distinguish a value the
+        // operator exported from one `dotenvy` planted, which it already knows
+        // how to do (`dotenv_file_setting` reads the FILE for exactly this
+        // reason) but does not do on the early-return path.
         egret_test_db::assert_database_url_is_exported();
         let db = Db { pool: pool.clone() };
         let (ws, _user) = crate::common::seed_workspace(&db).await;

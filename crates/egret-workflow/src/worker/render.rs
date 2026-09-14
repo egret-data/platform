@@ -68,7 +68,7 @@ use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use super::claim::ExecutionCtx;
-use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind};
+use crate::executor::{ExecutionState, Plan, RunIx, RunState, TaskKind, Tick};
 use crate::models::{Flow, InputType};
 use crate::runners::RenderContext;
 
@@ -80,6 +80,22 @@ use crate::runners::RenderContext;
 /// are written before `settle` is entered, and no handler runs inside it.
 #[derive(Debug, Clone)]
 pub(super) struct Surface {
+    /// **The flow this execution runs, parsed once** — W8 Task 6 fix round 1.
+    ///
+    /// `load` already parsed it to build `inputs`, `vars`, `flow` and `labels`
+    /// and then threw it away, so `claim::sla_terminal` parsed the same source
+    /// a second time on **every settle of every execution** — 339 of the
+    /// corpus's 345 flows declare no `sla:` at all, and every one of them paid
+    /// for a parse to be told so. Keeping it also fixes a subtler thing: it
+    /// lets that guard ask *"is the SLA list empty"* **before** anything else,
+    /// which is the order `ExecutorService.handleExecutionChangedSLA` asks its
+    /// guards in, instead of parse-then-ask.
+    ///
+    /// `None` for a source that does not parse. That is not an error here: the
+    /// execution is already running, `ExecutionCtx::plan` was built from this
+    /// same source, and every reader below already treats an unparseable source
+    /// as "no information" rather than as a failure.
+    parsed: Option<Flow>,
     /// `inputs`, already merged with the flow's declared defaults.
     inputs: Value,
     /// `vars`.
@@ -492,6 +508,7 @@ impl Surface {
         }
 
         Ok(Surface {
+            parsed: flow,
             inputs,
             vars,
             flow: flow_value,
@@ -503,6 +520,13 @@ impl Surface {
             started,
             ids,
         })
+    }
+
+    /// The flow this execution runs, as `load` parsed it.
+    ///
+    /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
+    pub(super) fn flow(&self) -> Option<&Flow> {
+        self.parsed.as_ref()
     }
 
     /// The context one expression renders against.
@@ -533,19 +557,59 @@ impl Surface {
             let Some(last) = r.history.last().copied() else {
                 continue;
             };
-            if !last.is_terminal() {
-                continue;
-            }
             let Some(task) = plan.tasks.get(r.task) else {
                 continue;
             };
+            // **The one output a RUNNING task publishes, and W8 Task 4 is why
+            // the rule above now has an exception.**
+            //
+            // A `LoopUntil` writes `{iterationCount: n}` onto its own taskrun
+            // *before* each iteration's children are created --
+            // `ExecutorService.saveFlowableOutput` at creation (Kestra's
+            // `INITIAL_LOOP_VALUE`, which is `1`, not `0`) and
+            // `taskOutputService.saveOutputs(taskRun, waitFor.outputs(previous))`
+            // at every pause. So `{{ outputs.<loop>.iterationCount }}` resolves
+            // for a loop that has not terminated, and the corpus is built on
+            // that: `valids/waitfor-nested` runs `format: "{{ outputs.loop_1
+            // .iterationCount }}"` inside `loop_1` and exits when that value
+            // reaches 3, and `valids/loop-until-restart` writes the same
+            // expression. Without this arm both children fail on an undefined
+            // name -- `runners::env` is `UndefinedBehavior::Strict` -- and the
+            // nested flow never terminates at all.
+            //
+            // **It is `n`, not `n - 1`, and `valids/waitfor-nested` is the row
+            // that decides it.** Its three loops each exit on
+            // `outputs.<child>.value | number >= 3` where the child returned the
+            // loop's own `iterationCount`, and each ran exactly **three**
+            // iterations (2 `PAUSED` in each loop run, 26 across the execution
+            // -- 2 + 3x2 + 9x2, one per nested restart). A 0-based counter
+            // reaches 3 on the fourth iteration, or never.
+            //
+            // `tasks` is deliberately NOT given the same exception: nothing in
+            // the corpus reads `tasks.<id>.state` for a running task, and
+            // widening a second name on one construct's evidence is the shape
+            // this package keeps paying for.
+            if let crate::executor::TaskKind::LoopUntil { .. } = task.kind {
+                outputs.insert(
+                    task.id.clone(),
+                    json!({
+                        "iterationCount":
+                            crate::executor::loop_iteration(state, ix)
+                    }),
+                );
+            }
+            if !last.is_terminal() {
+                continue;
+            }
             // `None` becomes `{}`: measured on the artifact, an expression
             // cannot tell "no Output object" from an empty one — see the module
             // doc's table.
-            outputs.insert(
-                task.id.clone(),
-                self.own.get(&ix).cloned().unwrap_or_else(|| json!({})),
-            );
+            if !matches!(task.kind, crate::executor::TaskKind::LoopUntil { .. }) {
+                outputs.insert(
+                    task.id.clone(),
+                    self.own.get(&ix).cloned().unwrap_or_else(|| json!({})),
+                );
+            }
             tasks.insert(task.id.clone(), json!({"state": last.wire()}));
         }
         cx.insert("outputs", Value::Object(outputs));
@@ -562,6 +626,41 @@ impl Surface {
                 // variable -- so leaving it out failed 20 entries whose only
                 // expression was that.
                 if let Some(t) = plan.tasks.get(r.task) {
+                    // **`task.type` is `null` for every kind `build_plan`
+                    // descends into, and Kestra's is always the FQCN.** The
+                    // divergence set is exactly `{Sequential, Parallel, If,
+                    // Switch, Loop, Dag, Subflow}` -- note both ends of it:
+                    // `Subflow` is in (it is `Executable`, not a flowable the
+                    // renderer sees), and **`Pause` is in too since W8 Task 3**
+                    // -- a `TaskKind::Pause` gets no `type_id` either, for the
+                    // same reason and by the same line of `claim::persist`.
+                    // **`LoopUntil` joined them at W8 Task 4, under BOTH its
+                    // spellings** -- a `plan::TaskKind::LoopUntil` gets no
+                    // `type_id` either, and `kind_for` now maps
+                    // `io.kestra.plugin.core.flow.WaitFor` to the same
+                    // `models::TaskKind` as `...LoopUntil`, so the two
+                    // spellings no longer disagree here or anywhere else.
+                    // (They did through W8 Task 1 fix round 5, when `WaitFor`
+                    // reached `models::TaskKind::Leaf`; it changed nothing in
+                    // THIS comment even then, because the conclusion is drawn
+                    // from the PLAN kind and that was `Runnable` for both.)
+                    // The two opaque flowables left, `AllowFailure` and
+                    // `WorkingDirectory`, are OUT: they are planned `Runnable`
+                    // and so their `type_id` is populated -- as is a `Pause` or
+                    // a `LoopUntil` whose own properties `build_plan` cannot
+                    // read (`pause_gap`, `loop_until_gap`).
+                    //
+                    // **Latent, and the reason is nameable rather than
+                    // incidental**: only two corpus flows write `{{task.type}}`
+                    // (`valids/logs`, `valids/disable-simple`) and both write it
+                    // on a `core.log.Log` leaf, so no golden entry can fail on
+                    // it and no assertion here could either. The element of the
+                    // class this corpus does not contain is **a `{{ task.type }}`
+                    // on a flowable**. Recorded here and in
+                    // `oracle-exec/README.md`'s unclaimed table rather than only
+                    // in a completed task's report, because a finding that lives
+                    // in a report is a finding that has to be rediscovered.
+                    // Found by W8 Task 1's predicate sweep; not fixed by it.
                     cx.insert(
                         "task",
                         json!({
@@ -751,6 +850,7 @@ mod tests {
             history: vec![RunState::Created, state],
             attempts: Vec::<Attempt>::new(),
             not_before: None,
+            resume_with: None,
         };
         let state = ExecutionState {
             runs: vec![run(0, RunState::Success), run(1, RunState::Running)],
@@ -758,6 +858,9 @@ mod tests {
             metadata: crate::executor::ExecutionMeta::default(),
         };
         let surface = Surface {
+            // This fixture exercises the OUTPUT context only; nothing it drives
+            // reads the flow.
+            parsed: None,
             inputs: json!({}),
             vars: Value::Null,
             flow: Value::Null,
@@ -858,13 +961,24 @@ pub(super) fn render_run_if(surface: &Surface, plan: &Plan, state: &mut Executio
     Pass::Rendered
 }
 
-/// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`.**
+/// **Tier B — an `If`'s condition, a `Switch`'s value, a `Loop`'s `values:`, a
+/// `Pause`'s `pauseDuration:` and — W8 Task 4 — a `LoopUntil`'s `condition:`.**
 ///
 /// Each is read at its own run state, and that is measured rather than chosen:
-/// `CREATED` for a `Loop`, `RUNNING` for the other two. `valids/loop-empty`'s
+/// `CREATED` for a `Loop`, `RUNNING` for the rest. `valids/loop-empty`'s
 /// `1_each` reads `CREATED SUCCESS` with no `RUNNING` and no attempt and
 /// `valids/loop-null`'s reads `CREATED FAILED`, so on this artifact a `Loop`
 /// resolves its values *before* it runs; an `If` is started and then asked.
+///
+/// **A `LoopUntil` is the one kind whose state is not enough**, and the one
+/// asked MANY times for a single run. It is `RUNNING` for the whole of its
+/// body, so the state alone would evaluate its `condition:` before the children
+/// whose `outputs.<child>.…` it names have run; the third gate below is the
+/// executor's own `loop_until::condition_is_asked`, called rather than copied.
+/// And `Command::RestartLoop` clears `rendered` at every iteration, so the
+/// filter re-arms — which is Kestra's `runContext.render(this.condition)
+/// .skipCache()`, and is what stops iteration `k + 1` being decided by
+/// iteration `k`'s outputs.
 ///
 /// A render that fails FAILS the run — `valids/if-condition-fail`'s condition
 /// names an input the flow does not declare and its golden is one run,
@@ -873,12 +987,32 @@ pub(super) fn render_expressions(
     surface: &Surface,
     plan: &Plan,
     state: &mut ExecutionState,
+    now: Tick,
 ) -> Pass {
     let pending: Vec<RunIx> = (0..state.runs.len())
         .filter(|&ix| {
             expression_of(plan, state.runs[ix].task).is_some()
                 && state.runs[ix].history.last() == Some(&renders_at(plan, state.runs[ix].task))
                 && state.runs[ix].rendered.is_none()
+                // **A `LoopUntil` has a third gate and the other four kinds do
+                // not** -- W8 Task 4. `RUNNING` is when an `If` is asked, and a
+                // `LoopUntil` is `RUNNING` for its whole body as well, so the
+                // state alone would evaluate the condition before the children
+                // that its `outputs.<child>.…` names have run. The predicate is
+                // the executor's own, not a copy: see
+                // `executor::flowable::loop_until::condition_is_asked` for why
+                // rendering early is a terminal the artifact does not produce
+                // rather than a harmless extra evaluation.
+                && (!matches!(
+                    plan.tasks[state.runs[ix].task].kind,
+                    crate::executor::TaskKind::LoopUntil { .. }
+                ) || crate::executor::loop_condition_is_asked(
+                    plan,
+                    state,
+                    ix,
+                    state.runs[ix].task,
+                    now,
+                ))
         })
         .collect();
     if pending.is_empty() {
@@ -914,19 +1048,43 @@ fn fail(state: &mut ExecutionState, ix: RunIx) {
 
 /// The unrendered expression a planned task holds, by kind.
 ///
-/// Three kinds hold one: an `If`'s `condition`, a `Switch`'s `value` and a
-/// `Loop`'s `values`.
+/// Five kinds hold one: an `If`'s `condition`, a `Switch`'s `value`, a `Loop`'s
+/// `values`, a `Pause`'s `pauseDuration:` (W8 Task 3) and a `LoopUntil`'s
+/// `condition:` (W8 Task 4).
+///
+/// **The `Pause` arm is narrower than the other four**, and deliberately: it
+/// offers the expression only when the source does NOT already parse as an
+/// ISO-8601 literal. Every other kind's expression has to be rendered whatever
+/// it says, but `pauseDuration: PT1S` is a complete answer on its own, and
+/// `executor::flowable::pause` reads it without waiting for a render. Putting a
+/// literal `Pause` into this population would cost nothing on the oracle (the
+/// render is the identity for a source with no `{`) and would make the run's
+/// `rendered` slot non-`None` for 11 of the 12 baselined `Pause` entries, which
+/// is a stored field nothing reads and something can later disagree with.
 fn expression_of(plan: &Plan, task: usize) -> Option<String> {
     match &plan.tasks.get(task)?.kind {
         TaskKind::If { condition, .. } => Some(condition.clone()),
+        // W8 Task 4. Unlike the other four this one is asked MANY times for one
+        // run -- once per iteration -- which is what
+        // `Command::RestartLoop` clearing `rendered` arranges, and what Kestra
+        // spells `runContext.render(this.condition).skipCache()`.
+        TaskKind::LoopUntil { condition, .. } => Some(condition.clone()),
         TaskKind::Switch { value, .. } => Some(value.clone()),
         TaskKind::Loop { values, .. } => Some(values.clone()),
+        TaskKind::Pause {
+            duration: Some(source),
+        } if crate::executor::parse_duration(source).is_none() => Some(source.clone()),
         _ => None,
     }
 }
 
 /// The run state at which this task's expression is rendered — see
 /// [`render_expressions`] for the measurement.
+///
+/// A `Pause` takes the `RUNNING` default with the `If` and the `Switch`, and
+/// that is forced rather than chosen: its `pauseDuration:` is measured from
+/// [`TaskRun::attempt_started_at`](crate::executor::TaskRun::attempt_started_at),
+/// so the attempt has to be open before the answer is worth anything.
 fn renders_at(plan: &Plan, task: usize) -> RunState {
     match plan.tasks.get(task).map(|t| &t.kind) {
         Some(TaskKind::Loop { .. }) => RunState::Created,

@@ -2124,8 +2124,14 @@ pub(crate) type Bound = JsonValue;
 /// `set_formatter` is called. [`environment`] already calls it (for
 /// `json_writer_formatter`), so the flag is clear before this function runs and
 /// clear after — but a future `environment` that stopped setting one must not
-/// silently turn this into a bypass, which is what
-/// `a_bound_render_never_writes_a_value_into_the_text` is written to catch.
+/// silently turn this into a bypass. **This sentence said that is "what
+/// `a_bound_render_never_writes_a_value_into_the_text` is written to catch",
+/// and no such test exists** — the identifier occurs once in the tree, here.
+/// Found by W8 Task 7's final round, which swept every test name cited in a doc
+/// comment across the crate after two dangling citations turned up in one
+/// package. The guard is still owed; what it would have to assert is that a
+/// bound render with `set_formatter` never called writes no value into the
+/// text.
 ///
 /// # One pass, where [`render_str`] loops
 ///

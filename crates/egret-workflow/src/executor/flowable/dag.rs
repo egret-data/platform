@@ -18,48 +18,61 @@ use crate::executor::plan::{DagNode, Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
 use super::parallel::drive_concurrent;
-use super::{latest, Step};
+use super::{current_list, latest, Current, Step};
 
 /// Drive one `Dag`.
 ///
-/// # The predicate, and the one word this spells differently from Kestra
+/// # The predicate is Kestra's, word for word — since W8 Task 5 fix round 2
 ///
 /// A node is startable when every task it `dependsOn` has a run whose latest
-/// state is `SUCCESS`. Kestra's filter says **terminated**, not succeeded —
-/// `resolveDagNexts`'s comment is literally "Check if have no dependencies OR
-/// all dependencies are terminated" — so read alone, Kestra would create a
-/// node whose dependency had *failed*.
+/// state **is terminated**. Measured on the pinned artifact, not read from the
+/// checkout: `javap -p -c io/kestra/core/runners/FlowableUtils.class`,
+/// `lambda$resolveDagNexts$3` is `getState().isTerminated()` and nothing else
+/// — four instructions — and `State.Type.isTerminated()` is
+/// `FAILED || WARNING || SUCCESS || KILLED || CANCELLED || RETRIED || SKIPPED
+/// || RESUBMITTED`.
 ///
-/// It never does, and the two spellings cannot be told apart, because the
-/// branch closes first: rule 1 of [`drive_concurrent`] stops a branch creating
-/// anything the moment one of its children reaches a terminal state that is not
-/// `SUCCESS`. Every state that separates "terminated" from "succeeded" is a
-/// state that has already ended the branch, so no input reaches the predicate
-/// with a terminated-but-not-successful dependency.
+/// ## What this section said for five packages, and why it was safe until it
+/// was not
 ///
-/// That is an argument, and an argument is not a guard: it is why
-/// `a_dag_creates_nothing_downstream_of_a_failed_dependency` exists, and why it
-/// asserts on the *runs* rather than on which spelling this line uses. If a
-/// later task gives a branch a way to survive a failed child — `errors:` is
-/// Task 7's and does exactly that — this line and that test have to be
-/// revisited together, and the test is the one that will notice.
+/// It said the predicate was `SUCCESS` (later `SUCCESS` **or** `SKIPPED`), that
+/// *"the two spellings cannot be told apart"*, and that *"`FAILED` and `KILLED`
+/// remain unreachable here"*. The argument was: rule 1 of [`drive_concurrent`]
+/// closes the branch on any terminal that is not `SUCCESS`, so no
+/// terminated-but-not-successful dependency ever reaches this line.
 ///
-/// # W3c: the argument broke, exactly where it said it would
+/// **That argument had a dependency it did not name — rule 1's exclusion list
+/// — and W8 Task 5 removed it.** Rule 1 is `isFailed()` now, Kestra's own
+/// predicate, so a `WARNING`, `KILLED` or `RETRIED` sibling no longer closes
+/// the branch. Under the old `SUCCESS | SKIPPED` spelling that combination
+/// **stalls the `Dag` for ever**: the dependant is never ready and nothing
+/// fails it. Reverting this line while keeping rule 1 is not a style
+/// difference — it panics
+/// `a_dag_node_downstream_of_a_warning_dependency_still_runs` with
+/// *"down has a run"*, because the node is never created at all.
 ///
-/// `SKIPPED` is the state that separates the two spellings and does **not**
-/// end the branch: [`drive_concurrent`]'s rule 1 now excludes it, because
-/// `State.java:293` puts it in `isTerminatedNoFail()` beside `SUCCESS`. So a
-/// node whose `runIf:` rendered falsy reaches this predicate terminated, alive,
-/// and not `SUCCESS` — and a `Success`-only reading would leave every node that
-/// `dependsOn` it waiting for ever, on a `Dag` Kestra runs to completion.
-/// The predicate is therefore `SUCCESS` **or** `SKIPPED`, which is one step
-/// closer to Kestra's "terminated" and still not the whole of it: `FAILED` and
-/// `KILLED` remain unreachable here for the reason above.
+/// So the two lines are **coupled**, and the coupling runs both ways:
+/// narrowing rule 1 without widening this one hangs the `Dag`, and widening
+/// this one without narrowing rule 1 would let a dependant start under a
+/// failure the branch was about to close. Neither is safe alone, and the fix
+/// round that found the first had to make both.
 ///
-/// No corpus `Dag` node carries a `runIf:`
-/// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives that from
-/// all 345 flows), so this is read from the Java rather than measured live, and
-/// `a_dag_node_downstream_of_a_skipped_dependency_still_runs` is the guard.
+/// **The generalisation is the part worth keeping**: *an argument that a
+/// spelling is unobservable is a claim about ANOTHER predicate, and it expires
+/// silently when that predicate changes.* This one survived W3c (which
+/// weakened it to add `SKIPPED`) and died at W8 Task 5, in a commit that
+/// rewrote the function thirty lines below and left this doc contradicting it.
+///
+/// The guards, one per state that separates the spellings:
+/// `a_dag_node_downstream_of_a_skipped_dependency_still_runs` (W3c),
+/// `a_dag_node_downstream_of_a_warning_dependency_still_runs` and
+/// `a_dag_node_downstream_of_a_killed_dependency_still_runs` (W8 Task 5), and
+/// `a_dag_creates_nothing_downstream_of_a_failed_dependency`, which is the row
+/// that says rule 1 still closes the branch on a real failure. No corpus `Dag`
+/// node carries a `runIf:` or an `allowFailure:`
+/// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives the first
+/// from all 345 flows), so **the oracle scores none of them** and those four
+/// rows are the whole instrument.
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,
@@ -78,6 +91,39 @@ pub(crate) fn drive(
     if !errors.is_empty() {
         return super::parallel::drive(plan, state, &children, errors, parent, None, now);
     }
+    // **Kestra's SECOND gate, applied to the one path that did not go through
+    // it** -- W8 Task 5 fix round 4.
+    //
+    // `findTaskDependingFlowState` consults two predicates in order
+    // (`javap -p -c io/kestra/core/models/executions/Execution.class`):
+    // `hasFailed` at bci 110, then `hasFailedNoRetry` at bci 120, whose lambda
+    // is `getState().isFailed() && shouldNotBeRetried(...)` over bci 0-24 and
+    // whose `shouldNotBeRetried` is `!taskRun.shouldBeRetried(task.getRetry())`
+    // (bci 55-74, with an absent `ResolvedTask` answering `false` at 53). When
+    // every failure will be retried, the method returns `emptyList()`: start
+    // nothing, **fail nothing**, wait.
+    //
+    // egret has that predicate -- [`current_list`]'s `Current::RetryPending` is
+    // `failed.iter().all(will_retry)`, the exact complement of
+    // `hasFailedNoRetry`'s `anyMatch` -- and
+    // [`parallel::drive`](super::parallel::drive) has always consulted it.
+    // **`dag::drive` did not.** With an empty `errors:` it called
+    // `drive_concurrent` directly, so rule 1 saw a `FAILED` child whose retry
+    // was still pending and `fail_the_rest` killed its in-flight siblings,
+    // where the artifact waits. That is egret acting where the artifact does
+    // not, and the corpus cannot see it.
+    //
+    // It is one call because it is one Java method: `Dag.resolveNexts` ->
+    // `resolveDagNexts` -> `resolveParallelNexts` ->
+    // `findTaskDependingFlowState`, the same function a `Parallel` reaches.
+    // The `errors.is_empty()` branch above already routes through
+    // `parallel::drive`, which asks this for itself.
+    if matches!(
+        current_list(plan, state, &children, errors, parent, now),
+        Current::RetryPending
+    ) {
+        return Step::Waiting;
+    }
     drive_concurrent(
         plan,
         state,
@@ -93,12 +139,26 @@ pub(crate) fn drive(
                 return false;
             };
             node.depends_on.iter().all(|&dep| {
-                run_for(dep).is_some_and(|ix| {
-                    matches!(
-                        latest(state, ix),
-                        Some(RunState::Success) | Some(RunState::Skipped)
-                    )
-                })
+                // **`isTerminated()`, not "succeeded"** -- W8 Task 5 fix round
+                // 2. Measured on the pinned artifact (`javap -p -c`,
+                // `io/kestra/core/runners/FlowableUtils.class`):
+                // `lambda$resolveDagNexts$3` is
+                // `getState().isTerminated()` and nothing else. A dependency
+                // that FAILED satisfies the dependency gate on the artifact;
+                // the failure is handled one layer out, by
+                // `findTaskDependingFlowState` switching to the `errors:` list,
+                // which here is `parallel::drive_concurrent`'s rule 1.
+                //
+                // It read `Some(Success) | Some(Skipped)` -- an enumeration of
+                // two terminals, which was the same set only while no other
+                // terminal could reach a `Dag` child. `Warning` can since W8
+                // Task 5, and under the FIXED rule 1 above (which no longer
+                // fires on a `WARNING` sibling) that combination **stalls the
+                // DAG for ever**: the dependant is never ready and nothing
+                // fails it. Fixing rule 1 alone would have traded one
+                // divergence for a worse one, which is why these two lines
+                // move together.
+                run_for(dep).is_some_and(|ix| latest(state, ix).is_some_and(RunState::is_terminal))
             })
         },
     )

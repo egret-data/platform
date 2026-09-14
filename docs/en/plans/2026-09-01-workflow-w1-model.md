@@ -816,6 +816,17 @@ Task 4's validator reports them as declared-but-unimplemented rather than
 accepting them silently."
 ```
 
+> **Half of that quotation went out of date on 2026-09-14 (W8 Task 6), and it is
+> annotated rather than edited because it is a record of what W1 decided.**
+> `SLA.Type` has two subtypes and they are two different mechanisms in the
+> artifact. `EXECUTION_ASSERTION` (`ExecutionChangedSLA`) is **evaluated** from
+> W8 Task 6 — `crates/egret-workflow/src/sla.rs`, called by
+> `worker::claim::settle` — and it banks two golden entries.
+> `MAX_DURATION` (`ExecutionMonitoringSLA`) is still a data shape, and so are
+> `checks` and `quotas`. The `not_yet_enforced` warning below narrowed with it:
+> a flow whose `sla:` is assertions only no longer gets one, because for that
+> flow the warning would be false.
+
 ---
 
 ### Task 4: Parse, the task-type registry, and validation

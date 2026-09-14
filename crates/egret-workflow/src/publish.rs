@@ -217,6 +217,10 @@ fn resolve_task<'a>(
             TaskKind::LoopUntil(l) => resolve_all(&mut l.tasks, ws, refs).await,
             TaskKind::AllowFailure(a) => resolve_all(&mut a.tasks, ws, refs).await,
             TaskKind::WorkingDirectory(w) => resolve_all(&mut w.tasks, ws, refs).await,
+            // `tasks` only, and `errors` deliberately not -- this walk mirrors
+            // `Task::children()`, which is the control-flow walk, and every
+            // other arm here is narrow in exactly the same way.
+            TaskKind::Pause(p) => resolve_all(&mut p.tasks, ws, refs).await,
             // Fix round 1: a subflow spawns a DIFFERENT flow's execution
             // rather than owning local tasks -- `Task::children()` returns
             // none for it either, and `registry::known_type` never sees its

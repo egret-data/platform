@@ -42,9 +42,16 @@
 //! inside a [`settle`](claim) whose `now` is fixed for the transaction. A retry
 //! on a run with **no concurrently-live sibling** therefore sat `RETRYING` for
 //! ever. [`wake`] is the statement that re-reads the clock: it names the
-//! executions holding a due retry and hands each to [`resume`], and [`tick`]
-//! calls it **ahead of** the claim so the run it reopens is claimed by the same
-//! tick. See [`claim`]'s module doc for the two-clocks rule the predicate rests
+//! executions holding a **due deadline that something will act on** and hands
+//! each to [`resume`], and [`tick`] calls it **ahead of** the claim so the run
+//! it reopens is claimed by the same tick.
+//!
+//! **It is not only about retries, and the name is the older half.** W8 Task 7
+//! added the third arm: a bounded `Pause` or a `LoopUntil` parks its run
+//! `PAUSED` with a deadline and is no more claimable than a `RETRYING` one, so
+//! without that arm a bounded wait never ended in the product however correct
+//! `advance()` was. See [`due_retries`] for what each arm may name and for why
+//! the differential oracle scores none of it. See [`claim`]'s module doc for the two-clocks rule the predicate rests
 //! on, and `tests/worker.rs`'s
 //! `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
 //! for the property — which the differential oracle cannot see, because its
@@ -84,8 +91,8 @@ mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
-    apply_outcome, claim, resume, start_execution, start_execution_with_trigger, tick, wake,
-    Claimed,
+    apply_outcome, claim, due_retries, resume, start_execution, start_execution_with_trigger, tick,
+    wake, Claimed,
 };
 pub use reaper::reap;
 pub use registry::Handlers;
@@ -511,11 +518,57 @@ pub enum WorkerError {
     /// comment said the arm was unreachable — *"the claim never takes one
     /// (`type_id IS NOT NULL`), so reaching that arm is a corruption rather
     /// than a case"* — and that is false of shipped code: `build_plan` plans
-    /// `Subflow`, `WorkingDirectory` and `WaitFor` as **opaque `Runnable`s**,
-    /// which sets `type_id`, while `models::TaskKind` for the same task is not
-    /// `Leaf`. Measured on the corpus, 40-odd comparable entries reach it, and
+    /// `AllowFailure`, `WorkingDirectory` and `LoopUntil` as
+    /// **opaque `Runnable`s**,
+    /// which sets `type_id`, while `models::TaskKind` for the same task is a
+    /// **flowable** — so `claim::leaf`'s `Leaf` arm cannot match and it answers
+    /// `None`. Measured on the corpus, 40-odd
+    /// comparable entries reached it, and
     /// every one of them is a construct nothing in W3b implements rather than a
     /// row that has gone wrong.
+    ///
+    /// **`LoopUntil` only, and this list read `WaitFor`/`LoopUntil` until W8
+    /// Task 1 fix round 5.** Kestra's `WaitFor` alias is not egret's:
+    /// `models::kind_for` has no `"waitfor"` row, so a `WaitFor` reaches
+    /// `models::TaskKind::Leaf`, `claim::leaf` returns **`Some`** for it, and
+    /// the refusal is `NoHandler` — the case the paragraph below describes,
+    /// which used to be spelled with `Pause` and cannot be since W8 Task 3. The count of three is
+    /// unaffected; the membership is, and **7 of the corpus's 10 flows of that
+    /// construct use the `WaitFor` spelling**, so the population this arm is
+    /// argued from contains none of them. Measured at fix round 4 and
+    /// re-measured at round 5; the model divergence is the plan's Task 4
+    /// Step 0.
+    ///
+    /// **Exactly three constructs, and the predicate is "not a `Leaf`" — not
+    /// "no handler".** Those are two different refusals and this doc briefly
+    /// merged them at W8 Task 1. A task that IS a `Leaf` but whose type nothing
+    /// implements gets [`WorkerError::NoHandler`] instead, one gate later, and
+    /// `WaitFor` is precisely that case: plan-opaque like the three, but
+    /// `models::kind_for` has no `"waitfor"` row, so it reaches `Leaf`,
+    /// `claim::leaf` returns `Some`, and the refusal is `NoHandler`.
+    ///
+    /// **`Pause` was the example this paragraph used, and W8 Task 3 moved it
+    /// out of BOTH sets.** It is `models::TaskKind::Pause` now and
+    /// `executor::TaskKind::Pause` in the plan, so `claim::persist` writes it
+    /// no `type_id` at all and the claim's own `WHERE type_id IS NOT NULL`
+    /// never takes it — the same reason a `Subflow` is not here, one tier over.
+    /// A `Pause` therefore reaches neither refusal: `NotALeaf` is for a
+    /// `models` flowable the PLAN made claimable, and a `Pause` is claimable by
+    /// nothing. The example is replaced rather than deleted because the
+    /// distinction it draws — two different refusals, one gate apart — is what
+    /// this paragraph is for.
+    ///
+    /// **That list named `Subflow` first until W8 Task 1's sweep, and it had
+    /// been false since W6 Task 3.** The staleness mattered more than a name
+    /// usually does, because this list *is* the argument that the arm is
+    /// reachable: `Subflow` is [`crate::executor::TaskKind::Executable`] now,
+    /// `claim`'s insert writes `type_id` only for a `Runnable`, and its
+    /// `WHERE type_id IS NOT NULL` therefore never takes one. The arm survives
+    /// on the three constructs above; the 40-odd was measured with `Subflow` in
+    /// the set and is not re-derived here — but the subtrahend is:
+    /// `tests/executor.rs` derives that **all 21 entries holding an executed
+    /// top-level `Subflow` were in this population for that reason and none is
+    /// now**, so read it as *40-odd, of which 21 left at W6 Task 3*.
     ///
     /// It behaves exactly like [`WorkerError::NoHandler`]: the tick aborts for
     /// that run, the execution stalls, and the differential oracle's driver

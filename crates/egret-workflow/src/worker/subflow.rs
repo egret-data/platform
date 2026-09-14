@@ -69,12 +69,13 @@
 //!   catch block (`ExecutableUtils.java:305-309`), which is what produces its
 //!   golden attempt of `["CREATED","FAILED"]` beside a run of
 //!   `["CREATED","RUNNING","FAILED"]`.
-//! * **`allowFailure`/`allowWarning` are unrepresentable** — `models::Task`
-//!   carries neither and `RunState` has no `Warning` — so [`guess_state`]
-//!   implements only the `transmitFailed` half of
-//!   `ExecutableUtils.guessState`. `valids/task-allow-failure-executable-flow`
-//!   and `valids/task-allow-warning-executable-flow` are the two entries that
-//!   costs, and both stay baselined.
+//! * ~~**`allowFailure`/`allowWarning` are unrepresentable**~~ — **W8 Task 5.**
+//!   `models::Task` carries both and `RunState` has `Warning`, so
+//!   [`guess_state`] implements `ExecutableUtils.guessState` whole rather than
+//!   its `transmitFailed` half. `valids/task-allow-failure-executable-flow` and
+//!   `valids/task-allow-warning-executable-flow` are the two entries it used to
+//!   cost and **both bank**. `transmitFailed: false` is still unreachable from
+//!   the corpus and still implemented.
 //! * **`revision`, `labels`, `inheritLabels`, `scheduleDate` and
 //!   `restartBehavior` are not on `models::Subflow`** (W1's curation), so
 //!   nothing here can honour them. `valids/task-flow-inherited-labels` and
@@ -632,12 +633,19 @@ async fn on_child_terminal_inner(
     }
 
     // Fact 4: the child's own state first, then `guessState` if it differs.
-    let guessed = guess_state(sub.transmit_failed, child_state);
+    let parent_task = &ctx.plan.tasks[task];
+    let guessed = guess_state(
+        sub.transmit_failed,
+        child_state,
+        parent_task.allow_failure,
+        parent_task.allow_warning,
+    );
     let states: Vec<RunState> = if guessed == child_state {
         vec![child_state]
     } else {
         vec![child_state, guessed]
     };
+    // See `complete` for why the SECOND state is a `Command::CompleteRun`.
     complete(
         conn,
         parent_id,
@@ -659,7 +667,8 @@ async fn on_child_terminal_inner(
     .await
 }
 
-/// `ExecutableUtils.guessState`, restricted to the half egret can represent.
+/// `ExecutableUtils.guessState` — **whole since W8 Task 5**, except for the
+/// trigger set, which is narrowed for a reason that is not about the flags.
 ///
 /// Java's is
 /// ```text
@@ -669,16 +678,83 @@ async fn on_child_terminal_inner(
 /// } else return SUCCESS;
 /// ```
 ///
-/// **Three of its inputs do not exist here and that is stated rather than
-/// approximated**: `models::Task` carries no `allowFailure` and no
-/// `allowWarning`, and [`RunState`] has neither `Warning` nor a paused state.
-/// So the two `allow*` branches are unreachable and the trigger set narrows
-/// from `{FAILED, PAUSED, KILLED, WARNING}` to `{Failed, Killed}` —
-/// `State.Type.isFailed()` is `FAILED || KILLED` in Java, which is where the
-/// second of those comes from, and it is the same pair
-/// `spawn::terminated_in_error` reads for a `Loop`.
+/// The two-line body is [`crate::executor::allow_failure::soften`], which is
+/// the same expression written once for all four sites that read the flags.
 ///
-/// The cost is two golden entries, named in this module's doc.
+/// **The two inputs this paragraph used to call non-existent now exist.** It
+/// read: *"`models::Task` carries no `allowFailure` and no `allowWarning`, so
+/// the two `allow*` branches are unreachable, and [`RunState`] has no
+/// `Warning`"*. W8 Task 5 added all three, and the two golden entries that cost
+/// — `valids/task-allow-{failure,warning}-executable-flow` — bank.
+///
+/// # The trigger set, and a justification that expired inside the task that
+/// wrote it
+///
+/// Java's disjunction is `isFailed() || isPaused() || KILLED || WARNING`.
+/// **Three of the four are here; `PAUSED` is not, and that is a property of the
+/// CALLER.** [`on_child_terminal`] runs from `claim::settle` step 4 of a child
+/// that has **terminated**, and `State.Type.isTerminated()` does not list
+/// `PAUSED` — measured off the pinned artifact at W8 Task 2. So a paused child
+/// never reaches this function at all; the disjunct is unreachable rather than
+/// declined.
+///
+/// **`WARNING` was excluded for the same-sounding reason and the reason was
+/// wrong by the time it was written.** W8 Task 5 fix round 1 restored it. The
+/// paragraph it replaces read: *"a child execution ending `WARNING` needs
+/// something inside it to produce one, which for a `Subflow`'s child means the
+/// same flags one level down and no corpus flow writes that. Neither is
+/// representable as a `child_state` this function can be handed."* Both halves
+/// were false **in the commit that wrote them**:
+///
+/// - *"not representable"* was true until `RunState::Warning` existed, and the
+///   same task added it. `worker::from_wire` derives from [`RunState::ALL`], so
+///   the variant became decodable in the same commit this sentence claimed it
+///   was not.
+/// - *"needs the same flags one level down"* is not what it needs. A child
+///   execution ends `WARNING` whenever its own aggregate does — one softened
+///   failure and nothing worse, which is
+///   `executor::tests::an_execution_whose_only_failure_is_softened_ends_warning`
+///   driven end to end. The flags are the CHILD's own, at any depth, and the
+///   parent's `transmitFailed` is what carries the result up.
+///
+/// **The lesson is the mechanism, not the instance: a justification can expire
+/// silently when the task that expires it is the same task that reads it.** The
+/// question that finds it is not a re-read — it is *does this sentence name a
+/// thing this commit changes?*
+///
+/// The fixture missed it for the reason a fixture always does. `the_allow_flags
+/// _only_move_a_transmitted_failure` supplied `Failed`, `Killed` and `Success`
+/// and **never `Warning`** — the element of the class it was not built for.
+/// `a_warning_child_is_transmitted_and_only_allow_warning_moves_it` is the row
+/// that was missing.
+///
+/// **What the artifact answers, read off the bytecode** (`javap -p -c`,
+/// `ExecutableUtils.guessState`, offsets 44–47 for the trigger and 79–102 for
+/// the tail): with `transmitFailed: true` and a `WARNING` child,
+/// `(allowedFailure && isFailed())` is false because `isFailed()` is
+/// `this == FAILED` alone, so `finalState` is the child's own `WARNING`; the
+/// tail then maps it to `SUCCESS` under `allowWarning:` **and under
+/// `allowWarning:` alone**. That is exactly
+/// [`soften`](crate::executor::allow_failure::soften)'s `(Warning, _, true)`
+/// arm, which is why this function needs no arm of its own for it.
+///
+/// **Two corrections W8 Task 2 owes this paragraph, both from the decompiled
+/// artifact** (`/app/kestra` in `kestra/kestra@sha256:28f59bf1…`):
+///
+/// - It said `KILLED` came from `State.Type.isFailed()` being
+///   `FAILED || KILLED`. It is not: `isFailed()` is `this == FAILED` alone, and
+///   `KILLED` is a disjunct `guessState` spells out itself —
+///   `execution.getState().getCurrent() == State.Type.KILLED`. The pair is the
+///   same one `spawn::terminated_in_error` reads for a `Loop`, but not for the
+///   reason given.
+/// - It said `RunState` has no paused state. **From W8 Task 2 it does, and from
+///   W8 Task 3 something emits it.** The reason moves a second time:
+///   `flowable::pause` puts a RUN into [`RunState::Paused`], but this function
+///   is reached by a child EXECUTION's terminal, and a paused execution has not
+///   terminated. So `PAUSED` stays out because a paused child never gets here
+///   at all, not because nothing can be paused.
+///
+/// The cost WAS two golden entries, named in this module's doc; both bank.
 ///
 /// **`transmitFailed: false` is measured and unreachable from the corpus**:
 /// `egret.probe/probe-notransmit-parent` on the artifact gives
@@ -686,9 +762,27 @@ async fn on_child_terminal_inner(
 /// off (`tests/executor.rs`'s `no_corpus_subflow_turns_transmit_failed_off`).
 /// It is implemented anyway, because a differential oracle's job is the
 /// behaviour and not the subset of it one corpus happens to reach.
-fn guess_state(transmit_failed: bool, child: RunState) -> RunState {
-    match transmit_failed && matches!(child, RunState::Failed | RunState::Killed) {
-        true => child,
+fn guess_state(
+    transmit_failed: bool,
+    child: RunState,
+    allow_failure: bool,
+    allow_warning: bool,
+) -> RunState {
+    match transmit_failed
+        && matches!(
+            child,
+            // Java's disjunction, minus the one disjunct that cannot reach
+            // this function: `isFailed() || isPaused() || KILLED || WARNING`.
+            // See the doc above for why `PAUSED` is absent and why that is a
+            // property of the CALLER rather than a narrowing chosen here.
+            RunState::Failed | RunState::Killed | RunState::Warning
+        ) {
+        // **W8 Task 5 supplies the two `allow*` inputs the paragraph above
+        // called unreachable.** They are the `Subflow` TASK's own flags, read
+        // off the plan rather than off `models::Subflow` -- `allowFailure:` is
+        // a `Task.java` property, not a `Subflow.java` one, which is why
+        // `subflow_of` cannot hand them over.
+        true => crate::executor::allow_failure::soften(child, allow_failure, allow_warning),
         false => RunState::Success,
     }
 }
@@ -729,8 +823,27 @@ async fn complete(
     .execute(&mut *conn)
     .await
     .map_err(db_err)?;
-    for s in states {
-        apply(&mut state, &Command::SetRunState { run, state: *s });
+    // **The first state is a `SetRunState`; every state after it is a
+    // `CompleteRun`** -- W8 Task 5. The first one closes the attempt, and
+    // Kestra's `ExecutableUtils.subflowExecutionResult` rebuilds the attempt
+    // from the parent taskrun's whole `State` afterwards, so a `Subflow`'s
+    // attempt is a COPY of its run's history rather than a window onto part of
+    // it. Measured: `valids/task-allow-warning-executable-flow`'s run and
+    // attempt both read `CREATED RUNNING FAILED SUCCESS`, and so do
+    // `egret.probe/probe-notransmit-parent`'s on the pinned artifact.
+    //
+    // With one state -- which is every call but the two `allow*` `Subflow`s and
+    // any `transmitFailed: false` one -- this is byte-identical to what it was.
+    for (i, s) in states.iter().enumerate() {
+        let cmd = match i {
+            0 => Command::SetRunState { run, state: *s },
+            _ => Command::CompleteRun {
+                run,
+                run_state: *s,
+                attempt: *s,
+            },
+        };
+        apply(&mut state, &cmd);
     }
     claim::settle(conn, &ctx, &before, &mut state, now, None).await
 }
@@ -1147,14 +1260,260 @@ mod tests {
     /// artifact, whose parent run read `CREATED RUNNING FAILED SUCCESS`.
     #[test]
     fn guess_state_is_the_transmit_failed_half_of_the_artifacts_table() {
-        assert_eq!(guess_state(true, RunState::Failed), RunState::Failed);
-        assert_eq!(guess_state(true, RunState::Killed), RunState::Killed);
-        assert_eq!(guess_state(true, RunState::Success), RunState::Success);
-        assert_eq!(guess_state(false, RunState::Failed), RunState::Success);
-        assert_eq!(guess_state(false, RunState::Killed), RunState::Success);
-        // Not in Java's trigger set at all, so it is the `else` branch even
-        // with `transmitFailed` on.
-        assert_eq!(guess_state(true, RunState::Skipped), RunState::Success);
+        // The rows this table has always had, with both flags OFF -- which is
+        // what every `Subflow` in the corpus but two writes.
+        assert_eq!(
+            guess_state(true, RunState::Failed, false, false),
+            RunState::Failed
+        );
+        assert_eq!(
+            guess_state(true, RunState::Killed, false, false),
+            RunState::Killed
+        );
+        assert_eq!(
+            guess_state(true, RunState::Success, false, false),
+            RunState::Success
+        );
+        assert_eq!(
+            guess_state(false, RunState::Failed, false, false),
+            RunState::Success
+        );
+        assert_eq!(
+            guess_state(false, RunState::Killed, false, false),
+            RunState::Success
+        );
+        // **Non-trigger TERMINALS under `transmitFailed: true`** -- the rows
+        // that make WIDENING the trigger set fail rather than pass. Both are
+        // `isTerminatedNoFail()`'s and neither is in Java's disjunction, so
+        // both take the `else` branch and answer `SUCCESS`; adding either to
+        // the `matches!` would make `soften` return the state itself instead.
+        //
+        // `Skipped` was here already and `Retried` was **not** -- W8 Task 5 fix
+        // round 2 measured the difference: a mutation adding `| RunState::Skipped`
+        // to the trigger set dies on the line below, and one adding
+        // `| RunState::Retried` survived the whole suite until this row existed.
+        // One member of a class is not the class.
+        assert_eq!(
+            guess_state(true, RunState::Skipped, false, false),
+            RunState::Success
+        );
+        assert_eq!(
+            guess_state(true, RunState::Retried, false, false),
+            RunState::Success
+        );
+        // And with the flags ON, because `soften` is what the trigger arm
+        // calls: a widened set would return `Retried` here too, and a fixture
+        // that only ever passed `false, false` could not tell a widening from a
+        // `soften` that had stopped being identity on a non-`FAILED` state.
+        assert_eq!(
+            guess_state(true, RunState::Retried, true, true),
+            RunState::Success
+        );
+    }
+
+    /// **A `PAUSED` child cannot reach [`guess_state`], and that is carried by
+    /// code rather than by prose** — W8 Task 5 fix round 2.
+    ///
+    /// Java's trigger set is `isFailed() || isPaused() || KILLED || WARNING`
+    /// and this function omits `isPaused()`. The omission is sound because
+    /// `claim::settle` calls [`on_child_terminal`] behind
+    /// `is.filter(|s| s.is_terminal())`, so the only states this function can
+    /// be HANDED are `RunState::ALL`'s terminals — and `PAUSED` is not one.
+    /// That was true and unpinned: nothing failed if `is_terminal` grew a
+    /// `Paused`, and the doc would then have been quietly wrong in the same way
+    /// the `WARNING` justification was.
+    ///
+    /// **Derived from `RunState::ALL` rather than listed**, and with a positive
+    /// control: a `!contains` alone passes on an implementation where nothing
+    /// is reachable at all, which is the acquitting direction and the only one
+    /// that matters.
+    #[test]
+    fn a_paused_child_cannot_reach_guess_state() {
+        // **Through `claim::notifies_parent`, which is the predicate
+        // `claim::settle` actually filters on** -- not through `is_terminal`
+        // directly. Fix round 3: deriving from `is_terminal` made this test
+        // true of the ENUM and silent about the CALL SITE, so the link it
+        // exists to pin was still carried by prose alone.
+        let reachable: Vec<RunState> = RunState::ALL
+            .iter()
+            .copied()
+            .filter(|s| crate::worker::claim::notifies_parent(*s))
+            .collect();
+        assert!(
+            !reachable.contains(&RunState::Paused),
+            "a PAUSED child execution has not terminated, so `claim::settle`'s \
+             `is.filter(|s| s.is_terminal())` never hands it here -- and this \
+             is what lets `guess_state` omit Java's `isPaused()` disjunct"
+        );
+        for state in [RunState::Failed, RunState::Killed, RunState::Warning] {
+            assert!(
+                reachable.contains(&state),
+                "{state:?} IS in the trigger set and must be reachable -- \
+                 without this the assertion above passes on an `is_terminal` \
+                 that answers false for everything"
+            );
+        }
+        // **`Cancelled` is reachable here and is deliberately NOT in
+        // `guess_state`'s trigger set** -- W8 Task 6. It is terminal, so
+        // `claim::settle` really does hand it to `on_child_terminal`, and
+        // `ExecutableUtils.guessState`'s disjunction is `isFailed() ||
+        // isPaused() || KILLED || WARNING` (`ExecutableUtils.java:46-47`) with
+        // no `CANCELLED` in it -- so a cancelled child gives the parent's run
+        // `SUCCESS`. That is a row the corpus cannot supply and
+        // `a_cancelled_child_gives_the_parent_run_success` supplies it.
+        assert!(
+            reachable.contains(&RunState::Cancelled),
+            "unlike `Paused`, a `Cancelled` child DOES reach `guess_state`; \
+             the omission of `CANCELLED` from the trigger set is Java's, not a \
+             property of what can arrive"
+        );
+        assert_eq!(
+            reachable.len(),
+            7,
+            "seven of the thirteen `RunState::ALL` are terminal; a bare \
+             `!contains` says nothing about how many"
+        );
+    }
+
+    /// **A `CANCELLED` child gives the parent's `Subflow` run `SUCCESS`** —
+    /// W8 Task 6, and it is Java's omission rather than egret's.
+    ///
+    /// `ExecutableUtils.guessState`'s disjunction is `isFailed() || isPaused()
+    /// || KILLED || WARNING` (`ExecutableUtils.java:46-47`). `isFailed()` is
+    /// `FAILED` alone, and **`CANCELLED` is in none of the four** — so a child
+    /// execution that an `sla:` cancelled is not transmitted at all and the
+    /// `else` branch answers `SUCCESS`, whatever `transmitFailed:` says and
+    /// whatever the `allow*` flags say.
+    ///
+    /// **This row is reachable in production and not from this corpus**, which
+    /// is why it is asserted rather than argued: `RunState::Cancelled` has one
+    /// producer (a flow-level `EXECUTION_ASSERTION` with `behavior: CANCEL`)
+    /// and the two corpus flows that carry one are named as a `Subflow` target
+    /// by nothing. `a_paused_child_cannot_reach_guess_state` is the companion
+    /// that pins the OTHER half — that a `CANCELLED` child really does arrive
+    /// here, unlike a `PAUSED` one.
+    ///
+    /// Every combination of the three flags is driven, because the claim is
+    /// that none of them moves the answer; a single row could not say that.
+    #[test]
+    fn a_cancelled_child_gives_the_parent_run_success() {
+        for transmit in [true, false] {
+            for af in [true, false] {
+                for aw in [true, false] {
+                    assert_eq!(
+                        guess_state(transmit, RunState::Cancelled, af, aw),
+                        RunState::Success,
+                        "CANCELLED is outside `guessState`'s trigger set, so \
+                         transmitFailed={transmit} allowFailure={af} \
+                         allowWarning={aw} cannot change the answer"
+                    );
+                }
+            }
+        }
+        // The control on the same fixture: a state that IS in the trigger set
+        // is transmitted, so "SUCCESS for everything" fails here.
+        assert_eq!(
+            guess_state(true, RunState::Killed, false, false),
+            RunState::Killed
+        );
+    }
+
+    /// The `allow*` columns W8 Task 5 added, and the rows the corpus's two
+    /// declaring flows reach.
+    ///
+    /// **`transmitFailed` is varied against the SAME flag pair**, because the
+    /// two are read by different halves of Java's expression and a fixture that
+    /// only ever turned one knob could not tell "softened" from "never
+    /// triggered": both answer `SUCCESS` for `(Failed, true, true)`.
+    #[test]
+    fn the_allow_flags_only_move_a_transmitted_failure() {
+        // `valids/task-allow-failure-executable-flow` is `(true, Failed, true,
+        // false)`. This row read `Failed` at Step 2, where `RunState` had no
+        // `Warning`; Step 3 added the variant and this is the artifact's
+        // answer.
+        assert_eq!(
+            guess_state(true, RunState::Failed, true, false),
+            RunState::Warning
+        );
+        // `valids/task-allow-warning-executable-flow`.
+        assert_eq!(
+            guess_state(true, RunState::Failed, true, true),
+            RunState::Success
+        );
+        // `allowWarning:` alone does nothing to a FAILED child, at this site as
+        // at every other.
+        assert_eq!(
+            guess_state(true, RunState::Failed, false, true),
+            RunState::Failed
+        );
+        // A `KILLED` child is in the trigger set but is not `isFailed()`, so
+        // Java's `(allowedFailure && isFailed())` is false and the flags cannot
+        // move it. This is the row that separates "soften a failure" from
+        // "soften anything the trigger set admits".
+        assert_eq!(
+            guess_state(true, RunState::Killed, true, true),
+            RunState::Killed
+        );
+        // With `transmitFailed` off the `else` branch answers before the flags
+        // are consulted at all -- the same answer by a different route, which
+        // is why the row above it exists.
+        assert_eq!(
+            guess_state(false, RunState::Failed, true, true),
+            RunState::Success
+        );
+    }
+
+    /// **A `WARNING` child is TRANSMITTED, and only `allowWarning:` moves it**
+    /// — the row `the_allow_flags_only_move_a_transmitted_failure` did not
+    /// contain, and the one a shipped defect lived in until W8 Task 5 fix
+    /// round 1.
+    ///
+    /// That test supplies `Failed`, `Killed` and `Success` and never `Warning`,
+    /// so it could not see [`guess_state`] answering `SUCCESS` where the
+    /// artifact keeps `WARNING`. The trigger set is
+    /// `isFailed() || isPaused() || KILLED || WARNING` (bytecode 44–47) and the
+    /// tail is `finalState == WARNING && allowWarning ? SUCCESS : finalState`
+    /// (79–102).
+    ///
+    /// **The oracle cannot score any of this**, so these four assertions are
+    /// the whole instrument: no corpus `Subflow` has a child that ends
+    /// `WARNING`, because that needs the child's own flags and the two flows
+    /// that write them are the parents rather than the children. A mutation
+    /// reverting the `RunState::Warning` disjunct leaves the ratchet at 111 and
+    /// kills **only this test** — measured, fix round 1's M18.
+    ///
+    /// **`allow_failure` is varied against a fixed `allow_warning` in both
+    /// halves**, because `(allowedFailure && isFailed())` is false for a
+    /// `WARNING` child whatever `allowFailure:` says — a mapping that read the
+    /// two flags as one would pass a fixture that only moved `allow_warning`.
+    #[test]
+    fn a_warning_child_is_transmitted_and_only_allow_warning_moves_it() {
+        // Transmitted and kept: `allowFailure:` cannot reach it, because
+        // `State.Type.isFailed()` is `this == FAILED` alone.
+        assert_eq!(
+            guess_state(true, RunState::Warning, false, false),
+            RunState::Warning
+        );
+        assert_eq!(
+            guess_state(true, RunState::Warning, true, false),
+            RunState::Warning
+        );
+        // `allowWarning:` moves it, with `allowFailure:` on or off.
+        assert_eq!(
+            guess_state(true, RunState::Warning, false, true),
+            RunState::Success
+        );
+        assert_eq!(
+            guess_state(true, RunState::Warning, true, true),
+            RunState::Success
+        );
+        // The control: with `transmitFailed` off the `else` branch answers
+        // `SUCCESS` for the same child, so "SUCCESS" above would have been
+        // indistinguishable from "never triggered" without this row beside it.
+        assert_eq!(
+            guess_state(false, RunState::Warning, false, false),
+            RunState::Success
+        );
     }
 
     fn flow(src: &str) -> Flow {

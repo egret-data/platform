@@ -184,11 +184,26 @@ pub struct FlowOutput {
 }
 
 /// `sla/SLA.java` + `sla/types/{MaxDurationSLA,ExecutionAssertionSLA}.java`.
-/// Ported as a data shape only -- W1 is the model, not the executor;
-/// evaluating an SLA against a running execution is W3/W8. `SLA.Type`'s two
-/// `@JsonSubTypes` names (`MAX_DURATION`, `EXECUTION_ASSERTION`) are used as
-/// the external tag, the same internally-tagged-enum approach `task.rs`
-/// already uses for `Retry`'s three `@JsonSubTypes`.
+///
+/// **W1 ported this as a data shape only and said *"evaluating an SLA against a
+/// running execution is W3/W8"*. W8 Task 6 is that, for ONE of the two
+/// variants, so the sentence is now half true and the half matters:**
+///
+/// * [`Sla::ExecutionAssertion`] is Kestra's `ExecutionChangedSLA` and **is
+///   evaluated** -- [`crate::sla::first_execution_changed_violation`], called
+///   by `worker::claim::settle` where the artifact calls
+///   `ExecutorService.handleExecutionChangedSLA`. It banks two golden entries.
+/// * [`Sla::MaxDuration`] is Kestra's `ExecutionMonitoringSLA`, evaluated by a
+///   separate scheduled loop in the artifact, and **nothing in this crate
+///   evaluates one**. `spec::validate`'s `not_yet_enforced` warning was
+///   narrowed to exactly that case at W8 Task 6; `crate::sla`'s module doc
+///   carries the measurement of why the execution oracle cannot score it
+///   either.
+///
+/// `SLA.Type`'s two `@JsonSubTypes` names (`MAX_DURATION`,
+/// `EXECUTION_ASSERTION`) are used as the external tag, the same
+/// internally-tagged-enum approach `task.rs` already uses for `Retry`'s three
+/// `@JsonSubTypes`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Sla {
@@ -241,8 +256,14 @@ pub enum SlaBehavior {
     None,
 }
 
-/// `check/Check.java`. Ported as a data shape only, same as `Sla` above --
-/// checks are evaluated before an execution is created, which is W3/W8.
+/// `check/Check.java`. Ported as a data shape only -- checks are evaluated
+/// before an execution is created, which is W3/W8.
+///
+/// **This used to read *"same as `Sla` above"* and that pointer went stale at
+/// W8 Task 6**, which evaluates one of `Sla`'s two variants. Nothing evaluates
+/// a `Check`, which is still the whole claim, and it is now stated rather than
+/// delegated -- a comparison to a neighbour is a claim that travels when the
+/// neighbour moves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Check {
