@@ -84,8 +84,8 @@ mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
 pub use claim::{
-    apply_outcome, claim, resume, start_execution, start_execution_with_trigger, tick, wake,
-    Claimed,
+    apply_outcome, claim, due_retries, resume, start_execution, start_execution_with_trigger, tick,
+    wake, Claimed,
 };
 pub use reaper::reap;
 pub use registry::Handlers;

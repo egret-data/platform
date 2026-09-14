@@ -388,9 +388,17 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
-/// The executions holding a run whose retry delay has elapsed — a `RETRYING`
-/// one waiting to be reopened, or a `RETRIED` one whose **replay** has not been
+/// The executions holding a run whose **deadline has elapsed and which
+/// something will move** — a `RETRYING` one waiting to be reopened, a `PAUSED`
+/// one waiting to be resumed, or a `RETRIED` one whose **replay** has not been
 /// started yet.
+///
+/// **The name is narrower than the predicate and is kept on purpose.** Since
+/// W8 Task 7 two of the three arms are not retries; `due_retries` is what W4
+/// Task 1 called it and what every doc that cites it — this crate's,
+/// `oracle-exec/README.md`'s and W8's own record — still calls it, so renaming
+/// it would cost a reader the trail for a word. The arms below are the
+/// authority on what it selects; this sentence is, too.
 ///
 /// **The state term is the whole predicate's point** and it is not a tidiness:
 /// `advance()` never CLEARS a `not_before` — `executor::apply`'s
@@ -446,36 +454,90 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// [`claim`]'s reason: without a total order the rows come back in whatever
 /// the scan produced, and at `LIMIT 1` that decides *which* execution is
 /// woken rather than merely in what order.
-/// # It will never wake a `PAUSED` run, and the ratchet cannot tell you
+/// # The `PAUSED` arm, and the ratchet cannot score it either way
 ///
-/// **W8 Task 2, and W8 Task 3 made the hypothetical real.** The gate below is
-/// `r.state = 'RETRYING' OR (r.state = 'RETRIED' AND …)`. A bounded `Pause`
-/// parks a run with a `not_before_ms` and a state of `'PAUSED'`, which matches
-/// neither — so in the **product** a bounded pause never resumes, however
-/// correct `advance()` is. That was a prediction about a construct nothing
-/// emitted; since W8 Task 3 `flowable::pause` emits it, eight golden entries
-/// depend on the wait ending, and every one of them ends it through
-/// `driver::pass_time` rather than through this query. **The defect is live and
-/// it is Task 7's**, per the package's own assignment.
+/// **W8 Task 2 predicted it, W8 Task 3 made it real, and W8 Task 7 is the one
+/// that fixed it.** The gate below read `r.state = 'RETRYING' OR (r.state =
+/// 'RETRIED' AND …)` from W4 Task 1 until W8 Task 7. A bounded `Pause` parks a
+/// run with a `not_before_ms` and a state of `'PAUSED'`, which matched neither
+/// — so in the **product** a bounded pause never resumed, however correct
+/// `advance()` was. When that sentence was first written it was a prediction
+/// about a construct nothing emitted; `flowable::pause` has emitted it since W8
+/// Task 3, `flowable::loop_until` since Task 4, and eight golden entries depend
+/// on the wait ending.
 ///
-/// **This is the half the oracle is blind to, and it is blind for a reason that
-/// is a property of the instrument.** `oracle-exec/driver.rs`'s `pass_time`
-/// selects on `not_before_ms` alone, with no state term anywhere in its SQL,
-/// and then calls `worker::resume` directly. It never runs this query. So the
-/// driver reaches the same runs through a different door and a green ratchet
-/// says nothing about this predicate at all — the shape W4's item 15 named, a
-/// property proved about a path no deployment takes.
+/// # What the `PAUSED` arm may name, and why it needs no terms of its own
+///
+/// `'PAUSED'` is added bare, where `'RETRIED'` needed two extra conditions, and
+/// the asymmetry is structural rather than an oversight:
+///
+/// - **The unbounded pause is excluded by a CHECK, not by a term here.**
+///   `Resume::Never` writes no deadline (`executor::apply`'s `PauseRun` arm
+///   takes `not_before` out of the `Resume`), and migration 0141's
+///   `workflow_task_runs_resume_bound_matches` makes `resume_with = 'NEVER'`
+///   beside a non-NULL `not_before_ms` a row Postgres refuses. So the
+///   pre-existing `r.not_before_ms IS NOT NULL` term above already cannot
+///   reach one. **That is the over-acceptance this whole module must not
+///   commit** — seven corpus flows write an unbounded `Pause` and the artifact
+///   leaves every one of them `PAUSED` for the full harvest — and it is
+///   refused in the schema rather than remembered in this `WHERE`.
+///   `an_unbounded_pause_is_never_named_however_long_its_execution_lives` is
+///   the assertion at this end.
+/// - **A `PAUSED` run is never named twice for the same deadline**, which is
+///   the endless case the `RETRIED` arm needed terms for. `PAUSED` is not
+///   terminal (`RunState::is_terminal`, and
+///   `neither_paused_nor_restarted_is_terminal` partitions `RunState::ALL` to
+///   say so), and `flowable::resume_paused` moves a due one on the very settle
+///   this waker's `resume` produces — to its terminal for a `Pause`, back to
+///   `RUNNING` for a `LoopUntil`. The stale deadline it leaves behind is then
+///   in a state this predicate does not name, which is the `RETRYING` arm's
+///   own reason for having a state term at all.
+///
+/// # `RESTARTED` is NOT here, and that was measured rather than assumed
+///
+/// It is the other non-terminal state W8 Task 2 added, so the question has to
+/// be answered rather than skipped. Nothing can put a run in it carrying a
+/// live deadline: `RunState::Restarted` is pushed by `pause_mark` onto the
+/// **execution**'s history and by nothing onto a run's — `0` of the golden's
+/// 840 run histories hold it, against 12 execution histories that do — and the
+/// one command that ends a `LoopUntil`'s wait, `Command::RestartLoop`, clears
+/// `not_before` and `resume_with` in the same arm and pushes `RUNNING`. A
+/// state with no producer of due rows is not a gap in this gate.
+/// `the_waker_names_exactly_the_states_something_will_move` is the row that
+/// says so, and it enumerates `RunState::ALL` so a fourteenth variant cannot be
+/// answered by omission.
+///
+/// # Neither the fix nor the defect is visible to the ratchet
+///
+/// **The oracle is blind here for a reason that is a property of the
+/// instrument.** `oracle-exec/driver.rs`'s `pass_time` selects on
+/// `not_before_ms` alone, with no state term anywhere in its SQL, and then
+/// calls `worker::resume` directly. It never runs this query. So the driver
+/// reaches the same runs through a different door: the eight pause entries
+/// banked green with this gate narrow, and they stay green now it is wide.
+/// That is the shape W4's item 15 named — a property proved about a path no
+/// deployment takes — and it is why this fix ships with an integration test
+/// and no baseline movement.
 ///
 /// `executor::retry::reopen_due` is the pure-side twin and its blindness is the
-/// **opposite**: the driver does reach it, so it fails loudly. Recorded on both
-/// because one sentence about "the ratchet cannot see it" is wrong about one of
-/// them.
-pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
+/// **opposite**: the driver does reach it, so a narrowing there fails loudly.
+/// Recorded on both because one sentence about "the ratchet cannot see it" is
+/// wrong about one of them.
+///
+/// # Exported for the same reason [`wake`] is
+///
+/// `pub` so a test can measure the **selection** rather than the settle. The
+/// vocabulary row above hand-writes a `task_runs.state` for each member of
+/// `RunState::ALL`; going through [`wake`] would resume each one and
+/// `claim::persist` recomputes `state` from `history.last()`, so the fixture
+/// would erase the very column under test before the next read.
+pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Uuid>> {
     sqlx::query_scalar(
         "SELECT r.execution_id \
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
           WHERE (r.state = 'RETRYING' \
+                 OR r.state = 'PAUSED' \
                  OR (r.state = 'RETRIED' \
                      AND e.parent_run_ix IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
