@@ -758,9 +758,14 @@ const WAIT_FOR_TYPE: &str = "waitfor";
 ///   pause re-enters `RUNNING` to drive the handler. Nothing else in this
 ///   corpus has that shape.
 /// * `behavior:` — `RESUME`/`WARN`/`FAIL`/`CANCEL` at the moment the pause
-///   ends. Two of the four terminals it can produce, `WARNING` and
-///   `CANCELLED`, are not in [`RunState`](crate::executor::RunState) at all, so
-///   the construct is **unrepresentable** here and not merely unwritten.
+///   ends. This read *"two of the four terminals it can produce, `WARNING` and
+///   `CANCELLED`, are not in `RunState` at all, so the construct is
+///   unrepresentable here"*; **both are in it now** (W8 Task 5 and W8 Task 6),
+///   and the entry did **not** bank — see the measurement in the comment on
+///   [`pause_gap`]'s `behavior:` arm. What holds it is a fifth outcome the
+///   artifact produces for an out-of-enum value, and the fact that a DYNAMIC
+///   value cannot be classified at plan time at all, which is where this
+///   decision is taken.
 /// * `onPause:` — a single task run when the pause begins.
 ///   `valids/pause_on_pause`'s golden records it as a run with `parent: null`,
 ///   i.e. a SIBLING of the pause rather than a child, `overlapping` it.
@@ -800,19 +805,27 @@ pub fn pause_gap(p: &crate::models::Pause) -> Option<&'static str> {
     //
     // It is a gap for the reason it always was, and the measurement above is
     // what confirms that reason rather than replacing it: `behavior:` is
-    // four-valued and the artifact really does produce all four terminals, of
-    // which `CANCELLED` is not in
-    // [`RunState`](crate::executor::RunState) at all. (`WARNING` was the other
-    // one until W8 Task 5 added `RunState::Warning`; **one of the two arriving
-    // is not enough**, because `pause_gap` refuses the whole task whenever a
-    // `behavior:` is written, whatever value it holds.) A fifth outcome, the
-    // non-terminal hang on an out-of-enum value, is not representable either. **A dynamic one cannot
-    // even be classified here** -- its value is known at render time and this
-    // decision is taken at plan time -- so the whole task stays opaque, which
-    // is the only answer that cannot over-accept. The entry becomes bankable
-    // when `RunState` gains `CANCELLED` as well -- W8 Task 5 supplied
-    // `WARNING`, which is half of it, and moved nothing here for the reason
-    // above.
+    // four-valued and the artifact really does produce all four terminals.
+    //
+    // **This comment carried a PREDICTION and W8 Task 6 measured it false.** It
+    // said *"the entry becomes bankable when `RunState` gains `CANCELLED` as
+    // well -- W8 Task 5 supplied `WARNING`, which is half of it"*. W8 Task 6
+    // supplied the other half, the vocabulary is complete, and
+    // `valids/pause-behavior` did **not** bank: that task's ratchet moved
+    // 111 -> 109 and both ids were `sla:`'s. The prediction was a claim about
+    // the STATE VOCABULARY over an entry held by a PLAN decision -- this one.
+    // Two things still hold it, and neither is a missing variant:
+    //
+    // * a fifth outcome, the non-terminal HANG the artifact produces for a
+    //   value outside the enum (`NOPE`, lower-case `fail`, an undefined
+    //   `{{inputs.nosuch}}` -- each leaves the execution `RUNNING` past 120 s),
+    //   which is not a terminal and so not representable by any variant; and
+    // * **a dynamic value cannot even be classified here** -- it is known at
+    //   render time and this decision is taken at plan time.
+    //
+    // So the whole task stays opaque, which is the only answer that cannot
+    // over-accept. Being inside the vocabulary is necessary and not sufficient,
+    // and this is the fourth entry-population on this branch to measure that.
     if p.behavior.is_some() {
         return Some("behavior");
     }

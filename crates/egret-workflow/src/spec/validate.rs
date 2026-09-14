@@ -111,11 +111,27 @@ pub struct ValidationReport {
 /// * **`timeout` is enforced by W4 Task 2**, in `worker::timeout`, around
 ///   `Registry::run` — which is where the artifact enforces it too.
 ///
-/// Both rows are gone. The five that remain were re-checked the same way:
-/// `concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
-/// reader outside this validator, and `triggers` is W6's. `oracle-exec/README.md`'s
-/// unclaimed table records the same status for `sla:`. **It no longer has a row
-/// for flow `concurrency:` and that does not change this one**: W8 Task 1
+/// Both rows are gone. **`sla` is the third row to be re-checked and the
+/// FIRST to be narrowed rather than kept or deleted** — W8 Task 6. It said
+/// *"`concurrency`, `sla`, `checks` and `quotas` have W1 model shapes and no
+/// reader outside this validator"*, and half of that is now false: `crate::sla`
+/// reads `Flow::sla` and `worker::claim::settle` acts on it. But only half —
+/// `SLA.Type` has two subtypes and they are two different mechanisms in the
+/// artifact (see [`crate::sla`]), of which `EXECUTION_ASSERTION` is enforced
+/// and `MAX_DURATION` is not. So the row stays and its PREDICATE narrows:
+/// [`FeaturePresence::sla`] is now *declares a `MAX_DURATION`*, and a flow
+/// whose `sla:` is assertions only publishes without the warning, because for
+/// that flow the warning would be false. Warning about an enforced feature is
+/// the mirror of the divergence `plan::pause_gap` refuses — *"a publish that
+/// says yes over an executor that says no"* — and it costs a user the same
+/// way: they read the warning and work around a rule that is already working.
+///
+/// The three that remain un-narrowed were re-checked the same way:
+/// `concurrency`, `checks` and `quotas` have W1 model shapes and no reader
+/// outside this validator, and `triggers` is W6's.
+/// `oracle-exec/README.md`'s unclaimed table records the same split for
+/// `sla:`. **It no longer has a row for flow `concurrency:` and that does not
+/// change this one**: W8 Task 1
 /// deleted that row because the construct holds no baselined entry under the
 /// execution oracle, which is a statement about what the RATCHET can score and
 /// not about whether this validator must warn. A flow declaring `concurrency:`
@@ -258,6 +274,13 @@ fn is_runnable_child(task: &Task) -> bool {
 #[derive(Debug, Default)]
 struct FeaturePresence {
     concurrency: bool,
+    /// **Declares a `MAX_DURATION`**, not "declares an `sla:`" — W8 Task 6.
+    ///
+    /// See [`NOT_YET_ENFORCED`]'s doc: `EXECUTION_ASSERTION` is enforced from
+    /// W8 Task 6 and `MAX_DURATION` is not, so the flow-level question this
+    /// warning answers is no longer the same as "is the key present".
+    /// `an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does`
+    /// is the pair that pins it.
     sla: bool,
     checks: bool,
     quotas: bool,
@@ -273,7 +296,14 @@ pub fn validate(flow: &Flow) -> ValidationReport {
 
     let features = FeaturePresence {
         concurrency: flow.concurrency.is_some(),
-        sla: !flow.sla.is_empty(),
+        // **The narrowing, and it is the whole of it** -- W8 Task 6. `matches!`
+        // over the variant rather than a text needle: a flow can write either
+        // subtype, both, or the same subtype twice, and only the presence of a
+        // `MAX_DURATION` makes "not yet enforced" a true sentence.
+        sla: flow
+            .sla
+            .iter()
+            .any(|s| matches!(s, Sla::MaxDuration { .. })),
         checks: !flow.checks.is_empty(),
         quotas: !flow.quotas.is_empty(),
         triggers: !flow.triggers.is_empty(),
@@ -1994,7 +2024,11 @@ mod tests {
             ],
             "a row added here is a claim that egret does NOT enforce that \
              feature; a row removed is a claim that it now does. Both need the \
-             evidence this constant's doc carries"
+             evidence this constant's doc carries. **A row can also NARROW** -- \
+             `sla` did at W8 Task 6 -- and that moves `FeaturePresence`, not \
+             this list, which is why \
+             `an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does` \
+             exists beside this test rather than inside it"
         );
 
         // NEGATIVE: the two features that ARE enforced must not warn. A flow
@@ -2037,6 +2071,69 @@ mod tests {
              beside it does not: {:?}",
             r.warnings
         );
+    }
+
+    /// **The `sla` row narrowed rather than went** — W8 Task 6, and both halves
+    /// are asserted because either alone is satisfiable by a mistake.
+    ///
+    /// `SLA.Type`'s two subtypes are two different mechanisms in the artifact
+    /// and only one of them is enforced here, so *"`sla` is declared and not
+    /// enforced"* stopped being a question about the KEY and became a question
+    /// about the VARIANT. A validator that kept warning on every `sla:` would
+    /// tell the author of an `EXECUTION_ASSERTION` flow to work around a rule
+    /// that already works; one that stopped warning altogether would hide the
+    /// `MAX_DURATION` gap. The pair below is what separates them.
+    #[test]
+    fn an_execution_assertion_only_sla_does_not_warn_and_a_max_duration_does() {
+        let assertion_only = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
+             behavior: CANCEL\n    assert: \"{{ false }}\"\ntasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&assertion_only);
+        assert!(
+            !r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "sla"),
+            "an `EXECUTION_ASSERTION` IS enforced -- `crate::sla` evaluates it \
+             and `worker::claim::settle` acts on it -- so warning here would be \
+             a false sentence in a user-visible message: {:?}",
+            r.warnings
+        );
+        assert!(r.errors.is_empty(), "{r:?}");
+
+        let has_max_duration = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: a\n    type: EXECUTION_ASSERTION\n    \
+             behavior: CANCEL\n    assert: \"{{ false }}\"\n  - id: d\n    \
+             type: MAX_DURATION\n    behavior: FAIL\n    duration: PT1S\ntasks:\n  \
+             - id: t\n    type: x\n",
+        )
+        .unwrap();
+        let r = validate(&has_max_duration);
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.code == "not_yet_enforced" && w.path == "sla"),
+            "a `MAX_DURATION` beside an enforced assertion must still warn -- \
+             nothing in this crate evaluates one, and the flow above is the \
+             MIXED case, which is the one a per-key predicate gets wrong: {:?}",
+            r.warnings
+        );
+        assert!(r.errors.is_empty(), "{r:?}");
+
+        // And the degenerate mixed case in the other order, so the `any` above
+        // is not passing on declaration order.
+        let reversed = parse(
+            "id: f\nnamespace: a.b\nsla:\n  - id: d\n    type: MAX_DURATION\n    \
+             behavior: FAIL\n    duration: PT1S\n  - id: a\n    \
+             type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    assert: \"{{ false }}\"\n\
+             tasks:\n  - id: t\n    type: x\n",
+        )
+        .unwrap();
+        assert!(validate(&reversed)
+            .warnings
+            .iter()
+            .any(|w| w.code == "not_yet_enforced" && w.path == "sla"));
     }
 
     #[test]

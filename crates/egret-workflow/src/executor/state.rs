@@ -482,7 +482,8 @@ pub enum RunState {
     Restarted,
     /// **The terminal `allowFailure: true` leaves behind, and it is terminal in
     /// the BENIGN half** — W8 Task 5, which is what took this enum from 11 of
-    /// the golden's 13 states to **12**. `CANCELLED` is the one that remains.
+    /// the golden's 13 states to **12**. `CANCELLED` was the one that
+    /// remained, and W8 Task 6 added it: the enum is complete.
     ///
     /// **Terminal, and on which side of `isTerminatedNoFail` it falls is
     /// measured rather than inferred from the name.** Decompiled from

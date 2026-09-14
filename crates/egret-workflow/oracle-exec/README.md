@@ -1621,9 +1621,11 @@ number from the right file.)* Going the other way,
 
 `executor::RunState` had six members when this was written, so 7 of the 13 were
 unrepresentable. **Task 3 added `SUBMITTED`, Task 7 added `RETRIED`, W3c added
-`SKIPPED`, W8 Task 2 added `PAUSED` and `RESTARTED`, and W8 Task 5 added
-`WARNING`**, so the enum has twelve and **1 of the 13 remains
-unrepresentable**: `CANCELLED`. Each is recorded here rather than
+`SKIPPED`, W8 Task 2 added `PAUSED` and `RESTARTED`, W8 Task 5 added `WARNING`
+and W8 Task 6 added `CANCELLED`**, so the enum has **thirteen and the two
+vocabularies are the same set** — `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`
+asserts that equality, beside the now-empty *still missing* map, because an
+empty map is also what a broken walk returns. Each was recorded here rather than
 worked around in the normaliser, because a normaliser that quietly maps an
 unrepresentable state onto a representable one is a normaliser that hides the gap
 it was built to expose.
@@ -1702,7 +1704,7 @@ task that owns it:
 | state | `runs` entries | owner |
 |---|---|---|
 | `WARNING` | 10 | **`RunState::Warning` exists since W8 Task 5**; the rest of this cell is the attribution that preceded it and is what the split still rests on. **W8's, 8 of the 10** — `AllowFailure` ×3 and the `allowFailure:` flag ×5, derived by entry name in the residual table's `allowFailure` paragraph. The other 2 are unclaimed: `valids/retry-success` (`warningOnRetry`) and `valids/exit` (an `Exit`). This row said **Task 7's** and then said **unclaimed**; neither was right for the 8. It also kept a tail contradicting its own correction, removed in fix round 1: that tail said `valids/task-allow-failure-runnable` needs `warningOnRetry` — **its YAML contains no such key** (it declares `allowFailure: true` and a 3-attempt `retry: {type: constant, interval: PT0.100S, maxAttempts: 3}`) — and it ended with the word "Unclaimed", the owner the cell had just overturned. **Two** of the ten declare `warningOnRetry`: `valids/retry-success` and `valids/allow-failure-with-retry`. (Fix round 1's replacement said "`allowFailure:` and nothing else" and "`retry-success`'s alone", losing the `retry:` and the second declarer — a transcription that lost a member, inside the commit whose headline is a transcription that lost a member. Corrected in fix round 2) |
-| `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's |
+| `CANCELLED` | 3 | **not flow concurrency, which this row said for four packages.** Two are an `sla:` with `behavior: CANCEL` (`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`) and one is an `Exit` declaring `state: CANCELLED` (`valids/exit-cancelled`). Not one is a limit's — `the_cancelled_state_never_comes_from_a_concurrency_limit` derives it, and its control is that the two corpus flows writing `concurrency: {behavior: CANCEL}` produce no `CANCELLED` at all. W8 via `sla:`; `Exit` is the `ExecutionUpdatableTask` row's. **W8 Task 6 added `RunState::Cancelled` — the last of the golden's thirteen states — and reproduced TWO of the three**; `valids/exit-cancelled` stays baselined on the `Exit`, which is a different construct and still unclaimed |
 
 `SKIPPED` was a fifth row, 4 entries, credited first to `disabled: true` (wrong)
 and then to `runIf:` (right). **W3c implements `runIf:`**, so the row is gone
@@ -3202,7 +3204,20 @@ owner is how a suppression list starts.
 | ~~the replay a `CREATE_NEW_EXECUTION` retry starts~~ — **taken by W6 Task 4, all 4 banked** | ~~4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned`~~ | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6 Task 4.** It is the third kind of sub-execution and `ExecutionState` had no field for any of them; it has one now — `metadata`, Kestra's own `ExecutionMetadata`, stored by migration 0139. `worker::replay::spawn_due` is the other half of the artifact's execution-delay loop |
 | `afterExecution:` | **10** baselined entries | `Flow.afterExecution` | **unclaimed — new at Task 8.** W1's `Flow::after_execution` parses and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors` and nothing else, so those tasks are in no plan. It is `finally:`'s sibling and unclaimed for the same reason |
 | `{{ task.type }}` on a flowable | **0 baselined entries, and that is the finding** — a divergence this corpus cannot show | `worker::render`'s `task` context: `TaskKind::Runnable { type_id } => Some(..), _ => None`, where Kestra's `task.type` is always the FQCN. The divergence set is exactly `{Sequential, Parallel, If, Switch, Loop, Dag, Subflow}` — `Subflow` is IN it (`Executable` since W6) and the four opaque flowables are OUT (planned `Runnable`, so populated) | **unclaimed, and deliberately not fixed at W8 Task 1.** Only `valids/logs` and `valids/disable-simple` write `{{task.type}}` and both write it on a `core.log.Log` leaf, so no golden entry and no assertion can fail on it. The element of the class this corpus does not contain is **a `{{ task.type }}` on a flowable**. Found by the predicate sweep; recorded here and beside `render.rs`'s match rather than only in a task report |
-| `sla:` | **5** baselined entries | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8** (programme spec). W1 ports it as a data shape and says so; nothing evaluates one, and the row is here because a reader of the residual baseline had no way to learn that from this file |
+| ~~`sla:`~~ — **half taken by W8 Task 6** | ~~**5** baselined entries~~ — **3**, and all three are `MAX_DURATION`s | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8 Task 6 took `EXECUTION_ASSERTION` and refused `MAX_DURATION` by name.** The cell read *"W1 ports it as a data shape and says so; nothing evaluates one"*, and that is now half false: `src/sla.rs` evaluates an `ExecutionChangedSLA` and `worker::claim::settle` acts on it, which banks `valids/flow-concurrency-sla-assert-cancel` and `valids/sla-execution-condition`. The other subtype is an `ExecutionMonitoringSLA` — a **separate scheduled loop** in the artifact, not the executor's message path — and **the three that remain cannot be banked by any implementation whatsoever**; see the fifth blindness mechanism. The row is LOWERED rather than deleted, because the construct really does still hold them |
+
+**The `sla:` row is the first this table has lowered for a reason the reader
+must not read as progress-pending.** Every other lowering marks work somebody
+can still do. Here the remaining three, plus the two in `UNATTRIBUTED` held by
+an `sla:` in their CHILD, are **permanently unbankable under this oracle** — a
+`MAX_DURATION` needs an interval in which the execution is non-terminal and
+older than the bound, and `driver.rs`'s `Sleep::capped(Duration::ZERO)` removes
+it. A future package that implements `MAX_DURATION` correctly will move none of
+these five, and a package that budgets against them is budgeting against
+nothing. What a future reader would have to change to make them scorable is
+named in that mechanism's row: **uncap the driver's `Sleep`** — which costs
+`PT10M` on one entry alone — and give egret something the driver's
+`tick`/`pass_time` loop has no analogue of, a monitor keyed on wall-clock time.
 
 **The `flow concurrency:` row is the fourth this table has deleted rather than
 lowered, and the third deleted because a STATE was credited to the wrong
@@ -3259,11 +3274,21 @@ measured:
    pairs are all `overlapping` and its `spawned` is empty, so *when* the second
    child execution starts is in no compared field. (Leg 1 alone would not have
    settled this, and naming that is the point of stating both.)
-3. **The control.** Seven of the thirteen corpus declarers already MATCH with
-   nothing implemented, and the only two writing `behavior: CANCEL` — the sole
-   configuration that could cancel — are among them:
-   `valids/flow-concurrency-cancel`'s whole execution history is
+3. **The control.** ~~Seven~~ **TEN** of the thirteen corpus declarers already
+   MATCH with nothing implemented — 7 when this was written, 9 after W8 Task 3
+   banked the two `-pause` ones, 10 after W8 Task 6 — and the only two writing
+   `behavior: CANCEL` — the sole configuration that could cancel — are among
+   them: `valids/flow-concurrency-cancel`'s whole execution history is
    `CREATED RUNNING SUCCESS`.
+
+   **The tenth turns this leg from an absence into a measurement, which is
+   worth more than the count.** `valids/flow-concurrency-sla-assert-cancel`
+   declares `concurrency: {behavior: QUEUE, limit: 1}` **and** ends `CANCELLED`
+   — the exact shape a reader would credit to the limit. W8 Task 6 banked it by
+   implementing `sla:` and nothing whatsoever about `concurrency:`, so that
+   entry's `CANCELLED` is now reproduced **from the other construct, by name**.
+   Legs 1 and 2 say no limit fired; this one shows where the state came from
+   instead.
 
 `tests/executor.rs`'s `the_cancelled_state_never_comes_from_a_concurrency_limit`
 derives all of it on every run, so the sentence cannot drift back. Of the row's
@@ -4385,8 +4410,12 @@ what makes the number a bound rather than a guess:
 
 - For an entry egret **already reproduces**, a construct it declares is proven
   inert by the match itself — `valids/sla-max-duration-ok` declares an `sla:`
-  nothing evaluates and reproduces anyway. Only the feed can be taken away from
-  it.
+  that never fires (`PT10S` over a `PT0.5S` sleep) and reproduces anyway. Only
+  the feed can be taken away from it. (This example read *"an `sla:` nothing
+  evaluates"* until W8 Task 6, which evaluates one of `SLA.Type`'s two subtypes.
+  The reason the entry is inert was never that nothing evaluates an `sla:`; it
+  is that **this** `sla:` is not violated, and that distinction is exactly the
+  one the rule above is about.)
 - For an entry egret **does not** reproduce, a declared construct no W3b task
   owns is the leading explanation, and a ceiling may not assume it away.
 
@@ -6115,7 +6144,7 @@ exhaustive and named.
 | 3 | `Pause` → `PAUSED` | W8 — and **not one of the three is held by the wait**; see below |
 | 10 | `afterExecution:` | **unclaimed** |
 | 8 | `LoopUntil` / `WaitFor` | W8 — **and not one of the eight is held by the loop**; see below |
-| 5 | `sla:` | W8 |
+| 3 | `sla:` | **W8 Task 6 banked two of the five**; the three that remain are `MAX_DURATION`s and **no implementation can bank them under this harness** — see the fifth blindness mechanism below |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
 | **36** | **none of the above** | named individually in `UNATTRIBUTED` |
 
@@ -6171,7 +6200,10 @@ that actually holds each: two on `state::apply`'s attempt rule
 (`valids/retry-subflow`, `valids/subflow-parent-retry`, where Kestra accumulates
 a sub-execution's retries INSIDE the parent's attempt), two on a child-side
 over-acceptance the parent now transmits (`valids/restart-parent`,
-`valids/sla-parent-flow`), one on the unevaluated flow-level `outputs:`
+`valids/sla-parent-flow` — the second of those is W8 Task 6's, measured: its
+child really is spawned, really does run its `Sleep`, and really does end
+SUCCESS, which is the capped `Sleep` one level down and not an unresolvable
+target), one on the unevaluated flow-level `outputs:`
 (`valids/subflow-secret-output-parent`), and one on `OutputValues` having no
 handler (`valids/task-runif` — whose `Subflow` is the corpus's only unresolvable
 target and is SKIPPED by a falsy `runIf:`, so `Subflow` was never what held it),
@@ -6212,7 +6244,7 @@ per task rather than per type:
 
 | entry | what holds it |
 |---|---|
-| `valids/pause-behavior` | `behavior:`. **Not a defect and not about expressions** — fix round 2 measured the artifact honouring the value in every form (see *Drift at the execution seam*), so its `FAILED`/1 golden is `behavior: FAIL` working, `FAIL` being what `corpus.json` posts. It is held by the construct being four-valued: `WARN` and `CANCEL` mean `WARNING` and `CANCELLED`, and `RunState` holds `WARNING` since W8 Task 5 and not `CANCELLED`. A dynamic one cannot even be classified at plan time, where `pause_gap` decides — so half the vocabulary arriving moved nothing. It banks when `RunState` gains `CANCELLED` too |
+| `valids/pause-behavior` | `behavior:`. **Not a defect and not about expressions** — fix round 2 measured the artifact honouring the value in every form (see *Drift at the execution seam*), so its `FAILED`/1 golden is `behavior: FAIL` working, `FAIL` being what `corpus.json` posts. This cell ended *"it banks when `RunState` gains `CANCELLED` too"*, and **W8 Task 6 measured that false**: the vocabulary is complete, and the entry did not move (that task's ratchet went 111 → 109 and both ids were `sla:`'s). What holds it is `pause_gap`, a PLAN decision — a fifth outcome the artifact produces for an out-of-enum value is a non-terminal HANG no variant can represent, and a DYNAMIC value cannot be classified at plan time at all, which is where `pause_gap` decides |
 | `valids/pause_on_pause` | `onPause:`. Its golden records the sub-task as a run with `parent: null` — a **sibling** of the pause, `overlapping` it |
 | `valids/pause-errors-finally-after-execution` | `errors:` on the `Pause`, plus `finally:` and a flow-level `afterExecution:` — two rows above that are **unclaimed**. Its pause run re-enters `RUNNING` (`CREATED RUNNING PAUSED RUNNING FAILED`) to drive the handler |
 | ~~`valids/pause-timeout-allow-failure`~~ — **banked, W8 Task 5** | the only one of the four that WAS planned `TaskKind::Pause`, and it was held one layer out: `allowFailure: true` turns the timeout's `FAILED` into `WARNING`. That was the `AllowFailure` row's cause, counted here only because this table attributes by declaration. `ExecutorService.java:937` is the line — `.state(duration != null ? behavior.mapToState() : State.Type.fail(pauseTask))` — so the flags reach a `timeout:` bound and NOT a `pauseDuration:` one, which is why `valids/pause-delay` is untouched by them |
@@ -6604,6 +6636,10 @@ which is what a future package would have to change to make each one visible.
 *an out-of-enum `behavior:`*, and it is still five mechanisms: that row shares
 `backfill`'s — **no population** — and is listed for what it would otherwise
 license somebody to over-claim, not because it is a new way of being blind.
+**W8 Task 6 adds a seventh row, `sla: MAX_DURATION`, and it is still five
+mechanisms**: it shares the fifth — *the harness compresses time* — with the
+unbounded `Pause`. But it shares the mechanism and **not the effect**, and that
+is what the row is for; see the paragraph under the table.
 
 | construct | corpus | golden entries | what the ratchet holds | **the mechanism of the blindness** |
 |---|---|---|---|---|
@@ -6612,7 +6648,36 @@ license somebody to over-claim, not because it is a new way of being blind.
 | **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
 | **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
+| **`sla: MAX_DURATION`** (W8 Task 6) | 4 flows declare one (`sla-max-duration-fail`, `sla-subflow`, `flow-concurrency-sla-fail-child`, `sla-max-duration-ok`); **2 more entries are held by one in a different flow** (`sla-parent-flow`, `flow-concurrency-sla-fail-parent`, each calling a `Subflow` whose target declares it) | **6 — 1 matching, 5 baselined** | **the five baselined ones, permanently.** The ratchet compares them, they mismatch, and no implementation can change that | **The harness compresses time, and the WINDOW DOES NOT EXIST.** `MaxDurationSLA.evaluate` is `Duration.between(execution.startDate, Instant.now()) > duration`, so it needs an interval in which the execution is non-terminal and older than the bound. `driver::registry()` is built with `Sleep::capped(Duration::ZERO)`: `Sleep::run` is synchronous inside one `worker::tick` and writes **no** `not_before_ms`, so the only task these flows have reaches its terminal inside the tick that started it. **The clock does move in this harness** — `pass_time` rewinds `executions.created_at` by `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline — but its query selects on `r.not_before_ms IS NOT NULL`, so with no deadline registered it returns `Ok(false)` the first time it is asked and the loop breaks. Measured by `the_max_duration_window_does_not_exist_in_this_harness`: **0 deadlines** across all four declarers, against a control of **28 of 269 driven flows** that do register one; elapsed at the last run write 14.4 / 22.3 / 22.0 / 14.1 ms against bounds of 500 / 1000 / 3000 / 10000 ms; and all six `sleep` runs read `["CREATED","SUBMITTED","RUNNING","SUCCESS"]`, so no run is ever in flight across a step. **What a future package would change**: uncap the driver's `Sleep` — `PT10M` on `flow-concurrency-sla-fail-child` alone, `PT30S` three more times — AND give egret a monitor keyed on wall-clock time, which `advance()` (pure over `(plan, state, now)`, no I/O and no clock) cannot host and the driver's `tick`/`pass_time` loop has no analogue of |
 | **an out-of-enum `behavior:`** (W8 Task 3 fix round 3) | **0 corpus flows**; measured on probes only | 0 | nothing | **No population, and the behaviour is a HANG rather than a state.** A `Pause` whose `behavior:` renders to something outside `RESUME`/`WARN`/`FAIL`/`CANCEL` -- `NOPE`, lower-case `fail`, an undefined `{{inputs.nosuch}}` -- leaves the execution `RUNNING` past 120 s, non-terminal, with the pause run still `RUNNING`. Every one of the four enum values terminates, and terminates differently (`FAILED`/1, `SUCCESS`/2, `WARNING`/2, `CANCELLED`/1). The corpus's single `Pause` `behavior:` posts `FAIL`, so nothing here can score this edge; it is listed because the sentence *"the artifact honours the value"* is true **inside the enum only**, and W8 Task 3 fix round 2 wrote it without that qualifier from a grid whose every cell was a valid constant |
+
+#### The fifth mechanism has THREE effects, and they are not interchangeable
+
+**W8 Task 6 is what forces this paragraph.** *The harness compresses time* is
+one mechanism and it has now produced three different situations, which a reader
+who merged them would act on wrongly:
+
+| example | what the ratchet does | what a reader can act on |
+|---|---|---|
+| **an unbounded `Pause`** (W8 Task 3) | **cannot speak** — the artifact never finished, so `harvest.py` excluded the seven flows and there is no golden entry at all | teach the harvest to issue a resume. Until then an egret that resumed such a pause by itself is invisible **in both directions**, which is the one over-acceptance in that package nothing can see |
+| **`valids/loop-until-restart`** (W8 Task 4) | **speaks and is wrong** — the entry exists, is compared, and its value is a function of the ARTIFACT's poller latency (`1.17 s` and `1.92 s` for two `PT1S` pauses) | **nothing.** A correct implementation is baselined against it for ever; the golden itself is the thing that cannot be reproduced |
+| **`sla: MAX_DURATION`** (W8 Task 6) | **speaks and is right about Kestra** — the golden is deterministic on the artifact's side (a `PT0.5S` bound over a `PT2S` sleep violates every time) and unreachable on **egret's**, because the driver's own registry deletes the interval | uncap `driver.rs`'s `Sleep` — and then build the monitor, which is a second, separate piece of work |
+
+The third is the one worth stating apart, because it is the only one where the
+loss is **on egret's side of the harness and is repairable there**. It is not
+the second: `loop-until-restart`'s golden encodes a latency nobody can
+reproduce, and calling `MAX_DURATION` latency-dependent would file five
+repairable entries under *there is nothing to fix*. And it is not the first:
+these five entries **exist** in `golden.json` and are compared on every run, so
+an over-acceptance here is visible in one direction — egret completing a `Sleep`
+Kestra killed is exactly what
+`runtime_over_acceptance_is_registered_and_owned` records for all three
+declarers.
+
+**The rule this yields, and it is the one W8 Task 6 was asked for**: a refusal
+must name the mechanism AND the effect. *"The oracle cannot see it"* is five
+mechanisms; *"the harness compresses time"* is one mechanism and three effects;
+and the only sentence a later reader can act on is the one that says which.
 
 #### A LATENCY-DEPENDENT GOLDEN — a different category, not a sixth mechanism
 
@@ -6625,10 +6690,12 @@ function of the artifact's SCHEDULER rather than of the flow**, so a correct
 implementation is baselined against it for ever.
 
 Its **cause** is the fifth mechanism's — the harness compresses time — and its
-**effect is the opposite of the fifth's**: there, a flow the artifact never
-finished produced no golden entry at all and an over-acceptance was invisible in
-both directions; here a golden entry exists and **permanently cannot be
-reproduced by any implementation**. Calling it a sixth blindness would file an
+**effect is the opposite of the unbounded `Pause`'s**: there, a flow the
+artifact never finished produced no golden entry at all and an over-acceptance
+was invisible in both directions; here a golden entry exists and **permanently
+cannot be reproduced by any implementation**. (W8 Task 6 adds a THIRD effect to
+the same mechanism and the table above separates all three; this one is the
+only one where *there is nothing to fix* is the right answer.) Calling it a sixth blindness would file an
 unbankable entry under "the ratchet cannot see it" and lose the only thing a
 reader can act on, which is that **there is nothing to fix**. Its `LoopUntil` is bounded by
 `maxDuration: PT3S` with `interval: PT1S`, Kestra's `reachedMaximums` compares
@@ -7292,7 +7359,7 @@ sub-executions, or a run Kestra ended `KILLED`/`FAILED` that egret ended
 |---|---|---|
 | **W2** (the renderer answers where Java throws) | `all-flowable`, `disable-flowable`, `restart-child`, `restart-loop` | `{{ taskrun.value }}` is undefined in a `Loop` body and a `Switch` case in this artifact and Kestra FAILED both; `{{ 1 / taskrun.attemptsCount }}` renders `Infinity` where Java throws. So the run succeeds and everything after it runs — `all-flowable` 12 runs and 3 sub-executions against Kestra's 3 and 1 |
 | **W4** (the kill path) | `parallel-fail-with-flowable` | a `Sleep` still in flight when its sibling failed the `Parallel`. W4 Task 3 wired `TaskHandler::cancel` to the budget's expiry — the artifact's only `kill(null)` site — and this entry is not that: `advance()` abandoned the run, and `advance()` has no worker to tell. The row stands and the owner is still W4 |
-| **W8** (`sla:`) | `flow-concurrency-sla-assert-cancel`, `flow-concurrency-sla-fail-child`, `sla-execution-condition`, `sla-max-duration-fail`, `sla-subflow` | Kestra CANCELLED the execution or KILLED the `Sleep`; egret has neither construct and runs the tasks. Two of them recorded **0** runs on Kestra's side |
+| **W8** (`sla:`) | ~~`flow-concurrency-sla-assert-cancel`~~, `flow-concurrency-sla-fail-child`, ~~`sla-execution-condition`~~, `sla-max-duration-fail`, `sla-subflow` | **Five until W8 Task 6, three now.** The two struck out are the `EXECUTION_ASSERTION`s: egret cancels the execution before any run exists, so it no longer runs anything Kestra did not, and both bank. The three left are `MAX_DURATION`s, where Kestra KILLED the `Sleep` and egret completes it — and that is an over-acceptance of the **harness** rather than of egret, because `driver.rs` caps the `Sleep` to `ZERO` and no window exists to kill it in. They stay registered rather than excused |
 | **unclaimed** (a `Loop`'s own `outputs:`) | `loop-outputs-failed-render` | Kestra FAILED the loop at iteration 1 when its `outputs:` could not render; `advance()` has no loop `outputs:`, so egret runs all three |
 
 A **stalled** execution is deliberately not in this class: egret doing less than
@@ -8094,7 +8161,10 @@ commit that opens it, because that commit already pays the whole cost. By this
 file's own residual-baseline table that is **W8** — `Pause` (12 entries),
 `LoopUntil`/`WaitFor` (9), `AllowFailure`/`allowFailure:` (12) and `sla:` (5)
 are all its, and the first three are flowables that must be ported into
-`advance()`. (This list said flow `concurrency:` (7); that row was 6 by W6 and
+`advance()`. (`sla:` is the one of the four that did **not** need
+`src/executor/` opened for it: W8 Task 6 put the evaluation in
+`worker::claim::settle`, where the artifact puts it, precisely so `advance()`'s
+`(plan, state, now)` contract did not have to widen to reach a renderer.) (This list said flow `concurrency:` (7); that row was 6 by W6 and
 is deleted at W8 Task 1, its state having been misattributed, and `allowFailure`
 takes its place in the enumeration because §9 owns it.) Unless **W6**
 gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
@@ -9166,9 +9236,14 @@ replay implemented at all. The bank is a separate measurement in the ratchet.
 `the_terminal_list_covers_every_execution_terminal_the_golden_holds` derives the
 population instead of remembering it — and corrected the first answer written
 for it. `CANCELLED` **does** end three golden executions (`valids/exit-cancelled`,
-`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`);
-it stays out of the list because `is_stalled` classifies egret's traces and
-`RunState` has no `Cancelled`, which the test now asserts rather than assumes.
+`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`).
+It stayed out of the list while `is_stalled` classified egret's traces and
+`RunState` had no `Cancelled` — and the test asserted that rather than assuming
+it, with the message *"if `RunState` ever gains the variant, this test fails and
+`TERMINAL` has to grow with it"*. **W8 Task 6 gained the variant, that
+assertion is what failed, and `TERMINAL` grew.** The guard is now the other
+direction: every state a golden execution ends in is one `RunState` can hold and
+one the classifier knows.
 
 ## Mutations
 
@@ -9346,10 +9421,12 @@ Its golden is the artifact's own defect — see *Drift at the execution seam*:
 rendering a Pebble expression into `Property<Behavior>` fails at resume and
 FAILS the task for every value, including the ones that would have succeeded.
 Reproducing that would be a rule about Java reflection wearing a pause rule's
-name, and the two terminals a *literal* `behavior:` can produce, `WARNING` and
-`CANCELLED`, are not in `RunState` at all. Leaving the task opaque is the
-answer this file's own rule gives: a visibly wrong trace that stays baselined
-beats a plausible wrong one.
+name. This paragraph added *"and the two terminals a literal `behavior:` can
+produce, `WARNING` and `CANCELLED`, are not in `RunState` at all"* — **both are
+in it since W8 Task 6 and the entry still does not bank**, which is the measured
+correction: what holds it is `pause_gap`, not the vocabulary. Leaving the task
+opaque is the answer this file's own rule gives: a visibly wrong trace that
+stays baselined beats a plausible wrong one.
 
 ### Five corpus flows PUBLISH now, and the ratchet cannot show it either
 
@@ -9407,12 +9484,15 @@ defect the oracle could not see, because the corpus holds one `Pause`
 
 **`behavior:` is a whole gap again**, for the reason it had before the round
 went looking for a narrower one: it is four-valued, and `WARN`/`CANCEL` mean
-`WARNING`/`CANCELLED`. `RunState` holds `WARNING` since **W8 Task 5** and still
-does not hold `CANCELLED`; **half the vocabulary arriving moved nothing**,
-because `pause_gap` refuses the whole task whenever a `behavior:` is written,
-whatever value it holds. A dynamic one cannot even be *classified* at plan time,
-where `pause_gap` decides — its value is known at render time. The entry becomes
-bankable when `RunState` gains `CANCELLED` too.
+`WARNING`/`CANCELLED`. This paragraph ended *"the entry becomes bankable when
+`RunState` gains `CANCELLED` too"*, and **W8 Task 6 supplied `CANCELLED` and
+measured the prediction FALSE** — the ratchet moved 111 → 109 and both ids were
+`sla:`'s. `pause_gap` refuses the whole task whenever a `behavior:` is written,
+whatever value it holds; a dynamic one cannot even be *classified* at plan time,
+where `pause_gap` decides; and the fifth outcome, the non-terminal hang on an
+out-of-enum value, is not a state any variant could hold. **The whole
+vocabulary arriving moved nothing here**, which is what the half arriving
+already said and nobody read that way.
 
 **Kept from fix round 1, all of it re-verified:** the two unreachable
 `spec::validate` arms stay deleted, `the_two_control_flow_tables_name_the_same_types`

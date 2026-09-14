@@ -164,11 +164,20 @@ pub fn iteration(state: &ExecutionState, run: RunIx) -> usize {
 ///
 /// **What is true now.** Kestra's `isTerminatedNoFail()` is
 /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`, so `WARNING` is
-/// its FIRST member and a `WARNING` child **counts as executed**; the arm below
-/// spells the complement, `FAILED || KILLED`, over the terminals `RunState`
-/// holds. `CANCELLED` is the one state still outside the enum, and it belongs
-/// on the `FAILED || KILLED` side when it arrives — `isTerminatedInError()`
-/// lists it.
+/// its FIRST member and a `WARNING` child **counts as executed**.
+///
+/// **W8 Task 6 arrived and this paragraph's own prediction is what it tested.**
+/// The sentence here read *"the arm below spells the complement,
+/// `FAILED || KILLED`, over the terminals `RunState` holds; `CANCELLED` is the
+/// one state still outside the enum, and it belongs on the `FAILED || KILLED`
+/// side when it arrives"*. The prediction about the SIDE was right —
+/// `isTerminatedInError()` lists `CANCELLED` — and **the spelling was the
+/// defect**: a complement is right only for the enum it was written against,
+/// so an arm that spelled `!matches!(s, Failed | Killed)` would have called a
+/// cancelled body EXECUTED and iterated a loop Kestra stops. The arm is
+/// `RunState::is_terminated_no_fail` now, Kestra's positive list written once
+/// with its own partition guard, and `a_cancelled_child_does_not_count_as_executed`
+/// supplies the input this corpus cannot.
 ///
 /// **The golden is what says so**, and it is unchanged by any of this.
 /// `valids/waitfor-child-task-warning` is a `WaitFor` whose first child is a

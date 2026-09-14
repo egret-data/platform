@@ -221,6 +221,13 @@ Three layers, in order, and the order is the design:
    declared-but-unimplemented features (`concurrency`, `sla`, `checks`, `quotas`, `pause`) reported as
    **warnings that name the package that will implement them**, never as silent acceptance.
 
+> **`sla` narrowed on 2026-09-14 (W8 Task 6) and `pause` went earlier (W8 Task 3).**
+> `SLA.Type`'s `EXECUTION_ASSERTION` is evaluated now (`egret-workflow/src/sla.rs`);
+> `MAX_DURATION` is not. The warning is emitted for a flow that declares a
+> `MAX_DURATION` and not for one whose `sla:` is assertions only — warning about
+> an enforced feature costs a user the same way silent acceptance does, in the
+> opposite direction.
+
 Layer 3's warning channel matters more than it looks: without it, a user writes `concurrency: {limit: 1}`,
 sees a green publish, and reasonably concludes it is enforced.
 

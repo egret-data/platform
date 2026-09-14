@@ -541,8 +541,15 @@ def run_blockers(entry, flows, kinds):
     Run-driven: it asks what Kestra actually ran, not what the flow happens to
     declare.  A construct declared and never exercised does not block a trace
     that never shows it -- and that distinction is load-bearing, because
-    `valids/sla-max-duration-ok` declares an `sla:` nothing evaluates and
-    reproduces anyway.
+    `valids/sla-max-duration-ok` declares an `sla:` that never fires (PT10S over
+    a PT0.5S sleep) and reproduces anyway.
+
+    The clause used to read "an `sla:` nothing evaluates".  W8 Task 6 made that
+    false for one of `SLA.Type`'s two subtypes -- `EXECUTION_ASSERTION` is
+    evaluated now -- and false in a way that would have mattered here, because
+    the example is precisely an entry whose blocker rule must NOT fire.  The
+    reason it reproduces was never "nothing evaluates an sla", it was "this
+    sla is not violated", and that is what the sentence says now.
     """
     out = set()
     fid = entry["id"]

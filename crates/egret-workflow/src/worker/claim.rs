@@ -1647,11 +1647,7 @@ impl Marks {
 /// execution is already running, `ctx.plan` was built from that same source,
 /// and turning an SLA check into the thing that fails a running execution would
 /// be a new failure mode for every flow that has no `sla:` at all.
-fn sla_terminal(
-    surface: &Surface,
-    ctx: &ExecutionCtx,
-    state: &ExecutionState,
-) -> Option<RunState> {
+fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -> Option<RunState> {
     if state.history.last().is_some_and(|s| s.is_terminal()) {
         return None;
     }
@@ -1664,9 +1660,8 @@ fn sla_terminal(
     // Kestra builds it the same way: `runContextFactory.of(flow, execution)`,
     // no taskrun.
     let cx = surface.context(&ctx.plan, state, None);
-    let violation = crate::sla::first_execution_changed_violation(&flow, &mut |p| {
-        p.render(&cx).ok()
-    })?;
+    let violation =
+        crate::sla::first_execution_changed_violation(&flow, &mut |p| p.render(&cx).ok())?;
     crate::sla::state_for(violation.behavior)
 }
 

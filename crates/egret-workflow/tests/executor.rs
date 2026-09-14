@@ -5736,9 +5736,9 @@ fn the_cancelled_state_never_comes_from_a_concurrency_limit() {
          an assertion about an unimplemented construct: {matching:?}"
     );
     assert!(
-        matching.iter().any(|id| {
-            id.as_str() == "valids/flow-concurrency-sla-assert-cancel"
-        }),
+        matching
+            .iter()
+            .any(|id| { id.as_str() == "valids/flow-concurrency-sla-assert-cancel" }),
         "the tenth is the one that carries a CANCELLED, and it is the reason \
          this leg is a measurement rather than an absence -- see the comment \
          above. If it leaves this set, the argument that the golden's CANCELLED \

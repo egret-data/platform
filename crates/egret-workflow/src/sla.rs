@@ -326,10 +326,7 @@ mod tests {
     #[test]
     fn a_max_duration_is_filtered_out_and_an_assertion_beside_it_is_not() {
         assert_eq!(
-            first_execution_changed_violation(
-                &flow_with(vec![max_duration("d")]),
-                &mut verbatim
-            ),
+            first_execution_changed_violation(&flow_with(vec![max_duration("d")]), &mut verbatim),
             None,
             "`ExecutionChangedSLA.class::isInstance` excludes it; it is the \
              SLA MONITOR's, and this harness has no window for it -- see the \
@@ -363,7 +360,10 @@ mod tests {
             &mut verbatim,
         )
         .expect("both violate");
-        assert_eq!((v.sla_id.as_str(), v.behavior), ("first", Some(SlaBehavior::Cancel)));
+        assert_eq!(
+            (v.sla_id.as_str(), v.behavior),
+            ("first", Some(SlaBehavior::Cancel))
+        );
         assert_eq!(state_for(v.behavior), Some(RunState::Cancelled));
 
         // …and declaration order is what decides it, not the behaviour.
@@ -421,7 +421,11 @@ mod tests {
         };
         assert_eq!(
             first_execution_changed_violation(
-                &flow_with(vec![assertion("bad", Some(SlaBehavior::Fail), "{{ nosuch }}")]),
+                &flow_with(vec![assertion(
+                    "bad",
+                    Some(SlaBehavior::Fail),
+                    "{{ nosuch }}"
+                )]),
                 &mut render,
             ),
             None,

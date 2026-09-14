@@ -17,7 +17,7 @@ that construct* — not *the flow declares it*:
 | `Pause` | 12 | 20 | **12** | **7** |
 | `LoopUntil` / `WaitFor` | 9 | 10 | **9** | **3** &rarr; **1 measured** [^lu] |
 | `allowFailure` / `AllowFailure` | 12 | 15 | **12** | ~~**6**~~ &rarr; **7 measured** [^af] |
-| `sla:` | 5 | 6 | **7** | **2** |
+| `sla:` | 5 | 6 | **7** | **2 measured** [^sla] |
 | `WorkingDirectory` | 4 | 15 | **4** | **0 measured, 1 candidate** |
 | flow `concurrency:` | 6 | 13 | **0** | **0** |
 | flow `labels:` | 3 | 22 | **0** | **0** |
@@ -80,6 +80,20 @@ can differ in *both* directions, and this is the direction nobody had looked for
     handler exists for and stalls. The other four that stay are the
     `AllowFailure` FLOWABLE's, a different construct that is still planned
     opaque.
+
+[^sla]: **2, measured at W8 Task 6**, and the row's own asymmetry is the
+    finding: `5` counts DECLARERS and `7` counts CAUSES, because
+    `valids/sla-parent-flow` and `valids/flow-concurrency-sla-fail-parent`
+    declare no `sla:` at all — each calls a `Subflow` whose target declares one,
+    and a per-flow needle structurally cannot see that. (W8 Task 4's row is the
+    same asymmetry in the other direction.) The two that bank are the
+    `EXECUTION_ASSERTION`s; **the five that do not are unbankable by ANY
+    implementation**, because `oracle-exec/driver.rs` builds its registry with
+    `Sleep::capped(Duration::ZERO)` and a capped `Sleep` registers no
+    `not_before_ms`, so the interval `MaxDurationSLA.evaluate` measures does not
+    exist in this harness. `the_max_duration_window_does_not_exist_in_this_harness`
+    is the measurement; `oracle-exec/README.md`'s fifth blindness mechanism is
+    where it is filed.
 
 [^lu]: **Corrected by W8 Task 4, which implemented the construct and then
     measured it.** The `3` was the number of entries spelled `LoopUntil` rather
