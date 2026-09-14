@@ -27,10 +27,24 @@ flow_key?: string | null;
  * One or more states, **comma-separated** (`RUNNING,FAILED`): a run list
  * shows failures beside what is in flight.
  *
- * Comma-separated rather than a repeated `state=` key because axum's
- * `Query` decodes with `serde_urlencoded`, which silently keeps only the
- * LAST value of a repeated key — a caller selecting two chips would have
- * been filtered by one of them with no error anywhere.
+ * **A repeated `state=` key is REFUSED, not narrowed.** axum's `Query`
+ * decodes with `serde_urlencoded`, which answers
+ * ``Err("duplicate field `state`")`` for `?state=A&state=B`; over HTTP
+ * that is a **400**, body ``Failed to deserialize query string: duplicate
+ * field `state` ``. So comma-separation is not a guard against a silent
+ * drop — there is no silent drop — it is simply the spelling this
+ * parameter accepts for more than one value, and a caller who reaches for
+ * the repeated-key spelling is told so rather than served a narrower
+ * answer. `a_repeated_state_key_is_refused_rather_than_silently_narrowed`
+ * in `tests/executions_routes.rs` measures both halves.
+ *
+ * An earlier version of this comment claimed the opposite — that a
+ * repeated key is silently reduced to its last value. The DESIGN it
+ * defended was right and the MECHANISM was false, and the mechanism is
+ * what shipped: it reached `openapi.json` and the generated TypeScript
+ * JSDoc, where a frontend author would have read it and reasoned from it.
+ * **A decision and its mechanism are two claims, and the next person
+ * reasons from the mechanism.**
  *
  * **Present but empty (`?state=`) matches nothing**, which is what a UI
  * that has deselected every chip means. Absent means "every state".

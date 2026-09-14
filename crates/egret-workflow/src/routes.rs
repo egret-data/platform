@@ -1028,10 +1028,24 @@ pub struct ListExecutionsQuery {
     /// One or more states, **comma-separated** (`RUNNING,FAILED`): a run list
     /// shows failures beside what is in flight.
     ///
-    /// Comma-separated rather than a repeated `state=` key because axum's
-    /// `Query` decodes with `serde_urlencoded`, which silently keeps only the
-    /// LAST value of a repeated key — a caller selecting two chips would have
-    /// been filtered by one of them with no error anywhere.
+    /// **A repeated `state=` key is REFUSED, not narrowed.** axum's `Query`
+    /// decodes with `serde_urlencoded`, which answers
+    /// ``Err("duplicate field `state`")`` for `?state=A&state=B`; over HTTP
+    /// that is a **400**, body ``Failed to deserialize query string: duplicate
+    /// field `state` ``. So comma-separation is not a guard against a silent
+    /// drop — there is no silent drop — it is simply the spelling this
+    /// parameter accepts for more than one value, and a caller who reaches for
+    /// the repeated-key spelling is told so rather than served a narrower
+    /// answer. `a_repeated_state_key_is_refused_rather_than_silently_narrowed`
+    /// in `tests/executions_routes.rs` measures both halves.
+    ///
+    /// An earlier version of this comment claimed the opposite — that a
+    /// repeated key is silently reduced to its last value. The DESIGN it
+    /// defended was right and the MECHANISM was false, and the mechanism is
+    /// what shipped: it reached `openapi.json` and the generated TypeScript
+    /// JSDoc, where a frontend author would have read it and reasoned from it.
+    /// **A decision and its mechanism are two claims, and the next person
+    /// reasons from the mechanism.**
     ///
     /// **Present but empty (`?state=`) matches nothing**, which is what a UI
     /// that has deselected every chip means. Absent means "every state".
@@ -1078,6 +1092,7 @@ fn parse_state_filter(raw: Option<String>) -> Option<Vec<String>> {
     params(WorkspacePath, ListExecutionsQuery),
     responses(
         (status = 200, description = "One page of the workspace's executions, newest first, with the total behind it", body = ExecutionPageDto),
+        (status = 400, description = "The query string does not decode — a malformed `flow_id`/`since`/`until`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`)", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such workspace", body = egret_core::http::ErrorBody),
@@ -1134,6 +1149,7 @@ async fn list_executions(
     ),
     responses(
         (status = 200, description = "The execution, its frozen source, and every task run in run_ix order", body = ExecutionDto),
+        (status = 400, description = "`{id}` is not a UUID. Decided by axum's `Path` extractor before any handler runs — and AFTER `Auth`, so an anonymous caller still gets 401 and this leaks no existence", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:read permission, or the workflows module is disabled for this workspace", body = egret_core::http::ErrorBody),
         (status = 404, description = "No such execution in this workspace. **An execution belonging to another workspace answers exactly this**, indistinguishably from one that never existed: a 403 would confirm the id is real.", body = egret_core::http::ErrorBody),

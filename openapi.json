@@ -25597,7 +25597,7 @@
           {
             "name": "state",
             "in": "query",
-            "description": "One or more states, **comma-separated** (`RUNNING,FAILED`): a run list\nshows failures beside what is in flight.\n\nComma-separated rather than a repeated `state=` key because axum's\n`Query` decodes with `serde_urlencoded`, which silently keeps only the\nLAST value of a repeated key — a caller selecting two chips would have\nbeen filtered by one of them with no error anywhere.\n\n**Present but empty (`?state=`) matches nothing**, which is what a UI\nthat has deselected every chip means. Absent means \"every state\".",
+            "description": "One or more states, **comma-separated** (`RUNNING,FAILED`): a run list\nshows failures beside what is in flight.\n\n**A repeated `state=` key is REFUSED, not narrowed.** axum's `Query`\ndecodes with `serde_urlencoded`, which answers\n``Err(\"duplicate field `state`\")`` for `?state=A&state=B`; over HTTP\nthat is a **400**, body ``Failed to deserialize query string: duplicate\nfield `state` ``. So comma-separation is not a guard against a silent\ndrop — there is no silent drop — it is simply the spelling this\nparameter accepts for more than one value, and a caller who reaches for\nthe repeated-key spelling is told so rather than served a narrower\nanswer. `a_repeated_state_key_is_refused_rather_than_silently_narrowed`\nin `tests/executions_routes.rs` measures both halves.\n\nAn earlier version of this comment claimed the opposite — that a\nrepeated key is silently reduced to its last value. The DESIGN it\ndefended was right and the MECHANISM was false, and the mechanism is\nwhat shipped: it reached `openapi.json` and the generated TypeScript\nJSDoc, where a frontend author would have read it and reasoned from it.\n**A decision and its mechanism are two claims, and the next person\nreasons from the mechanism.**\n\n**Present but empty (`?state=`) matches nothing**, which is what a UI\nthat has deselected every chip means. Absent means \"every state\".",
             "required": false,
             "schema": {
               "type": [
@@ -25660,6 +25660,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExecutionPageDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query string does not decode — a malformed `flow_id`/`since`/`until`, a non-numeric `limit`/`offset`, or a **repeated** key (`?state=A&state=B` answers `duplicate field state`; several states go in ONE comma-separated `state=`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -25749,6 +25759,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExecutionDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`{id}` is not a UUID. Decided by axum's `Path` extractor before any handler runs — and AFTER `Auth`, so an anonymous caller still gets 401 and this leaks no existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }

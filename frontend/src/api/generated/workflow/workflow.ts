@@ -68,6 +68,11 @@ export type workflowListExecutionsResponse200 = {
   status: 200
 }
 
+export type workflowListExecutionsResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type workflowListExecutionsResponse401 = {
   data: ErrorBody
   status: 401
@@ -91,7 +96,7 @@ export type workflowListExecutionsResponse500 = {
 export type workflowListExecutionsResponseSuccess = (workflowListExecutionsResponse200) & {
   headers: Headers;
 };
-export type workflowListExecutionsResponseError = (workflowListExecutionsResponse401 | workflowListExecutionsResponse403 | workflowListExecutionsResponse404 | workflowListExecutionsResponse500) & {
+export type workflowListExecutionsResponseError = (workflowListExecutionsResponse400 | workflowListExecutionsResponse401 | workflowListExecutionsResponse403 | workflowListExecutionsResponse404 | workflowListExecutionsResponse500) & {
   headers: Headers;
 };
 
@@ -211,6 +216,11 @@ export type workflowGetExecutionResponse200 = {
   status: 200
 }
 
+export type workflowGetExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
 export type workflowGetExecutionResponse401 = {
   data: ErrorBody
   status: 401
@@ -234,7 +244,7 @@ export type workflowGetExecutionResponse500 = {
 export type workflowGetExecutionResponseSuccess = (workflowGetExecutionResponse200) & {
   headers: Headers;
 };
-export type workflowGetExecutionResponseError = (workflowGetExecutionResponse401 | workflowGetExecutionResponse403 | workflowGetExecutionResponse404 | workflowGetExecutionResponse500) & {
+export type workflowGetExecutionResponseError = (workflowGetExecutionResponse400 | workflowGetExecutionResponse401 | workflowGetExecutionResponse403 | workflowGetExecutionResponse404 | workflowGetExecutionResponse500) & {
   headers: Headers;
 };
 
