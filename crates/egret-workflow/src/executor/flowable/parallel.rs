@@ -124,8 +124,9 @@ pub(crate) fn drive(
 /// would finish branch one before creating anything in branch two.
 ///
 /// **4. Terminate when every child run has.** The state is Kestra's
-/// `Execution.guessFinalState` priority order, narrowed to what [`RunState`]
-/// can hold: `KILLED` beats `FAILED` beats `SUCCESS`.
+/// `Execution.guessFinalState` priority order, which [`RunState`] can now hold
+/// in full: `KILLED` beats `FAILED` beats `CANCELLED` beats `WARNING` beats the
+/// `SUCCESS` it starts from.
 pub(crate) fn drive_concurrent(
     plan: &Plan,
     state: &ExecutionState,
@@ -404,29 +405,46 @@ fn fail_the_rest(state: &ExecutionState, runs: &[Option<RunIx>]) -> Vec<Command>
         .collect()
 }
 
-/// Kestra's `Execution.guessFinalState`, narrowed to the states [`RunState`]
-/// can hold.
+/// Kestra's `Execution.guessFinalState`, over the runs a branch created.
 ///
 /// Java's priority is `KILLED > FAILED > CANCELLED > WARNING > PAUSED`, over a
 /// single pass that breaks on `KILLED`
-/// (`core/src/main/java/io/kestra/core/models/executions/Execution.java:769`).
+/// (`core/src/main/java/io/kestra/core/models/executions/Execution.java:774-789`).
 ///
-/// **This said `CANCELLED`, `WARNING` and `PAUSED` were "three of the six
-/// states this enum still cannot represent", and by W8 Task 2 both halves of
-/// that were stale.** The count was the enum's seven-member era (13 golden
-/// states minus 7); it had been 4 since W3c and is **2** now — `WARNING` (10
-/// entries) and `CANCELLED` (3), owned by `AllowFailure`/`allowFailure:` and by
-/// `sla:`/`Exit`. `PAUSED` **is** representable from W8 Task 2, so it is left
-/// out of this aggregate for a different reason, and a measured one: it is not
-/// terminal, `aggregate_created` runs only over runs that are, and `PAUSED`
-/// sits below `WARNING` in the priority above anyway. What is left of the order
-/// here is `KILLED`, then `FAILED`, then the `SUCCESS` it starts from.
-fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
+/// # This is the SECOND copy of that pass and it was two variants behind the
+/// first — W8 Task 6
+///
+/// [`super::aggregate`] is the other, and this one carried only `KILLED` and
+/// `FAILED` because the doc it inherited said `WARNING` and `CANCELLED` were
+/// *"states this enum cannot represent"*. That was true when it was written and
+/// **stopped being true at W8 Task 5**, which added `RunState::Warning` and
+/// updated [`super::aggregate`]'s chain without touching this one — so a
+/// `Parallel`/`Dag` branch with a `WARNING` child answered `SUCCESS` where the
+/// artifact answers `WARNING`. That is not a state this corpus can put under a
+/// branch (`valids/task-allow-failure-flowable` and its three siblings are
+/// baselined on the `AllowFailure` FLOWABLE, a different construct), so no
+/// figure moved in either direction and nothing could have noticed; it was
+/// found by W8 Task 6 enumerating **every** consumer of a terminality
+/// judgement before adding `Cancelled` to any of them, which is the method W8
+/// Task 5 fix round 2 bought.
+///
+/// Both variants are here now and the two copies agree, asserted by
+/// `the_two_guess_final_state_copies_agree`.
+///
+/// `PAUSED` is still left out, for a reason that is a property of the CALLER
+/// rather than of this order: rule 4 runs this only when every child run is
+/// terminal, and `PAUSED` is not. It sits below `WARNING` in the priority
+/// anyway.
+pub(crate) fn aggregate_created(state: &ExecutionState, runs: &[RunIx]) -> RunState {
     let mut out = RunState::Success;
     for &ix in runs {
         match latest(state, ix) {
             Some(RunState::Killed) => return RunState::Killed,
             Some(RunState::Failed) => out = RunState::Failed,
+            Some(RunState::Cancelled) if out != RunState::Failed => out = RunState::Cancelled,
+            Some(RunState::Warning) if out != RunState::Failed && out != RunState::Cancelled => {
+                out = RunState::Warning
+            }
             _ => {}
         }
     }

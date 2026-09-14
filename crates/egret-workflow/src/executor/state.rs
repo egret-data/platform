@@ -335,8 +335,11 @@ pub struct Attempt {
 /// `RUNNING`. Measured: of the golden's 18 `PAUSED` execution histories, 12
 /// carry a `RESTARTED` and 6 do not, and the 6 are exactly `LoopUntil`'s.
 ///
-/// **`WARNING` arrived at W8 Task 5**; the one still missing is `CANCELLED`,
-/// with 3 `runs` entries whose trace uses it.
+/// **`WARNING` arrived at W8 Task 5 and `CANCELLED` at W8 Task 6, which is the
+/// LAST of the golden's thirteen**: the vocabulary this enum holds and the
+/// vocabulary the golden uses are now the same set, and
+/// `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden`
+/// is what says so rather than this sentence.
 /// `oracle-exec/README.md` prints the full table and names which later task owns
 /// each.
 ///
@@ -514,6 +517,52 @@ pub enum RunState {
     /// `io.kestra.plugin.core.output.OutputValues` child `driver.rs` ships no
     /// handler for, and one (`valids/retry-success`) by `warningOnRetry`.
     Warning,
+    /// **The terminal a violated `sla:` leaves on the EXECUTION** — W8 Task 6,
+    /// which is what took this enum from 12 of the golden's 13 states to all
+    /// **13**. Nothing is left outside it.
+    ///
+    /// **Terminal, and terminal in the FAILING half — both halves measured.**
+    /// Decompiled from `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`: `isTerminated()` is `FAILED ||
+    /// WARNING || SUCCESS || KILLED || CANCELLED || RETRIED || SKIPPED ||
+    /// RESUBMITTED` — so it is terminal; `isTerminatedNoFail()` is `WARNING ||
+    /// SUCCESS || RETRIED || SKIPPED || RESUBMITTED` — so it is **not** benign;
+    /// and `isTerminatedInError()` is `FAILED || KILLED || CANCELLED` — so it is
+    /// an error. Those are three predicates and not one, and each of them has a
+    /// consumer in this crate that had to gain the row: [`is_terminal`], the
+    /// new [`is_terminated_no_fail`] (which `flowable::loop_until::
+    /// children_executed` reads), and `worker::spawn::terminated_in_error`.
+    /// **That triple is the shape W8 Task 5 fix round 2 paid for** — adding
+    /// `Warning` to `is_terminal` alone left a family of sibling predicates
+    /// wrong — so this variant's arms were written by enumerating the family
+    /// first. `flowable::aggregate`'s priority chain is the fourth consumer and
+    /// is not a terminality predicate at all:
+    /// `Execution.guessFinalState`'s single pass is `KILLED > FAILED >
+    /// CANCELLED > WARNING > PAUSED` (`Execution.java:774-789`), so this
+    /// variant sits **between** `Failed` and `Warning` there.
+    ///
+    /// **It has exactly one producer, and it is an EXECUTION state rather than
+    /// a run state.** [`crate::sla`]'s `EXECUTION_ASSERTION` with `behavior:
+    /// CANCEL` emits `SetExecutionState { Cancelled }`; nothing emits a
+    /// `SetRunState { Cancelled }` and no handler can report one. A *run* can
+    /// still hold it, by one road only — a child execution that ends
+    /// `CANCELLED` is reported to the parent's `Subflow` run
+    /// (`worker::subflow::on_child_terminal`) or to a `Loop`'s
+    /// (`worker::spawn::on_execution_terminal`) — and **no corpus entry takes
+    /// that road**: the only two flows whose `sla:` can cancel
+    /// (`valids/sla-execution-condition`,
+    /// `valids/flow-concurrency-sla-assert-cancel`) are named as a `Subflow`
+    /// target by nothing. The predicates above are therefore correct on an
+    /// input the corpus cannot supply, which is why each carries a unit row
+    /// that supplies it.
+    ///
+    /// **The golden's `CANCELLED` population is 3 execution histories and 0 run
+    /// histories**, and this variant arriving banks two of them:
+    /// `valids/sla-execution-condition` and
+    /// `valids/flow-concurrency-sla-assert-cancel`. The third,
+    /// `valids/exit-cancelled`, is an `Exit` — `oracle-exec/README.md`'s
+    /// `ExecutionUpdatableTask` row — and stays baselined.
+    Cancelled,
 }
 
 impl RunState {
@@ -546,6 +595,7 @@ impl RunState {
         RunState::Paused,
         RunState::Restarted,
         RunState::Warning,
+        RunState::Cancelled,
     ];
 
     /// This variant's position in [`RunState::ALL`]. Exhaustive on purpose.
@@ -563,6 +613,7 @@ impl RunState {
             RunState::Paused => 9,
             RunState::Restarted => 10,
             RunState::Warning => 11,
+            RunState::Cancelled => 12,
         }
     }
 
@@ -581,6 +632,7 @@ impl RunState {
             RunState::Paused => "PAUSED",
             RunState::Restarted => "RESTARTED",
             RunState::Warning => "WARNING",
+            RunState::Cancelled => "CANCELLED",
         }
     }
 
@@ -602,6 +654,46 @@ impl RunState {
                 // first, beside `SUCCESS`. Both readings matter and they are
                 // not the same predicate -- see `RunState::Warning`.
                 | RunState::Warning
+                // W8 Task 6. `isTerminated()` lists `CANCELLED` fifth;
+                // `isTerminatedNoFail()` does NOT list it, which is what
+                // `is_terminated_no_fail` below is for.
+                | RunState::Cancelled
+        )
+    }
+
+    /// True where `State.Type.isTerminatedNoFail()` is true for the same name —
+    /// **terminal AND not an error**, which is a different question from
+    /// [`is_terminal`](RunState::is_terminal) and has its own consumer.
+    ///
+    /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`, decompiled
+    /// from `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `io/kestra/core/models/flows/State.java`. Of those five this enum holds
+    /// four; `RESUBMITTED` is not a `RunState` and never will be from this
+    /// corpus (it appears in 0 golden histories).
+    ///
+    /// # Why it exists, and it is a structural answer to a measured class of bug
+    ///
+    /// `flowable::loop_until::children_executed` spelled this predicate as
+    /// *the complement of `Failed | Killed` inside the terminals this enum
+    /// holds*. A complement is right only for the enum it was written against:
+    /// W8 Task 5's `Warning` happened to fall on the side that complement gave
+    /// it, and W8 Task 6's `Cancelled` does **not** — it is terminal, it is not
+    /// no-fail, and the complement would have called it executed. Writing
+    /// Kestra's predicate down once, as a positive list with the same partition
+    /// guard [`is_terminal`](RunState::is_terminal) has, is what stops the
+    /// third variant repeating it. `the_two_state_vocabularies_agree` in
+    /// `tests/executor.rs` cross-checks every variant of this against
+    /// `models::State::is_terminated_no_fail`, which is a second, independently
+    /// written copy of the same Java.
+    ///
+    /// **It implies terminality and that is asserted rather than assumed**: all
+    /// five Java members are in `isTerminated()`, so
+    /// `is_terminated_no_fail() => is_terminal()` holds for every variant, and
+    /// `no_fail_is_a_subset_of_terminal` is the row that says so.
+    pub fn is_terminated_no_fail(self) -> bool {
+        matches!(
+            self,
+            RunState::Success | RunState::Warning | RunState::Retried | RunState::Skipped
         )
     }
 }
@@ -940,10 +1032,11 @@ mod tests {
     ///     || this == SKIPPED || this == RESUBMITTED;
     /// ```
     ///
-    /// ~~Five~~ **SIX** of those eight are members of this enum and every one of
-    /// them is asserted true; the six non-members of the list are asserted
-    /// false. So a `Paused` quietly added to `is_terminal` fails, and so does a
-    /// `Success` quietly removed.
+    /// ~~Five~~ ~~SIX~~ **SEVEN** of those eight are members of this enum and
+    /// every one of them is asserted true; the six non-members of the list are
+    /// asserted false. So a `Paused` quietly added to `is_terminal` fails, and
+    /// so does a `Success` quietly removed. Only `RESUBMITTED` is left outside,
+    /// and it appears in 0 golden histories.
     ///
     /// # It said FIVE while the enum held six, and the totality assertion is
     /// the fix
@@ -957,7 +1050,11 @@ mod tests {
     /// The row is added, and so is the thing that makes the omission
     /// impossible rather than merely fixed: **the two lists are asserted to
     /// PARTITION [`RunState::ALL`]**. Counting `ALL.len()` alone could not do
-    /// it — 6 + 6 = 12 is true of the wrong twelve too.
+    /// it — 7 + 6 = 13 is true of the wrong thirteen too. **W8 Task 6 is the
+    /// first variant to arrive with the partition already in place, and it is
+    /// what made the omission visible at compile-run time rather than at review
+    /// time**: `Cancelled` added to the enum and to neither list fails the
+    /// coverage assert before any oracle runs.
     ///
     /// **Which of the three asserts catches what, corrected** — fix round 2's
     /// review measured this and the first version of the paragraph credited
@@ -967,7 +1064,7 @@ mod tests {
     /// |---|---|
     /// | a variant in NEITHER list | the **coverage** assert (`named == all`) |
     /// | a variant in BOTH lists | the **pre-existing loops** — it is asserted terminal and non-terminal, and no `is_terminal` can satisfy both |
-    /// | a variant TWICE in ONE list | the **disjointness** assert (`named.len() == 6 + 6`), 12 against 13 |
+    /// | a variant TWICE in ONE list | the **disjointness** assert (`named.len() == 7 + 6`), 12 against 13 |
     ///
     /// So the disjointness line never fires for the case its name suggests. It
     /// is **not** dead: a duplicate inside one list reaches it, and that is a
@@ -980,12 +1077,14 @@ mod tests {
     #[test]
     fn neither_paused_nor_restarted_is_terminal() {
         // `State.Type.isTerminated()`'s members that this enum holds. `Warning`
-        // is the sixth, added in fix round 1 -- see this test's doc.
-        const TERMINAL: [RunState; 6] = [
+        // is the sixth, added in W8 Task 5 fix round 1; `Cancelled` is the
+        // seventh and last, added in W8 Task 6 -- see this test's doc.
+        const TERMINAL: [RunState; 7] = [
             RunState::Success,
             RunState::Failed,
             RunState::Warning,
             RunState::Killed,
+            RunState::Cancelled,
             RunState::Retried,
             RunState::Skipped,
         ];
@@ -1041,11 +1140,50 @@ mod tests {
         assert_eq!(RunState::Restarted.wire(), "RESTARTED");
         assert_eq!(
             RunState::ALL.len(),
-            12,
-            "the golden's vocabulary is 13; this enum now holds 12 of it (11 \
-             until W8 Task 5 added `Warning`; `CANCELLED` is the one left), and \
+            13,
+            "the golden's vocabulary is 13 and this enum now holds ALL of it \
+             (11 until W8 Task 5 added `Warning`, 12 until W8 Task 6 added \
+             `Cancelled`), and \
              `tests/executor.rs::the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` \
-             is what derives the rest"
+             is what derives that rather than this line"
+        );
+    }
+
+    /// **`isTerminatedNoFail` is a SUBSET of `isTerminated`, over every
+    /// variant** -- the relation Java's two lists have and the one a
+    /// hand-written pair can lose.
+    ///
+    /// Both directions are exercised, so it is not an assertion an
+    /// answer-`false`-to-everything implementation passes: the subset arm is
+    /// checked on all thirteen, and the four variants that are terminal and
+    /// NOT no-fail are named, which is what would fail if
+    /// [`RunState::is_terminated_no_fail`] were widened to the whole terminal
+    /// set.
+    #[test]
+    fn no_fail_is_a_subset_of_terminal() {
+        for s in RunState::ALL {
+            if s.is_terminated_no_fail() {
+                assert!(
+                    s.is_terminal(),
+                    "{s:?} is in State.Type.isTerminatedNoFail() and every one \
+                     of those five is also in isTerminated()"
+                );
+            }
+        }
+        let failing: std::collections::BTreeSet<&str> = RunState::ALL
+            .iter()
+            .filter(|s| s.is_terminal() && !s.is_terminated_no_fail())
+            .map(|s| s.wire())
+            .collect();
+        assert_eq!(
+            failing,
+            std::collections::BTreeSet::from(["CANCELLED", "FAILED", "KILLED"]),
+            "`isTerminated() && !isTerminatedNoFail()` is exactly \
+             `State.Type.isTerminatedInError()` -- `FAILED || KILLED || \
+             CANCELLED` (`State.java:296`) -- and `worker::spawn::\
+             terminated_in_error` spells that list out by hand. Two spellings \
+             of one Java predicate is one chance for them to disagree, and \
+             this is the assertion that would notice"
         );
     }
 

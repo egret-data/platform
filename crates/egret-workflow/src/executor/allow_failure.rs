@@ -315,11 +315,15 @@ mod tests {
     /// unfalsifiable alone**, and a filter that excluded everything would make
     /// the loop above pass by running nothing.
     #[test]
-    fn the_untouched_population_is_ten_of_the_twelve() {
+    fn the_untouched_population_is_eleven_of_the_thirteen() {
         let untouched = RunState::ALL
             .iter()
             .filter(|s| !matches!(s, RunState::Failed | RunState::Warning))
             .count();
-        assert_eq!((untouched, RunState::ALL.len()), (10, 12));
+        // 10 of 12 until W8 Task 6 added `Cancelled`, which `soften` leaves
+        // alone: Kestra's two `if`s read `state == FAILED` and `state ==
+        // WARNING`, so `allowFailure:` on a task whose subflow child was
+        // CANCELLED by an `sla:` does NOT turn that into a success.
+        assert_eq!((untouched, RunState::ALL.len()), (11, 13));
     }
 }

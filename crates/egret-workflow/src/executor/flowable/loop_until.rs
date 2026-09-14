@@ -185,15 +185,19 @@ pub(crate) fn children_executed(state: &ExecutionState, run: RunIx, tasks: &[Tas
     tasks.iter().all(|&task| {
         super::run_of(state, Some(run), task)
             .and_then(|ix| super::latest(state, ix))
-            // `isTerminatedNoFail()` is `WARNING || SUCCESS || RETRIED ||
-            // SKIPPED || RESUBMITTED`, so the complement inside the terminals
-            // this enum holds is `FAILED || KILLED` -- and W8 Task 5's
-            // `RunState::Warning` falls on the EXECUTED side, which is the
-            // decision the section above hands this task. Adding the variant
-            // without widening this arm would have been the over-acceptance
-            // named there in reverse: a `WARNING` child that stalls a loop
-            // Kestra lets through.
-            .is_some_and(|s| s.is_terminal() && !matches!(s, RunState::Failed | RunState::Killed))
+            // **`isTerminatedNoFail()` itself, not the complement of a
+            // hand-written failure list** -- W8 Task 6. This arm used to read
+            // `s.is_terminal() && !matches!(s, Failed | Killed)`, which is a
+            // complement taken against the enum as it stood: it was right for
+            // W8 Task 5's `Warning` by luck (Kestra does list `WARNING` in
+            // `isTerminatedNoFail()`) and would have been WRONG for W8 Task 6's
+            // `Cancelled`, which is terminal, is not no-fail, and would have
+            // been counted executed. `RunState::is_terminated_no_fail` is
+            // Kestra's positive list written once, with the same partition
+            // guard `is_terminal` has and a cross-check against
+            // `models::State`; `a_cancelled_child_does_not_count_as_executed`
+            // is the row that supplies the input this corpus cannot.
+            .is_some_and(RunState::is_terminated_no_fail)
     })
 }
 

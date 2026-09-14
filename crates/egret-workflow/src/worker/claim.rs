@@ -1028,6 +1028,21 @@ pub(super) async fn settle(
     // same thing across a transaction boundary as it does inside one.
     let mut seq = ctx.seq + 1;
     marks.observe(before, state, seq);
+    // **`ExecutorService.handleExecutionChangedSLA`, and it is here for the
+    // same reason it is there**: the artifact evaluates it on every execution
+    // message, immediately BEFORE `executorService.process(executor)`
+    // (`ExecutionEventMessageHandler.java:244`). `drive` below is `process`, so
+    // this is that edge. An execution the SLA terminates is terminal when
+    // `advance()` is first asked, and `advance()` returns nothing for a
+    // terminal execution -- which is what produces the golden's
+    // `["CREATED","CANCELLED"]` with no runs, rather than a `RUNNING` that has
+    // to be taken back.
+    if let Some(terminal) = sla_terminal(&surface, ctx, state) {
+        let snapshot = state.clone();
+        seq += 1;
+        apply(state, &Command::SetExecutionState { state: terminal });
+        marks.observe(&snapshot, state, seq);
+    }
     let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
@@ -1600,6 +1615,61 @@ impl Marks {
 /// Bounded by [`MAX_ROUNDS`]: a caller that does not converge has found a cycle
 /// or a render that keeps re-arming, and both must be loud rather than spin
 /// with a transaction open.
+/// **The state a violated `ExecutionChangedSLA` puts this execution into**, or
+/// `None` — `ExecutorService.handleExecutionChangedSLA` plus the state half of
+/// `processViolation`, over [`crate::sla`]'s decision.
+///
+/// # Why it is here and not in `advance()`
+///
+/// `EXECUTION_ASSERTION`'s `assert:` is `runContext.render`ed
+/// (`ExecutionAssertionSLA.evaluate`), and the corpus depends on that:
+/// `valids/sla-execution-condition`'s is `{{inputs.string != 'CANCEL'}}`.
+/// [`advance`](crate::executor::advance) is pure over `(plan, state, now)` and
+/// has no renderer and no access to `inputs`, so evaluating an SLA there would
+/// mean widening its contract. It does not need to be there: the decision is a
+/// function of the flow and the render surface, both of which this `settle`
+/// already holds, and Kestra takes it outside `process` too. **A change to
+/// `advance()`'s contract is a finding, not a step**, and this is the finding
+/// ruled on rather than taken.
+///
+/// # The three guards, each of them Kestra's
+///
+/// 1. `executor.getExecution().getState().isTerminated()` — an execution that
+///    has already finished is not re-judged. It is what makes this idempotent
+///    across the many `settle`s one execution has: the violation fires once,
+///    terminates the execution, and every later call returns here.
+/// 2. `ListUtils.isEmpty(flow.getSla())` — no `sla:`, no work and no parse of
+///    a render context. 339 of the corpus's 345 flows take this arm.
+/// 3. `violation.behavior()` — `NONE` changes no state
+///    ([`crate::sla::state_for`]).
+///
+/// A source that no longer parses yields `None` rather than an error: this
+/// execution is already running, `ctx.plan` was built from that same source,
+/// and turning an SLA check into the thing that fails a running execution would
+/// be a new failure mode for every flow that has no `sla:` at all.
+fn sla_terminal(
+    surface: &Surface,
+    ctx: &ExecutionCtx,
+    state: &ExecutionState,
+) -> Option<RunState> {
+    if state.history.last().is_some_and(|s| s.is_terminal()) {
+        return None;
+    }
+    let flow = crate::spec::parse(&ctx.source).ok()?;
+    if flow.sla.is_empty() {
+        return None;
+    }
+    // `run: None` -- an execution-level render with no run of its own, which is
+    // exactly what `Surface::context`'s `Option<RunIx>` was left open for.
+    // Kestra builds it the same way: `runContextFactory.of(flow, execution)`,
+    // no taskrun.
+    let cx = surface.context(&ctx.plan, state, None);
+    let violation = crate::sla::first_execution_changed_violation(&flow, &mut |p| {
+        p.render(&cx).ok()
+    })?;
+    crate::sla::state_for(violation.behavior)
+}
+
 fn drive(
     ctx: &ExecutionCtx,
     surface: &Surface,

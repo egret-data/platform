@@ -999,6 +999,149 @@ mod tests {
         }
     }
 
+    /// **`CANCELLED` outranks `WARNING` and loses to `FAILED`** — W8 Task 6,
+    /// and the row is Java's own priority rather than a preference.
+    ///
+    /// `Execution.guessFinalState`'s single pass is `KILLED > FAILED >
+    /// CANCELLED > WARNING > PAUSED`
+    /// (`core/.../executions/Execution.java:774-789`, each arm guarded on
+    /// every higher one). Both neighbours are supplied, in both orders, because
+    /// an arm pasted at the wrong end of the chain is right about one neighbour
+    /// and wrong about the other — which is the only failure this ordering can
+    /// have.
+    ///
+    /// **No corpus entry can supply a `CANCELLED` run** — `RunState::Cancelled`
+    /// has one producer and it writes the EXECUTION's state, never a run's, and
+    /// the only road to a run is a subflow/loop child that cancels, which no
+    /// corpus flow declares. So this is the whole instrument for the arm.
+    #[test]
+    fn cancelled_outranks_warning_and_loses_to_failed() {
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("plans");
+        for (a, b, expected) in [
+            (RunState::Cancelled, RunState::Warning, RunState::Cancelled),
+            (RunState::Warning, RunState::Cancelled, RunState::Cancelled),
+            (RunState::Cancelled, RunState::Failed, RunState::Failed),
+            (RunState::Failed, RunState::Cancelled, RunState::Failed),
+            (RunState::Cancelled, RunState::Killed, RunState::Killed),
+            (RunState::Killed, RunState::Cancelled, RunState::Killed),
+            (RunState::Cancelled, RunState::Success, RunState::Cancelled),
+            (RunState::Success, RunState::Cancelled, RunState::Cancelled),
+            // The control for the arm below it, unchanged by this task: a
+            // `WARNING` still beats a `SUCCESS`.
+            (RunState::Warning, RunState::Success, RunState::Warning),
+        ] {
+            let state = two_terminal_children(&plan, a, b);
+            let children = match &plan.tasks[0].kind {
+                TaskKind::Parallel { tasks, .. } => tasks.clone(),
+                other => panic!("the fixture's root is a Parallel, not {other:?}"),
+            };
+            assert_eq!(
+                flowable::aggregate(&state, &children, Some(0)),
+                expected,
+                "children ({a:?}, {b:?})"
+            );
+        }
+    }
+
+    /// **The two copies of `guessFinalState` in this crate agree over every
+    /// ordered pair of terminals** — W8 Task 6.
+    ///
+    /// [`flowable::aggregate`] serves `Sequential`/`If`/`Switch`/`LoopUntil`
+    /// and `flowable::parallel::aggregate_created` serves `Parallel`/`Dag`.
+    /// They are two transliterations of one Java method and they had **drifted
+    /// by a whole variant**: W8 Task 5 added `Warning`'s rank to the first and
+    /// not to the second, so a `Parallel` with a `WARNING` child answered
+    /// `SUCCESS` where the artifact answers `WARNING`. Nothing could notice —
+    /// the four corpus entries that put a `WARNING` under a flowable are
+    /// baselined on the `AllowFailure` construct, so the ratchet is unmoved
+    /// whichever answer is given — and it was found by W8 Task 6 enumerating
+    /// every consumer of a terminality judgement before adding `Cancelled` to
+    /// any of them.
+    ///
+    /// Asserting the two against **each other** rather than each against a
+    /// literal is deliberate: a literal table would be a third copy. What this
+    /// does not license is *"both are right"*; the row tests above are what
+    /// pin the chain against Java.
+    #[test]
+    fn the_two_guess_final_state_copies_agree() {
+        let plan = build_plan(
+            "id: x\nnamespace: io.kestra.tests\ntasks:\n  - id: par\n    type: io.kestra.plugin.core.flow.Parallel\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n      - id: b\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+        )
+        .expect("plans");
+        let children = match &plan.tasks[0].kind {
+            TaskKind::Parallel { tasks, .. } => tasks.clone(),
+            other => panic!("the fixture's root is a Parallel, not {other:?}"),
+        };
+        let terminals: Vec<RunState> = RunState::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.is_terminal())
+            .collect();
+        assert_eq!(
+            terminals.len(),
+            7,
+            "every terminal is driven; a filter that emptied would make the \
+             loop below pass by running nothing"
+        );
+        let mut pairs = 0usize;
+        for &a in &terminals {
+            for &b in &terminals {
+                let state = two_terminal_children(&plan, a, b);
+                assert_eq!(
+                    flowable::aggregate(&state, &children, Some(0)),
+                    flowable::parallel::aggregate_created(&state, &[1, 2]),
+                    "the two `guessFinalState` copies disagree on ({a:?}, {b:?})"
+                );
+                pairs += 1;
+            }
+        }
+        assert_eq!(pairs, 49);
+    }
+
+    /// A `Parallel` whose two children have already terminated in `a` and `b`.
+    ///
+    /// Written by [`apply`] rather than by hand so that the runs it produces
+    /// are the runs `advance()` would have produced — a state built field by
+    /// field is a state no executor ever wrote.
+    fn two_terminal_children(plan: &Plan, a: RunState, b: RunState) -> ExecutionState {
+        let children = match &plan.tasks[0].kind {
+            TaskKind::Parallel { tasks, .. } => tasks.clone(),
+            other => panic!("the fixture's root is a Parallel, not {other:?}"),
+        };
+        assert_eq!(children.len(), 2);
+        let mut state = ExecutionState::new(plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: plan.roots[0],
+                parent: None,
+                value: None,
+            },
+        );
+        apply(&mut state, &Command::StartRun { run: 0, at: T0 });
+        for (i, &child) in children.iter().enumerate() {
+            apply(
+                &mut state,
+                &Command::CreateRun {
+                    task: child,
+                    parent: Some(0),
+                    value: None,
+                },
+            );
+            apply(
+                &mut state,
+                &Command::SetRunState {
+                    run: i + 1,
+                    state: if i == 0 { a } else { b },
+                },
+            );
+        }
+        state
+    }
+
     /// **`concurrent:` caps how many children a `Parallel` creates at once.**
     ///
     /// Kestra's cap is on the *stream* of next task runs
@@ -8190,6 +8333,61 @@ tasks:
             assert_eq!(asked, 5, "{go:?}: once per iteration but the last");
             assert_eq!(now, Tick(5000), "{go:?}: five pauses of PT1S");
         }
+    }
+
+    /// **A `CANCELLED` child STOPS a `LoopUntil`**, and it is the row the old
+    /// spelling of `children_executed` would have got wrong — W8 Task 6.
+    ///
+    /// `childTaskRunExecuted` filters on `isTerminatedNoFail()`, which is
+    /// `WARNING || SUCCESS || RETRIED || SKIPPED || RESUBMITTED`
+    /// (`State.java:292`) — **`CANCELLED` is not in it**, so a cancelled body
+    /// did not execute and the loop takes its children's aggregate without ever
+    /// asking its condition, exactly as `FAILED` and `KILLED` do in
+    /// [`the_five_terminals_split_the_way_is_terminated_no_fail_splits_them`].
+    ///
+    /// **The old spelling was a COMPLEMENT and that is why this is a separate
+    /// test rather than a sixth row.** `children_executed` read
+    /// `s.is_terminal() && !matches!(s, Failed | Killed)`, which is
+    /// `isTerminatedNoFail` only for the enum it was written against. W8 Task
+    /// 5's `Warning` fell on the side that complement gave it by luck;
+    /// `Cancelled` does not, and under the old spelling this loop would have
+    /// iterated six times on a body Kestra treats as failed. The predicate is
+    /// `RunState::is_terminated_no_fail` now — Kestra's positive list, written
+    /// once — and this is the row that would notice it being widened back.
+    ///
+    /// Nothing in the corpus supplies a `CANCELLED` loop child, so these
+    /// assertions are the whole instrument. The `SUCCESS` control beside them
+    /// is what stops an implementation that stopped on everything passing.
+    #[test]
+    fn a_cancelled_child_does_not_count_as_executed() {
+        let src = loop_until_flow(
+            "    condition: \"{{ done }}\"\n    checkFrequency:\n      \
+             interval: PT1S\n      maxIterations: 5\n",
+            ONE_RETURN,
+        );
+        let plan = build_plan(&src).expect("it plans");
+
+        let (state, now, asked) = run_loop_until(&plan, RunState::Cancelled, &["false"]);
+        assert_eq!(
+            wire(&state.runs[0].history),
+            ["CREATED", "RUNNING", "CANCELLED"],
+            "a CANCELLED body is `isTerminatedInError`: one iteration, and the \
+             loop takes the children's aggregate -- which ranks CANCELLED \
+             (`guessFinalState`'s third arm)"
+        );
+        assert_eq!(
+            asked, 0,
+            "and the condition is never EVALUATED, not merely ignored"
+        );
+        assert_eq!(now, T0, "nothing waited");
+
+        // The control, on the same fixture: a state that IS
+        // `isTerminatedNoFail` iterates to the limit. Without it, a
+        // `children_executed` that answered `false` for everything would pass
+        // the three assertions above.
+        let (state, now, asked) = run_loop_until(&plan, RunState::Success, &["false"]);
+        assert_eq!(state.runs[0].history.last(), Some(&RunState::Success));
+        assert_eq!((asked, now), (5, Tick(5000)));
     }
 
     /// **A `SKIPPED` child still counts as executed**, so a loop whose body was

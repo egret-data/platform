@@ -255,13 +255,24 @@ pub(crate) fn aggregate(
             // **W8 Task 5, and its position in the chain is the artifact's
             // priority order, not an accident of where it was pasted.**
             // `Execution.guessFinalState`'s single pass is
-            // `KILLED > FAILED > CANCELLED > WARNING > PAUSED`, so a `WARNING`
-            // child loses to a `FAILED` sibling and beats a `SUCCESS` one --
-            // which the `!=` guard below is: it upgrades `Success` and refuses
-            // to downgrade `Failed`. `CANCELLED` sits between them on the
-            // artifact and is the one state this enum still lacks; when it
-            // arrives it belongs above this arm, not below it.
-            Some(RunState::Warning) if out != RunState::Failed => out = RunState::Warning,
+            // `KILLED > FAILED > CANCELLED > WARNING > PAUSED`
+            // (`Execution.java:774-789`), so a `WARNING` child loses to a
+            // `FAILED` sibling and beats a `SUCCESS` one -- which the `!=`
+            // guards are: they upgrade `Success` and refuse to downgrade
+            // anything above.
+            //
+            // **`CANCELLED` arrived at W8 Task 6 and it went ABOVE this arm,
+            // which is where Task 5's comment said it belonged.** The Java's
+            // own conditions are the guards written out: `CANCELLED` is taken
+            // unless the running answer is already `KILLED` or `FAILED`, and
+            // `WARNING` unless it is already any of those three. Nothing in the
+            // corpus supplies a `CANCELLED` run -- see `RunState::Cancelled`
+            // for the derivation -- so `cancelled_outranks_warning_and_loses_to_failed`
+            // is the row that supplies it.
+            Some(RunState::Cancelled) if out != RunState::Failed => out = RunState::Cancelled,
+            Some(RunState::Warning) if out != RunState::Failed && out != RunState::Cancelled => {
+                out = RunState::Warning
+            }
             _ => {}
         }
     }

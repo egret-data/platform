@@ -15,6 +15,7 @@
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
 //! - `worker`    — W4 (claim loops, handlers, reaper)
+//! - `sla`       — W8 Task 6 (`sla:` evaluation; `EXECUTION_ASSERTION` only)
 //! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
 //!   the flow trigger's window-free arm)
 //! - `plugins`   — W5 (handler registry)
@@ -33,6 +34,10 @@ pub mod refs;
 pub mod repo;
 pub mod routes;
 pub mod runners;
+/// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
+/// by name with the measurement. `pub` so `tests/executor.rs` (an integration
+/// test) can drive the predicate, the same reason `executor` and `worker` are.
+pub mod sla;
 pub mod spec;
 // W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
 // trigger's window-free arm. `pub` because the routes

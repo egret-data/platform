@@ -541,9 +541,17 @@ fn transmit_failed(ctx: &claim::ExecutionCtx, task: TaskIx) -> Result<bool> {
 }
 
 /// `State.Type.isTerminatedInError()` — `FAILED || KILLED || CANCELLED`
-/// (`State.java:296`), of which [`RunState`] has the first two.
+/// (`State.java:296`), **all three of which [`RunState`] has since W8 Task 6**.
+///
+/// It is spelled as Kestra's literal list rather than as
+/// `is_terminal() && !is_terminated_no_fail()` so that a reader can diff it
+/// against the Java line by line; `state::tests::no_fail_is_a_subset_of_terminal`
+/// asserts the two spellings agree, which is what makes keeping both safe.
 fn terminated_in_error(state: RunState) -> bool {
-    matches!(state, RunState::Failed | RunState::Killed)
+    matches!(
+        state,
+        RunState::Failed | RunState::Killed | RunState::Cancelled
+    )
 }
 
 /// **The state the loop run reads for an iteration that ended `RETRIED`, and

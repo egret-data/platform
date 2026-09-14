@@ -1353,11 +1353,68 @@ mod tests {
                  that answers false for everything"
             );
         }
+        // **`Cancelled` is reachable here and is deliberately NOT in
+        // `guess_state`'s trigger set** -- W8 Task 6. It is terminal, so
+        // `claim::settle` really does hand it to `on_child_terminal`, and
+        // `ExecutableUtils.guessState`'s disjunction is `isFailed() ||
+        // isPaused() || KILLED || WARNING` (`ExecutableUtils.java:46-47`) with
+        // no `CANCELLED` in it -- so a cancelled child gives the parent's run
+        // `SUCCESS`. That is a row the corpus cannot supply and
+        // `a_cancelled_child_gives_the_parent_run_success` supplies it.
+        assert!(
+            reachable.contains(&RunState::Cancelled),
+            "unlike `Paused`, a `Cancelled` child DOES reach `guess_state`; \
+             the omission of `CANCELLED` from the trigger set is Java's, not a \
+             property of what can arrive"
+        );
         assert_eq!(
             reachable.len(),
-            6,
-            "six of the twelve `RunState::ALL` are terminal; a bare \
+            7,
+            "seven of the thirteen `RunState::ALL` are terminal; a bare \
              `!contains` says nothing about how many"
+        );
+    }
+
+    /// **A `CANCELLED` child gives the parent's `Subflow` run `SUCCESS`** —
+    /// W8 Task 6, and it is Java's omission rather than egret's.
+    ///
+    /// `ExecutableUtils.guessState`'s disjunction is `isFailed() || isPaused()
+    /// || KILLED || WARNING` (`ExecutableUtils.java:46-47`). `isFailed()` is
+    /// `FAILED` alone, and **`CANCELLED` is in none of the four** — so a child
+    /// execution that an `sla:` cancelled is not transmitted at all and the
+    /// `else` branch answers `SUCCESS`, whatever `transmitFailed:` says and
+    /// whatever the `allow*` flags say.
+    ///
+    /// **This row is reachable in production and not from this corpus**, which
+    /// is why it is asserted rather than argued: `RunState::Cancelled` has one
+    /// producer (a flow-level `EXECUTION_ASSERTION` with `behavior: CANCEL`)
+    /// and the two corpus flows that carry one are named as a `Subflow` target
+    /// by nothing. `a_paused_child_cannot_reach_guess_state` is the companion
+    /// that pins the OTHER half — that a `CANCELLED` child really does arrive
+    /// here, unlike a `PAUSED` one.
+    ///
+    /// Every combination of the three flags is driven, because the claim is
+    /// that none of them moves the answer; a single row could not say that.
+    #[test]
+    fn a_cancelled_child_gives_the_parent_run_success() {
+        for transmit in [true, false] {
+            for af in [true, false] {
+                for aw in [true, false] {
+                    assert_eq!(
+                        guess_state(transmit, RunState::Cancelled, af, aw),
+                        RunState::Success,
+                        "CANCELLED is outside `guessState`'s trigger set, so \
+                         transmitFailed={transmit} allowFailure={af} \
+                         allowWarning={aw} cannot change the answer"
+                    );
+                }
+            }
+        }
+        // The control on the same fixture: a state that IS in the trigger set
+        // is transmitted, so "SUCCESS for everything" fails here.
+        assert_eq!(
+            guess_state(true, RunState::Killed, false, false),
+            RunState::Killed
         );
     }
 
