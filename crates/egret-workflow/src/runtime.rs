@@ -85,6 +85,28 @@
 //! run's **attempt count** (2, not 3) and on the handler's call log for that run
 //! — the two places a double reopen is visible.
 //!
+//! **Measured: the `FOR UPDATE` is NOT the only thing holding this up**, and
+//! that is written down rather than left for the next reader to discover by
+//! deleting it and seeing green. W10 Task 2 mutation F flipped `claim::load`
+//! from `Lock::Yes` to `Lock::No` — the whole of the serialisation this
+//! statement names — and `two_tickers_reopen_a_due_retry_exactly_once` stayed
+//! green, 3 runs of 3, against a control of 10/10. The callers were enumerated
+//! before anything was concluded (`resume`, `apply_outcome` and `input_for` on
+//! the `Stack::Fresh` side; `spawn::spawn_one` and `subflow` on the nested one),
+//! and the reason the outcome does not move is that **three further mechanisms
+//! produce the same one**: `UNIQUE (execution_id, run_ix)` from migration 0134,
+//! which `claim::load`'s own doc names as what happens if the lock is ever lost
+//! (a collision, not a duplicate run); `persist`'s `rows_affected` fence on the
+//! released run's lease; and Postgres's own row-level write locks on the
+//! `task_runs` UPDATEs, which serialise the writers even with no advisory lock
+//! in front of them.
+//!
+//! So the `FOR UPDATE` is **sufficient and not individually necessary** here —
+//! the same shape `persist`'s doc already records for its two fences. What the
+//! test asserts is the **outcome** (one reopen), which is the invariant a
+//! deployment has; the mechanism above is one of four things delivering it, and
+//! a reader must not quote the `FOR UPDATE` as the sole reason.
+//!
 //! ## 4. [`reap`](crate::worker::reap) — safe by **re-evaluation under READ COMMITTED**
 //!
 //! One `UPDATE … SET claimed_at = NULL WHERE claimed_at IS NOT NULL AND state =
@@ -129,7 +151,29 @@
 //! `a_tick_that_only_woke_something_returns_zero_so_a_drain_loop_would_never_stop`
 //! (the contract) and
 //! `the_worker_ticks_on_a_fixed_interval_rather_than_draining_to_zero` (the
-//! loop).
+//! loop). Both die when the loop is rewritten as `while tick(..)? > 0`
+//! (mutation C, 2 runs of 2, control 10/10).
+//!
+//! # What is NOT asserted here, named rather than left to be found
+//!
+//! **The REAPER's `MissedTickBehavior::Skip` has no test.** Deleting it
+//! (mutation A2, 2 runs of 2) leaves all 10 tests green, where deleting the
+//! *worker's* (mutation A1, 3 runs of 3) kills
+//! `a_paused_ticker_does_not_fire_catch_up_ticks` every time. The callers were
+//! enumerated before anything was concluded: three tests drive the reaper
+//! ticker and not one of them holds it past a single one of its own intervals,
+//! because [`reap`](crate::worker::reap) is one `UPDATE` with no await inside it
+//! and the only way to make it slow is to lock the table out from under it.
+//!
+//! And even then the property would stay invisible, which is the honest half:
+//! `reap` takes **no batch**, so it reclaims everything on each pass and N
+//! catch-up passes leave the database in exactly the state one pass does. The
+//! worker's `Skip` is observable *only* because `batch` bounds a tick's work.
+//! This is a **load** property with no behavioural consequence — one `UPDATE`
+//! per missed interval against a table with nothing to give — and killing its
+//! mutant would mean counting calls from inside production code. It is kept for
+//! the same reason `egret-automation`'s is, and it is recorded here as unproved
+//! rather than reported as covered.
 
 use std::sync::Arc;
 use std::time::Duration;
