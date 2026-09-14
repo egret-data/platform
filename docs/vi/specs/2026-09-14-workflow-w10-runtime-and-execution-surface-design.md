@@ -169,8 +169,11 @@ Gói này khiến hệ thống **thực sự chạy lần đầu tiên**. Hai m�
 `message`, `created_seq`, `ended_seq`, `resume_with`.
 
 **Nên một gantt KHÔNG cần cột mới nào.** `created_seq`/`ended_seq` nằm trên
-`task_runs`, và cùng với các mốc thời gian đã có trong `history` của từng run thì
-đó là toàn bộ đầu vào. Lý do chưa có gantt không phải thiếu dữ liệu — mà là thiếu
+`task_runs`, và cùng với `execution.created_at` và `attempts[].started_at` của từng
+run thì đó là toàn bộ đầu vào. **`history` KHÔNG mang ngày tháng** —
+`worker::claim::states_json` ghi tên trạng thái trần, và `state.rs:254` nói rõ vì sao
+không thêm trường `started_at` thứ hai: nó sẽ là bản sao có thể bất đồng với
+`attempts[0].started_at`. Lý do chưa có gantt không phải thiếu dữ liệu — mà là thiếu
 một **endpoint**.
 
 W10 ship, theo hình dạng `egret-dataapi::management_router` đã dùng cho auth, phạm

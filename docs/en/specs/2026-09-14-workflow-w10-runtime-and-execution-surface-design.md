@@ -170,8 +170,10 @@ hazards, both measured rather than imagined:
 range: `outputs`, `message`, `created_seq`, `ended_seq`, `resume_with`.
 
 **So a gantt needs no new column.** `created_seq`/`ended_seq` are on `task_runs`,
-and together with the timestamps already in each run's `history` they are the
-whole input. The reason there is no gantt
+and together with `execution.created_at` and each run's `attempts[].started_at`
+they are the whole input. **`history` carries no dates** — `worker::claim::states_json`
+writes bare state names, and `state.rs:254` says why a second `started_at` field is
+not added: it would be a copy of `attempts[0].started_at` that could disagree. The reason there is no gantt
 is not missing data — it is a missing **endpoint**.
 
 W10 ships, in the shape `egret-dataapi::management_router` already uses for auth,
