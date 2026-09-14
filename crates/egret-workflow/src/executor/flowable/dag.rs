@@ -18,7 +18,7 @@ use crate::executor::plan::{DagNode, Plan, TaskIx};
 use crate::executor::state::{ExecutionState, RunIx, RunState, Tick};
 
 use super::parallel::drive_concurrent;
-use super::{latest, Step};
+use super::{current_list, latest, Current, Step};
 
 /// Drive one `Dag`.
 ///
@@ -90,6 +90,39 @@ pub(crate) fn drive(
     // too.
     if !errors.is_empty() {
         return super::parallel::drive(plan, state, &children, errors, parent, None, now);
+    }
+    // **Kestra's SECOND gate, applied to the one path that did not go through
+    // it** -- W8 Task 5 fix round 4.
+    //
+    // `findTaskDependingFlowState` consults two predicates in order
+    // (`javap -p -c io/kestra/core/models/executions/Execution.class`):
+    // `hasFailed` at bci 110, then `hasFailedNoRetry` at bci 120, whose lambda
+    // is `getState().isFailed() && shouldNotBeRetried(...)` over bci 0-24 and
+    // whose `shouldNotBeRetried` is `!taskRun.shouldBeRetried(task.getRetry())`
+    // (bci 55-74, with an absent `ResolvedTask` answering `false` at 53). When
+    // every failure will be retried, the method returns `emptyList()`: start
+    // nothing, **fail nothing**, wait.
+    //
+    // egret has that predicate -- [`current_list`]'s `Current::RetryPending` is
+    // `failed.iter().all(will_retry)`, the exact complement of
+    // `hasFailedNoRetry`'s `anyMatch` -- and
+    // [`parallel::drive`](super::parallel::drive) has always consulted it.
+    // **`dag::drive` did not.** With an empty `errors:` it called
+    // `drive_concurrent` directly, so rule 1 saw a `FAILED` child whose retry
+    // was still pending and `fail_the_rest` killed its in-flight siblings,
+    // where the artifact waits. That is egret acting where the artifact does
+    // not, and the corpus cannot see it.
+    //
+    // It is one call because it is one Java method: `Dag.resolveNexts` ->
+    // `resolveDagNexts` -> `resolveParallelNexts` ->
+    // `findTaskDependingFlowState`, the same function a `Parallel` reaches.
+    // The `errors.is_empty()` branch above already routes through
+    // `parallel::drive`, which asks this for itself.
+    if matches!(
+        current_list(plan, state, &children, errors, parent, now),
+        Current::RetryPending
+    ) {
+        return Step::Waiting;
     }
     drive_concurrent(
         plan,

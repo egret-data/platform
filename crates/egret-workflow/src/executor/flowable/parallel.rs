@@ -181,20 +181,28 @@ pub(crate) fn drive_concurrent(
     // **This line is `hasFailed`, the one at bci 110**, and that one really is
     // `isFailed()` alone. `State.Type.isFailed()` is `this == FAILED`.
     //
-    // **The retry clause is the SECOND gate and egret has it elsewhere.** In
-    // Java, `hasFailedNoRetry` returning false makes
-    // `findTaskDependingFlowState` return `emptyList()` -- start nothing, fail
-    // nothing, wait for the retry. egret's counterpart is
-    // [`current_list`](super::current_list)'s `Current::RetryPending`, which is
-    // the same decision in the same shape. **What `fail_the_rest` does NOT have
-    // is that clause**: a `Parallel` child that failed and WILL be retried
-    // makes this rule fail its in-flight siblings, where Kestra leaves them
-    // alone. Registered as a divergence rather than fixed in a fix round,
-    // because it is unreachable from this corpus -- measured, probe RP -- and
-    // `no_corpus_parallel_child_declares_a_retry` derives why: the only corpus
-    // flow pairing a `retry:` with a concurrent flowable is
-    // `valids/retry-flowable-parallel`, whose `retry:` sits on a `Loop` with
-    // one child and therefore has no sibling to fail.
+    // **The retry clause is the SECOND gate and it belongs to the CALLER, not
+    // here** -- corrected at W8 Task 5 fix round 4, which found that fix round
+    // 3's account of it was wrong.
+    //
+    // Round 3 wrote *"`fail_the_rest` does NOT have that clause ... registered
+    // as a divergence"*. The clause was never missing from this rule: it is
+    // [`current_list`](super::current_list)'s `Current::RetryPending`, whose
+    // `failed.iter().all(will_retry)` is the exact complement of
+    // `hasFailedNoRetry`'s `anyMatch`, and [`drive`] above returns
+    // `Step::Waiting` on it **before** `drive_concurrent` is ever called. A
+    // `Parallel` child mid-retry therefore never reaches this line, which is
+    // why probe RP -- adding the clause here -- changed nothing and survived.
+    //
+    // **What round 3 measured was real and the diagnosis was one layer off.**
+    // The path that skipped the gate was [`dag::drive`](super::dag::drive):
+    // with an empty `errors:` it called `drive_concurrent` directly, never
+    // asking `current_list` at all. That is where the gate went, and
+    // `a_dag_node_awaiting_a_retry_does_not_fail_its_siblings` is the row that
+    // holds it. The lesson is the shape of the error, not the line: **"this
+    // predicate lacks a clause" and "one CALLER of it skips the gate" produce
+    // the same symptom and have different fixes**, and a probe that adds the
+    // clause to the predicate cannot tell them apart -- it survives under both.
     //
     // `SKIPPED` stays out for W3c's reason, unchanged: a falsy `runIf:` on one
     // branch must not fail the others, and

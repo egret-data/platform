@@ -176,15 +176,24 @@ MUTATIONS = {
            ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
            ".any(|&ix| matches!(latest(state, ix),\n"
            "            Some(RunState::Failed) | Some(RunState::Retried)));"),
-    # RP is a FORWARD probe, not a revert: it ADDS the `hasFailedNoRetry`
-    # clause rule 1 lacks. A verdict of "survives" is the measurement that the
-    # divergence is unreachable from this corpus.
-    "RP": ("src/executor/flowable/parallel.rs",
-           ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
-           ".any(|&ix| latest(state, ix) == Some(RunState::Failed)\n"
-           "            && crate::executor::retry::policy_for(plan, state, ix)\n"
-           "                .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))\n"
-           "                .is_none());"),
+    # **RP, retargeted at fix round 4.** It used to ADD the `hasFailedNoRetry`
+    # clause to rule 1 and it SURVIVED -- which fix round 3 read as "the
+    # divergence is unreachable". The real reading is that rule 1 was never the
+    # site: `parallel::drive` consults `current_list`'s `Current::RetryPending`
+    # before `drive_concurrent` is reached, so adding the clause there is
+    # redundant and a probe that adds it cannot distinguish "the predicate
+    # lacks a clause" from "one caller skips the gate".
+    #
+    # It now REVERTS the gate at its real site, `dag::drive`, which with an
+    # empty `errors:` bypassed `current_list` entirely.
+    "RP": ("src/executor/flowable/dag.rs",
+           "    if matches!(\n"
+           "        current_list(plan, state, &children, errors, parent, now),\n"
+           "        Current::RetryPending\n"
+           "    ) {\n"
+           "        return Step::Waiting;\n"
+           "    }\n",
+           ""),
     "M24": ("src/executor/state.rs",
             "                | RunState::Warning\n        )",
             "                | RunState::Warning\n                | RunState::Paused\n        )"),

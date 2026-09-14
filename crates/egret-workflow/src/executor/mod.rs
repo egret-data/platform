@@ -5773,6 +5773,85 @@ tasks:
         }
     }
 
+    /// A `Dag` of two INDEPENDENT nodes — no `dependsOn` between them — so one
+    /// can fail while the other is still in flight. `{RETRY}` is filled in or
+    /// blanked by the two rows that use it.
+    const DAG_INDEPENDENT_NODES: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: d
+    type: io.kestra.plugin.core.flow.Dag
+    tasks:
+      - task:
+          id: boom
+          type: io.kestra.plugin.core.execution.Fail
+{RETRY}      - task:
+          id: sibling
+          type: io.kestra.plugin.core.debug.Return
+          format: b
+"#;
+
+    /// **A `Dag` node whose failure will be RETRIED does not fail its
+    /// siblings** — Kestra's second gate, and the one path in this executor
+    /// that did not go through it.
+    ///
+    /// `findTaskDependingFlowState` asks two predicates in order: `hasFailed`
+    /// (bci 110) and then `hasFailedNoRetry` (bci 120). When every failure will
+    /// be retried the second answers false and the method returns
+    /// `emptyList()` — start nothing, **fail nothing**, wait.
+    ///
+    /// egret's counterpart is [`flowable::current_list`]'s
+    /// `Current::RetryPending`, whose `failed.iter().all(will_retry)` is the
+    /// exact complement of `hasFailedNoRetry`'s `anyMatch`.
+    /// `parallel::drive` has always consulted it; **`dag::drive` did not** —
+    /// with an empty `errors:` it went straight to `drive_concurrent`, so rule
+    /// 1 saw a `FAILED` child mid-retry and `fail_the_rest` killed the
+    /// siblings. **egret acting where the artifact does not**, which is
+    /// over-acceptance however quiet the ratchet is.
+    ///
+    /// **The control is the second row**: with the `retry:` removed, the same
+    /// flow DOES fail the sibling. Without it this test passes on an
+    /// implementation where rule 1 never fires for a `Dag` at all, which is
+    /// precisely what a badly-placed gate would produce.
+    ///
+    /// **The oracle cannot score either row** —
+    /// `no_corpus_parallel_child_declares_a_retry` derives that no corpus flow
+    /// puts a `retry:` on a direct `Parallel`/`Dag` child, so the artifact and
+    /// not the corpus is the authority here.
+    #[test]
+    fn a_dag_node_awaiting_a_retry_does_not_fail_its_siblings() {
+        const RETRY: &str = "          retry:\n            type: constant\n            \
+                             interval: PT1S\n            maxAttempts: 3\n";
+
+        let plan =
+            build_plan(&DAG_INDEPENDENT_NODES.replace("{RETRY}", RETRY)).expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(&plan, &[("boom", RunState::Failed)]);
+        assert_eq!(
+            history_of(&plan, &state, "boom").last().copied(),
+            Some("RETRYING"),
+            "the control for this row: the failure really is mid-retry, not \
+             merely failed"
+        );
+        assert_eq!(
+            history_of(&plan, &state, "sibling"),
+            ["CREATED", "SUBMITTED", "RUNNING"],
+            "still in flight -- the artifact waits for the retry and fails \
+             nothing, so `fail_the_rest` must not have run"
+        );
+
+        // The discriminating row: the SAME flow with no `retry:`.
+        let plain =
+            build_plan(&DAG_INDEPENDENT_NODES.replace("{RETRY}", "")).expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(&plain, &[("boom", RunState::Failed)]);
+        assert_eq!(
+            history_of(&plain, &state, "sibling"),
+            ["CREATED", "SUBMITTED", "RUNNING", "FAILED"],
+            "with nothing left to retry, `hasFailedNoRetry` is TRUE and rule 1 \
+             fires as it always did -- this is what stops the row above \
+             passing on a Dag that never fails anything"
+        );
+    }
+
     /// **Rule 4 completes a `Dag` under a `KILLED` dependency**, which is what
     /// the two fix-round-2 changes do differently *together*.
     ///
@@ -6131,22 +6210,29 @@ tasks:
     ///
     /// Kestra gates the switch to a branch's `errors:` on **two** predicates in
     /// order (`findTaskDependingFlowState`, bci 110 and 120): `hasFailed`, then
-    /// `hasFailedNoRetry`. Rule 1 is the first; it has no counterpart for the
-    /// second, so a `Parallel` child that failed and **will be retried** makes
-    /// egret fail its in-flight siblings where Kestra waits. egret does have
-    /// the second gate — [`flowable::current_list`]'s `Current::RetryPending` —
-    /// but rule 1 does not consult it.
+    /// `hasFailedNoRetry`. egret has both — rule 1 is the first, and
+    /// [`flowable::current_list`]'s `Current::RetryPending` is the second.
     ///
-    /// **It is unreachable from this corpus, and the near-miss is the
-    /// interesting part.** Three flows declare a `Parallel`/`Dag` *and* a
-    /// `retry:` — `valids/full` and `invalids/duplicate-parallel` put the
-    /// `retry:` on a top-level task, and **`valids/subflow-parent-retry` puts
-    /// it inside a `Parallel`**, on `subflow1`/`subflow2`. That one is a
-    /// grandchild: rule 1 reads the `Parallel`'s DIRECT children (`seq1`,
-    /// `seq2`), and a `Sequential` whose child is mid-retry stays `RUNNING`
-    /// because `current_list` answers `RetryPending`. So the second gate
-    /// protects the first, one level down — which is why the divergence needs a
-    /// `retry:` on a direct child and why this test looks for exactly that.
+    /// **This doc said rule 1 "does not consult it" and that was the wrong
+    /// diagnosis** (W8 Task 5 fix round 3, corrected in round 4).
+    /// `parallel::drive` consults the second gate before `drive_concurrent` is
+    /// reached; what skipped it was `dag::drive`, which with an empty `errors:`
+    /// called `drive_concurrent` directly. The gate is there now
+    /// (`a_dag_node_awaiting_a_retry_does_not_fail_its_siblings`), and what
+    /// this test still derives is unchanged and is why the ARTIFACT rather than
+    /// the corpus had to be the authority for it.
+    ///
+    /// **No corpus flow can score the second gate, so the artifact is its
+    /// authority.** Three flows declare a `Parallel`/`Dag` *and* a `retry:` —
+    /// `valids/full` and `invalids/duplicate-parallel` put the `retry:` on a
+    /// top-level task, and **`valids/subflow-parent-retry` puts it inside a
+    /// `Parallel`**, on `subflow1`/`subflow2`. That one is a grandchild: rule 1
+    /// reads the `Parallel`'s DIRECT children (`seq1`, `seq2`), and a
+    /// `Sequential` whose child is mid-retry stays `RUNNING` because
+    /// `current_list` answers `RetryPending`. **The shape is one nesting level
+    /// from live**, which is why the gate is implemented from the bytecode
+    /// rather than left until a corpus flow demands it — and why this test
+    /// fails the day one does, telling the reader the golden can now judge it.
     #[test]
     fn no_corpus_parallel_child_declares_a_retry() {
         fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
@@ -6259,9 +6345,12 @@ tasks:
         assert_eq!(
             offenders,
             Vec::<String>::new(),
-            "a corpus `Parallel` or `Dag` child declares a `retry:`, so rule \
-             1's missing `hasFailedNoRetry` clause is now reachable and a \
-             golden entry can judge it. Add the clause rather than the entry"
+            "a corpus `Parallel` or `Dag` child declares a `retry:`, so \
+             Kestra's second gate -- `hasFailedNoRetry` at bci 120, egret's \
+             `Current::RetryPending` -- is now reachable from the oracle and a \
+             golden entry can judge it. Re-read \
+             `a_dag_node_awaiting_a_retry_does_not_fail_its_siblings` against \
+             that entry rather than against the bytecode alone"
         );
     }
 
