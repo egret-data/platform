@@ -545,8 +545,32 @@ fn transmit_failed(ctx: &claim::ExecutionCtx, task: TaskIx) -> Result<bool> {
 ///
 /// It is spelled as Kestra's literal list rather than as
 /// `is_terminal() && !is_terminated_no_fail()` so that a reader can diff it
-/// against the Java line by line; `state::tests::no_fail_is_a_subset_of_terminal`
-/// asserts the two spellings agree, which is what makes keeping both safe.
+/// against the Java line by line.
+///
+/// # The guard this doc claimed, which did not exist
+///
+/// This paragraph said `state::tests::no_fail_is_a_subset_of_terminal` *"asserts
+/// the two spellings agree, which is what makes keeping both safe."* **It does
+/// not, and never called this function.** It compares
+/// `is_terminal() && !is_terminated_no_fail()` against a **literal set written
+/// in its own body**, so it pins one spelling against a third copy and says
+/// nothing about this one. Measured: **MX1** — drop `RunState::Cancelled` here,
+/// leaving `Failed | Killed` — **survived 3 of 3 runs**, 1036 passed, a result
+/// line byte-identical to the control.
+///
+/// **A wrong assertion is worse than none**, because it converts an unguarded
+/// predicate into a defended one, and this package has already paid for that
+/// class twice. [`tests::the_two_spellings_of_terminated_in_error_agree`] is
+/// the guard now: it calls **this function** for every member of
+/// `RunState::ALL` and compares it to the derived predicate, so a variant added
+/// to one spelling and not the other fails rather than diverging quietly.
+///
+/// **Not shipped today**, and the bound is worth stating rather than leaving a
+/// reader to infer: W8 Task 6's `sub_flow_source` clears `sla:` from a
+/// synthesised loop body, so no iteration of this corpus can end `CANCELLED`
+/// and `transmitFailed` has never been asked about one. The scenario is one
+/// package away — give a `Loop` child a `CANCELLED` terminal and the unguarded
+/// version reports **SUCCESS** for a cancelled iteration.
 fn terminated_in_error(state: RunState) -> bool {
     matches!(
         state,
@@ -782,6 +806,69 @@ fn worker_err(e: WorkerError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The guard [`terminated_in_error`]'s doc claimed and did not have.**
+    ///
+    /// Two spellings of one Java predicate is one chance for them to disagree,
+    /// and the assertion that was cited for it —
+    /// `state::tests::no_fail_is_a_subset_of_terminal` — **never calls this
+    /// function**. It compares `is_terminal() && !is_terminated_no_fail()`
+    /// against a literal set written in its own body, which pins one spelling
+    /// to a third copy of the list and leaves this one free. **MX1** (drop
+    /// `RunState::Cancelled`, leaving `Failed | Killed`) survived that suite
+    /// **3 of 3 runs** with a result line byte-identical to the control.
+    ///
+    /// This calls `terminated_in_error` itself, over **every** member of
+    /// `RunState::ALL` rather than over the three that happen to be true today,
+    /// so the failure it reports is *which variant* disagrees and in *which
+    /// direction*. A variant added to one spelling and not the other fails
+    /// here; so does MX1.
+    ///
+    /// **This test postdates the defect it proves and cannot be evidence that
+    /// the defect was ever caught** — it is written because MX1 showed nothing
+    /// caught it. The honest claim is the narrow one: MX1 died 3/3 *after* this
+    /// existed and survived 3/3 before.
+    #[test]
+    fn the_two_spellings_of_terminated_in_error_agree() {
+        let mut disagreeing: Vec<String> = Vec::new();
+        for s in RunState::ALL {
+            let literal = terminated_in_error(*s);
+            let derived = s.is_terminal() && !s.is_terminated_no_fail();
+            if literal != derived {
+                disagreeing.push(format!(
+                    "{}: terminated_in_error={literal}, \
+                     is_terminal() && !is_terminated_no_fail()={derived}",
+                    s.wire()
+                ));
+            }
+        }
+        assert!(
+            disagreeing.is_empty(),
+            "`State.Type.isTerminatedInError()` is `FAILED || KILLED || \
+             CANCELLED` (`State.java:296`) and this crate holds it twice -- \
+             literally in `worker::spawn::terminated_in_error`, derivably in \
+             `RunState`. They disagree on:\n  {}",
+            disagreeing.join("\n  ")
+        );
+
+        // **The positive control.** Every row above is an equality, and an
+        // implementation answering `false` to both sides would satisfy all
+        // thirteen. Naming the three that must be TRUE is what stops that, and
+        // it is the same list `no_fail_is_a_subset_of_terminal` checks from the
+        // other side -- the difference being that this one reached it through
+        // the function.
+        let in_error: std::collections::BTreeSet<&str> = RunState::ALL
+            .iter()
+            .filter(|s| terminated_in_error(**s))
+            .map(|s| s.wire())
+            .collect();
+        assert_eq!(
+            in_error,
+            std::collections::BTreeSet::from(["CANCELLED", "FAILED", "KILLED"]),
+            "and the three, by name, read OUT of the function rather than \
+             compared to a literal beside it"
+        );
+    }
 
     fn vals(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()

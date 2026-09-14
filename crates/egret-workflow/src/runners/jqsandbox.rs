@@ -140,7 +140,11 @@ pub(super) type Data = jaq_core::data::JustLut<Val>;
 /// divergence, like every other refusal in this module.
 // Read by the tests and by a human; the runtime path uses the LITERAL in
 // `BOUNDED_DEFS`, because a `Def<&'static str>` borrows its source.
-// `the_literal_in_the_jq_source_is_the_bound` is what ties the two together.
+// The tie between the two is OWED, not written: `the_literal_in_the_jq_source_
+// _is_the_bound` is cited here and by `bounded_defs`' doc and **does not
+// exist** (W8 Task 7's citation sweep). Nothing today compares `BOUNDED_DEFS`'
+// literal to `MAX_STEPS`, so they can drift silently -- which is the whole
+// hazard the citation claimed to have closed.
 #[allow(dead_code)]
 pub(super) const MAX_STEPS: usize = 65536;
 
@@ -530,8 +534,9 @@ def scan(re): scan(re; "g");
 /// The bound is written into the jq source as a **literal**, because a
 /// `Def<&'static str>` borrows from its source and the `Loader` outlives no
 /// `String` built per call.
-/// [`tests::the_literal_in_the_jq_source_is_the_bound`] is what keeps the
-/// literal and [`MAX_STEPS`] from drifting apart.
+/// **Nothing keeps the literal and [`MAX_STEPS`] from drifting apart.** This
+/// named `tests::the_literal_in_the_jq_source_is_the_bound` as doing so and
+/// that test does not exist — see the comment above `MAX_STEPS`.
 pub(super) fn bounded_defs() -> Vec<Def<&'static str>> {
     jaq_core::load::parse(BOUNDED_DEFS, |p| p.defs())
         .expect("runners::jqsandbox::BOUNDED_DEFS must be valid jq")

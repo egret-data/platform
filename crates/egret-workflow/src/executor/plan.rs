@@ -643,8 +643,14 @@ pub enum RetryDelay {
     /// choice is not free in general — `valids/retry-random` is bounded by
     /// `maxAttempts: 3` with `maxDuration: PT15S` against a worst case of
     /// 3 × 0.5 s, so it cannot be reached there.
-    /// `a_random_retry_delay_is_inside_kestras_own_bounds` pins the bounds so a
-    /// later task that wants a real RNG has the assertion already written.
+    /// **This cited `a_random_retry_delay_is_inside_kestras_own_bounds` as
+    /// pinning the bounds "so a later task that wants a real RNG has the
+    /// assertion already written". No test of that name exists** — found by W8
+    /// Task 7's final round's citation sweep. What does exist and does pin the
+    /// bounds is
+    /// [`the_exponential_delay_doubles_and_the_random_one_stays_inside_its_bounds`](super::tests),
+    /// in `executor/mod.rs`; the sentence above promised a later task an
+    /// assertion under a name it would not have found.
     Random {
         min_interval: Duration,
         max_interval: Duration,

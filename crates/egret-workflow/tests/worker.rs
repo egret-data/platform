@@ -6635,3 +6635,111 @@ async fn the_waker_names_exactly_the_states_something_will_move(pool: sqlx::PgPo
          (execution {not_yet}) — the state terms are not the only terms"
     );
 }
+
+/// **W8 Task 7 final round: a `PAUSED` run inside a TERMINAL execution is never
+/// named, because `advance()` would write nothing and the waker would name it
+/// again on the next tick, for ever.**
+///
+/// The first version of the `'PAUSED'` arm had no execution-terminality term,
+/// and the justification for not needing one was **false**: it said
+/// `flowable::resume_paused` moves a due run on the very settle this waker's
+/// `resume` produces, so the stale deadline lands in a state the predicate does
+/// not name. `advance()` returns on its **first line** when the execution is
+/// terminal —
+///
+/// ```ignore
+/// if state.history.last().is_some_and(|s| s.is_terminal()) { return Vec::new(); }
+/// ```
+///
+/// — and `RunState::Paused` is **not** terminal, so `claim::sla_terminal` will
+/// `CANCEL` an execution that is still holding a parked bounded `Pause`. The
+/// run keeps `state = 'PAUSED'` and its `not_before_ms` for ever, every tick
+/// names it, and every tick relocks the execution and settles it into writing
+/// nothing but a new `executions.seq`. **That is the endless case the
+/// `'RETRIED'` arm needed two extra terms to avoid, reached by a third road.**
+///
+/// # Both directions, and the control is the whole test
+///
+/// One `assert!(named.is_empty())` would pass against a broken fixture, a
+/// refused `UPDATE`, or a waker that named nobody at all. So the two rows are
+/// **the same row twice**, differing only in `executions.state`: one `CANCELLED`
+/// (terminal), one `RUNNING` (not). The second must be named. A predicate that
+/// dropped the new term fails on the first; one that dropped the `'PAUSED'` arm
+/// entirely fails on the second.
+///
+/// # Why the row is written by hand
+///
+/// **No merged code produces this pairing**, which is the point: it is latent,
+/// not shipped. No corpus flow declares both an `sla:` and a `Pause`, so the
+/// oracle has never built one and cannot. The row the SCHEMA admits is what the
+/// predicate has to be safe against — the same argument migration 0142 rests
+/// on, and the same one
+/// `the_waker_names_exactly_the_states_something_will_move` rests on.
+///
+/// The terminal list in the SQL is **derived from `RunState::ALL`** by
+/// `is_terminal()`, so this test also fixes the *direction* a fourteenth
+/// terminal variant takes: it joins the exclusion automatically rather than
+/// waiting to be remembered.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_paused_run_in_a_terminal_execution_is_never_named(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let mut ids: Vec<(&str, Uuid)> = Vec::new();
+    for (label, execution_state) in [("cancelled", "CANCELLED"), ("running", "RUNNING")] {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!("terminal-{label}")),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
+        // A bounded pause, parked and due. `resume_with` is required by 0142
+        // and its non-`NEVER` value is required by 0141 to sit beside a
+        // deadline, so this is the shape `Command::PauseRun` actually writes.
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET state = 'PAUSED', not_before_ms = 0, resume_with = 'TERMINAL:SUCCESS' \
+              WHERE execution_id = $1 AND task_id = 'a'",
+        )
+        .bind(ex)
+        .execute(&pool)
+        .await
+        .expect("park a due bounded pause");
+        sqlx::query("UPDATE workflow.executions SET state = $2 WHERE id = $1")
+            .bind(ex)
+            .bind(execution_state)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("set the execution {execution_state}: {e}"));
+        ids.push((label, ex));
+    }
+
+    let named: std::collections::BTreeSet<Uuid> = due_retries(&pool, 64)
+        .await
+        .expect("due_retries")
+        .into_iter()
+        .collect();
+
+    let cancelled = ids[0].1;
+    let running = ids[1].1;
+
+    // The control first: without it every assertion below is satisfied by a
+    // waker that named nobody.
+    assert!(
+        named.contains(&running),
+        "the waker did not name the RUNNING execution ({running}) holding a due \
+         bounded pause, so this test cannot say anything about the CANCELLED \
+         one. It named {named:?}"
+    );
+    assert!(
+        !named.contains(&cancelled),
+        "the waker named execution {cancelled}, whose own state is CANCELLED. \
+         `advance()` returns an empty Vec on its first line for a terminal \
+         execution, so `resume` would write nothing but a new \
+         `executions.seq` — and the run stays PAUSED with its deadline, so the \
+         next tick names it again, for ever. It named {named:?}"
+    );
+}

@@ -480,18 +480,51 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 ///   reach one. **That is the over-acceptance this whole module must not
 ///   commit** — seven corpus flows write an unbounded `Pause` and the artifact
 ///   leaves every one of them `PAUSED` for the full harvest — and it is
-///   refused in the schema rather than remembered in this `WHERE`.
-///   `an_unbounded_pause_is_never_named_however_long_its_execution_lives` is
-///   the assertion at this end.
-/// - **A `PAUSED` run is never named twice for the same deadline**, which is
-///   the endless case the `RETRIED` arm needed terms for. `PAUSED` is not
-///   terminal (`RunState::is_terminal`, and
-///   `neither_paused_nor_restarted_is_terminal` partitions `RunState::ALL` to
-///   say so), and `flowable::resume_paused` moves a due one on the very settle
-///   this waker's `resume` produces — to its terminal for a `Pause`, back to
-///   `RUNNING` for a `LoopUntil`. The stale deadline it leaves behind is then
-///   in a state this predicate does not name, which is the `RETRYING` arm's
-///   own reason for having a state term at all.
+///   refused in the schema rather than remembered in this `WHERE`. The
+///   assertion at this end is the third arm of
+///   `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`.
+///   **That citation named
+///   `an_unbounded_pause_is_never_named_however_long_its_execution_lives`,
+///   which does not exist** — the identifier occurred exactly once in the whole
+///   tree, in the citation itself. It is the second dangling citation in this
+///   package (W8 Task 4's `every_paused_run_names_its_resumer` was the first,
+///   cited by `resume_paused`'s own doc before it was written), which is why
+///   the round that fixed it also swept every test name cited in a doc comment
+///   across the crate. **A citation is a claim and needs a positive control:
+///   the control here is that the name kept below occurs 7 times in the tree,
+///   not 1.**
+/// - **A `PAUSED` run is never named twice for the same deadline** — but
+///   **only because of the second term, and the first version of this bullet
+///   was wrong about why.** It said `flowable::resume_paused` moves a due run
+///   on the very settle this waker's `resume` produces, so the run leaves
+///   `PAUSED` and the stale deadline lands in a state this predicate does not
+///   name. That holds *unless `advance()` returns on its first line*, and it
+///   does exactly that when the **execution** is terminal
+///   (`advance`'s `if state.history.last().is_some_and(is_terminal) { return
+///   Vec::new() }`). `RunState::Paused` is **not** terminal, so `sla_terminal`
+///   will happily `CANCEL` an execution that is still holding a parked bounded
+///   `Pause`: the run keeps `state = 'PAUSED'` and its `not_before_ms`, every
+///   tick names it, and every tick relocks the execution and settles it into
+///   writing nothing but a new `executions.seq`. **That is the endless case the
+///   `RETRIED` arm needed two extra terms to avoid, reached by a third road.**
+///   `NOT (e.state = ANY($2))` is the term that closes it, and the list is
+///   **derived from `RunState::ALL` by `is_terminal()`** rather than written
+///   into the SQL, so a fourteenth terminal variant joins it without anybody
+///   remembering to. `a_paused_run_in_a_terminal_execution_is_never_named` is
+///   the assertion, with the same fixture in a RUNNING execution as its
+///   control.
+///
+///   **The `RETRYING` arm has the same shape and is deliberately left alone —
+///   a finding, not a fix.** An `sla:` `CANCEL` can terminate an execution
+///   holding a `RETRYING` run just as easily, `reopen_due` is skipped by the
+///   same early return, and the loop is identical. It is **not** closed here
+///   because no corpus flow declares both `sla:` and a `retry:`, because the
+///   arm predates this task by four packages, and because widening it is a
+///   behaviour change to a path W4 measured and this task did not. The
+///   `RETRIED` arm is a third case again and must **not** be given this term
+///   without measurement: `replay::spawn_due` runs in the settle *outside*
+///   `advance()`, so a replay owed by a cancelled execution may well still be
+///   owed, and nothing here has established which.
 ///
 /// # `RESTARTED` is NOT here, and that was measured rather than assumed
 ///
@@ -537,7 +570,7 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
           WHERE (r.state = 'RETRYING' \
-                 OR r.state = 'PAUSED' \
+                 OR (r.state = 'PAUSED' AND NOT (e.state = ANY($2))) \
                  OR (r.state = 'RETRIED' \
                      AND e.parent_run_ix IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
@@ -553,6 +586,17 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
           LIMIT $1",
     )
     .bind(limit)
+    // **Derived from `RunState::ALL`, not listed** -- `spawn::terminated_count`'s
+    // shape, and the only one that survives a fourteenth variant. A hand-written
+    // `('SUCCESS','FAILED',...)` in the SQL above would be a second copy of
+    // `is_terminal` that no compiler and no test compares to the first.
+    .bind(
+        RunState::ALL
+            .iter()
+            .filter(|s| s.is_terminal())
+            .map(|s| s.wire())
+            .collect::<Vec<_>>(),
+    )
     .fetch_all(exec)
     .await
     .map_err(db_err)

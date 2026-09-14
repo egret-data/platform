@@ -1182,9 +1182,14 @@ mod tests {
             "`isTerminated() && !isTerminatedNoFail()` is exactly \
              `State.Type.isTerminatedInError()` -- `FAILED || KILLED || \
              CANCELLED` (`State.java:296`) -- and `worker::spawn::\
-             terminated_in_error` spells that list out by hand. Two spellings \
-             of one Java predicate is one chance for them to disagree, and \
-             this is the assertion that would notice"
+             terminated_in_error` spells that list out by hand. **This message \
+             said \"this is the assertion that would notice\" and it would \
+             NOT**: the comparison below is against a LITERAL written here, so \
+             it pins one spelling to a third copy and never calls the other \
+             function at all. Dropping `Cancelled` from `terminated_in_error` \
+             survived this test 3 of 3 runs. \
+             `worker::spawn::tests::the_two_spellings_of_terminated_in_error_agree` \
+             is the one that notices, because it calls it"
         );
     }
 
