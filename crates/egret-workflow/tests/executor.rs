@@ -7818,9 +7818,28 @@ fn iso_millis(iso: &str) -> Option<i64> {
 /// **The clock really does move in this harness**, which is why the first fact
 /// alone is not the answer: `pass_time` rewinds `executions.created_at` by
 /// `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline
-/// it is given. What these five flows lack is a deadline for it to move *to*.
-/// The window is not entered late and not missed — there is no instant at which
-/// it could be evaluated.
+/// it is given. What these flows lack is a deadline for it to move *to*. The
+/// window is not entered late and not missed — there is no instant at which it
+/// could be evaluated.
+///
+/// # This is true of the FOUR DECLARERS, and the two parents have a different
+/// and stronger reason — W8 Task 6 fix round 1
+///
+/// Everything above and everything asserted below is measured over the four
+/// flows that **declare** a `MAX_DURATION`. `valids/sla-parent-flow` and
+/// `valids/flow-concurrency-sla-fail-parent` are not among them: they declare
+/// none, they are absent from the registrar control printed below, and the
+/// sentence *"no run of these flows is ever in flight across a step"* is
+/// **false** for them — a `Subflow` run necessarily spans steps, which is the
+/// whole of how it waits for its child. Generalising the four's measurement to
+/// all five was W8 Task 6's error and fix round 1's narrowing.
+///
+/// Their mechanism is asserted separately, in
+/// [`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`], and it is
+/// the better fact: `pass_time`'s `WITH RECURSIVE` walks
+/// `parent_execution_id`, a subflow child is linked by `trigger_execution_id`,
+/// and so the clock-advance walk **cannot reach the child at all** — which
+/// would hold even if the child registered a deadline.
 ///
 /// # What is asserted, and why the zero is not asserted alone
 ///
@@ -8029,6 +8048,61 @@ async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
             vec![("SUCCESS".to_string(),)],
             "{child}, as spawned by {parent}, ran exactly one task and it \
              succeeded"
+        );
+
+        // **The PREMISE the SUCCESS above rests on, named and asserted** --
+        // W8 Task 6 fix round 1. "The child ended SUCCESS because its capped
+        // `Sleep` succeeded" is the whole story only if the `Sleep` is the
+        // child's ONLY failure road; that came from reading the YAML, not from
+        // this test, and an unasserted premise is how a merely COMPATIBLE
+        // explanation becomes a believed one.
+        let tasks: Vec<(String,)> = sqlx::query_as(
+            "SELECT r.task_id FROM workflow.executions e \
+               JOIN workflow.task_runs r ON r.execution_id = e.id \
+              WHERE e.trigger_execution_id IS NOT NULL AND e.flow_key = $1",
+        )
+        .bind(child)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read the child's task ids");
+        assert_eq!(
+            tasks,
+            vec![("sleep".to_string(),)],
+            "{child} has exactly ONE task and it is the `Sleep`, so its SUCCESS \
+             cannot have come from anywhere else"
+        );
+
+        // **And the fifth entry's mechanism, which is STRONGER than the other
+        // four's and is a DIFFERENT fact** -- W8 Task 6 fix round 1.
+        //
+        // For the three declarers, the reason `pass_time` cannot move the clock
+        // is that no deadline is registered. For the two PARENTS there is a
+        // reason that would hold even if one were: `pass_time`'s `WITH
+        // RECURSIVE` walks `e.parent_execution_id`, and a subflow child is
+        // linked by `trigger_execution_id` -- migration 0138's
+        // `workflow_executions_one_link_kind` makes carrying both
+        // unrepresentable. **The clock-advance walk cannot reach the child at
+        // all.** This runs that exact CTE and asserts it returns only the
+        // parent.
+        let reachable: Vec<(String,)> = sqlx::query_as(
+            "WITH RECURSIVE tree AS ( \
+                 SELECT id, flow_key FROM workflow.executions WHERE flow_key = $1 \
+                 UNION ALL \
+                 SELECT e.id, e.flow_key FROM workflow.executions e \
+                   JOIN tree t ON e.parent_execution_id = t.id \
+             ) SELECT DISTINCT flow_key FROM tree ORDER BY flow_key",
+        )
+        .bind(parent)
+        .fetch_all(&db.pool)
+        .await
+        .expect("walk pass_time's own tree");
+        assert_eq!(
+            reachable,
+            vec![(parent.to_string(),)],
+            "`driver::pass_time`'s recursive CTE joins `parent_execution_id`, \
+             so the subflow child {child} is not in the tree it moves the clock \
+             for -- even a child that DID register a `not_before_ms` could not \
+             be reached"
         );
 
         assert!(

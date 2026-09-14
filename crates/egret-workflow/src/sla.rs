@@ -75,6 +75,59 @@
 //! something [`crate::executor::advance`] — pure over `(plan, state, now)`,
 //! no I/O and no clock — cannot host in any case.
 //!
+//! # An SLA that cannot be evaluated is VIOLATED, and the checkout says the
+//! opposite
+//!
+//! **W8 Task 6 shipped the opposite of this and defended it with an
+//! assertion**; fix round 1 measured the artifact and inverted both. The
+//! checkout at `96893b589a` reads
+//!
+//! ```java
+//! } catch (Exception e) {
+//!     runContext.logger().error("Ignoring SLA '{}' because of the error: {}", …);
+//!     return Optional.<Violation> empty();
+//! }
+//! ```
+//!
+//! and **the running artifact does not**. Disassembled from `/app/kestra` in
+//! `kestra/kestra@sha256:28f59bf1…` (`javap -p -c -v
+//! io/kestra/executor/SLAService.class`), `lambda$evaluateExecutionChangedSLA$0`
+//! has exception table `from 0 to 6 target 7 Class java/lang/Exception`, and
+//! the handler at 7 logs
+//!
+//! ```text
+//! SLA '{}' could not be evaluated and is treated as violated: {}
+//! ```
+//!
+//! then builds `new Violation(sla.getId(), sla.getBehavior(), sla.getLabels(),
+//! <concat>)` and `areturn`s `Optional.of(…)` at 69–72. **There is no
+//! `Optional.empty()` anywhere on that path** — the method's only other
+//! `areturn` is the success path at 6. The `<concat>` is bootstrap method #5,
+//! recipe `SLA could not be evaluated: \u0001` over `e.getMessage()`, which is
+//! the [`Violation::reason`] this module now builds verbatim.
+//!
+//! This is the third time on this programme that **the artifact is not the
+//! checkout** (after `Sleep`'s `@DurationMin` type-use annotation and `Pause`'s
+//! `behavior:`), and it is the first time the difference was a *behavioural
+//! inversion* rather than a missing constraint.
+//!
+//! **Why it matters more than its size:** `assert: "{{ undefined }}"` with
+//! `behavior: FAIL` is FAILED by the artifact. Skipping it runs the flow to
+//! completion — over-acceptance, and the ratchet cannot see it, because no
+//! corpus `sla:` names anything that does not resolve.
+//!
+//! **The absent `assert:` goes the same way, and BOTH Java roads agree.**
+//! `@NotNull @NotEmpty` in Java and unchecked by `spec::validate`, so it is
+//! reachable from a source that never went through publish — which the
+//! oracle's driver is. `ExecutionAssertionSLA.evaluate` calls
+//! `runContext.render(this.get_assert())` on a null. If that returns null,
+//! `TruthUtils.isTruthy(null)` is `false` (verified on the artifact:
+//! `isTruthy` is `aload_0; ifnull 23` → `iconst_0`) and the SLA is violated; if
+//! it throws, the catch above violates it. **Which road it takes is unmeasured
+//! and cannot be observed from outside**, because the two differ only in the
+//! `reason` string, which nothing compares. Recorded as a derivation, not a
+//! measurement.
+//!
 //! # What is NOT ported from `processViolation`, named rather than implied
 //!
 //! * **`violation.labels()`.** `processViolation` appends the violated SLA's
@@ -124,52 +177,69 @@ pub struct Violation {
 /// the later ones cannot affect the execution.
 ///
 /// `render` is the caller's renderer for one `Property<String>`, returning
-/// `None` for a render that will not resolve. That is Kestra's own handling and
-/// not a shortcut: `evaluateExecutionChangedSLA` wraps each `sla.evaluate` in a
-/// `try/catch` that logs and yields `Optional.empty()`, so **an assertion that
-/// will not render is skipped rather than failing the execution** — the
-/// opposite of what a `runIf:` does with the same accident
-/// (`render::render_run_if` fails the run). The two are different Java and are
-/// deliberately different here.
+/// `Err(message)` for a render that will not resolve. **That is a VIOLATION,
+/// not a skip** — see this module's *An SLA that cannot be evaluated is
+/// VIOLATED* section for the bytecode, and for why W8 Task 6's first answer
+/// (skip) was both wrong and asserted as an invariant. The `Err` payload is
+/// Java's `e.getMessage()` and lands in [`Violation::reason`] behind the same
+/// `SLA could not be evaluated: ` prefix the artifact concatenates.
+///
+/// It happens to agree with what a `runIf:` does with the same accident
+/// (`render::render_run_if` fails the run), but they are different Java and the
+/// agreement is a coincidence rather than a shared rule.
 ///
 /// A `MAX_DURATION` is skipped, which is the `ExecutionChangedSLA.class
 /// ::isInstance` filter and not a gap — see this module's doc.
 pub fn first_execution_changed_violation(
     flow: &Flow,
-    render: &mut dyn FnMut(&Property<String>) -> Option<String>,
+    render: &mut dyn FnMut(&Property<String>) -> Result<String, String>,
 ) -> Option<Violation> {
     flow.sla.iter().find_map(|sla| match sla {
         // `ExecutionMonitoringSLA`, and the message path never sees one.
         Sla::MaxDuration { .. } => None,
         Sla::ExecutionAssertion { common, assert_ } => {
-            // `@NotNull @NotEmpty` in Java. `spec::validate` has no rule for an
-            // absent `assert:` (only `behavior:` and `MAX_DURATION`'s
-            // `duration:` are checked), so this is reachable from a source that
-            // was never published -- which the oracle's driver is. Kestra would
-            // render a null and NPE; skipping is the answer that cannot
-            // over-accept.
-            let assertion = assert_.as_ref()?;
-            let rendered = render(assertion)?;
+            let violated = |reason: String| {
+                Some(Violation {
+                    sla_id: common.id.clone(),
+                    behavior: common.behavior,
+                    labels: common.labels.clone(),
+                    reason,
+                })
+            };
+            // **An SLA that cannot be evaluated is VIOLATED** -- the artifact's
+            // catch, not the checkout's. See the module doc; W8 Task 6 shipped
+            // the opposite.
+            let Some(assertion) = assert_.as_ref() else {
+                return violated(UNEVALUABLE.to_string() + "assert is null");
+            };
+            let rendered = match render(assertion) {
+                Ok(v) => v,
+                Err(e) => return violated(format!("{UNEVALUABLE}{e}")),
+            };
             // `TruthUtils.isTruthy`, which is the SAME predicate
             // `If`/`Switch`/`runIf:` use -- `executor::is_truthy`, measured
             // against the running artifact over 38 rows including the eleven
             // where Java's `String.trim()` and Rust's `str::trim()` disagree.
             // Calling it rather than copying it is what keeps one Java method
-            // from having two answers in this crate.
+            // from having two answers in this crate. Verified again on the
+            // artifact in fix round 1: `isTruthy` is `ifnull` then
+            // `FALSE_VALUES.contains(trim())`, identical to the checkout.
             match crate::executor::is_truthy(&rendered) {
                 true => None,
-                false => Some(Violation {
-                    sla_id: common.id.clone(),
-                    behavior: common.behavior,
-                    labels: common.labels.clone(),
-                    // `ExecutionAssertionSLA.evaluate`'s own wording, over the
-                    // UNRENDERED source, which is what Java interpolates.
-                    reason: format!("assertion is false: {}.", assertion.source()),
-                }),
+                // `ExecutionAssertionSLA.evaluate`'s own wording, over the
+                // UNRENDERED source, which is what Java interpolates. Verified
+                // against the artifact's bootstrap method #0, recipe
+                // `assertion is false: \u0001.`
+                false => violated(format!("assertion is false: {}.", assertion.source())),
             }
         }
     })
 }
+
+/// The artifact's prefix for a `Violation` built by the catch — bootstrap
+/// method #5's recipe, `SLA could not be evaluated: \u0001`, with the
+/// placeholder being `e.getMessage()`.
+const UNEVALUABLE: &str = "SLA could not be evaluated: ";
 
 /// **The state `ExecutorService.processViolation` puts the execution into**, or
 /// `None` for a violation that changes no state.
@@ -226,8 +296,8 @@ mod tests {
 
     /// Render the source verbatim — the identity a literal `Property` has
     /// anyway (`Property::render`'s "a source with no `{` renders to itself").
-    fn verbatim(p: &Property<String>) -> Option<String> {
-        Some(p.source().to_string())
+    fn verbatim(p: &Property<String>) -> Result<String, String> {
+        Ok(p.source().to_string())
     }
 
     /// **The whole of `processViolation`'s state half, both directions.**
@@ -407,40 +477,126 @@ mod tests {
         );
     }
 
-    /// **A render that will not resolve SKIPS the SLA**, which is
-    /// `evaluateExecutionChangedSLA`'s `try/catch`, and is the OPPOSITE of what
-    /// the same accident does to a `runIf:`.
+    /// **A render that will not resolve VIOLATES the SLA** — W8 Task 6 fix
+    /// round 1, and this test is the inversion of the one that shipped.
     ///
-    /// The control is the second SLA: it is reached, so "skipped" is not
-    /// "aborted".
+    /// # It was asserted the other way, and that is worse than not asserting it
+    ///
+    /// W8 Task 6 shipped `an_unrenderable_assertion_is_skipped_rather_than_violated`,
+    /// whose message read *"Kestra logs the error and yields
+    /// `Optional.empty()`; it does NOT fail the execution"*. That is the
+    /// **checkout's** catch and **not the artifact's**: disassembled from
+    /// `/app/kestra` in `kestra/kestra@sha256:28f59bf1…`,
+    /// `SLAService.lambda$evaluateExecutionChangedSLA$0`'s handler builds a
+    /// `Violation` and `Optional.of`s it, with no `Optional.empty()` anywhere
+    /// on that path. So `assert: "{{ undefined }}"` with `behavior: FAIL` is
+    /// FAILED by the artifact and was run to completion by egret.
+    ///
+    /// **The assertion is what made it expensive.** This branch's rule is that
+    /// a wrong assertion converts a divergence into a defended invariant: the
+    /// next reader gets a green test telling them not to look. It is inverted
+    /// here rather than deleted, so the correction sits at the site that
+    /// carried the error.
+    ///
+    /// **Two controls, and the second one changed DIRECTION with the fix.** A
+    /// truthy SLA before the unrenderable one proves the walk reaches it; and
+    /// because an un-evaluable SLA is now a violation, it is also the FIRST
+    /// violation, so a later violating SLA must not be the answer — which is
+    /// the half the old test asserted the other way round.
     #[test]
-    fn an_unrenderable_assertion_is_skipped_rather_than_violated() {
+    fn an_unrenderable_assertion_is_treated_as_violated() {
         let mut render = |p: &Property<String>| match p.source() {
-            "{{ nosuch }}" => None,
-            other => Some(other.to_string()),
+            "{{ nosuch }}" => Err("nosuch is undefined".to_string()),
+            other => Ok(other.to_string()),
         };
+        let v = first_execution_changed_violation(
+            &flow_with(vec![assertion(
+                "bad",
+                Some(SlaBehavior::Fail),
+                "{{ nosuch }}",
+            )]),
+            &mut render,
+        )
+        .expect("the artifact treats an un-evaluable SLA as VIOLATED");
+        assert_eq!(v.sla_id, "bad");
+        assert_eq!(state_for(v.behavior), Some(RunState::Failed));
         assert_eq!(
-            first_execution_changed_violation(
-                &flow_with(vec![assertion(
-                    "bad",
-                    Some(SlaBehavior::Fail),
-                    "{{ nosuch }}"
-                )]),
-                &mut render,
-            ),
-            None,
-            "Kestra logs the error and yields `Optional.empty()`; it does NOT \
-             fail the execution"
+            v.reason, "SLA could not be evaluated: nosuch is undefined",
+            "the artifact's bootstrap method #5, recipe \
+             `SLA could not be evaluated: \\u0001` over `e.getMessage()`"
         );
-        let after = first_execution_changed_violation(
+
+        // Control A: the walk REACHES an unrenderable SLA that is not first, so
+        // the violation is not merely "the first SLA always wins".
+        let after_truthy = first_execution_changed_violation(
             &flow_with(vec![
+                assertion("ok", Some(SlaBehavior::Cancel), "true"),
                 assertion("bad", Some(SlaBehavior::Fail), "{{ nosuch }}"),
-                assertion("good", Some(SlaBehavior::Cancel), "false"),
             ]),
             &mut render,
         )
-        .expect("the SLA after an unrenderable one must still be evaluated");
-        assert_eq!(after.sla_id, "good");
+        .expect("a truthy SLA does not stop the walk");
+        assert_eq!(after_truthy.sla_id, "bad");
+
+        // Control B, the one that flipped: it STOPS there. A later violating
+        // SLA carrying a DIFFERENT behaviour must not be the answer.
+        let stops = first_execution_changed_violation(
+            &flow_with(vec![
+                assertion("bad", Some(SlaBehavior::Fail), "{{ nosuch }}"),
+                assertion("later", Some(SlaBehavior::Cancel), "false"),
+            ]),
+            &mut render,
+        )
+        .expect("both violate");
+        assert_eq!(
+            (stops.sla_id.as_str(), state_for(stops.behavior)),
+            ("bad", Some(RunState::Failed)),
+            "`violations.getFirst()`, and the un-evaluable one IS a violation"
+        );
+    }
+
+    /// **An absent `assert:` is violated too, and BOTH Java roads agree** — so
+    /// the answer does not depend on which one the artifact takes.
+    ///
+    /// `@NotNull @NotEmpty` in Java and unchecked by `spec::validate`, so it is
+    /// reachable from a source that never went through publish — which the
+    /// oracle's driver is. `evaluate` calls `runContext.render(null)`: if that
+    /// returns null, `TruthUtils.isTruthy(null)` is `false` (verified on the
+    /// artifact — `aload_0; ifnull 23` → `iconst_0`) and the SLA is violated;
+    /// if it throws, `SLAService`'s catch violates it.
+    ///
+    /// **The premise this does NOT establish, named rather than left implicit:**
+    /// which road it takes. The two differ only in the `reason` string, which
+    /// nothing in this crate or the oracle compares — so the difference is not
+    /// observable, but that is a derivation and not a measurement, and the
+    /// `reason` below is therefore egret's choice rather than a reproduction.
+    #[test]
+    fn an_absent_assertion_is_violated_by_either_java_road() {
+        let v = first_execution_changed_violation(
+            &flow_with(vec![Sla::ExecutionAssertion {
+                common: SlaCommon {
+                    id: "noassert".to_string(),
+                    behavior: Some(SlaBehavior::Cancel),
+                    labels: Vec::new(),
+                },
+                assert_: None,
+            }]),
+            &mut verbatim,
+        )
+        .expect("an absent `assert:` cannot be silently skipped");
+        assert_eq!(
+            (v.sla_id.as_str(), state_for(v.behavior)),
+            ("noassert", Some(RunState::Cancelled))
+        );
+        // The control: a PRESENT truthy assertion of the same shape does not
+        // violate, so this is not an implementation that violates everything.
+        assert_eq!(
+            first_execution_changed_violation(
+                &flow_with(vec![assertion("a", Some(SlaBehavior::Cancel), "true")]),
+                &mut verbatim
+            ),
+            None
+        );
     }
 
     /// A flow with no `sla:` at all asks the renderer nothing —
@@ -451,7 +607,7 @@ mod tests {
         let mut calls = 0usize;
         let mut count = |p: &Property<String>| {
             calls += 1;
-            Some(p.source().to_string())
+            Ok(p.source().to_string())
         };
         assert_eq!(
             first_execution_changed_violation(&flow_with(Vec::new()), &mut count),
@@ -462,7 +618,7 @@ mod tests {
         let mut calls = 0usize;
         let mut count = |p: &Property<String>| {
             calls += 1;
-            Some(p.source().to_string())
+            Ok(p.source().to_string())
         };
         assert_eq!(
             first_execution_changed_violation(

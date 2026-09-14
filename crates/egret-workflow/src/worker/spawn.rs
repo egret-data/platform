@@ -638,6 +638,24 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
     // `triggers:` into it would put a schedule on a row that is one iteration
     // of one run.
     flow.triggers = Vec::new();
+    // **And the flow-level `sla:` is the parent execution's, not an
+    // iteration's** -- W8 Task 6 fix round 1, and it closes a real
+    // over-acceptance rather than tidying.
+    //
+    // Kestra runs an iteration as a sub-execution of the SAME flow and guards
+    // the evaluation site instead: `handleExecutionChangedSLA` returns early on
+    // `getKind() == ExecutionKind.LOOP`. egret has no `ExecutionKind` -- this
+    // function synthesises a different flow -- so the same fact is expressed by
+    // not carrying the field. Without this line a flow with an
+    // `EXECUTION_ASSERTION` and a `Loop` had its SLA evaluated once per
+    // iteration by `claim::sla_terminal`, cancelling iterations Kestra runs.
+    //
+    // **No corpus flow declares both**, so the ratchet is silent in both
+    // directions and `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`
+    // is the whole instrument. It is a clear rather than a guard for the reason
+    // `triggers:` above is: a field that is not there cannot be read by the
+    // next consumer either.
+    flow.sla = Vec::new();
     serde_norway::to_string(&flow).map_err(|e| {
         worker_err(WorkerError::Corrupt(
             owner,
@@ -930,6 +948,55 @@ mod tests {
              `transmitFailed` loop on the first failure with two values never \
              started, which is `valids/loop-failed`'s measured shape"
         );
+    }
+
+    /// **A `Loop` iteration does not inherit the parent's flow-level `sla:`**
+    /// — W8 Task 6 fix round 1, and the instrument for a defect the ratchet
+    /// cannot see.
+    ///
+    /// Kestra's `handleExecutionChangedSLA` returns early on
+    /// `getKind() == ExecutionKind.LOOP`, because there an iteration IS a
+    /// sub-execution of the same flow. [`sub_flow_source`] synthesises a
+    /// different flow instead, and it copied everything it did not explicitly
+    /// clear — so before this fix the parent's `EXECUTION_ASSERTION` was
+    /// evaluated once per iteration by `claim::sla_terminal`, cancelling
+    /// iterations the artifact runs.
+    ///
+    /// **No corpus flow declares both an `sla:` and a `Loop`**, which is why
+    /// this is a hand-built fixture rather than a corpus derivation, and why
+    /// the ratchet is silent in both directions. The control is `tasks:`: the
+    /// body still arrives, so "the field is gone" is not "the synthesis broke".
+    #[test]
+    fn no_flow_level_sla_is_inherited_by_a_loop_sub_execution() {
+        let source = "id: f\nnamespace: a.b\nsla:\n  - id: a\n    \
+                      type: EXECUTION_ASSERTION\n    behavior: CANCEL\n    \
+                      assert: \"{{ false }}\"\ntasks:\n  - id: lp\n    \
+                      type: io.kestra.plugin.core.flow.Loop\n    values: [1]\n    \
+                      tasks:\n      - id: body\n        \
+                      type: io.kestra.plugin.core.log.Log\n        message: x\n";
+        let parent = crate::spec::parse(source).expect("the fixture parses");
+        assert_eq!(
+            parent.sla.len(),
+            1,
+            "the fixture must carry an `sla:` -- otherwise the assertion below \
+             passes on a flow that never had one"
+        );
+
+        let sub = sub_flow_source(source, "lp", Uuid::nil()).expect("the body synthesises");
+        let reparsed = crate::spec::parse(&sub).expect("the sub-flow re-parses");
+        assert!(
+            reparsed.sla.is_empty(),
+            "a `Loop` iteration is not the execution the flow-level `sla:` is \
+             about; carrying it evaluates the SLA once per iteration. Got {:?}",
+            reparsed.sla
+        );
+        assert_eq!(
+            reparsed.tasks.len(),
+            1,
+            "and the body still arrives -- the control that separates \
+             `sla:` being cleared from the synthesis being broken"
+        );
+        assert_eq!(reparsed.tasks[0].id, "body");
     }
 
     /// Every corpus flow that holds a `Loop` — the sub-flow this module

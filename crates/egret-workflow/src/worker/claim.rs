@@ -1632,27 +1632,48 @@ impl Marks {
 /// `advance()`'s contract is a finding, not a step**, and this is the finding
 /// ruled on rather than taken.
 ///
-/// # The three guards, each of them Kestra's
+/// # Kestra has FOUR guards, this has three, and the fourth is closed
+/// elsewhere — W8 Task 6 fix round 1
 ///
-/// 1. `executor.getExecution().getState().isTerminated()` — an execution that
-///    has already finished is not re-judged. It is what makes this idempotent
-///    across the many `settle`s one execution has: the violation fires once,
+/// `handleExecutionChangedSLA` returns early on
+/// `flow == null || ListUtils.isEmpty(flow.getSla()) ||
+/// executor.getExecution().getKind() == ExecutionKind.LOOP ||
+/// executor.getExecution().getState().isTerminated()`. Three of the four are
+/// here, **in Kestra's order**, and the fourth is not a guard in this crate at
+/// all:
+///
+/// 1. **the flow parses and its `sla:` is non-empty** — `flow == null ||
+///    isEmpty(getSla())`. Read off [`Surface::flow`], which `Surface::load`
+///    already parsed: W8 Task 6 parsed `ctx.source` a SECOND time here, on
+///    every settle of every execution, and 339 of the corpus's 345 flows paid
+///    for a parse only to be told they have no `sla:`. An unparseable source
+///    yields `None` rather than an error — this execution is already running
+///    and `ctx.plan` was built from that same source, so failing it here would
+///    be a new failure mode for every flow that declares no `sla:`.
+/// 2. **the execution is not terminated** — what makes this idempotent across
+///    the many `settle`s one execution has: the violation fires once,
 ///    terminates the execution, and every later call returns here.
-/// 2. `ListUtils.isEmpty(flow.getSla())` — no `sla:`, no work and no parse of
-///    a render context. 339 of the corpus's 345 flows take this arm.
 /// 3. `violation.behavior()` — `NONE` changes no state
 ///    ([`crate::sla::state_for`]).
 ///
-/// A source that no longer parses yields `None` rather than an error: this
-/// execution is already running, `ctx.plan` was built from that same source,
-/// and turning an SLA check into the thing that fails a running execution would
-/// be a new failure mode for every flow that has no `sla:` at all.
+/// # The fourth guard is `ExecutionKind.LOOP`, and egret closes it at the source
+///
+/// Kestra runs a `Loop` iteration as a sub-execution **of the same flow**, so
+/// the flow-level `sla:` is right there and the guard is what stops it being
+/// evaluated once per iteration. egret does not: `worker::spawn::sub_flow_source`
+/// synthesises a *different* flow from the loop body. **It did not clear
+/// `sla:`**, so the parent's SLA was inherited by every iteration and this
+/// function would have evaluated it there — an over-acceptance no corpus flow
+/// reaches (none declares both an `sla:` and a `Loop`) and the ratchet cannot
+/// see. Fix round 1 clears it beside `triggers:`, which was already cleared for
+/// the same kind of reason, so the condition is **unrepresentable** rather than
+/// guarded. See `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`.
 fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -> Option<RunState> {
-    if state.history.last().is_some_and(|s| s.is_terminal()) {
+    let flow = surface.flow()?;
+    if flow.sla.is_empty() {
         return None;
     }
-    let flow = crate::spec::parse(&ctx.source).ok()?;
-    if flow.sla.is_empty() {
+    if state.history.last().is_some_and(|s| s.is_terminal()) {
         return None;
     }
     // `run: None` -- an execution-level render with no run of its own, which is
@@ -1660,8 +1681,13 @@ fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -
     // Kestra builds it the same way: `runContextFactory.of(flow, execution)`,
     // no taskrun.
     let cx = surface.context(&ctx.plan, state, None);
-    let violation =
-        crate::sla::first_execution_changed_violation(&flow, &mut |p| p.render(&cx).ok())?;
+    // `Err` is a render that will not resolve, and the artifact treats that as
+    // a VIOLATION rather than as a skip -- see `crate::sla`'s module doc for
+    // the bytecode, and for the assertion W8 Task 6 shipped saying the
+    // opposite.
+    let violation = crate::sla::first_execution_changed_violation(flow, &mut |p| {
+        p.render(&cx).map_err(|e| e.to_string())
+    })?;
     crate::sla::state_for(violation.behavior)
 }
 

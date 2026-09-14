@@ -80,6 +80,22 @@ use crate::runners::RenderContext;
 /// are written before `settle` is entered, and no handler runs inside it.
 #[derive(Debug, Clone)]
 pub(super) struct Surface {
+    /// **The flow this execution runs, parsed once** — W8 Task 6 fix round 1.
+    ///
+    /// `load` already parsed it to build `inputs`, `vars`, `flow` and `labels`
+    /// and then threw it away, so `claim::sla_terminal` parsed the same source
+    /// a second time on **every settle of every execution** — 339 of the
+    /// corpus's 345 flows declare no `sla:` at all, and every one of them paid
+    /// for a parse to be told so. Keeping it also fixes a subtler thing: it
+    /// lets that guard ask *"is the SLA list empty"* **before** anything else,
+    /// which is the order `ExecutorService.handleExecutionChangedSLA` asks its
+    /// guards in, instead of parse-then-ask.
+    ///
+    /// `None` for a source that does not parse. That is not an error here: the
+    /// execution is already running, `ExecutionCtx::plan` was built from this
+    /// same source, and every reader below already treats an unparseable source
+    /// as "no information" rather than as a failure.
+    parsed: Option<Flow>,
     /// `inputs`, already merged with the flow's declared defaults.
     inputs: Value,
     /// `vars`.
@@ -492,6 +508,7 @@ impl Surface {
         }
 
         Ok(Surface {
+            parsed: flow,
             inputs,
             vars,
             flow: flow_value,
@@ -503,6 +520,13 @@ impl Surface {
             started,
             ids,
         })
+    }
+
+    /// The flow this execution runs, as `load` parsed it.
+    ///
+    /// See [`Surface::parsed`] for why it is kept rather than re-parsed.
+    pub(super) fn flow(&self) -> Option<&Flow> {
+        self.parsed.as_ref()
     }
 
     /// The context one expression renders against.
@@ -834,6 +858,9 @@ mod tests {
             metadata: crate::executor::ExecutionMeta::default(),
         };
         let surface = Surface {
+            // This fixture exercises the OUTPUT context only; nothing it drives
+            // reads the flow.
+            parsed: None,
             inputs: json!({}),
             vars: Value::Null,
             flow: Value::Null,
