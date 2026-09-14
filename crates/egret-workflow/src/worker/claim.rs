@@ -595,9 +595,18 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// calls `worker::resume` directly. It never runs this query. So the driver
 /// reaches the same runs through a different door: the eight pause entries
 /// banked green with this gate narrow, and they stay green now it is wide.
-/// That is the shape W4's item 15 named — a property proved about a path no
-/// deployment takes — and it is why this fix ships with an integration test
-/// and no baseline movement.
+/// That is the shape W4's item 15 named — a property whose only instrument is an
+/// integration test, because the oracle reaches the same runs through a door
+/// that cannot fail — and it is why this fix ships with one and no baseline
+/// movement.
+///
+/// **The gloss item 15 used for that shape, "a path no deployment takes", is no
+/// longer true of this query.** Since W10 Task 2 `egret-bin` runs the claim loop
+/// ([`crate::runtime::spawn`]), so `runtime` → [`tick`] → [`wake`] → this
+/// statement is a production path. The ratchet's blindness to it is unchanged;
+/// what changed is that it is now blindness about **shipping** behaviour rather
+/// than about a driver's, which makes the integration test more load-bearing
+/// than it was, not less.
 ///
 /// `executor::retry::reopen_due` is the pure-side twin and its blindness is the
 /// **opposite**: the driver does reach it, so a narrowing there fails loudly.
@@ -665,15 +674,25 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
 /// source** — the thing `resume` did not have, its only caller being
 /// `oracle-exec/driver.rs`, and the whole reason this hole survived a package.
 ///
-/// **That sentence said "a production caller", and W4 Task 6 measured that it
-/// is not one yet.** [`tick`] itself has no production caller: a grep for
-/// `tick(`, `reap(` and `start_execution(` over every `crates/*/src` finds no
-/// call site at all, and `egret-bin` builds a `WorkflowState` — the flow repo
-/// and its refs — with no claim loop. So the chain this doc describes is real
-/// and ends one link short of a deployment, and this is exactly the sentence a
-/// reader would quote as evidence the waker is wired. It is wired to
-/// **`tick`**; nothing is wired to `tick`. `oracle-exec/README.md`'s coverage
-/// statement carries it as item 15, and W4's own section as its sixth fact.
+/// **That sentence said "a production caller"; W4 Task 6 measured that it was
+/// not one; W10 Task 2 made it one.** Until then [`tick`] had no caller in any
+/// `crates/*/src` — a grep for `tick(`, `reap(` and `start_execution(` found no
+/// call site at all, and `egret-bin` built a `WorkflowState` (the flow repo and
+/// its refs) with no claim loop — so the chain this doc describes ended one link
+/// short of a deployment. **It no longer does.**
+/// [`crate::runtime::spawn`] is the claim loop, `egret-bin` starts it beside the
+/// automation ticker under `[workflow] worker_enabled`, and the waker therefore
+/// runs in the product: `runtime` → [`tick`] → [`wake`] → [`resume`].
+///
+/// The history is kept rather than deleted, because it is the reason this doc
+/// is worded as carefully as it is: this was exactly the sentence a reader
+/// would quote as evidence the waker was wired, back when it was wired only to
+/// [`tick`] and nothing was wired to [`tick`]. The gap survived a whole package
+/// behind it.
+///
+/// `oracle-exec/README.md`'s coverage statement carries the same proposition as
+/// its item 15, and W4's own section as its sixth fact; W10 Task 7 owns that
+/// file's sweep, and item 15 is one of at least eight instances there.
 ///
 /// **Every named execution is attempted and the first error is returned after
 /// the loop**, which is [`tick`]'s own rule for the same reason: one
@@ -1267,11 +1286,23 @@ pub async fn start_execution(
 /// [`start_execution`] with Kestra's `Execution.trigger` supplied.
 ///
 /// A **sibling** rather than a sixth parameter on `start_execution`, because
-/// that function has **65** call sites across `crates/` and all but one of them
-/// have no trigger: widening it would mean writing `None` sixty-four times to
-/// serve one caller, and sixty-four uniform `None`s are the kind of argument
-/// that hides a mutation (W6 Task 6's `max_depth` survived a two-sided mutation
-/// for exactly that reason -- every fixture passed the default).
+/// that function has **88** call sites across `crates/` and all but one of them
+/// have no trigger: widening it would mean writing `None` at every one of them
+/// to serve a single caller, and a long run of uniform `None`s is the kind of
+/// argument that hides a mutation (W6 Task 6's `max_depth` survived a two-sided
+/// mutation for exactly that reason -- every fixture passed the default).
+///
+/// **The count is dated, because it decays.** 88 is measured at W10 Task 2 fix
+/// round 1; the line first said **65**, which was true when W6 Task 6 wrote it,
+/// and it had already reached **76** before W10 Task 2 added
+/// `tests/runtime.rs`. So it was stale before this package touched it. Every
+/// call site is a test or `oracle-exec/driver.rs`; `crates/*/src` holds none.
+///
+/// The sentence also used to carry the ordinal **"sixty-four times"** beside the
+/// 65, and that is the structural half of the correction rather than an
+/// editorial one: an ordinal shares no letters with the number it names, so a
+/// sweep that grepped for `65` would have corrected the count and left the
+/// ordinal behind, disagreeing with it. The ordinal is gone, not updated.
 ///
 /// The figure is counted, not estimated. This doc said "twenty" until fix round
 /// 1's sweep ran
