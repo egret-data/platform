@@ -1265,3 +1265,801 @@ impl egret_workflow::worker::Registry for AlwaysSucceeds {
         );
     }
 }
+
+// ── The WRITE surface (W10 Task 5) ──────────────────────────────────────────
+//
+// ```text
+// POST /api/ws/{workspace}/workflows/flows/{id}/executions
+// POST /api/ws/{workspace}/workflows/executions/{id}/resume
+// POST /api/ws/{workspace}/workflows/executions/{id}/replay
+// ```
+//
+// **The gate test here is the MIRROR IMAGE of
+// [`workflow_manage_alone_cannot_read_executions`] above, and the asymmetry is
+// the whole point.** That test proves a READ gate with a `:manage`-only holder,
+// because a caller with no grants is refused by a handler that checks nothing.
+// A WRITE gate needs the opposite witness: a `:read`-only holder is exactly the
+// principal who would SUCCEED if `WF_MANAGE` were swapped for `WF_READ` or the
+// `require` removed, so
+// [`workflow_read_alone_cannot_start_resume_or_replay`] fails when the claim is
+// false. A bare unprivileged user would pass that test whether or not the gate
+// exists.
+
+/// A one-task flow, startable and not finishable without a worker.
+fn runnable_source(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: a.write\ntasks:\n  \
+         - id: a\n    type: io.kestra.plugin.core.log.Log\n    message: hi\n"
+    )
+}
+
+/// A flow that is a single **unbounded** `Pause` — neither `pauseDuration:`
+/// nor `timeout:`. `executor::Resume::Never`, which is the case the resume
+/// route cannot end; see [`an_unbounded_pause_is_not_ended_by_the_resume_route`].
+fn unbounded_pause_source(id: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: a.write\ntasks:\n  \
+         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n"
+    )
+}
+
+/// Insert one terminal execution with an explicit frozen `source` and `inputs`.
+///
+/// [`insert_execution`] above hard-codes [`SEEDED_SOURCE`] and leaves `inputs`
+/// at its column default, and the replay tests need both to be values a DRAFT
+/// does not hold — that is the only way to tell "replay ran the frozen source"
+/// from "replay re-read the flow".
+async fn insert_execution_with(
+    db: &Db,
+    ws: Uuid,
+    flow_id: Option<Uuid>,
+    state: &str,
+    source: &str,
+    inputs: Value,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs) \
+         VALUES ($1, $2, 'a.write', 'frozen', $3, $4, $5, $6) RETURNING id",
+    )
+    .bind(ws)
+    .bind(flow_id)
+    .bind(source)
+    .bind(state)
+    .bind(serde_json::json!(["CREATED", state]))
+    .bind(inputs)
+    .fetch_one(&db.pool)
+    .await
+    .expect("insert execution with source")
+}
+
+/// The `workflow.executions` row's `state` column, read straight out of the
+/// table rather than off a DTO — the resume tests assert about a state the
+/// route is supposed NOT to have changed, and reading it back through the same
+/// handler under test would let one bug hide another.
+async fn state_of(db: &Db, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM workflow.executions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read execution state")
+}
+
+/// **401 from every write route**, with a positive control on each so a
+/// mistyped path cannot pass as a refusal: a 404 is not a 401, but neither is
+/// it a route.
+#[tokio::test]
+async fn an_unauthenticated_caller_gets_401_from_every_write_route() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let flow = common::seed_flow(&db, ws, user, &runnable_source("anon-write"), "draft").await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("anon-done"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let app = common::app(&db).await;
+    for path in [
+        format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        format!("/api/ws/{ws}/workflows/executions/{done}/resume"),
+        format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+    ] {
+        assert_eq!(
+            common::anon_post(&app, &path).await.status(),
+            401,
+            "{path} must refuse an anonymous caller"
+        );
+    }
+
+    // The controls, same three URLs with a session. Each is a DIFFERENT
+    // success-shaped answer and none of them is 404, which is what says the
+    // routes exist: start creates, resume refuses a SUCCESS execution, replay
+    // creates.
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+            user
+        )
+        .await
+        .status(),
+        201
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{done}/resume"),
+            user
+        )
+        .await
+        .status(),
+        409
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+            user
+        )
+        .await
+        .status(),
+        201
+    );
+}
+
+/// **`workflow:read` alone cannot start, resume or replay.** The discriminating
+/// witness for a write gate — see this section's comment.
+///
+/// Both arms matter and they are different claims: the `:read` holder's three
+/// 403s say the gate is at least `WF_MANAGE`, and the `:manage` holder's three
+/// non-403s say it is not something stricter and that the routes are reachable
+/// at all. Swap `WF_MANAGE` for `WF_READ` on any one handler and the first arm
+/// fails on exactly that route; delete the `require` and it fails there too.
+#[tokio::test]
+async fn workflow_read_alone_cannot_start_resume_or_replay() {
+    let Some(db) = common::db().await else { return };
+    let (ws, reader) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, reader, &["workflow:read"]).await;
+    let (_ws2, manager) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, manager, &["workflow:manage"]).await;
+
+    let flow = common::seed_flow(&db, ws, reader, &runnable_source("gate-write"), "draft").await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("gate-done"),
+        serde_json::json!({}),
+    )
+    .await;
+    let start = format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
+    let resume = format!("/api/ws/{ws}/workflows/executions/{done}/resume");
+    let replay = format!("/api/ws/{ws}/workflows/executions/{done}/replay");
+
+    let app = common::app(&db).await;
+    for path in [&start, &resume, &replay] {
+        assert_eq!(
+            common::post_no_body(&app, path, reader).await.status(),
+            403,
+            "{path}: workflow:read does not imply workflow:manage"
+        );
+    }
+    // Nothing was created by the three refusals -- a 403 with a side effect is
+    // the failure a status assertion alone cannot see.
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        1,
+        "the three refused writes must not have created anything beside the seeded execution"
+    );
+
+    // The `:manage` control. Three different non-403 answers, for this
+    // section's stated reason.
+    assert_eq!(
+        common::post_no_body(&app, &start, manager).await.status(),
+        201
+    );
+    assert_eq!(
+        common::post_no_body(&app, &resume, manager).await.status(),
+        409
+    );
+    assert_eq!(
+        common::post_no_body(&app, &replay, manager).await.status(),
+        201
+    );
+}
+
+/// **404, never 403, for a flow or an execution in another workspace — and
+/// nothing is created.** A 403 would confirm the id is real; a 404 that still
+/// started something would be worse than either, and only a count can see it.
+#[tokio::test]
+async fn writes_against_another_workspace_are_404_and_start_nothing() {
+    let Some(db) = common::db().await else { return };
+    let (mine, user) = common::seed_workspace(&db).await;
+    common::grant(&db, mine, user, &["workflow:manage"]).await;
+    let (theirs, other) = common::seed_workspace(&db).await;
+    common::grant(&db, theirs, other, &["workflow:manage"]).await;
+
+    let their_flow =
+        common::seed_flow(&db, theirs, other, &runnable_source("foreign"), "draft").await;
+    let their_execution = insert_execution_with(
+        &db,
+        theirs,
+        None,
+        "SUCCESS",
+        &runnable_source("foreign-done"),
+        serde_json::json!({}),
+    )
+    .await;
+
+    let app = common::app(&db).await;
+    for path in [
+        format!("/api/ws/{mine}/workflows/flows/{their_flow}/executions"),
+        format!("/api/ws/{mine}/workflows/executions/{their_execution}/resume"),
+        format!("/api/ws/{mine}/workflows/executions/{their_execution}/replay"),
+    ] {
+        assert_eq!(
+            common::post_no_body(&app, &path, user).await.status(),
+            404,
+            "{path} must be indistinguishable from an id that never existed"
+        );
+    }
+    assert_eq!(common::execution_count(&db, mine).await, 0);
+    assert_eq!(
+        common::execution_count(&db, theirs).await,
+        1,
+        "the seeded execution, and nothing a foreign caller made"
+    );
+
+    // Controls, in the OWNING workspace: the same three ids answer 201/409/201
+    // there, so the 404s above are about the workspace and not about the ids.
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{theirs}/workflows/flows/{their_flow}/executions"),
+            other
+        )
+        .await
+        .status(),
+        201
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{theirs}/workflows/executions/{their_execution}/resume"),
+            other
+        )
+        .await
+        .status(),
+        409
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{theirs}/workflows/executions/{their_execution}/replay"),
+            other
+        )
+        .await
+        .status(),
+        201
+    );
+}
+
+/// **A start runs the DRAFT's source and the caller's inputs, through
+/// `worker::start_execution` and not a second creation path.**
+///
+/// Three things say it is that function rather than an INSERT of the same
+/// shape: the row carries a `NULL` `execution_trigger` (the webhook's caller is
+/// the only one that fills it), the first settle has already run so a task run
+/// exists, and `seq` has moved off zero. An open-coded INSERT would produce a
+/// row with none of those.
+#[tokio::test]
+async fn a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage", "workflow:read"]).await;
+    let source = runnable_source("start-shape");
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
+
+    let app = common::app(&db).await;
+    let res = common::post(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+        serde_json::json!({ "inputs": { "who": "world", "n": 3 } }),
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let dto = common::json(res).await;
+    let id: Uuid = dto["id"].as_str().expect("id").parse().expect("uuid");
+
+    assert_eq!(
+        dto["source"].as_str(),
+        Some(source.as_str()),
+        "the execution runs the draft's frozen source"
+    );
+    assert_eq!(
+        dto["flow_id"].as_str().map(str::to_string),
+        Some(flow.to_string())
+    );
+
+    let (trigger, inputs, seq, runs): (Option<Value>, Value, i64, i64) = sqlx::query_as(
+        "SELECT e.execution_trigger, e.inputs, e.seq, \
+                (SELECT count(*) FROM workflow.task_runs r WHERE r.execution_id = e.id) \
+           FROM workflow.executions e WHERE e.id = $1",
+    )
+    .bind(id)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the started row");
+    assert_eq!(
+        trigger, None,
+        "an API start records no trigger; a webhook does"
+    );
+    // **The MAPPING, not the key set.** `{"who":"world","n":3}` and
+    // `{"who":3,"n":"world"}` have the same keys, so an assertion about keys
+    // alone would survive a handler that swapped the values it forwarded.
+    assert_eq!(inputs, serde_json::json!({ "who": "world", "n": 3 }));
+    assert!(seq > 0, "the first settle ran; seq is {seq}");
+    assert_eq!(runs, 1, "the first settle created the Log run");
+}
+
+/// **`inputs` that is not an object is REFUSED, not coerced to `{}`.**
+///
+/// `start_execution_with_trigger` writes `{}` for any non-object, which would
+/// turn `"inputs": [1,2]` into a silently empty start. Both halves are measured
+/// here, because a guard that only refuses cannot be told from one that refuses
+/// everything: the three non-objects 400, and absent / `null` / `{}` all start.
+#[tokio::test]
+async fn inputs_that_are_not_an_object_are_refused_rather_than_coerced() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let flow = common::seed_flow(&db, ws, user, &runnable_source("inputs"), "draft").await;
+    let path = format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
+
+    let app = common::app(&db).await;
+    for bad in [
+        serde_json::json!({ "inputs": [1, 2] }),
+        serde_json::json!({ "inputs": "world" }),
+        serde_json::json!({ "inputs": 7 }),
+    ] {
+        let res = common::post(&app, &path, user, bad.clone()).await;
+        assert_eq!(res.status(), 400, "{bad} must be refused, not coerced");
+    }
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        0,
+        "a refused start creates nothing"
+    );
+
+    // The accepting half: three spellings of "no inputs", all of which start
+    // and all of which store `{}`.
+    assert_eq!(common::post_no_body(&app, &path, user).await.status(), 201);
+    assert_eq!(
+        common::post(&app, &path, user, serde_json::json!({}))
+            .await
+            .status(),
+        201
+    );
+    assert_eq!(
+        common::post(&app, &path, user, serde_json::json!({ "inputs": null }))
+            .await
+            .status(),
+        201
+    );
+    let empties: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workflow.executions WHERE workspace_id = $1 AND inputs = '{}'::jsonb",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("count empty-input executions");
+    assert_eq!(empties, 3);
+}
+
+/// **Both doors a flow can be switched off by**, and a trashed flow is a 404
+/// rather than a 409.
+///
+/// The `state` column is the one the management UI writes and the YAML's own
+/// `disabled: true` is the other; reading only the column is what let a
+/// disabled flow fire through the webhook (that route's fix round 1, Critical
+/// 1). The enabled control is what says the two 409s are about `disabled` and
+/// not about the route.
+#[tokio::test]
+async fn a_disabled_or_trashed_flow_cannot_be_started() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+
+    let by_column =
+        common::seed_flow(&db, ws, user, &runnable_source("off-column"), "disabled").await;
+    let by_yaml = common::seed_flow(
+        &db,
+        ws,
+        user,
+        &format!("{}disabled: true\n", runnable_source("off-yaml")),
+        "draft",
+    )
+    .await;
+    let trashed = common::seed_flow(&db, ws, user, &runnable_source("trashed"), "draft").await;
+    sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE id = $1")
+        .bind(trashed)
+        .execute(&db.pool)
+        .await
+        .expect("trash the flow");
+    let live = common::seed_flow(&db, ws, user, &runnable_source("on"), "draft").await;
+
+    let app = common::app(&db).await;
+    for (flow, want, why) in [
+        (by_column, 409, "the state column"),
+        (by_yaml, 409, "the YAML's own disabled:"),
+        // 404 and NOT 409: a trashed flow must be indistinguishable from one
+        // that never existed, the way `subflow::resolve` and the webhook both
+        // treat `deleted_at IS NOT NULL`.
+        (trashed, 404, "deleted_at"),
+    ] {
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+                user
+            )
+            .await
+            .status(),
+            want,
+            "{why} must refuse with {want}"
+        );
+    }
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{live}/executions"),
+            user
+        )
+        .await
+        .status(),
+        201,
+        "the control: an enabled, untrashed flow starts"
+    );
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        1,
+        "only the control started anything"
+    );
+}
+
+/// **Resuming something that is not `PAUSED` is a 409, not a silent success.**
+///
+/// `worker::resume` on a running or finished execution commits a settle that
+/// changes nothing and answers `Ok(())`, so without this check the route would
+/// answer 200 to a caller who pressed a button that did nothing. The control is
+/// a really-paused execution, started through the route above, which answers
+/// 200 — so the 409s are about the state and not about the route.
+#[tokio::test]
+async fn resume_on_a_non_paused_execution_is_a_conflict_not_a_silent_success() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let running = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "RUNNING",
+        &runnable_source("resume-running"),
+        serde_json::json!({}),
+    )
+    .await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("resume-done"),
+        serde_json::json!({}),
+    )
+    .await;
+    let pause_flow =
+        common::seed_flow(&db, ws, user, &unbounded_pause_source("resume-ok"), "draft").await;
+
+    let app = common::app(&db).await;
+    for (id, state) in [(running, "RUNNING"), (done, "SUCCESS")] {
+        let res = common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{id}/resume"),
+            user,
+        )
+        .await;
+        assert_eq!(res.status(), 409, "a {state} execution cannot be resumed");
+        assert_eq!(
+            state_of(&db, id).await,
+            state,
+            "and the refusal left the row alone"
+        );
+    }
+
+    // The control: a genuinely `PAUSED` execution answers 200 on the same
+    // route. Started through the start route so the pause is the executor's own
+    // and not a state string this test wrote.
+    let started = common::json(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{pause_flow}/executions"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    let paused: Uuid = started["id"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        state_of(&db, paused).await,
+        "PAUSED",
+        "a flow that is one Pause reaches PAUSED in its own first settle"
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{paused}/resume"),
+            user
+        )
+        .await
+        .status(),
+        200
+    );
+}
+
+/// **A replay runs the replayed execution's FROZEN source and inputs, not the
+/// draft's** — and it is a new execution, leaving the original untouched.
+///
+/// The draft is edited to a different source before the replay, which is what
+/// makes this discriminating: a handler that re-read the flow would produce the
+/// draft's source and pass every other assertion here.
+#[tokio::test]
+async fn a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let frozen = runnable_source("replay-frozen");
+    let flow = common::seed_flow(&db, ws, user, &frozen, "draft").await;
+    let done = insert_execution_with(
+        &db,
+        ws,
+        Some(flow),
+        "SUCCESS",
+        &frozen,
+        serde_json::json!({ "who": "world", "n": 3 }),
+    )
+    .await;
+    // The draft moves on. Same namespace and `flow_id` so the row still
+    // matches, a different body so the two sources cannot be confused.
+    let edited =
+        format!("{frozen}  - id: b\n    type: io.kestra.plugin.core.log.Log\n    message: later\n");
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&edited)
+        .execute(&db.pool)
+        .await
+        .expect("edit the draft");
+
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/executions/{done}/replay"),
+        user,
+    )
+    .await;
+    assert_eq!(res.status(), 201);
+    let dto = common::json(res).await;
+    let replacement: Uuid = dto["id"].as_str().unwrap().parse().unwrap();
+
+    assert_ne!(replacement, done, "a replay is a NEW execution");
+    assert_eq!(
+        dto["source"].as_str(),
+        Some(frozen.as_str()),
+        "the frozen source, not the edited draft"
+    );
+    let (inputs, parent): (Value, Option<Uuid>) =
+        sqlx::query_as("SELECT inputs, parent_execution_id FROM workflow.executions WHERE id = $1")
+            .bind(replacement)
+            .fetch_one(&db.pool)
+            .await
+            .expect("read the replacement");
+    // The mapping, not the key set -- see
+    // [`a_start_runs_the_drafts_source_with_the_inputs_the_caller_sent`].
+    assert_eq!(inputs, serde_json::json!({ "who": "world", "n": 3 }));
+    // **Unlinked, and asserted rather than assumed.** Migration 0138's
+    // `workflow_executions_loop_run_idx` is UNIQUE over
+    // `(parent_execution_id, parent_run_ix, loop_index)` NULLS NOT DISTINCT, so
+    // the one `(X, NULL, NULL)` slot belongs to `replay::spawn_due`'s
+    // `CREATE_NEW_EXECUTION` replacement. A manual replay that took it would
+    // make a later retry-replay of the same execution fail a constraint. If
+    // someone gives the manual replay a link of its own, this assertion is what
+    // makes them come back to `replay_execution`'s doc.
+    assert_eq!(parent, None);
+    assert_eq!(
+        state_of(&db, done).await,
+        "SUCCESS",
+        "the replayed execution itself is untouched"
+    );
+}
+
+/// **A replay of an execution that has not finished is a 409.**
+///
+/// Nothing in the schema records that two executions of one flow are a replay
+/// and its original (see [`a_replay_runs_the_frozen_source_and_inputs_and_not_the_drafts`]),
+/// so the narrow door is the one that cannot over-accept. The control is the
+/// same route on a terminal execution.
+#[tokio::test]
+async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let source = runnable_source("replay-state");
+    let mut unfinished = Vec::new();
+    for state in ["CREATED", "RUNNING", "PAUSED", "RETRYING"] {
+        unfinished.push((
+            state,
+            insert_execution_with(&db, ws, None, state, &source, serde_json::json!({})).await,
+        ));
+    }
+    let app = common::app(&db).await;
+    for (state, id) in &unfinished {
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{id}/replay"),
+                user
+            )
+            .await
+            .status(),
+            409,
+            "a {state} execution has not finished"
+        );
+    }
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        unfinished.len() as i64,
+        "nothing was created by the refusals"
+    );
+
+    // Every terminal state `RunState::is_terminal` names, so the predicate is
+    // pinned at both ends rather than by one lucky SUCCESS.
+    for state in [
+        "SUCCESS", "FAILED", "WARNING", "KILLED", "SKIPPED", "RETRIED",
+    ] {
+        let id = insert_execution_with(&db, ws, None, state, &source, serde_json::json!({})).await;
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{id}/replay"),
+                user
+            )
+            .await
+            .status(),
+            201,
+            "a {state} execution is finished and can be replayed"
+        );
+    }
+}
+
+/// **The finding: an UNBOUNDED pause is not ended by the resume route, and a
+/// BOUNDED one is.**
+///
+/// `flowable::resume_paused` is the only thing that moves a run out of
+/// `PAUSED`; it is pure over `(state, run, now)` and its `Resume::Never` arm
+/// returns `Waiting` *before* it reads `now`, so no clock value and no number
+/// of calls can end such a wait. A `Pause` with neither `pauseDuration:` nor
+/// `timeout:` is exactly that case. The route is not broken — the command it
+/// would need does not exist, which is a capability `advance()` does not have
+/// and which this task is forbidden to add to it.
+///
+/// **The fixture carries BOTH elements of the class**, which is the thing
+/// `a_gantt_row_is_computable_from_the_execution_dto_alone`'s first draft
+/// lacked: the unbounded pause (the gap) and a bounded one whose deadline has
+/// passed (the control that says the route itself works). Without the second,
+/// "resume changed nothing" is equally consistent with a route that does
+/// nothing at all.
+///
+/// `#[sqlx::test]` rather than the shared database: the bounded arm backdates
+/// `created_at` so the deadline is in the past, and `worker::wake` in a
+/// neighbouring test binary selects due deadlines **globally** — on a shared
+/// database it could resume this execution before the route does, and the
+/// control would pass for the wrong reason.
+#[sqlx::test(migrations = "../../migrations")]
+async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+    let never = common::seed_flow(&db, ws, user, &unbounded_pause_source("never"), "draft").await;
+    let bounded = common::seed_flow(
+        &db,
+        ws,
+        user,
+        "id: bounded\nnamespace: a.write\ntasks:\n  \
+         - id: pause\n    type: io.kestra.plugin.core.flow.Pause\n    pauseDuration: PT1S\n",
+        "draft",
+    )
+    .await;
+
+    let app = common::app(&db).await;
+    let start = |flow: Uuid| format!("/api/ws/{ws}/workflows/flows/{flow}/executions");
+
+    // ── The gap ──────────────────────────────────────────────────────────
+    let a: Uuid = common::json(common::post_no_body(&app, &start(never), user).await).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(state_of(&db, a).await, "PAUSED");
+    for round in 1..=3 {
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{a}/resume"),
+                user
+            )
+            .await
+            .status(),
+            200,
+            "round {round}: the route accepts the request"
+        );
+        assert_eq!(
+            state_of(&db, a).await,
+            "PAUSED",
+            "round {round}: and the execution has not moved, because nothing \
+             egret holds can end a Resume::Never wait"
+        );
+    }
+
+    // ── The control ──────────────────────────────────────────────────────
+    let b: Uuid = common::json(common::post_no_body(&app, &start(bounded), user).await).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(state_of(&db, b).await, "PAUSED");
+    // `Tick` is milliseconds since `created_at` (`claim::load_with` computes it
+    // in SQL), so moving `created_at` back is the only way to put a PT1S
+    // deadline in the past without sleeping.
+    sqlx::query(
+        "UPDATE workflow.executions SET created_at = created_at - interval '1 hour' WHERE id = $1",
+    )
+    .bind(b)
+    .execute(&pool)
+    .await
+    .expect("backdate the bounded pause");
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
+            user
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        state_of(&db, b).await,
+        "SUCCESS",
+        "a pauseDuration: ends SUCCESS, and the route is what drove it there"
+    );
+    // And the same route now refuses, because the execution is no longer paused
+    // -- which also says the 200 above was not the 409 arm in disguise.
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{b}/resume"),
+            user
+        )
+        .await
+        .status(),
+        409
+    );
+}

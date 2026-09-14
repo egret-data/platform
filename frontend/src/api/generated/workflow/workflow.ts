@@ -34,6 +34,7 @@ import type {
   FlowListItemDto,
   FlowVersionDto,
   PublishFlowRequest,
+  StartExecutionRequest,
   UpdateFlowRequest,
   ValidateFlowRequest,
   ValidationReportDto,
@@ -352,7 +353,294 @@ export function useWorkflowGetExecution<TData = Awaited<ReturnType<typeof workfl
 
 
 
-export type workflowListFlowsResponse200 = {
+export type workflowReplayExecutionResponse201 = {
+  data: ExecutionDto
+  status: 201
+}
+
+export type workflowReplayExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowReplayExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowReplayExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowReplayExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowReplayExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowReplayExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowReplayExecutionResponseSuccess = (workflowReplayExecutionResponse201) & {
+  headers: Headers;
+};
+export type workflowReplayExecutionResponseError = (workflowReplayExecutionResponse400 | workflowReplayExecutionResponse401 | workflowReplayExecutionResponse403 | workflowReplayExecutionResponse404 | workflowReplayExecutionResponse409 | workflowReplayExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowReplayExecutionResponse = (workflowReplayExecutionResponseSuccess | workflowReplayExecutionResponseError)
+
+export const getWorkflowReplayExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/replay`
+}
+
+/**
+ * # It is a start, deliberately, and from the FROZEN source
+ *
+ * `worker::start_execution` with `workflow.executions.source` and
+ * `workflow.executions.inputs` — the row's own copies, not a re-read of the
+ * draft. `worker::replay::spawn_due` takes the same decision for the
+ * `CREATE_NEW_EXECUTION` replacement and states the reason: *"a replay that
+ * picked up an edit made since would be a different flow with the same
+ * trace."* Starting from the draft is what `POST .../flows/{id}/executions`
+ * is for, and the two routes exist to be different.
+ *
+ * # Why the replacement names no parent, which is NOT a choice
+ *
+ * `replay::spawn_due` links its replacement with `parent_execution_id` set and
+ * `parent_run_ix` NULL. That slot is **one per execution and already spoken
+ * for**: migration 0138's `workflow_executions_loop_run_idx` is
+ * `UNIQUE (parent_execution_id, parent_run_ix, loop_index) NULLS NOT DISTINCT
+ * WHERE parent_execution_id IS NOT NULL`, so `(X, NULL, NULL)` can exist once,
+ * and `spawn_due` reads exactly that to answer "it already exists". A manual
+ * replay that took the slot would make a later retry-replay of the same
+ * execution fail a unique constraint, and a second manual replay fail one too.
+ *
+ * `start_execution` has no parent parameter and this task does not add one, so
+ * the replacement is unlinked: **the relationship between a manual replay and
+ * what it replays is in the audit trail and nowhere in the data.** Stated
+ * rather than discovered. What it would take is a link that is not that index's
+ * — a nullable `replayed_from` column of its own — which is a migration and a
+ * schema decision, not a route.
+ *
+ * # Terminal only
+ *
+ * A non-terminal execution is refused (409) rather than replayed. With no link
+ * column there is nothing to tell an operator that two RUNNING executions of
+ * one flow are a replay and its original, and the narrow door cannot
+ * over-accept. `RunState::is_terminal` is the predicate — read through
+ * `worker::from_wire`, which is derived from `RunState::ALL`, so a state added
+ * to the enum is classified here without anyone remembering to come back.
+ * @summary Run a finished execution again.
+ */
+export const workflowReplayExecution = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowReplayExecutionResponse> => {
+
+  return customInstance<workflowReplayExecutionResponse>(getWorkflowReplayExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowReplayExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workflowReplayExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowReplayExecution>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workflowReplayExecution(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowReplayExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowReplayExecution>>>
+
+    export type WorkflowReplayExecutionMutationError = ErrorBody
+
+    /**
+ * @summary Run a finished execution again.
+ */
+export const useWorkflowReplayExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowReplayExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowReplayExecution>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowReplayExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowResumeExecutionResponse200 = {
+  data: ExecutionDto
+  status: 200
+}
+
+export type workflowResumeExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowResumeExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowResumeExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowResumeExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowResumeExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowResumeExecutionResponseSuccess = (workflowResumeExecutionResponse200) & {
+  headers: Headers;
+};
+export type workflowResumeExecutionResponseError = (workflowResumeExecutionResponse401 | workflowResumeExecutionResponse403 | workflowResumeExecutionResponse404 | workflowResumeExecutionResponse409 | workflowResumeExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowResumeExecutionResponse = (workflowResumeExecutionResponseSuccess | workflowResumeExecutionResponseError)
+
+export const getWorkflowResumeExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/executions/${encodeURIComponent(id)}/resume`
+}
+
+/**
+ * # What this route can and cannot do, measured
+ *
+ * It calls [`worker::resume`](crate::worker::resume), which takes the same
+ * `FOR UPDATE` and runs the same `settle` as every other writer. That drives
+ * `advance()` once more against the row as it now stands — which is exactly
+ * what un-parks a pause whose **deadline** has passed.
+ *
+ * **It cannot end an unbounded pause, and that is a capability `advance()`
+ * does not have rather than a bug here.** `flowable::resume_paused` is the
+ * only thing that moves a run out of `PAUSED`, it is pure over
+ * `(state, run, now)`, and its `Resume::Never` arm returns `Step::Waiting`
+ * *before* it looks at `now` — so no value of the clock ends such a wait and
+ * no number of calls to this route will either. `Resume::Never` is a `Pause`
+ * with neither `pauseDuration:` nor `timeout:`; `RunState::Resume`'s own doc
+ * records seven corpus flows written that way, every one of which "reached
+ * PAUSED and stayed there for the full 90s" on the pinned artifact, because
+ * such a pause ends only on an explicit resume signal. egret has no command
+ * that carries one.
+ *
+ * The route is still the right shape for the signal when it arrives: it is the
+ * gate, the 404 and the 409 that a resume needs, and the missing piece is a
+ * `Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`
+ * pins the gap so that a future command makes a test fail rather than a
+ * paragraph stale.
+ * @summary Resume a `PAUSED` execution.
+ */
+export const workflowResumeExecution = async (workspace: string,
+    id: string, options?: Parameters<typeof customInstance>[1]): Promise<workflowResumeExecutionResponse> => {
+
+  return customInstance<workflowResumeExecutionResponse>(getWorkflowResumeExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getWorkflowResumeExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext> => {
+
+const mutationKey = ['workflowResumeExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowResumeExecution>>, {workspace: string;id: string}> = (props) => {
+          const {workspace,id} = props ?? {};
+
+          return  workflowResumeExecution(workspace,id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowResumeExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowResumeExecution>>>
+
+    export type WorkflowResumeExecutionMutationError = ErrorBody
+
+    /**
+ * @summary Resume a `PAUSED` execution.
+ */
+export const useWorkflowResumeExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowResumeExecution>>, TError,{workspace: string;id: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowResumeExecution>>,
+        TError,
+        {workspace: string;id: string},
+        TContext
+      > => {
+      return useMutation(getWorkflowResumeExecutionMutationOptions(options), queryClient);
+    }
+    export type workflowListFlowsResponse200 = {
   data: FlowListItemDto[]
   status: 200
 }
@@ -940,6 +1228,117 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
         TContext
       > => {
       return useMutation(getWorkflowDeleteFlowMutationOptions(options), queryClient);
+    }
+    export type workflowStartFlowExecutionResponse201 = {
+  data: ExecutionDto
+  status: 201
+}
+
+export type workflowStartFlowExecutionResponse400 = {
+  data: ErrorBody
+  status: 400
+}
+
+export type workflowStartFlowExecutionResponse401 = {
+  data: ErrorBody
+  status: 401
+}
+
+export type workflowStartFlowExecutionResponse403 = {
+  data: ErrorBody
+  status: 403
+}
+
+export type workflowStartFlowExecutionResponse404 = {
+  data: ErrorBody
+  status: 404
+}
+
+export type workflowStartFlowExecutionResponse409 = {
+  data: ErrorBody
+  status: 409
+}
+
+export type workflowStartFlowExecutionResponse500 = {
+  data: ErrorBody
+  status: 500
+}
+
+export type workflowStartFlowExecutionResponseSuccess = (workflowStartFlowExecutionResponse201) & {
+  headers: Headers;
+};
+export type workflowStartFlowExecutionResponseError = (workflowStartFlowExecutionResponse400 | workflowStartFlowExecutionResponse401 | workflowStartFlowExecutionResponse403 | workflowStartFlowExecutionResponse404 | workflowStartFlowExecutionResponse409 | workflowStartFlowExecutionResponse500) & {
+  headers: Headers;
+};
+
+export type workflowStartFlowExecutionResponse = (workflowStartFlowExecutionResponseSuccess | workflowStartFlowExecutionResponseError)
+
+export const getWorkflowStartFlowExecutionUrl = (workspace: string,
+    id: string,) => {
+
+
+
+
+  return `/api/ws/${encodeURIComponent(workspace)}/workflows/flows/${encodeURIComponent(id)}/executions`
+}
+
+export const workflowStartFlowExecution = async (workspace: string,
+    id: string,
+    startExecutionRequest: StartExecutionRequest, options?: Parameters<typeof customInstance>[1]): Promise<workflowStartFlowExecutionResponse> => {
+
+  return customInstance<workflowStartFlowExecutionResponse>(getWorkflowStartFlowExecutionUrl(workspace,id),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(startExecutionRequest)
+  }
+);}
+
+
+
+
+
+export const getWorkflowStartFlowExecutionMutationOptions = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext> => {
+
+const mutationKey = ['workflowStartFlowExecution'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof workflowStartFlowExecution>>, {workspace: string;id: string;data: StartExecutionRequest}> = (props) => {
+          const {workspace,id,data} = props ?? {};
+
+          return  workflowStartFlowExecution(workspace,id,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type WorkflowStartFlowExecutionMutationResult = NonNullable<Awaited<ReturnType<typeof workflowStartFlowExecution>>>
+    export type WorkflowStartFlowExecutionMutationBody = StartExecutionRequest
+    export type WorkflowStartFlowExecutionMutationError = ErrorBody
+
+    export const useWorkflowStartFlowExecution = <TError = ErrorBody,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof workflowStartFlowExecution>>, TError,{workspace: string;id: string;data: StartExecutionRequest}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof workflowStartFlowExecution>>,
+        TError,
+        {workspace: string;id: string;data: StartExecutionRequest},
+        TContext
+      > => {
+      return useMutation(getWorkflowStartFlowExecutionMutationOptions(options), queryClient);
     }
     export type workflowPublishFlowResponse200 = {
   data: FlowVersionDto

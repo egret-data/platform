@@ -920,12 +920,19 @@ async fn fail_run(
 ///    version archive; its `revision` parameter is a separate opt-in that
 ///    egret's model has no field for at all.
 ///
+/// **W10 Task 5 added the THIRD site**, `routes::start_flow_execution` — the
+/// management API's start button — and it takes the same decision for reason 1
+/// again. Note the ordinal moved with the count: this paragraph said "two
+/// files" below and an ordinal shares no letters with the number it names, so
+/// both had to be corrected or they would disagree.
+///
 /// **What it costs, stated rather than discovered**: an author editing a draft
-/// changes what a live webhook URL runs, with no publish step in between. That
-/// is a real operational hazard and it is the reason this is written down in
-/// two files. The fix, when someone wants it, is a `flow_versions`-backed
-/// execution path — and it has to arrive HERE and in `webhook_routes` together,
-/// for reason 1.
+/// changes what a live webhook URL — or a start button — runs, with no publish
+/// step in between. That is a real operational hazard and it is the reason this
+/// is written down in three files. The fix, when someone wants it, is a
+/// `flow_versions`-backed execution path — and it has to arrive HERE, in
+/// `webhook_routes` and in `routes::start_flow_execution` together, for
+/// reason 1.
 ///
 /// **2. It is scoped to `workspace_id`, and `FlowRepo::find_by_name` is not.**
 /// That method's own doc records why it cannot be: `WorkflowRefPort::workspace_of`

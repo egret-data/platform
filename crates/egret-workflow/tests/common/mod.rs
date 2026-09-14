@@ -295,6 +295,35 @@ pub async fn post(
     send(app, "POST", path, user, Some(body)).await
 }
 
+/// `POST` with **no request body at all** — not an empty JSON object.
+///
+/// A separate helper rather than `post(app, path, user, json!(null))`, because
+/// the two are different requests on the wire and exactly one route cares:
+/// `POST .../flows/{id}/executions` takes `body: Option<Json<..>>`, so "no body"
+/// and "a body that says `null`" reach different arms of its extractor. A test
+/// that could only send one of them could not tell a handler that requires a
+/// body from one that does not.
+pub async fn post_no_body(app: &App, path: &str, user: UserId) -> axum::response::Response {
+    send(app, "POST", path, user, None).await
+}
+
+/// `POST` to the authenticated app carrying **no session cookie** — the 401
+/// case for a write route. [`anon_get`]'s sibling; see its doc.
+pub async fn anon_post(app: &App, path: &str) -> axum::response::Response {
+    use tower::ServiceExt;
+    app.router
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 pub async fn put(
     app: &App,
     path: &str,
