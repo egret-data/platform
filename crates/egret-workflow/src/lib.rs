@@ -38,6 +38,12 @@ pub mod refs;
 pub mod repo;
 pub mod routes;
 pub mod runners;
+/// W10 Task 2: the two background tickers that give
+/// [`worker::tick`](worker::tick) and [`worker::reap`](worker::reap) their
+/// first production caller, and the per-statement concurrency argument the
+/// `SKIP LOCKED` sentence does not cover. `pub` because `egret-bin` starts it
+/// and `tests/runtime.rs` drives it.
+pub mod runtime;
 /// W8 Task 6: `sla:` — `EXECUTION_ASSERTION` evaluated, `MAX_DURATION` refused
 /// by name with the measurement. `pub` so `tests/executor.rs` (an integration
 /// test) can drive the predicate, the same reason `executor` and `worker` are.
@@ -63,6 +69,7 @@ pub use refs::WorkflowRefs;
 pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
+pub use runtime::RuntimeConfig;
 pub use webhook_routes::{
     webhook_router, webhook_router_with_guard, WebhookGuard, WebhookResponse,
     MAX_WEBHOOK_BODY_BYTES, WEBHOOK_ATTEMPTS_PER_WINDOW, WEBHOOK_ATTEMPT_WINDOW,

@@ -1700,6 +1700,49 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         tracing::info!("automation ticker disabled by config");
     }
 
+    // ── Workflow runtime: the claim loop and the lease reaper (W10 Task 2) ──
+    //
+    // **This is what makes the workflow engine run.** Before it, a webhook or an
+    // API call created a `workflow.executions` row and nothing ever advanced it:
+    // `egret_workflow::worker::tick` had no caller in any `crates/*/src`, so
+    // every durability property W3b and W4 prove was proved about code no
+    // deployment ran.
+    //
+    // Two tickers, one per replica, cancelled by the same token as everything
+    // else above. No leader election — but the reason is NOT one sentence
+    // inherited four times: the claim's `FOR UPDATE SKIP LOCKED` covers the
+    // claim and nothing else, and `egret_workflow::runtime`'s module doc gives
+    // a separate safety statement for `wake`, `due_retries` and `reap`, each
+    // proved by a test in `crates/egret-workflow/tests/runtime.rs` that runs two
+    // tickers against one database.
+    //
+    // The gate is inside `runtime::spawn` rather than an `if` here, so that
+    // exactly one thing decides and a test can reach it; `worker_enabled`
+    // defaults to `false` (`egret_config::WorkflowConfig::worker_enabled`).
+    //
+    // **`Handlers::with_core_tasks()` only, and that is deliberate.** It
+    // registers four handlers: `core.log.Log`, `core.debug.Return`,
+    // `core.execution.Fail` and `core.flow.Sleep`. `egret.sql` is not here
+    // because it needs an `Arc<dyn QueryExecPort>` that neither constructor
+    // takes; `egret.container` and `egret.script.python` are not here because
+    // running containers in a workspace's name on a schedule is the governance
+    // question W5 raises for plugin jars, arriving early, and it is a separate
+    // and deliberate decision (programme spec §3.3). A flow whose task type is
+    // unregistered fails loudly with `WorkerError::NoHandler` rather than
+    // silently doing nothing.
+    egret_workflow::runtime::spawn(
+        db.pool.clone(),
+        std::sync::Arc::new(egret_workflow::worker::Handlers::with_core_tasks()),
+        egret_workflow::RuntimeConfig {
+            enabled: config.workflow.worker_enabled,
+            tick_interval: std::time::Duration::from_secs(config.workflow.tick_interval_secs),
+            batch: config.workflow.batch,
+            reaper_interval: std::time::Duration::from_secs(config.workflow.reaper_interval_secs),
+            working_timeout: std::time::Duration::from_secs(config.workflow.working_timeout_s),
+        },
+        reaper_cancel.clone(),
+    );
+
     // api_url: the server's own externally-reachable base URL (for EGRET_API_URL
     // forwarded to kernel processes as a callback base). Defaults to
     // http://127.0.0.1:{port} from the configured listen address when catalog
