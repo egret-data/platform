@@ -538,9 +538,25 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// golden says so directly: every `valids/retry-new-execution-*` link reads
 /// execution `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
 /// `["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`. Dropping the
-/// exemption — the naive hoist — is **mutation MX6**, and it takes the ratchet
-/// from 109 to 113, reporting exactly the four `retry-new-execution-*` entries
-/// as regressions.
+/// exemption — the naive hoist — is **mutation MX6**.
+///
+/// **I predicted MX6 would take the ratchet from 109 to 113 and name those four
+/// entries. It does not: the ratchet reads 109 under MX6, three runs out of
+/// three.** The prediction was a plausible inference written in the voice of a
+/// measurement, and the reason it is wrong is *this function's own subject*:
+/// the oracle reaches a due replay through `driver::pass_time` → `resume` →
+/// `settle` → `replay::spawn_due`, and **never through this query**. A change
+/// here cannot move the ratchet for the replay entries any more than it can for
+/// the pause entries — the same blindness, one arm further along.
+///
+/// What MX6 **does** kill, 3 of 3 runs, is
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists` and
+/// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
+/// — **both W6 Task 4's, both written long before this term existed**, so
+/// unlike the guard tests of this round they are assertions that **predate what
+/// they prove**. That is the strongest available evidence the exemption is
+/// load-bearing rather than defensive, and it is stronger than the ratchet
+/// figure I had claimed.
 ///
 /// **And the exemption is a proxy for the real rule, soundly.** The guard is
 /// about consumers *inside* `advance()`: `'RETRYING'` is consumed by

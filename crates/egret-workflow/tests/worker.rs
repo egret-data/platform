@@ -6780,9 +6780,16 @@ async fn a_paused_run_in_a_terminal_execution_is_never_named(pool: sqlx::PgPool)
 /// `valids/retry-new-execution-*` link reads execution
 /// `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
 /// `["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`. The naive hoist —
-/// the same term without `r.state = ANY($2)` — takes the ratchet from **109 to
-/// 113**, naming exactly those four entries. So the cell below is not a
-/// weakening of the guard; it is the arm whose consumer,
+/// the same term without `r.state = ANY($2)` — is **mutation MX6**, and it kills
+/// this test AND two of W6 Task 4's, 3 runs of 3:
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists` and
+/// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
+/// — assertions that **predate** the term and therefore prove it was not
+/// written to fit them. **The ratchet does NOT move: 109 under MX6, 3 runs of
+/// 3.** (I predicted 109 → 113 and was wrong, for this waker's own reason — the
+/// oracle reaches a due replay through `driver::pass_time`, never through this
+/// query.) So the cell below is not a weakening of the guard; it is the arm
+/// whose consumer,
 /// `worker::replay::spawn_due`, runs in the settle **outside** `advance()` and
 /// is therefore untouched by the early return the guard is about.
 ///
@@ -6873,10 +6880,12 @@ async fn a_terminal_execution_hides_every_arm_except_the_replay(pool: sqlx::PgPo
     assert!(
         wrong.is_empty(),
         "the execution-terminality term has moved:\n  {}\n\
-         Making it vacuous shows up as the three `CANCELLED`/`RETRIED` rows \
-         flipping to named=true; dropping its `r.state = ANY($2)` exemption \
-         shows up as `RETRIED in a RETRIED execution` flipping to named=false, \
-         and that one also takes the ratchet from 109 to 113.\nNamed: {named:?}",
+         Making it vacuous flips the TWO non-terminal-run rows -- \
+         `RETRYING`/`CANCELLED` and `PAUSED`/`CANCELLED` -- to named=true, and \
+         leaves the `RETRIED` row alone, which is already exempt; dropping its \
+         `r.state = ANY($2)` exemption flips `RETRIED in a RETRIED execution` \
+         to named=false and also kills two of W6 Task 4's replay tests. \
+         Neither moves the ratchet.\nNamed: {named:?}",
         wrong.join("\n  ")
     );
 }
