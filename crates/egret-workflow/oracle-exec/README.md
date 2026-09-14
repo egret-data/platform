@@ -8462,8 +8462,46 @@ on this branch and the first where inattention is not the explanation.
 **The general form**: the "sweep by concept, not by phrase" rule assumes the
 concept's words appear. An ordinal is a counter-example — it refers without
 naming — and a line break is a counter-example to the tooling rather than to the
-rule. A qualification sweep therefore has **three** populations, not one: the
-concept, the phrase verbatim (fragment-matched), and the ordinals that count it.
+rule. A qualification sweep therefore has **four** populations, not one: the
+concept, the phrase verbatim (fragment-matched), the ordinals that count it, and
+**data that feeds a generator** — `probe.json` is an input to
+`harvest.py --rewrite-runnable`, so prose beside a false row does not stop a
+regeneration re-emitting it, and a correction in `runnable.txt` is durable only
+because it sits below `HANDWRITTEN_SENTINEL`, which that flag preserves.
+
+#### And the same question for a PREDICATE — W8 Task 7
+
+**Formulation 3 is about figures, and the thing it cannot reach is a
+predicate.** *A figure is safe only if a running program compares it.* **So is a
+predicate — and a predicate has no printed value for a sweep to compare.**
+`claim::due_retries`' state gate was wrong for a whole package: it enumerated
+`'RETRYING'` and `'RETRIED'` while `advance()` had gained two more producers of
+resumable runs, and **no figure moved when it went false.** W6's Critical was
+the same class and its own sweep could not have found it, *because it swept
+figures and that was a predicate.*
+
+Two things make the class findable, and they are different jobs:
+
+* **To FIND one**: sweep by concept — *"what selects a run to act on"*, *"what
+  walks the execution chain"* — and enumerate the whole population with a
+  verdict each. Eleven selectors, one wrong. A phrase sweep reaches none of
+  them, because a predicate defined by an **omission** shares no text with what
+  it omits.
+* **To keep one found**: give it the shape `is_terminal` has. A predicate over
+  an enum must be **derived** from the enum (`spawn::terminated_count` filters
+  `RunState::ALL` by `is_terminal()`), **carried on the data** (`resume_paused`
+  reads the run's own `resume_with`, so there is no list of kinds to be missing
+  from), or **answered for every member with the key set asserted**
+  (`the_waker_names_exactly_the_states_something_will_move`, and
+  `neither_paused_nor_restarted_is_terminal` before it). All three make the
+  fourteenth variant a **failing test** instead of a silent omission. A hand
+  list behind a catch-all makes it a stall.
+
+**And the same asymmetry the figures have applies**: `retry::reopen_due` is the
+pure-side twin of the same predicate and the driver *does* reach it, so
+narrowing that one fails loudly. One sentence about *"the ratchet cannot see
+it"* is wrong about one of the two, which is why they are recorded separately in
+`retry.rs` and `claim.rs` rather than together.
 
 #### Five passes, and every one scoped by surface when the predicate is about mechanism
 
