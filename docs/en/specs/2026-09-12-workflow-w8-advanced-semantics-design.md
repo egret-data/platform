@@ -52,7 +52,7 @@ field**.
 
 W4 established that *"the oracle cannot see it"* is three distinct facts; W6 found
 a fourth. Here is a fifth, and it is the reason **five of `sla:`'s seven entries
-are unbankable by any implementation whatsoever**:
+are unbankable by any implementation **given this harness**:
 
 **`Sleep::capped(ZERO)` means no run is ever in flight, and `driver::pass_time`
 only moves the clock to a registered `not_before_ms`.** An SLA's
@@ -91,7 +91,14 @@ can differ in *both* directions, and this is the direction nobody had looked for
     implementation**, because `oracle-exec/driver.rs` builds its registry with
     `Sleep::capped(Duration::ZERO)` and a capped `Sleep` registers no
     `not_before_ms`, so the interval `MaxDurationSLA.evaluate` measures does not
-    exist in this harness. `the_max_duration_window_does_not_exist_in_this_harness`
+    exist in this harness. **Fix round 1 qualifies that with *given this
+    harness*** — uncapping the driver's `Sleep` would move them, so they are not
+    *permanently* unbankable the way `valids/loop-until-restart` is, whose
+    GOLDEN is the irreproducible part. The two `*-parent` entries have a
+    stronger reason again: `pass_time`'s recursive walk joins
+    `parent_execution_id` and a subflow child is linked by
+    `trigger_execution_id`, so the clock-advance walk cannot reach the child at
+    all. `the_max_duration_window_does_not_exist_in_this_harness`
     is the measurement; `oracle-exec/README.md`'s fifth blindness mechanism is
     where it is filed.
 
