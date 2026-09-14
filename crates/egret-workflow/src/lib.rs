@@ -9,7 +9,10 @@
 //! Modules arrive with their package:
 //!
 //! - `models`    — W0 (this crate's first type) and W1
-//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`)
+//! - `repo`      — W1 (`workflow.flows` + `workflow.flow_versions`) and W10
+//!   Task 3 (`ExecutionRepo`, the READ layer over `workflow.executions` +
+//!   `workflow.task_runs`; the writes stay in `worker::claim`, which holds the
+//!   `FOR UPDATE` this one deliberately does not)
 //! - `refs`      — W1 Task 7 (`WorkflowRefs`, the real `WorkflowRefPort`)
 //! - `routes`    — W1 Task 7 (the nine management routes, spec §10)
 //! - `runners`   — W2 (expression rendering)
@@ -66,7 +69,10 @@ pub mod worker;
 
 pub use publish::publish;
 pub use refs::WorkflowRefs;
-pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
+pub use repo::{
+    CreateFlowInput, ExecutionDetail, ExecutionFilter, ExecutionPage, ExecutionRepo, ExecutionRow,
+    FlowRepo, FlowRow, FlowVersionRow, ListFilter, Page, TaskRunRow, UpdateFlowInput,
+};
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
 pub use runtime::RuntimeConfig;
