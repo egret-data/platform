@@ -416,7 +416,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 ///
 /// W6 Task 4. A `CREATE_NEW_EXECUTION` retry leaves the run **`RETRIED`** —
 /// terminal — with a deadline, and `reopen_due` will never touch it: what is
-/// due is a whole new execution, which [`super::replay::spawn_due`] starts from
+/// due is a whole new execution, which `worker::replay::spawn_due` starts from
 /// the settle this waker's `resume` produces. `RETRIED` alone would be the
 /// unbounded case the paragraph above describes, because nothing ever moves a
 /// `RETRIED` run either — so the arm carries both conditions that decide
@@ -439,7 +439,7 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 /// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
 /// drive the two.
 ///
-/// **The clock is [`load_with`]'s, spelled the same way**, so an execution
+/// **The clock is `load_with`'s, spelled the same way**, so an execution
 /// named here is one `retry::reopen_due` will actually reopen — see the module
 /// doc's `not_before` bullet.
 ///
