@@ -31,9 +31,16 @@
 //! it is tempting to write that sentence once and let it stand for the loop.
 //! **It does not.** A tick issues three statements and a reaper pass issues a
 //! fourth; three of the four contain no `SKIP LOCKED` at all and one contains no
-//! lock of any kind. Each gets its own statement below, and each statement is
-//! proved by a test in `tests/runtime.rs` that runs **two tickers against one
-//! database** — because a guard nobody has seen fail is a guard nobody has seen.
+//! lock of any kind. Each gets its own statement below, and each has its own
+//! test in `tests/runtime.rs` — because a guard nobody has seen fail is a guard
+//! nobody has seen.
+//!
+//! **Three of the four run two tickers against one database; statement 2 runs
+//! two concurrent direct calls, and the difference is named rather than
+//! smoothed over.** `due_retries` returns its selection, and a selection is not
+//! observable from inside a ticker — the ticker swallows the value into `tick`.
+//! Wrapping it in tickers would trade the assertion for nondeterminism and add
+//! no interleaving the direct pair does not already produce.
 //!
 //! ## 1. [`claim`](crate::worker::claim) — safe by **exclusion**
 //!
@@ -64,6 +71,13 @@
 //! timing — which is the shipped-wrong-assertion failure this branch pays the
 //! most for.
 //!
+//! **What that test actually runs is `tokio::join!` on two direct
+//! `due_retries` calls plus a third sequential one — not two tickers**, and the
+//! name is the older half. The value under assertion is the statement's
+//! *return*, which no ticker exposes; the third call is what says selection
+//! consumes nothing. Read the name as "two concurrent wakers", which is what it
+//! measures.
+//!
 //! ## 3. [`wake`](crate::worker::wake)/[`resume`](crate::worker::resume) — safe by **idempotence under the execution's row lock**
 //!
 //! [`wake`](crate::worker::wake) hands each id
@@ -88,27 +102,53 @@
 //! run's **attempt count** (2, not 3) and on the handler's call log for that run
 //! — the two places a double reopen is visible.
 //!
-//! **Measured: the `FOR UPDATE` is NOT the only thing holding this up**, and
-//! that is written down rather than left for the next reader to discover by
-//! deleting it and seeing green. W10 Task 2 mutation F flipped `claim::load`
-//! from `Lock::Yes` to `Lock::No` — the whole of the serialisation this
-//! statement names — and `two_tickers_reopen_a_due_retry_exactly_once` stayed
-//! green, 3 runs of 3, against a control of 10/10. The callers were enumerated
-//! before anything was concluded (`resume`, `apply_outcome` and `input_for` on
-//! the `Stack::Fresh` side; `spawn::spawn_one` and `subflow` on the nested one),
-//! and the reason the outcome does not move is that **three further mechanisms
-//! produce the same one**: `UNIQUE (execution_id, run_ix)` from migration 0134,
-//! which `claim::load`'s own doc names as what happens if the lock is ever lost
-//! (a collision, not a duplicate run); `persist`'s `rows_affected` fence on the
-//! released run's lease; and Postgres's own row-level write locks on the
-//! `task_runs` UPDATEs, which serialise the writers even with no advisory lock
-//! in front of them.
+//! ### The lock is load-bearing, and a surviving mutant does not say otherwise
 //!
-//! So the `FOR UPDATE` is **sufficient and not individually necessary** here —
-//! the same shape `persist`'s doc already records for its two fences. What the
-//! test asserts is the **outcome** (one reopen), which is the invariant a
-//! deployment has; the mechanism above is one of four things delivering it, and
-//! a reader must not quote the `FOR UPDATE` as the sole reason.
+//! **Do not remove the `FOR UPDATE`.** W10 Task 2 mutation F flipped
+//! `claim::load` from `Lock::Yes` to `Lock::No` — the whole of the
+//! serialisation this statement names — and
+//! `two_tickers_reopen_a_due_retry_exactly_once` stayed green, 3 runs of 3,
+//! against a control of 10/10. That is a fact about the **fixture**, not about
+//! the lock.
+//!
+//! **Why the mutant lives: idempotence by VALUE, not exclusion.** `advance()`
+//! is pure over `(plan, state, now)`. Two racers that both `load` before either
+//! commits read the *same* `before` and therefore compute the *same* `after`,
+//! so the loser's write puts back exactly the bytes the winner wrote. Writing a
+//! value twice is invisible.
+//!
+//! **What the lock actually buys is the window the fixture never opens.**
+//! Nothing in `resume` delays between `load` and `settle`, so this ordering
+//! never occurs in the test:
+//!
+//! 1. loser `load`s — sees the run `RETRYING`, deadline elapsed;
+//! 2. winner commits the reopen — run `CREATED`, attempt 2 open;
+//! 3. the claim takes attempt 2 and a handler runs it;
+//! 4. **loser writes its stale `after` back**, reopening a run that has already
+//!    been reopened — a third attempt, from a snapshot three steps old.
+//!
+//! Step 4 is a **lost update**, and it is not prevented by anything else on this
+//! path. Row-level write locks serialise the two writers but do not stop it:
+//! `persist`'s UPDATE is keyed `WHERE execution_id = $8 AND run_ix = $9`, so
+//! after the loser unblocks the predicate still matches and its stale values
+//! land.
+//!
+//! **Two mechanisms an earlier draft of this paragraph named do NOT apply here,
+//! and the correction is kept because the wrong version is the more plausible
+//! reading.** `resume` calls `settle(…, None)`, so `persist`'s `release` is
+//! `None`: its `rows_affected` fence sits inside `if let Some(l) = lease` and is
+//! **never evaluated** on this path, and its `claimed_at` term binds NULL and is
+//! vacuously true. And `UNIQUE (execution_id, run_ix)` (migration 0134) guards
+//! the **INSERT** branch — `ix >= before.runs.len()`, a run being created —
+//! whereas reopening an existing run is the **UPDATE** branch. Neither is a
+//! backstop for step 4.
+//!
+//! So: the test asserts the **outcome** a deployment has (one reopen), the lock
+//! is what keeps that outcome true in an interleaving the test cannot force, and
+//! *"the mutant survives"* is a statement about the fixture's reach. A
+//! deterministic proof needs a seam that delays a `resume` between its `load`
+//! and its `settle`; there is none today, and a flaky proof of a real hazard is
+//! worse than a named unforced one.
 //!
 //! ## 4. [`reap`](crate::worker::reap) — safe by **re-evaluation under READ COMMITTED**
 //!

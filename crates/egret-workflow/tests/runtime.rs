@@ -1,6 +1,9 @@
 //! The loops' own tests: the gate, cancellation, the ticker's cadence, and a
-//! **per-statement** concurrency property proved by running two tickers against
-//! one database.
+//! **per-statement** concurrency property. Three of the four run two tickers
+//! against one database; statement 2 runs two concurrent direct calls, because
+//! the value it asserts is a selection's **return** and a ticker swallows that
+//! into `tick`. The difference is stated here and at each test rather than
+//! smoothed into one sentence that would be wrong about a quarter of them.
 //!
 //! # Why this file exists beside `tests/worker.rs`
 //!
@@ -584,7 +587,11 @@ async fn the_worker_ticks_on_a_fixed_interval_rather_than_draining_to_zero(pool:
     );
 }
 
-// ── Step 4: a safety statement per call, each proved by two tickers ─────────
+// ── Step 4: a safety statement per call, each with its own test ─────────────
+//
+// Statements 1, 3 and 4 run TWO TICKERS against one database. Statement 2 runs
+// two concurrent direct calls, for the reason its own doc gives: what it
+// asserts is `due_retries`' return value, which no ticker exposes.
 
 /// **Statement 1 — `claim` is safe by EXCLUSION.** Two tickers against one
 /// database never hand one run to two handlers.
@@ -688,6 +695,13 @@ async fn two_tickers_against_one_database_never_hand_one_run_to_two_handlers(poo
 /// It is also asserted **twice over**: concurrently (two in-flight selects) and
 /// then again sequentially, because a selection that consumed what it named
 /// would answer differently the second time.
+///
+/// **This one is NOT two tickers, unlike its three siblings, and the name is
+/// the older half.** It is `tokio::join!` over two direct `due_retries` calls.
+/// The thing under assertion is the statement's **return value**, and a ticker
+/// swallows that into `tick` — so the ticker shape would cost the assertion and
+/// buy no interleaving this does not already produce. Read the name as "two
+/// concurrent wakers".
 #[sqlx::test(migrations = "../../migrations")]
 async fn due_retries_excludes_nothing_so_two_tickers_both_name_the_same_execution(
     pool: sqlx::PgPool,

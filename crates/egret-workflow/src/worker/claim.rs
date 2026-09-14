@@ -691,8 +691,11 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
 /// behind it.
 ///
 /// `oracle-exec/README.md`'s coverage statement carries the same proposition as
-/// its item 15, and W4's own section as its sixth fact; W10 Task 7 owns that
-/// file's sweep, and item 15 is one of at least eight instances there.
+/// its item 15, and W4's own section as its sixth fact. **W10 Task 7 owns that
+/// file's sweep.** No count of its instances is given here on purpose: a
+/// tally of another file's current state is a sentence that goes false the
+/// moment that file is corrected, which is the failure this very paragraph
+/// exists to undo.
 ///
 /// **Every named execution is attempted and the first error is returned after
 /// the loop**, which is [`tick`]'s own rule for the same reason: one
@@ -1286,23 +1289,33 @@ pub async fn start_execution(
 /// [`start_execution`] with Kestra's `Execution.trigger` supplied.
 ///
 /// A **sibling** rather than a sixth parameter on `start_execution`, because
-/// that function has **88** call sites across `crates/` and all but one of them
-/// have no trigger: widening it would mean writing `None` at every one of them
-/// to serve a single caller, and a long run of uniform `None`s is the kind of
-/// argument that hides a mutation (W6 Task 6's `max_depth` survived a two-sided
-/// mutation for exactly that reason -- every fixture passed the default).
+/// all but one call site of that function has no trigger: widening it would
+/// mean writing `None` at every one of them to serve a single caller, and a
+/// long run of uniform `None`s is the kind of argument that hides a mutation
+/// (W6 Task 6's `max_depth` survived a two-sided mutation for exactly that
+/// reason -- every fixture passed the default). Every call site is a test or
+/// `oracle-exec/driver.rs`; `crates/*/src` holds none.
 ///
-/// **The count is dated, because it decays.** 88 is measured at W10 Task 2 fix
-/// round 1; the line first said **65**, which was true when W6 Task 6 wrote it,
-/// and it had already reached **76** before W10 Task 2 added
-/// `tests/runtime.rs`. So it was stale before this package touched it. Every
-/// call site is a test or `oracle-exec/driver.rs`; `crates/*/src` holds none.
+/// # The count this line used to carry is GONE, and that is the fix
 ///
-/// The sentence also used to carry the ordinal **"sixty-four times"** beside the
-/// 65, and that is the structural half of the correction rather than an
-/// editorial one: an ordinal shares no letters with the number it names, so a
-/// sweep that grepped for `65` would have corrected the count and left the
-/// ordinal behind, disagreeing with it. The ordinal is gone, not updated.
+/// It said **65**, with the ordinal **"sixty-four times"** beside it. Both were
+/// true when W6 Task 6 wrote them and neither was true afterwards: the figure
+/// had already decayed before W10 touched anything, and W10 Task 2's own tests
+/// moved it again. Two things were wrong at once, and only one of them is about
+/// being out of date:
+///
+/// 1. **An ordinal shares no letters with the number it names.** A sweep that
+///    grepped `65` would have corrected the count and left "sixty-four"
+///    disagreeing with it.
+/// 2. **A count needs a recipe, and a recipe is a second representation.**
+///    Whether the definition line counts, whether `start_execution_with_trigger`
+///    counts, whether doc mentions count — each answer gives a different number,
+///    so any figure here is only reproducible beside the exact grep that made
+///    it, and then there are two things to keep in step instead of one.
+///
+/// The argument never needed a number: "all but one" is the whole of it, and it
+/// is true at every count. **Removing the figure is the structural fix; dating
+/// it would only have been the editorial one.**
 ///
 /// The figure is counted, not estimated. This doc said "twenty" until fix round
 /// 1's sweep ran
