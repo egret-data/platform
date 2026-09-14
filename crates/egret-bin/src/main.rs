@@ -2082,6 +2082,7 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let workflow = Some(egret_workflow::WorkflowState {
         db: db.clone(),
         repo: egret_workflow::FlowRepo::new(db.clone()),
+        executions: egret_workflow::ExecutionRepo::new(db.clone()),
         refs: std::sync::Arc::new(egret_workflow::WorkflowRefs {
             flows: egret_workflow::FlowRepo::new(db.clone()),
             dataapi_endpoints: std::sync::Arc::new(egret_dataapi::EndpointStore::new(db.clone())),
