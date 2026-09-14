@@ -61,8 +61,8 @@ fn one_task(id: &str) -> String {
 }
 
 /// A one-task flow that retries once, `interval` apart. Paired with
-/// [`FailsOnce`] this is the only shape that reaches the waker: a `RETRYING`
-/// run with no concurrently-live sibling.
+/// [`Recorder::failing_every_first_attempt`] this is the only shape that
+/// reaches the waker: a `RETRYING` run with no concurrently-live sibling.
 fn one_task_with_retry(id: &str, interval: &str) -> String {
     format!(
         "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\

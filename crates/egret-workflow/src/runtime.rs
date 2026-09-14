@@ -66,7 +66,9 @@
 //!
 //! ## 3. [`wake`](crate::worker::wake)/[`resume`](crate::worker::resume) — safe by **idempotence under the execution's row lock**
 //!
-//! [`wake`] hands each id [`due_retries`] named to [`resume`], and `resume`'s
+//! [`wake`](crate::worker::wake) hands each id
+//! [`due_retries`](crate::worker::due_retries) named to
+//! [`resume`](crate::worker::resume), and `resume`'s
 //! `load` takes `SELECT … FROM workflow.executions WHERE id = $1 FOR UPDATE`
 //! (`worker/claim.rs:1521`). So the second replica's `resume` **blocks** behind
 //! the first's — it does not skip, and it must not: skipping would be a woken
@@ -77,7 +79,8 @@
 //!
 //! **The honest residue, stated rather than rounded to "no-op":** the loser's
 //! settle still writes a new `executions.seq` even though it produces no
-//! commands — [`due_retries`]'s own doc names that cost for the same statement.
+//! commands — [`due_retries`](crate::worker::due_retries)'s own doc names that
+//! cost for the same statement.
 //! A redundant `seq` bump is invisible to every consumer; a second attempt would
 //! not be, and that is the invariant the test asserts.
 //!
@@ -121,7 +124,8 @@
 //! and the re-evaluation is exactly what stops that.
 //!
 //! The counts split between the two passes and only their union is meaningful,
-//! which is why [`reap`] returning a count is safe where [`wake`] returning ids
+//! which is why [`reap`](crate::worker::reap) returning a count is safe where
+//! [`wake`](crate::worker::wake) returning ids
 //! is necessary: a reclaimed lease is fungible.
 //!
 //! The predicate's *other* direction — a lease **inside** the timeout is left
