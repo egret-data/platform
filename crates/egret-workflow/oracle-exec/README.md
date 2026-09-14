@@ -10181,3 +10181,113 @@ The gate after the round: **259 result lines / 3512 passed / 0 failed / 5
 ignored**, exit 0, against `35d20de6`'s 259 / 3507 / 0 / 5, reconciled by a
 test-NAME-SET diff of **5 added and 0 removed**. `sql_starrocks_live` reports
 **8 passed in 0.75 s**, its duration rather than its count.
+
+## Final round, part 2 — closing the family, and a figure I got wrong closing it
+
+**A recorded divergence is not a closed one.** Part 1 put the
+execution-terminality term on the `'PAUSED'` arm alone and wrote the identical
+`'RETRYING'` case down as a finding. That is *corrected where found, missed
+elsewhere* in its **structural** form rather than its documentary one — one
+member of a family fixed, its sibling left standing — and this file has recorded
+that failure mode fourteen times in its documentary form without once catching
+it in this one.
+
+### The term is hoisted, and the exemption is one arm
+
+```sql
+AND (r.state = ANY($2) OR NOT (e.state = ANY($2)))
+```
+
+One term at the top of the `WHERE`, closing `'RETRYING'`, `'PAUSED'` and both
+`'RETRIED'` replay terms together. `$2` stays **derived from `RunState::ALL` by
+`is_terminal()`**, so a fourteenth terminal variant joins *both halves* without
+anybody remembering to: the guard is unrepresentable-to-forget for whatever arm
+comes next, which is the property the per-arm shape did not have.
+
+**It could not be hoisted bare, and the arm that refuses it is named with a
+measurement.** `r.state = ANY($2)` exempts an arm whose RUN state is itself
+terminal — today exactly `'RETRIED'` — and the exemption is **load-bearing**: a
+`CREATE_NEW_EXECUTION` retry ends **this execution** `RETRIED`, so that arm's
+entire population lives in a terminal execution by construction. The golden says
+so without interpretation — every `valids/retry-new-execution-*` link reads
+execution `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
+`["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`.
+
+**And the exemption is a sound proxy rather than a coincidence that fits three
+arms.** The guard is about consumers *inside* `advance()`, which returns
+`Vec::new()` on its first line for a terminal execution: `'RETRYING'` is
+consumed by `retry::reopen_due` and `'PAUSED'` by `flowable::resume_paused`,
+both inside it; `'RETRIED'` is consumed by `worker::replay::spawn_due`, which
+runs in the settle **outside** it. Keying on *"the run's own state is terminal"*
+**implies** that — `advance()` moves no terminal run, so an arm whose run state
+is terminal must have its consumer elsewhere — so the proxy cannot drift from
+the rule it stands for.
+
+### The mutations
+
+| mutation | what it does | runs | verdict |
+|---|---|---|---|
+| **MX5** | the hoisted term made vacuous (`… OR TRUE`) | 3 | **dead 3/3** — kills `a_terminal_execution_hides_every_arm_except_the_replay` on **both** the `RETRYING`/`CANCELLED` and `PAUSED`/`CANCELLED` rows, and `a_paused_run_in_a_terminal_execution_is_never_named`. Ratchet: **109, green** |
+| **MX6** | the naive hoist — the same term without `r.state = ANY($2)` | 3 | **dead 3/3** in the worker suite. Ratchet: **109, green, 3 of 3** |
+
+Control on the unmutated tree: the five relevant tests pass, 5 passed / 0
+failed. Each mutation printed out-of-band evidence it landed — the `git diff`
+line and a token count separating the SQL from the doc that quotes it — **before
+any verdict was read**.
+
+**MX5's killing tests were written for MX5 and are not evidence anything caught
+the defect before**, exactly as item 1's were. **MX6's are the opposite and that
+is the point**: it kills `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists`
+and `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`,
+**both W6 Task 4's, both written long before this term existed** — assertions
+that *predate what they prove*, and therefore evidence the exemption was not
+shaped to fit them.
+
+### The figure I got wrong, and it was this file's own subject
+
+**I wrote — in the doc, in the test, and in the test's own failure message —
+that MX6 takes the ratchet from 109 to 113, naming those four entries. It does
+not. The ratchet reads 109 under MX6, three runs of three.**
+
+It was a plausible inference published in the voice of a measurement, and the
+reason it is false is the thing this whole task is about: the oracle reaches a
+due replay through `driver::pass_time` → `resume` → `settle` →
+`replay::spawn_due`, and **never through `due_retries`**. A change to the waker
+cannot move the ratchet for the replay entries any more than it can for the
+pause entries — **the same blindness, one arm further along.** *Item 11's shape
+caught me writing about item 11.*
+
+The correction is in all three places, and the honest evidence for the exemption
+is MX6's two predating victims rather than a ratchet figure that never existed.
+The 3×2's message also said *"the three rows"* flip under MX5; it is **two** —
+the `RETRIED` row is exempt under both forms.
+
+### `RETRIED`'s third case is settled: REFUSED, with the measurement behind it
+
+Part 1 left it *unmeasured*, which is the condition under which a defect
+survives longest. Measured now, and the disposition is a **refusal**: the
+`'RETRIED'` arm must **not** take the guard, because its population is terminal
+executions by construction (the golden, above) and because removing its
+exemption kills two tests that predate the term (MX6, above). The per-arm shape
+is correct **for that one arm**, and the record says *that* rather than *"not
+fixed"*.
+
+### Recorded for its owner: `jqsandbox.rs`'s `MAX_STEPS` is unguarded
+
+Found by part 1's citation sweep, outside this task's subject and left for its
+owner rather than fixed here. **Nothing compares `BOUNDED_DEFS`' jq-source
+literal to `MAX_STEPS`** — the drift the citation
+`the_literal_in_the_jq_source_is_the_bound` claimed to have closed, for a test
+that does not exist. It is written at **both** sites in
+`crates/egret-workflow/src/runners/jqsandbox.rs` — the comment above the
+`MAX_STEPS` constant and `bounded_defs`' own doc — so whoever next edits either
+one reads it there rather than here.
+
+### This round banks nothing, beside a number that can disagree
+
+`baseline.txt` byte-identical: md5 **`c702545ebe209286a02fca5b4b5eea73`** before
+and after, id list **`3c290eeab650320a1a9d7b5fb5d92d75`**, ratchet **109** — and
+**109 under MX5 and 109 under MX6 as well**, which is the number that could have
+disagreed and did not. Both halves of the hoisted term are invisible to the
+oracle; the instruments are `tests/worker.rs`'s, and that is the finding, not an
+aside.
