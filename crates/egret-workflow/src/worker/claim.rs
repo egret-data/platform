@@ -494,37 +494,68 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
 ///   the control here is that the name kept below occurs 7 times in the tree,
 ///   not 1.**
 /// - **A `PAUSED` run is never named twice for the same deadline** — but
-///   **only because of the second term, and the first version of this bullet
-///   was wrong about why.** It said `flowable::resume_paused` moves a due run
-///   on the very settle this waker's `resume` produces, so the run leaves
+///   **only because of the hoisted term below, and the first version of this
+///   bullet was wrong about why.** It said `flowable::resume_paused` moves a due
+///   run on the very settle this waker's `resume` produces, so the run leaves
 ///   `PAUSED` and the stale deadline lands in a state this predicate does not
-///   name. That holds *unless `advance()` returns on its first line*, and it
-///   does exactly that when the **execution** is terminal
-///   (`advance`'s `if state.history.last().is_some_and(is_terminal) { return
-///   Vec::new() }`). `RunState::Paused` is **not** terminal, so `sla_terminal`
-///   will happily `CANCEL` an execution that is still holding a parked bounded
-///   `Pause`: the run keeps `state = 'PAUSED'` and its `not_before_ms`, every
-///   tick names it, and every tick relocks the execution and settles it into
-///   writing nothing but a new `executions.seq`. **That is the endless case the
-///   `RETRIED` arm needed two extra terms to avoid, reached by a third road.**
-///   `NOT (e.state = ANY($2))` is the term that closes it, and the list is
-///   **derived from `RunState::ALL` by `is_terminal()`** rather than written
-///   into the SQL, so a fourteenth terminal variant joins it without anybody
-///   remembering to. `a_paused_run_in_a_terminal_execution_is_never_named` is
-///   the assertion, with the same fixture in a RUNNING execution as its
-///   control.
+///   name. That holds *unless `advance()` returns on its first line*, which it
+///   does when the **execution** is terminal. See the section below.
 ///
-///   **The `RETRYING` arm has the same shape and is deliberately left alone —
-///   a finding, not a fix.** An `sla:` `CANCEL` can terminate an execution
-///   holding a `RETRYING` run just as easily, `reopen_due` is skipped by the
-///   same early return, and the loop is identical. It is **not** closed here
-///   because no corpus flow declares both `sla:` and a `retry:`, because the
-///   arm predates this task by four packages, and because widening it is a
-///   behaviour change to a path W4 measured and this task did not. The
-///   `RETRIED` arm is a third case again and must **not** be given this term
-///   without measurement: `replay::spawn_due` runs in the settle *outside*
-///   `advance()`, so a replay owed by a cancelled execution may well still be
-///   owed, and nothing here has established which.
+/// # The execution-terminality term is ONE term over every arm, and the
+/// # exemption is measured
+///
+/// ```sql
+/// AND (r.state = ANY($2) OR NOT (e.state = ANY($2)))
+/// ```
+///
+/// `$2` is the terminal vocabulary, **derived from `RunState::ALL` by
+/// `is_terminal()`** rather than written into the SQL —
+/// `spawn::terminated_count`'s shape, and the only one a fourteenth terminal
+/// variant joins without anybody remembering to.
+///
+/// **Why it exists.** [`advance`](crate::executor::advance) returns
+/// `Vec::new()` on its first line when the execution is terminal, and
+/// `RunState::Paused` and `RunState::Retrying` are both **non**-terminal — so
+/// `claim::sla_terminal` can `CANCEL` an execution that is still holding a
+/// parked bounded `Pause` or a waiting retry. That run keeps its state and its
+/// `not_before_ms`; every tick names it; every tick relocks the execution and
+/// settles it into writing nothing but a new `executions.seq`. **It is the
+/// endless case the `RETRIED` arm needed two extra terms to avoid, reached by a
+/// third road.**
+///
+/// **Why it is ONE term and not one per arm.** W8 Task 7 shipped it on the
+/// `'PAUSED'` arm alone and recorded the `'RETRYING'` twin as a finding; *a
+/// recorded divergence is not a closed one*, and fixing one member of a family
+/// while its sibling stands is this branch's named failure mode in its
+/// structural form. Hoisted, it closes both at once and **is unrepresentable
+/// rather than remembered for whatever arm comes next**.
+///
+/// **Why the `r.state = ANY($2)` half is not a hole.** It exempts an arm whose
+/// RUN state is itself terminal, and today that is exactly one: `'RETRIED'`.
+/// The exemption is **load-bearing and measured, not defensive** — a
+/// `CREATE_NEW_EXECUTION` retry ends **this execution** `RETRIED`, so the whole
+/// population of that arm lives in terminal executions by construction. The
+/// golden says so directly: every `valids/retry-new-execution-*` link reads
+/// execution `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
+/// `["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`. Dropping the
+/// exemption — the naive hoist — is **mutation MX6**, and it takes the ratchet
+/// from 109 to 113, reporting exactly the four `retry-new-execution-*` entries
+/// as regressions.
+///
+/// **And the exemption is a proxy for the real rule, soundly.** The guard is
+/// about consumers *inside* `advance()`: `'RETRYING'` is consumed by
+/// `retry::reopen_due` and `'PAUSED'` by `flowable::resume_paused`, both inside
+/// it, while `'RETRIED'` is consumed by `worker::replay::spawn_due`, which runs
+/// in the settle **outside** `advance()` and is therefore unaffected by its
+/// early return. Keying on *"the run's own state is terminal"* implies that:
+/// `advance()` moves no terminal run, so an arm whose run state is terminal
+/// **must** have its consumer outside `advance()`. The proxy cannot drift from
+/// the rule it stands for.
+///
+/// `a_terminal_execution_hides_every_arm_except_the_replay` is the 3×2 table —
+/// `RETRYING`/`PAUSED`/`RETRIED` × terminal/non-terminal execution — and
+/// `a_paused_run_in_a_terminal_execution_is_never_named` drives the pause half
+/// end to end.
 ///
 /// # `RESTARTED` is NOT here, and that was measured rather than assumed
 ///
@@ -570,12 +601,13 @@ pub async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
           WHERE (r.state = 'RETRYING' \
-                 OR (r.state = 'PAUSED' AND NOT (e.state = ANY($2))) \
+                 OR r.state = 'PAUSED' \
                  OR (r.state = 'RETRIED' \
                      AND e.parent_run_ix IS NULL \
                      AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
                                       WHERE c.parent_execution_id = e.id \
                                         AND c.parent_run_ix IS NULL))) \
+            AND (r.state = ANY($2) OR NOT (e.state = ANY($2))) \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \

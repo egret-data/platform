@@ -6743,3 +6743,140 @@ async fn a_paused_run_in_a_terminal_execution_is_never_named(pool: sqlx::PgPool)
          next tick names it again, for ever. It named {named:?}"
     );
 }
+
+/// **W8 Task 7 final round part 2: one execution-terminality term over every
+/// arm, and the ONE arm that is legitimately exempt.**
+///
+/// The term the round before this added sat on the `'PAUSED'` arm alone, and
+/// the `'RETRYING'` twin — the identical endless case, reached by an `sla:`
+/// `CANCEL` over a waiting retry instead of a parked pause — was *recorded as a
+/// finding*. **A recorded divergence is not a closed one**, and fixing one
+/// member of a family while its sibling stands is this branch's named failure
+/// mode in its structural form rather than its documentary one. The term is
+/// hoisted now:
+///
+/// ```sql
+/// AND (r.state = ANY($2) OR NOT (e.state = ANY($2)))
+/// ```
+///
+/// # The 3×2, and both halves of the term are pinned by it
+///
+/// | run state | in a TERMINAL execution | in a RUNNING one |
+/// |---|---|---|
+/// | `RETRYING` | **not named** — `retry::reopen_due` is inside `advance()`, which returns `Vec::new()` on its first line | named |
+/// | `PAUSED` | **not named** — `flowable::resume_paused` likewise | named |
+/// | `RETRIED` | **NAMED** — the exemption | named |
+///
+/// The left column pins `NOT (e.state = ANY($2))`; the right column is the
+/// control without which every "not named" row is satisfied by a waker that
+/// named nobody; and the `RETRIED`/terminal cell pins `r.state = ANY($2)`,
+/// which a test of the guard alone would have deleted without noticing.
+///
+/// # The exemption is measured, not defensive
+///
+/// A `CREATE_NEW_EXECUTION` retry ends **this execution** `RETRIED`, so the
+/// whole population of that arm lives in a terminal execution **by
+/// construction** — the golden says so in as many words: every
+/// `valids/retry-new-execution-*` link reads execution
+/// `["CREATED","RUNNING","FAILED","RETRIED"]` beside run
+/// `["CREATED","SUBMITTED","RUNNING","FAILED","RETRIED"]`. The naive hoist —
+/// the same term without `r.state = ANY($2)` — takes the ratchet from **109 to
+/// 113**, naming exactly those four entries. So the cell below is not a
+/// weakening of the guard; it is the arm whose consumer,
+/// `worker::replay::spawn_due`, runs in the settle **outside** `advance()` and
+/// is therefore untouched by the early return the guard is about.
+///
+/// **This test postdates both defects and is not evidence that anything caught
+/// either of them before.** It exists because a review read the guard and found
+/// the `RETRYING` half unguarded and the `RETRIED` half unmeasured.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_terminal_execution_hides_every_arm_except_the_replay(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    // (run state, execution state, must the waker name it?)
+    //
+    // `CANCELLED` is the terminal used throughout because it is the one an
+    // `sla:` actually produces over a live execution -- the reachable form of
+    // this row rather than an arbitrary terminal.
+    let cases: [(&str, &str, bool); 6] = [
+        ("RETRYING", "CANCELLED", false),
+        ("PAUSED", "CANCELLED", false),
+        ("RETRIED", "RETRIED", true),
+        ("RETRYING", "RUNNING", true),
+        ("PAUSED", "RUNNING", true),
+        ("RETRIED", "RUNNING", true),
+    ];
+
+    let mut planted: Vec<(&str, &str, bool, Uuid)> = Vec::new();
+    for (run_state, execution_state, want) in cases {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!(
+                "hoist-{}-{}",
+                run_state.to_lowercase(),
+                execution_state.to_lowercase()
+            )),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
+        // 0142 requires a `resume_with` for a `PAUSED` row and 0141 requires a
+        // deadline beside any non-`NEVER` discriminant, so this is the shape
+        // `Command::PauseRun` really writes -- and it is harmless on the other
+        // two, whose own CHECK is one-way (see 0142's "the converse is FALSE").
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET state = $2, not_before_ms = 0, resume_with = 'TERMINAL:SUCCESS' \
+              WHERE execution_id = $1 AND task_id = 'a'",
+        )
+        .bind(ex)
+        .bind(run_state)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("plant a due {run_state} run: {e}"));
+        sqlx::query("UPDATE workflow.executions SET state = $2 WHERE id = $1")
+            .bind(ex)
+            .bind(execution_state)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("set the execution {execution_state}: {e}"));
+        planted.push((run_state, execution_state, want, ex));
+    }
+
+    let named: std::collections::BTreeSet<Uuid> = due_retries(&pool, 64)
+        .await
+        .expect("due_retries")
+        .into_iter()
+        .collect();
+
+    // The positive control before any negative row is believed.
+    assert!(
+        !named.is_empty(),
+        "the waker named NOBODY out of {} planted rows; every `false` row below \
+         is unfalsifiable until this holds",
+        planted.len()
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (run_state, execution_state, want, ex) in &planted {
+        let got = named.contains(ex);
+        if got != *want {
+            wrong.push(format!(
+                "run {run_state} in a {execution_state} execution: expected \
+                 named={want}, got named={got} (execution {ex})"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the execution-terminality term has moved:\n  {}\n\
+         Making it vacuous shows up as the three `CANCELLED`/`RETRIED` rows \
+         flipping to named=true; dropping its `r.state = ANY($2)` exemption \
+         shows up as `RETRIED in a RETRIED execution` flipping to named=false, \
+         and that one also takes the ratchet from 109 to 113.\nNamed: {named:?}",
+        wrong.join("\n  ")
+    );
+}
