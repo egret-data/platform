@@ -7698,3 +7698,343 @@ fn the_corpus_subflow_graph_has_no_cycle_and_no_deep_chain() {
          `worker::subflow`'s cycle guard leaves open"
     );
 }
+
+// --------------------------------------------------------------------------
+// W8 Task 6: the `MAX_DURATION` refusal, as a running program
+// --------------------------------------------------------------------------
+
+/// The three corpus flows whose own `sla:` is a `MAX_DURATION`, with the bound
+/// each declares in milliseconds.
+///
+/// Derived-with-a-literal on purpose: the ids and the bounds are read back out
+/// of `corpus/` by [`the_max_duration_declarations_are_exactly_these`], so this
+/// table cannot silently disagree with the YAML, and it is spelled out here so
+/// a reader of the refusal has the numbers in front of them.
+const MAX_DURATION_FLOWS: &[(&str, i64)] = &[
+    ("valids/sla-max-duration-fail", 500),
+    ("valids/sla-subflow", 1_000),
+    ("valids/flow-concurrency-sla-fail-child", 3_000),
+    // `valids/sla-max-duration-ok`'s bound is PT10S over a `PT0.5S` sleep. It
+    // is the CONTROL and it is deliberately in this list: it is the one
+    // `MAX_DURATION` flow that MATCHES, and it matches for a reason that has
+    // nothing to do with the SLA -- it would match under a correct
+    // implementation and under none at all, so it discriminates nothing. Having
+    // it here is what stops "the three baselined ones" being read as "the
+    // `MAX_DURATION` population".
+    ("valids/sla-max-duration-ok", 10_000),
+];
+
+/// **The `MAX_DURATION` population is read off the corpus, not remembered.**
+///
+/// Four flows in 345 declare one, and the two `*-parent` entries that are ALSO
+/// held by a `MAX_DURATION` declare no `sla:` at all — which is the asymmetry
+/// [`the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`] measures
+/// and this test is the other half of: a per-flow needle sees exactly these
+/// four and cannot see those two.
+#[test]
+fn the_max_duration_declarations_are_exactly_these() {
+    let mut found: Vec<(String, i64)> = Vec::new();
+    for entry in corpus() {
+        let source = corpus_source(&entry.id);
+        if !source.contains("type: MAX_DURATION") {
+            continue;
+        }
+        // `duration: PT…` on the line after, in any order relative to
+        // `behavior:`; the corpus writes both orders and a parser that assumed
+        // one would silently find three flows.
+        let iso = source
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("duration: ").map(str::to_string))
+            .unwrap_or_else(|| panic!("{} declares a MAX_DURATION with no duration:", entry.id));
+        let ms = iso_millis(&iso)
+            .unwrap_or_else(|| panic!("{}: {iso:?} is not an ISO-8601 duration", entry.id));
+        found.push((entry.id.clone(), ms));
+    }
+    found.sort();
+    let mut expected: Vec<(String, i64)> = MAX_DURATION_FLOWS
+        .iter()
+        .map(|(id, ms)| ((*id).to_string(), *ms))
+        .collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "the corpus's whole `MAX_DURATION` population, with each bound read \
+         back out of the YAML. `MAX_DURATION_FLOWS` is what the refusal is \
+         stated against, so it must be derivable"
+    );
+    // The needle's blind spot, asserted rather than described: neither entry
+    // held by a MAX_DURATION *in another flow* is in the list above.
+    for parent in [
+        "valids/sla-parent-flow",
+        "valids/flow-concurrency-sla-fail-parent",
+    ] {
+        assert!(
+            !corpus_source(parent).contains("sla:"),
+            "{parent} is held by a `MAX_DURATION` and declares no `sla:` of its \
+             own -- that is why the DECLARER count (4) and the CAUSE count (5) \
+             differ, and why a per-flow grep is the wrong instrument for the \
+             second"
+        );
+        assert!(
+            baseline().contains(parent),
+            "{parent} is still baselined; if it banks, the cause count moves \
+             and this whole section has to be re-derived"
+        );
+    }
+}
+
+/// `PT…S` to milliseconds, for the three shapes the corpus writes
+/// (`PT0.5S`, `PT1S`, `PT3S`, `PT10S`). Deliberately tiny: a real ISO parser
+/// lives in `executor::parse_duration` and is not reachable from an integration
+/// test, and a wrong answer here fails
+/// [`the_max_duration_declarations_are_exactly_these`] loudly rather than
+/// quietly.
+fn iso_millis(iso: &str) -> Option<i64> {
+    let secs: f64 = iso.strip_prefix("PT")?.strip_suffix('S')?.parse().ok()?;
+    Some((secs * 1000.0).round() as i64)
+}
+
+/// **The `MAX_DURATION` window does not exist in this harness** — the
+/// measurement behind W8 Task 6's refusal, and the reason five golden entries
+/// are unbankable by any implementation whatsoever.
+///
+/// # The claim, stated precisely enough to survive a reader who knows the clock
+/// moves
+///
+/// `MaxDurationSLA.evaluate` compares `Duration.between(execution.startDate,
+/// Instant.now())` against the bound, so it needs an interval in which the
+/// execution is **non-terminal** and **older than the bound**. Two facts about
+/// `oracle-exec/driver.rs` remove it:
+///
+/// 1. the registry is `Sleep::capped(Duration::ZERO)`, and `Sleep::run` is
+///    synchronous inside one `worker::tick` — so the only task these flows have
+///    reaches its terminal inside the tick that started it, and writes **no**
+///    `not_before_ms`;
+/// 2. `driver::pass_time` is the only thing in this harness that advances an
+///    execution's clock, and its query selects on `r.not_before_ms IS NOT NULL`
+///    — so with no deadline registered it returns `Ok(false)` the first time it
+///    is asked and the driver's loop breaks.
+///
+/// **The clock really does move in this harness**, which is why the first fact
+/// alone is not the answer: `pass_time` rewinds `executions.created_at` by
+/// `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline
+/// it is given. What these five flows lack is a deadline for it to move *to*.
+/// The window is not entered late and not missed — there is no instant at which
+/// it could be evaluated.
+///
+/// # What is asserted, and why the zero is not asserted alone
+///
+/// The load-bearing assertion is a **zero** — no deadline is ever registered —
+/// and a zero is what a broken query returns too. So it is asserted beside a
+/// **control derived from the same query on the same rows**: the driven corpus
+/// contains flows that DO register a deadline, they are named, and the count is
+/// positive. A query that found nothing would fail on that half.
+#[tokio::test]
+async fn the_max_duration_window_does_not_exist_in_this_harness() {
+    // The corpus has already been driven, and every row it wrote is still
+    // there: `egret_side` TRUNCATEs once, inside its `OnceCell`, before the
+    // first entry runs. Awaiting it here is what orders this test after that.
+    let _ = egret_side().await;
+    let db = common::db().await.expect("the oracle needs DATABASE_URL");
+
+    let rows: Vec<(String, i64, i64, Option<f64>)> = sqlx::query_as(
+        "SELECT e.flow_key, \
+                count(*)::bigint AS runs, \
+                count(r.not_before_ms)::bigint AS deadlines, \
+                max(EXTRACT(EPOCH FROM (r.updated_at - e.created_at)) * 1000)::float8 \
+                  AS elapsed_ms \
+           FROM workflow.executions e \
+           JOIN workflow.task_runs r ON r.execution_id = e.id \
+          GROUP BY e.flow_key",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the deadline census");
+
+    let by_flow: BTreeMap<&str, (i64, i64, Option<f64>)> = rows
+        .iter()
+        .map(|(k, runs, deadlines, elapsed)| (k.as_str(), (*runs, *deadlines, *elapsed)))
+        .collect();
+
+    // ---- the control, first: the zero below has to be falsifiable ----------
+    let registrars: Vec<&str> = rows
+        .iter()
+        .filter(|(_, _, deadlines, _)| *deadlines > 0)
+        .map(|(k, ..)| k.as_str())
+        .collect();
+    println!(
+        "flows that registered at least one `not_before_ms` under the driver: \
+         {} of {} -- {registrars:?}",
+        registrars.len(),
+        rows.len()
+    );
+    assert!(
+        registrars.len() >= 5,
+        "the same query, over the same rows, must find flows that DO register a \
+         deadline -- otherwise the zeroes below are a broken query rather than a \
+         measurement. Found {registrars:?}"
+    );
+
+    // ---- the measurement ---------------------------------------------------
+    for (id, bound_ms) in MAX_DURATION_FLOWS {
+        let key = id.strip_prefix("valids/").expect("corpus ids are prefixed");
+        let (runs, deadlines, elapsed) = by_flow
+            .get(key)
+            .copied()
+            .unwrap_or_else(|| panic!("{id} produced no task_runs at all"));
+        println!(
+            "{id}: bound {bound_ms} ms, {runs} run(s), {deadlines} deadline(s), \
+             elapsed at the last run write {elapsed:?} ms"
+        );
+        assert_eq!(
+            deadlines, 0,
+            "{id}: a capped `Sleep` registers no `not_before_ms`, so \
+             `driver::pass_time` has nothing to move the clock TO and returns \
+             `Ok(false)` on its first call. This is the whole of why the \
+             `MAX_DURATION` window does not exist -- not that it is missed"
+        );
+        let elapsed = elapsed.expect("a row that has runs has an elapsed");
+        assert!(
+            elapsed < *bound_ms as f64,
+            "{id}: the execution's last run row was written {elapsed} ms after \
+             the execution was created, and the bound is {bound_ms} ms. This is \
+             wall-clock rather than a logical clock, and the margin is two \
+             orders of magnitude on an idle machine -- if it ever fails, the \
+             answer is NOT to loosen it: it would mean the driver really did \
+             leave a window open and the refusal has to be re-derived"
+        );
+    }
+
+    // ---- and the run shape, which is the structural half -------------------
+    //
+    // "No run is ever in flight across a step" is what makes the elapsed figure
+    // above irrelevant to the answer rather than merely comfortable. A `Sleep`
+    // that reached PAUSED, or RETRYING, or was left RUNNING, would be a run the
+    // executor had to come back to -- and coming back is the only thing that
+    // puts a second evaluation point after the first.
+    let sleeps: Vec<(String, String)> = sqlx::query_as(
+        "SELECT e.flow_key, r.history::text \
+           FROM workflow.executions e JOIN workflow.task_runs r ON r.execution_id = e.id \
+          WHERE r.task_id = 'sleep' AND e.flow_key = ANY($1) \
+          ORDER BY e.flow_key",
+    )
+    .bind(
+        MAX_DURATION_FLOWS
+            .iter()
+            .map(|(id, _)| id.trim_start_matches("valids/").to_string())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("read the sleep runs");
+    // **SIX, not four**, and the two extra are the evidence rather than noise:
+    // `sla-subflow` and `flow-concurrency-sla-fail-child` each ran TWICE in
+    // this corpus -- once as their own golden entry and once as the child
+    // `valids/sla-parent-flow` / `valids/flow-concurrency-sla-fail-parent`
+    // spawned. Both copies go straight through, which is the same fact one
+    // level down and is what
+    // `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`
+    // measures from the other side.
+    assert_eq!(
+        sleeps.len(),
+        6,
+        "one `sleep` run per `MAX_DURATION` flow, plus the second run of each \
+         of the two that are also a `Subflow` TARGET: {sleeps:?}"
+    );
+    for (flow, history) in &sleeps {
+        assert_eq!(
+            history, "[\"CREATED\", \"SUBMITTED\", \"RUNNING\", \"SUCCESS\"]",
+            "{flow}: the capped `Sleep` goes straight through. A `PAUSED` or a \
+             `RETRYING` here would be a run the executor comes back to, which \
+             is the only shape that gives this harness a second instant to \
+             evaluate an SLA at"
+        );
+    }
+}
+
+/// **The two `*-parent` entries are held one level down, and by a child that
+/// RAN** — W8 Task 6, and it is the measurement that keeps the refusal pinned
+/// to the right mechanism.
+///
+/// `valids/sla-parent-flow` and `valids/flow-concurrency-sla-fail-parent`
+/// declare no `sla:`. Each calls a `Subflow` whose target declares a
+/// `MAX_DURATION`, and on the artifact the child FAILED and the parent's run
+/// FAILED with it. egret's parent run SUCCEEDS.
+///
+/// **There are two ways to get a mismatch there and only one of them is the
+/// `sla:`.** The other is that the target does not resolve at all: `publish`
+/// refuses every corpus flow containing an `io.kestra.plugin.core.flow.Sleep`
+/// (the spec registry has no row for it), so both children are **draft-only**
+/// in `workflow.flows`, and a reader who stopped at the publish report would
+/// conclude the parent never spawned anything. That reading is wrong and the
+/// direction matters: `worker::subflow::spawn_one` FAILS the parent's run for
+/// an unresolvable target, which is the same direction as the golden and would
+/// have looked like the `sla:` working.
+///
+/// So this asserts what actually happened: the target resolves (`subflow::
+/// resolve` selects any non-deleted, non-disabled row, draft or live), a child
+/// execution exists, it ran its `Sleep`, and it ended **SUCCESS** — which is
+/// the capped `Sleep` again, one level down.
+#[tokio::test]
+async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
+    let _ = egret_side().await;
+    let db = common::db().await.expect("the oracle needs DATABASE_URL");
+
+    for (parent, child) in [
+        ("sla-parent-flow", "sla-subflow"),
+        (
+            "flow-concurrency-sla-fail-parent",
+            "flow-concurrency-sla-fail-child",
+        ),
+    ] {
+        // A subflow child is linked by `trigger_execution_id`, never by
+        // `parent_execution_id` -- migration 0138's CHECK makes carrying both
+        // unrepresentable -- so this is the only walk that finds one.
+        let children: Vec<(String, String)> = sqlx::query_as(
+            "SELECT c.flow_key, c.state \
+               FROM workflow.executions p \
+               JOIN workflow.executions c ON c.trigger_execution_id = p.id \
+              WHERE p.flow_key = $1 \
+              ORDER BY c.created_at",
+        )
+        .bind(parent)
+        .fetch_all(&db.pool)
+        .await
+        .expect("walk the trigger link");
+
+        assert_eq!(
+            children,
+            vec![(child.to_string(), "SUCCESS".to_string())],
+            "{parent} must have spawned exactly one child, {child}, and that \
+             child must have SUCCEEDED. A child that is absent would mean the \
+             target did not resolve -- a different cause with the same \
+             direction as the golden -- and a child that FAILED would mean \
+             something other than the capped `Sleep` is holding this entry"
+        );
+
+        // …and the child really ran its task, rather than resolving to an empty
+        // execution: the `Sleep` is the whole of what a `MAX_DURATION` would
+        // have had time to kill.
+        let sleeps: Vec<(String,)> = sqlx::query_as(
+            "SELECT r.state FROM workflow.executions e \
+               JOIN workflow.task_runs r ON r.execution_id = e.id \
+              WHERE e.trigger_execution_id IS NOT NULL AND e.flow_key = $1",
+        )
+        .bind(child)
+        .fetch_all(&db.pool)
+        .await
+        .expect("read the child's runs");
+        assert_eq!(
+            sleeps,
+            vec![("SUCCESS".to_string(),)],
+            "{child}, as spawned by {parent}, ran exactly one task and it \
+             succeeded"
+        );
+
+        assert!(
+            baseline().contains(&format!("valids/{parent}")),
+            "valids/{parent} is still baselined -- this test describes why, and \
+             if it banks the description is stale"
+        );
+    }
+}
