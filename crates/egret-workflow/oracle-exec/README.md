@@ -7121,23 +7121,40 @@ fires and its bound's terminal is `WARNING` rather than `FAILED`, which is
 under `Pause` would credit the wait with a bank the flag made. Migration `0143`
 exists for that one entry's `resume_with = 'TERMINAL:WARNING'`.
 
-**The attribution standard is W6 Task 3's and it was met per construct**: a
-one-line mutation that reverts the construct returns the ratchet to its old
-value **naming exactly the banked ids**. Those mutations are in each task's own
-section below, with a run count and a control beside each verdict; they are
-measurements those tasks took, not something `cargo test` re-runs.
+**The attribution standard is W6 Task 3's and it was met for all four
+constructs, which is checked here rather than asserted**: a mutation that
+reverts the construct returns the ratchet to its old value **naming exactly the
+banked ids**.
+
+| construct | the mutation | what the ratchet named |
+|---|---|---|
+| `Pause` | M1, one line | 127, **exactly those eight** as regressions |
+| `LoopUntil` / `WaitFor` | M2 — `descend`'s arm back to `return Step::Waiting`, one line, token count `1 → 0` printed before the verdict | 119, `REGRESSION: 1` — `valids/waitfor-nested`, and nothing else |
+| `allowFailure:` / `allowWarning:` | **M12** (`PlanTask` carries `false,false`) and **M13** (`models::Task` parses `false`) — the provenance chain end to end, author YAML → `models::Task` → `PlanTask` → each of the four sites | **all seven**, on each of the two independently |
+| `sla:` | `and(None)`, 1 grep hit, **3 runs, dead 3/3** | `REGRESSION: 2` — exactly the two |
+
+Those are measurements those tasks took, each with its run count and its control
+beside it; they are **not** something `cargo test` re-runs. Two of W8 Task 5's
+mutations **survived** at a green and unmoved ratchet and were fixed rather than
+explained away — see its section.
 
 #### The route, not the total — four places the package differed from its own spec
 
 The spec predicted eighteen and eighteen is what happened, and **not one of the
 four constructs landed on its predicted number.** Two errors cancelled.
 
-1. **Task 3 was low by one.** The spec gave `Pause` seven; it banked eight. The
-   eighth is `valids/pause-kill-delay`, and what was missing from the prediction
-   is that `FlowService.java:574` **exempts `Pause` from "a `timeout:` is for
-   runnable tasks only"** — so a `Pause`'s own `timeout:` is honoured where a
-   `Sequential`'s is ignored, which is the opposite of the rule the `timeout:`
-   row of W4's three-holes table states for every other flowable.
+1. **Task 3 was low by one.** The spec gave `Pause` seven; it banked eight, and
+   the eighth is **`valids/pause-timeout`** — `timeout: PT1S`, no
+   `pauseDuration:`. The estimate treated a `timeout:` on a flowable as W4's,
+   which is what `FlowService.java:574` says for every non-`RunnableTask`
+   **except `Pause`** — an exception this file and `PlanTask::timeout` have both
+   recorded since W3a Task 7. **Reading the exception as the rule cost one
+   entry**, and it is the one bank in the package that required
+   `PlanTask::timeout` to stop being `None` for the first time in the crate's
+   life. (The spec's `Pause` row also counts `valids/pause-timeout-allow-failure`,
+   which Task 3 did **not** bank — Task 5 did — so the predicted seven and the
+   measured eight are not nested and *"the eighth"* means *the one the estimate's
+   reason excluded*, not a set difference.)
 2. **Task 4 was high by two, and the cause is a spelling.** The spec said
    *"three bankable"* out of nine `LoopUntil`/`WaitFor` entries. One banked.
    **The *"three"* was a spelling split, not a separator**: six of the nine are
@@ -7320,19 +7337,20 @@ equal to its numerator is a sign the sweep only found what it went looking
 for**:
 
 * **the phrase, verbatim, across the whole repository** — `due_retries` appears
-  in **nine** committed files. Seven were examined and **five corrected**:
-  `src/worker/claim.rs`, `src/worker/mod.rs`, `src/executor/retry.rs`,
-  `tests/worker.rs` and `oracle-exec/runnable.txt`. `src/worker/subflow.rs`'s
-  sentence (*"a global scan, so a shipping worker wakes such a retry like any
-  other"*) is **still true and truer**, and `tests/executor.rs`'s is about the
-  retry population, which did not move. The other two are
-  `docs/en/plans/…-w8-advanced-semantics.md` and
-  `docs/en/specs/…-design.md` — **examined and deliberately NOT corrected**:
-  they are the dated plan and design record, the plan's line *is* this task, and
-  the spec's §Risks item 2 is a prediction this package discharged rather than a
-  claim that went stale. Editing them would falsify the record of what was known
-  when. That is a verdict, not a miss, and it is written here so the next sweep
-  does not re-find them as a defect.
+  in **ten** committed files (`.superpowers/` is the package's working record and
+  is not swept). **10 examined / 6 corrected**: `src/worker/claim.rs`,
+  `src/worker/mod.rs`, `src/executor/retry.rs`, `tests/worker.rs`,
+  `oracle-exec/runnable.txt` and **this file**. Two are **examined and still
+  true**: `src/worker/subflow.rs`'s sentence (*"a global scan, so a shipping
+  worker wakes such a retry like any other"*) is truer now, and
+  `tests/executor.rs`'s is about the retry population, which did not move. Two
+  are **examined and deliberately NOT corrected** —
+  `docs/en/plans/…-w8-advanced-semantics.md` and `docs/en/specs/…-design.md`.
+  They are the dated plan and design record; the plan's line *is* this task, and
+  the spec's §Risks item 2 is a prediction this package **discharged** rather
+  than a claim that went stale. Editing them would falsify the record of what
+  was known when. **That is a verdict, not a miss**, and it is written here so
+  the next sweep does not re-find them as a defect.
 * **data that feeds a generator** — `oracle-exec/runnable.txt`'s retry block is
   **below `HANDWRITTEN_SENTINEL`**, which `harvest.py --rewrite-runnable`
   preserves, so the correction cannot be undone by a regeneration. **1 examined,
