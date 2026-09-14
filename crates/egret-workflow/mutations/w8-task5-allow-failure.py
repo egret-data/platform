@@ -162,6 +162,29 @@ MUTATIONS = {
     # `PAUSED` becomes terminal. The trigger-set omission in `guess_state` is
     # SOUND ONLY because a paused child never reaches it, and that soundness
     # rested on this line rather than on anything in `subflow.rs`.
+    # --- fix round 3: the narrowing's own members, and the missing clause ---
+    #
+    # RK/RR RE-ADMIT the two states fix round 2 narrowed rule 1 by. Both
+    # SURVIVED the whole suite when fix round 2 shipped -- the narrowing was
+    # right and unguarded -- which is what
+    # `a_killed_or_retried_branch_does_not_fail_its_siblings` exists to change.
+    "RK": ("src/executor/flowable/parallel.rs",
+           ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
+           ".any(|&ix| matches!(latest(state, ix),\n"
+           "            Some(RunState::Failed) | Some(RunState::Killed)));"),
+    "RR": ("src/executor/flowable/parallel.rs",
+           ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
+           ".any(|&ix| matches!(latest(state, ix),\n"
+           "            Some(RunState::Failed) | Some(RunState::Retried)));"),
+    # RP is a FORWARD probe, not a revert: it ADDS the `hasFailedNoRetry`
+    # clause rule 1 lacks. A verdict of "survives" is the measurement that the
+    # divergence is unreachable from this corpus.
+    "RP": ("src/executor/flowable/parallel.rs",
+           ".any(|&ix| latest(state, ix) == Some(RunState::Failed));",
+           ".any(|&ix| latest(state, ix) == Some(RunState::Failed)\n"
+           "            && crate::executor::retry::policy_for(plan, state, ix)\n"
+           "                .and_then(|p| crate::executor::retry::next_retry_at(p, state, ix, now))\n"
+           "                .is_none());"),
     "M24": ("src/executor/state.rs",
             "                | RunState::Warning\n        )",
             "                | RunState::Warning\n                | RunState::Paused\n        )"),

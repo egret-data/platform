@@ -164,12 +164,37 @@ pub(crate) fn drive_concurrent(
     // variant inert here instead of a defect: `isFailed()` names what it
     // includes.
     //
-    // **Measured on the pinned artifact** (`javap -p -c`,
-    // `io/kestra/core/models/executions/Execution.class`): `lambda$hasFailed$0`,
-    // `lambda$hasFailed$1` and `lambda$hasFailedNoRetry$0` are each
-    // `getState().isFailed()` and nothing else, and `State.Type.isFailed()` is
-    // `this == FAILED`. `findTaskDependingFlowState` is what those gate, and it
-    // is the artifact's whole "a sibling went wrong" switch.
+    // **Which Java predicate this IS, corrected** -- the first version of this
+    // comment named three lambdas and said all three were
+    // `getState().isFailed()` and nothing else, which is false for one of them
+    // and shipped three times inside the round that wrote it (here, the
+    // report, and the new test's doc).
+    //
+    // `findTaskDependingFlowState` calls TWO predicates, in order
+    // (`javap -p -c io/kestra/core/models/executions/Execution.class`):
+    //
+    // | bci | call | lambda | what it is |
+    // |---|---|---|---|
+    // | 110 | `hasFailed(List, TaskRun)` | `lambda$hasFailed$1` | `getState().isFailed()`, four instructions |
+    // | 120 | `hasFailedNoRetry(List, TaskRun)` | `lambda$hasFailedNoRetry$0` | `isFailed() && shouldNotBeRetried(...)`, **bci 0-24 with a branch** |
+    //
+    // **This line is `hasFailed`, the one at bci 110**, and that one really is
+    // `isFailed()` alone. `State.Type.isFailed()` is `this == FAILED`.
+    //
+    // **The retry clause is the SECOND gate and egret has it elsewhere.** In
+    // Java, `hasFailedNoRetry` returning false makes
+    // `findTaskDependingFlowState` return `emptyList()` -- start nothing, fail
+    // nothing, wait for the retry. egret's counterpart is
+    // [`current_list`](super::current_list)'s `Current::RetryPending`, which is
+    // the same decision in the same shape. **What `fail_the_rest` does NOT have
+    // is that clause**: a `Parallel` child that failed and WILL be retried
+    // makes this rule fail its in-flight siblings, where Kestra leaves them
+    // alone. Registered as a divergence rather than fixed in a fix round,
+    // because it is unreachable from this corpus -- measured, probe RP -- and
+    // `no_corpus_parallel_child_declares_a_retry` derives why: the only corpus
+    // flow pairing a `retry:` with a concurrent flowable is
+    // `valids/retry-flowable-parallel`, whose `retry:` sits on a `Loop` with
+    // one child and therefore has no sibling to fail.
     //
     // `SKIPPED` stays out for W3c's reason, unchanged: a falsy `runIf:` on one
     // branch must not fail the others, and

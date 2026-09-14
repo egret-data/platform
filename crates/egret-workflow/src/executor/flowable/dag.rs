@@ -22,44 +22,57 @@ use super::{latest, Step};
 
 /// Drive one `Dag`.
 ///
-/// # The predicate, and the one word this spells differently from Kestra
+/// # The predicate is Kestra's, word for word — since W8 Task 5 fix round 2
 ///
 /// A node is startable when every task it `dependsOn` has a run whose latest
-/// state is `SUCCESS`. Kestra's filter says **terminated**, not succeeded —
-/// `resolveDagNexts`'s comment is literally "Check if have no dependencies OR
-/// all dependencies are terminated" — so read alone, Kestra would create a
-/// node whose dependency had *failed*.
+/// state **is terminated**. Measured on the pinned artifact, not read from the
+/// checkout: `javap -p -c io/kestra/core/runners/FlowableUtils.class`,
+/// `lambda$resolveDagNexts$3` is `getState().isTerminated()` and nothing else
+/// — four instructions — and `State.Type.isTerminated()` is
+/// `FAILED || WARNING || SUCCESS || KILLED || CANCELLED || RETRIED || SKIPPED
+/// || RESUBMITTED`.
 ///
-/// It never does, and the two spellings cannot be told apart, because the
-/// branch closes first: rule 1 of [`drive_concurrent`] stops a branch creating
-/// anything the moment one of its children reaches a terminal state that is not
-/// `SUCCESS`. Every state that separates "terminated" from "succeeded" is a
-/// state that has already ended the branch, so no input reaches the predicate
-/// with a terminated-but-not-successful dependency.
+/// ## What this section said for five packages, and why it was safe until it
+/// was not
 ///
-/// That is an argument, and an argument is not a guard: it is why
-/// `a_dag_creates_nothing_downstream_of_a_failed_dependency` exists, and why it
-/// asserts on the *runs* rather than on which spelling this line uses. If a
-/// later task gives a branch a way to survive a failed child — `errors:` is
-/// Task 7's and does exactly that — this line and that test have to be
-/// revisited together, and the test is the one that will notice.
+/// It said the predicate was `SUCCESS` (later `SUCCESS` **or** `SKIPPED`), that
+/// *"the two spellings cannot be told apart"*, and that *"`FAILED` and `KILLED`
+/// remain unreachable here"*. The argument was: rule 1 of [`drive_concurrent`]
+/// closes the branch on any terminal that is not `SUCCESS`, so no
+/// terminated-but-not-successful dependency ever reaches this line.
 ///
-/// # W3c: the argument broke, exactly where it said it would
+/// **That argument had a dependency it did not name — rule 1's exclusion list
+/// — and W8 Task 5 removed it.** Rule 1 is `isFailed()` now, Kestra's own
+/// predicate, so a `WARNING`, `KILLED` or `RETRIED` sibling no longer closes
+/// the branch. Under the old `SUCCESS | SKIPPED` spelling that combination
+/// **stalls the `Dag` for ever**: the dependant is never ready and nothing
+/// fails it. Reverting this line while keeping rule 1 is not a style
+/// difference — it panics
+/// `a_dag_node_downstream_of_a_warning_dependency_still_runs` with
+/// *"down has a run"*, because the node is never created at all.
 ///
-/// `SKIPPED` is the state that separates the two spellings and does **not**
-/// end the branch: [`drive_concurrent`]'s rule 1 now excludes it, because
-/// `State.java:293` puts it in `isTerminatedNoFail()` beside `SUCCESS`. So a
-/// node whose `runIf:` rendered falsy reaches this predicate terminated, alive,
-/// and not `SUCCESS` — and a `Success`-only reading would leave every node that
-/// `dependsOn` it waiting for ever, on a `Dag` Kestra runs to completion.
-/// The predicate is therefore `SUCCESS` **or** `SKIPPED`, which is one step
-/// closer to Kestra's "terminated" and still not the whole of it: `FAILED` and
-/// `KILLED` remain unreachable here for the reason above.
+/// So the two lines are **coupled**, and the coupling runs both ways:
+/// narrowing rule 1 without widening this one hangs the `Dag`, and widening
+/// this one without narrowing rule 1 would let a dependant start under a
+/// failure the branch was about to close. Neither is safe alone, and the fix
+/// round that found the first had to make both.
 ///
-/// No corpus `Dag` node carries a `runIf:`
-/// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives that from
-/// all 345 flows), so this is read from the Java rather than measured live, and
-/// `a_dag_node_downstream_of_a_skipped_dependency_still_runs` is the guard.
+/// **The generalisation is the part worth keeping**: *an argument that a
+/// spelling is unobservable is a claim about ANOTHER predicate, and it expires
+/// silently when that predicate changes.* This one survived W3c (which
+/// weakened it to add `SKIPPED`) and died at W8 Task 5, in a commit that
+/// rewrote the function thirty lines below and left this doc contradicting it.
+///
+/// The guards, one per state that separates the spellings:
+/// `a_dag_node_downstream_of_a_skipped_dependency_still_runs` (W3c),
+/// `a_dag_node_downstream_of_a_warning_dependency_still_runs` and
+/// `a_dag_node_downstream_of_a_killed_dependency_still_runs` (W8 Task 5), and
+/// `a_dag_creates_nothing_downstream_of_a_failed_dependency`, which is the row
+/// that says rule 1 still closes the branch on a real failure. No corpus `Dag`
+/// node carries a `runIf:` or an `allowFailure:`
+/// (`no_corpus_parallel_or_dag_child_declares_a_run_if` re-derives the first
+/// from all 345 flows), so **the oracle scores none of them** and those four
+/// rows are the whole instrument.
 pub(crate) fn drive(
     plan: &Plan,
     state: &ExecutionState,

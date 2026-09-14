@@ -959,6 +959,21 @@ pub async fn apply_outcome(
     .await
 }
 
+/// **Whether an execution reaching `s` tells its parent** — the predicate the
+/// two links below are gated on, named so that something other than a comment
+/// can assert it.
+///
+/// It is `is_terminal` and the indirection is the point: `worker::subflow`'s
+/// [`guess_state`](super::subflow) omits Java's `isPaused()` disjunct from its
+/// trigger set, and that omission is sound **only because** a `PAUSED` child
+/// never reaches it. That "only because" lived in prose on both sides until W8
+/// Task 5 fix round 3. `a_paused_child_cannot_reach_guess_state` calls this
+/// function, so a change to the filter here breaks a test rather than a
+/// paragraph.
+pub(super) fn notifies_parent(s: RunState) -> bool {
+    s.is_terminal()
+}
+
 /// The lease a writer holds, and the run it releases.
 ///
 /// Carried as one value rather than as a bare `run_ix` because the two halves
@@ -1041,7 +1056,7 @@ pub(super) async fn settle(
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
-        if let Some(terminal) = is.filter(|s| s.is_terminal()) {
+        if let Some(terminal) = is.filter(|s| notifies_parent(*s)) {
             spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
             // The other kind of link. `on_execution_terminal` reads
             // `parent_execution_id` and this reads `trigger_execution_id`, and

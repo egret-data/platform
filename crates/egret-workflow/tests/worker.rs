@@ -6175,4 +6175,53 @@ async fn a_paused_row_that_names_no_resumer_cannot_be_stored(pool: sqlx::PgPool)
     .execute(&pool)
     .await
     .expect("a terminated bounded pause keeps its discriminant and must be stored");
+
+    // **Migration 0143's value, exercised** -- W8 Task 5 fix round 3. `0143`
+    // widened 0141's `workflow_task_runs_resume_with_known` CHECK with
+    // `TERMINAL:WARNING`, for a `Pause` whose `timeout:` fires under
+    // `allowFailure: true` (`valids/pause-timeout-allow-failure`). It was
+    // **unexercised**: the literal appeared nowhere but the migration, and
+    // deleting 0143 failed nothing -- the executor writes the row through
+    // `Resume::wire`, and no test drove that path against Postgres.
+    //
+    // The row below is refused without 0143 and accepted with it, which is the
+    // whole of what the migration changes. Its control is the `TERMINAL:SUCCESS`
+    // write above: if the CHECK were dropped altogether BOTH would pass, so the
+    // pair is what makes this an assertion about the vocabulary rather than
+    // about Postgres accepting an UPDATE.
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'WARNING', resume_with = 'TERMINAL:WARNING', not_before_ms = 1000 \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await
+    .expect(
+        "migration 0143 admits TERMINAL:WARNING -- a `Pause` whose `timeout:` \
+         fires under `allowFailure: true`",
+    );
+    assert_eq!(
+        run_state(&pool, ex, "a").await.as_deref(),
+        Some("WARNING"),
+        "and the row really landed, so the write above is not a no-op UPDATE \
+         matching zero rows"
+    );
+
+    // The negative half, so the CHECK is shown to still REFUSE something: a
+    // discriminant 0143 did not add stays out.
+    let refused = sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'CANCELLED', resume_with = 'TERMINAL:CANCELLED', not_before_ms = 1000 \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(ex)
+    .execute(&pool)
+    .await;
+    assert!(
+        refused.is_err(),
+        "`TERMINAL:CANCELLED` is not in the vocabulary -- 0143 added one \
+         discriminant, not an escape hatch. `CANCELLED` is the state `RunState` \
+         still does not hold, so this row is also the marker for whoever adds it"
+    );
 }

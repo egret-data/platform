@@ -1329,10 +1329,15 @@ mod tests {
     /// that matters.
     #[test]
     fn a_paused_child_cannot_reach_guess_state() {
+        // **Through `claim::notifies_parent`, which is the predicate
+        // `claim::settle` actually filters on** -- not through `is_terminal`
+        // directly. Fix round 3: deriving from `is_terminal` made this test
+        // true of the ENUM and silent about the CALL SITE, so the link it
+        // exists to pin was still carried by prose alone.
         let reachable: Vec<RunState> = RunState::ALL
             .iter()
             .copied()
-            .filter(|s| s.is_terminal())
+            .filter(|s| crate::worker::claim::notifies_parent(*s))
             .collect();
         assert!(
             !reachable.contains(&RunState::Paused),

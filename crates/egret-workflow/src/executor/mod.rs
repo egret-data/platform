@@ -1095,8 +1095,16 @@ mod tests {
     // dag
     // ----------------------------------------------------------------------
 
-    /// **A node is created only once every task it `dependsOn` has SUCCEEDED,
-    /// and the whole eligible batch is created at once.**
+    /// **A node is created only once every task it `dependsOn` has
+    /// TERMINATED, and the whole eligible batch is created at once.**
+    ///
+    /// The word was *succeeded* until W8 Task 5 fix round 2, in this doc and in
+    /// this test's own name — and on `valids/dag`, whose every dependency
+    /// succeeds, the two are the same assertion. The name is kept because
+    /// renaming a test loses its history and the fixture really does only
+    /// exercise successful dependencies; the three rows that separate the
+    /// spellings are `a_dag_node_downstream_of_a_{skipped,warning,killed}
+    /// _dependency_still_runs`.
     ///
     /// The assertion is `valids/dag`'s own `taskRunList`, verbatim from
     /// `golden.json`: `dag, task1, task2, task3, task4, task6, task5`. That
@@ -1148,13 +1156,20 @@ mod tests {
     /// **Nothing downstream of a failed dependency is ever created, and the
     /// `Dag` ends FAILED rather than stuck.**
     ///
-    /// This is also what makes the predicate's spelling unobservable. Kestra's
-    /// `resolveDagNexts` filters on "all dependencies are **terminated**";
-    /// [`dag::drive`](crate::executor::flowable::dag::drive) says *succeeded*.
-    /// Read alone the two differ on a failed dependency — and no input reaches
-    /// the predicate in that state, because the branch has already closed. If a
-    /// later task gives a branch a way to survive a failed child (`errors:` is
-    /// Task 7's and does exactly that), this is the test that notices.
+    /// **This used to be offered as the reason the predicate's spelling was
+    /// unobservable, and that reasoning is retired.** It said Kestra's
+    /// `resolveDagNexts` filters on "all dependencies are **terminated**" while
+    /// `dag::drive` said *succeeded*, and that no input could reach the
+    /// predicate in a state that told them apart because rule 1 had already
+    /// closed the branch. W8 Task 5 narrowed rule 1 to Kestra's `isFailed()`,
+    /// which is precisely the dependency that argument rested on, and
+    /// `dag::drive` says *terminated* now — the same word as the artifact.
+    ///
+    /// What this row still says, and it is the load-bearing half: **rule 1 does
+    /// close the branch on a real `FAILED` dependency**, so nothing downstream
+    /// is created and the `Dag` ends `FAILED` rather than stuck. It is the
+    /// control for the three `…_still_runs` rows, which would otherwise pass on
+    /// an implementation that had stopped closing branches at all.
     #[test]
     fn a_dag_creates_nothing_downstream_of_a_failed_dependency() {
         let plan = plan_of("valids/dag");
@@ -5643,9 +5658,18 @@ tasks:
     /// `fail_the_rest` — **egret failing runs Kestra succeeds**, which is the
     /// class the comment directly above that line already forbade.
     ///
-    /// Measured on the pinned artifact: `lambda$hasFailed$0`,
-    /// `lambda$hasFailed$1` and `lambda$hasFailedNoRetry$0` in
-    /// `Execution.class` are each `getState().isFailed()` and nothing else.
+    /// Measured on the pinned artifact, and **corrected in fix round 3**: this
+    /// read *"`lambda$hasFailed$0`, `lambda$hasFailed$1` and
+    /// `lambda$hasFailedNoRetry$0` … are each `getState().isFailed()` and
+    /// nothing else"*, which is false for the third —
+    /// `lambda$hasFailedNoRetry$0` is `isFailed() && shouldNotBeRetried(…)`,
+    /// bci 0–24 with a branch. Rule 1 corresponds to **`hasFailed`**, called at
+    /// bci 110 of `findTaskDependingFlowState`, whose lambda
+    /// (`lambda$hasFailed$1`) is four instructions and really is `isFailed()`
+    /// alone. The retry clause belongs to the second gate at bci 120, which is
+    /// [`flowable::current_list`]'s `Current::RetryPending`; see
+    /// `parallel::drive_concurrent`'s rule 1 for the one place egret still
+    /// lacks it and why no corpus flow can reach it.
     ///
     /// **The oracle cannot score this** — no corpus flow puts an
     /// `allowFailure:` inside a `Parallel`, and applying the fix leaves the
@@ -5674,6 +5698,133 @@ tasks:
                 |r| r.history.contains(&RunState::Failed) && plan.tasks[r.task].id == "sibling"
             ),
             "no sibling may carry a FAILED that rule 1 wrote"
+        );
+    }
+
+    /// A `Parallel` whose first branch is a bare leaf the driver gives an
+    /// arbitrary terminal, and whose second is left in flight.
+    const PARALLEL_LEAF_SIBLING: &str = r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: par
+    type: io.kestra.plugin.core.flow.Parallel
+    tasks:
+      - id: doomed
+        type: io.kestra.plugin.core.debug.Return
+        format: a
+      - id: sibling
+        type: io.kestra.plugin.core.debug.Return
+        format: b
+"#;
+
+    /// **Rule 1 is narrowed by exactly three states, and all three are pinned
+    /// here** — `Warning`, `Killed` and `Retried`.
+    ///
+    /// Rule 1 used to be an exclusion list and is `isFailed()` now. Two of the
+    /// three states that changed hands were **unguarded** after fix round 2:
+    /// probes re-admitting `Killed` and `Retried` to the predicate both
+    /// SURVIVED the whole suite at 797 + 54 with the ratchet unmoved, so
+    /// nothing would have noticed the narrowing being undone. The `Warning` row
+    /// lives in `a_warning_branch_does_not_fail_its_siblings`; these two are
+    /// its missing siblings.
+    ///
+    /// **Right against the artifact**: `hasFailed`'s lambda is
+    /// `getState().isFailed()`, and `State.Type.isFailed()` is `this == FAILED`
+    /// — so neither `KILLED` nor `RETRIED` switches a branch to its `errors:`.
+    /// `KILLED` still dominates the parent's terminal, by a different
+    /// mechanism: `guessFinalState` tests it first and breaks, which
+    /// [`flowable::aggregate`] reproduces — asserted below, because a narrowing
+    /// that also lost the aggregate would be a second defect wearing the first
+    /// one's clothes.
+    ///
+    /// **The oracle cannot score any of it**: no corpus `Parallel` child
+    /// reaches `KILLED` or `RETRIED` with a sibling in flight.
+    #[test]
+    fn a_killed_or_retried_branch_does_not_fail_its_siblings() {
+        for (branch, parent) in [
+            (RunState::Killed, RunState::Killed),
+            (RunState::Retried, RunState::Success),
+        ] {
+            let plan = build_plan(PARALLEL_LEAF_SIBLING).expect("the probe plans");
+            let (state, _) = run_to_fixpoint_completing(&plan, &[("doomed", branch)]);
+            assert_eq!(
+                history_of(&plan, &state, "doomed").last().copied(),
+                Some(branch.wire()),
+                "{branch:?}: the control -- the branch really did end there"
+            );
+            assert_eq!(
+                history_of(&plan, &state, "sibling"),
+                ["CREATED", "SUBMITTED", "RUNNING"],
+                "{branch:?} is not `isFailed()`, so rule 1 must leave a sibling \
+                 that is still in flight alone"
+            );
+            // And once the sibling finishes, the parent's terminal is the
+            // AGGREGATE's -- `KILLED` dominates, `RETRIED` has no arm at all.
+            let (done, _) = run_to_fixpoint_completing(
+                &plan,
+                &[("doomed", branch), ("sibling", RunState::Success)],
+            );
+            assert_eq!(
+                history_of(&plan, &done, "par").last().copied(),
+                Some(parent.wire()),
+                "{branch:?}: `guessFinalState`'s priority pass, unchanged by \
+                 the narrowing"
+            );
+        }
+    }
+
+    /// **Rule 4 completes a `Dag` under a `KILLED` dependency**, which is what
+    /// the two fix-round-2 changes do differently *together*.
+    ///
+    /// `ended_badly` has a second reader: rule 4 treats a branch as finishable
+    /// when every created run is terminal AND either every child has a run **or
+    /// rule 1 already closed the branch**. Narrowing rule 1 removes the second
+    /// disjunct for `KILLED` and `RETRIED` — so on its own it would leave a
+    /// `Dag` with an uncreated node `Waiting` for ever, i.e. STUCK.
+    ///
+    /// It does not, because the dependency gate moved in the same commit: a
+    /// `KILLED` dependency **is** terminated, so `down` is created, so
+    /// `created.len() == children.len()` and rule 4's first disjunct carries
+    /// it. **The coupling runs in both directions** — `dag.rs`'s doc records
+    /// the other one — and this row is what says the pair is closed rather than
+    /// merely consistent.
+    #[test]
+    fn a_dag_node_downstream_of_a_killed_dependency_still_runs() {
+        let plan = build_plan(
+            r#"id: probe
+namespace: io.kestra.tests
+tasks:
+  - id: d
+    type: io.kestra.plugin.core.flow.Dag
+    tasks:
+      - task:
+          id: up
+          type: io.kestra.plugin.core.debug.Return
+          format: a
+      - task:
+          id: down
+          type: io.kestra.plugin.core.debug.Return
+          format: b
+        dependsOn:
+          - up
+"#,
+        )
+        .expect("the probe plans");
+        let (state, _) = run_to_fixpoint_completing(
+            &plan,
+            &[("up", RunState::Killed), ("down", RunState::Success)],
+        );
+        assert_eq!(
+            history_of(&plan, &state, "down"),
+            ["CREATED", "SUBMITTED", "RUNNING", "SUCCESS"],
+            "a KILLED dependency is TERMINATED, so the dependant is ready -- \
+             without the gate moving with rule 1 this run would not exist and \
+             rule 4 would leave the Dag Waiting"
+        );
+        assert_eq!(
+            history_of(&plan, &state, "d").last().copied(),
+            Some("KILLED"),
+            "and rule 4 completes the branch on the aggregate, KILLED first"
         );
     }
 
@@ -5972,6 +6123,146 @@ tasks:
                  is the one the decision was taken at end to end"
             );
         }
+    }
+
+    /// **No corpus flow puts a `retry:` on a DIRECT `Parallel` or `Dag`
+    /// child** — the derivation behind the one divergence
+    /// [`parallel::drive_concurrent`]'s rule 1 knowingly carries.
+    ///
+    /// Kestra gates the switch to a branch's `errors:` on **two** predicates in
+    /// order (`findTaskDependingFlowState`, bci 110 and 120): `hasFailed`, then
+    /// `hasFailedNoRetry`. Rule 1 is the first; it has no counterpart for the
+    /// second, so a `Parallel` child that failed and **will be retried** makes
+    /// egret fail its in-flight siblings where Kestra waits. egret does have
+    /// the second gate — [`flowable::current_list`]'s `Current::RetryPending` —
+    /// but rule 1 does not consult it.
+    ///
+    /// **It is unreachable from this corpus, and the near-miss is the
+    /// interesting part.** Three flows declare a `Parallel`/`Dag` *and* a
+    /// `retry:` — `valids/full` and `invalids/duplicate-parallel` put the
+    /// `retry:` on a top-level task, and **`valids/subflow-parent-retry` puts
+    /// it inside a `Parallel`**, on `subflow1`/`subflow2`. That one is a
+    /// grandchild: rule 1 reads the `Parallel`'s DIRECT children (`seq1`,
+    /// `seq2`), and a `Sequential` whose child is mid-retry stays `RUNNING`
+    /// because `current_list` answers `RetryPending`. So the second gate
+    /// protects the first, one level down — which is why the divergence needs a
+    /// `retry:` on a direct child and why this test looks for exactly that.
+    #[test]
+    fn no_corpus_parallel_child_declares_a_retry() {
+        fn walk(node: &serde_json::Value, out: &mut Vec<String>) {
+            if let serde_json::Value::Object(map) = node {
+                let canon = map
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::models::canonical_flow_type);
+                match canon.as_deref() {
+                    Some("parallel") => {
+                        for child in map
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            if child.get("retry").is_some() {
+                                out.push(child["id"].as_str().unwrap_or("<no id>").to_string());
+                            }
+                        }
+                    }
+                    Some("dag") => {
+                        for entry in map
+                            .get("tasks")
+                            .and_then(|v| v.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            let Some(task) = entry.get("task") else {
+                                continue;
+                            };
+                            if task.get("retry").is_some() {
+                                out.push(task["id"].as_str().unwrap_or("<no id>").to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match node {
+                serde_json::Value::Object(map) => {
+                    for v in map.values() {
+                        walk(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        walk(v, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // The positive control, both spellings and both shapes -- an empty
+        // result below must be a property of the corpus and not of the walker.
+        for (ty, body) in [
+            (
+                "io.kestra.plugin.core.flow.Parallel",
+                "    tasks:\n      - id: on\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n        retry:\n          type: constant\n          interval: PT1S\n      - id: off\n        type: io.kestra.plugin.core.debug.Return\n        format: x\n",
+            ),
+            (
+                "io.kestra.plugin.core.flow.Dag",
+                "    tasks:\n      - task:\n          id: on\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n          retry:\n            type: constant\n            interval: PT1S\n      - task:\n          id: off\n          type: io.kestra.plugin.core.debug.Return\n          format: x\n",
+            ),
+        ] {
+            let probe: serde_json::Value = serde_norway::from_str(&format!(
+                "id: probe\nnamespace: io.kestra.tests\ntasks:\n  - id: p\n    type: {ty}\n{body}"
+            ))
+            .expect("the probe parses");
+            let mut found = Vec::new();
+            walk(&probe, &mut found);
+            assert_eq!(
+                found,
+                ["on".to_string()],
+                "{ty}: the walker must find the child with a retry and not the other"
+            );
+        }
+
+        let mut offenders: Vec<String> = Vec::new();
+        let mut both = 0usize;
+        for (id, source) in every_corpus_flow() {
+            let has_pd = [
+                "core.flow.Parallel",
+                "core.flow.Dag",
+                "core.parallel",
+                "core.dag",
+            ]
+            .iter()
+            .any(|k| source.contains(k));
+            if has_pd && source.contains("retry:") {
+                both += 1;
+            }
+            let Ok(doc) = serde_norway::from_str::<serde_json::Value>(&source) else {
+                continue;
+            };
+            let mut here = Vec::new();
+            walk(&doc, &mut here);
+            offenders.extend(here.into_iter().map(|t| format!("{id}/{t}")));
+        }
+        // **The number that can disagree.** A bare `offenders.is_empty()` is
+        // unfalsifiable alone -- it passes on a corpus with no `Parallel` in it
+        // at all -- so the wider population is asserted beside it.
+        assert_eq!(
+            both, 3,
+            "corpus flows declaring BOTH a Parallel/Dag and a retry: anywhere. \
+             If this moves, re-read whether the new one puts the retry on a \
+             DIRECT child"
+        );
+        assert_eq!(
+            offenders,
+            Vec::<String>::new(),
+            "a corpus `Parallel` or `Dag` child declares a `retry:`, so rule \
+             1's missing `hasFailedNoRetry` clause is now reachable and a \
+             golden entry can judge it. Add the clause rather than the entry"
+        );
     }
 
     /// **No corpus flow puts a `runIf:` on a `Parallel` or `Dag` child**, so
