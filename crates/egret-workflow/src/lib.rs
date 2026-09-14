@@ -19,7 +19,9 @@
 //!   is the package that calls it from `egret-bin` (spec §9)
 //! - `sla`       — W8 Task 6 (`sla:` evaluation; `EXECUTION_ASSERTION` only)
 //! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
-//!   the flow trigger's window-free arm)
+//!   the flow trigger's window-free arm). W6 built the predicate as a pure
+//!   function and no table, so nothing here fires in production; **W12** builds
+//!   `workflow.triggers` and the loop that claims it (spec §9)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the

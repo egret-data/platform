@@ -1,4 +1,4 @@
-# W10 — Runtime và bề mặt execution, cùng ba hạng mục không gói nào sở hữu
+# W10 — Runtime và bề mặt execution, cùng bốn hạng mục không gói nào sở hữu
 
 **Trạng thái:** thiết kế, chờ review
 **Phụ thuộc:** W3b (executor bền), W4 (runner), W8 (ngữ nghĩa nâng cao — đã merge)
@@ -14,14 +14,19 @@ Mọi gói W trước đều mở đầu bằng một phép đo trên corpus. G�
 loại khác, vì phát hiện không nằm ở flow mà ở **quyền sở hữu**.
 
 Dòng W7 viết: *"Workflows nav group; YAML editor; read-only topology; execution
-gantt and logs"*. **Hai trong bốn hạng mục ấy không dựng được**, và lý do là ba
-thứ chúng cần **không thuộc gói nào trong bảng**:
+gantt and logs"*. **Hai trong bốn hạng mục ấy không dựng được**, và lý do là
+**bốn** thứ chúng cần **không thuộc gói nào trong bảng**. Ba thứ đã nằm sẵn trong
+bảng này lúc viết spec; thứ tư — vòng trigger — do W10 Task 1 tìm ra trong lúc đo
+schema cho dòng log, và nó được liệt ở đây vì một phát hiện về các hạng mục vô
+chủ mà lại lặng lẽ bỏ sót một hạng mục thì chính là lặp lại cái khiếm khuyết nó
+đang ghi:
 
 | W7 cần gì | spec chương trình thiết kế ở đâu | gói nào sở hữu việc xây |
 |---|---|---|
 | một tiến trình đẩy execution đi tiếp | **§6.3**, *"worker loop … trigger loop … reclaim"* | **W3b** — *"claim loops; reaper"*. **Đã merge. Hàm thì có; không ai gọi.** |
 | một bề mặt REST cho execution | **không đâu cả** | **không gói nào** |
 | `workflow.task_logs` + một sink biết ghi vào đó | **§6.1** (danh sách bảng) và **§11** câu hỏi mở 1 | **không gói nào** |
+| một vòng kích hoạt trigger `cron:` và lịch | **§6.3**, *"worker loop … **trigger loop** … reclaim"*, và dòng `workflow.triggers` ở **§6.1** | **không gói nào** — W6 ship `trigger::tick` dưới dạng **hàm thuần trên state được tiêm vào** và không xây bảng nào cho nó |
 
 **Kiểm bằng máy, không phải đọc:** quét cả bảng package (§9) tìm
 `task_logs|execution api|ExecutionController|wire|binary|daemon` → **0**.
@@ -29,13 +34,32 @@ thứ chúng cần **không thuộc gói nào trong bảng**:
 352, bên trong mục *"Not ported, but required reading before W7"* — nó được nêu
 như một **hình dạng để nghiên cứu**, chưa bao giờ như một hạng mục phải giao.
 
+**Dòng thứ tư được đo theo đúng cách ấy, mỗi số 0 đều kèm một control.** Không
+migration nào tạo `workflow.triggers` — schema `workflow` có đúng bốn bảng:
+`flows`, `flow_versions`, `executions`, `task_runs` (control: `workflow.executions`
+xuất hiện trong **ba** file migration, nên phép tìm có chạm tới migration).
+`TriggerState::initialise` có **đúng một** caller và đó là một helper `#[cfg(test)]`
+trong `trigger/mod.rs`; ngoài `crates/egret-workflow/src/trigger/` không có gì gọi
+`trigger::tick`; và `crates/egret-bin/src/main.rs` chứa chuỗi `trigger` **không lần
+nào** (control: `egret_workflow` xuất hiện **5** lần trong cùng file). **Nên một
+trigger `cron:` KHÔNG THỂ nổ trong production, và W10 với phạm vi hiện tại không
+đổi điều đó** — W10 nối vòng *worker*, vốn có bảng để claim; vòng trigger thì
+không có bảng nào.
+
 **Đây là ảnh gương của một defect W8 đã đóng.** Ở đó `allowFailure` bị giao **hai
-lần** trong hai tài liệu và gói phải nói chủ nào sai. Ở đây ba hạng mục được giao
+lần** trong hai tài liệu và gói phải nói chủ nào sai. Ở đây bốn hạng mục được giao
 **không lần nào**. Một dòng gọi tên một thứ trong kiến trúc rồi không bao giờ gọi
 lại trong kế hoạch thì, với người đi kiểm độ phủ, **trông y hệt một dòng đã xong**.
 
-Nên W10 tồn tại để **đặt chủ cho ba thứ đó**, và bảng §9 của spec chương trình là
-**một hạng mục phải giao của gói này**, không phải tài liệu tham chiếu cho nó.
+Nên W10 tồn tại để **đặt chủ cho cả bốn**. Hai thứ đầu W10 tự xây; hai thứ còn
+lại W10 gọi tên chứ không nuốt vào: **W11** là log, **W12** là vòng trigger, mỗi
+cái được ghi ở §9 kèm phép đo, như một quyết định chứ không phải một chỗ bỏ sót.
+Hạng mục phải giao của W10 là *execution đi tiếp được và nhìn thấy được*; có nó
+thì một flow chạy được bằng start thủ công qua API hoặc bằng webhook, cả hai đều
+đã hoạt động. Cron là một năng lực riêng, cần bảng riêng, claim riêng và lập luận
+an toàn riêng; nhét nó vào lúc này sẽ nhân đôi phần việc concurrency của runtime
+trước khi phần việc ấy tồn tại. **Bảng §9 của spec chương trình là một hạng mục
+phải giao của gói này**, không phải tài liệu tham chiếu cho nó.
 
 ## 2. Cái gì phán xét W10 — và câu trả lời trung thực là *không phải ratchet*
 
@@ -241,7 +265,7 @@ Không đổi, với bốn điều mang trọng lượng ở đây:
   harness nào lái tick** — tiêu đề của cả gói.
 - `workflow.task_logs`, một `LogSink` biết lưu, retention và một API đọc — **hoặc
   một lời hoãn tường minh sang W11, ghi lại kèm phép đo** (§5).
-- **Bảng package §9 của spec chương trình được sửa**, để ba hạng mục trên có chủ,
+- **Bảng package §9 của spec chương trình được sửa**, để cả bốn hạng mục trên có chủ,
   và phát hiện ở §1 được ghi ở đúng chỗ người đọc bảng sau này sẽ thấy.
 - Một mục trong tuyên bố độ phủ, cùng giọng với phần trigger của W6, nói rằng
   **oracle không thể phát ngôn gì cho gói này** và vì sao.

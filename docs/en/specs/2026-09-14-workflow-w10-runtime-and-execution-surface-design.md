@@ -1,4 +1,4 @@
-# W10 — Runtime and execution surface, and three deliverables no package owns
+# W10 — Runtime and execution surface, and four deliverables no package owns
 
 **Status:** design, awaiting review
 **Depends on:** W3b (durable executor), W4 (runner), W8 (advanced semantics — merged)
@@ -11,14 +11,19 @@ Every W package so far opened with a corpus measurement. This one opens with a
 different kind, because the finding is not about flows — it is about **ownership**.
 
 W7's row reads *"Workflows nav group; YAML editor; read-only topology; execution
-gantt and logs"*. Two of those four cannot be built, and the reason is that three
-things they need are **owned by no package in the table**:
+gantt and logs"*. Two of those four cannot be built, and the reason is that four
+things they need are **owned by no package in the table**. Three were in this
+table when the spec was written; the fourth — the trigger loop — was found by W10
+Task 1 while measuring the schema for the logs row, and it is listed here because
+a finding about unowned deliverables that quietly omits one repeats the defect it
+records:
 
 | what W7 needs | where the programme spec designs it | which package owns building it |
 |---|---|---|
 | a process that advances executions | **§6.3**, *"worker loop … trigger loop … reclaim"* | **W3b** — *"claim loops; reaper"*. **Merged. The functions exist; nothing calls them.** |
 | an execution REST surface | **nowhere** | **none** |
 | `workflow.task_logs` + a sink that writes to it | **§6.1**'s schema list, and **§11** open question 1 | **none** |
+| a loop that fires `cron:` and schedule triggers | **§6.3**, *"worker loop … **trigger loop** … reclaim"*, and **§6.1**'s `workflow.triggers` row | **none** — W6 shipped `trigger::tick` as a **pure function over injected state** and built no table for it |
 
 **Machine-checked, not read:** grepping the whole package table (§9) for
 `task_logs|execution api|ExecutionController|wire|binary|daemon` returns **0**.
@@ -26,14 +31,34 @@ things they need are **owned by no package in the table**:
 inside *"Not ported, but required reading before W7"* — it is named as a **shape to
 study**, never as a deliverable.
 
+**The fourth row is measured the same way, each zero beside a control.** No
+migration anywhere creates `workflow.triggers` — schema `workflow` holds exactly
+four tables, `flows`, `flow_versions`, `executions` and `task_runs` (control:
+`workflow.executions` appears in **three** migration files, so the search reaches
+migrations). `TriggerState::initialise` has **exactly one** caller and it is a
+`#[cfg(test)]` helper in `trigger/mod.rs`; nothing outside
+`crates/egret-workflow/src/trigger/` calls `trigger::tick`; and
+`crates/egret-bin/src/main.rs` contains the string `trigger` **zero** times
+(control: `egret_workflow` appears **5** times in the same file). **So a `cron:`
+trigger cannot fire in production, and W10 as scoped does not change that** —
+W10 wires the *worker* loop, which has a table to claim from; the trigger loop
+has none.
+
 **This is the mirror image of a defect W8 closed.** There, `allowFailure` was
 assigned **twice** in two documents and the package had to say which owner was
-wrong. Here three deliverables are assigned **zero** times. A row that names a
+wrong. Here four deliverables are assigned **zero** times. A row that names a
 thing in the architecture and never in the plan reads, to anyone checking coverage,
 exactly like a row that is done.
 
-So W10 exists to **give these three an owner**, and the programme spec's §9 table
-is a deliverable of this package, not a reference for it.
+So W10 exists to **give all four an owner**. It builds the first two itself and
+names the other two rather than absorbing them: **W11** is logs, **W12** is the
+trigger loop, each recorded in §9 with its measurement as a decision rather than
+an omission. W10's deliverable is *executions advance and are visible*; with it a
+flow runs by manual API start or by webhook, both of which already work. Cron is
+a separate capability needing its own table, its own claim and its own safety
+argument, and folding it in now would duplicate the runtime's concurrency work
+before that work exists. **The programme spec's §9 table is a deliverable of this
+package, not a reference for it.**
 
 ## 2. What judges W10 — and the honest answer is *not the ratchet*
 
@@ -242,7 +267,7 @@ Unchanged, with four that carry weight here:
   state with no harness driving the tick** — the package's headline.
 - `workflow.task_logs`, a persisting `LogSink`, retention and a read API —
   **or an explicit deferral to W11, recorded with the measurement** (§5).
-- **The programme spec's §9 package table corrected**, so these three deliverables
+- **The programme spec's §9 package table corrected**, so all four deliverables
   have an owner, and §1's finding recorded where the next reader of the table will
   see it.
 - A coverage-statement entry saying, in the same voice as W6's trigger section,
