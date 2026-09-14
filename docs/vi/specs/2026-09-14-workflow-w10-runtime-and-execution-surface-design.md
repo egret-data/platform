@@ -196,7 +196,10 @@ Rust, không ở đâu khác**.
 
 - **Không có bảng `workflow.task_logs`** — đã quét mọi migration; bảng ấy nằm trong
   danh sách §6.1 của spec chương trình và **chưa bao giờ được tạo**.
-- **`LogSink` có ba bản cài và không bản nào lưu một dòng nào**: `TracingSink`
+- **`LogSink` có ba bản cài TRONG `src/` và không bản nào lưu một dòng nào**
+  (bản thứ tư nằm trong một test container sống, `container_docker_live.rs:261` —
+  con số được giới hạn phạm vi có chủ ý, vì một chữ "ba" không kèm phạm vi là SAI
+  trên cả `crates/`): `TracingSink`
   (ghi ra `tracing`), `Recorder` (test), và `NameHintSink`.
 - Handler container ghi **`stdOutLineCount` và `stdErrLineCount`** — **đếm dòng,
   không phải nội dung**.

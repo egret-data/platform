@@ -197,7 +197,9 @@ Measured:
 
 - **No `workflow.task_logs` table exists** — grepped every migration; the table is
   in the programme spec's §6.1 schema list and has never been created.
-- **`LogSink` has three implementations and none of them persists a line**:
+- **`LogSink` has three implementations in `src/` and none of them persists a line**
+  (a fourth lives in a live-container test, `container_docker_live.rs:261` — the
+  count is scoped on purpose, because an unscoped "three" is false across `crates/`):
   `TracingSink` (writes to `tracing`), a test `Recorder`, and `NameHintSink`.
 - The container handler records **`stdOutLineCount` and `stdErrLineCount`** —
   counts, not content.
