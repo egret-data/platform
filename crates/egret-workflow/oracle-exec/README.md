@@ -10007,3 +10007,172 @@ already said and nobody read that way.
 stays, `parallel`'s rule 3 stays exhaustive, and the `LIVE`/`baseline.txt:204`
 record corrections stay. Only the ninth bank and the `dynamic_behavior` rule it
 needed are withdrawn.
+
+## Final round
+
+**The whole-branch review returned SHIP with no shipped defect, and four items
+that are closed here.** Two of them are the same class — *a claim that a guard
+exists, where the guard does not* — and the ratchet is blind to all four, which
+is why each is closed by a mutation with a run count and a control rather than
+by a paragraph.
+
+| # | what | the mutation | verdict |
+|---|---|---|---|
+| 1 | `worker::spawn::terminated_in_error` had **no guard** and its doc cited one | **MX1** — drop `RunState::Cancelled`, leaving `Failed \| Killed` | **survived 3/3 before**, 1036 passed, byte-identical to the control; **dead 3/3 after** |
+| 2 | the `'PAUSED'` arm had **no execution-terminality term**, and the reason given for not needing one was false | **MX3** — `NOT (e.state = ANY($2))` → `(e.state = ANY($2) OR TRUE)` | **dead 3/3**, and the other two pause tests pass, so the mutation is narrow |
+| 3 | a citation naming a test that was never written — **the second in one package** | — | swept mechanically, below |
+| 4 | the two `EXECUTION_ASSERTION` banks were **not discriminating** | **MX4** — `is_truthy(&rendered)` → `is_truthy(&rendered) && false`, i.e. violate every assertion unconditionally | **dead 3/3**, **and the ratchet reads 109, green, on the same build** |
+
+### 1 — a wrong assertion, which is the class this package had already paid for
+
+`terminated_in_error` spells `State.Type.isTerminatedInError()` as Kestra's
+literal list. Its doc said `state::tests::no_fail_is_a_subset_of_terminal`
+*"asserts the two spellings agree, which is what makes keeping both safe."*
+**That test never calls the function.** It compares
+`is_terminal() && !is_terminated_no_fail()` against a **literal set written in
+its own body**, so it pins one spelling to a *third* copy of the list and says
+nothing about the one it names — and its own message read *"this is the
+assertion that would notice."*
+
+Measured rather than argued: **MX1 survived 3 of 3 runs**, 1036 passed, a result
+line byte-identical to the control. `worker::spawn::tests::the_two_spellings_of_terminated_in_error_agree`
+calls the function for **every** member of `RunState::ALL` and compares it to
+the derived predicate, with a positive control naming the three that must be
+true — because thirteen equalities are all satisfied by an implementation
+answering `false` to both sides. MX1 now dies 3/3, killed by exactly that test,
+reporting `CANCELLED: terminated_in_error=false, is_terminal() && !is_terminated_no_fail()=true`.
+
+**The killing assertion postdates the defect and cannot be evidence the defect
+was ever caught.** It was written *because* MX1 showed nothing caught it. The
+honest claim is the narrow one: MX1 survived 3/3 before it existed and dies 3/3
+after.
+
+**Not shipped today**, and the bound is worth stating rather than leaving to
+inference: W8 Task 6's `sub_flow_source` clears `sla:` from a synthesised loop
+body, so no iteration of this corpus can end `CANCELLED` and `transmitFailed`
+has never been asked about one. The scenario is one package away — give a `Loop`
+child a `CANCELLED` terminal and the unguarded version reports **SUCCESS** for a
+cancelled iteration, silently.
+
+### 2 — the `'PAUSED'` arm needed a term, and my reason for thinking otherwise was false
+
+The arm shipped with this justification: *`flowable::resume_paused` moves a due
+run on the very settle this waker's `resume` produces, so the stale deadline
+lands in a state the predicate does not name.* **That is false whenever
+`advance()` returns on its first line**, which it does when the **execution** is
+terminal:
+
+```rust
+if state.history.last().is_some_and(|s| s.is_terminal()) { return Vec::new(); }
+```
+
+`RunState::Paused` is **not** terminal, so `claim::sla_terminal` will `CANCEL`
+an execution that is still holding a parked bounded `Pause`. That run keeps
+`state = 'PAUSED'` and its `not_before_ms`; every tick names it; every tick
+relocks the execution and settles it into writing nothing but a new
+`executions.seq`. **It is the endless case the `'RETRIED'` arm needed two extra
+terms to avoid, reached by a third road**, and the review found it by reading
+the guard rather than the prose.
+
+`NOT (e.state = ANY($2))` closes it, and the terminal list is **derived from
+`RunState::ALL` by `is_terminal()`** rather than written into the SQL —
+`spawn::terminated_count`'s shape, and the only one a fourteenth variant joins
+without anybody remembering to. `a_paused_run_in_a_terminal_execution_is_never_named`
+drives the same row twice, differing **only** in `executions.state`: `CANCELLED`
+must not be named, `RUNNING` must be, and the second is the control without
+which the first is satisfied by a broken fixture.
+
+**No producer exists in merged code** — no corpus flow declares both an `sla:`
+and a `Pause` — so this is latent, and the row is written by hand for the reason
+migration 0142 exists: *the predicate must be safe against a row the schema
+admits, not only against rows this executor writes today.*
+
+**Two neighbours, deliberately untouched, and each for its own reason.** The
+`'RETRYING'` arm has the **same shape** — an `sla:` `CANCEL` can terminate an
+execution holding a `RETRYING` run, `reopen_due` is skipped by the same early
+return, the loop is identical — and it is left alone because no corpus flow
+declares both `sla:` and a `retry:`, because the arm predates this task by four
+packages, and because widening it is a behaviour change to a path W4 measured
+and this round did not. The `'RETRIED'` arm is a **third** case and must not be
+given this term without measurement: `replay::spawn_due` runs in the settle
+*outside* `advance()`, so a replay owed by a cancelled execution may well still
+be owed, and nothing here has established which. **Recorded as findings, not
+fixed quietly.**
+
+### 3 — a citation is a claim, and this package made the same false one twice
+
+`claim.rs` cited `an_unbounded_pause_is_never_named_however_long_its_execution_lives`
+as *"the assertion at this end."* The identifier occurred **once in the whole
+tree — in the citation itself**, against **7** occurrences of the positive
+control beside it. W8 Task 4 had already done this once
+(`every_paused_run_names_its_resumer`, cited by `resume_paused`'s own doc before
+it was written). Twice is a class, so the round swept it mechanically.
+
+**The sweep**: every snake_case identifier of three-or-more words appearing in a
+doc or line comment anywhere under `crates/egret-workflow`, matched against
+every test name defined **anywhere in the repository** (a doc may legitimately
+cite a sibling crate's test). Comment runs are **joined before matching**,
+because a phrase that wraps a line break is invisible to a line-oriented grep —
+the failure this file already records once — and a citation truncated by the
+author's own ellipsis is resolved by prefix.
+
+| | count |
+|---|---|
+| test-shaped identifiers cited in comments | **245** |
+| resolving (exactly, or as a truncation of a real name) | **228** |
+| flagged | **17** |
+| of those, **defined** but missed by the extractor's attribute walk | 4 |
+| of those, **deliberate records** of a name that does not exist — *"a test that no longer exists"*, *"the deleted …"*, *"it was …"*, a clippy lint name, one artifact of the line-joiner | 9 |
+| **genuinely dangling** | **4** |
+
+The four, and what each now says instead of claiming a guard it does not have:
+
+| citation | site | now |
+|---|---|---|
+| `an_unbounded_pause_is_never_named_however_long_its_execution_lives` | `worker/claim.rs` | cites the assertion that exists, and records the miss |
+| `a_bound_render_never_writes_a_value_into_the_text` | `runners/env.rs` | *the guard is still owed*, with what it would have to assert |
+| `a_random_retry_delay_is_inside_kestras_own_bounds` | `executor/plan.rs` | names the test that **does** pin the bounds, `the_exponential_delay_doubles_and_the_random_one_stays_inside_its_bounds` — the old sentence promised a later task an assertion under a name it would not have found |
+| `the_literal_in_the_jq_source_is_the_bound` | `runners/jqsandbox.rs`, twice | **nothing keeps `BOUNDED_DEFS`' literal and `MAX_STEPS` from drifting**, which is the hazard the citation claimed to have closed |
+
+**A dangling citation is worse than silence for the same reason a wrong
+assertion is**: it converts an unguarded thing into a defended one, and the next
+reader spends their budget elsewhere.
+
+### 4 — a bank that was attribution, and is evidence now
+
+Both `EXECUTION_ASSERTION` entries end `["CREATED","CANCELLED"]` with **0 runs**
+and they are the corpus's only two declarers, so **"violate every
+`EXECUTION_ASSERTION` unconditionally" banks both byte for byte** — and W8 Task
+6's attribution mutation cannot separate the two implementations either, because
+reverting the feature makes both entries mismatch under either reading.
+
+`corpus.json` records the way out: `valids/sla-execution-condition` declares
+`inputs.string` as a `SELECT` over `PASS`/`CANCEL`/`LABEL`, the harvest drove
+one of the three, and **two `inputs_alternatives` sit unused** with Kestra's own
+test method beside each. `PASS` — the `SELECT`'s default — violates **neither**
+assertion and must not cancel; `LABEL` violates the `NONE`-behaviour one, which
+changes no state, and so separates *violated* from *cancelled* as `PASS` alone
+cannot.
+
+`the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_did_not_drive`
+drives all three through `driver::run`. **Under MX4 it fails, naming `PASS` and
+`LABEL` with their traces — and the ratchet on the same build reads 109,
+green.** That is the measurement the item is worth: an over-acceptance this
+corpus cannot score in either direction, now scored by a running program.
+
+**It is a test and not a bank, and cannot become one.** `harvest.py` posts one
+input set per flow, so the artifact's answers for `PASS` and `LABEL` were never
+captured; **`baseline.txt` cannot move by one entry here**. The authority for the
+two expectations is Kestra's own test *names*, recorded by the harvest in
+`inputs_from` — weaker than a captured trace, and said so rather than dressed
+up. What a future harvest would change: post the alternatives too, which is the
+same *"teach the harness a second verb"* the unbounded-`Pause` row already owes.
+
+### The round banked nothing, beside a number that can disagree
+
+`baseline.txt` is byte-identical: md5 **`c702545ebe209286a02fca5b4b5eea73`**
+before and after, id list **`3c290eeab650320a1a9d7b5fb5d92d75`**, ratchet
+**109** — and 109 under MX1, MX3 and MX4 as well. **Three of the four items are
+invisible to it by construction and the fourth is an over-acceptance it cannot
+see**, which is the whole reason this section exists rather than a line in the
+per-task table.
