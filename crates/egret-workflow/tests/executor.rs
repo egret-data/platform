@@ -8116,3 +8116,117 @@ async fn the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded() {
         );
     }
 }
+
+/// **W8 Task 7 final round: the two `EXECUTION_ASSERTION` banks are
+/// DISCRIMINATING, driven rather than argued.**
+///
+/// Both banked entries end `["CREATED","CANCELLED"]` with **0 runs** and they
+/// are the corpus's only two `EXECUTION_ASSERTION` declarers, so *"violate
+/// every `EXECUTION_ASSERTION` unconditionally"* banks both of them **byte for
+/// byte**. The ratchet cannot tell that implementation from the right one, and
+/// the attribution mutation for W8 Task 6 cannot either: reverting the feature
+/// makes both entries mismatch under either reading.
+///
+/// `corpus.json` records what closes it. `valids/sla-execution-condition`
+/// declares `inputs.string` as a `SELECT` over `PASS`/`CANCEL`/`LABEL` and the
+/// harvest drove exactly one of the three — `CANCEL` — leaving **two
+/// `inputs_alternatives` unused**, each with Kestra's own test method beside it:
+///
+/// | input | `inputs_from` | what must happen |
+/// |---|---|---|
+/// | `CANCEL` | `SLATestCase.java:62 executionConditionSLAShouldCancel()` | the golden: `CANCELLED`, 0 runs |
+/// | `LABEL` | `SLATestCase.java:86 executionConditionSLAShouldLabel()` | the **`NONE`**-behaviour SLA is violated, which changes no state |
+/// | *(none — `defaults: PASS`)* | `SLATestCase.java:56 executionConditionSLAShouldPass()` | **neither** assertion is violated |
+///
+/// **`PASS` is the row that does the work.** An implementation that violates
+/// unconditionally cancels it; a correct one runs the flow. `LABEL` is the
+/// second half and is a different question — there the assertion **is**
+/// violated and the behaviour is `NONE`, so it separates *"violated"* from
+/// *"cancelled"*, which `PASS` alone cannot.
+///
+/// # Why this is a test and not a bank
+///
+/// There is no golden entry to bank: `harvest.py` posts one input set per flow,
+/// so the artifact's answers for `PASS` and `LABEL` were never captured and
+/// **the ratchet cannot move by one entry here, in either direction**. The
+/// authority for the two expectations is Kestra's own test *names*, recorded in
+/// `corpus.json`'s `inputs_from` by the harvest — which is weaker than a
+/// captured trace and is said so rather than dressed up. What this test
+/// establishes is the discrimination: the same `src/sla.rs` that banks the two
+/// entries also declines to cancel the two inputs that must not be cancelled,
+/// and that discrimination used to live only in `sla.rs`'s own truthy/falsy
+/// unit tables, where nothing connected it to the banked entries.
+///
+/// `egret_side()` is awaited first and its result discarded, purely to
+/// serialise behind its one-time `TRUNCATE workflow.executions CASCADE`; this
+/// test then seeds its own workspace and drives its own executions.
+#[tokio::test]
+async fn the_execution_assertion_banks_discriminate_on_the_inputs_the_harvest_did_not_drive() {
+    let _ = egret_side().await;
+
+    let db = common::db()
+        .await
+        .expect("this drives a REAL executor and needs DATABASE_URL");
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let source = corpus_source("valids/sla-execution-condition");
+    let reg = driver::registry();
+
+    // (label, inputs, must the execution end CANCELLED?, how many runs)
+    let cases: [(&str, serde_json::Value, bool, usize); 3] = [
+        (
+            "CANCEL (the golden's own input)",
+            serde_json::json!({"string": "CANCEL"}),
+            true,
+            0,
+        ),
+        (
+            "PASS (the SELECT's default, undriven)",
+            serde_json::json!({}),
+            false,
+            1,
+        ),
+        (
+            "LABEL (violated, behaviour NONE, undriven)",
+            serde_json::json!({"string": "LABEL"}),
+            false,
+            1,
+        ),
+    ];
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (label, inputs, expect_cancelled, expect_runs) in cases {
+        let t = match driver::run(&db.pool, ws, &reg, &source, inputs.clone()).await {
+            driver::Ran::Trace(t) => *t,
+            driver::Ran::Refused(msg) => {
+                wrong.push(format!("{label}: egret REFUSED the flow: {msg}"));
+                continue;
+            }
+            driver::Ran::Broken(msg) => {
+                wrong.push(format!("{label}: the driver broke: {msg}"));
+                continue;
+            }
+        };
+        let last = t.execution.last().cloned().unwrap_or_default();
+        let cancelled = last == "CANCELLED";
+        if cancelled != expect_cancelled || t.runs.len() != expect_runs {
+            wrong.push(format!(
+                "{label}: expected cancelled={expect_cancelled} with {expect_runs} run(s), \
+                 got cancelled={cancelled} with {} run(s); execution {:?}, runs {:?}",
+                t.runs.len(),
+                t.execution,
+                t.runs
+                    .iter()
+                    .map(|r| (&r.task, &r.state))
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+
+    assert!(
+        wrong.is_empty(),
+        "the `EXECUTION_ASSERTION` banks are not discriminating -- an \
+         implementation that violated every assertion unconditionally would \
+         produce the golden's CANCELLED for all three of these:\n  {}",
+        wrong.join("\n  ")
+    );
+}
