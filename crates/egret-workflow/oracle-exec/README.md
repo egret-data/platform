@@ -7090,7 +7090,7 @@ differed, then what the ratchet still cannot speak for.
 
 | | ratchet | what the task shipped |
 |---|---|---|
-| package base `4a4ed007` (W6's tip, on `main`) | 127 mismatching, 127 baselined, 0 broken | — |
+| package base `d76de96e` (W6's tip — the commit W8's spec `3a38b0e6` sits on) | 127 mismatching, 127 baselined, 0 broken | — |
 | Task 1 | 127 | three corrections before anything was counted; the `concurrency:` row DELETED |
 | Task 2 | 127 | `RunState::Paused` and `RunState::Restarted`, non-terminal, with the partition guarded |
 | Task 3 | **119** | `Pause` — the wait, its bound, and the resume |
