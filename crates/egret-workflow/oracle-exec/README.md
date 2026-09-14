@@ -7314,7 +7314,7 @@ task that moved them.
 | *The ordered pairs*' **six-family table** | 6 | **6** | `744 / 445 / 1759 / 709 / 177 / 51` → **705 / 396 / 1528 / 522 / 147 / 43** — W6 **Task 3**-era, two packages behind |
 | **item 2** of *What this ratchet does not prove* | 6 | **5** | `744 / 433 / 1703 / 665 / 165 / 43` → **705 / 396 / 1528 / 522 / 147 / 43** — W6 **Task 8**-era; `43` is the one that did not move, because **not one of the eighteen carries a sub-execution** |
 | `kept_ordered_pairs_…`'s own assertion **message** | 1 | **1** | *"Flipping all 744"*, three lines under a tuple asserting `705` |
-| **25** | **18** | | |
+| **total** | **25** | **18** | |
 
 **Two of those copies disagreed with each other**, which is the strongest
 argument this file has produced for the rule: item 2 and the six-family table
