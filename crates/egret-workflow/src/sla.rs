@@ -136,17 +136,34 @@
 //! completion — over-acceptance, and the ratchet cannot see it, because no
 //! corpus `sla:` names anything that does not resolve.
 //!
-//! **The absent `assert:` goes the same way, and BOTH Java roads agree.**
+//! **The absent `assert:` goes the same way, and fix round 2 MEASURED which
+//! road** — W8 Task 6 fix round 1 wrote *"which road it takes is unmeasured"*
+//! with the disassembler already open, which made it a derivation that did not
+//! need to be one.
+//!
 //! `@NotNull @NotEmpty` in Java and unchecked by `spec::validate`, so it is
-//! reachable from a source that never went through publish — which the
-//! oracle's driver is. `ExecutionAssertionSLA.evaluate` calls
-//! `runContext.render(this.get_assert())` on a null. If that returns null,
-//! `TruthUtils.isTruthy(null)` is `false` (verified on the artifact:
-//! `isTruthy` is `aload_0; ifnull 23` → `iconst_0`) and the SLA is violated; if
-//! it throws, the catch above violates it. **Which road it takes is unmeasured
-//! and cannot be observed from outside**, because the two differ only in the
-//! `reason` string, which nothing compares. Recorded as a derivation, not a
-//! measurement.
+//! reachable from a source that never went through publish — which the oracle's
+//! driver is. `ExecutionAssertionSLA.evaluate` calls
+//! `runContext.render(this.get_assert())` on a null, and the chain is
+//! **road 1, null-in-null-out, no throw**, disassembled from the pin:
+//!
+//! * `DefaultRunContext.render(String)` → `VariableRenderer.render(String, Map)`
+//!   → `render(String, Map, boolean)`;
+//! * that overload opens `0: aload_1; 1: ifnonnull 6; 4: aconst_null;
+//!   5: areturn` — **a null argument returns null and raises nothing**;
+//! * `TruthUtils.isTruthy(null)` is `false` (`aload_0; ifnull 23` → `iconst_0`);
+//! * so `evaluate` takes its violation arm and the artifact's `reason` is
+//!   bootstrap #0's `assertion is false: \u0001.` over a null `get_assert()` —
+//!   **`"assertion is false: null."`**, *not* the catch's
+//!   `SLA could not be evaluated: …`.
+//!
+//! **egret emits the catch's wording here and the artifact emits the
+//! assertion's — a measured divergence, and the only one this module knowingly
+//! carries.** It is record-only because nothing can observe it:
+//! `worker::claim::sla_terminal` keeps `Violation::behavior` and discards
+//! `reason`, so the two strings produce the identical execution state. A future
+//! task that makes a `reason` observable — a log line, an execution label —
+//! owes this string an alignment.
 //!
 //! # What is NOT ported from `processViolation`, named rather than implied
 //!
@@ -575,21 +592,21 @@ mod tests {
         );
     }
 
-    /// **An absent `assert:` is violated too, and BOTH Java roads agree** — so
-    /// the answer does not depend on which one the artifact takes.
+    /// **An absent `assert:` is violated, and fix round 2 measured WHICH road
+    /// the artifact takes** — fix round 1 said both roads agree and left it
+    /// there, which was true but weaker than the evidence available.
     ///
-    /// `@NotNull @NotEmpty` in Java and unchecked by `spec::validate`, so it is
-    /// reachable from a source that never went through publish — which the
-    /// oracle's driver is. `evaluate` calls `runContext.render(null)`: if that
-    /// returns null, `TruthUtils.isTruthy(null)` is `false` (verified on the
-    /// artifact — `aload_0; ifnull 23` → `iconst_0`) and the SLA is violated;
-    /// if it throws, `SLAService`'s catch violates it.
+    /// Disassembled from the pin: `VariableRenderer.render(String, Map, boolean)`
+    /// opens `aload_1; ifnonnull 6; aconst_null; areturn`, so a null renders to
+    /// null and nothing is thrown; `TruthUtils.isTruthy(null)` is `false`; and
+    /// `evaluate` takes its own violation arm. **Road 1**, and the artifact's
+    /// `reason` is therefore `"assertion is false: null."`.
     ///
-    /// **The premise this does NOT establish, named rather than left implicit:**
-    /// which road it takes. The two differ only in the `reason` string, which
-    /// nothing in this crate or the oracle compares — so the difference is not
-    /// observable, but that is a derivation and not a measurement, and the
-    /// `reason` below is therefore egret's choice rather than a reproduction.
+    /// **egret's `reason` here is the CATCH's wording and diverges** — a
+    /// measured divergence, not an unknown. This test asserts only
+    /// `(sla_id, state)`, which is everything `sla_terminal` keeps, so the
+    /// divergence is unobservable and the string is not asserted. See the
+    /// module doc.
     #[test]
     fn an_absent_assertion_is_violated_by_either_java_road() {
         let v = first_execution_changed_violation(

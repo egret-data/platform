@@ -7796,7 +7796,9 @@ fn iso_millis(iso: &str) -> Option<i64> {
 
 /// **The `MAX_DURATION` window does not exist in this harness** — the
 /// measurement behind W8 Task 6's refusal, and the reason five golden entries
-/// are unbankable by any implementation whatsoever.
+/// are unbankable by any implementation **given this harness** (fix round 2's
+/// qualifier: uncapping `driver.rs`'s `Sleep` moves all five, so "whatsoever"
+/// promised more than the sentence below delivers).
 ///
 /// # The claim, stated precisely enough to survive a reader who knows the clock
 /// moves

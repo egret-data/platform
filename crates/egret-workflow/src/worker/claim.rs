@@ -1665,9 +1665,19 @@ impl Marks {
 /// `sla:`**, so the parent's SLA was inherited by every iteration and this
 /// function would have evaluated it there — an over-acceptance no corpus flow
 /// reaches (none declares both an `sla:` and a `Loop`) and the ratchet cannot
-/// see. Fix round 1 clears it beside `triggers:`, which was already cleared for
-/// the same kind of reason, so the condition is **unrepresentable** rather than
-/// guarded. See `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`.
+/// see. Fix round 1 clears it beside `triggers:`, so the condition is
+/// **unrepresentable** rather than guarded. See
+/// `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`.
+///
+/// **Fix round 2 corrects the reason this paragraph gave.** It said *"egret has
+/// no `ExecutionKind`"*. It has one — [`crate::models::ExecutionKind`], with a
+/// `Loop` variant, read by `trigger::flow` — and what is true is narrower:
+/// **`workflow.executions` has no `kind` column.** The correction matters
+/// because the false version implied no alternative existed, and one did: a
+/// loop iteration's row carries a non-NULL `loop_index`, which
+/// [`Surface::load`] already selects, so this function COULD have asked. The
+/// clear at the source is a choice between two available sites and not a
+/// last resort.
 fn sla_terminal(surface: &Surface, ctx: &ExecutionCtx, state: &ExecutionState) -> Option<RunState> {
     let flow = surface.flow()?;
     if flow.sla.is_empty() {

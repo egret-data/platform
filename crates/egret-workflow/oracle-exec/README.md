@@ -6182,9 +6182,18 @@ deadline and never further. The corroboration that this is a property of the
 CONSTRUCT rather than of that entry: `valids/waitfor-max-duration`, the same
 shape at `PT5S`/`PT0.2S`, is one of only **two** corpus flows whose normalised
 trace Kestra ITSELF could not reproduce across five rounds, so it has no golden
-entry and is excluded by name in `stability.json`. **This is a sixth way the
+entry and is excluded by name in `stability.json`. ~~**This is a sixth way the
 oracle is blind, and it belongs beside the other five: a golden figure that is a
-function of the artifact's SCHEDULER rather than of the flow.** Both entries now
+function of the artifact's SCHEDULER rather than of the flow.**~~ **W8 Task 6
+fix round 1 DEMOTED that, and fix round 2 is what brought the correction here.**
+It is not a sixth mechanism and not a category of its own: its cause is
+mechanism 5, and what felt new is a value on a second axis — it is **effect 2**,
+*the ratchet speaks and is wrong*, in the product table under *EFFECT is a
+second axis*, roughly 500 lines below. **The blindness count stays at five.**
+*(An ORDINAL survives the renaming of the concept it names: nothing that
+searches for "mechanism 6" or for the concept's own words finds "a sixth way" or
+"beside the other five", and both go false the moment the count moves. Sweep
+ordinals and counts as their own population.)* Both entries now
 carry a blocker row in `handler_surface.py` — `clock` and `render` — so the
 ceiling does not name an entry nothing can bank.
 
@@ -8040,6 +8049,26 @@ failed is the finding**. Both are *locality* rules — they ask where a figure
 sits. The third is a *provenance* rule: it asks whether anything recomputes the
 figure when the code runs. A locality rule cannot be applied to a file nobody
 has opened, which is exactly where the last two hid.
+
+#### And the same question for a PHRASE — W8 Task 6 fix round 2
+
+**The rule above is about figures.** A figure is safe when a running program
+recomputes it. A *phrase* has no such test, and W8 Task 6 corrected the same
+sentence in four files and left it standing in two more. Both misses have a
+**nameable reason**, which is what makes them worth a section rather than an
+apology — this is the fourteenth *corrected where found, missed elsewhere* round
+on this branch and the first where inattention is not the explanation.
+
+| the miss | why the sweep could not see it | what to do instead |
+|---|---|---|
+| **A phrase that WRAPS A LINE BREAK.** `baseline.txt` still read *"unbankable by any\n# implementation whatsoever"* after two passes over that very file | `grep` is **line-oriented**. The phrase exists in the file and in no single line of it, so every pattern containing both halves returns nothing — and returns nothing *quietly*, which is indistinguishable from being clean | when you qualify a phrase, search for its **shortest distinctive fragment** (`unbankable by any`), never the whole sentence; or read the file with a matcher that spans lines |
+| **An ORDINAL, which names a concept and survives the concept's renaming.** `README.md` said *"This is a **sixth** way the oracle is blind, and it belongs **beside the other five**"* ~500 lines above the section demoting it | searching for *"mechanism 6"*, or for the concept's own words, finds neither *"a sixth way"* nor *"beside the other five"* nor *"the other five mechanisms"* — and **every one of them goes false the moment the count moves.** An ordinal is a name with no letters in common with what it names | sweep **ordinals and counts as their own population**, separately from the concept: *sixth, fifth, the other five, three effects, N mechanisms*. Report it as its own N / M |
+
+**The general form**: the "sweep by concept, not by phrase" rule assumes the
+concept's words appear. An ordinal is a counter-example — it refers without
+naming — and a line break is a counter-example to the tooling rather than to the
+rule. A qualification sweep therefore has **three** populations, not one: the
+concept, the phrase verbatim (fragment-matched), and the ordinals that count it.
 
 #### Five passes, and every one scoped by surface when the predicate is about mechanism
 

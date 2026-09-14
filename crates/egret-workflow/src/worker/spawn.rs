@@ -644,11 +644,28 @@ fn sub_flow_source(source: &str, loop_task_id: &str, owner: Uuid) -> Result<Stri
     //
     // Kestra runs an iteration as a sub-execution of the SAME flow and guards
     // the evaluation site instead: `handleExecutionChangedSLA` returns early on
-    // `getKind() == ExecutionKind.LOOP`. egret has no `ExecutionKind` -- this
-    // function synthesises a different flow -- so the same fact is expressed by
-    // not carrying the field. Without this line a flow with an
-    // `EXECUTION_ASSERTION` and a `Loop` had its SLA evaluated once per
-    // iteration by `claim::sla_terminal`, cancelling iterations Kestra runs.
+    // `getKind() == ExecutionKind.LOOP`.
+    //
+    // **W8 Task 6 fix round 2 corrects the reason given here.** It read *"egret
+    // has no `ExecutionKind`"*, and that is **false**:
+    // [`crate::models::ExecutionKind`] exists, has a `Loop` variant, and
+    // `trigger::flow` reads it for `ExecutionKind.isNormal`. The true statement
+    // is narrower -- **`workflow.executions` has no `kind` column**, so an
+    // execution egret creates does not carry one and `claim::settle` cannot ask
+    // Kestra's question in Kestra's words.
+    //
+    // **And the narrower truth does not leave the reader without an
+    // alternative, which the false one implied.** A loop iteration IS
+    // identifiable there: its row has a non-NULL `loop_index`, which
+    // `render::Surface::load` already SELECTs. So both sites were available and
+    // this is a choice between them, not the only option. It is made here
+    // because a field that is not carried cannot be read by the next consumer
+    // either, which is the rule `triggers:` above is cleared under -- the same
+    // reason `state::Resume` is a field rather than two `TaskKind` lists.
+    //
+    // Without this line a flow with an `EXECUTION_ASSERTION` and a `Loop` had
+    // its SLA evaluated once per iteration by `claim::sla_terminal`, cancelling
+    // iterations Kestra runs.
     //
     // **No corpus flow declares both**, so the ratchet is silent in both
     // directions and `no_flow_level_sla_is_inherited_by_a_loop_sub_execution`

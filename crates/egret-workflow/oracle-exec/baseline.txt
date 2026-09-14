@@ -487,7 +487,13 @@
 # is why neither carries a `RUNNING`.
 #
 # **SEVEN entries are held by an `sla:` and FIVE of them are unbankable by any
-# implementation whatsoever, including a correct one.** That is the asymmetry
+# implementation GIVEN THIS HARNESS, including a correct one.** (Fix round 2:
+# the qualifier. `whatsoever` stood here while README, `sla.rs` and the design
+# spec were all qualified in fix round 1 -- this copy survived because the
+# phrase WRAPS A LINE BREAK and a line-oriented grep cannot see it. Uncapping
+# `driver.rs`'s `Sleep` moves all five; `permanently` belongs to
+# `valids/loop-until-restart`, whose GOLDEN is the irreproducible part.) That is
+# the asymmetry
 # this row is worth reading for: the residual table counts **5** DECLARERS and
 # the CAUSE count is **7**. `sla-parent-flow` and
 # `flow-concurrency-sla-fail-parent` declare no `sla:` at all -- each calls a

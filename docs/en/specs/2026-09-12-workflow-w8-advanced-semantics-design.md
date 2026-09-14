@@ -293,7 +293,7 @@ Unchanged, with four that carry weight here:
 - `Pause` and `LoopUntil` together — one state, one package.
 - `allowFailure`/`allowWarning`, with the two-owner question settled.
 - `sla:`'s two `EXECUTION_ASSERTION` entries, and the other five **recorded as
-  unbankable with the mechanism**.
+  unbankable — given this harness — with the mechanism AND the effect**.
 - **The `concurrency:` row deleted** from the residual table, with the
   `CANCELLED` misattribution recorded as the W3c-shaped defect it is.
 - `plan.rs`'s opacity doc corrected to include `LoopUntil`.
