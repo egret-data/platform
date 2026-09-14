@@ -271,7 +271,11 @@
 # `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
 # `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
 # their children; and the two `task-allow-*-executable-flow` on `WARNING`,
-# which `RunState` cannot hold. The `Subflow` row is therefore REMOVED from the
+# which `RunState` could not hold WHEN THIS WAS WRITTEN -- W8 Task 5 added the
+# variant and BOTH of those two banked, so this clause names a cause that no
+# longer holds anything. It is annotated rather than rewritten because the
+# paragraph is W6 Task 3's arithmetic and the seven it counts were seven then.
+# The `Subflow` row is therefore REMOVED from the
 # residual-baseline table rather than lowered from 22 to 10 -- the same rule
 # `disabled: true` and `runIf:` were removed under.
 #
@@ -332,6 +336,19 @@
 # `WARNING`/`CANCELLED`, neither in `RunState`. It banks when those two states
 # arrive, which is the `AllowFailure` row's work and not this one's.
 #
+# **BOTH states have arrived -- `WARNING` at W8 Task 5, `CANCELLED` at W8 Task
+# 6 -- and `valids/pause-behavior` did NOT bank.** The ratchet moved 111 -> 109
+# at Task 6 and both ids were `sla:`'s. The prediction above was a claim about
+# the STATE VOCABULARY over an entry held by a PLAN decision: `plan::pause_gap`
+# refuses the whole task whenever a `behavior:` is written, whatever value it
+# holds; a DYNAMIC value cannot be classified at plan time at all, which is
+# where `pause_gap` decides; and the artifact's fifth outcome for a value
+# OUTSIDE the enum is a non-terminal HANG (`RUNNING` past 120 s, measured at W8
+# Task 3), which is not a state any variant could hold. Being inside the
+# vocabulary is necessary and not sufficient -- the fourth population on this
+# oracle to measure that, after `RETRIED`'s four, `SKIPPED`'s four and W8 Task
+# 2's sixteen.
+#
 # W8 Task 3 (`Pause`) banked 8, 127 -> 119 -- the whole of the row
 # `README.md`'s residual table assigned to it is TWELVE, so four are left and
 # each is named below with what holds it.
@@ -365,6 +382,10 @@
 #                                     name of a pause rule, and the two terminals a LITERAL `behavior:`
 #                                     can produce -- `WARNING` and `CANCELLED` -- are not in `RunState`
 #                                     at all, so the construct is unrepresentable either way.
+#                                     **BOTH are in `RunState` now (W8 Tasks 5 and 6) and the entry
+#                                     still does not bank** -- see the block above. What is
+#                                     unrepresentable is the FIFTH outcome, the non-terminal hang on an
+#                                     out-of-enum value; what holds the entry is `pause_gap`.
 #   pause_on_pause                    `onPause:`. Its golden records the sub-task as a run with
 #                                     `parent: null`, a SIBLING of the pause that `overlapping`s it.
 #   pause-errors-finally-after-execution  `errors:` AND `finally:` AND a flow-level `afterExecution:`.
@@ -375,7 +396,11 @@
 #                                     is held one layer out: `allowFailure: true` turns the timeout's
 #                                     FAILED into WARNING, `models::Task` carries no `allowFailure`, and
 #                                     `RunState` has no `Warning`. It is the `AllowFailure` row's, not
-#                                     this one's.
+#                                     this one's. **All three clauses went at W8 Task 5**, which added
+#                                     `models::Task::allow_failure`, `RunState::Warning` and the
+#                                     mapping -- and `valids/pause-timeout-allow-failure` BANKED there.
+#                                     The line is kept as W8 Task 3's record of why it was left, and is
+#                                     no longer a statement about HEAD.
 #
 # **A `Pause` with NEITHER `pauseDuration:` nor `timeout:` stays PAUSED for
 # ever, and no line of this file can say so.** Seven corpus flows are written
@@ -410,7 +435,11 @@
 #   strict upper bound on what this task could bank. (`waitfor-child-task-
 #   warning` is held twice over: its other child is an `allowFailure: true`
 #   `Fail` whose run is `WARNING`, which `RunState` cannot hold -- the
-#   `AllowFailure` row's.)
+#   `AllowFailure` row's.) **The second half went at W8 Task 5**: `RunState`
+#   holds `WARNING`, that child is byte-identical to the golden, and the entry
+#   is held by the `OutputValues` handler ALONE -- measured by unbaselining it
+#   and watching it stall at `CREATED RUNNING`. "Held twice over" is now held
+#   once.
 #
 #   `loopuntil-failed-flowable` differs on ONE field: the loop's terminal.
 #   Its runs, attempts and order pairs are reproduced exactly and its execution

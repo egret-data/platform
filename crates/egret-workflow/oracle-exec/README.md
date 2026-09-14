@@ -3209,7 +3209,14 @@ owner is how a suppression list starts.
 **The `sla:` row is the first this table has lowered for a reason the reader
 must not read as progress-pending.** Every other lowering marks work somebody
 can still do. Here the remaining three, plus the two in `UNATTRIBUTED` held by
-an `sla:` in their CHILD, are **permanently unbankable under this oracle** — a
+an `sla:` in their CHILD, are **unbankable by any implementation GIVEN THIS
+HARNESS** — and the qualifier is load-bearing, because six lines below this one
+names the repair. W8 Task 6 wrote *"permanently unbankable"* and then described
+how to fix it, which is a contradiction a reader is entitled to stop at. The
+five are not permanently unbankable; they are unbankable while
+`driver::registry()` caps the `Sleep`, and the uncapping is on the record below
+as a scoped, costed follow-on. What is permanent is
+`valids/loop-until-restart` — a
 `MAX_DURATION` needs an interval in which the execution is non-terminal and
 older than the bound, and `driver.rs`'s `Sleep::capped(Duration::ZERO)` removes
 it. A future package that implements `MAX_DURATION` correctly will move none of
@@ -6648,38 +6655,55 @@ is what the row is for; see the paragraph under the table.
 | **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
 | **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
 | **an unbounded `Pause`** (W8 Task 3) | 7 flows: `pause-test`, `pause_on_resume`, `pause_on_resume_optional`, `loop-pause`, `resume-validate`, `pause_no_tasks`, `follow-dependencies-partial-parent` | **0** | nothing | **The ARTIFACT never finished, so the harvest excluded the flows.** Not a link nobody walks and not an empty population: each of the seven has an `execution_id` in `corpus.json` and a disposition saying it "reached PAUSED and stayed there for the full 90s", because a `Pause` with neither `pauseDuration:` nor `timeout:` ends only on an explicit resume and a standalone harvest issues none. Kestra's own tests drive these with `runOneUntilPaused(...)` then `executionService.resume(...)`. So the golden has no entry to compare and **an egret that resumed such a pause by itself would leave every figure in `baseline.txt` unchanged** — the one over-acceptance in this package that is invisible in both directions. What a future package would change: teach the harvest to issue a resume, which means `harvest.py` gaining a second verb and `normalise.py` a way to record when it was issued |
-| **`sla: MAX_DURATION`** (W8 Task 6) | 4 flows declare one (`sla-max-duration-fail`, `sla-subflow`, `flow-concurrency-sla-fail-child`, `sla-max-duration-ok`); **2 more entries are held by one in a different flow** (`sla-parent-flow`, `flow-concurrency-sla-fail-parent`, each calling a `Subflow` whose target declares it) | **6 — 1 matching, 5 baselined** | **the five baselined ones, permanently.** The ratchet compares them, they mismatch, and no implementation can change that | **The harness compresses time, and the WINDOW DOES NOT EXIST.** `MaxDurationSLA.evaluate` is `Duration.between(execution.startDate, Instant.now()) > duration`, so it needs an interval in which the execution is non-terminal and older than the bound. `driver::registry()` is built with `Sleep::capped(Duration::ZERO)`: `Sleep::run` is synchronous inside one `worker::tick` and writes **no** `not_before_ms`, so the only task these flows have reaches its terminal inside the tick that started it. **The clock does move in this harness** — `pass_time` rewinds `executions.created_at` by `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline — but its query selects on `r.not_before_ms IS NOT NULL`, so with no deadline registered it returns `Ok(false)` the first time it is asked and the loop breaks. Measured by `the_max_duration_window_does_not_exist_in_this_harness`: **0 deadlines** across all four declarers, against a control of **28 of 269 driven flows** that do register one; elapsed at the last run write 14.4 / 22.3 / 22.0 / 14.1 ms against bounds of 500 / 1000 / 3000 / 10000 ms; and all six `sleep` runs read `["CREATED","SUBMITTED","RUNNING","SUCCESS"]`, so no run is ever in flight across a step. **What a future package would change**: uncap the driver's `Sleep` — `PT10M` on `flow-concurrency-sla-fail-child` alone, `PT30S` three more times — AND give egret a monitor keyed on wall-clock time, which `advance()` (pure over `(plan, state, now)`, no I/O and no clock) cannot host and the driver's `tick`/`pass_time` loop has no analogue of |
+| **`sla: MAX_DURATION`** (W8 Task 6) | 4 flows declare one (`sla-max-duration-fail`, `sla-subflow`, `flow-concurrency-sla-fail-child`, `sla-max-duration-ok`); **2 more entries are held by one in a different flow** (`sla-parent-flow`, `flow-concurrency-sla-fail-parent`, each calling a `Subflow` whose target declares it) | **6 — 1 matching, 5 baselined** | **the five baselined ones, for as long as the driver caps its `Sleep`.** The ratchet compares them, they mismatch, and no implementation can change that **without changing the harness** — which is effect 3, not effect 2, and is why the word is not "permanently" | **The harness compresses time, and the WINDOW DOES NOT EXIST.** `MaxDurationSLA.evaluate` is `Duration.between(execution.startDate, Instant.now()) > duration`, so it needs an interval in which the execution is non-terminal and older than the bound. `driver::registry()` is built with `Sleep::capped(Duration::ZERO)`: `Sleep::run` is synchronous inside one `worker::tick` and writes **no** `not_before_ms`, so the only task these flows have reaches its terminal inside the tick that started it. **The clock does move in this harness** — `pass_time` rewinds `executions.created_at` by `shortfall + 1` and calls `worker::resume`, landing 1 ms past every deadline — but its query selects on `r.not_before_ms IS NOT NULL`, so with no deadline registered it returns `Ok(false)` the first time it is asked and the loop breaks. Measured by `the_max_duration_window_does_not_exist_in_this_harness` **over the four DECLARERS** — the two `*-parent` entries are not in it and their sentence is different, see below: **0 deadlines** across all four, against a control of **28 of 269 driven flows** that do register one; elapsed at the last run write 14.4 / 22.3 / 22.0 / 14.1 ms against bounds of 500 / 1000 / 3000 / 10000 ms; and all six `sleep` runs read `["CREATED","SUBMITTED","RUNNING","SUCCESS"]`, so no run of a DECLARER is ever in flight across a step. **The two parents have a different and stronger reason, and the generalisation to all five was W8 Task 6's error**: their own `Subflow` run necessarily DOES span steps, and what stops the clock there is that `pass_time`'s `WITH RECURSIVE` joins `parent_execution_id` while a subflow child is linked by `trigger_execution_id` — **the clock-advance walk cannot reach the child at all**, which would hold even if the child registered a deadline. `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded` runs that exact CTE and asserts it returns only the parent. **What a future package would change**: uncap the driver's `Sleep` — `PT10M` on `flow-concurrency-sla-fail-child` alone, `PT30S` three more times — AND give egret a monitor keyed on wall-clock time, which `advance()` (pure over `(plan, state, now)`, no I/O and no clock) cannot host and the driver's `tick`/`pass_time` loop has no analogue of |
 | **an out-of-enum `behavior:`** (W8 Task 3 fix round 3) | **0 corpus flows**; measured on probes only | 0 | nothing | **No population, and the behaviour is a HANG rather than a state.** A `Pause` whose `behavior:` renders to something outside `RESUME`/`WARN`/`FAIL`/`CANCEL` -- `NOPE`, lower-case `fail`, an undefined `{{inputs.nosuch}}` -- leaves the execution `RUNNING` past 120 s, non-terminal, with the pause run still `RUNNING`. Every one of the four enum values terminates, and terminates differently (`FAILED`/1, `SUCCESS`/2, `WARNING`/2, `CANCELLED`/1). The corpus's single `Pause` `behavior:` posts `FAIL`, so nothing here can score this edge; it is listed because the sentence *"the artifact honours the value"* is true **inside the enum only**, and W8 Task 3 fix round 2 wrote it without that qualifier from a grid whose every cell was a valid constant |
 
-#### The fifth mechanism has THREE effects, and they are not interchangeable
+#### EFFECT is a second axis, orthogonal to mechanism — and it demotes the sixth
 
-**W8 Task 6 is what forces this paragraph.** *The harness compresses time* is
-one mechanism and it has now produced three different situations, which a reader
-who merged them would act on wrongly:
+**W8 Task 6 found this and stated it too narrowly; fix round 1 records the
+product rather than the sentence.** The task wrote *"the fifth mechanism has
+three effects"*. It has, but **effect is not a property of mechanism 5** — it is
+an independent axis, and writing it as a property of one mechanism hides that
+the same three values classify every row in the table above.
 
-| example | what the ratchet does | what a reader can act on |
-|---|---|---|
-| **an unbounded `Pause`** (W8 Task 3) | **cannot speak** — the artifact never finished, so `harvest.py` excluded the seven flows and there is no golden entry at all | teach the harvest to issue a resume. Until then an egret that resumed such a pause by itself is invisible **in both directions**, which is the one over-acceptance in that package nothing can see |
-| **`valids/loop-until-restart`** (W8 Task 4) | **speaks and is wrong** — the entry exists, is compared, and its value is a function of the ARTIFACT's poller latency (`1.17 s` and `1.92 s` for two `PT1S` pauses) | **nothing.** A correct implementation is baselined against it for ever; the golden itself is the thing that cannot be reproduced |
-| **`sla: MAX_DURATION`** (W8 Task 6) | **speaks and is right about Kestra** — the golden is deterministic on the artifact's side (a `PT0.5S` bound over a `PT2S` sleep violates every time) and unreachable on **egret's**, because the driver's own registry deletes the interval | uncap `driver.rs`'s `Sleep` — and then build the monitor, which is a second, separate piece of work |
+The axis is the product of two questions:
 
-The third is the one worth stating apart, because it is the only one where the
-loss is **on egret's side of the harness and is repairable there**. It is not
-the second: `loop-until-restart`'s golden encodes a latency nobody can
-reproduce, and calling `MAX_DURATION` latency-dependent would file five
-repairable entries under *there is nothing to fix*. And it is not the first:
-these five entries **exist** in `golden.json` and are compared on every run, so
-an over-acceptance here is visible in one direction — egret completing a `Sleep`
-Kestra killed is exactly what
-`runtime_over_acceptance_is_registered_and_owned` records for all three
-declarers.
+* **does a golden entry exist?** — which decides whether the ratchet can speak
+  at all, and therefore whether an over-acceptance is invisible in **both**
+  directions or only in one;
+* **where does the irreproducibility live?** — in the **golden** (the captured
+  value is not a function of the flow), in the **harness** (the golden is fine
+  and the harness will not produce the input), or in **egret** (both sides are
+  fine and egret's own answer is wrong — the ordinary baselined entry).
 
-**The rule this yields, and it is the one W8 Task 6 was asked for**: a refusal
-must name the mechanism AND the effect. *"The oracle cannot see it"* is five
-mechanisms; *"the harness compresses time"* is one mechanism and three effects;
-and the only sentence a later reader can act on is the one that says which.
+| | irreproducibility in the GOLDEN | in the HARNESS | in EGRET |
+|---|---|---|---|
+| **no golden entry** | — *(empty: with no entry there is nothing to be a function of)* | **effect 1 — the ratchet cannot speak.** An unbounded `Pause`; the webhook that is never POSTed; `backfill`'s empty population. Over-acceptance invisible in **both** directions. **Act on**: make the harness produce the input | — *(empty: nothing to compare egret against)* |
+| **a golden entry exists** | **effect 2 — the ratchet speaks and is wrong.** `valids/loop-until-restart`. **Act on**: nothing; the golden is the thing that cannot be reproduced | **effect 3 — it speaks, is right about Kestra, and egret's side is deleted by the harness.** `sla: MAX_DURATION`. Over-acceptance visible in **one** direction. **Act on**: repair the harness — uncap `driver.rs`'s `Sleep`, then build the monitor | the ordinary baselined entry: implement it |
 
-#### A LATENCY-DEPENDENT GOLDEN — a different category, not a sixth mechanism
+**Applied outward, the table reclassifies two things the file already had.**
+
+* **Mechanism 4 — *the harness never performs the out-of-band action*** (the
+  webhook) lands squarely on **effect 1**: no entry, invisible both ways, and
+  the repair is *make the harness do it*. It is the same cell as the unbounded
+  `Pause`, reached by a different mechanism. That is the point of a product:
+  mechanism says *why the input is missing*, effect says *what the ratchet can
+  therefore do*, and they vary independently.
+* **The "sixth mechanism" is not a mechanism at all — it IS effect 2**, and is
+  demoted here. It was introduced as *the golden encodes the artifact's own
+  scheduler*, which is a **cause** already covered (mechanism 5, the harness and
+  the artifact disagreeing about time); what made it feel new was that the
+  ratchet spoke and was wrong, and that is a value on this axis rather than a
+  sixth way of being blind. The blindness count stays at **five**.
+
+**The rule this yields, and it is the durable part**: a refusal must name the
+mechanism **and** the effect. *"The oracle cannot see it"* is five mechanisms;
+*"the harness compresses time"* is one mechanism whose entries land in three
+different cells; and the only sentence a later reader can act on is the one that
+says which cell.
+
+#### A LATENCY-DEPENDENT GOLDEN — not a sixth mechanism, and since W8 Task 6
+#### fix round 1 not a category either: it is **effect 2**
 
 **W8 Task 4 fix round 1 rules on this, and the ruling is sharper than the one
 the task first wrote.** Every mechanism in the table above is a reason the
@@ -6695,7 +6719,12 @@ artifact never finished produced no golden entry at all and an over-acceptance
 was invisible in both directions; here a golden entry exists and **permanently
 cannot be reproduced by any implementation**. (W8 Task 6 adds a THIRD effect to
 the same mechanism and the table above separates all three; this one is the
-only one where *there is nothing to fix* is the right answer.) Calling it a sixth blindness would file an
+only one where *there is nothing to fix* is the right answer.) **Fix round 1
+demotes this section's own claim to a cell**: *"a different category"* was
+right that it is not a mechanism and wrong that it is a category of its own. It
+is the (golden entry exists × irreproducibility in the GOLDEN) cell of the
+product above, and the reason it is the only member is that this corpus has one
+latency-dependent golden, not that the cell is special. Calling it a sixth blindness would file an
 unbankable entry under "the ratchet cannot see it" and lose the only thing a
 reader can act on, which is that **there is nothing to fix**. Its `LoopUntil` is bounded by
 `maxDuration: PT3S` with `interval: PT1S`, Kestra's `reachedMaximums` compares

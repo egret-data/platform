@@ -31,8 +31,12 @@
 //! # `MAX_DURATION` is refused by name, and the refusal is a MEASUREMENT
 //!
 //! **Five golden entries are held by a `MAX_DURATION` and not one of them can
-//! be banked by any implementation whatsoever** — including a correct one — for
-//! a reason that is a property of `oracle-exec/driver.rs` rather than of egret:
+//! be banked by any implementation — GIVEN THIS HARNESS.** The qualifier is
+//! fix round 1's: the reason is a property of `oracle-exec/driver.rs` rather
+//! than of egret, and a harness that stopped capping its `Sleep` would move
+//! them, so *"permanently unbankable"* was the wrong word (that belongs to
+//! `valids/loop-until-restart`, whose GOLDEN is the irreproducible part). The
+//! five:
 //!
 //! * `valids/sla-max-duration-fail` (`PT0.5S` over a `Sleep: PT2S`),
 //! * `valids/sla-subflow` (`PT1S` over `PT10S`),
@@ -66,10 +70,26 @@
 //! is that sentence as a running program, with a control that reports a
 //! non-zero count for a flow which *does* register a deadline.
 //!
+//! **That paragraph is about the four DECLARERS, and fix round 1 narrowed it.**
+//! The two `*-parent` entries declare no `sla:`, are not in that test's
+//! population, and *"no run of these flows is ever in flight across a step"* is
+//! **false** for them — a `Subflow` run necessarily spans steps, which is how
+//! it waits for its child. Their mechanism is different and stronger:
+//! `pass_time`'s `WITH RECURSIVE` joins `e.parent_execution_id`, and a subflow
+//! child is linked by `trigger_execution_id` (migration 0138's
+//! `workflow_executions_one_link_kind` forbids both), so **the clock-advance
+//! walk cannot reach the child at all** — true even if the child registered a
+//! deadline. `the_two_sla_parents_are_held_by_a_child_that_ran_and_succeeded`
+//! runs that exact CTE.
+//!
 //! This is `oracle-exec/README.md`'s **fifth** blindness mechanism — *the
-//! harness compresses time* — and its effect is a third one within that
-//! mechanism, distinct from the other two and written down there rather than
-//! merged with them. So no `MAX_DURATION` evaluator is written here: an
+//! harness compresses time* — with **effect 3** on the second axis that file
+//! records: a golden entry exists, the ratchet speaks and is right about
+//! Kestra, and the irreproducibility lives in the **harness**, so an
+//! over-acceptance here is visible in one direction and the repair is a harness
+//! change. (Fix round 1: effect is an axis in its own right, not a property of
+//! mechanism 5 — mechanism 4 lands on effect 1, and what this file once called
+//! a sixth mechanism is effect 2.) So no `MAX_DURATION` evaluator is written here: an
 //! implementation nothing can score is the shape this programme has already
 //! paid for three times, and a monitor loop keyed on wall-clock time is
 //! something [`crate::executor::advance`] — pure over `(plan, state, now)`,
