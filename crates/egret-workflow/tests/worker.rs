@@ -56,7 +56,7 @@ use std::sync::Mutex;
 
 use egret_metastore::Db;
 use egret_workflow::worker::{
-    apply_outcome, claim, reap, start_execution, wake, Outcome, Registry, TaskInput,
+    apply_outcome, claim, due_retries, reap, start_execution, wake, Outcome, Registry, TaskInput,
 };
 use uuid::Uuid;
 
@@ -6223,5 +6223,402 @@ async fn a_paused_row_that_names_no_resumer_cannot_be_stored(pool: sqlx::PgPool)
         "`TERMINAL:CANCELLED` is not in the vocabulary -- 0143 added one \
          discriminant, not an escape hatch. `CANCELLED` is the state `RunState` \
          still does not hold, so this row is also the marker for whoever adds it"
+    );
+}
+
+/// A `Pause` and a successor behind it, with or without a `pauseDuration:`.
+///
+/// The bound is an `Option` rather than two fixtures because the whole point of
+/// [`a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`]
+/// is that the two flows differ in **exactly** that line: an unbounded `Pause`
+/// must be invisible to the waker for a structural reason, not because its
+/// fixture happened to be built differently. The successor is there so "the
+/// wait ended" is observable as a task that ran rather than only as a state.
+fn a_pause(id: &str, bound: Option<&str>) -> String {
+    let duration = match bound {
+        Some(d) => format!("\x20   pauseDuration: {d}\n"),
+        None => String::new(),
+    };
+    format!(
+        "id: {id}\n\
+         namespace: t\n\
+         tasks:\n\
+         \x20 - id: pause\n\
+         \x20   type: io.kestra.plugin.core.flow.Pause\n\
+         {duration}\
+         \x20 - id: last\n\
+         \x20   type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: after\n"
+    )
+}
+
+/// **W8 Task 7, Step 1: a bounded pause whose wait has elapsed is woken, one
+/// whose wait has not is left alone, and an unbounded one is never woken at
+/// all.**
+///
+/// `claim::due_retries` was gated to `'RETRYING'`/`'RETRIED'` from W4 Task 1
+/// until this test. A bounded `Pause` parks its run `'PAUSED'` with a
+/// `not_before_ms`, which matched neither arm, so **in the product** the wait
+/// never ended however correct `advance()` was. W8 Task 3 gave `'PAUSED'` a
+/// producer and Task 4 a second one, so this is a live defect rather than the
+/// prediction it was when Task 2 wrote it down.
+///
+/// # The ratchet is green either way and this test is the only instrument
+///
+/// `oracle-exec/driver.rs`'s `pass_time` selects on `not_before_ms` with **no
+/// state term at all** and then calls `worker::resume` itself, so the oracle
+/// reaches these same runs through a different door. All eight pause entries
+/// banked in W8 Task 3 with the gate narrow and stay banked with it wide:
+/// `baseline.txt` cannot move for this fix and cannot move if it is reverted.
+/// That is W4 item 15's shape — a property proved about a path no deployment
+/// takes — and it is why the assertion has to be here.
+///
+/// # Nothing rewinds a clock here
+///
+/// `executions.created_at` is untouched and the second elapses in real time,
+/// exactly as in
+/// [`a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`],
+/// whose shape this follows. The three executions are driven together so the
+/// waker has to **choose**: a predicate that named everything due would pass a
+/// test that held only the due one.
+///
+/// **The unbounded arm is the over-acceptance guard.** Seven corpus flows write
+/// a `Pause` with no bound and the artifact leaves every one of them `PAUSED`
+/// for the full 90 s harvest, so a waker that resumed one would ship a wrong
+/// product behind a green ratchet. It is refused **in the schema**: migration
+/// 0141's `workflow_task_runs_resume_bound_matches` makes `resume_with =
+/// 'NEVER'` beside a non-NULL `not_before_ms` unrepresentable, so the
+/// pre-existing `not_before_ms IS NOT NULL` term cannot reach one. This asserts
+/// that end of it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = Recorder::default();
+
+    let due = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_pause("pause-due", Some("PT1S")),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start due");
+    let waiting = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_pause("pause-waiting", Some("PT30S")),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start waiting");
+    let unbounded = start_execution(
+        &pool,
+        ws,
+        None,
+        &a_pause("pause-unbounded", None),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start unbounded");
+
+    // All three park in the same state. What separates them is the deadline,
+    // which is the column this predicate reads.
+    for (label, execution, floor) in [
+        ("due", due, Some(1_000)),
+        ("waiting", waiting, Some(30_000)),
+        ("unbounded", unbounded, None),
+    ] {
+        assert_eq!(
+            run_state(&pool, execution, "pause").await.as_deref(),
+            Some("PAUSED"),
+            "the {label} pause must be PAUSED before anything is measured: {}",
+            stuck(&pool, execution, "pause").await
+        );
+        match floor {
+            Some(floor) => {
+                let deadline = not_before_of(&pool, execution, "pause")
+                    .await
+                    .expect("a bounded pause writes its deadline");
+                assert!(
+                    deadline >= floor,
+                    "the {label} pause's deadline must be at least its own \
+                     `pauseDuration:` past the execution's origin: {}",
+                    stuck(&pool, execution, "pause").await
+                );
+            }
+            None => assert_eq!(
+                not_before_of(&pool, execution, "pause").await,
+                None,
+                "an unbounded pause must write NO deadline — `Resume::Never` is \
+                 what keeps the environment's clock from being asked to move, \
+                 and migration 0141 is what makes the pairing structural: {}",
+                stuck(&pool, execution, "pause").await
+            ),
+        }
+        assert!(
+            run_state(&pool, execution, "last").await.is_none(),
+            "the successor must not exist while the {label} pause is waiting: {}",
+            stuck(&pool, execution, "pause").await
+        );
+    }
+
+    // The `pauseDuration:` passes in REAL time. `executions.created_at` is
+    // untouched — a rewind is `driver::pass_time`'s trick and it is exactly why
+    // this hole survived a package.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![due],
+        "the waker must name the execution whose pause came due and no other. \
+         due={due} (pauseDuration PT1S, elapsed); waiting={waiting} (PT30S, not \
+         elapsed); unbounded={unbounded} (no bound, no deadline, never due). \
+         It named {woken:?}. With the `'PAUSED'` arm removed from \
+         `claim::due_retries` this is `[]` and every baselined figure is \
+         unchanged"
+    );
+
+    let finished = drain_with(&pool, &reg).await;
+
+    assert_eq!(
+        run_state(&pool, due, "pause").await.as_deref(),
+        Some("SUCCESS"),
+        "a `pauseDuration:` that elapses ends its run SUCCESS — that terminal \
+         was chosen by `pause::deadline` at pause time and carried on the \
+         `Resume`. Instead: {}",
+        stuck(&pool, due, "pause").await
+    );
+    assert_eq!(
+        run_state(&pool, due, "last").await.as_deref(),
+        Some("SUCCESS"),
+        "the wait ending is what creates the successor, and nothing else in \
+         this execution could: {}",
+        stuck(&pool, due, "pause").await
+    );
+    assert_eq!(
+        reg.seen(),
+        vec!["last".to_string()],
+        "exactly one task reached a handler — the successor. A `Pause` is a \
+         flowable and never does"
+    );
+    assert_eq!(
+        finished,
+        1,
+        "exactly one run's result committed after the wake: {:?}",
+        reg.seen()
+    );
+
+    // The other two directions, which are what a widened predicate breaks.
+    for (label, execution) in [("waiting", waiting), ("unbounded", unbounded)] {
+        assert_eq!(
+            run_state(&pool, execution, "pause").await.as_deref(),
+            Some("PAUSED"),
+            "the {label} pause must still be waiting 1.3 s in: {}",
+            stuck(&pool, execution, "pause").await
+        );
+        assert!(
+            run_state(&pool, execution, "last").await.is_none(),
+            "and its successor must still not exist: {}",
+            stuck(&pool, execution, "pause").await
+        );
+    }
+
+    // **The state term's own assertion, and the one that names it.**
+    // `Command::SetRunState` moves a bounded pause to its terminal WITHOUT
+    // clearing `not_before_ms` — only `Command::RestartLoop` clears one — so
+    // `due`'s run still carries a deadline that is still in the past. The state
+    // term is the only thing between the waker and a finished execution it
+    // would relock and re-settle on every tick for ever.
+    let again = wake(&pool, 8).await.expect("wake again");
+    assert!(
+        again.is_empty(),
+        "the waker named {again:?} when nothing is waiting on an elapsed \
+         deadline. Due side: {}. Waiting side: {}. Unbounded side: {}",
+        stuck(&pool, due, "pause").await,
+        stuck(&pool, waiting, "pause").await,
+        stuck(&pool, unbounded, "pause").await
+    );
+}
+
+/// **W8 Task 7, Step 1's other half: the waker's state vocabulary is a
+/// PARTITION of `RunState::ALL`, and a fourteenth variant cannot be answered by
+/// omission.**
+///
+/// W8's first predicate class: *adding a variant to a state enum silently
+/// falsifies every predicate that enumerates a SUBSET of it, and the compiler
+/// cannot find them, because they are defined by an OMISSION.* `claim::due_retries`'s
+/// `WHERE` is exactly such a subset, written in SQL where not even an
+/// exhaustive `match` could help — `Warning` and `Cancelled` were added to this
+/// enum in W8 Tasks 5 and 6 and nothing asked this predicate about either.
+///
+/// So the question is asked here for **every** member of `RunState::ALL`, with
+/// a verdict each, in the shape `neither_paused_nor_restarted_is_terminal` uses
+/// for `is_terminal`: the expectation table's key set is asserted equal to
+/// `ALL`'s, so a variant added tomorrow **fails this test** rather than
+/// silently joining the unnamed majority.
+///
+/// # What it measures, and why it is `due_retries` rather than `wake`
+///
+/// The SELECT, not the settle. `claim::persist` recomputes `task_runs.state`
+/// from `history.last()`, so a fixture that hand-writes a state and then goes
+/// through `wake` would have the very column under test overwritten before it
+/// could be read back. `due_retries` is `pub` for this.
+///
+/// The rows are hand-written for the same reason: no `advance()` can produce a
+/// `KILLED` run holding a live deadline, and that is the point — the predicate
+/// must be safe against a row the schema admits, not only against rows this
+/// executor writes today. `resume_with` is set on all of them because migration
+/// 0142 refuses a `'PAUSED'` row without one, and 0141 refuses a non-`'NEVER'`
+/// discriminant without a `not_before_ms`.
+///
+/// # Three verdicts, and each has a named reason
+///
+/// | state | named | why |
+/// |---|---|---|
+/// | `RETRYING` | yes | `retry::reopen_due` puts it back to `CREATED` |
+/// | `PAUSED` | yes | `flowable::resume_paused` ends the wait — W8 Task 7 |
+/// | `RETRIED` | yes | `replay::spawn_due` starts the new execution |
+/// | the other ten | no | nothing moves a run in them, so a named one would be relocked and re-settled on every tick for ever |
+///
+/// **`RESTARTED` is the one to look at twice**, because it is the other
+/// non-terminal state W8 Task 2 added and "non-terminal" is not the rule here.
+/// Nothing pushes it onto a *run* — `pause_mark` writes it to the
+/// **execution**'s history, 0 of the golden's 840 run histories hold it against
+/// 12 execution histories that do — and `Command::RestartLoop`, the one command
+/// that ends a `LoopUntil`'s wait, clears `not_before` and `resume_with` in the
+/// same arm.
+///
+/// # The clock control
+///
+/// A fourteenth execution is `'PAUSED'` with a deadline far in the future. It
+/// is what fails if the clock term is dropped while the state terms are kept,
+/// which a state-only table could not see.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_waker_names_exactly_the_states_something_will_move(pool: sqlx::PgPool) {
+    use egret_workflow::executor::RunState;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    // The verdict for every member of `RunState::ALL`, spelled out. The key set
+    // is checked against `ALL` below, so this table cannot go stale by omission.
+    let expected: BTreeMap<&str, bool> = BTreeMap::from([
+        ("CREATED", false),
+        ("SUBMITTED", false),
+        ("RUNNING", false),
+        ("SUCCESS", false),
+        ("FAILED", false),
+        ("RETRYING", true),
+        ("RETRIED", true),
+        ("KILLED", false),
+        ("SKIPPED", false),
+        ("PAUSED", true),
+        ("RESTARTED", false),
+        ("WARNING", false),
+        ("CANCELLED", false),
+    ]);
+
+    let vocabulary: BTreeSet<&str> = RunState::ALL.iter().map(|s| s.wire()).collect();
+    let tabled: BTreeSet<&str> = expected.keys().copied().collect();
+    assert_eq!(
+        tabled, vocabulary,
+        "this table must answer for EVERY `RunState`. A variant in `ALL` and \
+         not here is the omission that made `Warning` and `Cancelled` silently \
+         un-asked; one here and not in `ALL` is a state this predicate can \
+         never see"
+    );
+
+    // One execution per state, each holding a run whose deadline has passed.
+    let mut execution_of: BTreeMap<&str, Uuid> = BTreeMap::new();
+    for state in expected.keys().copied() {
+        let ex = start_execution(
+            &pool,
+            ws,
+            None,
+            &one_task(&format!("vocab-{}", state.to_lowercase())),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("start execution");
+        sqlx::query(
+            "UPDATE workflow.task_runs \
+                SET state = $2, not_before_ms = 0, resume_with = 'TERMINAL:SUCCESS' \
+              WHERE execution_id = $1 AND task_id = 'a'",
+        )
+        .bind(ex)
+        .bind(state)
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("store a due run in {state}: {e}"));
+        execution_of.insert(state, ex);
+    }
+
+    // The clock control: `PAUSED`, which the state terms DO name, with a
+    // deadline an hour out.
+    let not_yet = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task("vocab-not-yet"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start not-yet");
+    sqlx::query(
+        "UPDATE workflow.task_runs \
+            SET state = 'PAUSED', not_before_ms = 3600000, resume_with = 'TERMINAL:SUCCESS' \
+          WHERE execution_id = $1 AND task_id = 'a'",
+    )
+    .bind(not_yet)
+    .execute(&pool)
+    .await
+    .expect("store a PAUSED run whose deadline has not arrived");
+
+    let named: BTreeSet<Uuid> = due_retries(&pool, 64)
+        .await
+        .expect("due_retries")
+        .into_iter()
+        .collect();
+
+    // Positive control first: a `due_retries` that returned nothing at all —
+    // a broken fixture, a CHECK that silently refused every UPDATE — would
+    // satisfy every `false` row below on its own.
+    assert!(
+        !named.is_empty(),
+        "the waker named NOBODY out of {} due runs. Every negative row below is \
+         unfalsifiable until this holds",
+        expected.len()
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (state, want) in &expected {
+        let ex = execution_of[state];
+        let got = named.contains(&ex);
+        if got != *want {
+            wrong.push(format!(
+                "{state}: expected named={want}, got named={got} (execution {ex})"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the waker's state vocabulary has moved:\n  {}\n\
+         Named: {:?}. Removing the `'PAUSED'` arm shows up here as \
+         `PAUSED: expected named=true, got named=false`",
+        wrong.join("\n  "),
+        named
+    );
+
+    assert!(
+        !named.contains(&not_yet),
+        "the waker named a `PAUSED` run whose deadline is an hour away \
+         (execution {not_yet}) — the state terms are not the only terms"
     );
 }
