@@ -1359,8 +1359,7 @@ useful half twice.
     DOC has said so since W3b ("it changes one timestamp and calls the same
     `resume` any other caller would"), and this package wrote the opposite for
     five tasks.
-    Instrumented `wake` over the whole oracle: **0 fires on the retry
-    population, in every run.**  It used to read a flat `0 fires over 294
+    Instrumented `wake` over the whole oracle.  It used to read a flat `0 fires over 294
     entries` and W8 Task 7 made that half false: widening `due_retries` to name
     a due `PAUSED` run gave the oracle a second door to the same `resume`, and
     the instrument now reads **1 fire in one of five runs and 0 in the other
@@ -1369,6 +1368,10 @@ useful half twice.
     ratchet is **109 in all five** and in a sixth with the arm removed: both
     doors call the same `worker::resume`, so which one opens changes no trace.
     `tests/worker.rs` is the positive control on the same build (1 fire).
+    The instrument printed an execution id only, so THE ONE FIRE IS NOT
+    ATTRIBUTED to an entry and is not claimed to be.  What IS known is the
+    change: only the `'PAUSED'` arm moved, the `RETRYING`/`RETRIED` selection is
+    byte-identical, so the retry mechanism above is untouched.
     NOT a hole in retrying: a change on any of the 17 matching entries IS
     reported.
 
