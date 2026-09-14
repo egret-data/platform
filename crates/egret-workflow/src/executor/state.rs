@@ -791,8 +791,8 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         } => {
             let r = &mut state.runs[*run];
             r.history.push(*run_state);
-            if let (Some(s), Some(a)) = (attempt, r.attempts.last_mut()) {
-                a.history.push(*s);
+            if let Some(a) = r.attempts.last_mut() {
+                a.history.push(*attempt);
             }
         }
         // W8 Task 4 -- Kestra's `ExecutionService.retryWaitFor`, whose two
@@ -940,42 +940,88 @@ mod tests {
     ///     || this == SKIPPED || this == RESUBMITTED;
     /// ```
     ///
-    /// Five of those eight are members of this enum and every one of them is
-    /// asserted true; the six non-members of the list are asserted false. So a
-    /// `Paused` quietly added to `is_terminal` fails, and so does a `Success`
-    /// quietly removed.
+    /// ~~Five~~ **SIX** of those eight are members of this enum and every one of
+    /// them is asserted true; the six non-members of the list are asserted
+    /// false. So a `Paused` quietly added to `is_terminal` fails, and so does a
+    /// `Success` quietly removed.
+    ///
+    /// # It said FIVE while the enum held six, and the totality assertion is
+    /// the fix
+    ///
+    /// W8 Task 5 added `Warning`, which `State.Type.isTerminated()` lists
+    /// **second**, and did not add it here — so **the guard named for
+    /// terminality was silent about the terminal that task introduced**.
+    /// Measured in fix round 1: deleting `| RunState::Warning` from
+    /// [`RunState::is_terminal`] kills **8 tests and not this one**.
+    ///
+    /// The row is added, and so is the thing that makes the omission
+    /// impossible rather than merely fixed: **the two lists are asserted to
+    /// PARTITION [`RunState::ALL`]**. A variant added to the enum and to
+    /// neither list now fails here by construction, which is the only version
+    /// of this guard that does not depend on somebody remembering. Counting
+    /// `ALL.len()` alone could not do it — 6 + 6 = 12 is true of the wrong
+    /// twelve too.
     ///
     /// The wire spellings are here for the same reason `run_state_all_holds…`
     /// checks them: a variant whose `wire()` collides with another's is
     /// invisible to the golden.
     #[test]
     fn neither_paused_nor_restarted_is_terminal() {
-        for state in [
+        // `State.Type.isTerminated()`'s members that this enum holds. `Warning`
+        // is the sixth, added in fix round 1 -- see this test's doc.
+        const TERMINAL: [RunState; 6] = [
             RunState::Success,
             RunState::Failed,
+            RunState::Warning,
             RunState::Killed,
             RunState::Retried,
             RunState::Skipped,
-        ] {
-            assert!(
-                state.is_terminal(),
-                "{state:?} is in State.Type.isTerminated() and must stay terminal"
-            );
-        }
-        for state in [
+        ];
+        const NOT_TERMINAL: [RunState; 6] = [
             RunState::Created,
             RunState::Submitted,
             RunState::Running,
             RunState::Retrying,
             RunState::Paused,
             RunState::Restarted,
-        ] {
+        ];
+        for state in TERMINAL {
+            assert!(
+                state.is_terminal(),
+                "{state:?} is in State.Type.isTerminated() and must stay terminal"
+            );
+        }
+        for state in NOT_TERMINAL {
             assert!(
                 !state.is_terminal(),
                 "{state:?} is NOT in State.Type.isTerminated() -- a run in it is \
                  still the executor's business"
             );
         }
+        // **The two lists PARTITION the enum**, which is what stops the next
+        // variant being omitted from both the way `Warning` was omitted from
+        // the first. Disjointness is asserted beside coverage because a
+        // variant in both lists would make the counts agree and the assertions
+        // contradict each other.
+        let named: std::collections::BTreeSet<&str> = TERMINAL
+            .iter()
+            .chain(NOT_TERMINAL.iter())
+            .map(|s| s.wire())
+            .collect();
+        let all: std::collections::BTreeSet<&str> =
+            RunState::ALL.iter().map(|s| s.wire()).collect();
+        assert_eq!(
+            named.len(),
+            TERMINAL.len() + NOT_TERMINAL.len(),
+            "a variant is named in BOTH lists"
+        );
+        assert_eq!(
+            named, all,
+            "every RunState variant must be on exactly one side of \
+             State.Type.isTerminated(); this fails for a variant added to the \
+             enum and to neither list -- which is how `Warning` slipped past \
+             this guard in the commit that introduced it"
+        );
         assert_eq!(RunState::Paused.wire(), "PAUSED");
         assert_eq!(RunState::Restarted.wire(), "RESTARTED");
         assert_eq!(

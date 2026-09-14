@@ -208,7 +208,16 @@ And the dependency runs the other way more strongly than the row implies: **W6
 Task 3 is what moved all four divergences onto W8's constructs at all** — before
 it they diverged at the `Subflow` — and **W6's `guess_state` is explicitly
 narrowed from `{FAILED, PAUSED, KILLED, WARNING}` to `{Failed, Killed}`**, so both
-`Paused` and `Warning` **widen a W6 function**. W6 Task 3 is also what lowered the
+`Paused` and `Warning` **widen a W6 function**.
+
+> **Measured at W8 Task 5 fix round 1: only ONE of the two widens it.**
+> `WARNING` is back in the trigger set — a child execution really can end
+> `WARNING` once its own aggregate does, and the artifact transmits it (bytecode
+> 44–47) and lets `allowWarning:` alone map it to `SUCCESS` (79–102). `PAUSED`
+> does **not** and cannot: `on_child_terminal` runs from a child that has
+> TERMINATED, and `State.Type.isTerminated()` does not list `PAUSED`, so that
+> disjunct is unreachable from the caller rather than declined. Two disjuncts
+> that read as one narrowing are two different facts. W6 Task 3 is also what lowered the
 `concurrency:` row from 7 to 6.
 
 ## 6. What judges W8

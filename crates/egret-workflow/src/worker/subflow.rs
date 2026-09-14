@@ -687,15 +687,56 @@ async fn on_child_terminal_inner(
 /// `Warning`"*. W8 Task 5 added all three, and the two golden entries that cost
 /// — `valids/task-allow-{failure,warning}-executable-flow` — bank.
 ///
-/// **The trigger set is still `{Failed, Killed}` and that is a DIFFERENT
-/// narrowing**, one this task did not touch: `PAUSED` and `WARNING` are in
-/// Java's disjunction as states of a **child EXECUTION**, and a child execution
-/// reaches this function only when it has terminated. `PAUSED` is not terminal
-/// at all; a child execution ending `WARNING` needs something inside it to
-/// produce one, which for a `Subflow`'s child means the same flags one level
-/// down and no corpus flow writes that. Neither is representable as a
-/// `child_state` this function can be handed, so the set is what the caller can
-/// supply rather than a subset anybody chose.
+/// # The trigger set, and a justification that expired inside the task that
+/// wrote it
+///
+/// Java's disjunction is `isFailed() || isPaused() || KILLED || WARNING`.
+/// **Three of the four are here; `PAUSED` is not, and that is a property of the
+/// CALLER.** [`on_child_terminal`] runs from `claim::settle` step 4 of a child
+/// that has **terminated**, and `State.Type.isTerminated()` does not list
+/// `PAUSED` — measured off the pinned artifact at W8 Task 2. So a paused child
+/// never reaches this function at all; the disjunct is unreachable rather than
+/// declined.
+///
+/// **`WARNING` was excluded for the same-sounding reason and the reason was
+/// wrong by the time it was written.** W8 Task 5 fix round 1 restored it. The
+/// paragraph it replaces read: *"a child execution ending `WARNING` needs
+/// something inside it to produce one, which for a `Subflow`'s child means the
+/// same flags one level down and no corpus flow writes that. Neither is
+/// representable as a `child_state` this function can be handed."* Both halves
+/// were false **in the commit that wrote them**:
+///
+/// - *"not representable"* was true until `RunState::Warning` existed, and the
+///   same task added it. `worker::from_wire` derives from [`RunState::ALL`], so
+///   the variant became decodable in the same commit this sentence claimed it
+///   was not.
+/// - *"needs the same flags one level down"* is not what it needs. A child
+///   execution ends `WARNING` whenever its own aggregate does — one softened
+///   failure and nothing worse, which is
+///   `executor::tests::an_execution_whose_only_failure_is_softened_ends_warning`
+///   driven end to end. The flags are the CHILD's own, at any depth, and the
+///   parent's `transmitFailed` is what carries the result up.
+///
+/// **The lesson is the mechanism, not the instance: a justification can expire
+/// silently when the task that expires it is the same task that reads it.** The
+/// question that finds it is not a re-read — it is *does this sentence name a
+/// thing this commit changes?*
+///
+/// The fixture missed it for the reason a fixture always does. `the_allow_flags
+/// _only_move_a_transmitted_failure` supplied `Failed`, `Killed` and `Success`
+/// and **never `Warning`** — the element of the class it was not built for.
+/// `a_warning_child_is_transmitted_and_only_allow_warning_moves_it` is the row
+/// that was missing.
+///
+/// **What the artifact answers, read off the bytecode** (`javap -p -c`,
+/// `ExecutableUtils.guessState`, offsets 44–47 for the trigger and 79–102 for
+/// the tail): with `transmitFailed: true` and a `WARNING` child,
+/// `(allowedFailure && isFailed())` is false because `isFailed()` is
+/// `this == FAILED` alone, so `finalState` is the child's own `WARNING`; the
+/// tail then maps it to `SUCCESS` under `allowWarning:` **and under
+/// `allowWarning:` alone**. That is exactly
+/// [`soften`](crate::executor::allow_failure::soften)'s `(Warning, _, true)`
+/// arm, which is why this function needs no arm of its own for it.
 ///
 /// **Two corrections W8 Task 2 owes this paragraph, both from the decompiled
 /// artifact** (`/app/kestra` in `kestra/kestra@sha256:28f59bf1…`):
@@ -707,16 +748,11 @@ async fn on_child_terminal_inner(
 ///   same one `spawn::terminated_in_error` reads for a `Loop`, but not for the
 ///   reason given.
 /// - It said `RunState` has no paused state. **From W8 Task 2 it does, and from
-///   W8 Task 3 something emits it.** The narrowing is unchanged and the reason
-///   moves a second time: `flowable::pause` puts a RUN into
-///   [`RunState::Paused`], but this function is reached by a child
-///   EXECUTION's terminal, and a paused execution has not terminated —
-///   `State.Type.isTerminated()` does not list `PAUSED`, which is exactly what
-///   W8 Task 2 measured off the pinned artifact. So the trigger set stays
-///   narrow because a paused child never gets here at all, not because nothing
-///   can be paused. `Warning` was still W8's and still unreachable then; it is
-///   W8 Task 5's and is neither now, though the trigger set is unchanged for
-///   the reason above.
+///   W8 Task 3 something emits it.** The reason moves a second time:
+///   `flowable::pause` puts a RUN into [`RunState::Paused`], but this function
+///   is reached by a child EXECUTION's terminal, and a paused execution has not
+///   terminated. So `PAUSED` stays out because a paused child never gets here
+///   at all, not because nothing can be paused.
 ///
 /// The cost WAS two golden entries, named in this module's doc; both bank.
 ///
@@ -732,7 +768,15 @@ fn guess_state(
     allow_failure: bool,
     allow_warning: bool,
 ) -> RunState {
-    match transmit_failed && matches!(child, RunState::Failed | RunState::Killed) {
+    match transmit_failed
+        && matches!(
+            child,
+            // Java's disjunction, minus the one disjunct that cannot reach
+            // this function: `isFailed() || isPaused() || KILLED || WARNING`.
+            // See the doc above for why `PAUSED` is absent and why that is a
+            // property of the CALLER rather than a narrowing chosen here.
+            RunState::Failed | RunState::Killed | RunState::Warning
+        ) {
         // **W8 Task 5 supplies the two `allow*` inputs the paragraph above
         // called unreachable.** They are the `Subflow` TASK's own flags, read
         // off the plan rather than off `models::Subflow` -- `allowFailure:` is
@@ -796,7 +840,7 @@ async fn complete(
             _ => Command::CompleteRun {
                 run,
                 run_state: *s,
-                attempt: Some(*s),
+                attempt: *s,
             },
         };
         apply(&mut state, &cmd);
@@ -1287,6 +1331,59 @@ mod tests {
         // is why the row above it exists.
         assert_eq!(
             guess_state(false, RunState::Failed, true, true),
+            RunState::Success
+        );
+    }
+
+    /// **A `WARNING` child is TRANSMITTED, and only `allowWarning:` moves it**
+    /// — the row `the_allow_flags_only_move_a_transmitted_failure` did not
+    /// contain, and the one a shipped defect lived in until W8 Task 5 fix
+    /// round 1.
+    ///
+    /// That test supplies `Failed`, `Killed` and `Success` and never `Warning`,
+    /// so it could not see [`guess_state`] answering `SUCCESS` where the
+    /// artifact keeps `WARNING`. The trigger set is
+    /// `isFailed() || isPaused() || KILLED || WARNING` (bytecode 44–47) and the
+    /// tail is `finalState == WARNING && allowWarning ? SUCCESS : finalState`
+    /// (79–102).
+    ///
+    /// **The oracle cannot score any of this**, so these four assertions are
+    /// the whole instrument: no corpus `Subflow` has a child that ends
+    /// `WARNING`, because that needs the child's own flags and the two flows
+    /// that write them are the parents rather than the children. A mutation
+    /// reverting the `RunState::Warning` disjunct leaves the ratchet at 111 and
+    /// kills **only this test** — measured, fix round 1's M18.
+    ///
+    /// **`allow_failure` is varied against a fixed `allow_warning` in both
+    /// halves**, because `(allowedFailure && isFailed())` is false for a
+    /// `WARNING` child whatever `allowFailure:` says — a mapping that read the
+    /// two flags as one would pass a fixture that only moved `allow_warning`.
+    #[test]
+    fn a_warning_child_is_transmitted_and_only_allow_warning_moves_it() {
+        // Transmitted and kept: `allowFailure:` cannot reach it, because
+        // `State.Type.isFailed()` is `this == FAILED` alone.
+        assert_eq!(
+            guess_state(true, RunState::Warning, false, false),
+            RunState::Warning
+        );
+        assert_eq!(
+            guess_state(true, RunState::Warning, true, false),
+            RunState::Warning
+        );
+        // `allowWarning:` moves it, with `allowFailure:` on or off.
+        assert_eq!(
+            guess_state(true, RunState::Warning, false, true),
+            RunState::Success
+        );
+        assert_eq!(
+            guess_state(true, RunState::Warning, true, true),
+            RunState::Success
+        );
+        // The control: with `transmitFailed` off the `else` branch answers
+        // `SUCCESS` for the same child, so "SUCCESS" above would have been
+        // indistinguishable from "never triggered" without this row beside it.
+        assert_eq!(
+            guess_state(false, RunState::Warning, false, false),
             RunState::Success
         );
     }

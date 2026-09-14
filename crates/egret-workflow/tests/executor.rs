@@ -2724,26 +2724,31 @@ fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
 // bigger per entry than Task 3's: three executions of one flow, each with one
 // run, and the run histories are five states long
 // (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
-/// **433 through W8 Task 2, 419 after W8 Task 3, 412 now** -- Task 3's 14 run
-/// terminals plus the 7 `valids/waitfor-nested` carries, which leave the
+/// **433 through W8 Task 2, 419 after W8 Task 3, 412 after W8 Task 4, 396
+/// now** -- Task 3's 14 run terminals, the 7 `valids/waitfor-nested` carries,
+/// and W8 Task 5's **16** over its seven banked entries, which leave the
 /// un-falsifiable half for the reported half. 840 is unchanged, because banking
 /// moves a run across the line rather than creating one.
 const TERMINALS_ON_BASELINED_ENTRIES: usize = 396;
 const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
-/// **165 through W8 Task 2, 157 after W8 Task 3, 156 now** -- the eight `Pause`
-/// entries W8 Task 3 banked and the one `LoopUntil` entry W8 Task 4 banked,
-/// none of which carries a sub-execution, so each fall is exactly the count.
+/// **165 through W8 Task 2, 157 after W8 Task 3, 156 after W8 Task 4, 149
+/// now** -- the eight `Pause` entries W8 Task 3 banked, the one `LoopUntil`
+/// entry W8 Task 4 banked, and W8 Task 5's seven. None of the sixteen carries a
+/// sub-execution -- `SUB_EXECUTIONS_ON_BASELINED_ENTRIES` has not moved since
+/// W6 Task 4 -- so each fall is exactly the entry count.
 const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 149;
-/// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 now** -- 56 run-history
-/// tokens on Task 3's eight, and 37 on `valids/waitfor-nested`, whose seven runs
-/// include three loops reading `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING
-/// SUCCESS`.
+/// **1703 through W8 Task 2, 1647 after W8 Task 3, 1610 after W8 Task 4, 1528
+/// now** -- 56 run-history tokens on Task 3's eight, 37 on
+/// `valids/waitfor-nested` (whose seven runs include three loops reading
+/// `CREATED RUNNING PAUSED RUNNING PAUSED RUNNING SUCCESS`), and **82** on W8
+/// Task 5's seven, which is high per entry because three of them retry: a
+/// `task-allow-*-runnable` run history is thirteen tokens long.
 const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1528;
-/// **665 through W8 Task 2, 617 after W8 Task 3, 562 now** -- 48
-/// execution-history tokens on Task 3's eight, i.e. six apiece (every one of
-/// them reads `CREATED RUNNING PAUSED RESTARTED RUNNING <terminal>`), and 55 on
-/// `valids/waitfor-nested` alone, whose execution alternates `PAUSED`/`RUNNING`
-/// 26 times.
+/// **665 through W8 Task 2, 617 after W8 Task 3, 562 after W8 Task 4, 526
+/// now** -- 48 execution-history tokens on Task 3's eight, i.e. six apiece
+/// (every one of them reads `CREATED RUNNING PAUSED RESTARTED RUNNING
+/// <terminal>`), 55 on `valids/waitfor-nested` alone (whose execution
+/// alternates `PAUSED`/`RUNNING` 26 times), and **36** on W8 Task 5's seven.
 const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 526;
 
 /// **What the order restriction actually removes, driven through the real

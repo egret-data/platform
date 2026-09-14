@@ -224,10 +224,12 @@ pub enum Command {
     /// would be wrong for every retry: `valids/retry-failed`'s attempts each end
     /// `FAILED` and the `RETRYING` that follows must not join them.
     ///
-    /// `None` leaves the attempt alone entirely. No caller writes it today; it
-    /// is the spelling for a run whose history moves while no attempt is open,
-    /// and it is here so that the field's meaning is a value rather than a
-    /// convention about which states are safe to push.
+    /// **`attempt` is a `RunState` and not an `Option`** — fix round 1. It was
+    /// `Option`, with `None` documented as "leaves the attempt alone", and no
+    /// caller ever wrote it: a variant nothing constructs is a branch in
+    /// `apply` nobody has seen taken, which is the shape this package has paid
+    /// for twice. A run whose history moves while no attempt is open is
+    /// [`Command::SetRunState`]'s job and always was.
     ///
     /// It contains no decision: both halves are values the emitter has already
     /// chosen, exactly as `SkipRun`'s two writes are.
@@ -235,8 +237,10 @@ pub enum Command {
         run: RunIx,
         /// Pushed onto the run's own history.
         run_state: RunState,
-        /// Pushed onto the latest attempt, open or closed.
-        attempt: Option<RunState>,
+        /// Pushed onto the latest attempt, open or closed. A run with no
+        /// attempt at all takes the `run_state` and nothing else, which is a
+        /// fact about the state rather than a choice this command makes.
+        attempt: RunState,
     },
     SetExecutionState {
         state: RunState,

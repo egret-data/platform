@@ -5189,8 +5189,10 @@ tasks:
     /// declares it on the flow's **first** task, so `plan.tasks[task]` and
     /// `plan.tasks[0]` are the same expression on all of them. Mutation M7 —
     /// `let t = &plan.tasks[0];` in [`flowable::descend`] — therefore **survived
-    /// the whole crate suite, 843 lib + 54 oracle tests at 0 failures, with the
-    /// ratchet green and unmoved at 111**. That is the operand rule this
+    /// the whole crate suite at 0 failures, with the ratchet green and unmoved
+    /// at 111**: **792 lib + 54 oracle**, which is 846 and not the "843 lib +
+    /// 54 oracle" this sentence carried for one round — 843 was the TOTAL of
+    /// the two, written as one of its parts. That is the operand rule this
     /// package keeps paying for: *a two-sided mutation pair on an OPERATOR says
     /// nothing about where the OPERAND came from*, and the seven ratchet
     /// entries that pin this mapping pin the operator only.

@@ -940,7 +940,7 @@ pub async fn apply_outcome(
         Command::CompleteRun {
             run,
             run_state: terminal,
-            attempt: Some(outcome.state),
+            attempt: outcome.state,
         }
     };
     apply(&mut state, &cmd);
