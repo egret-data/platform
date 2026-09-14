@@ -948,6 +948,18 @@ impl ExecutionRepo {
     /// Public beside [`Self::get`] so a detail page polling for progress can
     /// refresh the run table without re-reading the execution and its source
     /// every second.
+    ///
+    /// **The `ORDER BY` is not decoration and is not free.** `UNIQUE
+    /// (execution_id, run_ix)` (migration 0134) backs an index in exactly
+    /// that order, so at small row counts Postgres plans this read as an
+    /// `Index Scan using task_runs_execution_id_run_ix_key` and hands the
+    /// rows back sorted whether the statement asks or not -- measured, and it
+    /// is why deleting this clause leaves
+    /// `get_one_returns_its_task_runs_ordered_by_run_ix` green.
+    /// `task_runs_are_sorted_by_the_query_and_not_by_the_plan` is the test
+    /// that actually holds it: 500 shuffled runs flip the plan to a `Seq
+    /// Scan`, whose physical order is not `run_ix` order, and it checks that
+    /// it flipped before it checks the result.
     pub async fn task_runs(&self, ws: Uuid, execution: Uuid) -> Result<Vec<TaskRunRow>> {
         sqlx::query_as(concat!(
             "SELECT ",

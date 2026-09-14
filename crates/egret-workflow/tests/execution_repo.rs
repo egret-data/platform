@@ -571,3 +571,75 @@ async fn an_execution_with_no_task_runs_is_found_with_an_empty_run_list() {
     assert_eq!(detail.execution.state, "CREATED");
     assert!(detail.runs.is_empty());
 }
+
+/// **The ORDER BY, proven rather than assumed.**
+///
+/// [`get_one_returns_its_task_runs_ordered_by_run_ix`] above does NOT prove it:
+/// with three rows Postgres plans that read as an `Index Scan using
+/// task_runs_execution_id_run_ix_key`, and that index IS `(execution_id,
+/// run_ix)` -- so the rows arrive in `run_ix` order whether the statement asks
+/// for it or not. Measured, not supposed: deleting `ORDER BY t.run_ix` from
+/// `ExecutionRepo::task_runs` leaves that test green (mutation M7).
+///
+/// This one makes the index stop answering. Five hundred runs on one
+/// execution flips the plan to a `Seq Scan`, which returns PHYSICAL order --
+/// and the rows are inserted shuffled, so physical order is not `run_ix`
+/// order.
+///
+/// The first assertion is the instrument check, and it is the point: it reads
+/// the same rows with the same predicate and NO `ORDER BY`, and requires that
+/// answer to be unsorted. If a future planner sorts it anyway, this test fails
+/// LOUDLY rather than silently certifying an ORDER BY it can no longer see.
+#[tokio::test]
+async fn task_runs_are_sorted_by_the_query_and_not_by_the_plan() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let repo = ExecutionRepo::new(db.clone());
+
+    let id = insert_execution(&db, ws, &Exec::default()).await;
+    // Shuffled by an md5 of the index, so the insertion order -- and therefore
+    // the heap order -- is deterministic across runs but is not `run_ix` order.
+    sqlx::query(
+        "INSERT INTO workflow.task_runs \
+           (execution_id, run_ix, task_ix, task_id, type_id, state, history) \
+         SELECT $1, g, g, 't' || g, 'io.kestra.plugin.core.log.Log', 'CREATED', \
+                '[\"CREATED\"]'::jsonb \
+           FROM (SELECT generate_series(0, 499) AS g \
+                  ORDER BY md5(generate_series(0, 499)::text)) s",
+    )
+    .bind(id)
+    .execute(&db.pool)
+    .await
+    .expect("insert 500 shuffled task runs");
+    sqlx::query("ANALYZE workflow.task_runs")
+        .execute(&db.pool)
+        .await
+        .expect("analyze");
+
+    // The instrument: the same join, the same predicate, no ORDER BY.
+    let unordered: Vec<i32> = sqlx::query_scalar(
+        "SELECT t.run_ix FROM workflow.task_runs t \
+         JOIN workflow.executions e ON e.id = t.execution_id \
+         WHERE t.execution_id = $1 AND e.workspace_id = $2",
+    )
+    .bind(id)
+    .bind(ws)
+    .fetch_all(&db.pool)
+    .await
+    .expect("unordered control");
+    assert_eq!(unordered.len(), 500);
+    assert!(
+        !unordered.windows(2).all(|w| w[0] <= w[1]),
+        "INSTRUMENT FAILURE, not a product failure: at this row count the plan \
+         is supposed to stop handing back `run_ix` order for free, and it did \
+         not -- so the assertion below cannot tell an ORDER BY from an index \
+         and must not be read as proving one"
+    );
+
+    let runs = repo.task_runs(ws, id).await.expect("task_runs");
+    assert_eq!(
+        runs.iter().map(|r| r.run_ix).collect::<Vec<_>>(),
+        (0..500).collect::<Vec<i32>>(),
+        "the statement's ORDER BY is what sorts these, not the plan"
+    );
+}
