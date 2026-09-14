@@ -100,7 +100,10 @@ The package table (§9) assigns the runtime to **W3b** (merged, loop built as fu
 
 **Files:** modify `crates/egret-workflow/src/repo.rs`; create tests in the same file or `tests/execution_repo.rs`.
 
-`repo.rs` has exactly one repo, `FlowRepo` (line 189), and **nothing reads `workflow.executions`**.
+`repo.rs` has exactly one repo, `FlowRepo` (line 189), and **nothing reads
+`workflow.executions` for a human** — measured: there are **21** `FROM`/`JOIN`
+reads across seven files (control: `workflow.task_logs` returns 0, so the search
+reaches), and every one of them is the engine reading its own state.
 
 - [ ] **Step 1: Write the failing tests first** — list filters by workspace, by flow, by state and by time window; get-one returns its task runs ordered by `run_ix`; **and a cross-workspace test that inserts an execution in workspace B and asserts workspace A cannot see it by id.** That last is the `chart_id` class and must exist before the query does.
 - [ ] **Step 2: Implement `ExecutionRepo`** with runtime `sqlx::query(...)` — **this workspace has zero compile-time macros and no `.sqlx` directory**; a `query!` would be the first and would need offline data. Every statement filters on `workspace_id`.
