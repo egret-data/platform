@@ -26,6 +26,10 @@ mod common;
 /// The columns a test actually varies. Everything else takes the schema's own
 /// default, so a test names only what it is about.
 struct Exec {
+    /// Supplied only where the test needs to control the id's ORDER relative
+    /// to insertion order -- the `created_at` tie-break case. `None` lets the
+    /// column default to `gen_random_uuid()`.
+    id: Option<Uuid>,
     flow_id: Option<Uuid>,
     namespace: &'static str,
     flow_key: &'static str,
@@ -40,6 +44,7 @@ struct Exec {
 impl Default for Exec {
     fn default() -> Self {
         Self {
+            id: None,
             flow_id: None,
             namespace: "a.b",
             flow_key: "f",
@@ -53,8 +58,9 @@ impl Default for Exec {
 async fn insert_execution(db: &Db, ws: Uuid, e: &Exec) -> Uuid {
     sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, created_at) \
-         VALUES ($1, $2, $3, $4, 'id: f\ntasks: []\n', $5, $6, $7) \
+           (id, workspace_id, flow_id, namespace, flow_key, source, state, history, created_at) \
+         VALUES (COALESCE($8, gen_random_uuid()), $1, $2, $3, $4, \
+                 'id: f\ntasks: []\n', $5, $6, $7) \
          RETURNING id",
     )
     .bind(ws)
@@ -64,6 +70,7 @@ async fn insert_execution(db: &Db, ws: Uuid, e: &Exec) -> Uuid {
     .bind(e.state)
     .bind(&e.history)
     .bind(e.created_at)
+    .bind(e.id)
     .fetch_one(&db.pool)
     .await
     .expect("insert execution")
@@ -119,6 +126,13 @@ async fn insert_flow(db: &Db, ws: Uuid, user: egret_core::UserId, flow_key: &str
 ///
 /// Every assertion here is paired with a positive control from workspace B, so
 /// a repository that answered nothing to everybody would fail too.
+///
+/// **Workspace A owns a row of its own** (fix round 1). Without it, A's three
+/// negatives -- empty `rows`, `total == 0`, empty `task_runs` -- were three
+/// zeros on an empty workspace, and the test could not tell *"the predicate
+/// filters correctly"* from *"A happened to have nothing"*. A's row is what
+/// turns each negative into a **discrimination**: A sees exactly one
+/// execution, its own, and the count is 1 rather than 0 or 2.
 #[tokio::test]
 async fn an_execution_in_another_workspace_is_invisible_by_id_and_in_every_list() {
     let Some(db) = common::db().await else { return };
@@ -128,6 +142,19 @@ async fn an_execution_in_another_workspace_is_invisible_by_id_and_in_every_list(
 
     let bs = insert_execution(&db, ws_b, &Exec::default()).await;
     insert_task_run(&db, bs, 0, "only").await;
+
+    // A's own execution, so every negative below sits beside a positive in the
+    // SAME workspace and cannot be satisfied by A being empty.
+    let a_own = insert_execution(
+        &db,
+        ws_a,
+        &Exec {
+            flow_key: "a-owns-this",
+            ..Exec::default()
+        },
+    )
+    .await;
+    insert_task_run(&db, a_own, 0, "a-own-run").await;
 
     // Positive control: B can see its own, by id and in its list.
     let owned = repo
@@ -166,7 +193,8 @@ async fn an_execution_in_another_workspace_is_invisible_by_id_and_in_every_list(
         "404, not 403 — a 403 would confirm the id exists"
     );
 
-    // ...and it is nowhere in A's list, nor in A's count, nor in A's runs.
+    // ...and it is nowhere in A's list, nor in A's count, nor in A's runs --
+    // each asserted against A's OWN row, not against an empty workspace.
     let a_page = repo
         .list(ws_a, &ExecutionFilter::default(), Page::default())
         .await
@@ -177,8 +205,15 @@ async fn an_execution_in_another_workspace_is_invisible_by_id_and_in_every_list(
         a_page.rows.iter().map(|r| r.id).collect::<Vec<_>>()
     );
     assert_eq!(
-        a_page.total, 0,
-        "workspace A's total must not count workspace B's execution"
+        a_page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        vec![a_own],
+        "workspace A's list is exactly its own row -- neither empty (which \
+         would pass for the wrong reason) nor two rows"
+    );
+    assert_eq!(
+        a_page.total, 1,
+        "workspace A's total counts A's own execution and ONLY it; 2 means \
+         B's row leaked into the count, 0 means the count lost A's own"
     );
     assert!(
         repo.task_runs(ws_a, bs)
@@ -186,6 +221,23 @@ async fn an_execution_in_another_workspace_is_invisible_by_id_and_in_every_list(
             .expect("task_runs must answer empty, not error")
             .is_empty(),
         "workspace A must not read workspace B's task runs"
+    );
+    assert_eq!(
+        repo.task_runs(ws_a, a_own)
+            .await
+            .expect("A task_runs")
+            .len(),
+        1,
+        "...while A DOES reach its own, so the emptiness above is the \
+         predicate and not a broken join"
+    );
+    assert_eq!(
+        repo.get(ws_a, a_own)
+            .await
+            .expect("A must see its own execution")
+            .execution
+            .id,
+        a_own
     );
 
     // An id that never existed anywhere answers exactly as the foreign one
@@ -641,5 +693,227 @@ async fn task_runs_are_sorted_by_the_query_and_not_by_the_plan() {
         runs.iter().map(|r| r.run_ix).collect::<Vec<_>>(),
         (0..500).collect::<Vec<i32>>(),
         "the statement's ORDER BY is what sorts these, not the plan"
+    );
+}
+
+/// **The clamp, tested at both ends -- because a guard nobody has seen fail is
+/// a guard nobody has seen** (fix round 1).
+///
+/// `Page::clamped` existed with a doc comment explaining what it prevents and
+/// no test at either end: replacing its body with the identity survived the
+/// whole suite, twice. Worse, the hazard it names is real rather than
+/// theoretical -- Postgres treats a negative `LIMIT` as an **ERROR**, not as
+/// an empty page, so an unclamped `?limit=-1` becomes a 500. The first
+/// assertion below is that hazard, measured directly, so the rest of the test
+/// is defending something known to bite.
+#[tokio::test]
+async fn a_page_is_clamped_at_both_ends_rather_than_handed_to_postgres() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let repo = ExecutionRepo::new(db.clone());
+
+    // One more than MAX_PAGE_LIMIT, so the upper clamp has something to cut.
+    sqlx::query(
+        "INSERT INTO workflow.executions \
+           (workspace_id, namespace, flow_key, source, state, history, created_at) \
+         SELECT $1, 'a.b', 'f', 'src', 'RUNNING', '[\"CREATED\",\"RUNNING\"]'::jsonb, \
+                timestamptz '2026-01-01 00:00:00Z' + (g || ' seconds')::interval \
+           FROM generate_series(0, 200) AS g",
+    )
+    .bind(ws)
+    .execute(&db.pool)
+    .await
+    .expect("insert 201 executions");
+
+    // THE HAZARD, measured: Postgres refuses a negative LIMIT outright. This
+    // is what reaches the client as a 500 if the clamp is not there.
+    let refused = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM workflow.executions WHERE workspace_id = $1 LIMIT $2",
+    )
+    .bind(ws)
+    .bind(-1_i64)
+    .fetch_all(&db.pool)
+    .await;
+    assert!(
+        refused.is_err(),
+        "a negative LIMIT is supposed to be a database ERROR -- if Postgres \
+         has started accepting it, the clamp's stated reason no longer holds \
+         and this test is no longer defending what it says it defends"
+    );
+
+    // LOWER end: a malformed query string must produce a page, not an error.
+    let low = repo
+        .list(
+            ws,
+            &ExecutionFilter::default(),
+            Page {
+                limit: -1,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("a negative limit must be clamped, not handed to Postgres");
+    assert_eq!(low.rows.len(), 1, "clamped up to the minimum page of 1");
+    assert_eq!(
+        low.total, 201,
+        "the clamp changes the page, never the total"
+    );
+
+    let zero = repo
+        .list(
+            ws,
+            &ExecutionFilter::default(),
+            Page {
+                limit: 0,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("limit 0 must be clamped too");
+    assert_eq!(zero.rows.len(), 1);
+
+    // A negative OFFSET is equally an error in Postgres, and equally clamped.
+    let neg_offset = repo
+        .list(
+            ws,
+            &ExecutionFilter::default(),
+            Page {
+                limit: 3,
+                offset: -5,
+            },
+        )
+        .await
+        .expect("a negative offset must be clamped, not handed to Postgres");
+    let from_zero = repo
+        .list(
+            ws,
+            &ExecutionFilter::default(),
+            Page {
+                limit: 3,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("offset 0");
+    assert_eq!(
+        neg_offset.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        from_zero.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        "a negative offset lands on the first page, not before it"
+    );
+
+    // UPPER end: a caller asking for everything gets MAX_PAGE_LIMIT, and the
+    // fixture is deliberately 201 rows so "no upper clamp" is visible as 201.
+    let high = repo
+        .list(
+            ws,
+            &ExecutionFilter::default(),
+            Page {
+                limit: 10_000,
+                offset: 0,
+            },
+        )
+        .await
+        .expect("an enormous limit must be clamped, not served");
+    assert_eq!(
+        high.rows.len() as i64,
+        egret_workflow::repo::MAX_PAGE_LIMIT,
+        "the upper clamp is what stops one request reading a whole workspace"
+    );
+    assert_eq!(
+        high.total, 201,
+        "...and 201 here would mean the clamp let the whole match through"
+    );
+}
+
+/// **The `, id DESC` tie-break, which no fixture was forcing** (fix round 1).
+///
+/// Deleting it from `ExecutionRepo::list` survived the whole suite twice,
+/// because every other test gives its rows DISTINCT `created_at` values -- so
+/// pager stability, the reason the clause exists, was unguarded.
+///
+/// Three rows share one `created_at` and carry EXPLICIT, ascending ids,
+/// inserted in ascending order. Correct output is `id DESC`, i.e. the exact
+/// reverse of insertion order, so an untie-broken plan that falls back to
+/// physical order is wrong deterministically rather than probabilistically.
+///
+/// The first assertion is the instrument check, as in
+/// [`task_runs_are_sorted_by_the_query_and_not_by_the_plan`]: it runs the same
+/// statement WITHOUT the tie-break and requires that answer to differ. If a
+/// future plan happens to emit `id DESC` anyway, this test fails loudly
+/// instead of certifying a clause it can no longer see.
+#[tokio::test]
+async fn a_tie_on_created_at_is_broken_by_id_so_a_pager_cannot_repeat_a_row() {
+    let Some(db) = common::db().await else { return };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    let repo = ExecutionRepo::new(db.clone());
+
+    let tie = Utc.with_ymd_and_hms(2026, 5, 5, 12, 0, 0).unwrap();
+    let mut ids = Vec::new();
+    for n in 1..=3u8 {
+        let id = Uuid::from_bytes([n; 16]);
+        insert_execution(
+            &db,
+            ws,
+            &Exec {
+                id: Some(id),
+                created_at: tie,
+                ..Exec::default()
+            },
+        )
+        .await;
+        ids.push(id);
+    }
+    let descending = {
+        let mut d = ids.clone();
+        d.reverse();
+        d
+    };
+
+    // The instrument: the same predicate and the same primary sort key, with
+    // no tie-break.
+    let untied: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE workspace_id = $1 \
+         ORDER BY created_at DESC",
+    )
+    .bind(ws)
+    .fetch_all(&db.pool)
+    .await
+    .expect("untied control");
+    assert_eq!(untied.len(), 3);
+    assert_ne!(
+        untied, descending,
+        "INSTRUMENT FAILURE, not a product failure: without the tie-break the \
+         plan is supposed to STOP producing id-descending order, and it did \
+         not -- so the assertion below cannot tell a tie-break from a plan and \
+         must not be read as proving one"
+    );
+
+    let page = repo
+        .list(ws, &ExecutionFilter::default(), Page::default())
+        .await
+        .expect("list");
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        descending,
+        "equal created_at is broken by id DESC, by the statement and not the plan"
+    );
+
+    // The property the tie-break exists for: three single-row pages partition
+    // the three rows -- no row seen twice, none missed. This is what a pager
+    // does, and it is what an unstable sort breaks.
+    let mut seen = Vec::new();
+    for offset in 0..3 {
+        let p = repo
+            .list(ws, &ExecutionFilter::default(), Page { limit: 1, offset })
+            .await
+            .expect("one-row page");
+        assert_eq!(p.rows.len(), 1);
+        assert_eq!(p.total, 3);
+        seen.push(p.rows[0].id);
+    }
+    assert_eq!(
+        seen, descending,
+        "consecutive one-row pages must walk the same order the whole list \
+         has, or a pager repeats one row and never shows another"
     );
 }

@@ -646,9 +646,22 @@ macro_rules! task_run_cols {
 pub struct ExecutionRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
-    /// The draft this execution came from. `NULL` once that draft is deleted
-    /// (`ON DELETE SET NULL`, migration 0134) -- the record of what ran
-    /// outlives the flow it ran from.
+    /// The draft this execution came from.
+    ///
+    /// **In practice this is NOT NULL for a trashed flow, and an earlier
+    /// version of this comment said the opposite.** `executions_flow_id_fkey`
+    /// is `ON DELETE SET NULL` (migration 0134), but nothing in this crate
+    /// ever issues the `DELETE` that would fire it: [`FlowRepo::soft_delete`]
+    /// sets `deleted_at = now()`, and a grep for `DELETE FROM` over
+    /// `crates/egret-workflow/src` returns **0** (control: `UPDATE workflow.`
+    /// returns 10). So on the product's path a trashed flow keeps its id here,
+    /// and filtering by [`ExecutionFilter::flow_id`] DOES still return a
+    /// trashed flow's executions.
+    ///
+    /// `Option` stays, because the column is genuinely nullable and the
+    /// cascade is genuinely armed: a `DELETE` issued by a migration, by an
+    /// operator, or by a future hard-delete route would set it. The record of
+    /// what ran outlives the flow it ran from -- that part was always true.
     pub flow_id: Option<Uuid>,
     pub namespace: String,
     /// The YAML's `id`; `flow_id` is taken by the FK above.
@@ -740,12 +753,20 @@ struct ExecutionWithSource {
 /// it or a `Default` that widens it.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionFilter {
-    /// The draft the execution came from. An execution whose flow has since
-    /// been deleted has `flow_id IS NULL` and matches no value of this.
+    /// The draft the execution came from.
+    ///
+    /// **Trashing a flow does not hide its executions from this filter.**
+    /// `FlowRepo`'s delete is SOFT, so `executions.flow_id` keeps pointing at
+    /// the trashed draft -- see [`ExecutionRow::flow_id`] for the measurement.
+    /// A row only goes `NULL` here if something outside this crate issues a
+    /// real `DELETE`, and a `NULL` matches no value of this filter;
+    /// [`Self::flow_key`] + [`Self::namespace`] is what still finds those.
     pub flow_id: Option<Uuid>,
     pub namespace: Option<String>,
-    /// The YAML's `id` -- the human half of the identity, usable when the
-    /// draft is gone and `flow_id` is `NULL`.
+    /// The YAML's `id` -- the human half of the identity, and the only filter
+    /// that still finds an execution whose `flow_id` has been `NULL`ed by a
+    /// real `DELETE` (which nothing in this crate issues; see
+    /// [`ExecutionRow::flow_id`]).
     pub flow_key: Option<String>,
     /// Several, not one: a run list shows `FAILED` beside `RUNNING`. `Some`
     /// with an EMPTY vector matches nothing, which is what a UI that has
@@ -824,6 +845,35 @@ pub struct ExecutionPage {
 /// its read joins `workflow.executions` for it -- the join IS the predicate.
 /// There are no unscoped exceptions in this type, unlike [`FlowRepo`]: every
 /// method takes `ws` and none is a scoping primitive.
+///
+/// **Three hazards here are closed by the SCHEMA, not by these queries**, and
+/// are written down so nobody adds a clause that looks missing:
+///
+/// - **There is no soft delete on an execution.** `workflow.executions` has no
+///   `deleted_at` column at all (verified against the live schema; `flows` is
+///   the only table in the `workflow` schema that has one, which is why
+///   [`FlowRepo`] carries four `deleted_at IS NULL` predicates and this type
+///   carries none). A "trashed executions" filter would have nothing to read.
+/// - **A sub-execution cannot belong to another workspace.**
+///   `workflow_executions_parent_same_workspace` and
+///   `workflow_executions_trigger_same_workspace` (migration 0138) are
+///   COMPOSITE foreign keys onto `(id, workspace_id)`, so a parent or trigger
+///   link that crossed a workspace is unrepresentable. A future recursive read
+///   over those links inherits containment from the constraint and does not
+///   need to re-derive it -- but it must still carry its OWN `workspace_id`
+///   predicate on the root row, because nothing checks the root.
+/// - **`executions_flow_id_fkey` is the exception, and it is a trap.** It is
+///   SINGLE-column -- `FOREIGN KEY (flow_id) REFERENCES workflow.flows(id) ON
+///   DELETE SET NULL` -- with **no workspace component**, unlike the two
+///   above. Nothing stops `executions.flow_id` naming a `workflow.flows` row
+///   in a different workspace (`worker/subflow.rs`'s own doc concedes the
+///   same about this column). **Any statement that joins `workflow.flows`
+///   must add its own `f.workspace_id = $n`**; this type never joins it, which
+///   is why [`ExecutionRow::flow_id`] is returned as a bare id and
+///   [`ExecutionFilter::flow_id`] is compared as a bare value.
+///
+/// See the Task 3 report's "For Task 4" section for what that last one costs a
+/// list endpoint that wants to show a flow's name beside each execution.
 #[derive(Clone)]
 pub struct ExecutionRepo {
     db: Db,
@@ -951,11 +1001,18 @@ impl ExecutionRepo {
     ///
     /// **The `ORDER BY` is not decoration and is not free.** `UNIQUE
     /// (execution_id, run_ix)` (migration 0134) backs an index in exactly
-    /// that order, so at small row counts Postgres plans this read as an
-    /// `Index Scan using task_runs_execution_id_run_ix_key` and hands the
-    /// rows back sorted whether the statement asks or not -- measured, and it
-    /// is why deleting this clause leaves
-    /// `get_one_returns_its_task_runs_ordered_by_run_ix` green.
+    /// that order, so the plan CAN hand the rows back sorted whether the
+    /// statement asks or not.
+    ///
+    /// Measured, and stated no wider than the measurement: in the
+    /// never-`ANALYZE`d per-process test clone, the three-row shape planned an
+    /// `Index Scan using task_runs_execution_id_run_ix_key` and deleting this
+    /// clause left `get_one_returns_its_task_runs_ordered_by_run_ix` **green**.
+    /// That is a fact about a particular statistics state, not a rule about
+    /// "small row counts": on freshly-`ANALYZE`d empty stats the same three
+    /// rows plan a `Seq Scan` and come back `{2,0,1}`. The conclusion that
+    /// survives either way is that **the test could not tell which of the two
+    /// was sorting**, so it was not evidence for this clause.
     /// `task_runs_are_sorted_by_the_query_and_not_by_the_plan` is the test
     /// that actually holds it: 500 shuffled runs flip the plan to a `Seq
     /// Scan`, whose physical order is not `run_ix` order, and it checks that
