@@ -1868,12 +1868,71 @@ pub(crate) fn environment() -> Environment<'static> {
 /// task's whole property set at once), and that is where a shared, reused
 /// `Environment` belongs, with a clear owner for its lifetime.
 pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
+    match render_str_guarded(template, cx, &[])? {
+        GuardedRender::Rendered(text) => Ok(text),
+        // Unreachable with an empty forbidden list, and stated rather than
+        // `unwrap`ped so a future caller that passes a non-empty one here gets
+        // a message instead of a panic.
+        GuardedRender::Forbidden(root) => Err(RenderError::Template(format!(
+            "internal: render_str refused the root `{root}` with no forbidden list"
+        ))),
+    }
+}
+
+/// What [`render_str_guarded`] answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardedRender {
+    /// The fixpoint, reached without any pass naming a forbidden root.
+    Rendered(String),
+    /// Some pass named this root. **No further pass ran**, and no output is
+    /// returned.
+    Forbidden(String),
+}
+
+/// [`render_str`], refusing as soon as **any pass** of the fixpoint loop names
+/// one of `forbidden` as a top-level root.
+///
+/// # Why the check has to live inside this loop
+///
+/// W6 Task 7 fix round 3, Important 6. Rendering here is a fixpoint, not one
+/// pass: `render_once` runs up to [`MAX_RENDERING_AMOUNT`] times and **a pass
+/// can emit a template the next pass evaluates**. A caller that asked
+/// [`referenced_roots`] about the *source* therefore asked about pass 1 only,
+/// and a root reached by indirection was invisible to it:
+///
+/// ```text
+/// variables:
+///   tpl: "{{ [trigger] }}"
+/// triggers:
+///   - inputs:
+///       a: "{{ vars.tpl }}"
+/// ```
+///
+/// Pass 1 names `vars`. Pass 2 names `trigger`. Indirection through `vars` is
+/// ordinary authoring, not an exotic attack, and the webhook route accepted
+/// that input and stored `"[null]"`.
+///
+/// So the question is asked of **`current` before every pass**, which is the
+/// only place that sees every text the engine will evaluate. `forbidden` is
+/// empty for [`render_str`], and `["trigger"]` for a webhook's `inputs:`.
+///
+/// **It is not a security boundary.** Nothing here binds the forbidden name;
+/// this decides *acceptance*. See `trigger::webhook::InputContext`.
+pub fn render_str_guarded(
+    template: &str,
+    cx: &RenderContext,
+    forbidden: &[&str],
+) -> Result<GuardedRender, RenderError> {
     // `VariableRenderer.java:76-79`: "it's not a Pebble template so we
     // short-circuit rendering". Note the test is `{`, not `{{` -- a source
     // containing a lone `{` still goes through the engine. Done before the
     // thread, because a source with no brace does no work at all.
+    //
+    // A source with no `{` cannot name a root either, so the short circuit is
+    // safe for the guard as well -- asserted by
+    // `tests::the_brace_short_circuit_cannot_hide_a_forbidden_root`.
     if !template.contains('{') {
-        return Ok(template.to_string());
+        return Ok(GuardedRender::Rendered(template.to_string()));
     }
 
     // **On a thread whose stack egret chooses.** See [`RENDER_STACK_BYTES`]
@@ -1886,7 +1945,7 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
         let worker = std::thread::Builder::new()
             .name("egret-render".to_string())
             .stack_size(RENDER_STACK_BYTES)
-            .spawn_scoped(scope, || render_on_this_thread(template, cx))
+            .spawn_scoped(scope, || render_on_this_thread(template, cx, forbidden))
             .map_err(|e| RenderError::Template(format!("could not start a render thread: {e}")))?;
         match worker.join() {
             Ok(result) => result,
@@ -1897,8 +1956,45 @@ pub fn render_str(template: &str, cx: &RenderContext) -> Result<String, RenderEr
     })
 }
 
+/// The top-level names a template refers to, as the PARSER sees them.
+///
+/// W6 Task 7 fix round 1, Critical 2. The webhook route has to tell "this
+/// input needs a render root egret does not publish" apart from "this input is
+/// broken", and the first version of that decision was a substring scan for
+/// `"trigger."` — which `{{ trigger }}` walks straight past. A substring scan
+/// is a lexical test applied to an expression language and there are
+/// arbitrarily many ways to name a binding.
+///
+/// This asks the same parser that renders. It runs the identical front half of
+/// [`render_once`] — protect the `{% raw %}` regions, then [`rewrite`] — so a
+/// template whose roots this reports is a template the renderer would see the
+/// same way, and then returns minijinja's `undeclared_variables(false)`: the
+/// **top-level** names, so `trigger.body`, `trigger['body']`,
+/// `trigger | json` and `{% set t = trigger %}` all report `trigger`, while
+/// the literal word in a text run reports nothing.
+///
+/// `nested = false` on purpose. `true` would also report `body` for
+/// `trigger.body`, which is noise for the one question this is asked.
+///
+/// It is **not** the security boundary — that is the render context simply not
+/// binding the name (see `trigger::webhook::InputContext`). This only decides
+/// which message a refusal carries.
+pub fn referenced_roots(template: &str) -> Result<std::collections::BTreeSet<String>, RenderError> {
+    let (protected, _replacers) = replace_raw_tags(template);
+    let rewritten = rewrite(&protected)?;
+    let env = environment();
+    let tmpl = env
+        .template_from_str(&rewritten)
+        .map_err(|e| RenderError::Template(e.to_string()))?;
+    Ok(tmpl.undeclared_variables(false).into_iter().collect())
+}
+
 /// The render loop, on the thread [`render_str`] gave it.
-fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, RenderError> {
+fn render_on_this_thread(
+    template: &str,
+    cx: &RenderContext,
+    forbidden: &[&str],
+) -> Result<GuardedRender, RenderError> {
     let mut env = environment();
     let variables = cx.to_minijinja();
 
@@ -1920,9 +2016,24 @@ fn render_on_this_thread(template: &str, cx: &RenderContext) -> Result<String, R
     let mut current = template.to_string();
     // Inclusive: see [`MAX_RENDERING_AMOUNT`]'s note on Kestra's off-by-one.
     for _ in 0..=MAX_RENDERING_AMOUNT {
+        // **Before the pass, not after it.** See [`render_str_guarded`]: a
+        // previous pass may have emitted the text this one is about to
+        // evaluate, and that text is the only place a root reached by
+        // indirection is visible.
+        //
+        // A `current` that will not parse names nothing; the pass below then
+        // fails with the parser's own message, which is the right error for a
+        // broken template.
+        if !forbidden.is_empty() {
+            if let Ok(roots) = referenced_roots(&current) {
+                if let Some(hit) = forbidden.iter().find(|f| roots.contains(**f)) {
+                    return Ok(GuardedRender::Forbidden((*hit).to_string()));
+                }
+            }
+        }
         let next = render_once(&env, &current, &variables)?;
         if next == current {
-            return Ok(strip_raw_markers(&next));
+            return Ok(GuardedRender::Rendered(strip_raw_markers(&next)));
         }
         current = next;
     }
@@ -2343,6 +2454,60 @@ mod tests {
                 "{expr} must still be UNKNOWN, not answered: {message}"
             );
         }
+    }
+
+    /// The `{`-less short circuit returns before the guard loop, so it must be
+    /// incapable of hiding a forbidden root.
+    ///
+    /// It is: a source with no `{` cannot name a variable at all. Asserted
+    /// rather than reasoned, because the short circuit is a return statement
+    /// above every check in the function.
+    #[test]
+    fn the_brace_short_circuit_cannot_hide_a_forbidden_root() {
+        let cx = RenderContext::new();
+        assert_eq!(
+            render_str_guarded("trigger is a word here", &cx, &["trigger"]).unwrap(),
+            GuardedRender::Rendered("trigger is a word here".to_string())
+        );
+        assert!(referenced_roots("trigger is a word here")
+            .unwrap()
+            .is_empty());
+        // The control: one brace and it goes through the engine, where the
+        // guard sees it.
+        assert_eq!(
+            render_str_guarded("{{ trigger }}", &cx, &["trigger"]).unwrap(),
+            GuardedRender::Forbidden("trigger".to_string())
+        );
+    }
+
+    /// The guard fires on a pass the SOURCE does not name — the whole of fix
+    /// round 3's Important 6, at the layer that implements it.
+    #[test]
+    fn the_guard_sees_every_pass_not_only_the_first() {
+        let mut cx = RenderContext::new();
+        cx.insert(
+            "vars",
+            json!({"tpl": "{{ [trigger] }}", "ok": "{{ 1 + 1 }}"}),
+        );
+
+        let pass1 = referenced_roots("{{ vars.tpl }}").unwrap();
+        assert!(
+            pass1.contains("vars") && !pass1.contains("trigger"),
+            "pass 1 names `vars` and nothing else: {pass1:?}"
+        );
+
+        assert_eq!(
+            render_str_guarded("{{ vars.tpl }}", &cx, &["trigger"]).unwrap(),
+            GuardedRender::Forbidden("trigger".to_string()),
+            "pass 2 names it, and the guard is inside the loop"
+        );
+        // The control: the same indirection without the root renders to its
+        // fixpoint, so the assertion above is not satisfied by a guard that
+        // refuses every indirection.
+        assert_eq!(
+            render_str_guarded("{{ vars.ok }}", &cx, &["trigger"]).unwrap(),
+            GuardedRender::Rendered("2".to_string())
+        );
     }
 
     #[test]

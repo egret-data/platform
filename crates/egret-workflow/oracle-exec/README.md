@@ -22,9 +22,12 @@ normalised trace*.
 >
 > - **the sub-execution hole** is written three times in this file as *33*, *38*
 >   and *39* "of the 41 differing on nothing but `spawned`", each true at a
->   different moment. It is now **16 of the 41 MATCH, 6 differ only *inside*
->   `spawned`, 19 differ on more** — a different sentence, because the field is
->   filled rather than empty;
+>   different moment. It is now **22 of the 41 MATCH, 4 differ only *inside*
+>   `spawned`, 15 differ on more** — a different sentence, because the field is
+>   filled rather than empty. *(This bullet read 16/6/19 until W6 Task 8: the
+>   note that exists to stop a reader picking up a stale figure was itself two
+>   packages stale, in the file's own reading instructions. All three numbers
+>   are constants the suite asserts.)*;
 > - **`Command::SpawnExecution` has an executor** (`worker::spawn`) and this
 >   oracle drives it. Two places still say "nothing executes one until W3b/W6";
 > - **nothing is fed from `golden.json` any more** — **426** run terminals were
@@ -32,10 +35,11 @@ normalised trace*.
 >   give counts 204 that were inside sub-executions egret never created and were
 >   therefore never fed), and the circular field is gone;
 > - **"the kept 1104 are the whole of what this oracle asserts about
->   serialisation"** is wrong for the second time. **357** are; the other 747 sit
->   on baselined entries and cannot fail, which was as true under W3a as it is
->   now — and the same is true of every other golden field on a baselined entry,
->   not only of the pairs;
+>   serialisation"** is wrong for the second time. **360** are; the other **744**
+>   sit on baselined entries and cannot fail, which was as true under W3a as it
+>   is now — and the same is true of every other golden field on a baselined
+>   entry, not only of the pairs. *(357/747 until W6 Task 8; the split moves with
+>   `baseline.txt`, so every bank moves it.)*;
 > - **`egret.sql` ships with no oracle coverage at all** — 0 of 345 corpus flows
 >   and 0 of 294 golden entries — and its own suite **fails** without an engine
 >   now; it used to self-skip and report `7 passed; 0 failed; 0 ignored` in
@@ -733,23 +737,57 @@ Kestra becomes ready roughly 15–30 s after `docker compose up -d`.
 
 ### Sub-executions are hidden from `/executions/search`
 
-A sub-execution is fetchable by id and carries `parentId`, but does **not**
-appear in the search listing. A harvester that enumerates executions silently
-loses every loop iteration and every subflow.
+A sub-execution is fetchable by id but does **not** appear in the search
+listing. A harvester that enumerates executions silently loses every loop
+iteration and every subflow.
 
-`descendants()` therefore unions two independent discoveries and trusts neither
-alone:
+**Two sentences here were false and are corrected by W6** — the design spec's §7
+items 1 and 2, both of which this section is the origin of.
 
-1. the parent's log lines, which carry `in sub-execution [[link execution="…"]]`
-   — only present for the tasks that log it;
+*"A sub-execution … carries `parentId`"* is true of a **loop iteration** and of a
+`CREATE_NEW_EXECUTION` **replay**, and false of a **subflow child**, whose
+`parentId` is NULL and whose link is `trigger.variables.executionId`. Measured on
+the pinned artifact and recorded in full in *W6 Task 2 — three kinds of child
+execution*: `valids/subflow-parent`, a flow whose only task is a `Subflow` Kestra
+ran to SUCCESS, has `"descendants": []` in all five harvest rounds. The child
+exists; nothing keyed on `parentId` can see it. **That is a hole in this
+oracle's population, not merely in this sentence**, and it is why W6 links a
+subflow child by a column of its own.
+
+`descendants()` **was** documented — in its own docstring in `harvest.py`, the
+only place it is documented — as unioning **two independent discoveries**. It
+has **one**, and since W6 Task 8 the docstring and the call site say so too, so a
+reader who never opens this file is no longer told there are two:
+
+1. ~~the parent's log lines, which carry `in sub-execution [[link execution="…"]]`~~
+   — **dead**: the regex matches neither the raw JSON body (escaped quotes) nor
+   the decoded message, whose markup carries `flowId=` and `namespace=` before
+   the closing `]]`. W6 Task 4 saw the live shape again while probing a `Loop`:
+   `in sub-execution [[link execution="5Z4dkYmmBkChEpPYNR1HLM" flowId="replay-in-loop" namespace="egret.probe4"]]`.
+   W6 Task 8 re-measured it by **running the regex** over both shapes with a
+   **positive control on the shape it was written for** — 0 matches, 0 matches,
+   1 match — because an arm that matched nothing on every input would look
+   identical to a dead one;
 2. a recursive walk of Kestra's Postgres over the generated `parent_id` column,
-   which is the storage layer rather than the API.
+   which is the storage layer rather than the API — **the only arm that has ever
+   found anything**, and the one all **142** recovered sub-executions came from.
 
 The SQL goes over psql's **stdin**, not `-c`, and the id is a psql variable
 (`:'root'`): psql does not interpolate variables into a `-c` string, so the
-parameterisation would silently not happen. A non-zero psql exit is fatal — a
-swallowed error would degrade sub-execution recovery to the log-scrape arm
-alone, silently, and the harvest would still write a plausible `corpus.json`.
+parameterisation would silently not happen. A non-zero psql exit is fatal — and
+with the log-scrape arm dead, a swallowed error would degrade sub-execution
+recovery to **nothing at all**, silently, and the harvest would still write a
+plausible `corpus.json`.
+
+**The dead arm is left in the code, with an owner, and that is a decision.** It
+is dead against *this artifact's log markup* — a measurement about the artifact,
+not about the code — and deleting it changes what a re-harvest requests, which
+is a change W6 cannot run end to end because W6 deliberately does not
+re-harvest. It belongs to the package that makes triggers measurable, which has
+to open `descendants()` anyway to union `trigger_execution_id`; see the W6
+section of *The coverage statement*. **And the dead arm is not the hole**:
+`parent_id` is NULL for a subflow child and for anything a trigger creates, so
+no arm keyed on it could see those however well its regex matched.
 
 ### Terminal is not the same as finished
 
@@ -2534,9 +2572,11 @@ hole is stated with numbers and marked by a test rather than by a sentence.
 *(**Every row of this table is W3a's and the last three are false now.** This is
 the fourth moment the "differ on nothing but `spawned`" quantity was written
 down, and the whole quantity is retired: the field is filled, so the question is
-which entries **match** (16 of the 41) rather than which are held only by an
-empty field. 35 entries produce a sub-execution trace and 126 ordered pairs
-inside one. The table is kept because it is what the final review measured; see
+which entries **match** (**22** of the 41) rather than which are held only by an
+empty field. **39** entries produce a sub-execution trace and 126 ordered pairs
+inside one. *(Read 16 and 35 until W6 Task 8 — a stale figure inside the note
+that retires the table above it, which is the shape W4's sweep named and this
+one met again.)* The table is kept because it is what the final review measured; see
 *The coverage statement*.)*
 
 `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` asserts
@@ -3064,7 +3104,7 @@ owner is how a suppression list starts.
 | `WARNING` | 10 golden `runs` entries, including `valids/retry-success` and `valids/task-allow-failure-runnable` | `AllowFailure` and `retry.warningOnRetry` | **unclaimed — and this table's state list said Task 7 owned it.** Task 7 reads `warningOnRetry` into `RetryPolicy` and does nothing with it, because `RunState` cannot hold `WARNING`; `AllowFailure` is planned opaque |
 | a `Loop`'s own `errors:` | 4 baselined entries — `valids/all-flowable`, `valids/finally-loop`, `valids/finally-loop-parallel` and `invalids/loop-switch-failed`, which is a `runs` entry despite its directory | `Loop.errors`, resolved by Kestra inside the **sub-execution** (`Loop.java:272`) | **unclaimed — new at Task 7 fix round 1, and found by a guard that could not fail.** `models::Loop` has no `errors` field, so `plan.rs` has no `Loop` arm. It is filed beside `Subflow` and the `CREATE_NEW_EXECUTION` replay rather than as a missing `match` arm: a `Loop`'s `errors:` runs in an execution W3a does not create |
 | `finally:` | the whole `finally-*` family — 11 baselined entries — plus the only two corpus flows that put an `errors:` on a `Dag` or a `Parallel` | `AbstractBranch._finally` and `Flow._finally` | **unclaimed — new at Task 7.** W1's model carries `Flow::finally_` and Task 7 deliberately did NOT add the task-level field beside `errors`, because no W3a task implements it and a field nothing reads is a dead field |
-| the replay a `CREATE_NEW_EXECUTION` retry starts | 4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned` | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6/W3b, with `Subflow` and the `Loop` iteration** — it is a third kind of sub-execution and `ExecutionState` has no field for any of them |
+| ~~the replay a `CREATE_NEW_EXECUTION` retry starts~~ — **taken by W6 Task 4, all 4 banked** | ~~4 baselined entries (`retry-new-execution-*`), each right on every field but `spawned`~~ | `AbstractRetry.Behavior.CREATE_NEW_EXECUTION` → `ExecutionService.replay` | **W6 Task 4.** It is the third kind of sub-execution and `ExecutionState` had no field for any of them; it has one now — `metadata`, Kestra's own `ExecutionMetadata`, stored by migration 0139. `worker::replay::spawn_due` is the other half of the artifact's execution-delay loop |
 | `afterExecution:` | **10** baselined entries | `Flow.afterExecution` | **unclaimed — new at Task 8.** W1's `Flow::after_execution` parses and `spec::validate` walks it; `build_plan` flattens `tasks` and `errors` and nothing else, so those tasks are in no plan. It is `finally:`'s sibling and unclaimed for the same reason |
 | `sla:` | **5** baselined entries | `Flow.sla`, `SLA.Type.{MAX_DURATION,EXECUTION_ASSERTION}` | **W8** (programme spec). W1 ports it as a data shape and says so; nothing evaluates one, and the row is here because a reader of the residual baseline had no way to learn that from this file |
 
@@ -5281,8 +5321,9 @@ wrote. Beyond that, the specific holes, each with its count:
   and the two counts have not moved.*)*
   *(**W3b Task 5 changed the other half, and the whole bullet is now history.**
   This oracle drives `worker::start_execution`/`worker::tick`; egret's `spawned`
-  is populated for **35** entries, **16** of the 41 MATCH, **6** differ only
-  inside the field and 19 on more, and egret produces **126** ordered pairs
+  is populated for **39** entries, **22** of the 41 MATCH, **4** differ only
+  inside the field and 15 on more *(35/16/6/19 until W6 Task 8)*, and egret
+  produces **126** ordered pairs
   inside `spawned`. Task 4 left this sentence annotated rather than rewritten
   precisely so W3b Task 7's stale-twin sweep would meet it; it did. See* The
   coverage statement.*)* So egret's
@@ -5430,11 +5471,28 @@ number that moved in this package's own arithmetic is the count of things this
 statement does not prove: it was thirteen and it is seventeen — and the
 seventeenth is not the last one a reader should look at. **Item 15 is**, which is
 why it is also the sixth fact of the W4 section above: nothing in this workspace
-runs this worker.
+runs this worker. *(**It is eighteen since W6 Task 8**, and the eighteenth is the
+four trigger constructs — the largest uncovered surface this programme has
+added. The W6 section derives it.)*
+
+**W6 Task 8 re-derived them a fourth time, and this is the first package whose
+ratchet MOVED under a re-derivation**: 143 before Task 1, **127** at this
+commit, sixteen entries banked — twelve by `Subflow` executing and four by the
+`CREATE_NEW_EXECUTION` replay. So the sweep is not the whole yield this time;
+half of it is the W6 section below, which exists because **sixteen banked
+entries can make four triggers look measured when none of them is.** The sweep
+found stale copies at **sixteen** sites — thirteen corrected, three named — and
+every single one is a figure the suite asserts under a name the stale sentence
+did not use, including **two of the five bullets in this file's own opening
+reading instructions**, four doc comments in `src/` and `tests/`, and a pair
+that moved in opposite directions by the same amount so that *the total held*. Both
+of those falsify rules this statement has relied on, and they are written out at
+the end of the W6 section rather than here.
 
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
-retires* at the end.
+retires* at the end and, for the ones W6 moved, in *The figures W6 retires* in
+the W6 section.
 
 **The provenance rule below used to be stated for the whole statement and was
 itself stale — the whole-branch review's Important 3.** It read: *"Every **count**
@@ -5457,6 +5515,10 @@ So the rule is restated per family rather than for everything:
 | W4's instrumented **`wake` / `guard`** figures | **no** — measured once, under instrumentation that is not in the tree |
 | W4's prototype **143 → 140** | **no**, and `claim.rs` says so itself: not reproducible from this checkout |
 | W4 Task 5's **29-row mutation table** | **no** — derived by a harness in a scratch directory, not by anything `cargo test` runs |
+| W6's **sixteen banked entries**, the trigger census, and the `142 = 134 + 8` control | **yes** — `the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`, on every run |
+| W6's **artifact measurements** (the cron dialect, DST and late-tick behaviour, the 12/47/**100** nested loops, the 498/499 publish boundary, the `dependsOn` double-fire) | **no** — taken by running Kestra's own code against the pinned digest. Reproduced once each by a second party, which is the strongest thing said about them |
+| W6's **mutation tables** (Task 2's 7 then 11, Task 3's 12, 31/30/1 schedule, 45/45 flow, the webhook's 60/60 against a 0/30 control on the unmutated binary, and Task 8's 5 at 3 runs each plus 1 at 5) | **no** — run by hand, each with its run count and its control beside it, because *a one-run verdict is a coin flip reported as a measurement* |
+| W6's **claim classification** (149 claims → MEASURED 91 / DERIVED 33 / CHOSEN 25) | **no** — a hand audit, after a keyword classifier scoring 70/3/76 was built and thrown away |
 
 A figure is safe only if a running program compares it. Everything in rows 2–7
 is a figure a reader must treat as a measurement someone took, not as a fact the
@@ -5539,19 +5601,44 @@ between two different sets is how an arithmetic slip becomes invisible.)*
 | | count |
 |---|---|
 | golden entries | **294** |
-| matching | **151** |
-| baselined — egret does not reproduce it yet | **143** |
+| matching | **167** |
+| baselined — egret does not reproduce it yet | **127** |
 
 ```text
-  matching  151 = 128 of the 266 `runs` + 23 of the 28 `refused`
-  baselined 143 = 138 of the 266 `runs` +  5 of the 28 `refused`
+  matching  167 = 144 of the 266 `runs` + 23 of the 28 `refused`
+  baselined 127 = 122 of the 266 `runs` +  5 of the 28 `refused`
   ------------------------------------------------------------------
             294 = 266 + 28
 ```
 
-143 is simultaneously the mismatching count, the size of `baseline.txt` and the
+127 is simultaneously the mismatching count, the size of `baseline.txt` and the
 baselined count: **0 stale lines, 0 regressions, 0 unbanked progress, 0 broken**.
 That identity is the ratchet's own output, not a hand check.
+
+**163 → 167 at W6 Task 4**, one cause with four instances: the
+`CREATE_NEW_EXECUTION` replay. `valids/retry-new-execution-{flow,task}-{attempts,duration}`
+were each right on every field but `spawned`, and each now reproduces the chain
+the artifact ran — three executions, the first two `RETRIED` with a replay
+hanging off `parentId`, the third `FAILED` with none. What was missing was not
+the link column (migration 0138 gave it that at Task 2) but the two facts that
+END a chain: `execution.getMetadata()`'s `attemptNumber` and
+`originalCreatedDate`, which `advance()` read as the constants `(1, Tick(0))`.
+Those are true of the first execution of a chain and false of every replay, so
+nothing could ever refuse the fourth. Migration 0139 stores them,
+`ExecutionState::metadata` carries them, `retry::scan` emits the `ExecutionDelay`
+the artifact builds for **both** retry behaviours, and `worker::replay` creates
+the execution.
+
+**151 → 163 at W6 Task 3**, and unlike the two movements below it this one is a
+single cause with twelve instances: `Subflow` executes. Every one of the twelve
+declares a `Subflow`, every one of them stalled at that run before
+(`build_plan` planned it an opaque `Runnable`, which gave it a
+`task_runs.type_id`, which made it claimable, and `claim::leaf` then answered
+`None` because `models::TaskKind` for the same task is not a `Leaf` —
+`WorkerError::NotALeaf` aborted the tick), and each is attributed individually in
+`baseline.txt`'s header. **The 28 `refused` entries did not move at all**, which
+is the load-bearing half of the split above: nothing in this task changed what
+egret refuses.
 
 The five `refused` entries on the baselined side are **over-acceptances** —
 flows Kestra refused and egret plans — and they are the whole of egret's measured
@@ -5586,11 +5673,11 @@ name the defect. They stay baselined for `finally:`.
     at the top level                                       877
     inside `spawned`                                       227
 
-  a change to which the ratchet REPORTS                    357
-    at the top level                                       255
+  a change to which the ratchet REPORTS                    360
+    at the top level                                       258
     inside `spawned`                                       102
-  a change to which it does NOT                            747
-    at the top level                                       622
+  a change to which it does NOT                            744
+    at the top level                                       619
     inside `spawned`                                       125
   ----------------------------------------------------------
   TOTAL                                                   1104
@@ -5606,7 +5693,8 @@ W3a published *"877 asserted, 227 never"*, and the 227 were right for a
 structural reason: `Trace::restrict_order_to` descends through
 `self.spawned.iter_mut().zip(&golden.spawned)`, and egret's `spawned` was
 `Vec::new()` unconditionally, so that `zip` never iterated. The driver fills
-`spawned` — 35 entries produce one — so the reason is gone. **The replacement is
+`spawned` — 39 entries produce one since W6 Task 4's four replays — so the
+reason is gone. **The replacement is
 not 1104.** A pair on a *baselined* entry is compared and cannot be falsified:
 the entry mismatches whatever that pair says, so changing it changes nothing the
 ratchet reports. That was true of the 622 top-level pairs on baselined entries
@@ -5621,6 +5709,17 @@ verifying its md5 (`5773748d22d521e6a65afc5e2e2663d1`) after every run:
 | every **nested** pair — W3a's own experiment | 227 | 18 | **FAILS**: 150 mismatching, **7 REGRESSIONs** |
 | every pair on a **baselined** entry | 747 | 90 | green: 143 mismatching, 0 banked |
 | every pair on a **matching** entry | 357 | 41 | **FAILS**: 184 mismatching, **41 REGRESSIONs** |
+
+*(**These three rows are W4-era and are NOT re-run at W6 Task 3 or Task 4.** The
+populations they flip moved with the baseline — 747 → 744 and 357 → 360 at Task
+3, and again at Task 4 — and the `143 mismatching` in the middle row would read
+`127` — so the numbers in the
+right-hand column are a record of an experiment on a different tree, not a
+current measurement. They are left as they were run rather than adjusted,
+because an adjusted experimental result is a number no program ever produced;
+the two populations they rest on ARE re-derived above and asserted by
+`kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`. The
+CONCLUSION is unaffected: two thirds of the kept pairs still cannot fail.)*
 
 The first row is the one to read against W3a's, which recorded that flipping all
 227 left this crate **green**. The second is the honest half: two thirds of the
@@ -5637,12 +5736,18 @@ somebody measured. The same split over the other families, derived by
 
 | family | on a baselined entry, i.e. un-falsifiable | total |
 |---|---|---|
-| run terminals | **461** | 840 |
-| run-history state tokens | **1807** | 3355 |
-| execution-history state tokens | **751** | 1462 |
-| executions (266 entries + their 142 sub-executions) | **191** | 408 |
-| sub-executions | **53** | 142 |
-| kept ordered pairs | **747** | 1104 |
+| run terminals | **445** | 840 |
+| run-history state tokens | **1759** | 3355 |
+| execution-history state tokens | **709** | 1462 |
+| executions (266 entries + their 142 sub-executions) | **177** | 408 |
+| sub-executions | **51** | 142 |
+| kept ordered pairs | **744** | 1104 |
+
+*(All six fell at W6 Task 3, together, because they are six projections of one
+set — what lives on a baselined entry. The twelve entries banked there carry 16
+run terminals, 48 run-history tokens, 42 execution-history tokens, 14 executions,
+2 sub-executions and 3 ordered pairs between them, and every one of those is
+falsifiable now.)*
 
 The run-terminal row is the same 840 the fed table classifies, so the two
 sections are talking about one set of runs. Nothing here is a *new* weakness —
@@ -5650,12 +5755,21 @@ it is the same one sentence, applied to the fields nobody had applied it to.
 
 Two smaller facts about the population: **13 pairs were dropped** by the harvest
 (`valids/dag` 1, `valids/if` 9, `valids/parallel-nested` 3), all of them because
-the relation flipped between rounds; and the restriction removes **80** pairs
-across **6** entries from egret's side for having no counterpart in the golden —
+the relation flipped between rounds; and the restriction removes **85** pairs
+across **9** entries from egret's side for having no counterpart in the golden —
 15 under W3a's harness, over top-level pairs only. egret's relation domain is
-measured at `{before, overlapping}` over all **771** pairs it produces,
+measured at `{before, overlapping}` over all **791** pairs it produces,
 sub-executions included, so dropping a pair is exactly accepting either value
 Kestra was seen to produce.
+
+*(**80 across 6 over 771 through W5; 85 across 9 over 791 at W6 Task 3.** The
+three entries added are `valids/restart-parent`, `valids/restart-parent-loop`
+and `valids/subflow-secret-output-parent` — `Subflow` parents that used to stall
+at their `Subflow` run and now run past it into a successor Kestra never
+reached, which is exactly a pair with no counterpart. All three are registered in
+`STILL_OVER_ACCEPTED_AT_RUNTIME` against the child-side over-acceptance that
+causes it. The 771 → 791 is the twelve banked entries' own runs gaining
+endpoints.)*
 
 *(**This paragraph said "unchanged and still derived: … 87 pairs across 7
 entries … over all 778 pairs" and both figures were a version behind**, which
@@ -5733,27 +5847,57 @@ have made the control vacuous in its turn.
   41   golden entries carry a sub-execution
  142   sub-executions they carry between them
 
-  17   of the 41 now MATCH
-   8   agree on everything the parent execution holds and differ INSIDE `spawned`
-  16   differ on something else as well
+  22   of the 41 now MATCH
+   4   agree on everything the parent execution holds and differ INSIDE `spawned`
+  15   differ on something else as well
   ---
   41   TOTAL
 ```
 
+*(**17/8/16 through W5; 18/8/15 at W6 Task 3; 22/4/15 since W6 Task 4** — the
+four `valids/retry-new-execution-*` entries moved from the middle row to the
+top one when `worker::replay` created the replacement execution they were
+missing. **This block read 18/8/15 until W6 Task 8's sweep**, and the reason it
+survived Task 4 is worth naming: 18 + 8 + 15 and 22 + 4 + 15 both total 41, so
+the total-beside-the-parts discipline this file relies on **cannot see this
+class of error at all** — the same coincidence-of-size that once hid a 49 where
+the page carried an unrelated 51. Both moved numbers are named constants the
+suite asserts (`SPAWNED_ENTRIES_THAT_MATCH` = 22,
+`SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED` = 4).)*
+
+*(W6 Task 3's mover was
+`valids/loop-with-subflow` — the only one of the twelve `Subflow` banks that
+carries a sub-execution at all. Its `Loop` body IS a `Subflow`, so the body ran
+and the `Subflow` inside it stalled: the whole entry hung on the one construct
+that task shipped. `SPAWNED_ENTRIES_THAT_MATCH_BY_NAME` asserts the names — all
+**twenty-two** of them.)*
+
 Asserted, total beside the parts, by
 `the_sub_executions_are_compared_and_this_is_what_they_cost`, which also asserts
-the seventeen **by name**, because `baseline.txt`'s header attributes them one by
-one and got two of those attributions wrong. Beside it: **35 entries produce a
-`spawned` at all**, where every entry produced an empty one for the whole of W3a
+the twenty-two **by name**, because `baseline.txt`'s header attributes them one
+by one and got two of those attributions wrong. Beside it: **39 entries produce
+a `spawned` at all** (35 until W6 Task 4's four replays;
+`ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED` is the constant, and the ordered-pairs
+section above already said 39 while this sentence still said 35), where every entry produced an empty one for the whole of W3a
 and W3b Tasks 1–4, and egret produces **126** ordered pairs inside `spawned`
-where it produced 0.
+where it produced 0. (The pair count does not move at W6 Task 4: a replay's
+sub-execution holds a single run, and one run is no ordered pair.)
 
-The eight that differ only inside a sub-execution are
+The **four** that differ only inside a sub-execution are
 `invalids/loop-switch-failed`, `valids/finally-loop`,
-`valids/finally-loop-parallel`, `valids/retry-flowable-parallel` and the four
-`valids/retry-new-execution-*`. **This is a different sentence from the one W3a's
-`39 of the 41 differ on nothing but spawned` made**: that field was empty, and
-these eight are filled and wrong somewhere inside.
+`valids/finally-loop-parallel` and `valids/retry-flowable-parallel`. **This is a
+different sentence from the one W3a's `39 of the 41 differ on nothing but
+spawned` made**: that field was empty, and these four are filled and wrong
+somewhere inside.
+
+*(It was **eight** through W6 Task 3, and the four that left are the four
+`valids/retry-new-execution-*` entries Task 4 banked. They were in this bucket
+for the strongest version of "differs inside `spawned`": everything the parent
+execution held agreed and the child was ABSENT, because nothing created a
+replay. All four remaining are `Loop`s; `retry-flowable-parallel` is the one
+whose name still reads like a replay's and is not — its `retry:` is a bare
+`type: constant`, the default `RETRY_FAILED_TASK` behaviour, and exactly four of
+the 345 corpus flows write `CREATE_NEW_EXECUTION`.)*
 
 **`baseline.txt` said "Fifteen are the sub-execution hole closing" above sixteen
 names, and W3b Task 5's report said "fifteen … and one needed only the render
@@ -5766,28 +5910,58 @@ exactly as `loop-switch` does. Both are corrected in `baseline.txt`.
 
 ### The residual baseline, by construct and owner
 
-143 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
+127 entries. `the_residual_baseline_is_attributed_to_a_construct_or_named`
 derives this from the baselined flows' own YAML on every run and fails if a row
 moves; **the rows overlap and this is not a partition**, but the remainder is
 exhaustive and named.
 
 | baselined entries declaring it | construct | owner |
 |---|---|---|
-| 20 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
-| 22 | `Subflow` | **unclaimed** |
+| 19 | `Loop` — a sub-execution egret **runs and gets wrong** | see below |
 | 16 | `finally:` | **unclaimed** |
 | 16 | `ExecutionUpdatableTask` (`Labels`, `SetVariables`, `UnsetVariables`, `Exit`) | **unclaimed** |
 | 12 | `AllowFailure` / `allowFailure:` → `WARNING` | **unclaimed** |
 | 12 | `Pause` → `PAUSED` | W8 |
 | 10 | `afterExecution:` | **unclaimed** |
 | 9 | `LoopUntil` / `WaitFor` | W8 |
-| 7 | flow `concurrency:` → `CANCELLED` | W8 |
+| 6 | flow `concurrency:` → `CANCELLED` | W8 |
 | 5 | `sla:` | W8 |
-| 4 | `CREATE_NEW_EXECUTION`'s replay | W6 |
 | 4 | `WorkingDirectory` (planned opaque) | **unclaimed** |
-| **29** | **none of the above** | named individually in `UNATTRIBUTED` |
+| **35** | **none of the above** | named individually in `UNATTRIBUTED` |
 
-**The `Loop` row was 37, then 21, and is 20; the label moved with the number.**
+**The `CREATE_NEW_EXECUTION` replay row was 4 and is GONE, which is the fourth
+time this table has lost a row rather than lowered one.** W6 Task 4 banked all
+four; `worker::replay` creates the replacement execution and the needle
+`"CREATE_NEW_EXECUTION"` now matches no baselined entry at all. A draft of the
+removal kept the row at 0 "because `valids/retry-flowable-parallel` is a fifth
+flow declaring it" — **it declares no such thing**, its `retry:` is a bare
+`type: constant` on a `Loop` and its behaviour is the default
+`RETRY_FAILED_TASK`. Exactly four of the 345 corpus flows write the word.
+
+**The `Subflow` row was 22 and is GONE, which is the third time this table has
+lost a row rather than lowered one.** `Subflow` executes since W6 Task 3, so it
+holds nothing — the same rule `disabled: true` and `runIf:` were removed under.
+Twelve of the 22 banked in that commit; four of the remaining ten are absorbed
+by rows that stayed (`flow concurrency:` once, `Loop` once, `AllowFailure`
+twice) and the other six are named one by one in `UNATTRIBUTED`, with the cause
+that actually holds each: two on `state::apply`'s attempt rule
+(`valids/retry-subflow`, `valids/subflow-parent-retry`, where Kestra accumulates
+a sub-execution's retries INSIDE the parent's attempt), two on a child-side
+over-acceptance the parent now transmits (`valids/restart-parent`,
+`valids/sla-parent-flow`), one on the unevaluated flow-level `outputs:`
+(`valids/subflow-secret-output-parent`), and one on `OutputValues` having no
+handler (`valids/task-runif` — whose `Subflow` is the corpus's only unresolvable
+target and is SKIPPED by a falsy `runIf:`, so `Subflow` was never what held it).
+**Lowering the row to 10 instead would have kept six entries attributed to a
+construct that works**, which is the failure mode the rule exists to prevent.
+
+The `flow concurrency:` row is 7 → 6 for the same commit:
+`valids/flow-concurrency-parallel-subflow-kill-child` banked, and its
+`concurrency:` was never a blocker for its own trace — `behavior: QUEUE` changes
+WHEN a child starts and a parent's `taskRunList` does not record that.
+
+**The `Loop` row was 37, then 21, then 20, and is 19; the label moved with the
+number.** The 20 → 19 is `valids/loop-with-subflow` at W6 Task 3.
 It used to mean "a sub-execution egret asks for and cannot run"; W3b executes
 them, so what is left is a sub-execution that runs and diverges. The 21 → 20 is
 `valids/replay-loop`, which the sub-execution `inputs` fix banked. No single package owns
@@ -5803,7 +5977,9 @@ row is an attribution to the thing that *holds* an entry, not to a construct the
 flow happens to declare — the same rule that adds a row when a cause is found,
 run backwards.
 
-**The named remainder went from 13 to 29**, and 16 of the 18 new names are W3b
+**The named remainder went from 13 to 29, and to 35 at W6 Task 3** (the six
+above, moved out of the retired `Subflow` row rather than newly discovered), and
+16 of the 18 names the 13 → 29 added are W3b
 Task 5's: eleven entries whose task type has no handler at all (`OutputValues`
 ×6, `PurgeLogs` ×5, `Assert` ×1 — measured in advance by W3b Task 1) and five
 more a fed terminal had been hiding, four of which are W2 divergences that only a
@@ -5900,7 +6076,7 @@ and only one of them ends there for the reason a reader would guess.
 
 | hole | the population, derived | is the predicate reached? | why nothing can move |
 |---|---|---|---|
-| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = 14 baselined + 11 matching; of the 14, **4** are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all, leaving **10** the waker could ever have touched | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
+| **`retry:`** — the waker (Task 1) | **25** golden entries declare a `retry:` = **10 baselined + 15 matching** since W6 Task 4 (14 + 11 before it); all 10 remaining baselined ones are `RETRY_FAILED_TASK`, because the **4** `CREATE_NEW_EXECUTION` entries banked. *(This cell read "of the 14, 4 are `CREATE_NEW_EXECUTION`, which writes no `not_before` at all". That is now false in both halves: that arm emits the `ExecutionDelay` the artifact builds for both behaviours, and `due_retries` has a `RETRIED` arm to read it.)* | **Yes, constantly.** `tick` calls `wake` unconditionally, ahead of the claim, so `due_retries`' `SELECT` runs on every tick of all 294 entries — and returns **0 rows** every time | **The oracle contains a second waker, and it wins.** `driver::pass_time` is the only thing here that makes a deadline elapse, and it does not merely move the clock: it rewinds `executions.created_at` by the shortfall **and calls `worker::resume` itself**, in the same function. So a `RETRYING` run is due only *inside* the call that has already resumed it, and no tick ever sees one. **`driver.rs`'s own module doc said this all along** — *"it changes one timestamp and calls the same `resume` any other caller would"* — and the package spent five tasks writing that the rewind alone was the mechanism. Instrumented `wake`: **0** fires over the whole oracle, with `tests/worker.rs` as the positive control on the same build |
 | **`timeout:`** (Task 2) | **5** golden entries declare one. **4** are baselined; the **1** matching is `invalids/duplicate-parallel`, a flow Kestra *refused* — so it has no runs at all, and the reportable half of this population is empty for a reason nothing can change. *(W4's spec §1.1 says **4** for this row and is right over **its** population, the baseline; this table counts the golden. Both now name the population they count over, because a reader holding the two documents open sees a contradiction where there is a scope difference — and this file's whole subject is figures that are true under a scope nobody wrote down.)* | **Yes, exactly four times.** Instrumented `worker::timeout::guard` over all 294 entries: the budget was applied `1s`, `1s`, `250ms`, `3600s` — precisely the four declarations — and **expired 0 times** | **No corpus budget is short enough to fire.** Three of the four sit on a `Pause`, a flowable whose `timeout:` is `advance()`'s and which Kestra's own worker ignores (measured on the artifact: a `Sequential` carrying `timeout: PT1S` around a four-second `Sleep` ran to SUCCESS in 4.2 s); the fourth is an **hour** on a `core.log.Log` |
 | **kill** (Task 3) | **5** baselined ids contain `kill`, and **0** of them declare a `timeout:` anywhere in any of `Flow`'s four task lists | **No, zero times.** `Registry::cancel` hangs off the budget expiring, and the row above is why that never happens | **The five named ids are not this path's population at all**, and their own YAML says what they are: `exit-killed` is `Exit` carrying `state: KILLED`, an author-declared terminal rather than a kill anybody performs; `pause-kill-delay` is a bare `Pause`; `flow-concurrency-queue-killed-after-execution` and `flow-concurrency-parallel-subflow-kill-child` declare `concurrency: {behavior: QUEUE, limit: 1}`; and `flow-concurrency-parallel-subflow-kill` declares two `Subflow`s and no `concurrency:` of its own — it is named for what happens to its child. Four of the five are W8 constructs and the fifth is an output. The one runtime kill this corpus *does* hold — `parallel-fail-with-flowable`'s `Sleep`, abandoned by a failed `Parallel` — is `advance()`'s decision, and `advance()` has no worker to tell |
 
@@ -5990,6 +6166,391 @@ rather than from the arithmetic behind it. The two rows that need a daemon are
 the two questions no pure function can answer: *was a process spawned*, and
 *does the daemon agree which container this worker owns*.
 
+### W6 — the ratchet moved sixteen, and the four triggers are not among them
+
+`143` before W6 Task 1 and **`127`** at this commit: the first movement since
+W3b, and the first time in this programme that a coverage statement has had to
+separate *what a bank proves* from *what shipped beside it*. **That makes the
+risk this section exists for sharper rather than smaller.** W4's problem was
+that a number which never moves reads as "nothing happened"; W6's is the
+opposite — **sixteen banked entries can make four triggers look measured when
+none of them is.** And it really is half by volume, not a figure of speech:
+**12,274 of the 23,267 lines this package had added under `crates/` at
+`b4e1c368`** are `src/trigger/`, `src/webhook_routes.rs` and the two webhook
+route suites — **53%** of the package, judged by nothing in this file.
+*(`git diff --numstat cc4ad991 b4e1c368 -- crates/`, added lines. **The
+denominator is dated on purpose**: written as `cc4ad991..HEAD` it counted the
+file it lives in, so every later edit to this README falsified it — the
+whole-branch review caught it one commit after it was written, at 23,273. A
+figure that counts its own file is a shape "hunt the number whose checker is
+elsewhere" does not cover, and it is the only one this sweep created rather than
+found. **The numerator was claimed exact and not moving, and that was the same trap
+one half further in** — `82fd8ba9` edits `webhook_routes.rs`, which is one of
+the four numerator paths, so the numerator moves whenever this package touches
+its own uncovered half. Both halves dated together, **at `82fd8ba9`**:
+numerator **12,279** = `src/trigger/*` + `webhook_routes.rs` **1,215** +
+`tests/webhook_route.rs` + `egret-server/tests/workflow_webhook_mount.rs`;
+denominator **23,740**; **52%**. Dating the denominator and leaving the
+numerator undated in the same sentence is what let it through: **a sentence
+escapes the self-reference trap only if EVERY figure in it is dated, and the
+ratio is the only part worth quoting undated, because both halves move
+together.**
+
+**And the third instance is this paragraph.** The correction above shipped
+labelled *"measured at `a20f5e72`"*, and `12,279 / 23,740` are `82fd8ba9`'s
+figures — at `a20f5e72` they are `12,274 / 23,273`. Re-measured at five commits
+to find that: `b4e1c368` 12,274/23,267 · `a20f5e72` 12,274/23,273 · `ef943cf2`
+12,274/23,585 · `82fd8ba9` 12,279/23,740 · `a8bb1da6` 12,279/**23,754** — and
+the last of those moved *because that commit edits this file*, which is the rule
+demonstrating itself for the third time in one paragraph. **A date is a figure
+too, and it needs the same treatment as the number it labels.** The ratio has
+been 52–53% at every one of the five, which is why it is the only part worth
+quoting. A line count is a crude measure of anything and is used here only
+to say that the uncovered half is not a corner.)*
+
+Every figure in this section is either derived by a named test on every run or
+labelled as a measurement someone took. The derivations are
+`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none` and
+`the_seeded_correlation_id_divergence_has_no_corpus_population` in
+`tests/executor.rs`; both were **validated by injecting a known defect before
+their zeros were believed** (five defects, each killed on 3 of 3 runs, against a
+3-of-3 control on the unmutated binary — and the first form of one of them
+**did not compile**, which looks exactly like a mutation no test killed until
+you check).
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `cc4ad991` (W4's tip, on `main`) | 143 mismatching, 143 baselined, 0 broken | — |
+| Task 1 | 143 | the driver publishes the corpus into `workflow.flows` |
+| Task 2 | 143 | migration `0138` — three kinds of child execution, four CHECKs |
+| Task 3 | **131** | `Subflow` executes; `src/executor/` opens for the first time since W3a |
+| Task 4 | **127** | the `CREATE_NEW_EXECUTION` replay; migration `0139`'s metadata |
+| Task 5 | 127 | the schedule trigger, its cron engine and backfill |
+| Task 6 | 127 | the flow trigger |
+| Task 7 | 127 | the webhook trigger, its router and the lever that keeps it off |
+
+#### The sixteen, and the mechanism of each
+
+**16 = 12 + 4**, and both halves are derived from the corpus rather than listed:
+the twelve are *golden entries declaring a `Subflow`, verdict `runs`, matching*,
+and the four are *golden entries whose source writes `CREATE_NEW_EXECUTION`*.
+
+| | count | the mechanism that banked it |
+|---|---|---|
+| `Subflow` | **12** | `Subflow` was planned an opaque `TaskKind::Runnable`, which set `task_runs.type_id`, which made it claimable — and `claim::leaf` answered `None`, because `models::TaskKind` for the same task is not a `Leaf`. `WorkerError::NotALeaf` aborted the tick and every one of them stalled at that run. It is a `TaskKind::Executable` now: nothing claims it, and `worker::subflow` spawns the child and terminates the parent's run. The child is linked by `trigger_execution_id`, **not** `parent_execution_id`, because `driver.rs` builds `spawned` from the latter and all 41 `spawned`-carrying entries have zero `Subflow` children |
+| `CREATE_NEW_EXECUTION` replay | **4** | Migration `0138` gave the replay a representable row at Task 2 and it banked nothing; what was missing was the two facts that **END** a chain — `execution.getMetadata()`'s `attemptNumber` and `originalCreatedDate`, which `advance()` read as the constants `(1, Tick(0))`. True of a chain's first execution and false of every replay, so nothing could refuse the fourth. `0139` stores them, `retry::scan` emits the `ExecutionDelay` the artifact builds for both retry behaviours, and `worker::replay` creates the execution |
+
+**The attribution of the twelve is a running program and not a list** — W6 Task
+3 mapped `Subflow` back to `TaskKind::Runnable`, one line in `plan.rs`, and the
+ratchet returned to **143 reporting exactly those twelve as regressions**. That
+is the strongest form of attribution this programme has produced, and it is a
+measurement that task took rather than anything this suite re-runs.
+
+**The trap in the derivation, asserted rather than avoided.** *Matching ∧
+declares a `Subflow`* is **thirteen**, not twelve: `invalids/recursive-flow` is a
+flow Kestra **refused**, egret refuses it too, and it has matched since long
+before this package. The test asserts that thirteenth **separately, by name**,
+so the twelve cannot quietly absorb it. `23 = 12 + 1 + 10`: twenty-three golden
+entries declare a `Subflow`, and ten are still baselined — the design spec's
+"22 declarations" was the **baselined** population before the package
+(`22 = 12 + 10`), a different set from this one.
+
+#### The four constructs the ratchet cannot speak for, and the blindness is FOUR mechanisms
+
+W4 established that *"the oracle cannot see it"* is at least three distinct
+facts. Here it is four, and **they must not be merged** — merging them would
+lose the only thing a reader can act on, which is what a future package would
+have to change to make each one visible.
+
+| construct | corpus | golden entries | what the ratchet holds | **the mechanism of the blindness** |
+|---|---|---|---|---|
+| **webhook** | 15 flows, 15 declarations | 14 — 11 matching, 3 baselined | nothing | **The harness never sends the request.** `harvest.py` contains the string `executions/webhook` **exactly once**, and that once is the *reason* `valids/webhook-inputs` is excluded from the corpus ("Executed only through POST /executions/webhook/…"). The trigger is not invisible to a discovery walk; it is **never invoked**, and the one corpus flow that can only be started that way has **no golden entry at all** |
+| **schedule / cron** | 7 flows, 8 declarations | 6 — all 6 matching | nothing | **The execution exists and hangs off nothing.** `docker compose` runs `command: server standalone`, so the scheduler is live and fires it — the design spec's §1.1 measured **13** executions on the artifact of which **10** came from something other than the harness's POST, six of them from a `Schedule` nobody asked for. The execution it creates carries `parentId` NULL **and no trigger link either** (measured there, not here). `descendants()` walks the generated `parent_id` column transitively **from the one root the harness posted**, so a schedule-fired execution is not a descendant of anything and cannot be attributed to an entry even in principle. The `trigger`-link union the flow-trigger row needs **would not find this one** |
+| **flow trigger** | 17 flows, 21 declarations | 12 — all 12 matching | nothing | **The link exists and is not walked.** A `Flow`-fired execution records its cause in `trigger.variables.executionId` — the same place a subflow child's link lives, and the field egret's own `trigger_execution_id` column stands in for — and **no arm of `descendants()` reads it**: same verdict as the row above, opposite cause. This is the one of the four a `descendants()` union would close, and two things about that cost are worth writing down: it is a **JSON path** rather than a column swap unless Kestra generates a column for it (`parent_id` is generated and this file has never named a second — **unmeasured**), and it would still need `normalise.py`, which builds `by_parent` from `parentId` and `bail`s on a descendant that does not hang off the root, so a *discovered* trigger-fired execution could not be normalised into a trace |
+| **backfill** | **0 live declarations**; 2 commented-out lines, in `valids/full` and `valids/labels-deserialization` | 0 | nothing | **No population.** Not a blind instrument — nothing to be blind to. The two commented lines are the scanner's own positive control: it finds what *is* there, so the zero is a measurement rather than a reader that sees nothing |
+
+**Both sides are blind, and the second half is egret's.** Even if Kestra's
+trigger-fired executions reached the golden, nothing on egret's side of this
+oracle evaluates a trigger: measured with a repo-wide grep, `trigger::tick`,
+`trigger::run_until_idle`, `TriggerState`, `ScheduleTrigger` and
+`WindowFreeFlowTrigger` have **zero** uses outside `crates/egret-workflow/src/trigger/`
+— no production caller, no driver caller, no `tests/executor.rs` caller. The one
+exception is the webhook, whose only consumer is `webhook_routes.rs`, mounted by
+`egret-server` **only** when `[workflow] webhooks_enabled` is true, and its
+default is `false` (asserted in `egret-config`'s own tests, and `figment` makes a
+malformed value a hard startup error rather than a silent `false`). This is item
+15's shape one level in: the ratchet is a statement about a state machine and a
+driver, and for these four constructs it is not even that.
+
+**The control that makes these zeros mean something** is the **142**
+sub-executions the golden does hold — `142 = 134` carrying a loop index `+ 8`
+carrying none (the replays) — across 41 entries. This oracle records a
+sub-execution whenever Kestra links it by `parent_id`. So "not one trigger-fired
+execution anywhere in the golden" is a statement about **the link**, not about an
+instrument that records nothing; and the test asserts `(0, 0)` sub-executions
+under **every one of the 31** trigger-declaring golden entries beside that 142.
+
+**The inversion this section exists to prevent, stated as a number: 28 of the
+167 matching entries declare one of the three triggers.** Their matching is not
+evidence the trigger works — it is evidence the trigger was **not evaluated on
+either side**, since Kestra ran them from the harness's POST and egret ran them
+from the driver's. A reader who counts matching entries by construct would
+conclude the flow trigger is the best-covered thing in the package: **12 of 12
+entries matching, zero baselined.**
+
+**And the sharpest single row is `valids/task-flow`.** It is one of the sixteen,
+it **declares a `Schedule` trigger**, and it banked because `Subflow` executes.
+The design spec's §1 recorded the cron row as *1 baselined declaration*; that
+row is **0** now, and not one thing egret does with a schedule caused it. An
+attribution that counted declarations rather than causes would have credited the
+scheduler with a bank. The test asserts both that `valids/task-flow` is the
+overlap and that it is the **only** one.
+
+#### What each trigger's own tests establish — and the three refusals
+
+These are the instruments that stand in for the ratchet, and this is the
+position `egret.sql` (item 3) and `egret.container` (item 3b) already occupy.
+**94** tests live under `trigger::` — `14` in `trigger/mod.rs` (the clock, the
+state, `tick`, `run_until_idle`, backfill), `22` schedule, `23` flow, `35`
+webhook — plus `15` in `webhook_routes` and `31` in `tests/webhook_route.rs`.
+*(Derived from `cargo test --lib -- --list`, not from a `test result:` line: the
+filter `trigger::` is a **substring** match and reports 112, because it also
+selects `models::trigger::`. A count whose instrument answers a wider question
+than the one asked is this file's oldest recurring defect.)*
+
+**The schedule trigger** rests on four measurements taken by **running Kestra's
+own code off the pinned artifact** (a probe class compiled into
+`io.kestra.plugin.core.trigger` with a fixed `SchedulerClock`): the cron dialect
+built field by field over cron-utils 9.2.1 rather than a preset; `convertDateTime`'s
+`withZoneSameInstant` behaviour across a DST gap and a fall-back hour; missed
+ticks replaying one per pass without `lateMaximumDelay` and being dropped with
+it; and the backfill window advancing and clearing as it passes `end`. **31
+mutations, 30 killed, 1 survived and is named** (`M29`, a progress guard, left
+unclaimed rather than described as covered). Its own review then hand-audited
+all **149** claims in the module and its report into **MEASURED 91 / DERIVED 33 /
+CHOSEN 25**, asserted to partition, after **throwing away** a keyword classifier
+that scored 70/3/76 — *"reporting it would have been the same sin in a new
+costume."*
+
+**Refusal 1 — `lateMaximumDelay` is REFUSED, not interpreted.** It parses,
+resolves and is captured verbatim, and `ScheduleTrigger::resolve` refuses the
+schedule rather than scheduling as though the key were absent (which is what
+dropping it did: over-acceptance in the direction this oracle cannot catch).
+Reproducing `java.time.Duration.parse` is a measurement nobody has taken, and
+*"trading a known hole for an unknown one"* is the thing the refusal exists to
+avoid.
+
+**The flow trigger** is `WindowFreeFlowTrigger`, and the name is the second
+refusal. **Refusal 2 — `dependsOn` is refused, and that is 20 of the 21 corpus
+declarations**, which is the only figure in this half a test compares **against
+the corpus** (the 94 tests above are counted by `--list`, and everything else
+here is a measurement someone took on the artifact; `oracle-exec/corpus` appears
+in exactly one place under `src/trigger/`, and this is it): `the_corpus_flow_triggers_split_twenty_to_one` resolves exactly one
+declaration (`flow-trigger-when-condition-flow-listen/on_completion`) and
+refuses twenty, and it is written as the **acceptance criterion that fails the
+day the window lands**. The hazard behind the refusal was seen **live on the
+artifact** by that task's reviewer: one `dependsOn` listener fired **twice off a
+single source execution** (`PAUSED`, then `SUCCESS`) — exactly what Kestra's
+`fireOnce` suppresses, and wholly invisible to a ratchet with zero reachable
+entries. **45 mutations, 45 killed**, 13 probes, and **four permanent controls**,
+because *"a sweep with no controls reports the same thing broken as passing."*
+The task's own lesson is the one this section is written under: **a two-sided
+mutation pair on an OPERATOR says nothing about where the OPERAND came from** —
+`max_depth` survived being replaced by the literal `100` across all 17 tests,
+and swept properly there were **nine** fields of that shape.
+
+**The webhook trigger** is the one whose verdict is not "approved". It is
+**APPROVED and EXPOSURE NOT APPROVED**, and **the approval rests on the lever's
+default being OFF**: before `[workflow] webhooks_enabled` existed the router was
+mounted unconditionally, so *"do not expose"* had no lever at all. Two Criticals
+were closed **structurally** rather than by a check — a flow declaring
+`disabled: true` fired where the artifact answers 409, because the handler read
+the DB column and never `parsed.disabled`; and `inputs: {x: "{{ trigger }}"}`
+passed a substring scan and fed the execution the key-comparison context's
+private object, which is now an `InputContext` that **binds no `trigger` at
+all**, so a misclassification is a worse error message and can never be a leak
+(proved against 55 spellings with a positive control, then 14 more by a
+reviewer, including the root reached through a map **key**). **Refusal 3 — no
+`wait:`, no `STORE`, no multipart**: the surface is knowingly narrower than the
+artifact's and says so at the call site. Its anti-DoS control was itself a DoS
+(`SWEEP_AT` was a trigger, not a cap: 65,536 attacker-chosen keys gave 1.93 ms
+of mutex-held CPU per admission) and is now a `Mutex<Box<[AttemptWindow]>>` of
+exactly 4096 — flat 0.56→0.78 µs per admission and constant 98,304 bytes over
+250k keys, against a positive control reimplementing the old algorithm that goes
+to 4,672 µs.
+
+**What none of the three establishes, and no test in them can:
+over-acceptance.** A trigger that fires where Kestra would not is the next
+instance of this programme's recurring defect, and **the oracle cannot catch it**
+— it is a Global Constraint of this package rather than an observation about it.
+Every refusal above is an attempt to make that class smaller by declining
+surface, which is a different thing from measuring it.
+
+#### Instruments and defects handed on, each with an owner
+
+Recorded rather than fixed, because each belongs to a package that is not this
+one:
+
+| | owner |
+|---|---|
+| **`egret-test-db`'s opt-out prints `N passed`** where this programme's rule is `0 passed; N ignored` — the rule item 3 states and `EGRET_ALLOW_ENGINE_SKIP` obeys | whoever owns `egret-test-db`'s `skip_verdict`; it is the crate the rule was taken FROM, which is why nobody checked it |
+| **`egret-query/tests/connector_trino_params.rs` self-skips** (`12 passed; 0 ignored` in 0.01 s) and is **actively corrupting gate logs** — its `eprintln!` mangled a harness line and ate a test name out of W6 Task 6's name-set diff | `egret-query` |
+| **`FlowRepo::find_by_name` is still unscoped**, and **two** modules now route around it | the flow-repo owner; a `workspace_id` parameter is the fix, and the routing-around is the evidence it is needed |
+| **the dead log-scrape arm of `descendants()`** — left in place deliberately, with the measurement at the site | the package that makes triggers measurable: it has to open `descendants()` anyway to union `trigger_execution_id` |
+| **`plan::MAX_TASK_DEPTH = 48` sits above a cliff bracketed at 42-survives / 47-aborts**, because `spawn_one` settles a child **inside its caller's transaction**, so depth in the data is depth on the stack. Kestra has **no** semantic bound to port: 12, 47 and **100** nested one-value `Loop`s all run to SUCCESS on the artifact, and its only refusal is the YAML reader's Jackson limit, bisected to 498-publishes / 499-`422` | whoever stops `settle` driving a child's first settle inside its caller's transaction. Until then, moving that one W3a constant **below** the cliff converts a process abort into a plan-time refusal |
+| **the SEEDED `correlationId` divergence** — Kestra copies the cause's `system.correlationId` **label** verbatim and egret derives the chain root's **id**, so a root that declares one diverges | the wiring seam, `trigger::flow::FiredExecution::correlation_id`. `the_seeded_correlation_id_divergence_has_no_corpus_population` is why it is recorded and not banked: 22 corpus flows declare labels, **3** declare a `system.*` one, **none** declares `system.correlationId`, and the only **2** flows whose text names `correlationId` read it. **This row said more than that until the whole-branch review**, and the part it covered up was a defect rather than a divergence: the walk that produces the id stopped at a subflow link and answered the child's own id. Fixed, measured on the artifact, and instrumented — see below |
+
+#### What the whole-branch review found, and why nothing in this section could
+
+This section was written, reviewed and committed before the whole-branch review
+ran, and the review found a **Critical in the one place this section had just
+declared measured**. It belongs here rather than in a task report, because the
+mechanism is the coverage statement's own subject.
+
+**`Surface::load`'s `root` walked `parent_execution_id` alone.** It feeds
+`labels.system.correlationId`. Migration `0138` — the migration this package
+added — gives a subflow child `trigger_execution_id` with
+`parent_execution_id` **NULL**, so the walk stopped at the first subflow link
+and answered the child's **own** id. **That is `subflow::chain_holds`'s W6 Task
+3 Critical, one module over, never swept for**: a guard whose premise is *"the
+chain is walkable by one column"* against a migration that makes a child carry
+exactly one of two. Task 3 fixed it where it was found.
+
+**Three artefacts said the opposite and two of them called it measured** —
+`render.rs`'s own comment (*"agrees with the artifact on every machine-generated
+chain"*: a subflow chain is machine-generated), this file's W6 Task 4 section
+(*"`root` deliberately keeps walking the whole chain, and W6 Task 4 measured
+that this is right"*: Task 4 measured the **replay** link, and "the whole chain"
+was true of the parent chain and read as true of the causal chain), and the
+owner row above, which registered the divergence as reachable only by a
+**seeded** label and named an **unwired** seam as its owner while the wired path
+shipped it.
+
+**The corpus reaches it.** `valids/subflow-grand-child` logs
+`{{labels.system.correlationId}}` and is the target of `valids/subflow-child`,
+which is **one of the twelve entries this section credits**; the same shape holds
+for `valids/follow-dependencies-partial-{parent,child}`. The ratchet cannot see
+it: the golden records **states**, and a `Log` renders either value without
+failing. So this is the third kind of blindness in this very section — *the
+predicate is evaluated and its output is not compared* — reached not by a
+trigger but by a banked entry.
+
+**Measured on the artifact rather than argued**, once the review had found it —
+the corpus's own chain, renamed into a probe namespace on the pinned digest, read
+out of Kestra's Postgres:
+
+```text
+flow              id                      parentId  trigger.…executionId     system.correlationId
+corr-parent       2cvzjgi7mY6lDfaQxiNa0x  null      (started by hand)        2cvzjgi7mY6lDfaQxiNa0x
+corr-child        8yWnkcC1oAvHsunjmTG1Q   null      2cvzjgi7mY6lDfaQxiNa0x   2cvzjgi7mY6lDfaQxiNa0x
+corr-grand-child  2Cr8T9lsAM5icJ7KT5NEna  null      8yWnkcC1oAvHsunjmTG1Q    2cvzjgi7mY6lDfaQxiNa0x
+```
+
+The label is the **root's** id two links down, `parentId` is NULL at every hop,
+and the cause is `trigger.variables.executionId`. Fixed: `Link::cause()` is
+`parent.or(trigger)`, unambiguous because `one_link_kind` makes them exclusive.
+The ratchet was re-read after the fix — **127, 0 broken** — which is what the
+paragraph above predicts and not what it assumes.
+
+**And the test that was supposed to cover this could not**, which is the part
+worth carrying forward. `the_seeded_correlation_id_divergence_has_no_corpus_population`
+(then named without `seeded`) asserts that both label-reading entries are
+matching — and the oracle drives both **only as root executions**, where every
+implementation of the walk returns the same value. *A fixture answers the
+question you built it for and stays silent about the one you then generalise
+to*, for the eighth time in this package, in the test written to state the
+boundary. The walk's instrument is now
+`a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`, which drives
+**two** subflow links (one cannot tell "the root" from "the immediate cause"),
+keeps a loop child as the other-link control, and keeps a standalone execution
+as the control that says the label renders at all.
+
+**The widened walk needed a guard, and the guard has been seen to fail.**
+`loop -> subflow child` is writable now, and without gating the `levels`/`item`
+push on the same `inheriting` flag that child resolves `{{ item.value }}` off
+its **caller's** iteration: measured, `LOOPVAL`, SUCCESS, killed 3 of 3 runs by
+the mutation that removes the gate. It closes the asymmetry W6 Task 2's
+re-review recorded as N-2 — `item` crossing a non-loop link while `outputs`
+stopped.
+
+#### The figures W6 retires above this section, and what each is now
+
+The sweep ran under the third formulation — *a figure is safe only if a running
+program compares it; every other figure, in any file, at any distance from any
+derivation, is stale until re-derived* — and the yield says something about the
+rule. **Every figure it found was already compared by a running program, under a
+name the stale sentence did not use.** These are not numbers nobody checked;
+they are numbers checked under their own name and copied out under another.
+
+**Thirteen rows below: ten corrected in place and three named rather than
+corrected.** One of the ten rows is four separate doc comments, so it is
+**thirteen corrected sites and sixteen in all** — four of them in `src/` and
+`tests/` rather than anything in this file, and two in this file's own opening
+reading instructions.
+
+| where | said | is |
+|---|---|---|
+| **this file's opening blockquote**, the sub-execution bullet | `16 of the 41 MATCH, 6 inside, 19 on more` | **22 / 4 / 15** — the note that exists to stop a reader picking up a stale figure, two packages stale itself, in the file's own reading instructions |
+| **this file's opening blockquote**, the ordered-pair bullet | `357 are; the other 747` | **360 / 744** |
+| *The coverage statement* → *The sub-executions* | `18 / 8 / 15` | **22 / 4 / 15**, and `18 + 8 + 15` and `22 + 4 + 15` **both total 41** — so the total-beside-the-parts discipline this file relies on cannot see this class at all |
+| same section | `the eighteen by name`, `35 entries produce a spawned` | **twenty-two**, **39** — and the ordered-pairs section two screens up already said 39 |
+| item 2 | `747 of 1104`, `461 / 1807 / 751 / 191 / 53` | **744 of 1104**, **433 / 1703 / 665 / 165 / 43** — six figures, all of them constants the suite asserts, and the *ratio* the item is about did not move, which is why nothing prompted a re-read |
+| item 6 | `84 … 63 since W6 Task 3` | **59 since W6 Task 4**, and the four that left **never stalled**: a classifier artefact, not four executions that started finishing |
+| *The sub-executions: what is compared* — the retirement note on W3a's table | `16 of the 41`, `35 entries` | **22**, **39**: a stale figure inside the note that retires the table above it |
+| *What this oracle does not prove* (W3b's), the sub-execution bullet | `35 / 16 / 6 / 19` | **39 / 22 / 4 / 15** |
+| `oracle-exec/baseline.txt:204` | `It is 16 of the 41 MATCHING` | **22**. **Not corrected, and the reason is a constraint**: this package may not edit `baseline.txt`, whose md5 (`a3d887ae72595e61c8bc16e8530f9951`) is the reference every published W1–W6 number is stated against, and a comment-only edit still moves it. Named here instead |
+| `src/trigger/mod.rs`, the scheduler's own module doc | `seven corpus flows declare a cron and **one of those is baselined**` | **none of the six comparable entries is baselined**. Inherited from the design spec's §1 table, which was measured *before* the package; the one entry it counted is `valids/task-flow`, which W6 Task 3 banked because `Subflow` executes. **The scheduler's own doc invited a reader to read a `Subflow` bank as a schedule bank** |
+| `src/worker/subflow.rs`, `tests/executor.rs` (twice) and `tests/worker.rs` | `the ratchet is unmoved at 131` | **127**. The value the day W6 Task 3 measured it, four lines of the same package before Task 4 banked four more. The claim is *unmoved*; the number beside it was a moment, and all four now say so |
+| `oracle-exec/runnable.txt`, W4's *measured now* table | `matching 151 / baselined 143`, `357 / 747`, `17 / 8 / 16` | **167 / 127**, **360 / 744**, **22 / 4 / 15**. W6 appends its own block there rather than rewriting W4's, which is that file's convention |
+| the flip and corruption **experiments** in this section | `green at 143`, `144 mismatching` | left as they were run. They are experimental records on a different tree, and an adjusted experimental result is a number no program ever produced. Both mechanisms are still checked on every run by `a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to` and the pairs test; only the printed counts are historical |
+
+**Two rules were falsified as well as figures**, which is what W4 warned the
+sweep would find:
+
+1. *"A figure a test compares cannot go stale"* — false in the only way that
+   matters. Eleven of the rows above are figures the suite asserts. What went
+   stale is the **copy**, and a copy has no name for the constant it came from.
+   The shape to look for is not an unchecked number; it is **a number whose
+   checker is elsewhere**.
+2. *"Assert the total beside the parts and an error shows up"* — the
+   `22 + 4 + 15` row is a counterexample this file can now point at. Two figures
+   moved in opposite directions by the same amount and the total held.
+3. **"Where this section and anything above it disagree, this section is
+   right"** — this statement's own governance rule, and the sweep falsified it
+   *inside* the section. *The sub-executions* said **35** entries produce a
+   `spawned` while *The ordered pairs*, two screens up **in the same section**,
+   said **39**; item 2's five family figures were a package behind while the
+   tables they are drawn from were current. The authority is not this section.
+   **It is the named constants in `tests/executor.rs`** — `SPAWNED_ENTRIES_THAT_MATCH`,
+   `ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED`, `TERMINALS_ON_BASELINED_ENTRIES`
+   and the rest — which is where the next sweep should start.
+
+**And the method that worked, stated so the next sweep does not have to find it
+again: sweep from the CONSTANTS outward, not from the prose inward.** Every
+earlier formulation scoped the search by *place* (this file, this section, the
+files this task touched) and every one of them missed copies living somewhere
+nobody had a reason to open. Enumerating the constants the suite asserts and
+then grepping each one's **concept** — "of the 41", "entries produce a
+`spawned`", "end unfinished", "kept ordered pairs", and the bare ratchet values
+`143`/`131` — over `src/`, `tests/`, `oracle-exec/` and `docs/` in every file
+type found every one of the sixteen, including the four `131`s in doc comments
+and the module doc that had inherited a figure from the design spec's
+pre-package table. A phrase grep would have found what its author already knew
+was there; the constants are a list nobody has to remember.
+
+#### What this section does not do
+
+It does not attribute the trigger half to anything. **If every line of
+`src/trigger/` were wrong, this file would print `127` and every test in this
+suite would pass** — W6 Task 6 said so of its own package while shipping it, and
+it is the honest sentence to end on. Making triggers measurable is a package of
+its own: `descendants()` unioning `trigger_execution_id`, `normalise.py`
+building its tree on that link, a golden schema that can hold a sub-execution
+with no loop index, a **re-harvest**, and a **rewritten `baseline.txt`** — the
+reference point every published W1–W6 number is stated against. That cost
+belongs beside the decision, which is why it is written here rather than
+implied.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
@@ -6002,15 +6563,28 @@ guard, not a bound on behaviour: it fails when a *comparable* entry moves, and a
 flow nobody wrote is comparable to nothing.
 
 **2. Two thirds of the kept ordered pairs cannot fail — and the pairs are not
-special.** 747 of 1104, shown above by flipping every one of them and watching
-the ratchet stay green. A pair becomes assertable when its entry banks, not
-before. **The same holds of every other golden field on a baselined entry**,
-because `executor_matches_golden` reports only a non-baselined mismatch or a
-baselined match: 461 of 840 run terminals, 1807 of 3355 run-history tokens, 751
-of 1462 execution-history tokens, 191 of 408 executions and 53 of 142
-sub-executions are un-falsifiable for exactly the same reason. The statement used
-to carry this sentence about the pairs alone, with no counterpart, which reads as
-though the pairs were the weak family. They are the measured one.
+special.** **744** of 1104 today, derived by
+`kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line`; the
+flip experiment that demonstrated it was run at **747**, on the W4 tree, and is
+labelled above rather than adjusted. A pair becomes assertable when its entry
+banks, not before. **The same holds of every other golden field on a baselined
+entry**, because `executor_matches_golden` reports only a non-baselined mismatch
+or a baselined match: **433** of 840 run terminals, **1703** of 3355 run-history
+tokens, **665** of 1462 execution-history tokens, **165** of 408 executions and
+**43** of 142 sub-executions are un-falsifiable for exactly the same reason. The
+statement used to carry this sentence about the pairs alone, with no
+counterpart, which reads as though the pairs were the weak family. They are the
+measured one.
+
+*(**All six figures in this item were a package behind and W6 Task 8's sweep
+re-derived them**: 747/461/1807/751/191/53 were the W4-era values, at
+`baseline.txt` = 143. Each is a constant the suite asserts on every run —
+`TERMINALS_ON_BASELINED_ENTRIES` and its four siblings, and the pairs table
+above — so every one of them was **compared by a running program under a name
+this paragraph did not use**. That is the shape: not a figure nobody checked, a
+figure checked under its own name and copied out under a different one. The
+ratio the item is about did not move — 744/1104 is still two thirds — which is
+exactly why nothing prompted a re-read.)*
 
 **3. `egret.sql` reaches zero corpus entries and zero golden entries**, and a
 green ratchet says **nothing whatever** about it.
@@ -6197,12 +6771,34 @@ guards green over a path they do not touch, measured in
 ratchet, and it is now a decided one rather than an open one, with a named way
 back in.
 
-**6. 84 of the 294 executions end unfinished**, counted and named by
-`every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A task type
-with no handler — or a task the executor plans **opaque**, so the claim takes it
-and `models::TaskKind` has no leaf for it — makes `Registry::run` or
+**6. 84 of the 294 executions end unfinished — 63 since W6 Task 3, and 59 since
+W6 Task 4**, counted and
+named by `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`. A
+task type with no handler — or a task the executor plans **opaque**, so the claim
+takes it and `models::TaskKind` has no leaf for it — makes `Registry::run` or
 `Claimed::input` refuse, the tick abort for that run and the execution stall,
-which is what the shipping worker does. So the driver returns the partial trace,
+which is what the shipping worker does.
+
+> **The 21 that left are the whole of `Subflow`, and they are the second half of
+> that sentence rather than the first.** Through W5 a `Subflow` was planned an
+> opaque `Runnable`, which set `task_runs.type_id`, which made it claimable —
+> and `claim::leaf` then answered `None`, because `models::TaskKind` for the
+> same task is not a `Leaf`. Every entry holding an executed top-level `Subflow`
+> stalled there. A `TaskKind::Executable` gets no `type_id`, so nothing claims
+> it, and `worker::subflow` terminates it: 12 of the 21 are the entries W6 Task
+> 3 banked, and the other nine still mismatch on something else (five registered
+> in `STILL_OVER_ACCEPTED_AT_RUNTIME`, two on `state::apply`'s attempt rule, two
+> on the missing `WARNING`). **The remaining 63 became 59 at W6 Task 4, and
+> those four never stalled at all**: the `retry-new-execution-*` entries declare
+> only `core.execution.Fail`, which HAS a handler and ran it, and they were
+> counted because `is_stalled` omitted `RETRIED` from its terminal list while
+> `RunState::Retried`'s own doc, Kestra's `State.isTerminated()`,
+> `worker::claim::settle` and `worker::spawn::terminated_count` all called it
+> terminal. **A classifier artefact leaving the population, not four executions
+> that started finishing** — the count would have fallen to 59 with `RETRIED`
+> added and no replay implemented at all. The 59 are what the sentence above
+> always meant: a task type with no handler. So the driver returns the partial
+> trace,
 and `Broken` is now reserved for the instrument failing: the step bound, a panic,
 or `WorkerError::Corrupt`, which `driver.rs` used to discard along with every
 other worker error under `Err(_) => continue` and can now be reported. Nothing
@@ -6416,6 +7012,42 @@ per file, because a `git diff` that prints nothing looks the same whether it
 compared eleven files or none, and the file count is checked on both sides so a
 deletion cannot hide inside an empty diff.
 
+> **W6 Task 3 ENDS THAT, and this item is now a diff with a reason per file
+> rather than a machine check.** The paragraph above about what that costs
+> (*Pointers that no longer resolve*) is still exactly right, so it is not
+> softened here: item 12 was a one-command check and is a judgement call from
+> this commit on. What replaces it is the per-file diff below, each row saying
+> what the change is FOR, and a single measured claim it all rests on.
+>
+> **The claim:** `flowable::start` emits `SUBMITTED` for every
+> `TaskKind::Runnable`, and **not one of the 24 executed `Subflow` runs in
+> `golden.json` carries it** — derived over the golden on every run by
+> `no_subflow_run_in_the_golden_passes_through_submitted`, and from egret's side
+> by `only_a_runnable_passes_through_submitted`. So `Subflow` planned an opaque
+> `Runnable` — a runnable whose handler spawns and waits, the cheaper answer the
+> plan asked to be tried first — mismatches EVERY entry the package exists to
+> bank, whatever else its handler gets right. It banks nothing. That is the
+> finding; the directory opening is its consequence.
+>
+> `git diff --stat 3539fea2 HEAD -- crates/egret-workflow/src/executor/`:
+>
+> | file | what the change is for |
+> |---|---|
+> | `plan.rs` | the new `TaskKind::Executable` variant, and the `(ModelKind::Subflow, "subflow")` arm that builds one. Kestra's own `ExecutableTask`, and its doc carries the measurement above |
+> | `flowable/mod.rs` | `start` does not emit `SUBMITTED` for it and emits a `Command::SpawnSubflow` beside the `StartRun`; `descend` returns `Waiting` for it, as it does for a `Loop` |
+> | `command.rs` | the `Command::SpawnSubflow` variant — **and the stale pointer this table's own successor list has been holding since W3b** |
+> | `state.rs` | `apply`'s arm for it (a no-op, like `SpawnExecution`), and a second measured counter-example to rule 1 recorded beside the first |
+> | `retry.rs` | `scan` spells Kestra's `RunnableTask \|\| Subflow` instead of half of it — the doc there predicted this exact edit |
+> | `mod.rs` | `#[cfg(test)]` only: the two fixpoint helpers and `only_a_runnable_passes_through_submitted`, which gains an `Executable` arm and `valids/subflow-parent` |
+> | `flowable/loop_.rs` | **nothing new** — the two stale pointers, fixed |
+>
+> Nothing here changes `advance()`'s contract for a kind that already existed:
+> a `Runnable`, a `Sequential`, a `Parallel`, a `Dag`, an `If`, a `Switch` and a
+> `Loop` all take exactly the commands they took before, which is what
+> `only_a_runnable_passes_through_submitted`'s unchanged `flowables >= 8 &&
+> runnables >= 21` and the whole unchanged W1–W5 half of the ratchet assert.
+> `advance()` is still pure over `(plan, state, now)`.
+
 **13. A task-level `timeout:` never reached a handler — CLOSED by W4 Task 2, and
 the ratchet is blind to it for a different reason than item 11.** W3b measured
 that `models::Task`'s deserializer takes `timeout` out of a leaf's `spec` before
@@ -6539,7 +7171,7 @@ read `143` as *"the worker is fine in production"*: there is no production of it
 yet, and the reaper, the lease fence and the waker have never met an operator's
 `working_timeout_s`.
 
-**16. Two divergences the ratchet cannot hold, both measured on the artifact
+**16. Three divergences the ratchet cannot hold, each measured on the artifact
 rather than reasoned about.**
 
 *`egret.sql` does not stop the statement it timed out.* `worker::timeout::guard`
@@ -6573,6 +7205,212 @@ content for `Files.copy` to materialise). The two legs differ, an earlier draft
 of this gave one answer for both, and neither leg reaches the host — which is
 why the residual is accepted rather than fixed.
 
+*A replay of a `Subflow` child never tells the parent; Kestra's does, and at
+one ordering that changes the parent flow's own verdict.* W6 Task 4, fix rounds
+2-4. Measured on the pinned digest in **four separate compose projects** — fix
+rounds 2 and 3 and re-reviews 2 and 3, each on its own project, each torn down
+`-v` — with `tests/worker.rs`'s own fixture shape and the successor as the only
+variable.
+
+`Execution.childExecution()` copies `this.trigger` verbatim
+(`Execution.java:405-431`, the field at `:422`), so the replacement is still
+addressed to the parent's `sub` taskrun and Kestra reports its terminal there.
+egret's replacement carries no trigger link at all, so **no stamp is ever
+delivered, at any ordering** — and that is pinned twice rather than once.
+`claim::settle`'s terminal block (`claim.rs:950-960`) fires **both** dispatch
+arms on every terminal execution and both return `None` for a replacement:
+`subflow::on_child_terminal`'s `trigger_of` zips two NULL trigger columns, and
+`spawn::on_execution_terminal`'s `parent_of` zips a set `parent_execution_id`
+with a NULL `parent_run_ix`. The first is pinned by the
+`(trigger, trigger_run) == (None, None)` assertion in the test named below; the
+second by a CHECK — `workflow_executions_loop_run_whole_or_absent` makes a
+non-NULL `parent_run_ix` without a `loop_index` unrepresentable — which is the
+stronger kind of pin. **That is why the second ordering needs no second
+fixture**: egret's answer is invariant by construction, not by timing.
+
+**The size of the divergence depends on one thing: whether the parent is still
+alive when the stamp lands.** Rounds 1-2 measured only the first ordering and
+generalised from it; the third round changed the one thing the fixture held
+fixed — the successor — and measured again.
+
+| successor | parent EXECUTION | `sub` run | runs, by round |
+|---|---|---|---|
+| `Log` (finishes before the replacement does) | Kestra `SUCCESS` = egret `SUCCESS`, **16 of 16** | Kestra `FAILED`, egret `SUCCESS` | **16** = 2 (r2) + 1 (rr2) + 2 (r3) + 11 (rr3) |
+| `Sleep PT8S` (outlives the replay) | **Kestra `FAILED` in 21 of 22**, egret `SUCCESS` in all 22 | Kestra `FAILED`, egret `SUCCESS` | **22** = 2 (rr2) + 2 (r3) + 18 (rr3) |
+
+Eight of re-review 3's eighteen ordering-B runs were fired **concurrently** and
+all eight came out `FAILED`, so this is not a narrow timing window. The
+replacement's `trigger` was byte-identical to the child's in every run in which
+both were dumped.
+
+**Magnitudes are quoted as ranges observed with their run counts, because two
+figures written here as properties were falsified by the very next round's
+runs.** Nothing below should be cited as a single characteristic value.
+
+* the stamp follows the replacement's own terminal by **8.5-33.3 ms**, over the
+  **16** stamps recorded to a decimal (4 in fix round 3, 12 in re-review 3);
+  three further stamps recorded in fix round 2 and re-reviews 1-2 (~31, 30.8,
+  28.9 ms) fall inside that range. This entry said *"13-33 ms **in every run**"*:
+  8.5 ms falsifies the low end, and *"in every run"* was a claim over runs
+  nobody had made yet;
+* at ordering A it lands **407-1627.6 ms after** the parent's own terminal, over
+  **8** observations. This entry quoted 407-1134 ms and called the spread *"about
+  three-fold"*; 1627.6 ms exceeds it, and the spread is four-fold over what has
+  now been measured;
+* at ordering B it lands **17.4-45.9 ms before** it, over **8** observations,
+  with the parent still `RUNNING`;
+* at ordering B Kestra's `after` then completed `SUCCESS` **6.1-7.8 s after its
+  own execution had already been declared `FAILED`**, over **7** observations.
+
+**So this can be a divergence in the FLOW'S OWN VERDICT** — the same class, and
+at that ordering the same size, as the Critical this task opened with. The
+`sub` run diverges always; the execution diverges whenever a successor outlives
+the replay. Earlier drafts of this entry said *"every EXECUTION-level answer
+agrees"*; that was true of one fixture and is corrected here.
+
+**One rule, and its consequence depends on the parent's liveness** — report the
+replacement's terminal through the copied trigger. **It is not established that
+the rule always fires, and an earlier draft of this entry said it was.** That
+draft read *"it is **one deterministic rule**, not a race"*, which is stronger
+than 22 ordering-B runs support: **1 of the 22 delivered no stamp at all** on a
+live parent — the `sub` run stopped at
+`["CREATED","RUNNING","RETRIED","SUCCESS"]`, the parent ended `SUCCESS`, and the
+replacement had failed 8.4 s before the successor finished — and
+`Execution.hasTaskRunJoinable` (`Execution.java:844`) is a live path that
+**discards** a subflow result whose taskrun carries fewer histories than the
+execution row now holds. That run was not reproduced in 17 further attempts and
+is recorded as a **calibrated counterexample, not a falsification**: the honest
+statement is that the ordering is robust over 38 runs and the delivery is not
+known to be unconditional. **Faithfulness to behaviour** is still the right
+frame for what the fidelity rule covers; what it does not do is excuse egret
+here.
+
+**What following the rule would cost. The grounds have moved twice, and this is
+the current state of them — materially weaker than fix rounds 2-3 registered.**
+
+1. **NOT a relaxed CHECK. Cost 1 does not exist**, and it was the strongest of
+   the three grounds the ruling stood on. `worker::replay`'s INSERT
+   (`replay.rs:234-260`) sets `parent_execution_id` to the **child** and leaves
+   both trigger columns NULL; the child's own row carries
+   `(trigger_execution_id, trigger_run_ix)` = the parent execution and its `sub`
+   run. So **one hop up `parent_execution_id` from the replacement lands on the
+   row holding exactly the address Kestra's copied trigger holds** — the same
+   pair by construction, because `childExecution()` copies `this.trigger`
+   verbatim rather than deriving a new one. **Deriving the address instead of
+   storing it is what makes `workflow_executions_one_link_kind` irrelevant**,
+   and `spawned` never moves: `driver::read_trace_inner` reads
+   `parent_execution_id`, which such a walk does not touch, so all 41 golden
+   `spawned` entries and all sixteen banks are unaffected — which is the
+   entirety of what this cost was protecting. The mechanism is already in this
+   module (`subflow::chain_holds`, `subflow.rs:959-986`, walks
+   `COALESCE(trigger_execution_id, parent_execution_id)` recursively and
+   terminates because a row can only name an older row), and so is the call site
+   (`claim::settle` already calls `on_child_terminal` on **every** terminal
+   execution; today it returns at the first line). Two things such a walk must
+   get right, both expressible: it must **stop at a loop link** — one predicate,
+   `loop_index IS NULL`, in the same recursive CTE — or a loop iteration's
+   terminal would be delivered to an outer `Subflow` run, which is exactly the
+   distinction `ExecutableUtils.isSubflow` makes by trigger *type*
+   (`ExecutableUtils.java:313`, read at the pinned checkout); and
+   `claim.rs:953-957`'s dispatch comment stops being true **as written** — there
+   is still no double report, because `parent_of` zips a NULL `parent_run_ix`,
+   but the reason moves from the CHECK to the zip.
+2. **A weakened guard — and it is ASSERTED, never measured.**
+   `subflow::on_child_terminal` returns early on a parent run that is already
+   terminal (`subflow.rs:603-609`), and the run **is** terminal in *both*
+   orderings before the replacement even exists: the test below asserts
+   `["CREATED","RUNNING","RETRIED","SUCCESS"]` on it at that point. Kestra has no
+   such guard — `Execution.hasTaskRunJoinable` blocks terminal→non-terminal
+   (`:838`) and an outdated-history join (`:844`), and **permits
+   terminal→terminal when the history grows** — so following the rule means
+   replacing egret's "already terminal ⇒ never again" with Kestra's
+   monotonic-history rule. **Nothing in this tree observes this guard.**
+   Mutating it so it can never fire (`.is_some_and(|s| s.is_terminal())` →
+   `.is_some_and(|_s| false)`) left **53** worker tests, **45** executor tests
+   and the ratchet's `294 / 127 / 127 / 0` with a field breakdown byte-identical
+   to the clean run. And the two corpus flows its own doc names are **both
+   baselined** — `valids/retry-subflow` (`baseline.txt:386`) and
+   `valids/subflow-parent-retry` (`:397`) — so the ratchet is blind to them by
+   construction and could not have reported a change there either.
+
+   **Its stated grounds are also wrong in one half and redundant in the other.**
+   This entry and the test doc both said *"load-bearing for `transmitFailed` and
+   `wait: false`"*. The guard's own doc (`subflow.rs:571-602`) names something
+   else — a `Subflow` task's own `retry:` starting a SECOND child under one
+   `(execution, run_ix)`, which is why 0138's reverse index is deliberately not
+   unique — and `wait: false`. `transmitFailed` is not one of its grounds
+   anywhere in `src/`. And the `wait: false` half is **redundant except on an
+   error path**: `if !sub.wait { return Ok(()) }` sits *after* this guard
+   (`subflow.rs:627`), so removing the terminal guard changes a `wait: false`
+   run's outcome only where `spec::parse` or `subflow_of` fails on the parent's
+   own source — turning a silent `Ok(())` into an error. What is actually
+   exposed is the `retry:` half alone.
+
+   **Measuring it is not possible from outside `src/`, which is why it is still
+   asserted here.** The guard's firing is not observable through any public
+   surface: `on_child_terminal` is `pub(super)`, it returns `Ok(())` on both
+   paths, and a caller cannot distinguish "the guard fired" from "the child was
+   not a subflow child". Two instruments would settle it, and both change
+   `src/`: a temporary counter on the guard, run over the whole oracle and the
+   worker suite, which answers *how often it fires and on what*; or a test that
+   constructs the exposed shape — two children under one `(execution, run_ix)`
+   with the first child's terminal delivered **after** the second attempt has
+   moved the run — paired with the mutation above, which answers *whether it is
+   load-bearing*. The second is the stronger instrument and the harder one: it
+   is not established that egret can produce that delivery order at all, since
+   `on_child_terminal` runs synchronously inside the child's own settle, and
+   establishing that either way is itself unmeasured work.
+
+**A third cost was claimed in round 2 and is WITHDRAWN in round 3:** *"egret
+would need a path that writes to a terminal execution."* It does not exist at
+the ordering that matters — the parent is live, the write is ordinary, and
+W3b's durability property is not in play. (Kestra performs post-terminal run
+writes in *both* orderings anyway: `sub` in the first, `after` in the second.)
+
+**Zero corpus population, derived rather than remembered:** over `corpus/`,
+**345 flows, 4 writing `CREATE_NEW_EXECUTION` and none of those declaring a
+`Loop`; 25 declaring a `Subflow` across 20 literal `flowId` targets (a 21st
+string is an unrendered `{{ }}` template, counted by `driver::target_census`);
+intersection with the four = zero.** The ratchet is silent either way, which is
+why this is registered rather than baselined.
+
+**Parked, not hidden.** The third derived shape in `tests/executor.rs`'s
+`STILL_OVER_ACCEPTED_AT_RUNTIME` — a run Kestra stopped that egret completed —
+is exactly this divergence's shape. The moment any corpus flow reaches it, that
+test fails as an *unregistered* runtime over-acceptance rather than passing
+quietly. That is what makes shipping it defensible.
+
+**Ruled by the controller (fix rounds 2-3), recorded as a decision rather than
+an omission — and the footing under that ruling is now weaker than it was when
+the ruling was given.** The ruling stood on two grounds: 0138's CHECK and the
+empty corpus population. **The CHECK is avoidable** by a walk this module
+already contains (cost 1 above), so what is actually left is **zero corpus
+population plus one guard whose load-bearingness nobody has measured, whose
+stated justification is half redundant and half not what its own doc says**.
+Stated plainly so no reader has to re-derive it: this divergence — a divergence
+in a flow's own verdict, the class the plan's Global Constraints single out as
+*must not ship* — ships on an empty population and an unmeasured guard. It is
+asserted as a divergence, never as parity, by
+`a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`, whose
+messages carry Kestra's value beside egret's. A register that overstates its own
+justification is the same failure mode as one that understates the divergence,
+and this entry has now done both.
+
+**Two assertions in this task claimed parity here and were wrong**, one per
+round, in nearly the same words (*"which is what Kestra does too — measured"*).
+The lesson is worth more than either correction: **a measurement's framing can
+be an artifact of the fixture's incidental choices, and the way to find that is
+to change one thing the fixture holds fixed and measure again.** Both defects
+were found that way, by a reader who asked what the fixture was holding fixed —
+not by re-reading the claim. Fix round 4 adds the corollary the first three
+rounds paid for separately: **a correction applied where the diff points is not
+a correction.** Rounds 1-3 each corrected the sentence they were handed and left
+the same claim standing elsewhere — at its worst in a **second register of this
+same divergence**, ~1300 lines below, which contradicted this entry and ended
+with *"so Task 4's Concern 3 stands"*. Before correcting a claim, find every
+place that states it; that section is now a pointer to here rather than a rival
+account of the same measurement.
+
 **17. A worker that dies leaves containers and staging directories behind, and
 nothing collects them.** Reproduced, not hypothesised: killing three concurrent
 gates with `pkill -f 'target/debug/deps/'` left **four** `alpine:3.20` containers
@@ -6583,6 +7421,20 @@ There is no reaper for them, no `resume:` path, and the staging directory under
 the worker's own tree survives the same way. `reap` reclaims the *lease*, which
 is the row; nothing reclaims the process's leavings. An operator gets a query
 and no collector.
+
+**18. Four constructs W6 shipped reach zero entries, and a green `127` would
+look identical if every line of them were wrong** — the schedule trigger with
+its cron engine and backfill, the flow trigger, and the webhook trigger with its
+router. This is the largest uncovered surface any package in this programme has
+added, and it is **four different blindnesses**, not one: the webhook's request
+is never sent, a schedule-fired execution hangs off nothing, a flow-fired one
+hangs off a column no arm reads, and backfill has no corpus population at all.
+The W6 section above derives all of it, names what each construct's own tests do
+and do not establish, and names the three refusals those tests rest on — one of
+which (`dependsOn`, 20 of 21 corpus declarations) is the only figure in that
+half a running program compares. **The webhook's verdict is EXPOSURE NOT
+APPROVED, and that approval rests on `[workflow] webhooks_enabled` defaulting to
+`false`.**
 
 ### The stale twins this statement retires
 
@@ -6820,15 +7672,17 @@ on a principle:
 |---|---|---|
 | `src/worker/claim.rs`, `CREATE_BESIDE_A_CREATED_SIBLING`'s doc | `the_guard_w3a_deleted_is_reachable_again_and_what_it_costs` — **a name no test has ever had**, and so not even in the thirteen | **fixed**: it is `the_guard_w3a_deleted_did_not_come_back_and_the_reason_is_the_transaction` |
 | `tests/executor.rs`, the field-family list | `the_feed_absorbs_a_measured_share_of_the_golden_run_terminals` | **fixed** — marked as deleted at the point of use |
-| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **recorded only.** Read it as `every_sub_execution_egret_runs_is_one_kestra_ran` — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison now |
-| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **recorded only.** Read it as `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
-| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **recorded only**, and it has **no successor**: it was deleted with W3a's harness and its render tier. Rendering lives in `worker::render` and is tested there |
+| `src/executor/command.rs`, `SpawnExecution`'s doc | `every_first_batch_egret_spawns_is_a_prefix_of_what_kestra_ran` | **fixed at W6 Task 3**, the commit that opened the directory. It names `every_sub_execution_egret_runs_is_one_kestra_ran` now — a prefix was all one batch could offer; the driver runs them all, so it is a whole-set comparison — and the *"Nothing executes this yet"* sentence beside it, false since W3b Task 4, went with it |
+| `src/executor/flowable/loop_.rs`, module doc | `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank` | **fixed at W6 Task 3.** It names `the_sub_executions_are_compared_and_this_is_what_they_cost`, which derives the same 41 entries / 142 sub-executions the doc quotes |
+| `src/executor/flowable/loop_.rs`, the `values:` note | `the_caller_can_render_every_expression_except_the_ones_named` | **fixed at W6 Task 3**, and it is the one with **no successor**: it was deleted with W3a's harness and its render tier. The note now says so at the point of use — nothing asserts those two entries' second cause today, and both remain baselined |
 
-The last three rows are `src/executor/`, which **must stay byte-unchanged**, and
-their successors are named above so that the record is a lookup rather than a
-dead end — the `fixed` rows tell a reader what happened, and a `recorded only`
-row that did not name its successor would be a second dangling pointer standing
-in for the first.
+The last three rows are `src/executor/`, which stayed byte-unchanged from W3a
+until **W6 Task 3** and no longer does. Their successors are named above so that
+the record is a lookup rather than a dead end — the `fixed` rows tell a reader
+what happened, and a `recorded only` row that did not name its successor would
+be a second dangling pointer standing in for the first. *(All three read `fixed`
+now; the paragraph is kept as written because the argument below it is why they
+waited, and that argument is still the right one.)*
 
 **The reason for not touching them is stronger than "a constraint says so", and
 it is worth stating properly: `src/executor/` byte-unchanged is the calibration
@@ -6851,6 +7705,26 @@ gets there first through `CREATE_NEW_EXECUTION`'s replay (4), which lives in
 `executor/retry.rs`. Whoever it is: the two lines are in `command.rs`'s
 `SpawnExecution` doc and `loop_.rs`'s module doc and `values:` note, and this
 table is the successor list.
+
+> **DONE — W6 Task 3, `9fb5b0fa`, and not through the replay.** The package that
+> opened the directory is W6 and the reason is `Subflow`, not
+> `CREATE_NEW_EXECUTION`: `flowable::start` emits `SUBMITTED` for every
+> `TaskKind::Runnable`, and **not one of the 24 executed `Subflow` runs in
+> `golden.json` carries that state** (derived on every run by
+> `no_subflow_run_in_the_golden_passes_through_submitted`). So a `Subflow` left
+> planned an opaque `Runnable` — the cheaper answer, a runnable whose handler
+> spawns and waits — mismatches every entry the package exists to bank, whatever
+> else its handler gets right. It is a `TaskKind::Executable` now.
+>
+> **All three pointers were fixed in that commit**, which is the condition under
+> which they were left, and the three rows above say `fixed` rather than
+> `recorded only`. The third had no successor and now says so at the point of
+> use rather than only here.
+>
+> The paragraph above this one is still exactly right about what it cost: item
+> 12 is no longer a one-command machine check for this branch, and every later
+> package inherits the judgement call. What replaces it is stated in item 12
+> itself — the diff is reported per file with what each file's change is for.
 What is **not** left to prose is the table's own accuracy:
 `the_readme_pointers_that_no_longer_resolve_are_recorded_and_their_successors_do`
 fails if a retired name comes back as a live test, if a successor named here does
@@ -6996,3 +7870,965 @@ The second is the one worth reading twice. The exception table shrank from three
 rows to two, and the sweep is what makes that shrinkage *mandatory*: with the row
 deleted and the rule restored, the flow is not "a known exception" — it is an
 unlisted over-refusal, reported by name with its message.
+
+---
+
+# W6 Task 1 — the corpus in `workflow.flows`, and the publish path that refuses it
+
+Until this task `driver.rs` called `start_execution(pool, ws, None, source,
+inputs)` and **nothing ever wrote a row to `workflow.flows`**. A `core.subflow`
+task names its target by `(namespace, flowId)` and the only lookup that pair can
+go through is `FlowRepo::find_by_name`, which reads that table — so egret could
+not execute a `Subflow` at all, and nothing else in W6 was measurable until it
+could. 25 corpus flows declare one.
+
+`driver::publish_corpus` now files the whole corpus through the product's own
+path — `spec::parse` + `serde_json::to_value` + `FlowRepo::create` (that is
+`routes::create_flow` minus the HTTP), then `publish::publish` through the real
+`WorkflowRefs` (that is `routes::publish_flow` minus the HTTP). Nothing here
+INSERTs a row itself.
+
+## The ratchet did not move, and the mechanism is nameable
+
+**143 mismatching before, 143 after; 0 broken; `tests/executor.rs` 35/35 both
+times.** The ratchet fails in *both* directions — a mismatch outside
+`baseline.txt` is a regression, a baselined id that now matches is unbanked
+progress — so "143 → 143" is set equality and not two counts that happen to
+agree.
+
+Zero moves is the *expected* answer here rather than a disappointment, and the
+reason is structural rather than statistical: **nothing on the execution path
+reads `workflow.flows`.** The single reference is `worker::claim`'s
+`LEFT JOIN workflow.flows f ON f.id = e.flow_id`, which reads `flows.created_by`
+as the run's `principal_id`; the driver still passes `None` for `flow_id`, so
+that column is NULL for every execution the ratchet judges and the join
+contributes nothing. `handlers::sql` is `principal_id`'s only reader, and
+`no_corpus_entry_can_exercise_the_egret_sql_handler` already measures that no
+corpus flow reaches it.
+
+That `None` is deliberate and is called out in `publish_corpus`'s own doc:
+handing the flow id to `start_execution` would be a *second* widening with a
+second population to attribute, bought for a field nothing in this corpus can
+see. W6's `Subflow` links its child by its own column rather than by
+`parent_execution_id`, and takes the target's id from this table directly.
+
+## The census, and every number in it is asserted
+
+`driver::census` compares each figure against a constant in the same file and
+prints the whole table, because a figure nothing compares is stale the moment
+the code moves.
+
+| | corpus flows | |
+|---|---:|---|
+| **live version** | **16** | `publish` ran to `set_live` |
+| draft only — unported task type | 301 | `registry::known_type` refused a `Leaf` |
+| draft only — egret's own `validate` | 19 | a real disagreement about the flow |
+| unparseable — no row at all | 5 | `spec::parse` refused; `namespace`/`flow_id` are `NOT NULL` |
+| name-contested — no row at all | 4 | an earlier file already holds the `(namespace, flowId)` |
+| | **345** | |
+
+**336 of 345 corpus flows have a draft row, and that is what a `Subflow`
+resolves against.**
+
+## The finding: the product's publish path cannot publish this corpus
+
+**`publish` reaches a live version for 16 of 345, and 301 of the 320 refusals
+are one rule.** Publish step 4 asks `spec::registry::known_type` for every
+`TaskKind::Leaf`, and that table is an allow-list of the eight `egret.*` types
+plus `core.http`/`core.slack`/`core.log`. The corpus is Kestra's: every leaf in
+it is an `io.kestra.plugin.core.*` or `io.kestra.core.*` FQCN. So the refusals
+are, in order of population, `debug.Return` ×114, `log.Log` ×65,
+`execution.Fail` ×32, `flow.Sleep` ×19, `flow.Pause` ×18, and twenty more
+classes.
+
+**This is not a defect and no fix is proposed here.** Refusing an unported
+plugin at publish is exactly what W1 built `TASK_TYPES` for, and it is the same
+answer Kestra gives for a class its own image does not carry — 50 of these 345
+were refused by Kestra with a 422 `Invalid type:` for precisely that reason. It
+is a statement about the *instrument*: the oracle drives flows the product would
+not publish, and that asymmetry now has a number on it.
+
+Two consequences the rest of W6 inherits:
+
+1. **A `Subflow` must resolve against the DRAFT row, not a live version — and
+   the population that decides this is the TARGETS, not the declarers.**
+   Corrected in fix round 1; the first version of this line said "seven of the
+   nine remaining `Subflow` declarers", which was wrong in both the number and
+   the population. All nine of those declarers have a draft row, so nothing
+   about *them* is missed; what a resolver has to reach is the set of names
+   `Subflow` tasks point AT, and a declarer that publishes says nothing about
+   whether its target did. Measured by `driver::target_census`, asserted
+   against `SUBFLOW_TARGETS*` on every run:
+
+   | of the 21 distinct target strings a corpus `core.subflow` names | |
+   |---|---:|
+   | **literal `(namespace, flowId)` names** | **20** |
+   | — held by a corpus flow with a **live version** | **2** |
+   | — held by a corpus flow with a draft row only | 17 |
+   | — held by no corpus flow at all (`dummy_namespace/dummy_flow`) | 1 |
+   | not a name: `{{inputs.namespace}}/{{inputs.flowId}}` | 1 |
+
+   **A resolver that went through `flow_versions` would resolve 2 of 20**
+   (`io.kestra.tests/subflow-child` and
+   `io.kestra.tests/flow-concurrency-parallel-subflow-kill-child`) — not "miss
+   seven of nine". `FlowRepo::find_by_name` reads `workflow.flows` and does not
+   look at `live_version_id`, so the lookup the product already uses is the one
+   that reaches 19 of the 20. The 21st string is counted apart rather than
+   dropped so the denominator is visible: it is `valids/task-flow-dynamic`'s
+   dynamic target, read unrendered because that is where `publish` reads it too,
+   and it is the recorded `PUBLISHED_BUT_REFUSED` row rather than a name that
+   happens to be missing.
+2. **The 16 that do publish are not a random 16.** They are exactly the corpus
+   flows whose every task is control flow or a `core.subflow` — a `Subflow` is a
+   typed `TaskKind`, dispatched in `kind_for` before any `Leaf` arm exists to
+   consult the registry, so it never meets the allow-list. All sixteen are
+   `Subflow` declarers, and each of them resolved its `(namespace, flowId)`
+   through `find_by_name` and froze a `flow_ref`: `flow-concurrency-subflow`,
+   `flow-concurrency-parallel-subflow-kill`(`-child`),
+   `flow-concurrency-sla-fail-parent`, `loop-with-subflow`, `retry-subflow`,
+   `sla-parent-flow`, `subflow-child`, `subflow-inherited-labels-parent`,
+   `subflow-nullable-input-parent`, `subflow-parent`, `subflow-parent-no-wait`,
+   `subflow-parent-of-failed`, `subflow-parent-retry`, `task-flow`,
+   `task-flow-inherited-labels`. That is the two-pass order below working, not
+   an assumption about it.
+
+## The 19 `validate` refusals found no new over-refusal
+
+Sixteen are `invalids/` flows Kestra itself refused with a 422. Three are
+`valids/`, and all three are already accounted for:
+
+- `valids/invalid-draft-flow` — Kestra refused it too (`422 tasks: must not be
+  empty`), and egret's message is the same rule.
+- `valids/task-flow-dynamic` and
+  `valids/trigger-flow-listener-namespace-condition` — Kestra published both
+  with 200. Both are already the *whole* of
+  `executor::mod`'s `PUBLISHED_BUT_REFUSED` table, both are W1-owned, and
+  `every_flow_kestra_published_plans_except_two_named_over_refusals` already
+  sweeps for a third. Neither has a golden entry (`disposition:
+  not-standalone`), so neither can move the ratchet.
+
+So: **no over-refusal that was not already recorded.** The `task-flow-dynamic`
+row is the one W6 should read twice — egret cannot express a *dynamic* subflow
+target at all, and the fix its row names is to `publish::subflow_ref_name`'s
+encoding, not to the check.
+
+### How much of a sweep this actually is, bounded
+
+Fix round 1 corrects an overclaim here. The first version called this "the sweep
+this task was positioned to make", on the premise that publishing was the first
+thing to run `spec::validate` over the corpus. **That premise was stale:**
+`build_plan` has called `validate` since W1's fix — `src/executor/plan.rs:642`,
+"W1's `validate`, as the third gate" — so every flow Kestra published was
+already swept for a validate-level over-refusal by
+`every_flow_kestra_published_plans_except_two_named_over_refusals`, and the 19
+refusals above **reproduce** that sweep rather than extend it. (The stale
+premise came from the task brief, not from this file; recording the correction
+here because a decayed fact repeated is the class this programme has now found
+in six consecutive packages.)
+
+What publishing genuinely exercises for the first time is **steps 4–7**:
+`registry::known_type`, `RefKind` resolution through `WorkflowRefs`,
+`insert_version` and `set_live`. And that ran on **16 flows and 18
+`RefKind::Subflow` lookups** — counted by `driver::CountingRefs` and asserted
+as `SUBFLOW_LOOKUPS_ON_PUBLISHED`, not estimated — because step 4 refuses the
+other 301 drafts before their references are read. Four further lookups happen
+inside publishes that then fail (`SUBFLOW_LOOKUPS_ON_REFUSED`), on a `Subflow`
+that `resolve_all` reached before it met the unported `Leaf` that refused the
+flow; they are counted apart, because a lookup on a flow nobody can publish is
+not evidence the resolution shipped. **No other `RefKind` is exercised at all**,
+and no `core.trigger.flow` `dependsOn` either — none of the 16 declares one.
+
+**Those 16 are self-selected by step 4's own refusal** — they are exactly the
+flows with no unported leaf type, i.e. the ones whose every task is control flow
+or a `core.subflow`. So a green census here is evidence that `RefKind::Subflow`
+resolution works *for those 16*; it is **not** corpus-wide evidence, and nothing
+about the other 329 flows' references has been resolved even once. Task 3 should
+read it that way.
+
+## Two passes, and the order is `harvest.py`'s rather than the alphabet's
+
+Every draft is created before anything is published. `harvest.py`'s own capture
+loop records why, in the comment above its publish loop: ten corpus flows name a
+target that sorts later than they do, and it measured the cost on
+`valids/loop-with-subflow` — harvested flow-by-flow it failed with one loop
+iteration, harvested after everything was published it succeeds with two,
+"which is the whole of the 141-vs-142 gap".
+
+The iteration order is `corpus.json`'s **array** order, not the sorted key order
+`corpus_json()` hands back, and that is load-bearing. Three `(namespace,
+flowId)` pairs are claimed by more than one corpus file —
+`io.kestra.tests/switch-impossible` by 2, `/duplicate` by 3, `/empty` by 4 — and
+`UNIQUE (workspace_id, namespace, flow_id)` (migration 0132) lets only the first
+of each win. Sorted, `invalids/switch-invalid` takes
+`io.kestra.tests/switch-impossible` from `valids/switch-impossible`: the invalid
+file *parses* perfectly well, so `FlowRepo::create` accepts it and egret's
+refusal only arrives at publish, by which time the row is in the table. The
+loser is the one member of the three groups that Kestra published and executed
+and that has a golden entry.
+
+`driver::name_contest_won_by_the_right_file` is the guard, and it asks the
+question the way a `Subflow` will: it calls `FlowRepo::find_by_name` on each
+contested pair and asserts the row that comes back is the file
+`NAME_CONTESTED` names.
+
+## `RefKind::DataApiEndpoint` and `RefKind::Notebook` are asserted unreachable
+
+`publish_corpus` builds the real `WorkflowRefs` with two `unreachable!()`
+doubles for the other seams' ports — the same shape, and the same reason, as
+`refs.rs`'s own `UnreachableDataApi`/`UnreachableNotebooks`. Both kinds are
+declared only by an `egret.*` task type, `publish` reads a `RefField` only after
+`known_type` has matched, and no corpus flow names an `egret.*` type at all
+(`no_corpus_entry_can_exercise_the_egret_sql_handler` measures that). A double
+answering `Ok(None)` would turn a corpus that had grown one into a silent
+`NotFound`, indistinguishable from the 320 refusals beside it.
+
+## Mutations
+
+Three, each applied by a script that asserts its anchor is **unique in the whole
+file** and that the file's hash actually changed, each run against the committed
+code, each restored with `git checkout --` and confirmed by
+`if [ -z "$(git status --porcelain)" ]`.
+
+| mutation | what died, and with what |
+|---|---|
+| iterate `super::corpus()`'s array order sorted by id | `name_contest_won_by_the_right_file` — *`io.kestra.tests/switch-impossible` must resolve to `valids/switch-impossible`; it resolves to `invalids/switch-invalid`* |
+| drop pass 2 — never call `publish::publish` | `census` — `live versions: []`, left `0`, right `16` |
+| publish each flow inside pass 1, at the moment its draft is created, instead of in a second pass | `census` — left `11`, right `16` |
+
+The third is the one worth reading, and it is the only one whose number could
+not have been predicted from the code. **Five flows lose their target**, because
+the target had not been created yet when they were published:
+`loop-with-subflow` — `harvest.py`'s own named example, and the flow its
+141-vs-142 measurement was taken on — plus `sla-parent-flow`, `subflow-child`,
+`subflow-parent-retry` and `flow-concurrency-parallel-subflow-kill-child`. That
+is the same defect `harvest.py` hit on Kestra's side, reproduced on egret's, and
+it is why the two passes are two.
+
+### Fix round 1's mutations
+
+Three more, same harness — unique anchor asserted against the whole file,
+SHA-256 asserted changed, run against committed code, restored with
+`git checkout --` and confirmed by `if [ -z "$(git status --porcelain)" ]`.
+
+| mutation | what died |
+|---|---|
+| drop `Task::error_children()` from `subflow_targets`' walk | **nothing — 35/35 still green.** Recorded rather than reverted; see below |
+| weaken the `{{` split so a template falls through into `absent` | `target_census` — *targets no corpus flow holds*, left `2`, right `1` |
+| attribute every `Subflow` lookup to the published bucket | `lookup_census` — left `22`, right `18` |
+
+The second was first written as a *deletion* of the `if` block and **failed to
+compile** (`type annotations needed for Vec<_>` — `unrendered` was then never
+pushed to). A mutation that does not build looks exactly like one where no test
+died, so it was rewritten as a predicate no real target can match.
+
+**The first is a finding rather than a dead guard.** `subflow_targets` walks
+`Task::children()` *and* `Task::error_children()`; neither `spec::validate`
+(`validate.rs:1283`) nor `publish::resolve_task` recurses through
+`error_children()` at all — both walk `children()` only. So **a `Subflow`
+nested inside a flowable's `errors:` would never have its reference resolved at
+publish**: the same blind spot W3b Task 5 found in `worker::claim`'s
+`leaf_spec` one seam over, and the same shape as the whole-branch-review
+finding that `publish` never walked `flow.triggers`. It is latent — no corpus
+flow puts a `core.subflow` inside an `errors:`, which is exactly why the
+mutation survives — and it belongs to whoever owns `Subflow` resolution. The
+wider arm is kept because this census asks a different question from `publish`
+(*what would a resolver have to reach*), and its redundancy is written down
+here rather than left for a future reader to mistake for strength.
+
+---
+
+# W6 Task 2 — three kinds of child execution, and the CHECK the banks depend on
+
+Migration `0135` gave `workflow.executions` exactly **one** way to be a child:
+`(parent_execution_id, parent_run_ix, loop_index, loop_value)`, all four set or
+all four null. That CHECK was right about the thing it was written for — a child
+that knows its parent but not its index is not orderable, and the ordering is
+the whole of what `spawned` is compared on — and it forbade one more shape by
+accident: **a child with a parent and no loop index at all.**
+
+Kestra makes three different things here, and the distinction is measured on the
+pinned artifact rather than read off a class:
+
+| kind | `parentId` | `loopRun` | the link Kestra can be found by |
+|---|---|---|---|
+| loop iteration | set | set | `parentId` |
+| `CREATE_NEW_EXECUTION` replay | set | **absent** | `parentId` |
+| subflow child | **NULL** | absent | `trigger_execution_id` |
+
+**The replay row.** Over the four `valids/retry-new-execution-*` flows, all
+**eight** descendants in `traces.json` carry a `parentId`, a NULL `loopIndex`, a
+NULL `loopValue` and a NULL `spawnedBy` (which is `harvest.py`'s name for
+`loopRun.taskRunId`). Their golden entries say the same thing from the other
+side: every `spawned` element is `{"parent_run": null, "value": null, …}`.
+
+**The subflow row is measured by a visible absence.** `harvest.py` discovers
+descendants by following `parentId`; `valids/subflow-parent` is a flow whose only
+task is a `Subflow` that Kestra ran to SUCCESS, and its `descendants` is `[]` in
+all five rounds. The child exists. Nothing keyed on `parentId` can see it.
+
+## What migration `0138` adds, and what it refuses
+
+Two columns — `trigger_execution_id` and `trigger_run_ix` — and four
+constraints. The one that matters to this directory is
+**`workflow_executions_one_link_kind`**: a row may carry `parent_execution_id`
+or `trigger_execution_id`, never both. `read_trace_inner` builds `spawned` with
+`WHERE parent_execution_id = $1`, and **all 41 golden `spawned`-carrying entries
+have zero `Subflow` children** — a subflow child linked the other way would
+appear in egret's trace and turn W6's intended banks into `spawned` mismatches.
+`driver::w6_subflow_link::a_subflow_child_is_invisible_to_the_query_that_builds_spawned`
+drives the real `read_trace` over one subflow child and one loop child of the
+same parent and asserts exactly that split; the loop child is there because an
+empty `spawned` is what the test wants to see, so "no children found" cannot be
+the only thing asserted.
+
+The other three: `workflow_executions_loop_run_whole_or_absent` (the loop triple
+is whole or absent, and needs a parent when present — 0135's real target, kept),
+`workflow_executions_trigger_run_needs_its_execution`, and
+`workflow_executions_no_self_link`, which closes a hole 0135 also had: an INSERT
+that supplies its own `id` for `parent_execution_id` satisfies the foreign key,
+because the row exists by the time the constraint is checked.
+
+`workflow_executions_loop_run_idx` is recreated under the same name with
+`NULLS NOT DISTINCT`, so a parent may have **one** replay child and never two —
+two would tie under `ORDER BY parent_run_ix, loop_index` and be ordered by
+nothing, which is the collision `normalise.py` has to BAIL on. One per parent is
+the artifact's own behaviour: of the 710 descendants in `traces.json`, 40 carry
+a NULL `loopIndex` and **no parent has more than one of them**, because Kestra
+chains a `CREATE_NEW_EXECUTION` retry (root → replay → replay) instead of fanning
+it out. The same sweep found **no parent that mixes** a NULL-index child with
+loop children, so nothing yet has to decide where a replay sorts among
+iterations.
+
+The reverse index, `workflow_executions_trigger_idx`, is deliberately **not**
+unique. A `Subflow` task may carry its own `retry:` and each attempt starts a new
+child under the same `(execution, run_ix)`: `valids/subflow-parent-retry`
+declares two such tasks at `maxAttempts: 3`, and `valids/retry-subflow` puts a
+flow-level `retry:` over one. A unique index there would have made the second
+attempt unrepresentable.
+
+## What this task deliberately did NOT change, and what it costs W6 Task 4
+
+`read_trace_inner`'s `spawned` query is **unchanged**, including its decode
+type. It reads `Vec<(Uuid, i32, String)>` — not `Option`s — which was exactly
+right while a child with a parent and no loop index was unrepresentable. It no
+longer is: that child is the replay, and the four `retry-new-execution` entries
+want `{"parent_run": null, "value": null}` in `spawned`, which this decode cannot
+produce and would fail on. **Nothing writes such a row yet, so nothing is broken
+today.** Widening it belongs to the commit that starts writing one, so that the
+entries it moves are attributable to it. The comment above the query says the
+same thing at the site.
+
+*(**W6 Task 4 is that commit.** The decode is `(Uuid, Option<i32>,
+Option<String>)` now, and mutation M14 reverting it kills nine tests including
+all four entry tests — a `ColumnDecode` on a NULL, which the driver reports as
+`Broken` rather than as a mismatch.)*
+
+**Ratchet: 143 → 143, zero moves.** Nothing in this task writes an execution
+row, so nothing the ratchet compares could move; a step that changed it would
+have been a step nobody asked for.
+
+# W6 Task 3 — `Subflow` executes, and `src/executor/` opens
+
+**Ratchet: 143 → 131.** Twelve entries banked, zero regressions, zero broken,
+zero stale lines. Every one declares a `Subflow`; the attributions are in
+*Matching, baselined, and what each half is made of* above and one by one in
+`baseline.txt`'s header.
+
+## The finding, and why the cheap answer banks nothing
+
+`src/executor/` had been byte-unchanged since W3a across four packages, and
+*Pointers that no longer resolve* named the condition for opening it. **W6 is
+the package**, and the reason is `Subflow` rather than the
+`CREATE_NEW_EXECUTION` replay that section predicted.
+
+`flowable::start` emits **`SUBMITTED`** for every `TaskKind::Runnable`, and it
+is the one state in Kestra's record that separates a task the worker ran from
+one the executor ran. **Not one of the 24 executed `Subflow` runs in
+`golden.json` carries it** — all 24 read `CREATED RUNNING …`, and the one
+skipped run reads `CREATED SKIPPED`. So the cheaper answer the plan asked to be
+tried first — *a `Subflow` left an opaque `Runnable` whose handler spawns and
+waits* — mismatches **every** entry the package exists to bank, whatever else
+its handler gets right.
+
+Derived on every run, from both sides, and from a third that is stronger than
+either:
+
+- `no_subflow_run_in_the_golden_passes_through_submitted` walks the golden
+  (24 executed + 1 skipped, over 22 entries) and asserts the population beside
+  the claim, so a walk that found no `Subflow` run cannot pass vacuously;
+- `only_a_runnable_passes_through_submitted` asserts egret's side on
+  `valids/subflow-parent`;
+- `planning_the_loop_removed_forty_spurious_submitted_emissions` reproduces all
+  four of Task 5's committed `fed`/`flowable`/`unplanned`/`over_fed` figures
+  **only after adding back the 22 runs and the one TYPE W6 removed**, with
+  `!over_fed.contains_key("…flow.Subflow")` asserted so the `+ 1` is checked.
+  **22 of W5's 114 over-submitted runs were `Subflow`s.**
+
+And two mutations make it a fact about the ratchet rather than about a unit
+test: emitting `SUBMITTED` for an `Executable` fails
+`only_a_runnable_passes_through_submitted` with
+`["CREATED","SUBMITTED","RUNNING","SUCCESS"]`, and mapping `Subflow` back to
+`TaskKind::Runnable` — one line in `plan.rs` — returns the ratchet to 143 with
+exactly the twelve banked entries reported as regressions.
+
+## The child, and the link
+
+Measured on the pinned digest by running flows against it, not read off the
+sibling checkout:
+
+| measurement | flow |
+|---|---|
+| the child's `parentId` is **null**, its `trigger` is `{"type": "io.kestra.plugin.core.flow.Subflow", "variables": {"executionId", "taskRunId", "taskId", "namespace", "flowId", "flowRevision"}}`, and `parent_id` finds nothing | `io.kestra.tests/subflow-parent` |
+| `wait: false` does not wait, and the parent records `{"state":"CREATED","executionId":…}` — no `outputs` key | `egret.probe/probe-nowait-parent` |
+| `wait: true` gives `{executionId, state, outputs}` — a successor rendered `eid=… state=SUCCESS o1=hello` | `egret.probe/probe-outputs-parent` |
+| `transmitFailed` is applied ON TOP of the child's own state: run and attempt each `CREATED RUNNING FAILED SUCCESS` | `egret.probe/probe-notransmit-parent` |
+| an unresolvable target publishes with **200** and fails the RUN, with no child | `egret.probe/probe-unresolvable` |
+| a `Subflow` inside a flowable's `errors:` **runs** | `egret.probe/probe-errors-subflow` |
+
+So the link is `trigger_execution_id` / `trigger_run_ix` (migration 0138) and
+never `parent_execution_id` — which is what keeps the child invisible to the
+query that builds `spawned`, where all 41 golden entries have zero `Subflow`
+children. `a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id`
+asserts that query returns empty **first**, before it looks at the trigger
+columns at all, so a child linked the wrong way fails the load-bearing assertion
+rather than a lookup that quietly returns nothing.
+
+**Both wrong links were mutated.** Setting `parent_execution_id` while leaving
+`trigger_run_ix` is refused by the database, by name —
+`workflow_executions_trigger_run_needs_its_execution`, Task 2's guard firing
+live. Setting `parent_execution_id` alone is **representable** (it is the replay
+shape) and is caught by the test:
+`the child is 78ff3430-…, and the `spawned` query must not see it`.
+
+## Resolution: the draft row, and the workspace
+
+Against `workflow.flows.source`, not `flow_versions`: W6 Task 1 measured that
+only **2 of the 20** literal `Subflow` targets reach a live version, so a
+version-based resolver would resolve 2 of 20 and this package would bank
+nothing. It is also what `publish`'s own `FlowRepo::find_by_name` reads, and
+**nothing in `crates/*/src` starts an execution from a version snapshot** —
+there is no product route that starts one at all yet.
+
+**Scoped to `workspace_id`, where `find_by_name` cannot be.** That method's doc
+records why (`WorkflowRefPort::workspace_of` carries no caller-workspace
+parameter); this caller has it on `ExecutionCtx`. Deleting the term makes
+`a_subflow_target_in_another_workspace_does_not_resolve` report
+`(1, SUCCESS, None)` where it wants `(0, FAILED, "unable to find flow …")` —
+another tenant's flow source read and executed.
+
+## The unresolvable target, and the one shape that diverges
+
+`the_only_unresolvable_subflow_target_in_the_corpus_is_skipped` derives over all
+345 corpus flows that `dummy_namespace/dummy_flow` is the only literal target no
+corpus flow holds, and that the run naming it is `["CREATED","SKIPPED"]` — so
+**the ratchet cannot see this decision at all**, and it was measured on the
+artifact instead. egret agrees on all four observable parts: the flow is not
+refused, the run fails, the successor never runs, no child is created.
+
+One shape differs and is pinned in `tests/worker.rs` rather than described: the
+artifact's run reads `["CREATED","FAILED"]` with an attempt of `["FAILED"]` —
+no `RUNNING`, because it never gets as far as building the `SubflowExecution` —
+where egret reads `["CREATED","RUNNING","FAILED"]`. `Command::SpawnSubflow`
+cannot be emitted without a `StartRun` beside it (`apply` records nothing for
+it, so the round would repeat for ever), and no golden entry reaches the
+difference.
+
+## Fix round 1 — the guard that had been seen to fail
+
+**The cycle guard above shipped with a hole, and the review reproduced the same
+SIGABRT it was written for.** It walked `trigger_execution_id` only. A `Loop`
+sub-execution is linked by `parent_execution_id` and its `trigger_execution_id`
+is **NULL** — not by accident but by `workflow_executions_one_link_kind`, the
+constraint W6 Task 2 added to make carrying both unrepresentable. So the walk
+**truncated at every loop boundary**, and a cycle whose every hop crossed one
+was invisible to it:
+
+```text
+t/cyl-a:  loop(values: ["1"]) -> Subflow t/cyl-b
+t/cyl-b:  loop(values: ["1"]) -> Subflow t/cyl-a
+
+fatal runtime error: stack overflow, aborting   (SIGABRT)
+```
+
+Reproduced on this branch before the fix, with the guard shipped and enabled.
+The control is what made the diagnosis certain: with only **one** side looping
+the guard caught it, so the link kind is the whole difference.
+
+**The premise was wrong, not the arithmetic.** It assumed a causal chain is
+walkable by one link kind; 0138 guarantees the opposite — **a child is linked by
+exactly one of two columns, and which one depends on why it exists.** The walk
+now reads `COALESCE(trigger_execution_id, parent_execution_id)`, "whichever link
+this row has", and the `COALESCE` is unambiguous *because* of that same CHECK.
+A subflow child, a `Loop` iteration and a `CREATE_NEW_EXECUTION` replay are all
+one nested `settle` inside the caller's transaction, so all three are one link
+of the thing the guard is about.
+
+`tests/worker.rs`'s `a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too`
+is that reproduction kept as a test, and it asserts the chain **by name and in
+order** — `cyl-a (loop) → cyl-a (loop) → cyl-b (subflow) → cyl-b (loop)`, four
+executions, one refusal — because a bare count would not say the walk crossed
+the loop links at all.
+
+### And a backstop, which the earlier argument said could not exist
+
+The first version shipped **no** depth bound, on the argument that *"a bound
+large enough to be worth having is not one this recursion can survive"* —
+measured, 16 links overflowed. **That argument was made against a guard that
+turned out not to cover the reachable case**, and it generalised a measurement
+about a bound used as THE guard to one used as a backstop. As a backstop the
+number only has to sit between what is real (the corpus's deepest chain is **2
+links**) and what kills a stack (**16**). `MAX_SPAWN_CHAIN = 8` is inside both,
+and `a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing`
+is its positive control — twelve distinct chained flows, so only the bound can
+stop them.
+
+### The backstop then failed its own test, and that is the second finding
+
+The bound was first written as a second column in the guard's **own** recursive
+CTE. **Mutation M9 — reverting the walk to one link kind — proved that
+worthless**: it shared the walk, so breaking the walk broke both, and the
+reproduction **aborted the test binary with SIGABRT** rather than failing an
+assertion. *A backstop derived from the thing it is backstopping is not a
+backstop.*
+
+So the bound moved onto `claim::ExecutionCtx::depth`, a counter carried **down
+the call stack** — `0` at every entry point that begins a fresh stack
+(`start_execution`, `load_with`), and `caller + 1` at the only two places that
+nest a settle inside another (`spawn::spawn_one`, `subflow::spawn_one`). It
+counts the frames, which is what a stack cares about, and it is derived from
+nothing that can be wrong. Only `subflow::spawn_one` refuses on it: a `Loop`
+cannot recurse without bound, so bounding the loop spawner would be a behaviour
+change to a construct that cannot reach it.
+
+Re-running M9 after that move is the measurement that matters — an **assertion**
+naming the runaway chain, with the process intact:
+
+```text
+left:  [… "cyl-b (loop)", "cyl-a (subflow)", "cyl-a (loop)", …]  10 executions
+right: ["cyl-a (loop)", "cyl-a (loop)", "cyl-b (subflow)", "cyl-b (loop)"]  4
+```
+
+That is what lets the SIGABRT reproduction live in this suite at all: a
+regression of the cycle guard now fails an assertion instead of aborting the
+test binary and taking every other test in it along.
+
+**What neither closes, in the words the class deserves: `spawn_one` settles the
+child inside its caller's transaction, so depth in the data is depth on the
+stack.** Every bound here is a number chosen against a stack size this code does
+not control. The real fix is to stop settling the child there — a change to how
+`tick` finds work — and nothing in this package does it.
+
+> **Fix round 2 correction.** The paragraph above this one — *"it counts the
+> frames … derived from nothing that can be wrong … only `subflow::spawn_one`
+> refuses on it: a `Loop` cannot recurse without bound"* — is wrong in both
+> halves and is corrected below. **The sentence you are reading now is the one
+> that survived**, and it was true before that round and after it.
+
+### Fix round 2 — the counter counted one descent, and a `Loop` needs no `Subflow`
+
+**A. The counter was zeroed on every re-entrant load.** `claim::load_with` set
+`depth: 0` for every caller, under a comment asserting that a caller that loads
+an execution *"is starting a fresh call stack … a terminal callback or
+`subflow::complete`, and none of them is inside another `settle`"*. **Both named
+callers are inside another `settle`**: `claim::settle` step 4 calls
+`spawn::on_execution_terminal` and `subflow::on_child_terminal`, and step 3
+reaches `subflow::complete` through `subflow::spawn_all`. So a *completing*
+chain reset the counter once per link while the stack climbed —
+`0,1,2,0,1,2,…` — and **nine flows filed in one workspace, plain `wait: true`,
+aborted the worker with `fatal runtime error: stack overflow`** (eight on
+`wait: false`). `MAX_SPAWN_CHAIN` never fired on the reachable shape.
+
+The fix is `claim::Stack`, a two-armed enum every `load`/`load_with` now takes:
+`Stack::Fresh` for the three entry points that begin a stack (`apply_outcome`,
+`resume`, `input_for`) and `Stack::Nested(caller_depth)` for the three
+re-entrant sites. **There is no default**, which is the point: the false
+sentence was a `0` that could be written by omission.
+
+`tests/worker.rs`'s
+`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter` is the
+control and it exercises the **ascent** — the sibling test cannot, because *its
+chain never completes*: it runs straight down through nested `spawn_one`s,
+where the `caller + 1` arithmetic was always right.
+
+**B. Nested `Loop`s reach the same recursion with no `Subflow` in the flow, and
+this is what the ARTIFACT does about it.** Measured on the pinned digest,
+namespace `egret.probe2`, one flow per depth, one-value `Loop`s around a
+`Return`:
+
+| nested `Loop`s | Kestra (pinned artifact) | egret |
+|---|---|---|
+| 2 / 12 | published, executed, `CREATED RUNNING SUCCESS` | runs; depth 12 is 50 % past `MAX_SPAWN_CHAIN` and unrefused |
+| 47 | published, executed, **SUCCESS** | **SIGABRT — stack overflow**, one flow file, no `Subflow` |
+| 100 | published, executed, **SUCCESS** in 18 s | not reached |
+| 498 | published (`200`) | — |
+| 499 | **`422`** — `Illegal genericflow source: YAML parsing error: Document nesting depth (1001) exceeds the maximum allowed (1000, from StreamReadConstraints.getMaxNestingDepth())` | — |
+
+**Kestra imposes no semantic bound on `Loop` nesting.** Its only refusal is
+Jackson's document-nesting limit inside the YAML reader — two levels per
+`Loop`, so 498 publish and 499 does not — and it is a *parse* error, not a rule
+about flowables. The 498/499 boundary was bisected; the flow source is written
+flow-style so its size is linear in the depth (an indented source hits the
+request-size limit at ~352 and returns `413`, which is not a semantic answer).
+
+So *"fix it with the artifact's behaviour"* is not available: the artifact's
+behaviour is **accept and run it**, and egret cannot, because `spawn_one`
+settles the child inside its caller's transaction. **It is therefore recorded
+with an owner rather than patched with a new number.** It predates W6 —
+`spawn::on_execution_terminal`'s recursion is W3b (`ad93ef2d`),
+`plan::MAX_TASK_DEPTH` is W3a (`6f046e57`), and neither is in W6 Task 3's diff —
+and it is raised only because fix round 1 asserted it could not happen. The
+owner is **whoever changes `claim::settle` to stop driving a child's first
+settle inside its caller's transaction**; until then `MAX_TASK_DEPTH = 48` is
+the number on the wrong side of the cliff and it is W3a's constant.
+
+**What the two `Subflow` guards do bound is `Subflow` recursion, and that is
+all the text on this branch now claims.**
+
+### A false claim about a defence that does not exist, in two files
+
+`worker::subflow::resolve`'s doc said *"Migration 0138's composite foreign key
+would refuse the resulting child row"* for a cross-workspace resolve. **It would
+not.** The child carries the PARENT's `workspace_id` and the OTHER workspace's
+`flow_id`, so `workflow_executions_trigger_same_workspace` is satisfied, and the
+only constraint on `flow_id` is `executions_flow_id_fkey FOREIGN KEY (flow_id)
+REFERENCES workflow.flows(id)` — **one column, no workspace half**. The branch's
+own mutation proves it: dropping the `workspace_id = $1` predicate makes
+`a_subflow_target_in_another_workspace_does_not_resolve` report
+`(1, Some("SUCCESS"), None)` — the other tenant's flow read AND executed,
+refused by nothing.
+
+**The same sentence was in `tests/worker.rs` as well**, on the very test that is
+the defence, and the sweep found it because it was looked for rather than
+because it was handed over. Both now say what is true: `workspace_id = $1` is
+the only thing standing between an author-typed `(namespace, flowId)` and
+another tenant's flow source, and **nothing in the schema is a second line of
+defence.**
+
+**Ratchet unmoved: 131 before fix round 1 and 131 after**, `baseline.txt`
+byte-unchanged, so the twelve are the same twelve.
+
+## What this task deliberately did NOT change
+
+- **`read_trace_inner`'s decode**, still `(Uuid, i32, String)` — Task 4's, and
+  untouched here for the reason Task 2 gave. A `Subflow` child is invisible to
+  that query by construction, so nothing this task writes can reach it.
+  *(Widened by W6 Task 4, in the commit that starts writing the row it could not
+  decode.)*
+- **The publish-time half of the `errors:` gap.** `publish::resolve_task` still
+  walks `children()` only, so a `Subflow` inside a flowable's `errors:` never
+  has its `flow_ref` filled. The execution-time walk in `worker::subflow` does
+  go through `error_children()` — and unlike the census's wider walk, **it is
+  not redundant**: mutation M2 kills
+  `a_subflow_inside_an_errors_list_is_reached_and_spawned` with
+  `task "handler" is planned Executable but is not a Subflow of the execution's own source`.
+  The gap is written at the point of use rather than only in a report.
+- **`allowFailure` / `allowWarning`**, which `models::Task` does not carry and
+  `RunState` has no `Warning` for. `guess_state` implements only the
+  `transmitFailed` half of `ExecutableUtils.guessState` and says so; the two
+  `task-allow-*-executable-flow` entries are what that costs and both stay
+  baselined.
+
+# W6 Task 4 — the `CREATE_NEW_EXECUTION` replay, and the two facts that end a chain
+
+**Ratchet: 131 → 127.** Four entries banked — the whole of the row the residual
+table assigned to this task — zero regressions, zero broken, zero stale lines,
+and nothing else moved in either direction:
+
+```text
+  valids/retry-new-execution-flow-attempts   flow-level retry, maxAttempts: 3
+  valids/retry-new-execution-flow-duration   flow-level retry, maxDuration: PT6S / interval: PT2S
+  valids/retry-new-execution-task-attempts   the same two policies on the TASK, which is a
+  valids/retry-new-execution-task-duration   different Kestra method reading the same metadata
+```
+
+Each was right on every field but `spawned`, and each now reproduces the chain
+the artifact ran: **three executions**, the first two `RETRIED` with a replay
+hanging off `parentId`, the third `FAILED` with none.
+
+## The finding: a caller could not have done it, and the reason is what `advance()` READS
+
+The task's step 1 asked whether the new execution could be spawned by a caller
+without changing what `advance()` outputs. It cannot, and the interesting half
+of the answer is one level further in: **it could not be done without changing
+what `advance()` READS.**
+
+`retry::policy_for` already treated `CREATE_NEW_EXECUTION` as a policy kind, and
+`retry::scan` already ended the execution `RETRIED`. What it could not do is
+STOP. `next_retry_at`'s arm for that behaviour read two constants:
+
+```rust
+// `execution.getMetadata().getAttemptNumber()`, and `getOriginalCreatedDate()`.
+// This execution IS the first attempt, so its metadata attempt number is 1 --
+// and `Tick`'s origin is the execution's creation, so the origin is `Tick(0)`.
+RetryBehavior::CreateNewExecution => (1, Tick(0)),
+```
+
+Every word of that comment is true of the **first** execution of a chain and
+false of every replay. With `attemptNumber` pinned at 1, `1 >= maxAttempts` is
+false at every depth and `-flow-attempts` / `-task-attempts` retry for ever; with
+the origin pinned at each execution's own creation, no elapsed time ever
+accumulates and `-flow-duration` / `-task-duration` do the same. A caller cannot
+repair that after the fact, because **the golden's third execution ends
+`["CREATED","RUNNING","FAILED"]` with no `RETRIED`** — and whether `RETRIED` is
+emitted is `advance()`'s output.
+
+So the input widens by exactly Kestra's own `ExecutionMetadata` —
+`attemptNumber` and `originalCreatedDate`, the two fields both `TaskRun`'s and
+`ExecutionService`'s `nextRetryDate(retry, execution)` read — carried on
+`ExecutionState::metadata` and stored by migration **0139**. `advance()` is
+still pure over `(plan, state, now)`: no I/O, no clock, and one more field on
+the snapshot it is handed.
+
+The output changes too, by one existing command. Both arms of
+`ExecutorService.java:603-608` build the **same** `ExecutionDelay`,
+`.taskRunId(taskRun.getId()).date(nextRetryDate)`, and differ only in its
+`delayType` — `RESTART_FAILED_TASK` against `RESTART_FAILED_FLOW`. egret's
+`CREATE_NEW_EXECUTION` arm emitted none, under a test asserting `now == Tick(0)`
+and the words *"no `ScheduleRetry`: the delay belongs to the replay, not to this
+run"*. The artifact says the opposite, and the delay is the whole of what
+`maxDuration` is measured against; without it the replay would start the instant
+the execution failed.
+
+## `origin_offset_ms` can be derived, and is stored for four other reasons
+
+Kestra stores an absolute `originalCreatedDate`. 0139 stores the same fact
+relatively — how many milliseconds of the ORIGINAL execution's clock had already
+elapsed when this one was created.
+
+**This section, and 0139's header, said it "cannot be derived". That was false**
+and the fix round measured it: the column is exactly the recursive per-hop sum of
+`child.created_at − parent.created_at`, to the millisecond
+(`offset(second) = 1355 = hop(1355)`, `offset(third) = 2712 = 1355 + 1357`),
+exact because a same-transaction `now()` is. What was actually disproved is only
+the **two-endpoint** subtraction `own.created_at - original.created_at` computed
+on read, and the stronger sentence was generalised from it.
+
+The two-endpoint version fails because of `driver::pass_time`. It makes time pass
+by moving an execution's `created_at` **backwards** by the shortfall to its next
+deadline; that is its whole intervention. A chain of replays therefore
+accumulates simulated time *inside each link*, and a subtraction taken between
+the last link and the first cannot see any of it — it would read ~2 s of a chain
+that has simulated ~4 s, and the third execution would schedule a fourth. The
+per-hop sum can see it; the difference of the endpoints cannot.
+
+The column earns its place on four grounds instead: Kestra stores the same fact,
+so storing it is fidelity; `claim::load_with` is on every settle's hot path and
+O(1) beats a recursive CTE; it is immune to *any* later rewrite of an ancestor's
+`created_at`, which the derivation is only accidentally safe from; and it can be,
+and is, CHECK-constrained, which an expression cannot be.
+
+The clock is deliberately **not** shifted by the offset in `claim::load_with`:
+every other `Tick` in an execution — `TaskRun::not_before`, `Attempt::started_at`
+— is measured from that execution's own `created_at`, and so is `pass_time`'s
+shortfall. A shifted `now` would be read unshifted there and the driver would
+travel a chain's whole accumulated time on every hop.
+
+## Three refusals in `worker::replay::spawn_due`, each measured
+
+1. **Not before the deadline.** See above.
+2. **Not inside a `Loop` sub-execution.** Measured on the pinned digest
+   (`egret.probe4/replay-in-loop2`, a one-value `Loop` whose body's only task is
+   a `Fail` with `behavior: CREATE_NEW_EXECUTION, maxAttempts: 2`): the
+   iteration ends **FAILED**, one attempt, no `RETRIED`, **no child**, and the
+   server log says why — `Can't find taskrun with taskrunId
+   '2xzDjVNVp77Y88mGqnc45j' on execution '67EsI18j9aAz2j6a8Ewc2a'`. The id is the
+   **`Loop` run's**, which lives in the parent execution:
+   `markWithTaskRunAs(…, RETRIED, markParents = true)` walks the failing run's
+   parent chain and in a loop sub-execution that chain leaves the execution. So
+   Kestra cannot replay a loop iteration, and creating one here would be
+   over-acceptance the oracle cannot see — no corpus flow puts such a retry
+   inside a `Loop`, measured over all 345.
+   **The refusal is not the whole of what the artifact does there, and the
+   other half was a silent inversion.** With the iteration `RETRIED` and no
+   child, `spawn::decide` fell through to `terminated == total` and the loop run
+   ended **SUCCESS** — so the whole flow reported SUCCESS where Kestra reports
+   FAILED on both the loop run and the root (`rev4.probe/replay-in-loop`,
+   measured on both sides in the fix round). Kestra's throw aborts the retry
+   marking and fails the ITERATION execution, after which everything is the
+   ordinary `transmitFailed` path with a FAILED child; egret reproduces the
+   parent's half of that with `spawn::as_the_loop_reads_it`, one substitution at
+   the point the parent reads the child's terminal. It is deliberately not
+   `terminated_in_error(RETRIED)`, which reaches `terminateLoop`'s
+   `state == FAILED ? stateFailure : SUCCESS` ternary and ends the loop SUCCESS
+   again. The iteration's OWN terminal is still `RETRIED` where Kestra's is
+   `FAILED`: that half needs a field `advance()` does not have, and it is
+   asserted as it stands so it cannot drift unrecorded. **The ratchet does not
+   move either way** — 127 before and after — because no corpus flow reaches it,
+   which is exactly why it had to be fixed rather than baselined.
+3. **Not from a nested `settle`.** `interval: PT0S` over a flow that reaches
+   `FAILED` inside one settle — an unresolvable `Subflow` target is the
+   reachable example — would otherwise recurse `settle → spawn → settle` inside
+   a single transaction, which is the recursion `subflow::MAX_SPAWN_CHAIN` was
+   measured to abort the process under. The answer is structural rather than
+   numeric and it is the artifact's own: its replay comes off the
+   **execution-delay loop**, a different loop from the executor cycle
+   (`DefaultExecutor.java:508`), one execution per delivery.
+
+## A replay of a `Subflow` child: what fix round 2 measured, and why the account lives in item 16
+
+**This section used to be a second register of that divergence and it is now a
+pointer**, because two registers of one measurement drift apart and these two
+did: by fix round 3 this one still read *"four answers agree"*, *"the parent's
+own state never moves"* and *"every execution-level answer agrees with egret …
+**so Task 4's Concern 3 stands**"*, all of which item 16 had by then corrected,
+~1300 lines above. **The whole account — the two orderings, the run counts, the
+ranges, the costs, the empty corpus population and the controller's ruling —
+is in the coverage statement's item 16, and nowhere else.**
+
+What belongs here is the raw trace this section was written from, kept as a
+record of **one** fixture on the pinned digest (fix round 2, own compose project
+`t4r2kestra`, namespace `t4r2.probe`, egret's own fixture shape, two runs, torn
+down `-v`), written because fix round 1 had asserted the opposite of it with the
+words *"which is what Kestra does too — measured"*:
+
+```text
+parent      SUCCESS   ["CREATED","RUNNING","SUCCESS"]
+  run sub   FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
+  run after SUCCESS
+child       RETRIED   trigger.taskRunId = the parent's `sub` run
+replacement FAILED    parentId = the child, trigger = BYTE-IDENTICAL to the child's
+```
+
+**That trace is one ordering of two, and reading it as the shape is exactly the
+mistake this section made.** Its successor is a `Log` that finishes before the
+replacement does, so the stamp lands on a parent that has already ended and the
+parent EXECUTION agrees with egret. Change the successor to a `Sleep PT8S` — a
+legal publishable flow — and Kestra's parent EXECUTION ends **`FAILED`** where
+egret answers `SUCCESS`: a divergence in the flow's own verdict, measured 22
+times across three compose projects. The sentences this section carried about
+sizes, costs and what "every answer" does are superseded by item 16; the
+divergence is asserted as one, never as parity, by
+`a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent`.
+
+## Two questions W6 Task 3 left open, both measured on the artifact
+
+Task 3 added `Surface::load`'s sticky `inheriting` flag and deliberately left
+two neighbours for this task to **measure rather than choose**.
+
+**`root` / `correlationId` walks the whole chain, and that is right.**
+
+> **CORRECTION, W6 Task 8's whole-branch review.** *"The whole chain"* was true
+> of the **parent** chain and read as true of the **causal** chain, and the walk
+> followed `parent_execution_id` alone — so it stopped dead at a subflow child,
+> whose `parent_execution_id` is NULL by `0138`'s `one_link_kind`, and answered
+> the child's **own** id. The measurement below is sound and settles the
+> **replay** link only; the subflow link was never measured until the review
+> forced it. Both are now measured and one walk serves both — see the W6
+> section of *The coverage statement*, and `Link::cause` in
+> `src/worker/render.rs`. This is the third artefact of this package to state
+> the un-measured half as measured, and the only reason it was catchable is that
+> the two link kinds were named apart in `0138`.
+
+`egret.probe4/replay-correlation` — a flow-level `CREATE_NEW_EXECUTION` retry
+over a `Log` of `{{ labels.system.correlationId }}` and a `Fail`:
+
+```text
+root   cid=3nY5p1H9MmhpWnq4hZsVOD eid=3nY5p1H9MmhpWnq4hZsVOD
+replay cid=3nY5p1H9MmhpWnq4hZsVOD eid=5cNdx41IqqhyGSExZsuGLu
+```
+
+The replay's `correlationId` is the ORIGINAL's while its `execution.id` is its
+own. The mechanism agrees: `ExecutionService.replay` copies the parent's labels
+(adding `system.replay`) and `Execution.java:213` fills a `correlationId` in only
+when one is ABSENT. A sticky `root` would have diverged. No golden entry pairs a
+replay with a `correlationId` read, so the ratchet is silent and
+`a_replay_inherits_the_correlation_id_of_the_execution_it_replaces` is the
+instrument.
+
+**The `levels` / `item` walk crossing a non-loop link is unreachable.** A level
+is pushed only for a row that carries its own `(loop_index, loop_value,
+parent_run_ix)`, so a replay contributes none; the only row that could cross a
+replay link is a replay whose PARENT is a loop iteration — refusal 2 above, the
+one the artifact refuses too. So the state the walk is unguarded against is one
+no writer can produce, and it is left as it is rather than given a second flag
+nothing could make fire.
+
+> **CORRECTION, W6 Task 8.** That held only while the walk followed one column.
+> Widening `root` to the causal chain makes `loop -> subflow child`
+> **reachable**, and the push is now gated on the same `inheriting` flag. It is
+> a no-op on every row that existed before — and it is not a flag nothing can
+> make fire: **measured**, with the gate removed the child of a `Subflow` inside
+> a one-value `Loop` renders `{{ item.value }}` as `LOOPVAL`, its CALLER's
+> iteration value, and SUCCEEDS. That is `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item`'s
+> fourth part, killed 3 of 3 runs by mutation `M2`. It also closes the
+> asymmetry W6 Task 2's re-review recorded as N-2.
+
+## The classifier, corrected: `ENTRIES_LEFT_UNFINISHED` 63 → 59
+
+`is_stalled` omitted `RETRIED` from its terminal list, while
+`RunState::Retried`'s own doc, Kestra's `State.isTerminated()`,
+`claim::settle`'s terminal dispatch and `spawn::terminated_count` all called it
+terminal. The count's assertion says every member is *a task type this worker
+has no handler for*; the four `retry-new-execution-*` entries declare only
+`core.execution.Fail`, which **has** one and ran it.
+
+**The four leave as a classifier artefact, not as four executions that started
+finishing**: the count would have fallen to 59 with `RETRIED` added and no
+replay implemented at all. The bank is a separate measurement in the ratchet.
+
+`the_terminal_list_covers_every_execution_terminal_the_golden_holds` derives the
+population instead of remembering it — and corrected the first answer written
+for it. `CANCELLED` **does** end three golden executions (`valids/exit-cancelled`,
+`valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`);
+it stays out of the list because `is_stalled` classifies egret's traces and
+`RunState` has no `Cancelled`, which the test now asserts rather than assumes.
+
+## Mutations
+
+Fifteen, each built first, each with an anchor verified unique against the whole
+file, each asserted to have changed the file on disk, and each restored with
+`git checkout -- .` plus a `git status --porcelain` emptiness check.
+
+| # | mutation | died in | killed by |
+|---|---|---|---|
+| M1 | `state.metadata.attempt` → `1` | `--lib` | `the_execution_metadata_is_what_ends_a_create_new_execution_chain` |
+| M2 | `state.metadata.origin` → `Tick(0)` | `--lib` | the same |
+| M3 | drop the `ScheduleRetry` from the `CreateNewExecution` arm | `--lib` | `create_new_execution_ends_the_execution_retried` |
+| M4 | `spawn_due` ignores the deadline | worker | 5 tests |
+| M5 | drop the `ctx.depth > 0` refusal | worker | `a_replay_is_not_started_from_a_nested_settle_and_the_next_resume_starts_it` |
+| M6 | drop the `Loop` refusal | worker | `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level` |
+| M7 | drop the "a replay already exists" answer | worker | `a_second_resume_does_not_start_a_second_replay` |
+| M8 | `due_retries` drops its `NOT EXISTS` term | worker | 3 tests |
+| M9 | `due_retries` drops `e.parent_run_ix IS NULL` | worker | `a_replay_is_refused_inside_a_loop_…` |
+| M10 | `due_retries` drops the whole `RETRIED` arm | worker | 5 tests |
+| M11 | the offset stops accumulating | worker | `a_max_duration_chain_…`, `a_replay_chain_carries_…` |
+| M12 | `attempt + 1` → `attempt.max(2)` | worker | `a_replay_chain_carries_its_attempt_number_and_its_origin_offset` |
+| M13 | `TERMINAL` without `RETRIED` | executor | 3 tests |
+| M14 | `read_trace_inner`'s decode back to `(Uuid, i32, String)` | executor | 9 tests, including all four entry tests |
+| M15 | drop migration 0139's metadata CHECK | worker | `the_replay_metadata_is_unrepresentable_on_anything_but_a_replay` |
+
+**M12 SURVIVED the first round and the test grew a link because of it.**
+`attempt.max(2)` writes the right number for the first replay and the wrong one
+for every later replay, and every fast test ended its chain AT the first replay.
+Its only killer was the ratchet — minutes later, as the driver's step bound,
+which is what an unbounded chain looks like from there. `a_replay_chain_carries_…`
+now runs three links and asserts the increment twice.
+
+**M14 did not compile on its first form** (the tuple alone), which is the shape
+this programme records as indistinguishable from a mutation nothing killed. It
+was rewritten to revert the two call sites with it, compiled, and then died in
+nine tests.
+
+**M1, M2 and M16 make the chain unbounded**, so the executor suite takes the
+driver to `STEP_BOUND` on four entries and runs for over ten minutes. They are
+reported as killed by the fast suites, which is where they died; the ratchet's
+opinion of them was not waited for. `M16` (`Tick(-offset)` → `Tick(offset)`) is
+killed by `a_max_duration_chain_stops_when_the_original_clock_runs_out`, which
+exists because the `maxAttempts` chain cannot see the origin at all.
+
+## What this task deliberately did NOT change
+
+- **`ORDER BY parent_run_ix, loop_index`** in the `spawned` query. Postgres sorts
+  NULLs last, so a replay sorts after every loop child of the same parent — and
+  nothing can observe it. Over the 710 descendants in `traces.json`, 40 carry a
+  NULL `loopIndex`, no parent carries two, and **no parent mixes** one with a
+  loop child; on egret's side the same holds by construction, because refusal 2
+  above means a loop parent never has a replay child at all.
+- **The `RETRIED`-vs-`FAILED` divergence inside a loop sub-execution.** egret's
+  `advance()` still marks such a run `RETRIED` where the artifact throws and
+  ends the iteration `FAILED`, because `advance()` cannot see which link kind
+  carried the execution it is driving. It predates this task, no golden entry
+  reaches it, and what this task refuses is the part that would have been
+  over-acceptance: the child execution.
+- **The `system.replay` label.** The artifact adds one; egret's executions carry
+  no labels of their own beyond the flow's, so there is nothing to add it to.

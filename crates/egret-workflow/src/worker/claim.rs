@@ -66,12 +66,14 @@ use uuid::Uuid;
 
 use super::cancel;
 use super::render::{self, Pass, Surface};
+use super::replay;
 use super::spawn::{self, Requested};
+use super::subflow;
 use super::timeout::{self, Budget};
 use super::{from_wire, Outcome, Registry, TaskInput, WorkerError, MAX_ROUNDS};
 use crate::executor::{
-    advance, apply, build_plan, Attempt, Command, ExecutionState, Plan, RunIx, RunState, TaskKind,
-    TaskRun, Tick,
+    advance, apply, build_plan, Attempt, Command, ExecutionMeta, ExecutionState, Plan, RunIx,
+    RunState, TaskKind, TaskRun, Tick,
 };
 
 fn db_err(e: sqlx::Error) -> Error {
@@ -339,19 +341,48 @@ pub async fn claim(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> Result<Vec<Cl
     .map_err(db_err)
 }
 
-/// The executions holding a `RETRYING` run whose retry delay has elapsed.
+/// The executions holding a run whose retry delay has elapsed — a `RETRYING`
+/// one waiting to be reopened, or a `RETRIED` one whose **replay** has not been
+/// started yet.
 ///
-/// **The `RETRYING` term is the whole predicate's point** and it is not a
-/// tidiness: `advance()` never CLEARS a `not_before` — `executor::apply`'s
+/// **The state term is the whole predicate's point** and it is not a tidiness:
+/// `advance()` never CLEARS a `not_before` — `executor::apply`'s
 /// `ScheduleRetry` arm writes one and nothing writes `None` back — so a run
 /// that has been retried and has since succeeded still carries the deadline
-/// its retry wrote, for ever. Without the state term this statement would name
-/// every finished execution whose retry deadline is in the past, on every
+/// its retry wrote, for ever. Without it this statement would name every
+/// finished execution whose retry deadline is in the past, on every
 /// tick, and each would take the execution's row lock and a settle that writes
 /// nothing but a new `executions.seq`. Driven by
 /// `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`,
 /// whose last assertion is exactly that: nothing is `RETRYING` any more, the
 /// deadline is still there and still past, and the waker must name nobody.
+///
+/// # The `RETRIED` arm needs two more terms, for the same reason
+///
+/// W6 Task 4. A `CREATE_NEW_EXECUTION` retry leaves the run **`RETRIED`** —
+/// terminal — with a deadline, and `reopen_due` will never touch it: what is
+/// due is a whole new execution, which [`super::replay::spawn_due`] starts from
+/// the settle this waker's `resume` produces. `RETRIED` alone would be the
+/// unbounded case the paragraph above describes, because nothing ever moves a
+/// `RETRIED` run either — so the arm carries both conditions that decide
+/// whether a replay is still to come, and each closes a different endless case:
+///
+/// - **no replay child yet** — otherwise every finished chain is named for
+///   ever, once per tick, for a deadline that has already been acted on;
+/// - **`e.parent_run_ix IS NULL`** — otherwise a `Loop` sub-execution whose
+///   body carries such a retry is named for ever, because `spawn_due` refuses
+///   that one permanently (the artifact cannot replay a loop iteration either;
+///   see that function's doc) and no child will ever appear to stop it.
+///
+/// These are not one fence shared with `spawn_due`: this one bounds the
+/// **waker's** work, and `spawn_due`'s decides the **spawn**, which is also
+/// reached from a `resume` this predicate never saw — the oracle's driver takes
+/// exactly that path. Under both sits migration 0138's
+/// `workflow_executions_loop_run_idx` with `NULLS NOT DISTINCT`, which makes a
+/// second replay unrepresentable rather than merely unasked-for.
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists` and
+/// `a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level`
+/// drive the two.
 ///
 /// **The clock is [`load_with`]'s, spelled the same way**, so an execution
 /// named here is one `retry::reopen_due` will actually reopen — see the module
@@ -373,7 +404,12 @@ pub(super) async fn due_retries(exec: impl sqlx::PgExecutor<'_>, limit: i64) -> 
         "SELECT r.execution_id \
            FROM workflow.task_runs r \
            JOIN workflow.executions e ON e.id = r.execution_id \
-          WHERE r.state = 'RETRYING' \
+          WHERE (r.state = 'RETRYING' \
+                 OR (r.state = 'RETRIED' \
+                     AND e.parent_run_ix IS NULL \
+                     AND NOT EXISTS (SELECT 1 FROM workflow.executions c \
+                                      WHERE c.parent_execution_id = e.id \
+                                        AND c.parent_run_ix IS NULL))) \
             AND r.not_before_ms IS NOT NULL \
             AND r.not_before_ms <= \
                 (EXTRACT(EPOCH FROM (now() - e.created_at)) * 1000)::bigint \
@@ -732,7 +768,7 @@ async fn run_one(pool: &PgPool, c: &Claimed, reg: &dyn Registry) -> Result<()> {
 /// live view. Kestra's worker renders from a snapshot for the same reason.
 async fn input_for(pool: &PgPool, c: &Claimed) -> Result<(TaskInput, Budget)> {
     let mut conn = pool.acquire().await.map_err(db_err)?;
-    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No).await?;
+    let (ctx, state, _now) = load_with(&mut conn, c.execution_id, Lock::No, Stack::Fresh).await?;
     let surface = Surface::load(&mut conn, &ctx).await?;
     let run = usize::try_from(c.run_ix).map_err(|_| {
         worker_err(WorkerError::Corrupt(
@@ -762,7 +798,7 @@ pub async fn apply_outcome(
     claimed: &Claimed,
     outcome: &Outcome,
 ) -> Result<()> {
-    let (ctx, mut state, now) = load(conn, claimed.execution_id).await?;
+    let (ctx, mut state, now) = load(conn, claimed.execution_id, Stack::Fresh).await?;
     let before = state.clone();
 
     // The output goes down BEFORE `settle` renders, because a successor's
@@ -884,15 +920,51 @@ pub(super) async fn settle(
     // same thing across a transaction boundary as it does inside one.
     let mut seq = ctx.seq + 1;
     marks.observe(before, state, seq);
-    let spawns = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
+    let (spawns, subflows) = drive(ctx, &surface, state, now, &mut marks, &mut seq)?;
     persist(conn, ctx, before, state, release, &marks, seq).await?;
     spawn::spawn_all(conn, ctx, state, &spawns).await?;
+    // **After `persist`, exactly like the loop spawner, and for the same
+    // reason**: the child's row names `(execution, run_ix)` and that run has to
+    // exist. It differs in one way that matters for what comes next --
+    // `subflow::spawn_one` may complete the parent's own run (a `wait: false`
+    // subflow, or a target that does not resolve), and it does so through a
+    // nested `settle` on this same execution. That is the same re-entrancy
+    // `spawn::spawn_all` already has via `on_execution_terminal`, and it is why
+    // the terminal check below reads `state` -- this transaction's in-memory
+    // copy, which a nested settle deliberately does not update -- rather than
+    // the row: a nested settle that terminated the execution has ALREADY told
+    // its parent, and firing again from here would report one terminal twice.
+    subflow::spawn_all(conn, ctx, &surface, state, &subflows).await?;
+    // **The execution-delay loop, and it is a different loop in the artifact
+    // too.** A `CREATE_NEW_EXECUTION` retry ends THIS execution `RETRIED` and
+    // leaves an `ExecutionDelay` behind (`retry::scan`'s `ScheduleRetry`); the
+    // replacement execution is started later, by whoever notices the deadline.
+    // Here that is every `settle`, because `resume` -- from `worker::wake` in
+    // production and from `pass_time` in the oracle's driver -- is the settle a
+    // due deadline produces. It reads `state`, so the round that scheduled the
+    // delay can see it too, and refuses on `not_before > now`.
+    replay::spawn_due(conn, ctx, state, now).await?;
 
     let was = before.history.last().copied();
     let is = state.history.last().copied();
     if was != is {
         if let Some(terminal) = is.filter(|s| s.is_terminal()) {
-            spawn::on_execution_terminal(conn, ctx.id, terminal).await?;
+            spawn::on_execution_terminal(conn, ctx.id, terminal, ctx.depth).await?;
+            // The other kind of link. `on_execution_terminal` reads
+            // `parent_execution_id` and this reads `trigger_execution_id`, and
+            // `workflow_executions_one_link_kind` makes it impossible for both
+            // to find something -- so the pair is a dispatch, not two chances
+            // to report the same terminal.
+            //
+            // **For a `CREATE_NEW_EXECUTION` replay NEITHER finds anything**,
+            // and that is why egret's answer for a replayed `Subflow` child is
+            // invariant rather than timing-dependent: `trigger_of` zips two
+            // NULL trigger columns, and `parent_of` zips a set
+            // `parent_execution_id` with a NULL `parent_run_ix`, which
+            // `workflow_executions_loop_run_whole_or_absent` keeps NULL for a
+            // row with no loop index. Registered as a divergence in
+            // `oracle-exec/README.md`'s coverage statement, item 16.
+            subflow::on_child_terminal(conn, ctx.id, terminal, ctx.depth).await?;
         }
     }
     Ok(())
@@ -912,6 +984,42 @@ pub async fn start_execution(
     source: &str,
     inputs: serde_json::Value,
 ) -> Result<Uuid> {
+    start_execution_with_trigger(pool, workspace_id, flow_id, source, inputs, None).await
+}
+
+/// [`start_execution`] with Kestra's `Execution.trigger` supplied.
+///
+/// A **sibling** rather than a sixth parameter on `start_execution`, because
+/// that function has **65** call sites across `crates/` and all but one of them
+/// have no trigger: widening it would mean writing `None` sixty-four times to
+/// serve one caller, and sixty-four uniform `None`s are the kind of argument
+/// that hides a mutation (W6 Task 6's `max_depth` survived a two-sided mutation
+/// for exactly that reason -- every fixture passed the default).
+///
+/// The figure is counted, not estimated. This doc said "twenty" until fix round
+/// 1's sweep ran
+/// `grep -rn "start_execution(" crates/ --include="*.rs" | grep -v with_trigger | grep -v "///"`
+/// on 2026-09-12 and got 65. A number nobody has compared to a running command
+/// is the same shape of claim as an untested guard, which is the point of the
+/// sentence it appears in.
+///
+/// `trigger` is `{id, type, variables}` and lands in
+/// `workflow.executions.execution_trigger` (migration 0140), whose CHECK
+/// refuses a record missing any of the three. It is stored and **not**
+/// published into the render context; see that migration for the measurement
+/// behind that split.
+///
+/// It is written in the SAME transaction as the execution row and its first
+/// settle, so an execution can never be visible without the record of what
+/// started it.
+pub async fn start_execution_with_trigger(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    flow_id: Option<Uuid>,
+    source: &str,
+    inputs: serde_json::Value,
+    trigger: Option<serde_json::Value>,
+) -> Result<Uuid> {
     let flow = crate::spec::parse(source)
         .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
     let plan = build_plan(source)
@@ -920,8 +1028,9 @@ pub async fn start_execution(
     let mut tx = pool.begin().await.map_err(db_err)?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO workflow.executions \
-           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs) \
-         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6) RETURNING id",
+           (workspace_id, flow_id, namespace, flow_key, source, state, history, inputs, \
+            execution_trigger) \
+         VALUES ($1, $2, $3, $4, $5, 'CREATED', '[\"CREATED\"]'::jsonb, $6, $7) RETURNING id",
     )
     .bind(workspace_id)
     .bind(flow_id)
@@ -933,6 +1042,7 @@ pub async fn start_execution(
     } else {
         serde_json::json!({})
     })
+    .bind(trigger)
     .fetch_one(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -944,6 +1054,8 @@ pub async fn start_execution(
         source: source.to_string(),
         plan,
         seq: 0,
+        // A caller that starts an execution is the bottom of the stack.
+        depth: 0,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -970,7 +1082,7 @@ pub async fn start_execution(
 /// row written by the same code.
 pub async fn resume(pool: &PgPool, execution_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await.map_err(db_err)?;
-    let (ctx, mut state, now) = load(&mut tx, execution_id).await?;
+    let (ctx, mut state, now) = load(&mut tx, execution_id, Stack::Fresh).await?;
     let before = state.clone();
     settle(&mut tx, &ctx, &before, &mut state, now, None).await?;
     tx.commit().await.map_err(db_err)
@@ -993,6 +1105,54 @@ pub(super) struct ExecutionCtx {
     /// a `settle` consumed. Carried on the context rather than read again in
     /// `persist` because the whole of one settle has to agree about it.
     pub seq: i64,
+    /// **How many nested `settle`s deep this one is** — the recursion depth on
+    /// the *stack*, not a property of the execution.
+    ///
+    /// # Why it is carried rather than derived, and it was derived first
+    ///
+    /// `spawn_one` drives a child's first settle **inside its caller's
+    /// transaction**, so a chain of child executions is a chain of nested
+    /// `settle` frames and depth in the data is depth on the stack. W6 Task 3's
+    /// fix round bounded that with a recursive CTE over the link columns — and
+    /// mutation **M9 showed the bound was worthless against the defect it was
+    /// meant to backstop**: it shared its walk with the cycle guard, so
+    /// breaking the walk broke both and the mutation aborted the test binary
+    /// with SIGABRT instead of failing an assertion.
+    ///
+    /// This is the same fix one level down: a counter that is **not derived
+    /// from anything that can be wrong**. It is `0` only where a fresh call
+    /// stack begins — [`start_execution`], and every [`load_with`] whose caller
+    /// passes [`Stack::Fresh`] — and it is the caller's plus one everywhere a
+    /// frame nests inside another: the two spawners (`spawn::spawn_one` and
+    /// `subflow::spawn_one`) **and the three re-entrant loads**
+    /// ([`Stack::Nested`]).
+    ///
+    /// # The descent was right and the ASCENT was the hole, and it was reachable
+    ///
+    /// Fix round 1 shipped this counter with `load_with` writing `0`
+    /// unconditionally, on a written-down claim that no caller that loads an
+    /// execution is inside another `settle`. Two of them are, and they are the
+    /// two that a *completing* chain goes through — so the counter went
+    /// `0,1,2,0,1,2,…` up a chain that was climbing the stack the whole time,
+    /// and **nine flows filed in one workspace aborted the worker process**.
+    /// [`Stack`] is why that can no longer be written by omission.
+    ///
+    /// **Only `subflow::spawn_one` refuses on it, and the recorded reason for
+    /// that used to be false.** It said *"a `Loop` cannot recurse without
+    /// bound — its body is its own parent's `tasks:`, strictly smaller each
+    /// time — so bounding the loop spawner would be a behaviour change to a
+    /// construct that cannot reach it."* **It reaches it**: 12 statically
+    /// nested one-value `Loop`s, with no `Subflow` anywhere, run to completion
+    /// at depth 12 — half again past [`super::subflow::MAX_SPAWN_CHAIN`] — and
+    /// 47 of them abort the process. The true reason the loop spawner does not
+    /// refuse here is narrower and is not a safety argument at all:
+    /// `build_plan` accepts a nesting up to `plan::MAX_TASK_DEPTH` (48), so
+    /// refusing at 8 would refuse flows the planner accepts, and the artifact
+    /// accepts far more than either (measured: 498). See
+    /// [`super::subflow::MAX_SPAWN_CHAIN`]'s *"What neither bound closes"* for
+    /// the whole measurement and who owns it. Loop links are counted here,
+    /// because each one is a real frame.
+    pub depth: usize,
 }
 
 /// Whether [`load_with`] takes the execution's row lock.
@@ -1007,6 +1167,55 @@ pub(super) enum Lock {
     No,
 }
 
+/// **Where on the CALL STACK the caller loading this execution already is** —
+/// the one thing [`load_with`] cannot read off the row it reads.
+///
+/// # It is an enum, and a `usize` with a default is what it replaces
+///
+/// `load_with` used to write `depth: 0` under a comment asserting that every
+/// caller that loads an execution *"is starting a fresh call stack"*. **Two of
+/// them are not**: `claim::settle` step 4 calls
+/// [`spawn::on_execution_terminal`](super::spawn::on_execution_terminal) and
+/// [`subflow::on_child_terminal`](super::subflow::on_child_terminal), and
+/// `settle` step 3 reaches `subflow::complete` through
+/// `subflow::spawn_all`. Each re-enters `load_with` **inside the caller's own
+/// frame**, so the counter was reset once per level of a completing chain and
+/// [`super::subflow::MAX_SPAWN_CHAIN`] never fired: nine flows filed in one
+/// workspace, plain `wait: true`, aborted the worker process with
+/// `fatal runtime error: stack overflow`.
+///
+/// The fix is not a better default — it is **having no default**. A caller
+/// must say which of the two it is, at the call site, and the two answers are
+/// different *kinds* rather than two numbers, so [`Stack::Fresh`] cannot be
+/// written by forgetting.
+///
+/// `tests/worker.rs`'s
+/// `a_chain_of_subflows_that_COMPLETES_is_bounded_by_the_same_counter` is the
+/// control: it is the ascent, where the reset lived, as distinct from the
+/// descent the sibling test covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stack {
+    /// **This caller begins a fresh call stack.** The tick (`apply_outcome`),
+    /// [`resume`], and `input_for`, which runs before the tick's transaction
+    /// is even opened. Each is entered from `worker::run`, with nothing of
+    /// this crate's below it.
+    Fresh,
+    /// **This load happens inside a `settle` that is already `.0` deep**, and
+    /// the `settle` it is about to run nests inside that one — so the frame it
+    /// produces is `.0 + 1`.
+    Nested(usize),
+}
+
+impl Stack {
+    /// [`ExecutionCtx::depth`] for the context this load is building.
+    fn depth(self) -> usize {
+        match self {
+            Stack::Fresh => 0,
+            Stack::Nested(caller) => caller + 1,
+        }
+    }
+}
+
 /// Read the execution, **locking it**, and rebuild what `advance()` reads.
 ///
 /// `FOR UPDATE` is the serialisation two workers finishing two siblings of the
@@ -1017,21 +1226,25 @@ pub(super) enum Lock {
 pub(super) async fn load(
     conn: &mut PgConnection,
     execution_id: Uuid,
+    stack: Stack,
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
-    load_with(conn, execution_id, Lock::Yes).await
+    load_with(conn, execution_id, Lock::Yes, stack).await
 }
 
 pub(super) async fn load_with(
     conn: &mut PgConnection,
     execution_id: Uuid,
     lock: Lock,
+    stack: Stack,
 ) -> Result<(ExecutionCtx, ExecutionState, Tick)> {
     let row = sqlx::query(if lock == Lock::Yes {
         "SELECT source, history, workspace_id, flow_id, seq, \
+                attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
            FROM workflow.executions WHERE id = $1 FOR UPDATE"
     } else {
         "SELECT source, history, workspace_id, flow_id, seq, \
+                attempt_number, origin_offset_ms, \
                 (EXTRACT(EPOCH FROM (now() - created_at)) * 1000)::bigint AS now_ms \
            FROM workflow.executions WHERE id = $1"
     })
@@ -1053,6 +1266,14 @@ pub(super) async fn load_with(
         source,
         plan,
         seq: row.get("seq"),
+        // **The CALLER says, because only the caller knows.** Depth is a fact
+        // about the stack and a row read off the database cannot carry it --
+        // but "therefore it is zero" was the fix round 1 defect: two of the
+        // callers here are re-entered from *inside* another `settle`
+        // (`subflow::complete` and `spawn::on_execution_terminal`), so zeroing
+        // it made the counter walk in place while the stack climbed. See
+        // [`Stack`].
+        depth: stack.depth(),
     };
 
     let rows = sqlx::query(
@@ -1093,6 +1314,27 @@ pub(super) async fn load_with(
     let state = ExecutionState {
         runs,
         history: parse_states(execution_id, &history)?,
+        // Kestra's `Execution.metadata` (migration 0139). `now` is deliberately
+        // NOT shifted by the offset: every other `Tick` in this execution --
+        // `TaskRun::not_before`, `Attempt::started_at` -- is measured from THIS
+        // execution's `created_at`, and so is `oracle-exec/driver.rs`'s
+        // `pass_time`, which computes a shortfall against the same column. A
+        // clock shifted here would be read unshifted there and the driver would
+        // travel a chain's whole accumulated time on every hop. The offset is
+        // carried where its one reader is -- `retry::next_retry_at`'s
+        // `CREATE_NEW_EXECUTION` origin -- as a negative tick.
+        metadata: ExecutionMeta {
+            attempt: u32::try_from(row.get::<i32, _>("attempt_number")).map_err(|_| {
+                worker_err(WorkerError::Corrupt(
+                    execution_id,
+                    format!(
+                        "negative attempt_number {}",
+                        row.get::<i32, _>("attempt_number")
+                    ),
+                ))
+            })?,
+            origin: Tick(-row.get::<i64, _>("origin_offset_ms")),
+        },
     };
     Ok((ctx, state, Tick(now_ms)))
 }
@@ -1224,9 +1466,10 @@ fn drive(
     now: Tick,
     marks: &mut Marks,
     seq: &mut i64,
-) -> Result<Vec<Requested>> {
+) -> Result<(Vec<Requested>, Vec<subflow::Requested>)> {
     let plan = &ctx.plan;
     let mut spawns = Vec::new();
+    let mut subflows = Vec::new();
     for _ in 0..MAX_ROUNDS {
         let snapshot = state.clone();
         let cmds = advance(plan, state, now);
@@ -1235,6 +1478,7 @@ fn drive(
             *seq += 1;
             for cmd in &cmds {
                 spawns.extend(Requested::of(cmd));
+                subflows.extend(subflow::Requested::of(cmd));
                 apply(state, cmd);
             }
             marks.observe(&snapshot, state, *seq);
@@ -1255,7 +1499,7 @@ fn drive(
             continue;
         }
 
-        return Ok(spawns);
+        return Ok((spawns, subflows));
     }
     Err(worker_err(WorkerError::NoFixedPoint(ctx.id)))
 }
@@ -1557,6 +1801,7 @@ mod tests {
                 run(Some(0), RunState::Created),
             ],
             history: vec![RunState::Running],
+            metadata: crate::executor::ExecutionMeta::default(),
         };
         let before = CREATE_BESIDE_A_CREATED_SIBLING.load(std::sync::atomic::Ordering::Relaxed);
         // A sibling of run 1 being created while run 1 is still CREATED: the

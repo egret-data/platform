@@ -33,8 +33,11 @@
 //!    220 multi-sibling groups share one instant between them. Ordering
 //!    `spawned` by the instant is therefore not "unstable", it is undefined —
 //!    which is why `normalise.py` orders by the index and bails when two
-//!    iterations claim one, and why migration 0135 makes that collision
-//!    unrepresentable rather than detectable.
+//!    iterations claim one, and why `workflow_executions_loop_run_idx` makes
+//!    that collision unrepresentable rather than detectable. (Migration 0135
+//!    created that index; **migration 0138 owns it now** -- it drops and
+//!    recreates it under the same name with `NULLS NOT DISTINCT`, so that the
+//!    same argument covers the replay child, whose key is all NULLs.)
 //! 3. **`concurrencyLimit` is a live cap, not just a first-batch size.**
 //!    `advance()` emits the first batch and cannot emit a second — it is pure
 //!    over `(plan, state, now)` and `ExecutionState` records nothing about a
@@ -327,6 +330,14 @@ async fn spawn_one(
         // builds one pair table per node), so a shared counter would be a
         // number two traces read differently.
         seq: 0,
+        // **One deeper than its caller**, because the `settle` below runs
+        // inside this one. A `Loop` is never refused on it -- see
+        // `ExecutionCtx::depth` -- but its frames are real and are counted, so
+        // a `Subflow` nested inside loops carries the loops it sits in toward
+        // `subflow::MAX_SPAWN_CHAIN`. **That is not a bound on the loop
+        // nesting itself**, which nothing refuses: see that constant's
+        // "What neither bound closes".
+        depth: parent.depth + 1,
     };
     let empty = ExecutionState::new(&ctx.plan);
     let mut state = empty.clone();
@@ -384,25 +395,51 @@ pub(super) async fn on_execution_terminal(
     conn: &mut PgConnection,
     execution_id: Uuid,
     state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
     // Async recursion: a loop body may itself contain a `Loop`
     // (`valids/loop-nested`), so terminating the innermost sub-execution walks
-    // up the chain. The chain cannot cycle — `parent_execution_id` always names
-    // a row that existed before this one was inserted — so there is no depth
-    // bound here, for the reason `flowable::descend` gives for not having one
-    // either: a guard nobody could ever see fire is a guard nobody has seen.
-    Box::pin(on_execution_terminal_inner(conn, execution_id, state)).await
+    // up the chain, and each level is a nested `settle` inside the caller's
+    // transaction. The chain cannot **cycle** — `parent_execution_id` always
+    // names a row that existed before this one was inserted — but it can be
+    // arbitrarily **deep**, and nothing here refuses it.
+    //
+    // **The comment that used to sit here cited `flowable::descend`'s reason
+    // for having no depth guard, and it does not transfer.** `descend`'s
+    // recursion is bounded by `state.runs.len()` for any plan; this one is
+    // bounded only by how deeply an author nested `Loop`s, which `build_plan`
+    // caps at `plan::MAX_TASK_DEPTH` = 48. Measured: 12 nested one-value
+    // `Loop`s run at `ctx.depth = 12` with no `Subflow` anywhere, and **47
+    // abort the process with a stack overflow** — so this is not a guard
+    // nobody could see fire, it is an absent guard on a reachable recursion.
+    // It predates W6 (this recursion is W3b `ad93ef2d`, the cap is W3a
+    // `6f046e57`) and it is recorded with its owner and with what the artifact
+    // does instead on `subflow::MAX_SPAWN_CHAIN`.
+    Box::pin(on_execution_terminal_inner(
+        conn,
+        execution_id,
+        state,
+        caller_depth,
+    ))
+    .await
 }
 
 async fn on_execution_terminal_inner(
     conn: &mut PgConnection,
     execution_id: Uuid,
     child_state: RunState,
+    caller_depth: usize,
 ) -> Result<()> {
     let Some((parent_id, parent_run)) = parent_of(conn, execution_id).await? else {
         return Ok(());
     };
-    let (ctx, mut state, now) = claim::load(conn, parent_id).await?;
+    // **`Nested`, and the fix round 2 Critical is that this used to be `0`.**
+    // This is called from `claim::settle` step 4, so the `settle` at the bottom
+    // of this function nests inside the one that called it -- a `Loop` that
+    // starts its next iteration from here is one more frame, not a fresh
+    // stack. See `claim::Stack`.
+    let (ctx, mut state, now) =
+        claim::load(conn, parent_id, claim::Stack::Nested(caller_depth)).await?;
     let before = state.clone();
 
     let run = usize::try_from(parent_run).map_err(|_| {
@@ -443,7 +480,7 @@ async fn on_execution_terminal_inner(
 
     let terminal = match decide(
         transmit_failed(&ctx, task)?,
-        child_state,
+        as_the_loop_reads_it(child_state),
         started,
         terminated,
         values.len(),
@@ -509,6 +546,56 @@ fn terminated_in_error(state: RunState) -> bool {
     matches!(state, RunState::Failed | RunState::Killed)
 }
 
+/// **The state the loop run reads for an iteration that ended `RETRIED`, and
+/// the reason it is not `RETRIED`** — W6 Task 4, fix round 1.
+///
+/// A `CREATE_NEW_EXECUTION` retry inside a `Loop` body ends the *iteration*
+/// execution `RETRIED` on egret's side. Kestra never reports that state to a
+/// parent, and the measurement of what it does instead is on the pinned digest
+/// (`rev4.probe/replay-in-loop`, a one-value `Loop` whose body's only task is a
+/// `Fail` with `behavior: CREATE_NEW_EXECUTION`):
+///
+/// ```text
+/// exec 4hsgGQXsbKwevjszb3RKKN  parentId=None   state=FAILED  run l     = FAILED
+/// exec 1EM1lBJxgIfaFxh0dSBAVR  parentId=4hsg…  state=FAILED  run inner = FAILED
+/// WARN … Flow failed from executor … 'Can't find taskrun with taskrunId
+///   '3mXFFNkYdF9Xo5nc0VvOdy' on execution '1EM1lBJxgIfaFxh0dSBAVR''
+/// ```
+///
+/// The id it cannot find is the **`Loop` run's**, which lives in the parent:
+/// `markWithTaskRunAs(…, RETRIED, markParents = true)` walks the failing run's
+/// parent chain and that chain leaves the sub-execution. The throw aborts the
+/// retry marking, `handleFailedExecutionFromExecutor` fails **that execution**,
+/// and everything after it is the ordinary loop path with a `FAILED` child —
+/// which is why the iteration ends `FAILED` with its body run `FAILED`, and why
+/// the root ends `FAILED` through nothing more exotic than `transmitFailed`.
+///
+/// So this is not a special case bolted onto [`decide`]: it is the one
+/// substitution that puts the parent back on the path the artifact takes. It is
+/// deliberately **not** `terminated_in_error(Retried)`, which would have sent
+/// `decide` down `terminateLoop`'s `state == FAILED ? stateFailure : SUCCESS`
+/// ternary and ended the loop `SUCCESS` again — the same wrong answer by a
+/// different route.
+///
+/// # What it does NOT fix, and why that half is not one predicate
+///
+/// The iteration's own terminal stays `RETRIED` where Kestra's is `FAILED`, and
+/// its body run stays `RETRIED` where Kestra's is `FAILED`. That half is
+/// `advance()`'s, which is pure over `(plan, state, now)` and cannot see which
+/// link kind carried the execution it is driving — it would need a third
+/// metadata field, for a case no corpus flow reaches. This half needs nothing
+/// new: the caller is [`on_execution_terminal`], which is holding the link.
+///
+/// The inversion this repairs was **SUCCESS where Kestra says FAILED** — a
+/// silent over-acceptance the oracle cannot catch, because no corpus flow puts
+/// a `CREATE_NEW_EXECUTION` retry inside a `Loop` (measured over all 345).
+fn as_the_loop_reads_it(child: RunState) -> RunState {
+    match child {
+        RunState::Retried => RunState::Failed,
+        other => other,
+    }
+}
+
 /// The flow a sub-execution runs: the parent flow with the `Loop`'s body in
 /// place of its own `tasks:`.
 ///
@@ -570,12 +657,25 @@ fn find_task<'a>(flow: &'a Flow, want: &str) -> Option<&'a Task> {
         .find_map(|t| walk(t, want))
 }
 
-/// The parent execution and the loop run inside it, or `None` for a top-level
-/// execution.
+/// The parent execution and the **loop run** inside it, or `None` when there
+/// is no loop run to report back to.
 ///
-/// Migration 0135's CHECK is what makes the pair readable as a pair: the four
-/// loop columns are all set or all null, so a row that names a parent always
-/// names a run and an index too.
+/// **The `zip` is doing real work since migration 0138, and this doc used to
+/// say the opposite.** Under 0135's
+/// `workflow_executions_loop_run_all_or_nothing` the four loop columns were all
+/// set or all null, so a row naming a parent always named a run and an index
+/// too and the pair could never be half-present. 0138 keeps that for a loop
+/// iteration -- `workflow_executions_loop_run_whole_or_absent` still forbids a
+/// parent *and* a run *without* an index -- but deliberately admits one more
+/// shape: **a parent with no loop columns at all**, which is Kestra's
+/// `CREATE_NEW_EXECUTION` replay (W6 Task 4). For that row `parent_run_ix` is
+/// NULL and this function returns `None`, which is the answer it should give:
+/// a replay is a new execution of the same flow, not an iteration a `Loop` run
+/// is waiting on, and [`on_execution_terminal`] has nothing to report to.
+///
+/// A `Subflow` child never reaches here at all -- it is linked by
+/// `trigger_execution_id`, and `workflow_executions_one_link_kind` makes a row
+/// carrying both links unrepresentable.
 async fn parent_of(conn: &mut PgConnection, execution_id: Uuid) -> Result<Option<(Uuid, i32)>> {
     let row = sqlx::query(
         "SELECT parent_execution_id, parent_run_ix FROM workflow.executions WHERE id = $1",
@@ -746,6 +846,82 @@ mod tests {
         assert!(!terminated_in_error(RunState::Skipped));
         assert!(terminated_in_error(RunState::Failed));
         assert!(terminated_in_error(RunState::Killed));
+    }
+
+    /// **A `RETRIED` iteration fails its loop, and every other terminal is
+    /// passed through untouched** — W6 Task 4, fix round 1.
+    ///
+    /// Two-sided by construction: the `RETRIED` row is the substitution and the
+    /// loop over [`RunState::ALL`] is the control, so a
+    /// `as_the_loop_reads_it` that answered `FAILED` for everything fails here
+    /// rather than passing on the one row that matters.
+    ///
+    /// The third assertion is the one that says WHY the obvious one-predicate
+    /// fix is not this one: adding `RETRIED` to [`terminated_in_error`] sends
+    /// `decide` into `terminateLoop`'s ternary, whose non-`FAILED` arm is
+    /// `SUCCESS` — the same inversion by a different route.
+    #[test]
+    fn a_retried_iteration_is_read_by_its_loop_as_a_failure() {
+        assert_eq!(
+            as_the_loop_reads_it(RunState::Retried),
+            RunState::Failed,
+            "Kestra's executor fails the iteration execution outright rather \
+             than reporting RETRIED to the loop -- measured on the pinned \
+             digest, see this function's doc"
+        );
+        for state in RunState::ALL.iter().copied() {
+            if state == RunState::Retried {
+                continue;
+            }
+            assert_eq!(
+                as_the_loop_reads_it(state),
+                state,
+                "{state:?} must reach the loop unchanged; only RETRIED is a \
+                 state the artifact never reports to a parent"
+            );
+        }
+        assert_eq!(
+            decide(true, as_the_loop_reads_it(RunState::Retried), 1, 1, 1),
+            Next::Terminate(RunState::Failed),
+            "so the one-value loop whose body was retried into a new execution \
+             ends FAILED, and its root with it -- egret reported SUCCESS here \
+             until this substitution"
+        );
+        assert_eq!(
+            decide(true, RunState::Retried, 1, 1, 1),
+            Next::Terminate(RunState::Success),
+            "the inversion itself, at the fixture's own shape: a raw RETRIED \
+             falls through to `terminated == total` and the loop SUCCEEDS. \
+             **This line does NOT discriminate** -- at (1,1,1) the rejected \
+             alternative answers SUCCESS too, by the ternary instead of by the \
+             fall-through -- and it used to claim it did. The line below is the \
+             one that chooses"
+        );
+        // **The control, at the input where the three implementations differ.**
+        // (1,1,1) cannot tell them apart because two of the three answer
+        // SUCCESS by different routes; a three-value loop can, because the
+        // fall-through goes somewhere else entirely.
+        assert_eq!(
+            decide(true, RunState::Retried, 1, 1, 3),
+            Next::Start(1),
+            "as shipped, RETRIED is not `terminated_in_error`, so one \
+             terminated iteration of three starts the next one. **This is what \
+             excludes putting RETRIED into `terminated_in_error`**: that \
+             alternative answers `Terminate(SUCCESS)` here, through \
+             `terminateLoop`'s `state == FAILED ? stateFailure : SUCCESS` \
+             ternary -- which is the SAME wrong answer as the fall-through and \
+             is why the fix is a substitution rather than a predicate. The \
+             ternary's own arm is pinned next door by \
+             `a_killed_iteration_ends_a_transmit_failed_loop_with_success`, at \
+             this same shape"
+        );
+        assert_eq!(
+            decide(true, as_the_loop_reads_it(RunState::Retried), 1, 1, 3),
+            Next::Terminate(RunState::Failed),
+            "and the substitution answers FAILED at that shape too -- ending a \
+             `transmitFailed` loop on the first failure with two values never \
+             started, which is `valids/loop-failed`'s measured shape"
+        );
     }
 
     /// Every corpus flow that holds a `Loop` — the sub-flow this module

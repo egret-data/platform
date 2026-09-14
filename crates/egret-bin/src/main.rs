@@ -2071,6 +2071,23 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         idp,
         dataapi,
         workflow,
+        // **The anonymous webhook surface is OFF unless an operator says
+        // otherwise.** See `egret_server::AppState::workflow_webhooks_enabled`:
+        // the key in the URL is the whole credential, the surface's own
+        // security review says it is not approved for exposure, and before fix
+        // round 2 that verdict had no lever at all.
+        //
+        // It comes through `Config` like every other deployment switch —
+        // `[workflow] webhooks_enabled`, i.e.
+        // `EGRET_WORKFLOW__WEBHOOKS_ENABLED`, the `EGRET_<SECTION>__<KEY>`
+        // convention `EGRET_CATALOG__ENABLED` and `EGRET_OIDC__ENABLED`
+        // already follow. Fix round 2 shipped it as a flat `std::env::var`
+        // read here, which was outside the config type, outside the chart and
+        // outside the convention (fix round 3, Minors 2 and 3). figment does
+        // the string→bool step, so a value it cannot parse is a **startup
+        // error** rather than a silent `false`: an operator who meant to turn
+        // this on and mistyped finds out at boot.
+        workflow_webhooks_enabled: config.workflow.webhooks_enabled,
     });
     let addr = format!("{}:{}", config.server.host, config.server.port);
     let listener = tokio::net::TcpListener::bind(&addr)

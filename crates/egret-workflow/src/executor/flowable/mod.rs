@@ -202,6 +202,16 @@ pub(crate) fn start(plan: &Plan, run: RunIx, task: TaskIx, now: Tick) -> Vec<Com
         });
     }
     cmds.push(Command::StartRun { run, at: now });
+    // **A [`TaskKind::Executable`] is the third case, and it is why W6 opened
+    // this directory.** It is not `SUBMITTED` -- no worker ever sees it, and
+    // measured over `golden.json` not one of the 24 executed `Subflow` runs
+    // carries that state -- and it is not merely `StartRun` either: something
+    // has to create the child execution, and the only round in which that can
+    // be asked for is the one that starts the run. See
+    // [`Command::SpawnSubflow`] for why it cannot be asked for on its own.
+    if matches!(plan.tasks[task].kind, TaskKind::Executable { .. }) {
+        cmds.push(Command::SpawnSubflow { task, run });
+    }
     cmds
 }
 
@@ -318,6 +328,13 @@ pub(crate) fn descend(
     let errors = plan.tasks[task].errors.as_slice();
     let step = match &plan.tasks[task].kind {
         TaskKind::Runnable { .. } => return Step::Waiting,
+        // Waiting for the same reason a `Runnable` is, on a different thing:
+        // its terminal comes from the child execution reaching one, which
+        // `worker::subflow::on_child_terminal` reports. `advance()` cannot see
+        // a sub-execution at all -- it is pure over `(plan, state, now)` and
+        // `ExecutionState` holds nothing about one -- which is the same
+        // division of labour `TaskKind::Loop` already has.
+        TaskKind::Executable { .. } => return Step::Waiting,
         TaskKind::Sequential { tasks } => {
             sequential::drive(plan, state, tasks, errors, Some(run), now)
         }

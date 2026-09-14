@@ -55,6 +55,10 @@
 # `CREATE_NEW_EXECUTION` retry starts -- which nothing in `Command` can ask for
 # and `ExecutionState` has no field for. `valids/retry-flowable-parallel` is the
 # fifth, and it is the same hole with a `Loop` in front of it.
+#   [W6 Task 4: the last two clauses were true when they were written and are
+#   not now. `ExecutionState` has the field -- `metadata`, migration 0139 --
+#   and the replay is asked for by the `ScheduleRetry` this arm was missing.
+#   Four of those five entries left the hole; see the W6 Task 4 block below.]
 #
 # `timeout:` is NOT among the lines this task deleted and never could have been:
 # in this artifact the WORKER enforces it
@@ -216,6 +220,82 @@
 # `parallel-nested` out, `dag` and `parallel-fail-with-flowable` in -- which is
 # what says the order was deciding them. Every line here is unchanged by the
 # fix itself.
+#
+# W6 Task 3 (`Subflow`) banked 12, 143 -> 131. Every one declares a `Subflow`
+# and every one stalled at that run before: `build_plan` planned it an opaque
+# `TaskKind::Runnable`, which set `task_runs.type_id`, which made it claimable,
+# and `claim::leaf` then answered `None` because `models::TaskKind` for the same
+# task is not a `Leaf` -- `WorkerError::NotALeaf` aborted the tick. It is a
+# `TaskKind::Executable` now, gets no `type_id`, and `worker::subflow` runs it.
+#
+#   subflow-parent                                the base case
+#   subflow-child                                 the same, one level down
+#   subflow-parent-of-failed                      transmitFailed carries the child's FAILED up
+#   task-flow                                     inputs: THIRD reaches io.kestra.tests/switch and fails it
+#   task-flow-inherited-labels                    the same target with OK -> the DEFAULT case -> SUCCESS
+#   subflow-nullable-input-parent                 an unposted input, absorbed by the child's own `required: false`
+#   subflow-inherited-labels-parent               labels are not on models::Subflow and the parent's trace does not record them
+#   subflow-parent-no-wait                        wait: false -- SUCCESS at spawn, {"state":"CREATED"} as the output
+#   loop-with-subflow                             the only bank carrying a sub-execution: its Loop body IS a Subflow
+#   flow-concurrency-subflow                      concurrency: CANCEL never fires with one execution
+#   flow-concurrency-parallel-subflow-kill        concurrency: QUEUE changes WHEN a child starts, which the parent's trace does not record
+#   flow-concurrency-parallel-subflow-kill-child  the same, one level down
+#
+# The plan's estimate was 9 strict / 11 upper bound and the measurement is 12.
+# The bound was exceeded because "declares X" was read as "blocked by X" for two
+# constructs: three of the four `flow-concurrency-*` entries bank (the fourth is
+# held by `sla:`), and `loop-with-subflow` banks where the `Loop` residue was
+# assumed to hold it.
+#
+# TEN Subflow declarers still hold, and NONE of them is held by `Subflow`:
+# `retry-subflow` and `subflow-parent-retry` on `state::apply` rule 1 (Kestra
+# accumulates a sub-execution's retries INSIDE the parent's attempt);
+# `subflow-secret-output-parent` on the unevaluated flow-level `outputs:`;
+# `task-runif` on `OutputValues` having no handler; `restart-parent` and
+# `restart-parent-loop` on W2's `Infinity` render inside `restart-child`;
+# `sla-parent-flow` and `flow-concurrency-sla-fail-parent` on `sla:` inside
+# their children; and the two `task-allow-*-executable-flow` on `WARNING`,
+# which `RunState` cannot hold. The `Subflow` row is therefore REMOVED from the
+# residual-baseline table rather than lowered from 22 to 10 -- the same rule
+# `disabled: true` and `runIf:` were removed under.
+#
+# `loop-with-subflow` is the 18th name in `SPAWNED_ENTRIES_THAT_MATCH_BY_NAME`,
+# which is the list the Task 6 block above is about.
+#
+# W6 Task 4 (the `CREATE_NEW_EXECUTION` replay) banked 4, 131 -> 127 -- the
+# whole of the row `README.md`'s residual table assigned to it, and nothing
+# else moved in either direction:
+#
+#   retry-new-execution-flow-attempts   flow-level retry, maxAttempts: 3
+#   retry-new-execution-flow-duration   flow-level retry, maxDuration: PT6S / interval: PT2S
+#   retry-new-execution-task-attempts   the same two policies on the TASK, which is a
+#   retry-new-execution-task-duration   different Kestra method reading the same metadata
+#
+# Each was right on every field but `spawned` and each now reproduces the chain
+# the artifact ran: three executions, the first two `RETRIED` with a replay
+# hanging off `parentId`, the third `FAILED` with none. What was missing was
+# never the link column -- 0138 gave it that -- but the two facts that END a
+# chain, `execution.getMetadata()`'s `attemptNumber` and `originalCreatedDate`.
+# `advance()` read them as the constants `(1, Tick(0))`, which is true of the
+# first execution of a chain and false of every replay, so nothing could ever
+# refuse the fourth. Migration 0139 stores them, `ExecutionState::metadata`
+# carries them, and `worker::replay` creates the execution.
+#
+# The `spawned` hole is 34 of 41, not 38: these four leave it and no other
+# entry did. `valids/retry-flowable-parallel` is the fifth entry the Task 7
+# block above groups with them and it stays held -- but it is NOT a fifth
+# `CREATE_NEW_EXECUTION` flow: its `retry:` is a bare `type: constant` on a
+# `Loop`, which is the default `RETRY_FAILED_TASK` behaviour, and what holds it
+# is the `Loop`. Exactly four of the 345 corpus flows write
+# `CREATE_NEW_EXECUTION` and all four are banked here, so the residual
+# baseline's row for the construct is REMOVED rather than lowered -- the rule
+# `disabled: true` and `runIf:` were removed under.
+#
+# Nothing in the corpus puts a `CREATE_NEW_EXECUTION` retry inside a `Loop`,
+# and `worker::replay` refuses that combination anyway: measured on the pinned
+# artifact, Kestra cannot replay a loop sub-execution either -- it throws
+# `Can't find taskrun with taskrunId ...` (the LOOP run's, which lives in the
+# parent execution) and the sub-execution ends FAILED with no child.
 invalids/dag-invalid-subtask
 invalids/inputs-bad-validator-syntax
 invalids/inputs-with-multiple-constraint-violations
@@ -249,15 +329,12 @@ valids/finally-sequential
 valids/finally-sequential-error
 valids/finally-sequential-error-first
 valids/flow-concurrency-cancel-pause
-valids/flow-concurrency-parallel-subflow-kill
-valids/flow-concurrency-parallel-subflow-kill-child
 valids/flow-concurrency-queue-after-execution
 valids/flow-concurrency-queue-killed-after-execution
 valids/flow-concurrency-queue-pause
 valids/flow-concurrency-sla-assert-cancel
 valids/flow-concurrency-sla-fail-child
 valids/flow-concurrency-sla-fail-parent
-valids/flow-concurrency-subflow
 valids/flow-trigger-paused-flow
 valids/flow-with-array-outputs
 valids/flow-with-outputs-failed
@@ -278,7 +355,6 @@ valids/loop-outputs-failed-render
 valids/loop-outputs-store
 valids/loop-until-restart
 valids/loop-values-from-uri
-valids/loop-with-subflow
 valids/loopuntil-failed-flowable
 valids/npe-labels-update-task
 valids/output-values
@@ -307,10 +383,6 @@ valids/restart-with-after-execution
 valids/restart-with-finally
 valids/retry-failed-flow-duration
 valids/retry-flowable-parallel
-valids/retry-new-execution-flow-attempts
-valids/retry-new-execution-flow-duration
-valids/retry-new-execution-task-attempts
-valids/retry-new-execution-task-duration
 valids/retry-subflow
 valids/retry-success
 valids/retry-with-flowable-errors
@@ -322,12 +394,6 @@ valids/sla-parent-flow
 valids/sla-subflow
 valids/sleep-long
 valids/sleep-long-after-execution-flowable
-valids/subflow-child
-valids/subflow-inherited-labels-parent
-valids/subflow-nullable-input-parent
-valids/subflow-parent
-valids/subflow-parent-no-wait
-valids/subflow-parent-of-failed
 valids/subflow-parent-retry
 valids/subflow-secret-output-child
 valids/subflow-secret-output-parent
@@ -337,8 +403,6 @@ valids/task-allow-failure-runnable
 valids/task-allow-warning-executable-flow
 valids/task-allow-warning-flowable
 valids/task-allow-warning-runnable
-valids/task-flow
-valids/task-flow-inherited-labels
 valids/task-runif
 valids/task-runif-executionupdating
 valids/task-runif-taskswithstate

@@ -1323,8 +1323,10 @@ async fn a_loop_over_two_values_spawns_two_sub_executions_ordered_by_index(pool:
         "both iterations are written in ONE transaction, so the creation \
          instant is identical and cannot order them -- ordering `spawned` by \
          the instant is not unstable, it is undefined. `loop_index` is the \
-         only thing that orders these, which is why migration 0135 makes two \
-         iterations sharing one index unrepresentable."
+         only thing that orders these, which is why \
+         `workflow_executions_loop_run_idx` makes two iterations sharing one \
+         index unrepresentable. Migration 0135 created that index; migration \
+         0138 owns it now -- same name, plus `NULLS NOT DISTINCT`."
     );
 
     // And each sub-execution really runs the loop's body, in its own right.
@@ -2746,5 +2748,3329 @@ async fn one_result_per_transaction_is_the_ruling_and_this_is_the_step_it_costs(
     assert_ne!(
         ended1, ended3,
         "two siblings finished in one tick must not share a step: the step IS          the happens-before endpoint, and a shared one is exactly what a batched          transaction produces"
+    );
+}
+
+// --------------------------------------------------------------------------
+// W6 Task 2: the three kinds of child execution, and the CHECKs that make
+// every other combination unrepresentable
+// --------------------------------------------------------------------------
+
+/// Every column of `workflow.executions` that can link one execution to
+/// another, as one value, so a test can name a combination instead of writing
+/// an INSERT for it.
+///
+/// `Default` is a TOP-LEVEL execution -- no link of either kind -- and each
+/// test sets only the fields whose combination it is about.
+#[derive(Default, Clone, Copy)]
+struct Link {
+    /// Supplied only by the self-link cases, which need to know the id before
+    /// the row exists. `None` lets the column default.
+    id: Option<Uuid>,
+    parent: Option<Uuid>,
+    parent_run_ix: Option<i32>,
+    loop_index: Option<i32>,
+    loop_value: Option<&'static str>,
+    trigger: Option<Uuid>,
+    trigger_run_ix: Option<i32>,
+}
+
+/// Insert one execution with exactly `link`'s columns set, returning the
+/// database's own answer.
+///
+/// **Deliberately not `start_execution`.** The point of these tests is what the
+/// SCHEMA refuses, so the statement has to be able to express the illegal
+/// combinations -- a writer that cannot spell one cannot prove the database
+/// refuses it.
+async fn insert_linked(pool: &sqlx::PgPool, ws: Uuid, link: Link) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO workflow.executions \
+           (id, workspace_id, namespace, flow_key, source, state, history, \
+            parent_execution_id, parent_run_ix, loop_index, loop_value, \
+            trigger_execution_id, trigger_run_ix) \
+         VALUES (COALESCE($1, gen_random_uuid()), $2, 't', 'f', 'src', \
+                 'CREATED', '[\"CREATED\"]'::jsonb, $3, $4, $5, $6, $7, $8) \
+         RETURNING id",
+    )
+    .bind(link.id)
+    .bind(ws)
+    .bind(link.parent)
+    .bind(link.parent_run_ix)
+    .bind(link.loop_index)
+    .bind(link.loop_value)
+    .bind(link.trigger)
+    .bind(link.trigger_run_ix)
+    .fetch_one(pool)
+    .await
+}
+
+/// The name of the constraint that refused a write.
+///
+/// **The name is the assertion, not the fact that something failed.** A test
+/// that asserted only `is_err()` would keep passing if the CHECK were dropped
+/// and a NOT NULL, a foreign key or a unique index happened to refuse the same
+/// row for a different reason -- and it would keep passing if the constraint
+/// were renamed out from under it, which is the case migration 0138 itself
+/// creates by renaming 0135's.
+fn refusing_constraint(e: &sqlx::Error) -> String {
+    let db = e
+        .as_database_error()
+        .unwrap_or_else(|| panic!("expected a database error, got {e}"));
+    db.constraint()
+        .unwrap_or_else(|| panic!("the database refused the row without naming a constraint: {e}"))
+        .to_string()
+}
+
+/// Seed a workspace and one top-level execution to hang children off.
+async fn seed_root(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
+    let (_db, ws) = seed(pool).await;
+    let root = insert_linked(pool, ws, Link::default())
+        .await
+        .expect("a top-level execution has no link of either kind");
+    (ws, root)
+}
+
+/// **All three kinds of child execution are representable, and this is the
+/// positive control for the test below.**
+///
+/// Measured on the pinned artifact (`oracle-exec/traces.json`), Kestra makes
+/// three distinct things and links them two different ways:
+///
+/// | kind | `parentId` | loop index | the link it is found by |
+/// |---|---|---|---|
+/// | loop iteration | set | set | `parent_execution_id` |
+/// | `CREATE_NEW_EXECUTION` replay | set | **absent** | `parent_execution_id` |
+/// | subflow child | **NULL** | absent | `trigger_execution_id` |
+///
+/// Before migration 0138 the middle row was **unrepresentable** -- 0135's
+/// `workflow_executions_loop_run_all_or_nothing` required all four loop
+/// columns or none -- and the bottom row had no column to be written into at
+/// all. A test that only listed refusals could not tell "the CHECK is right"
+/// from "the CHECK forbids everything", so this one exists to be the other
+/// half of that pair.
+///
+/// The fourth row is W6 Task 6's `Flow` trigger, which is caused by an
+/// execution reaching a state and by no particular taskrun: it is here because
+/// the schema must already admit it, not because anything writes it yet.
+#[sqlx::test(migrations = "../../migrations")]
+async fn all_three_kinds_of_child_execution_are_representable(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+
+    for (kind, link) in [
+        (
+            "loop iteration",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        ),
+        (
+            "CREATE_NEW_EXECUTION replay",
+            Link {
+                parent: Some(root),
+                ..Link::default()
+            },
+        ),
+        (
+            "subflow child",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        ),
+        (
+            "flow-trigger-fired execution (W6 Task 6)",
+            Link {
+                trigger: Some(root),
+                ..Link::default()
+            },
+        ),
+    ] {
+        insert_linked(&pool, ws, link)
+            .await
+            .unwrap_or_else(|e| panic!("{kind} must be representable, and was refused: {e}"));
+    }
+}
+
+/// **Every wrong combination is refused, and by the constraint that is named
+/// here.**
+///
+/// This programme's rule is *unrepresentable beats unforgettable*: a writer
+/// that forgets one of these returns 200, it does not fail. Migration 0135's
+/// own comment says the same thing about the constraint 0138 replaces.
+///
+/// **The row that matters most is `both links at once`.**
+/// `oracle-exec/driver.rs` builds the oracle's `spawned` field with
+/// `WHERE parent_execution_id = $1`, and all 41 golden `spawned`-carrying
+/// entries have **zero** `Subflow` children. A subflow child that also carried
+/// a `parent_execution_id` would appear in egret's trace and turn the entries
+/// W6 exists to bank into `spawned` mismatches --
+/// `a_subflow_child_is_invisible_to_the_query_that_builds_spawned` in
+/// `oracle-exec/driver.rs` is the other end of that guarantee.
+#[sqlx::test(migrations = "../../migrations")]
+async fn every_wrong_child_link_is_refused_by_a_named_constraint(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    // Chosen by this test rather than by the database, because a self-link has
+    // to be written into the same row it names.
+    let mine = Uuid::new_v4();
+
+    let cases: Vec<(&str, Link, &str)> = vec![
+        (
+            "a loop index with no parent",
+            Link {
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a parent and a run, but no index -- 0135's real target, still refused",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a loop iteration with no value",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "a loop iteration that does not say which run spawned it",
+            Link {
+                parent: Some(root),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_loop_run_whole_or_absent",
+        ),
+        (
+            "BOTH links at once -- a subflow child that would appear in `spawned`",
+            Link {
+                parent: Some(root),
+                trigger: Some(root),
+                ..Link::default()
+            },
+            "workflow_executions_one_link_kind",
+        ),
+        (
+            "a trigger run ordinal into an execution that is not named",
+            Link {
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_trigger_run_needs_its_execution",
+        ),
+        (
+            "an execution that is its own parent",
+            Link {
+                id: Some(mine),
+                parent: Some(mine),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_no_self_link",
+        ),
+        (
+            "an execution that triggered itself",
+            Link {
+                id: Some(mine),
+                trigger: Some(mine),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+            "workflow_executions_no_self_link",
+        ),
+    ];
+
+    for (what, link, constraint) in cases {
+        let err = insert_linked(&pool, ws, link)
+            .await
+            .err()
+            .unwrap_or_else(|| {
+                panic!("the database ACCEPTED {what}, which must be unrepresentable")
+            });
+        assert_eq!(
+            refusing_constraint(&err),
+            constraint,
+            "{what} must be refused by {constraint}"
+        );
+    }
+}
+
+/// **One replay child per parent, and the collision is unrepresentable rather
+/// than merely undetected.**
+///
+/// 0135's argument, restated for a key that can now hold NULLs: two children of
+/// one parent that sort equal make the `spawned` order undetermined, which is
+/// what `oracle-exec/normalise.py` has to BAIL on, because the creation instant
+/// carries no information at all -- every sub-execution of one batch is written
+/// in one transaction and shares `now()`. A replay child's `parent_run_ix` and
+/// `loop_index` are both NULL, so under Postgres's default NULLS DISTINCT rule
+/// any number of them could hang off one parent and tie under
+/// `ORDER BY parent_run_ix, loop_index`. 0138 adds `NULLS NOT DISTINCT`.
+///
+/// **One per parent is the artifact's behaviour, measured.** Over the 710
+/// descendants in `oracle-exec/traces.json`, 40 carry a NULL `loopIndex` (the
+/// four `valids/retry-new-execution-*` flows, two deep, five rounds) and no
+/// parent has more than one of them: Kestra CHAINS a `CREATE_NEW_EXECUTION`
+/// retry rather than fanning it out.
+///
+/// **Both positive controls are here because a unique index is exactly the kind
+/// of guard that is easy to make too strong.** Two loop iterations of one run
+/// are legal, and so are two subflow children of ONE run -- a `Subflow` task may
+/// carry its own `retry:`, and each attempt starts a new child
+/// (`valids/subflow-parent-retry` declares two of them at `maxAttempts: 3`),
+/// which is why `workflow_executions_trigger_idx` is NOT unique.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_parent_may_have_one_replay_child_but_never_two(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+
+    let replay = Link {
+        parent: Some(root),
+        ..Link::default()
+    };
+    insert_linked(&pool, ws, replay)
+        .await
+        .expect("the first replay child");
+    let err = insert_linked(&pool, ws, replay)
+        .await
+        .expect_err("a SECOND replay child of the same parent must be unrepresentable");
+    assert_eq!(
+        refusing_constraint(&err),
+        "workflow_executions_loop_run_idx",
+        "two replay children of one parent tie under `ORDER BY parent_run_ix, \
+         loop_index` and would be ordered by nothing"
+    );
+
+    for index in 0..2 {
+        insert_linked(
+            &pool,
+            ws,
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(index),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("loop iteration {index} of one run must stay legal: {e}"));
+    }
+
+    for attempt in 0..2 {
+        insert_linked(
+            &pool,
+            ws,
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("attempt {attempt} of ONE retried `Subflow` run must stay legal: {e}")
+        });
+    }
+}
+
+/// **A subflow child is not part of its parent's record, and the foreign key
+/// says so.**
+///
+/// 0135 made `parent_execution_id` `ON DELETE CASCADE` because a loop
+/// sub-execution *is* a part of its parent -- it has no flow of its own and no
+/// meaning without the iteration that made it. A subflow child is the opposite:
+/// a full execution of a DIFFERENT flow, with its own row in the executions
+/// list. So `trigger_execution_id` takes no `ON DELETE` action at all, and this
+/// test is what that decision costs and what it buys.
+///
+/// **The cost is a refusal, and the refusal is deliberate.** Nothing in `src/`
+/// deletes an execution row today, so NO ACTION refuses a case that does not
+/// arise rather than guessing at it; `ON DELETE SET NULL` was not available as
+/// an alternative, because it would null the execution and leave
+/// `trigger_run_ix` set, which
+/// `workflow_executions_trigger_run_needs_its_execution` forbids -- the delete
+/// would then fail anyway, with a constraint error naming the wrong thing.
+///
+/// **The workspace cascade is the half that had to be measured**, because a NO
+/// ACTION self-reference could have made deleting a workspace impossible.
+/// It does not: parent and child go in one statement, and the referential check
+/// runs after it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_childs_parent_cannot_be_deleted_alone_but_the_workspace_cascade_takes_both(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    let child = insert_linked(
+        &pool,
+        ws,
+        Link {
+            trigger: Some(root),
+            trigger_run_ix: Some(0),
+            ..Link::default()
+        },
+    )
+    .await
+    .expect("a subflow child");
+
+    let err = sqlx::query("DELETE FROM workflow.executions WHERE id = $1")
+        .bind(root)
+        .execute(&pool)
+        .await
+        .expect_err("deleting an execution a subflow child still names must be refused");
+    assert_eq!(
+        refusing_constraint(&err),
+        "workflow_executions_trigger_same_workspace",
+        "the child must outlive nothing here silently: the refusal has to name \
+         the link, not some later CHECK"
+    );
+    let alive: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions WHERE id = $1")
+        .bind(child)
+        .fetch_one(&pool)
+        .await
+        .expect("count the child");
+    assert_eq!(alive, 1, "and nothing was deleted");
+
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .expect("deleting the workspace must still cascade through both links");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count what is left");
+    assert_eq!(left, 0, "the cascade removed the parent AND the child");
+}
+
+/// **Neither link may cross a workspace boundary.**
+///
+/// `parent_execution_id` (0135) and `trigger_execution_id` are id columns whose
+/// single-column foreign key checked only that the row EXISTS -- never whose it
+/// was. This repository has already paid for that shape once: five columns of
+/// exactly this kind, one of which (`chart_id`) allowed a cross-workspace read,
+/// patched only after it shipped.
+///
+/// 0138 replaces both foreign keys with composite ones carrying `workspace_id`,
+/// so a child can only name a row in its OWN workspace. **Both columns, not
+/// just the new one** -- closing it for `trigger_execution_id` alone would leave
+/// a guard that reads as complete and is not, the same reason
+/// `workflow_executions_no_self_link` closes 0135's hole as well as this
+/// migration's.
+///
+/// The same-workspace inserts are the positive control: a composite key that
+/// refused everything would look identical here to one that refuses the right
+/// thing. A nonexistent parent is checked too, because replacing a foreign key
+/// is a chance to lose plain referential integrity while gaining the scoping.
+#[sqlx::test(migrations = "../../migrations")]
+async fn neither_child_link_may_cross_a_workspace_boundary(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (ws, root) = seed_root(&pool).await;
+    let (_db, other) = seed(&pool).await;
+
+    for (kind, link) in [
+        (
+            "a loop iteration in the parent's own workspace",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(0),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+        ),
+        (
+            "a subflow child in the trigger's own workspace",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(0),
+                ..Link::default()
+            },
+        ),
+    ] {
+        insert_linked(&pool, ws, link)
+            .await
+            .unwrap_or_else(|e| panic!("{kind} must stay legal, and was refused: {e}"));
+    }
+
+    let cases: Vec<(&str, Link, &str)> = vec![
+        (
+            "a loop iteration whose parent is in ANOTHER workspace",
+            Link {
+                parent: Some(root),
+                parent_run_ix: Some(0),
+                loop_index: Some(1),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+        (
+            "a replay whose parent is in ANOTHER workspace",
+            Link {
+                parent: Some(root),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+        (
+            "a subflow child whose trigger is in ANOTHER workspace",
+            Link {
+                trigger: Some(root),
+                trigger_run_ix: Some(1),
+                ..Link::default()
+            },
+            "workflow_executions_trigger_same_workspace",
+        ),
+        (
+            "a parent that does not exist at all -- the scoping must not have \
+             cost plain referential integrity",
+            Link {
+                parent: Some(Uuid::new_v4()),
+                parent_run_ix: Some(0),
+                loop_index: Some(2),
+                loop_value: Some("a"),
+                ..Link::default()
+            },
+            "workflow_executions_parent_same_workspace",
+        ),
+    ];
+
+    for (what, link, constraint) in cases {
+        // `other` is the child's workspace; `root` lives in `ws`.
+        let err = insert_linked(&pool, other, link)
+            .await
+            .expect_err("a cross-workspace link must be unrepresentable");
+        assert_eq!(
+            refusing_constraint(&err),
+            constraint,
+            "{what} must be refused by {constraint}"
+        );
+    }
+}
+
+/// **A replay does not inherit the outputs of the execution it replays, and a
+/// loop iteration still does.**
+///
+/// `render::Surface::load` walks the `parent_execution_id` chain and copies
+/// every ancestor's terminated outputs into `inherited`. Until migration 0138
+/// that was unconditionally right: 0135's CHECK made a row with a parent and no
+/// loop index unrepresentable, so every parent link was a loop iteration's.
+/// 0138 admits the `CREATE_NEW_EXECUTION` replay, and a replay is a NEW
+/// execution of the same flow -- it must not read `{{ outputs.<task> }}` off the
+/// attempt it is replacing.
+///
+/// **The asymmetry is the reason this is guarded rather than merely written
+/// down.** The other consumer of the same widened invariant,
+/// `oracle-exec/driver.rs`'s `spawned` decode, would PANIC on a replay row and
+/// announce itself. This one would have rendered a value from a failed previous
+/// run and taken the other branch, in silence.
+///
+/// **Both halves hang off ONE parent execution with ONE terminated `before`
+/// run**, so the only difference between them is the kind of link -- a control
+/// that a second fixture could not give.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_does_not_inherit_outputs_but_a_loop_iteration_still_does(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    let parent = r#"id: inherit-parent
+namespace: t
+tasks:
+  - id: before
+    type: io.kestra.plugin.core.debug.Return
+    format: parent-output
+  - id: loop
+    type: io.kestra.plugin.core.flow.Loop
+    values: '["x"]'
+    tasks:
+      - id: item
+        type: io.kestra.plugin.core.debug.Return
+        format: "{{ outputs.before.value }}"
+"#;
+    let ex = start_execution(&pool, ws, None, parent, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let sub: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+           AND loop_index IS NOT NULL",
+    )
+    .bind(ex)
+    .fetch_one(&pool)
+    .await
+    .expect("the loop spawned exactly one sub-execution");
+    assert_eq!(
+        (
+            run_state(&pool, sub, "item").await,
+            run_outputs(&pool, sub, "item").await
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some(serde_json::json!({"value": "parent-output"}))
+        ),
+        "the positive control: a LOOP iteration reads its parent's outputs, \
+         which is `valids/loop-expression-context`'s whole shape and is what \
+         `inherited` exists for"
+    );
+
+    // The replay. Two tasks, because `start_execution` settles once itself and
+    // the run that reads the parent must not exist until the link is set:
+    // `reads` is created only when `gate` finishes, which is after the UPDATE.
+    let replayed = r#"id: inherit-replay
+namespace: t
+tasks:
+  - id: gate
+    type: io.kestra.plugin.core.log.Log
+    message: hi
+  - id: reads
+    type: io.kestra.plugin.core.debug.Return
+    format: "{{ outputs.before.value }}"
+"#;
+    let child = start_execution(&pool, ws, None, replayed, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    assert!(
+        run_state(&pool, child, "reads").await.is_none(),
+        "the run that reads the parent must not exist yet, or it was rendered \
+         before the link was set and this test would pass for the wrong reason"
+    );
+    // Written by hand because nothing spawns a replay yet -- W6 Task 4 does.
+    sqlx::query("UPDATE workflow.executions SET parent_execution_id = $1 WHERE id = $2")
+        .bind(ex)
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("link the child as a replay: a parent, and no loop columns");
+
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        (
+            run_state(&pool, child, "reads").await,
+            run_outputs(&pool, child, "reads").await
+        ),
+        (Some("FAILED".to_string()), None),
+        "a replay must NOT see `before`'s output. The same expression, over the \
+         same parent, SUCCEEDED for the loop iteration above -- so a failure \
+         here is the link kind and nothing else. Rendering it would have \
+         produced a value from the attempt this execution replaces, with no \
+         error anywhere"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W6 Task 3: `Subflow`
+//
+// The oracle compares the PARENT's trace and nothing else -- a subflow child is
+// linked by `trigger_execution_id` and is deliberately invisible to the
+// `spawned` query that builds it (`driver::read_trace_inner`, migration 0138).
+// So everything about the child, the link and the failure paths is this file's
+// to assert or it is asserted nowhere.
+// ---------------------------------------------------------------------------
+
+/// File one flow into `workflow.flows` through the product's own create path,
+/// so a `(namespace, flowId)` pair has something to resolve against.
+///
+/// `FlowRepo::create` and not an INSERT, for `driver::publish_corpus`'s reason:
+/// the resolver reads the same table the product writes, and a fixture that
+/// wrote the row itself could keep passing after that stopped being true.
+///
+/// It is deliberately NOT published to a live version. W6 Task 1 measured why
+/// that has to work: only 16 of the corpus's 345 flows reach one, so a resolver
+/// reading `flow_versions` would resolve 2 of the 20 `Subflow` targets. See
+/// `worker::subflow::resolve`.
+async fn file_flow(db: &Db, ws: Uuid, by: egret_core::UserId, source: &str) -> Uuid {
+    let flow = egret_workflow::spec::parse(source).expect("the fixture flow parses");
+    let input = egret_workflow::CreateFlowInput {
+        namespace: flow.namespace.clone(),
+        flow_id: flow.id.clone(),
+        source: source.to_string(),
+        plan: serde_json::to_value(&flow).expect("a parsed flow serialises"),
+        folder_id: None,
+    };
+    egret_workflow::FlowRepo::new(db.clone())
+        .create(ws, by, &input)
+        .await
+        .expect("file the flow")
+        .id
+}
+
+/// One subflow child as [`children_by_trigger`] reads it:
+/// `(id, trigger_run_ix, parent_execution_id, flow_key, state)`.
+///
+/// A named alias rather than the tuple inline, because the tuple is five wide
+/// and clippy's `type_complexity` is right that a reader cannot tell the two
+/// `Option`s apart at the call site. The two that matter are the middle pair —
+/// the link this task is about, present and absent.
+type SubflowChild = (Uuid, Option<i32>, Option<Uuid>, String, String);
+
+/// One row of the cycle guard's chain walk:
+/// `(execution id, flow_key, execution state, run state, run message)`.
+type ChainRow = (Uuid, String, String, Option<String>, Option<String>);
+
+/// Every execution linked to `parent` as a **subflow child**, with the columns
+/// that say which kind of child it is.
+async fn children_by_trigger(pool: &sqlx::PgPool, parent: Uuid) -> Vec<SubflowChild> {
+    sqlx::query_as(
+        "SELECT id, trigger_run_ix, parent_execution_id, flow_key, state \
+           FROM workflow.executions \
+          WHERE trigger_execution_id = $1 \
+          ORDER BY created_at, id",
+    )
+    .bind(parent)
+    .fetch_all(pool)
+    .await
+    .expect("read subflow children")
+}
+
+async fn run_history(pool: &sqlx::PgPool, execution: Uuid, task_id: &str) -> serde_json::Value {
+    sqlx::query_scalar(
+        "SELECT history FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read run history")
+}
+
+async fn attempt_histories(
+    pool: &sqlx::PgPool,
+    execution: Uuid,
+    task_id: &str,
+) -> Vec<serde_json::Value> {
+    let attempts: serde_json::Value = sqlx::query_scalar(
+        "SELECT attempts FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+    )
+    .bind(execution)
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .expect("read attempts");
+    attempts
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|x| x.get("history").cloned().unwrap_or(serde_json::Value::Null))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn subflow_parent(id: &str, target: &str, extra: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: sub\n    \
+         type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+         flowId: {target}\n{extra}  - id: after\n    \
+         type: io.kestra.plugin.core.log.Log\n    message: after\n"
+    )
+}
+
+/// **The link is `trigger_execution_id`, the parent run never passes through
+/// `SUBMITTED`, and the child is invisible to the query that builds `spawned`.**
+///
+/// All three at once, because they are one decision seen from three sides, and
+/// because each alone would pass against a different wrong implementation: a
+/// child linked by `parent_execution_id` would still make the parent SUCCEED,
+/// and a `Subflow` planned an opaque `Runnable` would still create a child if
+/// its handler did.
+///
+/// The artifact's own answer, measured on the pinned digest with
+/// `io.kestra.tests/subflow-parent`: the parent run is
+/// `CREATED RUNNING SUCCESS`, the child's `parentId` is **null**, its `trigger`
+/// is `{"type": "io.kestra.plugin.core.flow.Subflow", "variables":
+/// {"executionId": …, "taskRunId": …}}`, and
+/// `SELECT id FROM executions WHERE parent_id = <parent>` returns nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("child")).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // **The load-bearing assertion, and it is first on purpose.** It is asked
+    // WITHOUT going through the trigger columns -- the child is found by the
+    // flow it runs -- so a child linked the wrong way is still found here and
+    // this assertion is the one that fails, rather than a lookup that quietly
+    // returns nothing three lines earlier.
+    let ran: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM workflow.executions \
+          WHERE flow_key = 'child' AND id <> $1 ORDER BY created_at, id",
+    )
+    .bind(parent)
+    .fetch_all(&pool)
+    .await
+    .expect("find the child by the flow it runs");
+    assert_eq!(
+        ran.len(),
+        1,
+        "exactly one execution of the target flow, however it is linked: {ran:?}"
+    );
+    let child = ran[0].0;
+
+    // The query `driver::read_trace_inner` builds `spawned` from, verbatim.
+    // All 41 golden `spawned`-carrying entries have zero `Subflow` children, so
+    // a child this finds turns every entry W6 banks into a `spawned` mismatch.
+    let spawned: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions WHERE parent_execution_id = $1 \
+          ORDER BY parent_run_ix, loop_index",
+    )
+    .bind(parent)
+    .fetch_all(&pool)
+    .await
+    .expect("read the spawned query");
+    assert_eq!(
+        spawned,
+        Vec::<Uuid>::new(),
+        "the child is {child}, and the `spawned` query must not see it: all 41 \
+         golden `spawned`-carrying entries have ZERO Subflow children, so a \
+         child reachable this way turns every entry W6 Task 3 banks into a \
+         `spawned` mismatch"
+    );
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "exactly one child, and it exists: {kids:?}");
+    let (by_trigger, run_ix, parent_link, flow_key, child_state) = kids[0].clone();
+    assert_eq!(
+        (
+            by_trigger,
+            run_ix,
+            parent_link,
+            flow_key.as_str(),
+            child_state.as_str()
+        ),
+        (child, Some(0), None, "child", "SUCCESS"),
+        "the child names the parent's run 0 through `trigger_run_ix`, carries NO \
+         `parent_execution_id` (migration 0138's \
+         `workflow_executions_one_link_kind` makes carrying both \
+         unrepresentable), runs the TARGET flow rather than the parent's, and \
+         reaches a terminal of its own"
+    );
+
+    assert_eq!(
+        run_history(&pool, parent, "sub").await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "no SUBMITTED. That is the measurement W6 opened src/executor/ for -- \
+         `no_subflow_run_in_the_golden_passes_through_submitted` derives the \
+         Kestra side of it over all 24 executed `Subflow` runs in the golden"
+    );
+    assert_eq!(
+        run_outputs(&pool, parent, "sub").await,
+        Some(serde_json::json!({
+            "executionId": child.to_string(),
+            "state": "SUCCESS",
+            "outputs": {},
+        })),
+        "what the parent sees of its child. Measured on the artifact with \
+         `egret.probe/probe-outputs-parent`, which printed `eid=… state=SUCCESS \
+         o1=hello`; `outputs` is the empty map here because nothing in egret \
+         evaluates a flow-level `outputs:` block"
+    );
+    assert_eq!(
+        run_state(&pool, parent, "after").await,
+        Some("SUCCESS".to_string()),
+        "and the successor runs, so the parent really did wait rather than \
+         merely record a terminal"
+    );
+}
+
+/// **A target that does not resolve fails the RUN, not the flow, and creates no
+/// child.**
+///
+/// Measured on the artifact (`egret.probe/probe-unresolvable`): Kestra
+/// published the flow with **200**, executing it left the `Subflow` run FAILED,
+/// the successor never ran, the execution FAILED, and no child existed.
+///
+/// **The decision is what agrees; one shape does not, and it is unreachable.**
+/// Kestra's run reads `["CREATED","FAILED"]` with an attempt of `["FAILED"]` --
+/// no `RUNNING`, because it never gets as far as building the
+/// `SubflowExecution`. egret emits `StartRun` in the same round as the spawn
+/// request (`Command::SpawnSubflow` says why it cannot be emitted alone), so it
+/// reads `["CREATED","RUNNING","FAILED"]`. Asserted here rather than left as
+/// prose, so the divergence is a thing a reader can see and a change to it
+/// fails a test. `the_only_unresolvable_subflow_target_in_the_corpus_is_skipped`
+/// is why no golden entry can tell.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_that_does_not_resolve_fails_the_run_and_creates_no_child(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, _user) = common::seed_workspace(&db).await;
+    // Nothing is filed. The flow still STARTS -- a `build_plan` that refused it
+    // would turn `valids/task-runif` from `runs` into `refused`.
+    let source = subflow_parent("parent", "nobody-holds-this", "");
+    assert!(
+        egret_workflow::executor::build_plan(&source).is_ok(),
+        "the plan must not refuse a flow for an unresolvable target: nothing at \
+         plan time can know what `workflow.flows` holds, and Kestra published \
+         the same flow with 200"
+    );
+    let parent = start_execution(&pool, ws, None, &source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        children_by_trigger(&pool, parent).await.len(),
+        0,
+        "no child may be created for a target that does not resolve"
+    );
+    assert_eq!(
+        (
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+            run_state(&pool, parent, "after").await,
+            execution_history(&pool, parent).await,
+        ),
+        (
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'nobody-holds-this'".to_string()),
+            None,
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        ),
+        "the run fails carrying the reason, the successor is never created, and \
+         the execution takes the failure -- which is what the artifact did"
+    );
+    assert_eq!(
+        (
+            run_history(&pool, parent, "sub").await,
+            attempt_histories(&pool, parent, "sub").await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+            vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+        ),
+        "THE KNOWN DIVERGENCE, pinned rather than described: the artifact reads \
+         `[CREATED, FAILED]` with an attempt of `[FAILED]`. egret has already \
+         started the run by the time the lookup happens. No golden entry \
+         reaches this"
+    );
+}
+
+/// **A `Subflow` target in ANOTHER workspace does not resolve.**
+///
+/// `FlowRepo::find_by_name` -- what `publish` resolves a `RefKind::Subflow`
+/// through -- is deliberately unscoped, and its own doc records why it cannot
+/// be: `WorkflowRefPort::workspace_of` carries no caller-workspace parameter.
+/// **This caller has one**, on `ExecutionCtx`, so `worker::subflow::resolve`
+/// uses it.
+///
+/// The test is written so that the ONLY difference from the passing case is the
+/// workspace: the same namespace, the same flow id, the same source.
+///
+/// **This test IS the defence, because there is no other one.** The doc here
+/// used to add *"and migration 0138's composite foreign key would then refuse
+/// the child row"* — the same false sentence `worker::subflow::resolve` carried,
+/// found by the same sweep and corrected in the same commit. It would not:
+/// `executions_flow_id_fkey` is one column with no workspace half, and dropping
+/// the `workspace_id = $1` predicate makes this test report
+/// `(1, Some("SUCCESS"), None)` — the other tenant's flow read AND executed,
+/// refused by nothing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (theirs, their_user) = common::seed_workspace(&db).await;
+    let (ours, _our_user) = common::seed_workspace(&db).await;
+    file_flow(&db, theirs, their_user, &one_task("child")).await;
+
+    let parent = start_execution(
+        &pool,
+        ours,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a flow that exists in another workspace must be as invisible as one \
+         that does not exist at all. The SAME source, filed into THIS workspace, \
+         is what `a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id` \
+         runs, so a failure here is the scoping and nothing else"
+    );
+}
+
+/// **`wait: false` does not wait, and what the parent sees is the child's state
+/// at SPAWN time.**
+///
+/// Measured on the artifact: `egret.probe/probe-nowait-parent`'s successor
+/// printed `raw={"state":"CREATED","executionId":"61J0wKdkpWSS8MUTSfOPd8"}` --
+/// no `outputs` key, and `CREATED` rather than the `SUCCESS` the child reached a
+/// moment later. `valids/subflow-parent-no-wait` is the golden entry, and it is
+/// one of the 12 W6 Task 3 banks.
+///
+/// **The child still runs**, which is the half a `wait: false` implemented as
+/// "do nothing" would also pass. So both are asserted.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_that_does_not_wait_records_the_childs_state_at_spawn_and_still_runs_it(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // A child that FAILS, so "did not wait" and "waited and transmitted" cannot
+    // both produce SUCCESS: a parent that waited would take the failure.
+    let child_src = "id: child\nnamespace: t\ntasks:\n  - id: boom\n    \
+                     type: io.kestra.plugin.core.execution.Fail\n";
+    file_flow(&db, ws, user, child_src).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", "    wait: false\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "the child is still created and driven");
+    let (child, _, _, _, child_state) = kids[0].clone();
+    assert_eq!(
+        (
+            child_state.as_str(),
+            run_state(&pool, parent, "sub").await,
+            run_history(&pool, parent, "sub").await,
+            run_outputs(&pool, parent, "sub").await,
+            run_state(&pool, parent, "after").await,
+        ),
+        (
+            "FAILED",
+            Some("SUCCESS".to_string()),
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            Some(serde_json::json!({
+                "executionId": child.to_string(),
+                "state": "CREATED",
+            })),
+            Some("SUCCESS".to_string()),
+        ),
+        "the child really ran and really FAILED; the parent's run SUCCEEDED \
+         anyway, records `CREATED` for it, carries NO `outputs` key, and its \
+         successor ran. A `wait: false` that reported the child's terminal would \
+         fail this on three of the five"
+    );
+
+    // ---- the positive control for the `!sub.wait` guard itself -------------
+    //
+    // **The case above does not need that guard**, and that was measured
+    // rather than assumed: mutation M5a (delete the `!sub.wait` early return in
+    // `on_child_terminal`) leaves it GREEN, because the child above needs a
+    // worker tick to fail, by which time the parent's run is already terminal
+    // and the *already-decided* guard one line below catches it instead. Two
+    // guards, one observable behaviour — the shape W4 warned reads identical to
+    // a weak guard in a mutation table.
+    //
+    // This child terminates INSIDE `spawn_one`'s own settle: its only task has
+    // an unrenderable `runIf:`, which `render::render_run_if` fails without a
+    // handler (the shape `valids/task-runif`'s `willfailedtheflow` has —
+    // `[CREATED, FAILED]` with no attempt). So `on_child_terminal` fires while
+    // the parent's run is still RUNNING, the already-decided guard cannot
+    // apply, and `!sub.wait` is the only thing between a `wait: false` parent
+    // and its child's FAILED.
+    let instant = "id: child-instant\nnamespace: t\ntasks:\n  - id: x\n    \
+                   type: io.kestra.plugin.core.log.Log\n    \
+                   runIf: \"{{ outputs.notexists == 2 }}\"\n    message: hi\n";
+    file_flow(&db, ws, user, instant).await;
+    let fast = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent-fast", "child-instant", "    wait: false\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let fast_kids = children_by_trigger(&pool, fast).await;
+    assert_eq!(
+        fast_kids.len(),
+        1,
+        "the instant child exists: {fast_kids:?}"
+    );
+    assert_eq!(
+        (
+            fast_kids[0].4.as_str(),
+            run_history(&pool, fast, "sub").await,
+            run_state(&pool, fast, "after").await,
+        ),
+        (
+            "FAILED",
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+            Some("SUCCESS".to_string()),
+        ),
+        "the child FAILED before `spawn_one` returned, and the `wait: false` \
+         parent must still SUCCEED. Without the `!sub.wait` guard the child's \
+         FAILED arrives while this run is RUNNING and `guess_state` turns it \
+         into a FAILED parent"
+    );
+}
+
+/// **`transmitFailed` decides what a failing child does to its parent, and the
+/// two directions are asserted as a PAIR.**
+///
+/// One direction alone cannot tell a working implementation from a constant:
+/// with `transmitFailed` hard-coded true, the second case fails; hard-coded
+/// false, the first does. The measurements are
+/// `valids/task-flow`'s golden (`transmitFailed: true`, child FAILED, parent
+/// run `CREATED RUNNING FAILED`) and `egret.probe/probe-notransmit-parent` on
+/// the artifact (`transmitFailed: false`, same child, parent run
+/// `CREATED RUNNING FAILED SUCCESS`).
+///
+/// **The second is the two-step `ExecutableUtils.guessState` produces**, and
+/// egret's run history reproduces it. Its ATTEMPT does not:
+/// `executor::state::apply` rule 1 stops a terminated attempt taking further
+/// state, and that rule's own doc records this as the second measured shape it
+/// is wrong for. Unreachable from the corpus --
+/// `no_corpus_subflow_turns_transmit_failed_off` derives that -- and asserted
+/// here so the boundary is visible rather than remembered.
+#[sqlx::test(migrations = "../../migrations")]
+async fn transmit_failed_decides_what_a_failing_child_does_to_its_parent(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child_src = "id: child\nnamespace: t\ntasks:\n  - id: boom\n    \
+                     type: io.kestra.plugin.core.execution.Fail\n";
+    file_flow(&db, ws, user, child_src).await;
+
+    let on = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("p-on", "child", "    transmitFailed: true\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    let off = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("p-off", "child", "    transmitFailed: false\n"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            run_history(&pool, on, "sub").await,
+            run_state(&pool, on, "after").await,
+            execution_history(&pool, on).await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+            None,
+            serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        ),
+        "transmitFailed ON: the child's FAILED reaches the parent run, the \
+         successor is never created and the execution fails -- `valids/task-flow`"
+    );
+    assert_eq!(
+        (
+            run_history(&pool, off, "sub").await,
+            attempt_histories(&pool, off, "sub").await,
+            run_state(&pool, off, "after").await,
+            execution_history(&pool, off).await,
+        ),
+        (
+            serde_json::json!(["CREATED", "RUNNING", "FAILED", "SUCCESS"]),
+            vec![serde_json::json!(["CREATED", "RUNNING", "FAILED"])],
+            Some("SUCCESS".to_string()),
+            serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        ),
+        "transmitFailed OFF: the run takes the child's FAILED first and \
+         `guessState`'s SUCCESS after it -- the artifact's two-step. The ATTEMPT \
+         stops at FAILED, where the artifact's carries the SUCCESS too; that is \
+         `state::apply` rule 1 and it is unreachable from the corpus"
+    );
+}
+
+/// **A `Subflow` inside a flowable's `errors:` is reached, spawned and run.**
+///
+/// Measured on the artifact with `egret.probe/probe-errors-subflow`: the
+/// `handler` run reads `CREATED RUNNING SUCCESS` and a child execution exists.
+///
+/// It is the shape `spec::validate` and `publish::resolve_task` both miss --
+/// they walk `children()` only -- and `worker::subflow::subflow_of` walks
+/// `error_children()` for exactly this. No corpus flow reaches it, which is why
+/// `driver::subflow_targets` could measure its own wider walk as redundant;
+/// here it is not, and this is the test that says so.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_inside_an_errors_list_is_reached_and_spawned(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(&db, ws, user, &one_task("child")).await;
+
+    let source = "id: errors-subflow\nnamespace: t\ntasks:\n  - id: seq\n    \
+                  type: io.kestra.plugin.core.flow.Sequential\n    tasks:\n      \
+                  - id: boom\n        type: io.kestra.plugin.core.execution.Fail\n    \
+                  errors:\n      - id: handler\n        \
+                  type: io.kestra.plugin.core.flow.Subflow\n        namespace: t\n        \
+                  flowId: child\n";
+    let parent = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_history(&pool, parent, "handler").await,
+        ),
+        (1, serde_json::json!(["CREATED", "RUNNING", "SUCCESS"])),
+        "a walk that stopped at `children()` would answer `None` here and report \
+         a corruption for a flow the artifact merely finds unusual"
+    );
+}
+
+/// **A cycle of `Subflow`s stops instead of taking the worker down.**
+///
+/// The positive control for `worker::subflow`'s cycle guard, which is the one
+/// answer that module gives that is **not** the artifact's. `spec::validate`'s
+/// `self_dependency` refuses a `Subflow` naming its own flow —
+/// `invalids/recursive-flow` is that flow, and Kestra refuses it too — but
+/// **neither side refuses A → B → A**, and a resolver that looks its target up
+/// by name cannot see a cycle from one flow. Kestra would create executions for
+/// ever, one message at a time.
+///
+/// egret cannot: `spawn_one` drives the child's first settle inside its
+/// caller's transaction, so a cycle is unbounded async recursion. **Measured
+/// before the guard was written**: this exact pair overflowed the test thread's
+/// stack and aborted the process with SIGABRT, and it did so with a depth bound
+/// of 32 AND with one of 16 — which is why the guard is a cycle check rather
+/// than a depth bound. A number large enough to be worth having is one this
+/// recursion cannot survive.
+///
+/// **Both halves are asserted**, because a guard that stopped the recursion and
+/// left the run RUNNING would look identical here to one that worked.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cycle_of_subflows_stops_instead_of_crashing(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // A → B → A. Neither names itself, so `self_dependency` passes on both and
+    // both publish; the cycle only exists across the pair.
+    let a = "id: cyc-a\nnamespace: t\ntasks:\n  - id: sub\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: cyc-b\n";
+    let b = "id: cyc-b\nnamespace: t\ntasks:\n  - id: sub\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    flowId: cyc-a\n";
+    file_flow(&db, ws, user, a).await;
+    file_flow(&db, ws, user, b).await;
+
+    let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // **Ordered by the CHAIN, not by `created_at`.** The first draft of this
+    // ordered by `(created_at, id)` and passed alone and failed in the full
+    // suite: `now()` in Postgres is TRANSACTION time, so a parent and the child
+    // its own settle creates share the instant to the microsecond and the tie
+    // fell to a random uuid. That is the same fact `worker::claim`'s
+    // `ORDER BY created_at, execution_id, run_ix` exists for, met one table over.
+    let rows: Vec<ChainRow> = sqlx::query_as(
+        "WITH RECURSIVE down AS ( \
+             SELECT id, 0 AS depth FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, down.depth + 1 FROM workflow.executions e \
+               JOIN down ON e.trigger_execution_id = down.id \
+         ) \
+         SELECT e.id, e.flow_key, e.state, r.state, r.message \
+           FROM down JOIN workflow.executions e ON e.id = down.id \
+                     JOIN workflow.task_runs r ON r.execution_id = e.id \
+          ORDER BY down.depth",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("walk the chain from the root");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        (rows.len(), all),
+        (2, 2),
+        "the root and ONE child, on the chain and in the table: {rows:?}"
+    );
+    assert_eq!(rows[0].0, root, "the chain starts at the root");
+    assert_eq!(
+        (
+            rows[1].1.as_str(),
+            rows[1].2.as_str(),
+            rows[1].3.as_deref(),
+            rows[1].4.as_deref()
+        ),
+        (
+            "cyc-b",
+            "FAILED",
+            Some("FAILED"),
+            Some(
+                "subflow 't'.'cyc-a' is already running higher up this execution's \
+                 own chain; starting it would loop"
+            )
+        ),
+        "the child that would have closed the cycle must FAIL and say why. \
+         Leaving it RUNNING would stop the recursion and look identical in a count"
+    );
+    assert_eq!(
+        rows[0].2.as_str(),
+        "FAILED",
+        "and `transmitFailed` carries it back to the root, which is what makes \
+         the refusal visible to whoever started the flow"
+    );
+}
+
+/// **A cycle whose every hop crosses a `Loop` boundary.**
+///
+/// The shape the review reproduced with the first cycle guard shipped and
+/// enabled: two flows, each a one-value `Loop` whose body is a `Subflow` naming
+/// the other. It aborted the process with `SIGABRT`.
+///
+/// **Why the first guard missed it, and why the miss was structural.** That
+/// guard walked `trigger_execution_id` only. A `Loop` sub-execution is linked
+/// by `parent_execution_id` and its `trigger_execution_id` is NULL — not by
+/// accident but by `workflow_executions_one_link_kind`, the constraint W6 Task
+/// 2 added to make carrying both unrepresentable. So the walk **truncated at
+/// every loop boundary**, and no single walked segment ever contained a repeat.
+/// The guard's premise was that a causal chain is walkable by one link kind;
+/// migration 0138 guarantees it is not.
+///
+/// The control that makes the diagnosis certain is the sibling test
+/// [`a_cycle_of_subflows_stops_instead_of_crashing`], where neither hop crosses
+/// a loop and the first guard caught it — so what distinguishes them is the
+/// link kind and nothing else.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_cycle_whose_every_hop_crosses_a_loop_boundary_stops_too(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let a = "id: cyl-a\nnamespace: t\ntasks:\n  - id: each\n    \
+             type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    tasks:\n      \
+             - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+             namespace: t\n        flowId: cyl-b\n";
+    let b = "id: cyl-b\nnamespace: t\ntasks:\n  - id: each\n    \
+             type: io.kestra.plugin.core.flow.Loop\n    values: '[\"1\"]'\n    tasks:\n      \
+             - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+             namespace: t\n        flowId: cyl-a\n";
+    file_flow(&db, ws, user, a).await;
+    file_flow(&db, ws, user, b).await;
+
+    let root = start_execution(&pool, ws, None, a, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // **The chain by NAME and in order, not a bare count**, because the count
+    // alone would not say the walk crossed the loop links at all. It is read
+    // through the same `COALESCE(trigger_execution_id, parent_execution_id)`
+    // the guard walks, so a chain this query can order is a chain the guard
+    // could see.
+    let chain: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE down AS ( \
+             SELECT id, flow_key, trigger_execution_id IS NOT NULL AS by_trigger, \
+                    0 AS depth \
+               FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, e.flow_key, e.trigger_execution_id IS NOT NULL, down.depth + 1 \
+               FROM workflow.executions e \
+               JOIN down ON down.id = COALESCE(e.trigger_execution_id, e.parent_execution_id) \
+         ) \
+         SELECT flow_key || (CASE WHEN by_trigger THEN ' (subflow)' ELSE ' (loop)' END) \
+           FROM down ORDER BY depth",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("walk the chain");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r \
+          WHERE r.message IS NOT NULL ORDER BY r.created_at, r.execution_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        (chain, all, refused.len()),
+        (
+            vec![
+                "cyl-a (loop)".to_string(),
+                "cyl-a (loop)".to_string(),
+                "cyl-b (subflow)".to_string(),
+                "cyl-b (loop)".to_string(),
+            ],
+            4,
+            1
+        ),
+        "the whole chain: the root, its LOOP child, the `cyl-b` SUBFLOW child, \
+         and ITS loop child -- and then the spawn back to `cyl-a` is refused. \
+         Note the first row's label is the root's own (it carries neither link); \
+         what matters is that two of the three links are loop links, which is \
+         exactly what the first guard could not see. Four executions and no more"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "subflow 't'.'cyl-a' is already running higher up this execution's \
+                 own chain; starting it would loop"
+            )
+        ),
+        "and the run that would have closed it FAILS carrying the reason"
+    );
+    assert_eq!(
+        run_state(&pool, root, "each").await,
+        Some("FAILED".to_string()),
+        "the refusal reaches the root through the loop's own `transmitFailed`"
+    );
+}
+
+/// **A chain deeper than `MAX_SPAWN_CHAIN` is refused rather than overflowing a
+/// stack.**
+///
+/// The positive control for the backstop beside the cycle guard, and the reason
+/// the SIGABRT reproduction above can live in this suite at all: with a bound in
+/// place a regression of the cycle guard fails an assertion instead of aborting
+/// the test binary, which takes every other test in it with it.
+///
+/// **This is the class fix round 1 said was left open**, and the report's
+/// earlier sentence — *"a depth bound large enough to be worth having is not one
+/// this recursion can survive"* — was a measurement about a bound used as THE
+/// guard generalised to one used as a backstop. As a backstop it only has to sit
+/// between what is real (the corpus's deepest chain is **2 links**) and what
+/// kills a stack (**16 was measured to abort**). 8 is inside both.
+///
+/// The chain is `dep-0 → dep-1 → … → dep-11`, twelve DISTINCT flows, so the
+/// cycle guard has nothing to say about it and only the bound can stop it.
+///
+/// **This covers the DESCENT only, and that is a limit of it rather than a
+/// property of the bound.** Its chain never completes — it runs straight down
+/// through nested `spawn_one`s and hits the bound before any child terminates —
+/// so it could not see fix round 2's Critical, where the counter was reset on
+/// every re-entrant load and a *completing* chain walked past the bound into a
+/// stack overflow. The ascent is
+/// [`a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter`], and
+/// the two are a pair: mutation M10 (the re-entrant loads say `Stack::Fresh`
+/// again) kills that one and leaves this one green.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chain_of_subflows_deeper_than_the_bound_is_refused_rather_than_overflowing(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let deeper_than_the_bound = egret_workflow::worker::MAX_SPAWN_CHAIN + 4;
+    for i in 0..deeper_than_the_bound {
+        let src = format!(
+            "id: dep-{i}\nnamespace: t\ntasks:\n  - id: sub\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: dep-{}\n",
+            i + 1
+        );
+        file_flow(&db, ws, user, &src).await;
+    }
+    // The last one in the chain names a flow that does not exist, so if the
+    // bound ever stopped firing this test would fail on the count rather than
+    // run away -- and the message would be the unresolvable one, which is a
+    // different assertion failure and not the same as silence.
+    let root_src = "id: dep-0\nnamespace: t\ntasks:\n  - id: sub\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: dep-1\n";
+
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all,
+        egret_workflow::worker::MAX_SPAWN_CHAIN as i64 + 1,
+        "the root plus exactly MAX_SPAWN_CHAIN children, and then it stops"
+    );
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        refused.len(),
+        1,
+        "exactly one run is refused -- the one at the bound: {refused:?}"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "this execution is 8 child execution(s) down a chain and 8 is as \
+                 deep as this worker will build in one transaction; 't'.'dep-9' \
+                 is not started"
+            )
+        ),
+        "and it FAILS carrying the bound and the target it did not start. A \
+         backstop that stopped the recursion and left the run RUNNING would look \
+         identical in the count above"
+    );
+    assert_eq!(
+        run_state(&pool, root, "sub").await,
+        Some("FAILED".to_string()),
+        "and `transmitFailed` carries the refusal all the way back to the root"
+    );
+}
+
+/// **The same counter, on the ASCENT — where a completing chain climbs the
+/// stack and the counter used to be reset to zero on every link.**
+///
+/// # Why the sibling test above cannot see this, in the reviewer's own words
+///
+/// *"`a_chain_of_subflows_deeper_than_the_bound…` cannot see this defect
+/// because its chain never completes."* It runs straight down through nested
+/// `spawn_one`s, where the `caller + 1` arithmetic was always right, and hits
+/// the bound before any child terminates. **A test that exercises only the
+/// descent cannot see a defect in the ascent** — and the ascent is where a
+/// `wait: true` subflow actually spends its life, because that is how it
+/// resumes its parent.
+///
+/// # The defect this pins
+///
+/// `claim::load_with` wrote `depth: 0` for every caller, under a comment
+/// asserting that no caller that loads an execution is inside another
+/// `settle`. Two are: `subflow::complete` and `spawn::on_execution_terminal`
+/// are both reached from `claim::settle`. So a completing chain reset the
+/// counter once per link — the reviewer instrumented it and watched it cycle
+/// `0,1,2,0,1,2,…` — and **nine flows filed in one workspace, plain
+/// `wait: true`, aborted the worker process with
+/// `fatal runtime error: stack overflow`**. `claim::Stack` is the fix: a load
+/// must SAY which of the two it is.
+///
+/// # The shape, and why each part of it is needed
+///
+/// Each `asc-i` runs two subflows in sequence:
+///
+/// * `leaf` → `asc-leaf`, a flow whose only task carries an unrenderable
+///   `runIf:` so it FAILS **inside `spawn_one`'s own settle**, with no worker
+///   tick in between. That is what makes the ascent happen inside the descent's
+///   frames rather than on a fresh stack — the same fixture the `wait: false`
+///   positive control uses, and for the same reason.
+/// * `transmitFailed: false` on it, so `guess_state` turns that FAILED into a
+///   SUCCESS and the execution carries on to the second task instead of ending
+///   there. Without it the ascent stops at the first leaf and the flow never
+///   descends again.
+/// * `next` → `asc-{i+1}`, which is the link that must be refused.
+///
+/// So one level costs three frames — spawn the leaf, re-enter through
+/// `complete`, spawn the next — and `MAX_SPAWN_CHAIN` is reached partway down
+/// the third `asc-`. **`asc-4` is deliberately NOT filed**, so a counter that
+/// never fires runs to a *different* refusal (`unable to find flow 't'.'asc-4'`)
+/// and one more execution rather than running away: the mutation that reverts
+/// the threading fails this as an ASSERTION with the process intact, which is
+/// the whole reason the numbers here are small.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_chain_of_subflows_that_completes_is_bounded_by_the_same_counter(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // Terminates inside its own first settle: `render::render_run_if` fails
+    // with no handler, so there is no worker tick between the spawn and the
+    // callback that walks back up.
+    file_flow(
+        &db,
+        ws,
+        user,
+        "id: asc-leaf\nnamespace: t\ntasks:\n  - id: x\n    \
+         type: io.kestra.plugin.core.log.Log\n    \
+         runIf: \"{{ outputs.notexists == 2 }}\"\n    message: hi\n",
+    )
+    .await;
+    // Four levels. `asc-4` is never filed -- see the doc.
+    for i in 0..4 {
+        let src = format!(
+            "id: asc-{i}\nnamespace: t\ntasks:\n  - id: leaf\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: asc-leaf\n    transmitFailed: false\n  - id: next\n    \
+             type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+             flowId: asc-{}\n",
+            i + 1
+        );
+        file_flow(&db, ws, user, &src).await;
+    }
+
+    let root_src = "id: asc-0\nnamespace: t\ntasks:\n  - id: leaf\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: asc-leaf\n    transmitFailed: false\n  - id: next\n    \
+                    type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+                    flowId: asc-1\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    // By NAME and in order, not by count: a count alone cannot say the chain
+    // stopped at the right link, and `asc-3` appearing here is exactly what the
+    // unthreaded counter allowed.
+    //
+    // **Ordered by a walk of the chain, never by `created_at`.** All six rows
+    // are written in ONE transaction and `now()` in Postgres is transaction
+    // time, so they share the instant to the microsecond and the tie falls to a
+    // random uuid -- Concern 13 of this task's report, met a second time. The
+    // walk orders by `(depth, trigger_run_ix)`: `leaf` is run 0 and `next` is
+    // run 1 at every level, so the sequence below is a fact about the flow.
+    let names: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE down AS ( \
+             SELECT id, 0 AS depth, -1 AS ix FROM workflow.executions WHERE id = $1 \
+           UNION ALL \
+             SELECT e.id, down.depth + 1, e.trigger_run_ix \
+               FROM workflow.executions e JOIN down ON e.trigger_execution_id = down.id \
+         ) \
+         SELECT e.flow_key FROM down JOIN workflow.executions e ON e.id = down.id \
+          ORDER BY down.depth, down.ix",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("walk the chain from the root");
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all as usize,
+        names.len(),
+        "the walk reaches every execution there is, so the list below is the \
+         whole of what ran and not a subgraph of it"
+    );
+    assert_eq!(
+        names,
+        vec!["asc-0", "asc-leaf", "asc-1", "asc-leaf", "asc-2", "asc-leaf",],
+        "three levels and their three leaves, and then it stops. `asc-3` in \
+         this list is the defect: it means the counter was reset on the way \
+         back up and the stack kept climbing"
+    );
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        refused.len(),
+        1,
+        "exactly one run is refused -- the one at the bound: {refused:?}"
+    );
+    assert_eq!(
+        (refused[0].0.as_str(), refused[0].1.as_deref()),
+        (
+            "FAILED",
+            Some(
+                "this execution is 8 child execution(s) down a chain and 8 is as \
+                 deep as this worker will build in one transaction; 't'.'asc-3' \
+                 is not started"
+            )
+        ),
+        "and it is the DEPTH refusal naming `asc-3`. `unable to find flow \
+         't'.'asc-4'` here would mean the chain ran one level further than the \
+         bound allows and stopped only because the fixture ran out of flows"
+    );
+    assert_eq!(
+        run_state(&pool, root, "next").await,
+        Some("FAILED".to_string()),
+        "and `transmitFailed` carries the refusal back through every level to \
+         the root"
+    );
+}
+
+/// **The other two re-entrant sites: a `Loop`'s next iteration and a
+/// `wait: false` subflow's own completion are frames too.**
+///
+/// # Why this test exists, and it is a mutation result rather than a hunch
+///
+/// The threading fix touched **three** call sites, and the ascent test above
+/// covers exactly one of them. Measured, per site:
+///
+/// | mutation | site | ascent test | descent test |
+/// |---|---|---|---|
+/// | M10a | `subflow::on_child_terminal` (`wait: true`) | KILLED | passes |
+/// | M10b | `subflow::complete` from `spawn_one` (`wait: false`, and every refusal) | **SURVIVED** | passes |
+/// | M10c | `spawn::on_execution_terminal` (a `Loop`'s next iteration) | **SURVIVED** | passes |
+///
+/// Two threaded sites with nothing watching them is the shape the programme's
+/// own rule is about, and the `wait: false` one is not hypothetical — the
+/// reviewer's `wait: false` probe aborted the worker at **eight** levels, two
+/// fewer than the `wait: true` one. This test is the positive control for both.
+///
+/// # The frame arithmetic, which is what the fixture is built from
+///
+/// Every hop below happens inside `start_execution`'s single transaction,
+/// because nothing here ever needs a worker: the loop body and the subflow
+/// target both carry an unrenderable `runIf:` and fail inside their own first
+/// settle.
+///
+/// ```text
+/// settle(root, 0)
+///   each  -> iteration 0 at 1 -> FAILED -> on_execution_terminal(caller 1)
+///                             -> load root at 2 -> start iteration 1 at 3 -> FAILED
+///                             -> on_execution_terminal(caller 3)
+///                             -> load root at 4 -> start iteration 2 at 5 -> FAILED
+///                             -> on_execution_terminal(caller 5)
+///                             -> load root at 6 -> every value terminated -> settle(root, 6)
+///   fire1 -> child at 7 -> FAILED, but `wait: false` -> complete(Nested(6)) -> settle(root, 7)
+///   fire2 -> child at 8 -> FAILED, but `wait: false` -> complete(Nested(7)) -> settle(root, 8)
+///   deep  -> 8 + 1 > MAX_SPAWN_CHAIN  ->  REFUSED
+/// ```
+///
+/// `transmitFailed: false` on the `Loop` is what lets the flow reach `fire1` at
+/// all — every iteration FAILS, and a `transmitFailed` loop would end on the
+/// first one (`valids/loop-failed` against `valids/loop-failed-no-transmit`).
+///
+/// **Each surviving mutation moves the refusal off `deep` in a different
+/// direction**, which is why one test kills both: M10b flattens the two
+/// `wait: false` hops (`deep` reaches `spawn_one` at 2 instead of 8) and M10c
+/// flattens the three loop hops (`deep` reaches it at 2), and in both cases the
+/// child is created and there is no refusal at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_loop_ascent_and_a_wait_false_subflow_are_frames_too(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // Fails inside its own first settle, with no worker tick -- the same
+    // fixture the `wait: false` positive control and the ascent test use.
+    let instant = "id: asc-leaf\nnamespace: t\ntasks:\n  - id: x\n    \
+                   type: io.kestra.plugin.core.log.Log\n    \
+                   runIf: \"{{ outputs.notexists == 2 }}\"\n    message: hi\n";
+    file_flow(&db, ws, user, instant).await;
+
+    let root_src = "id: mix\nnamespace: t\ntasks:\n  \
+                    - id: each\n    type: io.kestra.plugin.core.flow.Loop\n    \
+                      values: [\"1\", \"2\", \"3\"]\n    transmitFailed: false\n    \
+                      tasks:\n      - id: body\n        \
+                        type: io.kestra.plugin.core.log.Log\n        \
+                        runIf: \"{{ outputs.notexists == 2 }}\"\n        message: hi\n  \
+                    - id: fire1\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n    wait: false\n  \
+                    - id: fire2\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n    wait: false\n  \
+                    - id: deep\n    type: io.kestra.plugin.core.flow.Subflow\n    \
+                      namespace: t\n    flowId: asc-leaf\n";
+    let root = start_execution(&pool, ws, None, root_src, serde_json::json!({}))
+        .await
+        .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    let refused: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT r.state, r.message FROM workflow.task_runs r WHERE r.message IS NOT NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the refusals");
+    assert_eq!(
+        (
+            run_state(&pool, root, "each").await,
+            run_state(&pool, root, "fire1").await,
+            run_state(&pool, root, "fire2").await,
+            run_state(&pool, root, "deep").await,
+            refused.len(),
+        ),
+        (
+            Some("SUCCESS".to_string()),
+            Some("SUCCESS".to_string()),
+            Some("SUCCESS".to_string()),
+            Some("FAILED".to_string()),
+            1,
+        ),
+        "the loop and both `wait: false` subflows run; only `deep` is refused. \
+         `deep` SUCCEEDing here means its frames were not counted -- which is \
+         what both surviving mutations produce: {refused:?}"
+    );
+    assert_eq!(
+        refused[0].1.as_deref(),
+        Some(
+            "this execution is 8 child execution(s) down a chain and 8 is as \
+             deep as this worker will build in one transaction; 't'.'asc-leaf' \
+             is not started"
+        ),
+        "and the refusal is the DEPTH one, at exactly 8 -- three loop hops, two \
+         `wait: false` hops, and the two frames each of those costs. A different \
+         number here means the arithmetic in this test's doc is wrong, not that \
+         the bound is"
+    );
+    // Three loop iterations and two `wait: false` children, and NOT a sixth:
+    // the refusal must happen before `deep`'s child row is written.
+    let all: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.executions")
+        .fetch_one(&pool)
+        .await
+        .expect("count executions");
+    assert_eq!(
+        all, 6,
+        "the root, three iterations, and two `wait: false` children"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W6 Task 4: the `CREATE_NEW_EXECUTION` replay, at the seams the oracle cannot
+// reach
+// ---------------------------------------------------------------------------
+
+/// A flow whose only task always fails, carrying a `CREATE_NEW_EXECUTION`
+/// retry.
+///
+/// `maxAttempts` is a parameter because the two things worth driving here are
+/// *the chain stops* and *the chain continues*, and one flow that did both
+/// would be two tests wearing one fixture.
+fn one_task_replaying(id: &str, interval: &str, max_attempts: u32) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: a\n    type: io.kestra.plugin.core.log.Log\n\
+         \x20   message: hi\n    retry:\n      behavior: CREATE_NEW_EXECUTION\n\
+         \x20     type: constant\n      interval: {interval}\n      maxAttempts: {max_attempts}\n"
+    )
+}
+
+/// The same policy on a task inside a one-value `Loop`.
+///
+/// The body is what fails, so the retry is decided inside the **sub-execution**
+/// — which is the row `worker::replay::spawn_due` refuses, because the artifact
+/// refuses it too.
+fn loop_body_replaying(id: &str, interval: &str) -> String {
+    format!(
+        "id: {id}\nnamespace: t\ntasks:\n  - id: l\n    type: io.kestra.plugin.core.flow.Loop\n\
+         \x20   values: [\"v1\"]\n    tasks:\n      - id: a\n        type: io.kestra.plugin.core.log.Log\n\
+         \x20       message: hi\n        retry:\n          behavior: CREATE_NEW_EXECUTION\n\
+         \x20         type: constant\n          interval: {interval}\n          maxAttempts: 3\n"
+    )
+}
+
+/// A [`Registry`] that fails every attempt of every run.
+///
+/// `FailsOnce` cannot be reused: a `CREATE_NEW_EXECUTION` chain gives every
+/// execution a FRESH run whose `attempt` is 1, so "fail the first attempt"
+/// would fail every one of them anyway and the name would be a lie about what
+/// the fixture does.
+#[derive(Default)]
+struct AlwaysFails {
+    seen: Mutex<Vec<String>>,
+}
+
+impl AlwaysFails {
+    fn seen(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Registry for AlwaysFails {
+    async fn run(&self, task: &TaskInput) -> egret_core::Result<Outcome> {
+        self.seen.lock().unwrap().push(task.task_id.clone());
+        Ok(Outcome::failed_with("this fixture always fails"))
+    }
+    async fn cancel(&self, task: &TaskInput) -> egret_core::Result<()> {
+        panic!(
+            "a handler that returned its own failure must not be killed: {}",
+            task.task_id
+        );
+    }
+}
+
+/// The replay hanging off an execution, if there is one: a child linked by
+/// `parent_execution_id` with **no** loop index.
+async fn replay_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NULL",
+    )
+    .bind(execution)
+    .fetch_optional(pool)
+    .await
+    .expect("read the replay")
+}
+
+/// `(attempt_number, origin_offset_ms)` — Kestra's `ExecutionMetadata`,
+/// migration 0139.
+async fn metadata_of(pool: &sqlx::PgPool, execution: Uuid) -> (i32, i64) {
+    sqlx::query_as("SELECT attempt_number, origin_offset_ms FROM workflow.executions WHERE id = $1")
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the metadata")
+}
+
+/// **The waker's `RETRIED` arm: a due replay is woken, one still waiting is
+/// left alone, and once the replacement exists the waker stops naming it.**
+///
+/// This is the shipping worker's half of the replay and **the oracle cannot see
+/// any of it**: `oracle-exec/driver.rs` makes the delay elapse by rewinding
+/// `executions.created_at` and calling `worker::resume` itself, so a
+/// `due_retries` that named nobody would leave the ratchet at **127** (131 when
+/// this sentence was written, before Task 4's own four banks) and this suite is
+/// the only instrument that would say why.
+///
+/// **Nothing here rewinds anything** — the delay elapses in real time, exactly
+/// as `a_retry_whose_delay_has_elapsed_is_woken_and_one_still_waiting_is_left_alone`
+/// does for the other behaviour.
+///
+/// Three directions, because a predicate that named everything would pass the
+/// first alone:
+///
+/// 1. the execution whose delay has elapsed is named, **by id**;
+/// 2. the one whose `PT30S` interval has not is not;
+/// 3. and after the replay exists, the first is named no more — which is the
+///    term that keeps a finished chain from being relocked and re-settled on
+///    every tick for ever, since nothing ever clears a `not_before`.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let due = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("due", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start due");
+    let waiting = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("waiting", "PT30S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start waiting");
+
+    assert_eq!(
+        drain_with(&pool, &reg).await,
+        2,
+        "both first attempts must have run: {:?}",
+        reg.seen()
+    );
+    for (label, execution, interval_ms) in [("due", due, 1_000), ("waiting", waiting, 30_000)] {
+        assert_eq!(
+            run_state(&pool, execution, "a").await.as_deref(),
+            Some("RETRIED"),
+            "a CREATE_NEW_EXECUTION retry marks the run RETRIED, not RETRYING \
+             -- the {label} run: {}",
+            stuck(&pool, execution, "a").await
+        );
+        let deadline = not_before_of(&pool, execution, "a")
+            .await
+            .expect("the replay's ExecutionDelay was scheduled");
+        assert!(
+            deadline >= interval_ms,
+            "the {label} run's deadline must be at least its own interval past \
+             the execution's origin: {}",
+            stuck(&pool, execution, "a").await
+        );
+        assert_eq!(
+            replay_of(&pool, execution).await,
+            None,
+            "no replay may exist before its delay has elapsed ({label})"
+        );
+    }
+
+    // The delay passes in REAL time.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![due],
+        "the waker must name the execution whose replay came due and no other. \
+         due={due} (interval PT1S, elapsed); waiting={waiting} (interval PT30S, \
+         not elapsed). It named {woken:?}"
+    );
+    let child = replay_of(&pool, due)
+        .await
+        .expect("the wake must have created the replacement execution");
+    assert_eq!(
+        replay_of(&pool, waiting).await,
+        None,
+        "and the execution the waker did not name must have no replay"
+    );
+    assert_eq!(
+        metadata_of(&pool, child).await.0,
+        2,
+        "the replacement is attempt 2 of the chain"
+    );
+
+    // Direction 3: the deadline is still there and still past, and the child
+    // now exists.
+    let again = wake(&pool, 8).await.expect("wake again");
+    assert!(
+        !again.contains(&due),
+        "the waker named {due} again after its replay existed. Nothing clears \
+         a `not_before`, so without the `NOT EXISTS` term this execution is \
+         relocked and re-settled on every tick for ever. It named {again:?}"
+    );
+}
+
+/// **A replay is refused inside a `Loop` sub-execution and taken at the top
+/// level** — the same flow shape either side of the one difference.
+///
+/// The refusal is the artifact's own behaviour, measured on the pinned digest
+/// (`egret.probe4/replay-in-loop2`): Kestra throws `Can't find taskrun with
+/// taskrunId <the LOOP run's>` out of `markWithTaskRunAs(…, markParents =
+/// true)`, whose walk leaves the sub-execution, and the iteration ends FAILED
+/// with no child. Creating one here would be over-acceptance the oracle cannot
+/// see — no corpus flow puts a `CREATE_NEW_EXECUTION` retry inside a `Loop`.
+///
+/// **Both directions, in one test, because a `spawn_due` that refused
+/// everything would pass either alone.** The control is the top-level
+/// execution: same policy, same interval, same handler, and it must get its
+/// replacement.
+///
+/// It also asserts the waker's own term: the loop sub-execution is one
+/// `due_retries` must never name, because no child will ever appear to stop it.
+///
+/// # It runs in BOTH directions, and the second one was added by a fix round
+///
+/// Everything the first version asserted was on the way **down** — that the
+/// iteration's run is `RETRIED`, that no replay is created, that the waker does
+/// not name it. The defect was on the way **up**: the loop run read a `RETRIED`
+/// iteration as one that had terminated without error and the whole flow
+/// reported `SUCCESS` where Kestra reports `FAILED`. A test that builds exactly
+/// the right fixture and only ever walks one direction through it is the third
+/// instance of that shape in this package. So this one now asserts the loop
+/// run, the root's history, **and** the one thing that is still divergent (the
+/// iteration's own terminal), which is what keeps the remaining gap from
+/// drifting unrecorded.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_is_refused_inside_a_loop_sub_execution_and_taken_at_the_top_level(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let looped = start_execution(
+        &pool,
+        ws,
+        None,
+        &loop_body_replaying("looped", "PT1S"),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the loop flow");
+    let top = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("top", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the top-level flow");
+    drain_with(&pool, &reg).await;
+
+    let iteration: Uuid = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NOT NULL",
+    )
+    .bind(looped)
+    .fetch_one(&pool)
+    .await
+    .expect("the loop spawned its one iteration");
+    assert_eq!(
+        run_state(&pool, iteration, "a").await.as_deref(),
+        Some("RETRIED"),
+        "the body run inside the iteration is RETRIED, so the only thing \
+         between it and a replay is `spawn_due`'s refusal: {}",
+        stuck(&pool, iteration, "a").await
+    );
+
+    // **The ASCENT, and it is the half a fix round had to add.** Everything
+    // above this walks DOWN into the sub-execution; the defect was on the way
+    // back up, where the loop run reads what the iteration terminated as. Egret
+    // reported SUCCESS here — `spawn::decide` fell through to
+    // `terminated == total` because `RETRIED` is not `terminated_in_error` —
+    // while Kestra reports FAILED on both rows, measured on the pinned digest:
+    //
+    // ```text
+    // exec 4hsg…  parentId=None   state=FAILED  run l     = FAILED
+    // exec 1EM1…  parentId=4hsg…  state=FAILED  run inner = FAILED
+    // ```
+    assert_eq!(
+        run_state(&pool, looped, "l").await.as_deref(),
+        Some("FAILED"),
+        "the loop run whose one iteration was retried into a replay Kestra \
+         cannot create must FAIL. It read SUCCESS until `as_the_loop_reads_it` \
+         -- a silent FAILED->SUCCESS inversion on a publishable flow that the \
+         oracle cannot see, because no corpus flow puts a CREATE_NEW_EXECUTION \
+         retry inside a Loop: {}",
+        stuck(&pool, looped, "l").await
+    );
+    assert_eq!(
+        execution_history(&pool, looped).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "and the root execution with it -- Kestra's root ends FAILED. This is \
+         the assertion the first round stopped one line short of"
+    );
+    // The half that is NOT fixed, asserted so it cannot drift unrecorded: the
+    // iteration's OWN terminal is still `RETRIED` where Kestra's is `FAILED`,
+    // because `advance()` is pure over `(plan, state, now)` and cannot see
+    // which link kind carried the execution it is driving.
+    assert_eq!(
+        execution_history(&pool, iteration).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED", "RETRIED"]),
+        "the iteration execution itself is the remaining divergence: it FAILS \
+         and is then marked RETRIED, where Kestra's stops at FAILED. It is recorded rather than repaired: fixing it needs a third \
+         metadata field on `ExecutionState` for a case no corpus flow reaches, \
+         and it is invisible to the parent now that the loop reads it as a \
+         failure"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    // The waker's term first: it must not name the iteration at all.
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert!(
+        !woken.contains(&iteration),
+        "the waker named the loop iteration {iteration}. Its replay is refused \
+         permanently, so no child will ever appear to stop it being named -- \
+         this is the arm that would relock and re-settle it for ever. Named: \
+         {woken:?}"
+    );
+
+    // And directly, which is the path the oracle's driver takes and the waker's
+    // predicate never sees.
+    egret_workflow::worker::resume(&pool, iteration)
+        .await
+        .expect("resume the iteration");
+    assert_eq!(
+        replay_of(&pool, iteration).await,
+        None,
+        "a `Loop` iteration must not be replayed even when `resume` is called \
+         on it directly: the artifact cannot do it and the child would be an \
+         orphan -- `spawn::on_execution_terminal` reports a terminal only \
+         through a `parent_run_ix`, which a replay does not have"
+    );
+
+    // The control: the same policy, not in a loop.
+    assert!(
+        woken.contains(&top),
+        "the top-level execution's replay is due and the waker must name it, \
+         or the refusal above is being made by something that refuses \
+         everything. Named: {woken:?}"
+    );
+    let child = replay_of(&pool, top)
+        .await
+        .expect("the top-level execution must get its replacement");
+    assert_eq!(
+        metadata_of(&pool, child).await.0,
+        2,
+        "and it is attempt 2 of that chain"
+    );
+}
+
+/// **The metadata accumulates up a chain, and `maxAttempts` is what ends it.**
+///
+/// `ExecutionMetadata.nextAttempt()` increments `attemptNumber` and leaves
+/// `originalCreatedDate` alone; migration 0139 stores the second as an offset,
+/// so "leaves it alone" is "grows by the elapsed time of the execution that
+/// spawned it". Both are asserted because they answer different questions —
+/// which attempt this is, and how much of the chain's clock has run — and the
+/// oracle can only see their consequence.
+///
+/// **`maxAttempts: 3`, so the increment is asserted TWICE.** A two-long chain
+/// was the first version and a mutation is why it is not: replacing
+/// `attempt + 1` with `attempt.max(2)` writes the right number for the first
+/// replay and the wrong one for every later replay, and a chain that ends AT
+/// the first replay cannot tell those apart. That mutation SURVIVED the whole
+/// of `--lib` and `--test worker` until this test grew a third link.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_chain_carries_its_attempt_number_and_its_origin_offset(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("chain", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the chain");
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        metadata_of(&pool, root).await,
+        (1, 0),
+        "the original execution is attempt 1 and its own creation is the origin"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![root],
+        "the root's replay is due"
+    );
+    let second = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    let (attempt, offset) = metadata_of(&pool, second).await;
+    assert_eq!(attempt, 2, "the replacement is attempt 2");
+    assert!(
+        offset >= 1_000,
+        "the offset is how much of the ORIGINAL's clock had run when this one \
+         was created, and the retry was a whole PT1S away, so it cannot be \
+         less than 1000 ms. It is {offset}"
+    );
+
+    // **The SECOND increment, which is the one a saturating `max(2)` gets
+    // wrong**: it writes the right number for the first replay and the wrong
+    // one for every later replay, so a two-long chain cannot see it.
+    drain_with(&pool, &reg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![second],
+        "attempt 2 of 3 is not the last, so its own replay comes due"
+    );
+    let third = replay_of(&pool, second)
+        .await
+        .expect("the second replacement");
+    let (third_attempt, third_offset) = metadata_of(&pool, third).await;
+    assert_eq!(
+        third_attempt, 3,
+        "the second replacement is attempt 3. An increment that saturates at 2 \
+         writes 2 here, `2 >= 3` is false for ever, and the chain never ends -- \
+         which the ratchet sees minutes later as the driver's step bound"
+    );
+    assert!(
+        third_offset >= offset + 1_000,
+        "and the origin offset accumulates: {third_offset} must be at least a \
+         second past the second execution's {offset}"
+    );
+
+    // The chain ends here: `attemptNumber >= maxAttempts` is 3 >= 3.
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        execution_history(&pool, third)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("FAILED")),
+        "attempt 3 of 3 exhausts the policy, so the third execution FAILS \
+         rather than being RETRIED"
+    );
+    assert_eq!(
+        not_before_of(&pool, third, "a").await,
+        None,
+        "and no fourth delay is scheduled: `next_retry_at` returned None, so \
+         `scan` emitted nothing at all for this run"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    assert!(
+        wake(&pool, 8).await.expect("wake").is_empty(),
+        "nothing is due anywhere: the chain is three executions long"
+    );
+    assert_eq!(
+        replay_of(&pool, third).await,
+        None,
+        "and the third execution has no replacement"
+    );
+}
+
+/// **A replay is never started from a nested `settle`, and the very next
+/// `resume` starts it** — the third of `worker::replay`'s refusals, with the
+/// shape that reaches it.
+///
+/// # Why this bound exists, and why it is not a number
+///
+/// `subflow::spawn_one` drives a child's first settle **inside its caller's
+/// transaction**, so a chain of executions is a chain of stack frames — the
+/// recursion `subflow::MAX_SPAWN_CHAIN` was measured to abort the process
+/// under. A replay reached from inside such a settle would extend that
+/// recursion with a chain nothing else bounds: `interval: PT0S` makes the
+/// deadline due at the instant it is written, and a flow that reaches `FAILED`
+/// **without a worker** — an unresolvable `Subflow` target is the reachable
+/// example, measured on the artifact — closes the loop entirely inside one
+/// transaction.
+///
+/// The answer is structural rather than numeric, and it is the artifact's own:
+/// its replay comes off the **execution-delay loop**, a different loop from the
+/// executor cycle (`DefaultExecutor.java:508`), one execution per delivery.
+/// egret's equivalent of "a different loop" is `claim::Stack::Fresh` — a settle
+/// with nothing of this crate's below it — so `spawn_due` refuses at any depth
+/// above 0 and leaves the deadline where it is.
+///
+/// # Both directions, from one execution
+///
+/// The refusal and the taking are asserted on the **same** execution `mid`,
+/// seconds apart, with nothing between them but who called `settle`: first
+/// nested inside its parent's spawn, then from `worker::resume` at the bottom
+/// of a fresh stack. A test that only drove the second could not tell this
+/// bound from no bound at all.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_is_not_started_from_a_nested_settle_and_the_next_resume_starts_it(
+    pool: sqlx::PgPool,
+) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+
+    // `mid` fails inside its own first settle -- its `Subflow` target does not
+    // resolve, which `a_subflow_target_that_does_not_resolve_fails_the_run_and_
+    // creates_no_child` pins -- and its flow-level retry is due at once.
+    let mid = "id: mid\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+               type: constant\n  interval: PT0S\n  maxAttempts: 3\ntasks:\n  - id: sub\n    \
+               type: io.kestra.plugin.core.flow.Subflow\n    namespace: t\n    \
+               flowId: nobody-holds-this\n";
+    file_flow(&db, ws, user, mid).await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "mid", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the parent");
+
+    let child = children_by_trigger(&pool, parent).await;
+    assert_eq!(
+        child.len(),
+        1,
+        "the parent's `Subflow` resolved and started `mid`: {child:?}"
+    );
+    let mid_id = child[0].0;
+    assert_eq!(
+        execution_history(&pool, mid_id)
+            .await
+            .as_array()
+            .and_then(|h| h.last().cloned()),
+        Some(serde_json::json!("RETRIED")),
+        "`mid` reached FAILED inside its parent's transaction and its \
+         `CREATE_NEW_EXECUTION` retry took it to RETRIED there -- if it did \
+         not, this test is no longer driving the nested case at all"
+    );
+    let deadline = not_before_of(&pool, mid_id, "sub")
+        .await
+        .expect("the replay's delay was scheduled");
+    assert_eq!(
+        deadline, 0,
+        "`interval: PT0S` at the instant of the failure: the deadline is due \
+         the moment it is written, so nothing but the depth refuses this spawn"
+    );
+
+    // Direction 1: refused, inside the parent's settle.
+    assert_eq!(
+        replay_of(&pool, mid_id).await,
+        None,
+        "a replay was started from a NESTED settle. `spawn_due` runs at the end \
+         of every settle and this one is inside `subflow::spawn_one`'s -- the \
+         recursion `subflow::MAX_SPAWN_CHAIN` exists to bound"
+    );
+
+    // Direction 2: the same execution, the same due deadline, from a fresh
+    // stack.
+    egret_workflow::worker::resume(&pool, mid_id)
+        .await
+        .expect("resume mid");
+    let replay = replay_of(&pool, mid_id)
+        .await
+        .expect("the resume must start the replacement: nothing else changed");
+    assert_eq!(
+        metadata_of(&pool, replay).await.0,
+        2,
+        "and it is attempt 2 of the chain"
+    );
+    // One per resume, not a chain built in this transaction: the replay's own
+    // settle is nested inside this one and refuses in turn.
+    assert_eq!(
+        replay_of(&pool, replay).await,
+        None,
+        "the replacement's OWN replay must wait for its own fresh stack, or the \
+         bound is not bounding: with `PT0S` and `maxAttempts: 3` an unbounded \
+         version builds the whole chain inside one transaction"
+    );
+}
+
+/// **A replay inherits the `correlationId` of the execution it replaces**, and
+/// its own `{{ execution.id }}` is still its own.
+///
+/// `render::Surface::load` walks `parent_execution_id` to the top of the chain
+/// for `root`, which feeds `labels.system.correlationId`, and it does **not**
+/// stop that walk where the `inheriting` flag stops the outputs walk. W6 Task 3
+/// left that difference open for Task 4 to measure rather than choose, and the
+/// measurement is on the pinned artifact — `egret.probe4/replay-correlation`, a
+/// flow-level `CREATE_NEW_EXECUTION` retry over a `Log` of
+/// `{{ labels.system.correlationId }}`:
+///
+/// ```text
+/// root   cid=3nY5p1H9MmhpWnq4hZsVOD eid=3nY5p1H9MmhpWnq4hZsVOD
+/// replay cid=3nY5p1H9MmhpWnq4hZsVOD eid=5cNdx41IqqhyGSExZsuGLu
+/// ```
+///
+/// `ExecutionService.replay` copies the parent's labels, and
+/// `Execution.java:213` fills a `correlationId` in only when one is ABSENT — so
+/// the label survives the whole chain. **No golden entry pairs a replay with a
+/// `correlationId` read**, so the ratchet is silent about this and the probe
+/// plus this test are the only instruments.
+///
+/// The condition of an `If` is the observation point because `advance()` stores
+/// the render in `task_runs.rendered`, which is a column a test can read
+/// without a handler in the middle.
+///
+/// # `maxAttempts: 3`, and the two-link chain is the whole point
+///
+/// **This test claimed to keep `root` from drifting and did not** — W6 Task 6's
+/// Important, carried to Task 8 and fixed here. Its fixture was `maxAttempts:
+/// 2`, i.e. **one** link, where the chain root and the immediate parent are the
+/// same row: replacing `root = id` inside `Surface::load`'s walk with
+/// `if root == ctx.id { root = id; }` — *take the nearest ancestor, not the
+/// top* — answered the same id, passed this test, passed the rest of the crate
+/// and passed the ratchet. The exact shape of
+/// [`a_replay_chain_carries_its_attempt_number_and_its_origin_offset`]'s
+/// `attempt.max(2)`, one module over: **a fixture answers the question you
+/// built it for and stays silent about the one you then generalise to.**
+///
+/// So the chain is three executions long and the assertion that matters is on
+/// the **second** replay, whose parent is the first replay and whose root is
+/// the original. Measured: with that mutation applied, the second replay
+/// renders the FIRST replay's id and this test fails naming both.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_replay_inherits_the_correlation_id_of_the_execution_it_replaces(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let source = "id: cid\nnamespace: t\nretry:\n  behavior: CREATE_NEW_EXECUTION\n  \
+                  type: constant\n  interval: PT1S\n  maxAttempts: 3\ntasks:\n  - id: cond\n    \
+                  type: io.kestra.plugin.core.flow.If\n    \
+                  condition: \"{{ labels.system.correlationId }}\"\n    then:\n      - id: a\n        \
+                  type: io.kestra.plugin.core.log.Log\n        message: hi\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    drain_with(&pool, &reg).await;
+
+    async fn rendered(pool: &sqlx::PgPool, execution: Uuid) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT rendered FROM workflow.task_runs \
+              WHERE execution_id = $1 AND task_id = 'cond'",
+        )
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the rendered condition")
+    }
+    assert_eq!(
+        rendered(&pool, root).await,
+        Some(root.to_string()),
+        "a top-level execution IS its own correlation root"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![root]);
+    let replay = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    drain_with(&pool, &reg).await;
+
+    assert_ne!(replay, root, "the replay is a different execution");
+    assert_eq!(
+        rendered(&pool, replay).await,
+        Some(root.to_string()),
+        "the replay's `labels.system.correlationId` must be the ORIGINAL \
+         execution's id -- `Surface::load`'s `root` walks the whole \
+         `parent_execution_id` chain, deliberately, and a sticky version of \
+         that walk (the one `inheriting` uses for outputs) would answer {replay} \
+         here and diverge from the artifact"
+    );
+
+    // **The SECOND link, which is the one a nearest-ancestor `root` gets
+    // wrong.** Everything above is one link deep, where the chain root IS the
+    // immediate parent, so it cannot tell the two apart -- and until this
+    // block existed, a `root` that stopped at the nearest ancestor passed the
+    // whole crate and the ratchet.
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(
+        wake(&pool, 8).await.expect("wake"),
+        vec![replay],
+        "attempt 2 of 3 is not the last, so the first replay's own replacement \
+         comes due -- if this is empty the chain is one link long again and the \
+         assertion below is measuring nothing"
+    );
+    let second = replay_of(&pool, replay)
+        .await
+        .expect("the second replacement exists");
+    drain_with(&pool, &reg).await;
+    assert_ne!(second, replay, "the second replay is its own execution");
+    assert_eq!(
+        parent_of(&pool, second).await,
+        Some(replay),
+        "and it hangs off the FIRST replay, not off the root: the two-link \
+         chain this assertion needs does not exist otherwise"
+    );
+    assert_eq!(
+        rendered(&pool, second).await,
+        Some(root.to_string()),
+        "two links up, and the label is still the ORIGINAL execution's id. A \
+         `root` that took the nearest ancestor instead of the top of the chain \
+         answers {replay} here -- it answers the same thing as the correct walk \
+         one link up, which is why the one-link fixture this test used to carry \
+         could not see it"
+    );
+}
+
+/// `parent_execution_id` of one execution, for the tests that need to assert
+/// the SHAPE of a chain rather than only its rendered output.
+async fn parent_of(pool: &sqlx::PgPool, execution: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT parent_execution_id FROM workflow.executions WHERE id = $1")
+        .bind(execution)
+        .fetch_one(pool)
+        .await
+        .expect("read the parent link")
+}
+
+/// **A second `resume` on an execution whose replay already exists starts no
+/// second one**, and the database would refuse it if it tried.
+///
+/// Two mechanisms sit on this and they are not the same fence, which is why
+/// both are driven here:
+///
+/// - `replay::spawn_due` asks whether a replay exists and answers "already
+///   done" rather than inserting. Without it the insert is attempted, and
+/// - migration 0138's `workflow_executions_loop_run_idx` — `(parent_execution_id,
+///   parent_run_ix, loop_index)` with `NULLS NOT DISTINCT` — makes the second
+///   row **unrepresentable**, so the attempt aborts the whole transaction
+///   rather than producing a fan-out.
+///
+/// The first is what keeps an ordinary second `resume` from being an error, and
+/// an ordinary second `resume` is not hypothetical: nothing ever clears a
+/// `not_before`, `worker::wake` filters on the child's absence but the oracle's
+/// driver resumes by deadline alone, and any caller may resume any execution at
+/// any time.
+///
+/// One replay per parent is the artifact's behaviour, measured: over the 710
+/// descendants in `traces.json`, 40 carry a NULL `loopIndex` and no parent
+/// carries two.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_second_resume_does_not_start_a_second_replay(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &one_task_replaying("twice", "PT1S", 3),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start");
+    drain_with(&pool, &reg).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+
+    egret_workflow::worker::resume(&pool, root)
+        .await
+        .expect("the first resume");
+    let first = replay_of(&pool, root).await.expect("one replay");
+
+    egret_workflow::worker::resume(&pool, root)
+        .await
+        .expect("the second resume must SUCCEED, not abort on a unique index");
+    let all: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow.executions \
+          WHERE parent_execution_id = $1 AND parent_run_ix IS NULL ORDER BY id",
+    )
+    .bind(root)
+    .fetch_all(&pool)
+    .await
+    .expect("read the replays");
+    assert_eq!(
+        all,
+        vec![first],
+        "the deadline is still past and nothing cleared it, so the second \
+         resume asked the same question and must answer `already done`"
+    );
+}
+
+/// **A `Subflow` child IS replayed, and egret cannot report the replacement's
+/// terminal to the parent: the `sub` RUN diverges always, and the parent
+/// EXECUTION diverges whenever a successor outlives the replay** — W6 Task 4,
+/// fix rounds 2-4.
+///
+/// # This test asserted the opposite of the artifact, and that was worse than
+/// asserting nothing
+///
+/// Fix round 1 wrote it with the message *"which is what Kestra does too —
+/// measured"* on the one line where Kestra does something else. A wrong claim
+/// does not merely fail to catch a divergence: it **defends** it, and the next
+/// reader takes the assertion for the measurement. Both halves are now measured
+/// here, on the pinned digest, twice, with this file's own fixture shape
+/// (compose project `t4r2kestra`, namespace `t4r2.probe`, torn down `-v`).
+///
+/// ```text
+/// parent      6Mma…  SUCCESS   ["CREATED","RUNNING","SUCCESS"]
+///   run sub          FAILED    ["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]
+///   run after        SUCCESS
+/// child       3vcz…  RETRIED   trigger.taskRunId = the parent's `sub` run
+/// replacement kPXx…  FAILED    parentId = the child,
+///                              trigger  = BYTE-IDENTICAL to the child's
+/// ```
+///
+/// Two facts the round-1 version got wrong:
+///
+/// 1. **The replacement is NOT untriggered.** `Execution.childExecution()`
+///    copies `this.trigger` verbatim (`Execution.java:405-431`, the field at
+///    :422), so the replacement carries the *parent's* `executionId` and the
+///    *parent's* `sub` `taskRunId`, exactly as the child does.
+/// 2. **The parent's `sub` run therefore ends `FAILED`**, stamped **8.5-33.3
+///    ms** after the replacement's own `FAILED` — a range over the 16 stamps
+///    recorded to a decimal (4 in fix round 3, 12 in re-review 3), not a
+///    characteristic figure. An earlier version of this doc said `~13-33 ms`,
+///    which the next round's runs falsified at the low end.
+///
+/// # What the FIXTURE was holding fixed, and the third correction it hid
+///
+/// Rounds 1 and 2 read the trace above as *"the stamp lands after the parent
+/// has finished, so it changes nothing"*. **That framing was an artifact of
+/// this fixture's trivial successor, not of Kestra's design.** Change one thing
+/// the fixture holds fixed — the successor, from `Log` to `Sleep PT8S`, still a
+/// legal publishable flow — and measure again. Both orderings, measured twice
+/// each on the pinned digest in fix round 3:
+///
+/// ```text
+/// successor `Log`    parent EXEC SUCCESS in 16/16   stamp +407 to +1627.6 ms AFTER the parent ended (8 obs)
+/// successor `Sleep`  parent EXEC FAILED  in 21/22   stamp  -17.4 to -45.9 ms BEFORE it, parent still RUNNING (8 obs)
+/// ```
+///
+/// It is **one rule** — report the replacement's terminal through the copied
+/// trigger — whose observable consequence depends on whether the parent is
+/// still alive to receive it. At the second ordering the write is ordinary, the
+/// parent is live, and **the flow's own verdict differs**: Kestra `FAILED`,
+/// egret `SUCCESS`. (Kestra's `after` then completed `SUCCESS` 6.1-7.8 s
+/// *after* the execution had been declared `FAILED`, over 7 observations.)
+///
+/// **It is NOT established that the rule always fires, and an earlier version
+/// of this doc said "one deterministic rule, not a race".** That is stronger
+/// than 22 ordering-B runs support: **1 of the 22 delivered no stamp at all**
+/// on a live parent — `sub` stopped at the same four states egret produces and
+/// the parent ended `SUCCESS` — and `Execution.hasTaskRunJoinable`
+/// (`Execution.java:844`) is a live path that discards a subflow result whose
+/// taskrun carries fewer histories than the execution row now holds. That run
+/// was not reproduced in 17 further attempts; it is a **calibrated
+/// counterexample, not a falsification**, and it is recorded because a property
+/// asserted from runs nobody had made yet is this task's recurring defect.
+///
+/// **egret's answer is the same at both orderings, by construction**, and the
+/// assertion that says so is the `(trigger, trigger_run) == (None, None)` one
+/// below: with no trigger link on the replacement, `subflow::on_child_terminal`
+/// is never invoked for it, so there is no stamp to be early or late. That is
+/// why this test does not need a second fixture to cover the second ordering —
+/// but it is also why the divergence is bigger than rounds 1-2 said.
+///
+/// # What agrees, and what egret cannot represent
+///
+/// The child (`RETRIED`), the replacement (`FAILED`) and the fact that a replay
+/// happens at all agree. Concern 3's verdict stands — replaying here is the
+/// artifact's behaviour and refusing it would be under-acceptance. **What
+/// diverges is the parent: its `sub` run always, and its EXECUTION whenever a
+/// successor outlives the replay.**
+///
+/// **It is not chosen — but it is less structural than this doc used to say,
+/// and fix round 4 corrected both halves of the claim:**
+///
+/// * ~~the CHECK makes it impossible~~. The replay must carry
+///   `parent_execution_id` — that is what puts it in the oracle's `spawned`,
+///   which is what all four banked entries compare — and 0138's
+///   `workflow_executions_one_link_kind` makes carrying a trigger link beside
+///   it unrepresentable. **But the address does not have to be stored.** This
+///   row's `parent_execution_id` names the CHILD, whose own
+///   `(trigger_execution_id, trigger_run_ix)` is the parent execution and its
+///   `sub` run — which is exactly the pair `Execution.childExecution()` copied,
+///   by construction. One hop up resolves it, `subflow::chain_holds` already
+///   walks `COALESCE(trigger_execution_id, parent_execution_id)`, and `spawned`
+///   never moves because `read_trace_inner` reads a column the walk does not
+///   touch. **So this cost does not exist**, and it was the stronger of the two
+///   the ruling stood on;
+/// * what actually drops the report is `subflow::on_child_terminal` returning
+///   early on a parent run that is already terminal — and it *is* terminal in
+///   both orderings before the replacement exists, which the
+///   `run_history(parent, "sub")` assertion below pins. Kestra has no such
+///   guard: `Execution.hasTaskRunJoinable` blocks terminal→non-terminal
+///   (`:838`) and an outdated-history join (`:844`) but permits
+///   terminal→terminal when the history grows. **Nothing in this tree observes
+///   that guard** — mutating it so it can never fire left this suite's 53
+///   tests, the executor suite's 45 and the ratchet's 294/127/127/0 unmoved —
+///   and its stated grounds are wrong in one half: this doc said
+///   *"`transmitFailed` and `wait: false`"*, while the guard's own doc names a
+///   `Subflow` task's `retry:` and `wait: false`, and the `wait: false` half is
+///   redundant behind the `!sub.wait` return that sits after it.
+///
+/// **A third cost was claimed in round 2 and is withdrawn.** It read *"egret
+/// would need a path that writes to a terminal execution"*. At the ordering
+/// that matters the parent is **live**, so the write is an ordinary one and
+/// W3b's durability property is not in play. The fidelity rule does not excuse
+/// egret here; an unmeasured guard and an empty corpus population are what it
+/// ships on.
+///
+/// For a shape **no corpus flow reaches** — derived, not remembered: over
+/// `oracle-exec/corpus/`, 345 flows, 4 writing `CREATE_NEW_EXECUTION` and none
+/// of those declaring a `Loop`; 25 declaring a `Subflow` across 20 literal
+/// `flowId` targets; intersection with the four is empty.
+///
+/// # A person decided this, and the decision is registered
+///
+/// **Ruled by the controller (W6 Task 4, fix rounds 2 and 3): the divergence
+/// stands, deliberately** — on 0138's CHECK and the empty corpus population.
+/// **Fix round 4 removed the first of those two grounds**: the CHECK is
+/// avoidable, so what the ruling now rests on is the empty corpus population
+/// plus one guard whose load-bearingness nobody has measured. The reasoning,
+/// the corrected size, the ranges with their run counts and the costs as they
+/// now stand are on the record in
+/// `oracle-exec/README.md`'s coverage statement, **item 16**, which is where
+/// this package registers divergences the ratchet cannot hold.
+///
+/// **It is parked, not hidden.** The third derived shape in
+/// `tests/executor.rs`'s `STILL_OVER_ACCEPTED_AT_RUNTIME` — a run Kestra
+/// stopped that egret completed — is exactly this divergence's shape, so the
+/// moment any corpus flow reaches it the suite fails as an *unregistered*
+/// runtime over-acceptance rather than passing quietly.
+///
+/// So a reader who reaches the assertions below is not looking at a test that
+/// lapsed. The values are egret's, they are correct, and each message carries
+/// Kestra's value beside them.
+///
+/// **It is the same FAILED→SUCCESS direction as this task's first Critical, and
+/// at the second ordering it is the same SIZE too** — the flow's own verdict.
+/// Rounds 1 and 2 said otherwise; that sentence is corrected here rather than
+/// left standing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_child_is_replayed_and_egret_cannot_report_it_to_the_parent(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    // The target flow fails for real -- `core.execution.Fail` has a handler in
+    // `with_core_tasks` -- and carries the flow's retry, so the retry is
+    // decided inside the CHILD execution.
+    let child_source = "\
+id: child
+namespace: t
+tasks:
+  - id: boom
+    type: io.kestra.plugin.core.execution.Fail
+    retry:
+      behavior: CREATE_NEW_EXECUTION
+      type: constant
+      interval: PT1S
+      maxAttempts: 2
+";
+    file_flow(&db, ws, user, child_source).await;
+
+    let reg = Handlers::with_core_tasks();
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the parent");
+    settle_everything(&pool, &reg).await;
+
+    let kids = children_by_trigger(&pool, parent).await;
+    assert_eq!(kids.len(), 1, "exactly one subflow child: {kids:?}");
+    let (child, _, parent_link, _, child_state) = kids[0].clone();
+    assert_eq!(
+        (parent_link, child_state.as_str()),
+        (None, "RETRIED"),
+        "the child is linked by the trigger columns only, and its own terminal \
+         is RETRIED -- the state a CREATE_NEW_EXECUTION retry ends an execution \
+         in. Kestra's child ends RETRIED too (measured)"
+    );
+    // **THE DIVERGENCE, asserted as one.** Kestra's `sub` run ends `FAILED`
+    // (`["CREATED","RUNNING","RETRIED","SUCCESS","FAILED"]`, measured in 38
+    // runs across four compose projects on the pinned digest). egret's ends
+    // `SUCCESS` and stops there. Round 1 asserted this value with the words
+    // "which is what Kestra does too -- measured", which was false and defended
+    // the gap.
+    //
+    // **Why egret stops is one thing, not two, and fix round 4 corrected it.**
+    // The replacement carries no trigger link (0138), but the address is
+    // derivable one hop up `parent_execution_id` without storing it -- so what
+    // actually drops the report is `on_child_terminal`'s already-terminal
+    // guard, and the assertion below pins that the run IS terminal here, before
+    // the replacement exists.
+    assert_eq!(
+        run_state(&pool, parent, "sub").await.as_deref(),
+        Some("SUCCESS"),
+        "egret's `sub` run ends SUCCESS. **Kestra's ends FAILED** -- it stamps \
+         the replacement's failure onto this run through the trigger block \
+         `Execution.childExecution()` copied, 8.5-33.3 ms after the \
+         replacement failed (16 stamps recorded to a decimal; an earlier \
+         version of this message said 13-33 ms and the next round's runs \
+         falsified the low end). WHEN it lands relative to the parent's own \
+         terminal depends on the successor and nothing else -- after it here, \
+         BEFORE it with a `Sleep PT8S`, where Kestra's parent then ends \
+         FAILED in 21 of 22 runs. This is a recorded DIVERGENCE, not \
+         agreement, and a RULED one: `oracle-exec/README.md`'s coverage \
+         statement, item 16, carries the measurement with its run counts, what \
+         following Kestra would actually cost -- ONE guard, which no test in \
+         this tree observes -- and the controller's ruling that it stands"
+    );
+    assert_eq!(
+        run_history(&pool, parent, "sub").await,
+        serde_json::json!(["CREATED", "RUNNING", "RETRIED", "SUCCESS"]),
+        "and the whole history, not just its last state, so the divergence is \
+         pinned at the exact point it starts: egret reaches Kestra's fourth \
+         entry and stops, and Kestra appends a fifth, FAILED. WHEN that fifth \
+         lands relative to the execution holding this run is the successor's \
+         doing rather than a property of the shape: after that execution had \
+         terminated with THIS fixture's `Log`, before it with a `Sleep PT8S`. \
+         **SUCCESS here is also already terminal**, which is the guard that \
+         would drop the report even with the address in hand -- item 16's \
+         second cost, and the only one that survives"
+    );
+    assert_eq!(
+        run_state(&pool, parent, "after").await.as_deref(),
+        Some("SUCCESS"),
+        "so the successor runs and the parent really did proceed"
+    );
+    assert_eq!(
+        replay_of(&pool, child).await,
+        None,
+        "no replacement before the delay has elapsed"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    let woken = wake(&pool, 8).await.expect("wake");
+    assert_eq!(
+        woken,
+        vec![child],
+        "the waker names the subflow child, and nothing else. A `spawn_due` \
+         keyed on `has a parent` rather than on `parent_run_ix` would refuse \
+         this replay, which is UNDER-acceptance: Kestra replays here, because \
+         the retried run's parents are all local to the child execution and \
+         nothing throws. Named: {woken:?}"
+    );
+    let replacement = replay_of(&pool, child)
+        .await
+        .expect("the subflow child gets its replacement");
+    assert_eq!(
+        metadata_of(&pool, replacement).await.0,
+        2,
+        "attempt 2 of the chain"
+    );
+    let (trigger, trigger_run): (Option<Uuid>, Option<i32>) = sqlx::query_as(
+        "SELECT trigger_execution_id, trigger_run_ix FROM workflow.executions WHERE id = $1",
+    )
+    .bind(replacement)
+    .fetch_one(&pool)
+    .await
+    .expect("read the replacement\'s trigger columns");
+    assert_eq!(
+        (trigger, trigger_run),
+        (None, None),
+        "egret's replacement carries NO trigger link, so \
+         `subflow::on_child_terminal` -- which reads `trigger_execution_id` -- \
+         can never reach the parent with it. **Kestra's replacement carries the \
+         child's trigger block verbatim** (`Execution.childExecution()` copies \
+         `this.trigger`, `Execution.java:422`), naming the parent execution and \
+         the parent's `sub` taskrun. egret STORES no such link: 0138's \
+         `workflow_executions_one_link_kind` makes `parent_execution_id` and \
+         `trigger_execution_id` mutually exclusive, and the replay needs the \
+         first, because that is the column the oracle's `spawned` is built from \
+         and all four banked entries compare. **`cannot` would be too strong, \
+         and fix round 4 corrected it**: `parent_execution_id` here names the \
+         CHILD, whose own trigger columns hold the very pair Kestra copied, so \
+         the address is one hop away and derivable without storing it. The \
+         value here is egret's, and the divergence is the point of the message"
+    );
+
+    // The replacement runs and ends, and the parent must not move.
+    settle_everything(&pool, &reg).await;
+    assert_eq!(
+        execution_history(&pool, replacement).await,
+        serde_json::json!(["CREATED", "RUNNING", "FAILED"]),
+        "attempt 2 of 2 has no third attempt to schedule, so the chain ends \
+         FAILED"
+    );
+    // **This message claimed parity and was WRONG -- fix round 3, and it is the
+    // SECOND time this task shipped that construction in an assertion.** It
+    // read: "which is what Kestra does too, measured: its parent's histories
+    // end at SUCCESS". That is true only of THIS fixture, whose successor is a
+    // `Log` that finishes before the replacement does. Change the successor to
+    // a `Sleep PT8S` -- a legal publishable flow -- and Kestra's parent
+    // EXECUTION ends **FAILED** in 21 of 22 runs across three compose
+    // projects: the `sub` stamp lands 17.4 to 45.9 ms BEFORE the parent's own
+    // terminal (8 observations), i.e. while it is still RUNNING. So the
+    // divergence can be the FLOW'S OWN VERDICT, not a run state after the flow
+    // is over. The 22nd run delivered no stamp at all and ended SUCCESS; it is
+    // recorded in item 16 as a counterexample to "the rule always fires",
+    // never as a reason to soften the sentence above.
+    assert_eq!(
+        execution_history(&pool, parent).await,
+        serde_json::json!(["CREATED", "RUNNING", "SUCCESS"]),
+        "egret's parent EXECUTION ends SUCCESS. **So does Kestra's ONLY \
+         because this fixture's successor is trivial.** With a successor that \
+         outlives the replay (`Sleep PT8S`, 22 runs on the pinned digest) the \
+         stamp lands while the parent is still RUNNING and Kestra's parent \
+         ends **FAILED** in 21 of them -- egret still answers SUCCESS, \
+         because its replacement carries no trigger link at all and so no \
+         stamp is ever delivered, at any ordering. That makes this a \
+         divergence in the FLOW'S OWN VERDICT, the same class as this task's \
+         first Critical, and it is registered and ruled: \
+         `oracle-exec/README.md` coverage statement, item 16"
+    );
+}
+
+/// **Migration 0139's CHECK: the replay metadata is unrepresentable on a row
+/// that is not a replay.**
+///
+/// A guard nobody has seen fail is a guard nobody has seen, and this one cannot
+/// be reached through `src/` at all: `worker::replay::spawn_one` is the only
+/// writer of a non-default `attempt_number`, and it writes the replay's own
+/// shape. So it is driven directly, at the level it lives at — a statement the
+/// database must refuse.
+///
+/// **Three rows, because one refusal proves nothing about which clause did it.**
+/// The permitted row is asserted first so a CHECK that refused everything would
+/// fail here rather than pass three times.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_replay_metadata_is_unrepresentable_on_anything_but_a_replay(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+
+    async fn insert(
+        pool: &sqlx::PgPool,
+        ws: Uuid,
+        parent: Option<Uuid>,
+        loop_ix: Option<i32>,
+        attempt: i32,
+        offset: i64,
+    ) -> Result<Uuid, sqlx::Error> {
+        sqlx::query_scalar(
+            "INSERT INTO workflow.executions \
+               (workspace_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value, \
+                attempt_number, origin_offset_ms) \
+             VALUES ($1,'t','f','src','CREATED','[\"CREATED\"]'::jsonb, \
+                     $2,$3,$3,$4,$5,$6) RETURNING id",
+        )
+        .bind(ws)
+        .bind(parent)
+        .bind(loop_ix)
+        .bind(loop_ix.map(|_| "v"))
+        .bind(attempt)
+        .bind(offset)
+        .fetch_one(pool)
+        .await
+    }
+
+    let root = insert(&pool, ws, None, None, 1, 0)
+        .await
+        .expect("a top-level execution with the default metadata is legal");
+    let replay = insert(&pool, ws, Some(root), None, 2, 1_234)
+        .await
+        .expect("a replay -- a parent, no loop index, attempt 2 -- is legal");
+    assert_ne!(replay, root);
+
+    let cases = [
+        (
+            "a top-level execution claiming to be attempt 2",
+            None,
+            None,
+            2,
+            0,
+        ),
+        (
+            "a top-level execution carrying an origin offset",
+            None,
+            None,
+            1,
+            5,
+        ),
+        (
+            "a LOOP iteration claiming to be attempt 2",
+            Some(root),
+            Some(0),
+            2,
+            0,
+        ),
+        (
+            "a replay claiming to be attempt 1 while carrying an offset",
+            Some(root),
+            None,
+            1,
+            9,
+        ),
+    ];
+    for (what, parent, loop_ix, attempt, offset) in cases {
+        let refused = insert(&pool, ws, parent, loop_ix, attempt, offset).await;
+        let Err(e) = refused else {
+            panic!("{what} was ACCEPTED; migration 0139's CHECK did not refuse it");
+        };
+        assert!(
+            e.to_string()
+                .contains("workflow_executions_metadata_belongs_to_a_replay")
+                || e.to_string()
+                    .contains("workflow_executions_origin_offset_non_negative"),
+            "{what} was refused by the wrong constraint, which means this case \
+             is not driving the CHECK it is written about: {e}"
+        );
+    }
+}
+
+/// **A `maxDuration` chain stops when the ORIGINAL execution's clock runs out**
+/// — the second of the two facts migration 0139 stores, driven on its own.
+///
+/// `a_replay_chain_carries_its_attempt_number_and_its_origin_offset` ends its
+/// chain on `maxAttempts`, so it cannot tell a working origin from a broken
+/// one: a policy with no attempt cap and a `maxDuration` is the only shape that
+/// reads `origin` at all.
+///
+/// `PT2S` over `PT1S` intervals gives the shortest chain with both an end and a
+/// middle: the first execution's next retry is one second in, which is inside
+/// the budget, and the second's is **two** seconds into the ORIGINAL's clock,
+/// which is not. An origin that reset per execution — or one whose sign was
+/// wrong — measures the second retry as one second again and the chain never
+/// ends.
+///
+/// The margin is about a second on both sides and does not depend on how fast
+/// this machine is: the offset is at least the interval by construction
+/// (the replay is created no earlier than its deadline), and the failure that
+/// schedules each retry happens milliseconds into its own execution.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_max_duration_chain_stops_when_the_original_clock_runs_out(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let (_db, ws) = seed(&pool).await;
+    let reg = AlwaysFails::default();
+
+    let source = "id: dur\nnamespace: t\ntasks:\n  - id: a\n    \
+                  type: io.kestra.plugin.core.log.Log\n    message: hi\n    retry:\n      \
+                  behavior: CREATE_NEW_EXECUTION\n      type: constant\n      \
+                  interval: PT1S\n      maxDuration: PT2S\n";
+    let root = start_execution(&pool, ws, None, source, serde_json::json!({}))
+        .await
+        .expect("start");
+    drain_with(&pool, &reg).await;
+    assert_eq!(
+        run_state(&pool, root, "a").await.as_deref(),
+        Some("RETRIED"),
+        "the first retry is one second in, well inside PT2S: {}",
+        stuck(&pool, root, "a").await
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_300)).await;
+    assert_eq!(wake(&pool, 8).await.expect("wake"), vec![root]);
+    let second = replay_of(&pool, root)
+        .await
+        .expect("the replacement exists");
+    drain_with(&pool, &reg).await;
+
+    assert_eq!(
+        run_state(&pool, second, "a").await.as_deref(),
+        Some("FAILED"),
+        "the second execution's next retry would be TWO seconds into the \
+         original's clock, which is not inside PT2S -- so it fails rather than \
+         being retried. An origin measured from its OWN creation, or one with \
+         the sign flipped, reads one second and retries: {}",
+        stuck(&pool, second, "a").await
+    );
+    assert_eq!(
+        not_before_of(&pool, second, "a").await,
+        None,
+        "and no third delay is scheduled at all"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    assert!(
+        wake(&pool, 8).await.expect("wake").is_empty(),
+        "nothing more is due"
+    );
+    assert_eq!(
+        replay_of(&pool, second).await,
+        None,
+        "and no third execution"
+    );
+}
+
+/// **A subflow grandchild's `labels.system.correlationId` is the ROOT's id, and
+/// it inherits no `item` from the loop that spawned its parent.**
+///
+/// The whole-branch review of W6 found `Surface::load`'s `root` walking
+/// `parent_execution_id` **alone**, which is `subflow::chain_holds`'s W6 Task 3
+/// defect one module over and never swept for: migration `0138`'s
+/// `workflow_executions_one_link_kind` makes a subflow child carry
+/// `trigger_execution_id` with `parent_execution_id` **NULL**, so the walk
+/// stopped dead at the first subflow link and `correlationId` was the child's
+/// **own** id.
+///
+/// # The artifact half, measured rather than argued
+///
+/// `t8.probe/corr-parent -> corr-child -> corr-grand-child` on the pinned digest
+/// — the corpus's own `subflow-parent -> subflow-child -> subflow-grand-child`
+/// shape, renamed — read out of Kestra's Postgres:
+///
+/// ```text
+/// flow              id                      parentId  trigger.…executionId     system.correlationId
+/// corr-parent       2cvzjgi7mY6lDfaQxiNa0x  null      (started by hand)        2cvzjgi7mY6lDfaQxiNa0x
+/// corr-child        8yWnkcC1oAvHsunjmTG1Q   null      2cvzjgi7mY6lDfaQxiNa0x   2cvzjgi7mY6lDfaQxiNa0x
+/// corr-grand-child  2Cr8T9lsAM5icJ7KT5NEna  null      8yWnkcC1oAvHsunjmTG1Q    2cvzjgi7mY6lDfaQxiNa0x
+/// ```
+///
+/// The label is the **root's** id two links down, `parentId` is NULL at every
+/// hop, and the cause is `trigger.variables.executionId`.
+///
+/// # Why this test needs four parts
+///
+/// A one-execution fixture cannot see the defect: **every** implementation of
+/// `root` returns the same value for a top-level execution, which is exactly
+/// how `the_seeded_correlation_id_divergence_has_no_corpus_population` came to assert
+/// that the two corpus readers "agree with the artifact" while comparing them
+/// only as roots. So:
+///
+/// 1. **standalone** — the instrument's own control: the label renders at all,
+///    and a root IS its own correlation id;
+/// 2. **two subflow links** — the assertion this test exists for. Two, not one:
+///    a walk that took the immediate cause instead of the top of the chain
+///    agrees with the correct one at a single link;
+/// 3. **a loop child** — the `parent_execution_id` half, which must keep
+///    working: a fix that swapped one column for the other instead of taking
+///    whichever is set would break this row and nothing else;
+/// 4. **`item` does not cross a subflow link** — the guard the widened walk
+///    needs. The walk reaches `loop -> subflow child` now, and without the gate
+///    that child would resolve `{{ item.value }}` off its caller's iteration.
+///
+/// The corpus reaches part 2 and the ratchet cannot: `valids/subflow-grand-child`
+/// logs `{{labels.system.correlationId}}` and is the target of
+/// `valids/subflow-child`, one of the twelve entries W6 banked — and the golden
+/// records states, so a `Log` renders either value without failing.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let reg = Handlers::with_core_tasks();
+
+    // An `If`'s condition is the observation point: `advance()` stores the
+    // render in `task_runs.rendered`, so no handler stands between the surface
+    // and the assertion.
+    fn reader(id: &str, expr: &str) -> String {
+        format!(
+            "id: {id}\nnamespace: t\ntasks:\n  - id: cond\n    \
+             type: io.kestra.plugin.core.flow.If\n    condition: \"{expr}\"\n    then:\n      \
+             - id: a\n        type: io.kestra.plugin.core.log.Log\n        message: hi\n"
+        )
+    }
+    async fn rendered_of(pool: &sqlx::PgPool, execution: Uuid, task: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT rendered FROM workflow.task_runs WHERE execution_id = $1 AND task_id = $2",
+        )
+        .bind(execution)
+        .bind(task)
+        .fetch_optional(pool)
+        .await
+        .expect("read the rendered condition")
+        .flatten()
+    }
+
+    let gc = reader("gc", "{{ labels.system.correlationId }}");
+
+    // 1. The standalone control.
+    let solo = start_execution(&pool, ws, None, &gc, serde_json::json!({}))
+        .await
+        .expect("start the standalone");
+    settle_everything(&pool, &reg).await;
+    assert_eq!(
+        rendered_of(&pool, solo, "cond").await,
+        Some(solo.to_string()),
+        "the control: a top-level execution IS its own correlation root, and the \
+         label renders at all. Every implementation of the walk agrees here, \
+         which is why the rest of this test exists"
+    );
+
+    // 2. Two subflow links: parent -> mid -> gc.
+    file_flow(&db, ws, user, &gc).await;
+    file_flow(&db, ws, user, &subflow_parent("mid", "gc", "")).await;
+    let root = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "mid", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start the chain");
+    settle_everything(&pool, &reg).await;
+    let mid = children_by_trigger(&pool, root);
+    let mid = mid.await;
+    assert_eq!(
+        mid.len(),
+        1,
+        "the parent spawned exactly one child, or the chain this test needs does \
+         not exist: {mid:?}"
+    );
+    let mid_id = mid[0].0;
+    let grand = children_by_trigger(&pool, mid_id).await;
+    assert_eq!(
+        grand.len(),
+        1,
+        "and the child spawned the grandchild -- TWO links, which is the whole \
+         point: {grand:?}"
+    );
+    let grand_id = grand[0].0;
+    assert_eq!(
+        (grand[0].2, grand[0].3.as_str()),
+        (None, "gc"),
+        "the grandchild carries no `parent_execution_id` (0138's \
+         `one_link_kind`) and runs the target flow, so the walk that has to \
+         reach the root has two `trigger_execution_id` hops to make"
+    );
+    assert_eq!(
+        rendered_of(&pool, grand_id, "cond").await,
+        Some(root.to_string()),
+        "**the assertion this test exists for**: two subflow links down, the \
+         label is still the ROOT's id -- measured on the artifact, where \
+         `corr-grand-child` carries `corr-parent`'s id. A walk keyed on \
+         `parent_execution_id` alone answers {grand_id} (its own id, because \
+         that column is NULL); a walk that took the immediate cause answers \
+         {mid_id}"
+    );
+    assert_eq!(
+        rendered_of(&pool, mid_id, "cond").await,
+        None,
+        "and `mid` has no `cond` run at all -- it is the `subflow_parent` \
+         fixture, not the reader. If this ever renders, the ids above are not \
+         the executions this test thinks they are"
+    );
+
+    // 3. The loop control: the `parent_execution_id` half still works.
+    let loopy = "id: loopy\nnamespace: t\ntasks:\n  - id: each\n    \
+                 type: io.kestra.plugin.core.flow.Loop\n    values: '[\"v1\"]'\n    tasks:\n      \
+                 - id: cond\n        type: io.kestra.plugin.core.flow.If\n        \
+                 condition: \"{{ labels.system.correlationId }}\"\n        then:\n          \
+                 - id: a\n            type: io.kestra.plugin.core.log.Log\n            message: hi\n";
+    let lroot = start_execution(&pool, ws, None, loopy, serde_json::json!({}))
+        .await
+        .expect("start the loop");
+    settle_everything(&pool, &reg).await;
+    let kids: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM workflow.executions WHERE parent_execution_id = $1")
+            .bind(lroot)
+            .fetch_all(&pool)
+            .await
+            .expect("read the loop's sub-executions");
+    assert_eq!(kids.len(), 1, "one value, one sub-execution: {kids:?}");
+    assert_eq!(
+        rendered_of(&pool, kids[0], "cond").await,
+        Some(lroot.to_string()),
+        "the OTHER link kind, and it must keep working: a fix that swapped \
+         `parent_execution_id` for `trigger_execution_id` rather than taking \
+         whichever is set would break this row alone"
+    );
+
+    // 4. `item` does not cross a subflow link.
+    file_flow(&db, ws, user, &reader("gcitem", "{{ item.value }}")).await;
+    let li = "id: li\nnamespace: t\ntasks:\n  - id: each\n    \
+              type: io.kestra.plugin.core.flow.Loop\n    values: '[\"LOOPVAL\"]'\n    tasks:\n      \
+              - id: sub\n        type: io.kestra.plugin.core.flow.Subflow\n        \
+              namespace: t\n        flowId: gcitem\n";
+    start_execution(&pool, ws, None, li, serde_json::json!({}))
+        .await
+        .expect("start the loop-over-subflow");
+    settle_everything(&pool, &reg).await;
+    let leaked: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, state FROM workflow.executions WHERE flow_key = 'gcitem' \
+          ORDER BY created_at, id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read the item-reading children");
+    assert_eq!(
+        leaked.len(),
+        1,
+        "one iteration, one subflow child: {leaked:?}"
+    );
+    assert_eq!(
+        (
+            rendered_of(&pool, leaked[0].0, "cond").await,
+            leaked[0].1.as_str()
+        ),
+        (None, "FAILED"),
+        "a subflow child has no `item`: the render fails and nothing is stored. \
+         Without the `inheriting` gate on the `levels` push, the widened walk \
+         would hand this child `LOOPVAL` off the iteration that spawned its \
+         CALLER -- a value from another execution's scope, rendered silently. \
+         (egret's side is what is asserted here; the artifact's answer to a \
+         subflow child reading `{{ item.value }}` is unmeasured, and the \
+         alternative is certainly wrong either way, since a subflow child's \
+         values arrive as `inputs:`)"
     );
 }

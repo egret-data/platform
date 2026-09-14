@@ -27,12 +27,76 @@ pub type RunIx = usize;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Tick(pub i64);
 
+/// Kestra's `ExecutionMetadata` — the two facts about an execution that are
+/// **not** facts about its runs, and that a `CREATE_NEW_EXECUTION` retry is the
+/// only reader of.
+///
+/// `core/src/main/java/io/kestra/core/models/executions/ExecutionMetadata.java`
+/// carries exactly `attemptNumber` (defaulting to 1) and `originalCreatedDate`,
+/// and `ExecutionMetadata.nextAttempt()` is the whole of how a replay derives
+/// the child's: `attemptNumber + 1`, the original date untouched.
+///
+/// # Why this is on [`ExecutionState`] and not on the caller
+///
+/// **It is what makes the replay chain terminate**, and until W6 Task 4 nothing
+/// in this module could see it. [`retry::next_retry_at`](super::retry) reads
+/// `(1, Tick(0))` for `CREATE_NEW_EXECUTION` — "this execution IS the first
+/// attempt, and `Tick`'s origin is its own creation" — which is true of the
+/// first execution and false of every replay, so `maxAttempts` never bites and
+/// `maxDuration` never accumulates. The caller cannot repair that after the
+/// fact: the golden's third execution ends `["CREATED","RUNNING","FAILED"]`
+/// with **no** `RETRIED`, and whether `RETRIED` is emitted is [`advance`]'s
+/// output, not the caller's. So the input widens; `advance` stays pure over
+/// `(plan, state, now)`.
+///
+/// [`advance`]: super::advance
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutionMeta {
+    /// `execution.getMetadata().getAttemptNumber()` — **1** for an execution
+    /// nobody has replayed, `N` for the `N-1`th replay of one.
+    ///
+    /// It counts EXECUTIONS of a `CREATE_NEW_EXECUTION` chain. The other
+    /// attempt count in this module, [`TaskRun::attempts`], counts a
+    /// `RETRY_FAILED_TASK`'s attempts inside ONE execution. They are the two
+    /// clocks `retry`'s header table separates and they are never the same
+    /// number: all four `retry-new-execution-*` entries end each execution with
+    /// exactly one attempt on the only run they have.
+    pub attempt: u32,
+    /// `execution.getMetadata().getOriginalCreatedDate()`, in this execution's
+    /// own [`Tick`] space — so **`Tick(0)` for an original and a NEGATIVE tick
+    /// for a replay**, the instant its chain began measured backwards from its
+    /// own creation.
+    ///
+    /// A `Tick` rather than a duration because that is what it is compared
+    /// against: `nextDate.isAfter(originalCreatedDate.plus(maxDuration))` is
+    /// `next.0 > origin.0 + maxDuration` here, and both sides have to be in one
+    /// clock. `Tick`'s doc says the origin is *the execution's creation*, which
+    /// stays exactly true — this is where the ORIGINAL execution's creation
+    /// falls on that scale.
+    pub origin: Tick,
+}
+
+impl Default for ExecutionMeta {
+    /// An execution nobody replayed: attempt 1, and its own creation is the
+    /// origin. Kestra's `@Builder.Default attemptNumber = 1` plus an
+    /// `originalCreatedDate` that is the execution's own `createdDate`.
+    fn default() -> Self {
+        Self {
+            attempt: 1,
+            origin: Tick(0),
+        }
+    }
+}
+
 /// The snapshot [`advance`](super::advance) reads. Owned by the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionState {
     /// CREATION order — the oracle compares this order.
     pub runs: Vec<TaskRun>,
     pub history: Vec<RunState>,
+    /// Kestra's `Execution.metadata`. Defaulted for every execution that is not
+    /// a `CREATE_NEW_EXECUTION` replay, which is all of them until one exists.
+    pub metadata: ExecutionMeta,
 }
 
 impl ExecutionState {
@@ -41,6 +105,7 @@ impl ExecutionState {
         Self {
             runs: Vec::new(),
             history: vec![RunState::Created],
+            metadata: ExecutionMeta::default(),
         }
     }
 }
@@ -304,10 +369,28 @@ impl RunState {
 /// second attempt reads `CREATED RUNNING FAILED RETRYING CREATED RUNNING
 /// FAILED` — Kestra accumulates the sub-execution's retries inside the parent's
 /// attempt — and `valids/subflow-parent-retry` is the same shape. Both are
-/// baselined, `Subflow` is planned opaque and is W6's, and no reachable entry
-/// has an attempt that continues past its own terminal. That is why the rule
-/// is stated here with its counter-example rather than left as an invariant
-/// somebody later discovers is not one.
+/// baselined -- `Subflow` is a [`TaskKind::Executable`](super::TaskKind::Executable)
+/// since W6, not opaque, and the two entries stay baselined on exactly this
+/// rule -- and no reachable entry has an attempt that continues past its own
+/// terminal. That is why the rule is stated here with its counter-example
+/// rather than left as an invariant somebody later discovers is not one.
+///
+/// **W6 measured a SECOND `Subflow` shape this rule is wrong for, and left the
+/// rule alone because nothing reachable can express it.** When a `Subflow`'s
+/// child terminates, Kestra writes the CHILD's state onto the parent run and
+/// then, if `ExecutableUtils.guessState` disagrees, writes that too -- and the
+/// attempt takes **both**. Measured on the pinned artifact,
+/// `egret.probe/probe-notransmit-parent` (`transmitFailed: false` over a child
+/// that FAILS) gives a run AND an attempt each reading
+/// `["CREATED","RUNNING","FAILED","SUCCESS"]`, and the golden holds the same
+/// shape for `valids/task-allow-failure-executable-flow` (`... FAILED,
+/// WARNING`). Neither is reachable here: [`RunState`] has no `Warning`,
+/// `models::Task` carries neither `allowFailure` nor `allowWarning`, and **no
+/// corpus `Subflow` writes `transmitFailed: false`** -- re-derived over all 25
+/// declarers by `tests/executor.rs`'s
+/// `no_corpus_subflow_turns_transmit_failed_off`.
+/// `worker::subflow::guess_state` records the same boundary from the other
+/// side.
 ///
 /// ## 2. A run re-entering `CREATED` has no render (W3c fix round 2)
 ///
@@ -402,6 +485,13 @@ pub fn apply(state: &mut ExecutionState, cmd: &Command) {
         // would be a non-exhaustive match rather than a decision, so it is
         // spelled out.
         Command::SpawnExecution { .. } => {}
+        // Nothing to record, for `SpawnExecution`'s reason and with one extra
+        // consequence spelled out on `Command::SpawnSubflow` itself: because
+        // this leaves the state untouched, a round that emitted it without also
+        // starting the run would emit it again for ever, which is why
+        // `flowable::start` emits it BESIDE the `StartRun` rather than instead
+        // of one.
+        Command::SpawnSubflow { .. } => {}
     }
 }
 

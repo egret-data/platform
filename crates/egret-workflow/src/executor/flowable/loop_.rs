@@ -7,7 +7,10 @@
 //! read. Each value produces a **separate sub-execution** carrying `parentId`,
 //! and the body's tasks never get a run in the parent. Two derivations, one per
 //! half: **41** golden entries carry **142** sub-executions between them
-//! (`the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`),
+//! (`the_sub_executions_are_compared_and_this_is_what_they_cost` — the name was
+//! `the_spawned_field_is_all_that_stands_between_these_entries_and_a_bank`, and
+//! the sentence it made stopped being true when W3b Task 4 built the spawner;
+//! corrected here by W6 Task 3, the first package to open this directory),
 //! and across the **39** comparable entries that hold a `Loop` not one of the
 //! **82** tasks inside a loop body has a run in its parent — on either side
 //! (`no_run_is_ever_created_for_a_task_inside_a_loop`, which checks Kestra's own
@@ -179,9 +182,15 @@ fn first_batch(concurrency_limit: u32, size: usize) -> usize {
 /// **`valids/loop-outputs-auto` and `valids/loop-values-from-uri`**, both
 /// writing `values: "{{ outputs.write.uri }}"` — and they would fail here even
 /// with a perfect render context. Task 6's first account attributed them wholly
-/// to the oracle's narrow `outputs`-less context, and that was half the reason;
-/// `the_caller_can_render_every_expression_except_the_ones_named` now asserts
-/// both causes.
+/// to the oracle's narrow `outputs`-less context, and that was half the reason.
+///
+/// **The test that asserted both causes no longer exists and has no
+/// successor**, which is why this correction names the gap instead of a name:
+/// `the_caller_can_render_every_expression_except_the_ones_named` was deleted
+/// with W3a's four-tier harness at W3b Task 5, along with the render tier it
+/// pinned. Rendering lives in `worker::render` and is tested there; nothing
+/// asserts these two entries' second cause today, and both remain baselined.
+/// (Corrected by W6 Task 3, the first package to open this directory.)
 ///
 /// **What closing it would take**, so that whoever does it is not designing from
 /// scratch: `advance()` performs no I/O, so it cannot fetch the file. The caller

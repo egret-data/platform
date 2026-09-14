@@ -63,6 +63,31 @@ pub struct AppState {
     /// Workflow management surface (W1 Task 7): flow drafts and their
     /// published versions; `None` in unit tests.
     pub workflow: Option<egret_workflow::WorkflowState>,
+    /// **The exposure lever for the anonymous webhook surface (W6 Task 7).
+    /// `false` means the routes are not mounted at all.**
+    ///
+    /// `POST /workflows/v1/{ws}/executions/webhook/{namespace}/{flow}/{key}`
+    /// is unauthenticated by construction — the key in the path is the whole
+    /// credential — and its own security review's verdict is *not approved for
+    /// exposure*. Until fix round 2 that verdict had **no lever**: the router
+    /// was mounted unconditionally, so an operator who had read the warning
+    /// could do nothing about it. A documented limitation nobody can act on is
+    /// not a control.
+    ///
+    /// **Default `false`**, in [`AppState::without_db`] and in
+    /// `egret_config::WorkflowConfig`, which `egret-bin` reads as
+    /// `[workflow] webhooks_enabled` / `EGRET_WORKFLOW__WEBHOOKS_ENABLED` —
+    /// the `EGRET_<SECTION>__<KEY>` convention, and a key the helm chart sets.
+    /// Off is the only safe default for a surface whose own doc says it should
+    /// not be exposed; an operator who wants it says so once, deliberately, and
+    /// a value figment cannot parse is a startup error rather than a silent
+    /// `false`.
+    ///
+    /// It gates **only** the webhook group. Workflow management
+    /// (`/api/ws/{workspace}/workflows/...`, session-authenticated) is
+    /// unaffected: turning this off stops webhook traffic and nothing else,
+    /// which is the same split `flows.state = 'disabled'` makes per flow.
+    pub workflow_webhooks_enabled: bool,
 }
 
 impl AppState {
@@ -88,6 +113,10 @@ impl AppState {
             idp: None,
             dataapi: None,
             workflow: None,
+            // Off. See the field's doc: this is the lever for a surface whose
+            // security review says "do not expose", so the default has to be
+            // the side of that sentence.
+            workflow_webhooks_enabled: false,
         }
     }
 
@@ -104,6 +133,34 @@ impl AppState {
     /// Only the composed router can answer that question.
     pub fn with_dataapi(mut self, dataapi: egret_dataapi::DataApiState) -> Self {
         self.dataapi = Some(dataapi);
+        self
+    }
+
+    /// Attach the workflow seam to an otherwise-empty test state.
+    ///
+    /// Exists for the same reason [`Self::with_dataapi`] does, and against the
+    /// same class of bug: [`Self::without_db`] leaves `workflow: None`, so
+    /// `build_router(without_db())` mounts neither the management group nor the
+    /// webhook group, and no test had ever built the composed router with the
+    /// **anonymous webhook surface** merged. That surface is the one whose
+    /// layering can be wrong in a way its own suite cannot see — it must land
+    /// OUTSIDE the CSRF layer, and `egret-workflow`'s `tests/webhook_route.rs`
+    /// mounts `webhook_router()` directly, so it passes whether or not
+    /// `build_router` wraps it.
+    pub fn with_workflow(mut self, workflow: egret_workflow::WorkflowState) -> Self {
+        self.workflow = Some(workflow);
+        self
+    }
+
+    /// Turn the anonymous webhook surface ON for a test.
+    ///
+    /// Separate from [`Self::with_workflow`] on purpose: a test that wants the
+    /// management router must not get the anonymous one as a side effect, and
+    /// the one test file that drives the webhook mount has to say so in its own
+    /// source. See [`AppState::workflow_webhooks_enabled`].
+    #[must_use]
+    pub fn with_workflow_webhooks(mut self) -> Self {
+        self.workflow_webhooks_enabled = true;
         self
     }
 }
@@ -396,8 +453,38 @@ pub fn build_router(state: AppState) -> Router {
         let group = Router::new()
             .nest("/api", egret_workflow::management_router())
             .layer(axum::middleware::from_fn(egret_auth::csrf::csrf_layer))
-            .with_state(workflow);
+            .with_state(workflow.clone());
         router = router.merge(group);
+
+        // The webhook surface (W6 Task 7), WITHOUT the CSRF layer and outside
+        // `/api` — the same placement, and the same two reasons, as the Data
+        // API serving group above.
+        //
+        // Outside `/api`: `WsContext`'s feature-entitlement gate recognises a
+        // path beginning `/api/ws/` or `/ws/`, and this caller has no session
+        // for it to resolve. Outside CSRF: a webhook caller is a machine that
+        // types the credential into the URL, so nothing is ambient and a CSRF
+        // cookie it can never hold would make every POST impossible — which is
+        // exactly what shipping `render_router` inside the layered group did.
+        //
+        // **It is anonymous on purpose, and therefore OFF by default.** The key
+        // in the path is the whole credential;
+        // `egret_workflow::webhook_routes`' module doc is where the scoping
+        // argument lives, and its security review's verdict is "not approved
+        // for exposure".
+        //
+        // `AppState::workflow_webhooks_enabled` is the lever that verdict
+        // needs. Before fix round 2 this `nest` was unconditional, so the
+        // warning had nothing behind it — an operator who agreed with it could
+        // not act on it. When the flag is false the routes are **not mounted**,
+        // so the paths 404 like any other unrouted URL rather than being
+        // mounted-and-refusing, and nothing about them is discoverable.
+        if state.workflow_webhooks_enabled {
+            let webhooks = Router::new()
+                .nest("/workflows/v1", egret_workflow::webhook_router())
+                .with_state(workflow);
+            router = router.merge(webhooks);
+        }
     }
 
     if let Some(catalog_engine) = state.catalog_engine.clone() {
@@ -525,7 +612,7 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
 ///   decides to stop, not SIGKILL. Kubernetes' default grace period is **30 s**,
 ///   which is *below* the request deadline: leaving it at the default would have
 ///   made this whole drain unreachable, so `backend-deployment.yaml` sets 65 and
-///   `drain_deadline_fits_inside_the_pods_termination_grace_period` pins the two
+///   `the_drain_deadline_fits_inside_the_pods_termination_grace_period` pins the two
 ///   together.
 ///
 /// # Why the drain matters more here than the numbers suggest

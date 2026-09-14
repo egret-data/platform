@@ -665,6 +665,650 @@ fn no_corpus_entry_can_exercise_the_egret_sql_handler() {
     );
 }
 
+/// Every corpus flow, parsed by the product's own model, plus the ones that do
+/// not parse — **counted, never skipped.**
+///
+/// `trigger::flow`'s own corpus test walks the directory and `continue`s on a
+/// flow `serde_norway` refuses, which is silent: a flow that failed to parse
+/// *and* declared a trigger would shrink every census below and look exactly
+/// like a smaller corpus. This returns both halves so the caller can assert
+/// `parsed + unparsed == 345` and check what the unparsed ones contain.
+type ParsedCorpus = (
+    Vec<(String, egret_workflow::models::Flow)>,
+    Vec<(String, String)>,
+);
+
+fn parsed_corpus() -> ParsedCorpus {
+    let (mut ok, mut bad) = (Vec::new(), Vec::new());
+    for entry in corpus() {
+        let text = corpus_source(&entry.id);
+        match serde_norway::from_str::<egret_workflow::models::Flow>(&text) {
+            Ok(flow) => ok.push((entry.id.clone(), flow)),
+            Err(e) => bad.push((entry.id.clone(), e.to_string())),
+        }
+    }
+    (ok, bad)
+}
+
+/// Does this corpus flow declare a task of type `ty`?
+///
+/// Textual, and deliberately the same shape as
+/// [`no_corpus_entry_can_exercise_the_egret_sql_handler`]'s scanner, whose
+/// `core.log.Log` control this reuses: a scanner that parsed nothing would
+/// report zero of everything and look identical to the truth.
+fn declares_type(source: &str, ty: &str) -> bool {
+    source.lines().any(|line| {
+        line.trim()
+            .trim_start_matches("- ")
+            .trim()
+            .strip_prefix("type:")
+            .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'') == ty)
+            .unwrap_or(false)
+    })
+}
+
+/// **The sixteen entries the W6 ratchet movement speaks for, and the four
+/// constructs it does not speak for at all.**
+///
+/// This is the derivation behind the W6 section of `oracle-exec/README.md`'s
+/// coverage statement, and it exists because **sixteen banked entries can make
+/// four triggers look measured when none of them is**. Everything the statement
+/// prints is computed here, with the total beside its parts, because a figure is
+/// safe only if a running program compares it.
+///
+/// # The twelve are not a list, they are a predicate — and the predicate has a trap
+///
+/// The twelve `Subflow` banks are derived as *golden entries declaring a
+/// `Subflow` task, verdict `runs`, matching*. Read carelessly that is *matching
+/// ∧ declares a `Subflow`*, which is **thirteen**: `invalids/recursive-flow` is
+/// a flow Kestra REFUSED, egret refuses it too, and it has matched since long
+/// before this package. Counting it would attribute a thirteenth bank to
+/// `Subflow` executing. It is asserted separately, by name, for exactly that
+/// reason — *a fixture answers the question you built it for and stays silent
+/// about the one you then generalise to.*
+///
+/// # The four constructs, and the blindness is FOUR different mechanisms
+///
+/// Derived below, per construct, rather than summarised as "the oracle cannot
+/// see it":
+///
+/// 1. **webhook** — the harness never sends the request. `harvest.py` contains
+///    the string `executions/webhook` exactly **once**, as the *reason*
+///    `valids/webhook-inputs` is excluded from the corpus. The trigger is not
+///    invisible; it is never invoked.
+/// 2. **schedule** — Kestra's scheduler fires it (the compose file runs
+///    `server standalone`), and the execution it creates hangs off **nothing**:
+///    `parent_id` NULL and no trigger link either. `descendants()` walks
+///    `parent_id` from one root, so a schedule-fired execution is not a
+///    descendant of anything the harness posted and cannot be attributed to an
+///    entry at all.
+/// 3. **flow trigger** — fires, and the execution records its cause in
+///    `trigger.variables.executionId` (egret's `trigger_execution_id` column
+///    stands in for that field; the artifact-side name is the JSON path, and
+///    whether Kestra generates a COLUMN for it is unmeasured — `parent_id` is
+///    generated and this oracle has never named a second). **No arm of
+///    `descendants()` reads it.** Same verdict as (2), different mechanism:
+///    here the link exists and is not walked; there there is no link to walk.
+/// 4. **backfill** — no population. **Zero** live declarations in 345 flows;
+///    the only two occurrences are commented out, and they are named here so
+///    the zero is a measurement and not a scanner that reads nothing.
+///
+/// The control that makes the zero mean something is the **142** sub-executions
+/// the golden does hold: this oracle records sub-executions when Kestra links
+/// them by `parent_id`, so "no trigger-fired execution anywhere in the golden"
+/// is a statement about the link, not about an instrument that records nothing.
+///
+/// # The sharpest single row: `valids/task-flow`
+///
+/// One of the sixteen banked entries **declares a `Schedule` trigger**, and it
+/// banked because `Subflow` executes. The design spec's §1 recorded the cron row
+/// as *1 baselined declaration*; it is **0** now, and not one thing egret does
+/// with a schedule caused that. An attribution by construct that counted
+/// declarations would have credited the scheduler with a bank.
+#[test]
+fn the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none() {
+    // ---- the split every figure below is stated against --------------------
+    let golden = golden();
+    let baselined = baseline();
+    let ids: BTreeSet<String> = golden.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(ids.len(), golden.len(), "golden ids must be unique");
+    assert!(
+        baselined.is_subset(&ids),
+        "every baseline line must name a golden entry"
+    );
+    let matching: BTreeSet<String> = ids.difference(&baselined).cloned().collect();
+    assert_eq!(
+        (golden.len(), matching.len(), baselined.len()),
+        (294, 167, 127),
+        "294 = 167 matching + 127 baselined, the total beside its parts"
+    );
+
+    // ---- the sixteen, by name and by derivation ----------------------------
+    const TWELVE: [&str; 12] = [
+        "valids/flow-concurrency-parallel-subflow-kill",
+        "valids/flow-concurrency-parallel-subflow-kill-child",
+        "valids/flow-concurrency-subflow",
+        "valids/loop-with-subflow",
+        "valids/subflow-child",
+        "valids/subflow-inherited-labels-parent",
+        "valids/subflow-nullable-input-parent",
+        "valids/subflow-parent",
+        "valids/subflow-parent-no-wait",
+        "valids/subflow-parent-of-failed",
+        "valids/task-flow",
+        "valids/task-flow-inherited-labels",
+    ];
+    const FOUR: [&str; 4] = [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-flow-duration",
+        "valids/retry-new-execution-task-attempts",
+        "valids/retry-new-execution-task-duration",
+    ];
+    let twelve: BTreeSet<String> = TWELVE.iter().map(|s| s.to_string()).collect();
+    let four: BTreeSet<String> = FOUR.iter().map(|s| s.to_string()).collect();
+    let sixteen: BTreeSet<String> = twelve.union(&four).cloned().collect();
+    assert_eq!(
+        (twelve.len(), four.len(), sixteen.len()),
+        (12, 4, 16),
+        "16 = 12 + 4, and no id is counted in both halves"
+    );
+    assert!(
+        sixteen.is_subset(&matching),
+        "all sixteen must be on the MATCHING side, or the ratchet does not \
+         speak for them: {:?}",
+        sixteen.difference(&matching).collect::<Vec<_>>()
+    );
+
+    const SUBFLOW: &str = "io.kestra.plugin.core.flow.Subflow";
+    let (mut sub_runs_matching, mut sub_refused_matching, mut sub_baselined) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let (mut cne_matching, mut cne_baselined) = (BTreeSet::new(), BTreeSet::new());
+    let mut log_control = 0usize;
+    for entry in &golden {
+        let source = corpus_source(&entry.id);
+        if declares_type(&source, "io.kestra.plugin.core.log.Log") {
+            log_control += 1;
+        }
+        if declares_type(&source, SUBFLOW) {
+            match (baselined.contains(&entry.id), entry.verdict) {
+                (true, _) => sub_baselined.insert(entry.id.clone()),
+                (false, Verdict::Runs) => sub_runs_matching.insert(entry.id.clone()),
+                (false, Verdict::Refused) => sub_refused_matching.insert(entry.id.clone()),
+            };
+        }
+        if source.contains("CREATE_NEW_EXECUTION") {
+            if baselined.contains(&entry.id) {
+                cne_baselined.insert(entry.id.clone());
+            } else {
+                cne_matching.insert(entry.id.clone());
+            }
+        }
+    }
+    assert_eq!(
+        log_control, 97,
+        "the scanner's positive control over the GOLDEN population -- the same \
+         97 `core.log.Log` entries `no_corpus_entry_can_exercise_the_egret_sql_handler` \
+         counts. A scanner that read nothing would report every census below as \
+         zero and look exactly like the truth"
+    );
+    assert_eq!(
+        sub_runs_matching, twelve,
+        "the twelve `Subflow` banks, DERIVED: every golden entry that declares a \
+         `Subflow`, that Kestra ran, and that egret now reproduces. If this set \
+         grows, the coverage statement's 16 is stale and must be re-derived -- \
+         which is the point of asserting the set rather than the count"
+    );
+    assert_eq!(
+        sub_refused_matching,
+        ["invalids/recursive-flow"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        "THE TRAP, asserted rather than avoided: one `Subflow`-declaring entry \
+         matches and is NOT a W6 bank. Kestra refused it, egret refuses it too, \
+         and it has matched since long before this package -- so `matching AND \
+         declares a Subflow` is 13, and the twelve is the `runs` half"
+    );
+    assert_eq!(
+        (
+            sub_runs_matching.len() + sub_refused_matching.len() + sub_baselined.len(),
+            sub_runs_matching.len(),
+            sub_refused_matching.len(),
+            sub_baselined.len()
+        ),
+        (23, 12, 1, 10),
+        "23 `Subflow`-declaring golden entries = 12 banked + 1 refusal that \
+         always matched + 10 still baselined. The design spec's 22 was the \
+         BASELINED count before this package (22 = 12 + 10), which is a \
+         different population from this one"
+    );
+    assert_eq!(
+        cne_matching, four,
+        "the four `CREATE_NEW_EXECUTION` banks, derived the same way"
+    );
+    assert!(
+        cne_baselined.is_empty(),
+        "and no `CREATE_NEW_EXECUTION` entry is left baselined: {cne_baselined:?}"
+    );
+
+    // ---- the four constructs -----------------------------------------------
+    let (parsed, unparsed) = parsed_corpus();
+    assert_eq!(
+        parsed.len() + unparsed.len(),
+        345,
+        "every corpus flow is parsed or named, never skipped"
+    );
+    assert!(
+        unparsed
+            .iter()
+            .all(|(id, _)| !corpus_source(id).contains("triggers:")),
+        "a flow that does not parse AND declares a `triggers:` block would \
+         shrink the census below and look exactly like a smaller corpus, so the \
+         census is only honest while this holds: {unparsed:?}"
+    );
+
+    const SCHEDULE: &str = "io.kestra.plugin.core.trigger.Schedule";
+    const FLOW_TRIGGER: &str = "io.kestra.plugin.core.trigger.Flow";
+    const WEBHOOK: &str = "io.kestra.plugin.core.trigger.Webhook";
+    let mut census: BTreeMap<&str, (BTreeSet<String>, usize)> = BTreeMap::new();
+    let mut declaring_flows: BTreeSet<String> = BTreeSet::new();
+    for (id, flow) in &parsed {
+        for t in &flow.triggers {
+            let ty = t.r#type.as_str();
+            let Some(key) = [SCHEDULE, FLOW_TRIGGER, WEBHOOK]
+                .into_iter()
+                .find(|k| *k == ty)
+            else {
+                continue;
+            };
+            // The product's own classifier must agree with the type string --
+            // two derivations of one fact, and a `Leaf` here would mean the
+            // scheduler never sees a trigger this census says it does.
+            let typed = matches!(
+                (key, &t.kind),
+                (SCHEDULE, egret_workflow::models::TriggerKind::Schedule(_))
+                    | (FLOW_TRIGGER, egret_workflow::models::TriggerKind::Flow(_))
+                    | (WEBHOOK, egret_workflow::models::TriggerKind::Webhook(_))
+            );
+            assert!(
+                typed,
+                "{id}/{} declares {ty} and the model classified it as something \
+                 else -- the census and the scheduler would disagree",
+                t.id
+            );
+            let e = census.entry(key).or_default();
+            e.0.insert(id.clone());
+            e.1 += 1;
+            declaring_flows.insert(id.clone());
+        }
+    }
+    let flows_and_declarations = |k: &str| {
+        let (f, d) = census.get(k).cloned().unwrap_or_default();
+        (f.len(), d)
+    };
+    assert_eq!(
+        (
+            flows_and_declarations(SCHEDULE),
+            flows_and_declarations(FLOW_TRIGGER),
+            flows_and_declarations(WEBHOOK),
+        ),
+        ((7, 8), (17, 21), (15, 15)),
+        "(flows, declarations) per construct. The 17 flow-trigger flows and 21 \
+         declarations are the same two numbers \
+         `trigger::flow::tests::the_corpus_flow_triggers_split_twenty_to_one` \
+         derives from the directory -- two independent routes to one census"
+    );
+
+    let trigger_golden: BTreeSet<String> = declaring_flows.intersection(&ids).cloned().collect();
+    let trigger_matching: BTreeSet<String> =
+        trigger_golden.intersection(&matching).cloned().collect();
+    let trigger_baselined: BTreeSet<String> =
+        trigger_golden.intersection(&baselined).cloned().collect();
+    assert_eq!(
+        (
+            declaring_flows.len(),
+            trigger_golden.len(),
+            trigger_matching.len(),
+            trigger_baselined.len()
+        ),
+        (38, 31, 28, 3),
+        "corpus flows declaring one of the three (38 = 7 + 17 + 15 with \
+         `invalids/duplicate` declaring two kinds), how many the oracle compares \
+         at all, and the split. **28 MATCHING entries declare a trigger this \
+         package built, and their matching is evidence the trigger was not \
+         evaluated on either side** -- which is the inversion this statement \
+         exists to prevent a reader making"
+    );
+    let uncompared: BTreeSet<String> = declaring_flows.difference(&ids).cloned().collect();
+    assert_eq!(
+        (
+            uncompared.len(),
+            uncompared.contains("valids/webhook-inputs")
+        ),
+        (7, true),
+        "and the other 7 have no golden entry at all -- they are in the 51 this \
+         oracle never compares. One of them is `valids/webhook-inputs`, which is \
+         there for exactly the reason this construct is invisible: it can only be \
+         started by the webhook POST the harness never sends. 38 = 31 + 7"
+    );
+    assert_eq!(
+        trigger_baselined,
+        [
+            "valids/webhook-outputs",
+            "valids/webhook-plaintext",
+            "valids/webhook-wait"
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<BTreeSet<_>>(),
+        "the three baselined trigger-declaring entries, all webhook, all \
+         baselined for reasons that are not the trigger (the design spec's §1 \
+         webhook row: 3, unchanged by this package)"
+    );
+
+    // Not one trigger-fired execution anywhere in the golden.
+    fn sub_executions(spawned: &[GoldenSpawned], loopish: &mut usize, replayish: &mut usize) {
+        for s in spawned {
+            if s.parent_run.is_none() && s.value.is_null() {
+                *replayish += 1;
+            } else {
+                *loopish += 1;
+            }
+            sub_executions(&s.spawned, loopish, replayish);
+        }
+    }
+    let (mut loopish, mut replayish, mut carriers) = (0usize, 0usize, 0usize);
+    for entry in &golden {
+        let (mut l, mut r) = (0usize, 0usize);
+        sub_executions(&entry.spawned, &mut l, &mut r);
+        if l + r > 0 {
+            carriers += 1;
+        }
+        if trigger_golden.contains(&entry.id) {
+            assert_eq!(
+                (l, r),
+                (0, 0),
+                "{} declares a trigger and its golden entry holds {} \
+                 sub-executions. Every one of the 31 holds exactly ONE \
+                 execution -- the harness's own POST -- so nothing a trigger \
+                 fired reached the golden",
+                entry.id,
+                l + r
+            );
+        }
+        loopish += l;
+        replayish += r;
+    }
+    assert_eq!(
+        (loopish + replayish, loopish, replayish, carriers),
+        (142, 134, 8, 41),
+        "THE CONTROL for the zero above: 142 sub-executions over 41 entries = \
+         134 carrying a loop index + 8 carrying none (the `CREATE_NEW_EXECUTION` \
+         replays). This oracle records a sub-execution when Kestra links it by \
+         `parent_id`, so the zero is a statement about the LINK and not about an \
+         instrument that records nothing"
+    );
+
+    // `valids/task-flow`: banked, and it declares a schedule.
+    let schedule_flows = census.get(SCHEDULE).cloned().unwrap_or_default().0;
+    assert!(
+        schedule_flows.contains("valids/task-flow") && sixteen.contains("valids/task-flow"),
+        "one of the sixteen declares a `Schedule` trigger and banked because \
+         `Subflow` executes. The cron row's `1 baselined declaration` is 0 now \
+         for a reason that has nothing to do with a schedule"
+    );
+    assert!(
+        schedule_flows
+            .intersection(&sixteen)
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 1
+            && census
+                .get(FLOW_TRIGGER)
+                .cloned()
+                .unwrap_or_default()
+                .0
+                .is_disjoint(&sixteen)
+            && census
+                .get(WEBHOOK)
+                .cloned()
+                .unwrap_or_default()
+                .0
+                .is_disjoint(&sixteen),
+        "and it is the ONLY overlap: no other banked entry declares any of the \
+         three"
+    );
+
+    // ---- the webhook's own mechanism: the request is never sent ------------
+    let harvest = include_str!("../oracle-exec/harvest.py");
+    assert_eq!(
+        harvest.matches("executions/webhook").count(),
+        1,
+        "`harvest.py` names the webhook execution path exactly once, and it is \
+         the REASON `valids/webhook-inputs` is excluded. A second occurrence \
+         would mean the harness posts one somewhere"
+    );
+    assert!(
+        harvest
+            .lines()
+            .find(|l| l.contains("executions/webhook"))
+            .is_some_and(|l| l.contains("webhook-inputs")),
+        "and that one occurrence is the exclusion reason, not a request"
+    );
+    assert!(
+        harvest.contains("parent_id = :'root'"),
+        "the one live discovery arm keys on `parent_id`, which Kestra leaves \
+         NULL for a subflow child and for anything a trigger creates -- the \
+         predicate is evaluated on every settle poll of all 268 executed flows \
+         and structurally cannot select a trigger-fired execution"
+    );
+    let normalise = include_str!("../oracle-exec/normalise.py");
+    assert!(
+        normalise.contains("parentId"),
+        "and the normaliser builds the tree on `parentId` too, so even a \
+         DISCOVERED trigger-fired execution could not be normalised into a trace"
+    );
+
+    // ---- backfill: no population at all ------------------------------------
+    let (mut live, mut commented) = (Vec::new(), BTreeSet::new());
+    for entry in corpus() {
+        for line in corpus_source(&entry.id).lines() {
+            if line.contains("backfill") {
+                if line.trim_start().starts_with('#') {
+                    commented.insert(entry.id.clone());
+                } else {
+                    live.push((entry.id.clone(), line.trim().to_string()));
+                }
+            }
+        }
+    }
+    assert!(
+        live.is_empty(),
+        "no corpus flow declares a live `backfill:`: {live:?}"
+    );
+    assert_eq!(
+        commented,
+        ["valids/full", "valids/labels-deserialization"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<BTreeSet<_>>(),
+        "and the two commented-out occurrences are the scanner's own control: \
+         it finds what IS there, so the zero above is a measurement rather than \
+         a scanner that reads nothing"
+    );
+}
+
+/// **The SEEDED `correlationId` divergence has no corpus population**, and
+/// every figure `worker::render`'s comment states about it is compared here
+/// rather than stated.
+///
+/// Kestra copies the cause's `system.correlationId` **label** verbatim and fills
+/// one in only when it is ABSENT, so a root that declares one hands that value —
+/// `ZZZTESTROOT` in W6 Task 6's probe, not an execution id at all — to every
+/// descendant. `render::Surface::load` derives the value from the chain root's
+/// **id** instead, and its unconditional `labels.insert("system", …)`
+/// additionally **shadows** any declared `system.*` label.
+///
+/// Both would show only on a flow that declares `system.correlationId`, or that
+/// reads a `system.*` label it declares, and the corpus holds neither. That is
+/// why the gap is recorded against the wiring seam
+/// (`trigger::flow::FiredExecution::correlation_id`) rather than banked or
+/// fixed: **the ratchet cannot move either way on it.**
+///
+/// # What this test CANNOT check, and it is why the name gained a word
+///
+/// It was `the_correlation_id_divergence_…`, and under that name it read as
+/// covering the value `Surface::load` computes. **It does not, and the
+/// whole-branch review found a live defect behind exactly that reading**: the
+/// `root` walk followed `parent_execution_id` alone and answered a subflow
+/// child its OWN id, two corpus flows reach it, and one of them is the target
+/// of a banked entry. The assertion below that both readers are *matching*
+/// golden entries cannot see that, and the reason is the shape this branch
+/// keeps meeting: **both are compared only as ROOT executions**, where every
+/// implementation of the walk returns the same value. The walk's instrument is
+/// `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item` in
+/// `tests/worker.rs`, which drives two subflow links and carries a loop control;
+/// this test is about the **label the flow declares**, and that is all its name
+/// now claims.
+///
+/// # This census is TEXTUAL, and the first version was not — which is the finding
+///
+/// Taken through `models::Flow`, the label census reads **21** flows, not 22,
+/// because **four corpus flows do not parse with the product's own model** —
+/// all four `invalids/`, which Kestra refused too — and **one of them,
+/// `invalids/system-labels`, carries two of the three `system.*` declarations
+/// this test names.** A model-based census would have reported one declaration
+/// where there are three, silently, and the sentence it was supporting would
+/// still have read as true. Both counts are asserted below so the gap between
+/// the two instruments is a number rather than a surprise; the claim is about
+/// what the corpus *says*, so the text is the instrument and the model is the
+/// cross-check.
+///
+/// The trigger census in
+/// [`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`]
+/// IS model-based and is sound for a reason it asserts rather than assumes:
+/// none of the four unparsed flows declares a `triggers:` block.
+#[test]
+fn the_seeded_correlation_id_divergence_has_no_corpus_population() {
+    let mut declaring_labels = 0usize;
+    let mut system_declarations: Vec<String> = Vec::new();
+    let mut correlation_lines: Vec<(String, String)> = Vec::new();
+    for entry in corpus() {
+        let source = corpus_source(&entry.id);
+        if source.lines().any(|l| l.trim_end() == "labels:") {
+            declaring_labels += 1;
+        }
+        for line in source.lines() {
+            // A label key at map depth 1 whose name is namespaced `system.…`:
+            // indented, `system.` , a name, then the colon.
+            let t = line.trim_start();
+            if line.starts_with(' ')
+                && t.starts_with("system.")
+                && t.split(':').next().is_some_and(|k| {
+                    k.len() > "system.".len() && !k.contains(' ') && !k.contains('{')
+                })
+            {
+                system_declarations.push(format!("{}:{}", entry.id, t.trim()));
+            }
+            // `labels.system.correlationId`, WITHOUT assuming the spacing: one
+            // of the two corpus reads is `{{labels.system.correlationId}}` and
+            // the other `{{ labels.system.correlationId }}`, so a grep for
+            // either spelling finds exactly half of this population.
+            if line.contains("correlationId") {
+                correlation_lines.push((entry.id.clone(), line.trim().to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        declaring_labels, 22,
+        "the control: 22 corpus flows declare a top-level `labels:` block, so a \
+         zero below is a measurement and not a scanner that sees no labels"
+    );
+    system_declarations.sort();
+    assert_eq!(
+        system_declarations,
+        vec![
+            "invalids/system-labels:system.id: id",
+            "invalids/system-labels:system.label: system_key",
+            "valids/minimal:system.readOnly: \"true\"",
+        ],
+        "three `system.*` label declarations exist, in two flows -- named, \
+         because `none of them is system.correlationId` is only worth saying \
+         beside the ones that ARE there"
+    );
+    assert!(
+        !system_declarations
+            .iter()
+            .any(|d| d.contains("system.correlationId")),
+        "and none seeds `system.correlationId`, which is the whole reason the \
+         divergence is unreachable here: {system_declarations:?}"
+    );
+
+    let mut readers: Vec<String> = correlation_lines.iter().map(|(id, _)| id.clone()).collect();
+    readers.sort();
+    assert_eq!(
+        readers,
+        vec![
+            "valids/follow-dependencies-partial-child",
+            "valids/subflow-grand-child"
+        ],
+        "the only two corpus flows whose text names `correlationId` are the two \
+         `render.rs` names as the measurement its `system` label exists for"
+    );
+    assert!(
+        correlation_lines
+            .iter()
+            .all(|(_, line)| line.contains("labels.system.correlationId") && line.contains("{{")),
+        "and both READ the label through an expression rather than declaring \
+         one: {correlation_lines:?}"
+    );
+    let ids: BTreeSet<String> = golden().into_iter().map(|e| e.id).collect();
+    let baselined = baseline();
+    for id in &readers {
+        assert!(
+            ids.contains(id) && !baselined.contains(id),
+            "{id} reads the label and must be a MATCHING golden entry -- which \
+             says exactly one thing, and the message here used to say more: the \
+             oracle drives both of these flows as ROOT executions, where every \
+             implementation of `Surface::load`'s walk answers the same value. \
+             So this pins that the label RENDERS and the entry reproduces, and \
+             it is silent about the walk. Reaching the walk needs a chain, which \
+             `a_subflow_grandchild_correlates_to_the_root_and_inherits_no_item` \
+             drives"
+        );
+    }
+
+    // The instrument gap, as a number: what the product's own model sees.
+    let (parsed, unparsed) = parsed_corpus();
+    assert_eq!(
+        parsed.len() + unparsed.len(),
+        345,
+        "every corpus flow is parsed or named, never skipped"
+    );
+    let model_labels = parsed.iter().filter(|(_, f)| !f.labels.is_empty()).count();
+    let model_system = parsed
+        .iter()
+        .flat_map(|(id, f)| f.labels.iter().map(move |l| (id, l)))
+        .filter(|(_, l)| l.key.starts_with("system."))
+        .count();
+    let unparsed_ids: BTreeSet<&str> = unparsed.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        (
+            unparsed.len(),
+            model_labels,
+            model_system,
+            unparsed_ids.contains("invalids/system-labels")
+        ),
+        (4, 21, 1, true),
+        "the model-based census, beside the textual one: FOUR flows `models::Flow` \
+         refuses (all `invalids/`), so it sees 21 label-declaring flows of 22 and \
+         ONE `system.*` declaration of three -- because the flow holding the other \
+         two is one of the four. 22 - 21 = 1 flow and 3 - 1 = 2 declarations, and \
+         both differences are that one flow. Unparsed: {unparsed_ids:?}"
+    );
+}
+
 /// Is `name` a database `egret-test-db` created for one test process?
 ///
 /// The rule is that crate's `CLONE_PATTERN`, restated where the destructive
@@ -733,7 +1377,11 @@ async fn egret_side() -> &'static Side {
             .execute(&db.pool)
             .await
             .expect("empty the execution tables");
-        let (ws, _user) = common::seed_workspace(&db).await;
+        let (ws, user) = common::seed_workspace(&db).await;
+        // W6 Task 1: the corpus goes into `workflow.flows` BEFORE any entry
+        // runs, because ten corpus flows name a target that sorts later than
+        // they do. See `driver::publish_corpus`.
+        driver::publish_corpus(&db.pool, ws, user).await;
 
         let mut out = Side::default();
         for entry in golden() {
@@ -1329,6 +1977,149 @@ async fn executor_matches_golden() {
     assert!(failures.is_empty(), "{failures}");
 }
 
+// --------------------------------------------------------------------------
+// W6 Task 4: one test per entry the replay banks
+// --------------------------------------------------------------------------
+
+/// The chain a `CREATE_NEW_EXECUTION` retry produces, asserted **shape first**
+/// so a failure says which link broke.
+///
+/// `executor_matches_golden` already compares these four entries whole; it
+/// reports `expected … / actual …` over an entire nested trace, which for a
+/// three-execution chain is a paragraph a reader has to diff by eye. These
+/// assert the three facts the chain turns on, in order — the number of links,
+/// the key each link carries, and where the chain STOPS — and only then fall
+/// back to the whole-trace equality that the ratchet itself asserts.
+///
+/// **The last of the three is the one that needed W6 Task 4's migration.** A
+/// chain that never stops is what egret would produce with the metadata
+/// missing: `next_retry_at` read `(1, Tick(0))` for this behaviour, so
+/// `maxAttempts` compared 1 against 3 for ever and `maxDuration` measured from
+/// each execution's own creation, which never accumulates.
+async fn a_replay_chain_of_three(id: &str, policy: &str) {
+    let side = egret_side().await;
+    assert!(
+        !baseline().contains(id),
+        "{id} is still in baseline.txt; this test asserts what it banks"
+    );
+    let entry = golden()
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("{id} is in the golden"));
+    let expected = Trace::from(&entry);
+    let Outcome::Trace(actual) = evaluate(side, &entry) else {
+        panic!("{id}: the driver did not produce a trace");
+    };
+    let mut actual = actual.clone();
+    actual.restrict_order_to(&expected);
+
+    // Link 1: this execution ends RETRIED and carries exactly one child.
+    let mut node = &actual;
+    let mut depth = 0usize;
+    while let Some(child) = node.spawned.first() {
+        assert_eq!(
+            node.execution.last().map(String::as_str),
+            Some("RETRIED"),
+            "{id} ({policy}): an execution that starts a replay must end              RETRIED, and this one at depth {depth} did not: {:?}",
+            node.execution
+        );
+        assert_eq!(
+            node.spawned.len(),
+            1,
+            "{id} ({policy}): a `CREATE_NEW_EXECUTION` retry chains one \
+             replacement at a time -- the artifact never fans one out (0 of \
+             the 40 NULL-`loopIndex` descendants in `traces.json` shares a \
+             parent with another). Depth {depth} has {}",
+            node.spawned.len()
+        );
+        assert_eq!(
+            (child.parent_run, child.value.as_deref()),
+            (None, None),
+            "{id} ({policy}): a replay carries neither a parent run nor a loop \
+             value -- that combination is what migration 0138 made \
+             representable and what `read_trace_inner`'s decode had to widen \
+             for. Depth {depth}"
+        );
+        node = child;
+        depth += 1;
+    }
+
+    // Link 2: where it stops.
+    assert_eq!(
+        depth, 2,
+        "{id} ({policy}): the chain is three executions -- the original and \
+         two replays. {depth} replay(s) is a policy that stopped at the wrong \
+         attempt, and an unbounded one is the driver's step bound rather than \
+         this assertion"
+    );
+    assert_eq!(
+        node.execution.last().map(String::as_str),
+        Some("FAILED"),
+        "{id} ({policy}): the LAST execution of the chain exhausts the policy, \
+         so it ends FAILED with no RETRIED and no child. This is the assertion \
+         the metadata exists for: {:?}",
+        node.execution
+    );
+
+    // And the whole trace, which is what the ratchet compares.
+    assert_eq!(
+        actual,
+        expected,
+        "{id} ({policy}): the chain shape is right and something else \
+         differs.\n  expected {}\n  actual   {}",
+        expected.display(),
+        actual.display()
+    );
+}
+
+/// `maxAttempts: 3` on the FLOW — `ExecutionService.nextRetryDate(retry,
+/// execution)`, which reads `execution.getMetadata().getAttemptNumber()`.
+#[tokio::test]
+async fn valids_retry_new_execution_flow_attempts() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-flow-attempts",
+        "flow-level, maxAttempts: 3, interval: PT1S",
+    )
+    .await;
+}
+
+/// `maxDuration: PT6S` on the FLOW, with `interval: PT2S` — the other guard in
+/// the same method, measured from `getOriginalCreatedDate()`.
+///
+/// **This is the entry that says the offset accumulates.** Three executions at
+/// two-second intervals put the fourth retry's date past the original creation
+/// plus six seconds; an origin that reset each time would put it at two.
+#[tokio::test]
+async fn valids_retry_new_execution_flow_duration() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-flow-duration",
+        "flow-level, maxDuration: PT6S, interval: PT2S",
+    )
+    .await;
+}
+
+/// `maxAttempts: 3` on the TASK — a different Kestra method
+/// (`TaskRun.nextRetryDate(retry, execution)`, `TaskRun.java:310`) reading the
+/// same two metadata fields, which is why the corpus carries both.
+#[tokio::test]
+async fn valids_retry_new_execution_task_attempts() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-task-attempts",
+        "task-level, maxAttempts: 3, interval: PT1S",
+    )
+    .await;
+}
+
+/// `maxDuration: PT6S` on the TASK, with `interval: PT2S`.
+#[tokio::test]
+async fn valids_retry_new_execution_task_duration() {
+    a_replay_chain_of_three(
+        "valids/retry-new-execution-task-duration",
+        "task-level, maxDuration: PT6S, interval: PT2S",
+    )
+    .await;
+}
+
 /// The whole population of ordered pairs the golden declines to assert — 13,
 /// across three flows.
 #[test]
@@ -1438,8 +2229,12 @@ async fn the_ordered_pairs_inside_spawned_are_reachable_now() {
     );
 }
 
-const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 35;
-const EGRET_TOP_LEVEL_PAIRS: usize = 565;
+const ENTRIES_WHERE_EGRET_PRODUCES_A_SPAWNED: usize = 39;
+// +15 at W6 Task 3: the `Subflow` entries that used to stall at their first
+// `Subflow` run now finish, so the runs after it exist and have endpoints.
+// The nested figure does not move -- a `Subflow` child is linked by
+// `trigger_execution_id` and is deliberately invisible to `spawned`.
+const EGRET_TOP_LEVEL_PAIRS: usize = 580;
 const EGRET_NESTED_PAIRS: usize = 126;
 
 /// **KEPT is not ASSERTED, and the line between them is the baseline rather
@@ -1524,16 +2319,20 @@ fn kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line() {
     );
     assert_eq!(
         (m_top, m_nested, m_top + m_nested),
-        (255, 102, 357),
+        (258, 102, 360),
         "the pairs a change to which the ratchet REPORTS: they live on entries \
-         that match, so any change to one makes its entry a REGRESSION"
+         that match, so any change to one makes its entry a REGRESSION. W6 Task \
+         3 moved 3 of them across the line, all top-level: the 12 `Subflow` \
+         entries it banked carry 3 ordered pairs between them"
     );
     assert_eq!(
         (b_top, b_nested, b_top + b_nested),
-        (622, 125, 747),
+        (619, 125, 744),
         "and the pairs a change to which it does not: they live on baselined \
-         entries, which mismatch whatever the pair says. Flipping all 747 leaves \
-         the ratchet green and unmoved at 143"
+         entries, which mismatch whatever the pair says. Flipping all 744 leaves \
+         the ratchet green and unmoved -- at 131 when W6 Task 3 flipped them, \
+         and at 127 since Task 4's four banks; the claim is `unmoved`, and the \
+         number beside it is a moment"
     );
     assert_eq!(
         (
@@ -1726,8 +2525,36 @@ fn the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs() {
 fn is_stalled(execution: &[String]) -> bool {
     !execution
         .last()
-        .is_some_and(|s| ["SUCCESS", "FAILED", "KILLED", "WARNING"].contains(&s.as_str()))
+        .is_some_and(|s| TERMINAL.contains(&s.as_str()))
 }
+
+/// The states this classifier reads as "the execution ended".
+///
+/// **`RETRIED` was missing and its absence was a defect, not a conservatism** —
+/// W6 Task 4. `RunState::Retried`'s own doc says *"terminal"*, Kestra's
+/// `State.isTerminated()` lists it, `worker::claim::settle` dispatches on
+/// `is_terminal()` and therefore reports a `RETRIED` execution to its parent,
+/// and `worker::spawn::terminated_count` counts one — so every other reader of
+/// the word in this repository already agreed, and this one list did not. It
+/// put the four `retry-new-execution-*` root executions into
+/// [`ENTRIES_LEFT_UNFINISHED`], whose assertion says every member is *a task
+/// type this worker has no handler for*: those four declare only
+/// `io.kestra.plugin.core.execution.Fail`, which **has** a handler, and they
+/// ran it.
+///
+/// It is spelled as a list beside the classifier rather than inline so that
+/// this doc has somewhere to live and so the positive control
+/// ([`a_stalled_execution_that_also_matched_would_be_counted`]) iterates the
+/// same list the classifier reads — a control that hard-coded its own copy
+/// could pass while the classifier used a different one.
+///
+/// `SKIPPED`, `CANCELLED` and `RESUBMITTED` are in Kestra's list and not here.
+/// [`the_terminal_list_covers_every_execution_terminal_the_golden_holds`]
+/// derives why, and it corrected the first answer this doc gave: `SKIPPED` and
+/// `RESUBMITTED` end no golden EXECUTION history, and **`CANCELLED` ends
+/// three** — but this classifier reads EGRET's traces and `RunState` has no
+/// `Cancelled`, so all three would be arms nothing could take.
+const TERMINAL: &[&str] = &["SUCCESS", "FAILED", "KILLED", "WARNING", "RETRIED"];
 
 /// **The positive control for `matched_while_stalled`.**
 ///
@@ -1739,12 +2566,30 @@ fn is_stalled(execution: &[String]) -> bool {
 #[test]
 fn a_stalled_execution_that_also_matched_would_be_counted() {
     let ended = |s: &str| vec!["CREATED".to_string(), "RUNNING".to_string(), s.to_string()];
-    for terminal in ["SUCCESS", "FAILED", "KILLED", "WARNING"] {
+    for terminal in TERMINAL {
         assert!(
             !is_stalled(&ended(terminal)),
             "{terminal} is a terminal state and must not count as stalled"
         );
     }
+    assert!(
+        TERMINAL.contains(&"RETRIED"),
+        "the arm W6 Task 4 added, asserted by name: a `CREATE_NEW_EXECUTION` \
+         retry ends its execution RETRIED and starts a replacement, which is \
+         the opposite of stalling. Iterating TERMINAL above cannot say this on \
+         its own -- an empty list would pass that loop"
+    );
+    assert!(
+        is_stalled(&[
+            "CREATED".to_string(),
+            "RUNNING".to_string(),
+            "RETRYING".to_string()
+        ]),
+        "RETRYING is the OTHER retry behaviour and is NOT terminal: the run is \
+         waiting for its next attempt inside this execution. This is the \
+         two-sided half of the RETRIED arm -- a classifier that took any state \
+         starting `RETR` would pass every other assertion here"
+    );
     assert!(
         is_stalled(&["CREATED".to_string(), "RUNNING".to_string()]),
         "an execution still RUNNING is stalled -- this is the arm that would be \
@@ -1758,13 +2603,104 @@ fn a_stalled_execution_that_also_matched_would_be_counted() {
     );
 }
 
+/// **What [`TERMINAL`] leaves out, derived from the golden rather than from
+/// Kestra's enum — and the derivation corrected the first answer.**
+///
+/// Kestra's `State.isTerminated()` also lists `SKIPPED`, `CANCELLED` and
+/// `RESUBMITTED`. This test was written asserting that none of the three ever
+/// ends an EXECUTION history in this golden, and **`CANCELLED` does**: three
+/// entries end in it (`valids/exit-cancelled`,
+/// `valids/flow-concurrency-sla-assert-cancel`, `valids/sla-execution-condition`),
+/// which is exactly the kind of remembered fact this programme keeps getting
+/// wrong and the reason the population is derived here instead.
+///
+/// **It is still not in [`TERMINAL`], and now for a measured reason rather than
+/// a mistaken one.** [`is_stalled`] classifies EGRET's traces, never the
+/// golden's, and `RunState` has no `Cancelled` — so no execution this driver
+/// produces can end there, and an arm for it would be one nothing could take.
+/// That is asserted below rather than asserted about: if `RunState` ever gains
+/// the variant, this test fails and `TERMINAL` has to grow with it.
+#[test]
+fn the_terminal_list_covers_every_execution_terminal_the_golden_holds() {
+    fn walk(node: &Trace, out: &mut BTreeSet<String>) {
+        if let Some(last) = node.execution.last() {
+            out.insert(last.clone());
+        }
+        for sub in &node.spawned {
+            walk(sub, out);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        walk(&Trace::from(entry), &mut seen);
+    }
+    println!("execution terminals in the golden: {seen:?}");
+    assert_eq!(
+        seen,
+        BTreeSet::from([
+            "CANCELLED".to_string(),
+            "FAILED".to_string(),
+            "KILLED".to_string(),
+            "RETRIED".to_string(),
+            "SUCCESS".to_string(),
+            "WARNING".to_string(),
+        ]),
+        "every state a golden EXECUTION history ends in. `RETRIED` is in it, \
+         which is what makes `is_stalled`'s omission of it a defect rather \
+         than an unused arm"
+    );
+    // `CANCELLED` is the one this classifier does not carry, and the reason is
+    // a property of the OTHER side of the comparison.
+    assert!(
+        !RunState::ALL.iter().any(|s| s.wire() == "CANCELLED"),
+        "`RunState` gained a CANCELLED: egret can now end an execution there, \
+         so `TERMINAL` has to carry it or `is_stalled` will call three W8 \
+         entries stalled. Until then the arm is unreachable and is left out"
+    );
+    for state in seen.iter().filter(|s| s.as_str() != "CANCELLED") {
+        assert!(
+            TERMINAL.contains(&state.as_str()),
+            "{state} ends a golden execution, egret can produce it, and \
+             `is_stalled` would call it stalled"
+        );
+    }
+    for state in TERMINAL {
+        assert!(
+            seen.contains(*state),
+            "{state} is in TERMINAL and ends no golden execution: an arm \
+             nothing can take"
+        );
+    }
+    for unused in ["SKIPPED", "RESUBMITTED"] {
+        assert!(
+            !seen.contains(unused),
+            "{unused} is terminal in Kestra's enum; if the golden now ends an \
+             execution in it, TERMINAL has to grow and this list has to say so"
+        );
+    }
+}
+
 /// The counts above, named so the coverage statement and this file cannot
 /// disagree about them.
-const TERMINALS_ON_BASELINED_ENTRIES: usize = 461;
-const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 53;
-const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 191;
-const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1807;
-const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 751;
+// **All five fell when W6 Task 3 banked 12 entries**, and they fell together
+// because they are five projections of one set: the runs, sub-executions,
+// executions and history tokens that live on a baselined entry. The 12 carry 16
+// run terminals, 2 sub-executions (`valids/loop-with-subflow`'s), 14 executions
+// (12 entries + those 2), 48 run-history tokens and 42 execution-history tokens
+// between them, and every one of those is falsifiable now instead of held.
+//
+// **All five fell again at W6 Task 4, by the same arithmetic over 4 entries**:
+// 12 run terminals, 8 sub-executions (two replays each), 12 executions (4
+// entries + those 8), 56 run-history tokens and 44 execution-history tokens.
+// The shape of a `retry-new-execution-*` entry is what makes those numbers
+// bigger per entry than Task 3's: three executions of one flow, each with one
+// run, and the run histories are five states long
+// (`CREATED SUBMITTED RUNNING FAILED RETRIED`).
+const TERMINALS_ON_BASELINED_ENTRIES: usize = 433;
+const SUB_EXECUTIONS_ON_BASELINED_ENTRIES: usize = 43;
+const EXECUTIONS_ON_BASELINED_ENTRIES: usize = 165;
+const HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 1703;
+const EXECUTION_HISTORY_TOKENS_ON_BASELINED_ENTRIES: usize = 665;
 
 /// **What the order restriction actually removes, driven through the real
 /// driver — and egret still never says `after`.**
@@ -1838,6 +2774,15 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
                 "valids/parallel-nested".to_string(),
                 "valids/restart-child".to_string(),
                 "valids/restart-loop".to_string(),
+                // W6 Task 3: three `Subflow` parents that used to stall at
+                // their `Subflow` run and now run past it, producing pairs the
+                // golden has no counterpart for -- exactly because they run a
+                // successor Kestra never reached. All three are registered in
+                // `STILL_OVER_ACCEPTED_AT_RUNTIME`, which is where the reason
+                // lives; this list is where it is visible.
+                "valids/restart-parent".to_string(),
+                "valids/restart-parent-loop".to_string(),
+                "valids/subflow-secret-output-parent".to_string(),
             ]
         ),
         "the entries the restriction removes a pair from, by name and by count"
@@ -1856,12 +2801,21 @@ async fn what_the_order_restriction_removes_is_derived_and_egret_never_says_afte
     );
 }
 
-const RESTRICTION_REMOVES: usize = 80;
-/// How many entries those 80 pairs come from — the other half of the coverage
+/// 80 through W5; **85 since W6 Task 3**, and the five come from the three
+/// entries it added to the list above: `valids/restart-parent` 2,
+/// `valids/restart-parent-loop` 2 and `valids/subflow-secret-output-parent` 1.
+/// Each is a pair between a run Kestra has and a run it does not, produced
+/// because the parent got past a `Subflow` whose child SUCCEEDS here and FAILED
+/// there.
+const RESTRICTION_REMOVES: usize = 85;
+/// How many entries those pairs come from — the other half of the coverage
 /// statement's *"80 pairs across 6 entries"*, which was printed and not
-/// asserted until W4 Task 6.
-const RESTRICTION_REMOVES_ENTRIES: usize = 6;
-const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 771;
+/// asserted until W4 Task 6. It is 85 across 9 since W6 Task 3.
+const RESTRICTION_REMOVES_ENTRIES: usize = 9;
+/// 771 through W5; **791 since W6 Task 3**, because 12 `Subflow` entries that
+/// stalled at their first run now finish and the runs after them have
+/// endpoints.
+const EGRET_PAIRS_BEFORE_RESTRICTION: usize = 791;
 
 /// Test names `oracle-exec/README.md` cites that **no longer exist**, each with
 /// its successor or an empty string where there is none — W3b Task 7.
@@ -2383,6 +3337,87 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
         unfinished.len()
     );
 
+    // **The other half of the message, DERIVED over the whole remaining
+    // population rather than trusted.** The four `retry-new-execution-*`
+    // entries are the four this claim was measurably false for; it was false
+    // for them, unchecked, for five packages, so the sentence gets a running
+    // program now.
+    //
+    // **It runs before every assertion in this test, on purpose, and the
+    // position was arrived at by measurement rather than by taste.** Dropping
+    // `RETRIED` from `TERMINAL` is the one-line mutation that puts the four
+    // back into `unfinished` and so drives this check. Behind the count, the
+    // by-name loop, OR the `matched_while_stalled` assertion it never runs at
+    // all under that mutation -- each of those fires first, and a derivation
+    // that cannot fail looks exactly like one that holds. Placed here, that
+    // mutation fails HERE, naming all four. Both positions were run.
+    //
+    // The predicate is the message's own: the entry must hold a
+    // [`TaskKind::Runnable`] whose `type_id` the DRIVER's registry has no
+    // handler for. `Runnable` and not any kind, or the claim would be vacuous
+    // -- every flow with a `Sequential` holds a type the registry does not
+    // serve, and flowables are `advance()`'s work, not a handler's.
+    let handled: BTreeSet<String> = driver::registry()
+        .type_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let mut stalled_without_an_unhandled_type: Vec<(String, Vec<String>)> = Vec::new();
+    for id in &unfinished {
+        let plan = build_plan(&corpus_source(id))
+            .unwrap_or_else(|e| panic!("{id} is in the runs population, so it plans: {e}"));
+        let leaves: Vec<String> = plan
+            .tasks
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TaskKind::Runnable { type_id } => Some(type_id.clone()),
+                _ => None,
+            })
+            .collect();
+        if leaves.iter().all(|t| handled.contains(t)) {
+            stalled_without_an_unhandled_type.push((id.clone(), leaves));
+        }
+    }
+    assert!(
+        stalled_without_an_unhandled_type.is_empty(),
+        "these entries are counted as left mid-flight and every runnable type \
+         they declare HAS a handler, so the reason this count gives for them is \
+         not their reason. That was true of the four `retry-new-execution-*` \
+         entries for five packages -- the message asserted it and nothing \
+         derived it -- and the fix was a classifier change, not a handler. \
+         {stalled_without_an_unhandled_type:?}"
+    );
+    // The control: the claim is not vacuous, because the driver's registry is
+    // not empty and the four it was wrong about would have failed the check
+    // above -- which is measured rather than reasoned, see the comment above.
+    assert_eq!(
+        driver::registry().type_ids(),
+        [
+            "io.kestra.plugin.core.debug.Return",
+            "io.kestra.plugin.core.execution.Fail",
+            "io.kestra.plugin.core.flow.Sleep",
+            "io.kestra.plugin.core.log.Log",
+        ],
+        "the four handlers the driver runs. If this list ever grew to cover \
+         everything the corpus declares, the derivation above would pass \
+         because nothing stalls rather than because the reason holds"
+    );
+    for id in [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-task-duration",
+    ] {
+        let plan = build_plan(&corpus_source(id)).expect("it plans");
+        assert!(
+            plan.tasks.iter().all(|t| match &t.kind {
+                TaskKind::Runnable { type_id } => handled.contains(type_id),
+                _ => true,
+            }),
+            "{id} declares only handled runnable types, so had it still been in \
+             `unfinished` the derivation above would have named it. That is \
+             what makes the derivation an instrument rather than a formality"
+        );
+    }
+
     assert_eq!(
         (execution, runs, order, spawned, refused, broken, total),
         (
@@ -2429,22 +3464,80 @@ async fn every_mismatching_entry_is_attributed_to_the_field_it_differs_on() {
     assert_eq!(
         unfinished.len(),
         ENTRIES_LEFT_UNFINISHED,
-        "how many executions the driver leaves mid-flight. Every one is a task \
-         type this worker has no handler for -- `Registry::run` refuses it, the \
-         tick aborts for that run, and the execution stalls exactly as the \
-         shipping worker would. Named and counted so the population cannot grow \
-         in silence: {unfinished:?}"
+        "how many executions the driver leaves mid-flight. Every one holds a \
+         task type this worker has no handler for -- `Registry::run` refuses \
+         it, the tick aborts for that run, and the execution stalls exactly as \
+         the shipping worker would. **That sentence is DERIVED above**, over \
+         this same population and the driver's own registry, rather than \
+         asserted: it was false for four entries for five packages before \
+         anybody checked it. **That sentence read `Every one IS a task \
+         type ...` and was false for four of them until W6 Task 4**: the \
+         `retry-new-execution-*` entries declare only \
+         `io.kestra.plugin.core.execution.Fail`, which has a handler and ran, \
+         and they were counted because `is_stalled` did not list `RETRIED` -- a \
+         classifier artefact rather than a stall. See [`TERMINAL`]. Named and \
+         counted so the population cannot grow in silence: {unfinished:?}"
     );
+    // **The correction, asserted rather than described.** A message that
+    // *says* the four are gone is prose; this is the check.
+    for id in [
+        "valids/retry-new-execution-flow-attempts",
+        "valids/retry-new-execution-flow-duration",
+        "valids/retry-new-execution-task-attempts",
+        "valids/retry-new-execution-task-duration",
+    ] {
+        assert!(
+            !unfinished.contains(&id.to_string()),
+            "{id} declares only `core.execution.Fail`, which HAS a handler. It \
+             ends `RETRIED`, which is terminal, and it now spawns the replay \
+             that follows it -- it cannot be an execution left mid-flight. \
+             Present in: {unfinished:?}"
+        );
+    }
 }
 
 /// The numbers above, as named constants so this report and the task's own
 /// report cannot disagree about them.
-const MISMATCH_ON_EXECUTION: usize = 104;
-const MISMATCH_ON_RUNS: usize = 124;
-const MISMATCH_ON_ORDER: usize = 76;
-const MISMATCH_ON_SPAWNED: usize = 20;
-const MISMATCHING_RUNS_ENTRIES: usize = 138;
-const ENTRIES_LEFT_UNFINISHED: usize = 84;
+// W6 Task 3: 12 entries left the mismatching population, and each of the four
+// field counters fell by however many of the 12 differed on that field.
+// `spawned` fell by exactly one, `valids/loop-with-subflow`, which is the only
+// one of the 12 that carries a sub-execution at all.
+const MISMATCH_ON_EXECUTION: usize = 90;
+const MISMATCH_ON_RUNS: usize = 112;
+const MISMATCH_ON_ORDER: usize = 72;
+const MISMATCH_ON_SPAWNED: usize = 15;
+const MISMATCHING_RUNS_ENTRIES: usize = 122;
+/// **84 through W5; 63 after W6 Task 3, and 59 since W6 Task 4 corrected the
+/// classifier.**
+///
+/// # The four W6 Task 4 removed were never stalled, and the count said they were
+///
+/// This constant's assertion says every member is *a task type this worker has
+/// no handler for*. The four `retry-new-execution-*` entries declare only
+/// `io.kestra.plugin.core.execution.Fail`, which **has** a handler and ran to a
+/// `FAILED` outcome; what put them here was [`is_stalled`] omitting `RETRIED`
+/// from its terminal list — see [`TERMINAL`]. So this is a **classifier
+/// artefact leaving the population**, not four executions that started
+/// finishing: the count would have fallen to 59 with `RETRIED` added and no
+/// replay implemented at all, and the entries would still not have matched.
+/// The bank is a separate measurement in the ratchet.
+///
+/// # 21 left at Task 3 and they were the whole of `Subflow`
+///
+/// Through W5 a `Subflow` was planned an opaque `TaskKind::Runnable`, which set
+/// `task_runs.type_id`, which made it claimable -- and `claim::leaf` then
+/// answered `None` for it, because `models::TaskKind` for the same task is not
+/// a `Leaf`. `WorkerError::NotALeaf` aborted the tick and the execution stalled
+/// there for ever. All 21 entries holding an executed top-level `Subflow` were
+/// in this population for that reason and none is now: a `TaskKind::Executable`
+/// gets no `type_id`, so nothing claims it, and `worker::subflow` terminates it.
+///
+/// The 21 are the 12 this commit banks plus nine that still mismatch on
+/// something else -- five registered in `STILL_OVER_ACCEPTED_AT_RUNTIME`, two
+/// held by `state::apply`'s attempt rule (`valids/retry-subflow`,
+/// `valids/subflow-parent-retry`) and two by the missing `WARNING`
+/// (`valids/task-allow-{failure,warning}-executable-flow`).
+const ENTRIES_LEFT_UNFINISHED: usize = 59;
 
 /// **The guard W3a deleted did NOT come back, and this is why — measured, not
 /// assumed.**
@@ -2618,7 +3711,7 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
         (
             SPAWNED_ENTRIES_THAT_MATCH,
             SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED,
-            16,
+            15,
             41
         ),
         "the 41 partitioned: how many MATCH, how many agree on everything the \
@@ -2630,12 +3723,13 @@ async fn the_sub_executions_are_compared_and_this_is_what_they_cost() {
 
 /// The count above, as a named constant so the report and the test cannot
 /// disagree about it.
-const SPAWNED_ENTRIES_THAT_MATCH: usize = 17;
+const SPAWNED_ENTRIES_THAT_MATCH: usize = 22;
 
 /// And the names, which is what `baseline.txt`'s header attributes one by one.
-/// Sixteen banked at W3b Task 5 and `valids/replay-loop` at the whole-branch
+/// Sixteen banked at W3b Task 5, `valids/replay-loop` at the whole-branch
 /// review's fix round, when a sub-execution began inheriting its parent's
-/// `inputs`.
+/// `inputs`, and `valids/loop-with-subflow` at W6 Task 3 -- its loop body is a
+/// `Subflow`, so the body ran and the `Subflow` inside it stalled.
 const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/flowable-with-parent-fail",
     "valids/loop-expression-context",
@@ -2652,20 +3746,42 @@ const SPAWNED_ENTRIES_THAT_MATCH_BY_NAME: &[&str] = &[
     "valids/loop-serial",
     "valids/loop-serial-multiple-tasks",
     "valids/loop-switch",
+    // W6 Task 3's only bank that carries a sub-execution: its `Loop` body is a
+    // `Subflow`, so the body ran but its `Subflow` run stalled -- the whole
+    // entry hung on the one construct this task shipped.
+    "valids/loop-with-subflow",
     "valids/replay-loop",
+    // W6 Task 4, and they are the only four names here that are NOT a `Loop`.
+    // Their sub-execution is the replacement a `CREATE_NEW_EXECUTION` retry
+    // starts -- a third kind of child, linked by `parent_execution_id` with no
+    // loop index at all (migrations 0138 and 0139) -- so each carries a chain
+    // of two: `RETRIED` -> `RETRIED` -> `FAILED`.
+    "valids/retry-new-execution-flow-attempts",
+    "valids/retry-new-execution-flow-duration",
+    "valids/retry-new-execution-task-attempts",
+    "valids/retry-new-execution-task-duration",
     "valids/switch-in-concurrent-loop",
 ];
 
 /// W3a's `39 of the 41 differ on nothing but `spawned`` has this as its
 /// successor, and it is a different sentence: egret fills the field now, so
-/// these **eight** differ **inside** it rather than by leaving it empty.
+/// these **four** differ **inside** it rather than by leaving it empty.
 ///
 /// *(The word was "six" and the constant under it was 8, on adjacent lines,
 /// since the whole-branch review's fix round moved `valids/finally-loop` and
 /// `valids/finally-loop-parallel` into this bucket. W4 Task 6's fourth sweep
 /// pass found it. The value was compared on every run and was right; the word
-/// beside it was not compared by anything.)*
-const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 8;
+/// beside it was not compared by anything. W6 Task 4 wrote the word and the
+/// value in one edit, from the same measurement.)*
+///
+/// **8 until W6 Task 4, and the four that left are the four it banked.** They
+/// were in this bucket for the strongest possible version of "differs inside
+/// `spawned`": everything the parent execution holds agreed and the child was
+/// **absent**, because nothing created a replay. The remaining four are
+/// `invalids/loop-switch-failed`, `valids/finally-loop`,
+/// `valids/finally-loop-parallel` and `valids/retry-flowable-parallel` -- all
+/// `Loop`s, none a replay -- and the test prints the list on every run.
+const SPAWNED_ENTRIES_DIFFERING_ONLY_INSIDE_SPAWNED: usize = 4;
 
 /// **No run is ever created for a task inside a `Loop`, over the whole
 /// corpus.**
@@ -2977,10 +4093,67 @@ const STILL_OVER_ACCEPTED_AT_RUNTIME: &[(&str, &str)] = &[
         "unclaimed: a `Loop`'s `outputs:` reading `{{ outputs.nonExistentTask.value }}`. Kestra \
          FAILED the loop at iteration 1; egret runs 3",
     ),
+    // **W6 made a `Subflow` execute, and these five are what that revealed: an
+    // over-acceptance that was already registered on the CHILD, now visible in
+    // its PARENT.** None of them is a new divergence. Before W6 Task 3 the
+    // parent's `Subflow` run stalled -- `build_plan` planned it an opaque
+    // `Runnable`, the claim took it, and `WorkerError::NotALeaf` aborted the
+    // tick -- so the parent could not get as far as running anything Kestra did
+    // not. It can now, and what it then does is transmit its child's terminal:
+    // the child SUCCEEDS here because of the row above or below it in this very
+    // list, `transmitFailed` faithfully carries that up, and the parent runs
+    // its successor.
+    //
+    // The owner of each is therefore the CHILD's row, named in the message, and
+    // fixing that row fixes this one with it. Registered separately rather than
+    // folded into the child's entry because this test compares entry ids and a
+    // parent that is not named here is indistinguishable from one nobody
+    // looked at.
+    (
+        "valids/flow-concurrency-sla-fail-parent",
+        "W8, through a subflow: its child `valids/flow-concurrency-sla-fail-child` is over-accepted \
+         above (no `sla:`), so the child SUCCEEDS, `transmitFailed` carries SUCCESS up, and the \
+         parent's `subflow` run SUCCEEDS where Kestra FAILED it",
+    ),
+    (
+        "valids/sla-parent-flow",
+        "W8, through a subflow: its child `valids/sla-subflow` is over-accepted above, so the \
+         parent's `subflow` run SUCCEEDS where Kestra FAILED it",
+    ),
+    (
+        "valids/restart-parent",
+        "W2, through a subflow: its child `valids/restart-child` is over-accepted above (the \
+         `Infinity` render), so the child SUCCEEDS and egret runs one more task in the parent",
+    ),
+    (
+        "valids/restart-parent-loop",
+        "W2, through a subflow inside a `Loop`: the same `valids/restart-child`, reached from a \
+         loop sub-execution, so egret runs 3 sub-executions and 3 runs where Kestra ran 1 and 2",
+    ),
+    // **The only one of the five that is a new INSTANCE and not only a newly
+    // visible one**, which fix round 1's review separated: the other four are
+    // owned by a row already in this list, so the child was over-accepted
+    // before and the parent merely could not reach it. This one has no
+    // pre-existing row -- its cause is a construct nothing in egret evaluates,
+    // and the run that now SUCCEEDs where Kestra FAILED it did not exist while
+    // the parent stalled. No capability was added that fires where Kestra would
+    // not; a run was.
+    (
+        "valids/subflow-secret-output-parent",
+        "unclaimed: the flow-level `outputs:` block is not evaluated anywhere in egret, so a child \
+         declaring `type: SECRET` outputs simply SUCCEEDS. On the artifact the PARENT fails inside \
+         `ExecutableUtils.subflowExecutionResultFromChildExecution`'s catch block while extracting \
+         them -- which is what gives its golden run `[CREATED, RUNNING, FAILED]` beside an attempt \
+         of `[CREATED, FAILED]` -- so egret's `subflow` run SUCCEEDS and its `hello` successor runs",
+    ),
 ];
 
-const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 28;
-const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 13;
+// W6 Task 4: +4 identical / -4 differing, and they are the four
+// `retry-new-execution-*` entries. Their key is `(None, None)` -- a replay
+// carries neither a parent run nor a loop index -- and egret produced an EMPTY
+// key list for each until `worker::replay` created the execution.
+const TOP_LEVEL_SPAWN_KEYS_IDENTICAL: usize = 32;
+const TOP_LEVEL_SPAWN_KEYS_DIFFER: usize = 9;
 
 /// **`concurrencyLimit` defaults to 1, and the corpus can tell** — the one
 /// measurement that separates it from `Parallel::concurrent`'s default of 0.
@@ -3101,6 +4274,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
     // makes the 40 a measurement -- swapping them for whatever today prints
     // would leave this test agreeing with itself.
     let mut in_an_errors_list = 0usize;
+    // **W6 widened it once more, and this is the movement that IS the package's
+    // finding.** A `Subflow` was a `TaskKind::Runnable` through W5, so every
+    // one of its runs landed in `fed` AND in `over_fed` -- fed because
+    // `golden_outcome` supplied its terminal, over-fed because `advance()`
+    // emitted a `SUBMITTED` no `Subflow` run in `golden.json` carries. It is a
+    // `TaskKind::Executable` now, so those runs are `flowable` and the
+    // `SUBMITTED` is gone. Derived here rather than folded into the constants
+    // below, for `in_an_errors_list`'s reason: constants swapped for whatever
+    // today prints leave this test agreeing with itself.
+    let mut is_a_subflow = 0usize;
 
     for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
         let trace = Trace::from(entry);
@@ -3150,6 +4333,16 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
                             *over_fed.entry(type_id.clone()).or_default() += 1;
                         }
                     }
+                    Some(TaskKind::Executable { .. }) => {
+                        flowable += 1;
+                        is_a_subflow += 1;
+                        assert!(
+                            !submitted,
+                            "{}: `Subflow` run {} carries SUBMITTED in the GOLDEN, which would \
+                             refute the whole reason W6 opened src/executor/",
+                            entry.id, run.task
+                        );
+                    }
                     Some(_) => flowable += 1,
                 }
             }
@@ -3165,11 +4358,19 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          has been populated since Task 3"
     );
     assert_eq!(
+        is_a_subflow, 22,
+        "every `Subflow` run in the comparable golden: 21 that executed, across \
+         20 entries, plus `valids/task-runif`'s `notexecutedflowable`, which a \
+         falsy `runIf:` SKIPPED. All 22 were `fed` and over-submitted through \
+         W5; none of them is either since W6 planned `Subflow` as \
+         `TaskKind::Executable`"
+    );
+    assert_eq!(
         (
-            fed - in_an_errors_list,
-            flowable,
+            fed - in_an_errors_list + is_a_subflow,
+            flowable - is_a_subflow,
             unplanned + in_an_errors_list,
-            over_fed.values().sum::<usize>()
+            over_fed.values().sum::<usize>() + is_a_subflow
         ),
         (424, 74, 342, 114),
         "the reconstruction must reproduce Task 5's four committed figures -- up \
@@ -3178,8 +4379,9 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
          numbers, and up to the one the null-list fix moved out of `unplanned` \
          and into `flowable` (`valids/switch-impossible`'s `impossible` run: the \
          flow is planned at all now, so its `Switch` is a flowable rather than a \
-         task with no plan). If it does not, nothing below is a measurement of \
-         anything"
+         task with no plan), and up to the 22 W6 moved out of `fed` and out of \
+         the over-feed at the same time. If it does not, nothing below is a \
+         measurement of anything"
     );
     assert_eq!(
         over_fed.get("io.kestra.plugin.core.flow.Loop").copied(),
@@ -3198,10 +4400,20 @@ fn planning_the_loop_removed_forty_spurious_submitted_emissions() {
         .filter(|(t, _)| t.starts_with("io.kestra.plugin.core.flow."))
         .map(|(_, n)| *n)
         .sum();
+    // W6 took a whole TYPE out of this bucket as well as 22 runs, so the `+ 1`
+    // is checked rather than assumed: `Subflow` must be absent from the map
+    // entirely, which is what a type that is no longer fed looks like.
+    assert!(
+        !over_fed.contains_key("io.kestra.plugin.core.flow.Subflow"),
+        "`Subflow` must contribute NO over-submitted run since W6 planned it \
+         `TaskKind::Executable`; it contributed {:?}",
+        over_fed.get("io.kestra.plugin.core.flow.Subflow")
+    );
     assert_eq!(
-        (flow_then, over_fed.len()),
+        (flow_then + is_a_subflow, over_fed.len() + 1),
         (89, 12),
-        "Task 5's flow bucket, reconstructed: 7 types and 89 runs"
+        "Task 5's flow bucket, reconstructed: 7 types and 89 runs, of which \
+         `io.kestra.plugin.core.flow.Subflow` was one type and 22 runs until W6"
     );
 }
 
@@ -3787,14 +4999,21 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `inputs`.
         (
             "Loop — a sub-execution egret runs and gets wrong",
-            20,
+            19,
             &["io.kestra.plugin.core.flow.Loop\n", "core.loop\n"],
         ),
-        (
-            "Subflow",
-            22,
-            &["io.kestra.plugin.core.flow.Subflow", "core.subflow"],
-        ),
+        // **`Subflow` was a row here with 22 through W5, and W6 Task 3 removed
+        // it rather than lowering it to 10.** Same rule as `disabled: true` and
+        // `runIf:` below, run for the third time: a row attributes an entry to
+        // the construct that HOLDS it, and `Subflow` holds nothing now — it
+        // executes, and 12 of the 22 banked in the commit that removed this row.
+        //
+        // The remaining 10 are all held by something else, and lowering the
+        // number instead would have kept six of them attributed to a construct
+        // that works. Four are absorbed by rows that stayed (`flow
+        // concurrency:` once, `Loop` once, `AllowFailure` twice); the other six
+        // are named one by one in `UNATTRIBUTED` below, which is where the
+        // honest attribution for each of them lives.
         ("finally:", 16, &["finally:"]),
         (
             "ExecutionUpdatableTask",
@@ -3831,7 +5050,11 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
                 "core.waitfor",
             ],
         ),
-        ("flow concurrency:", 7, &["\nconcurrency:"]),
+        // 7 through W5; `valids/flow-concurrency-parallel-subflow-kill-child`
+        // banked at W6 Task 3, because what its `concurrency: {behavior:
+        // QUEUE}` changes is WHEN its own child starts and its trace does not
+        // record that.
+        ("flow concurrency:", 6, &["\nconcurrency:"]),
         // `disabled: true` was a row here through Task 8 with 6 entries, and
         // `runIf:` was a row with 7 through W3a's final review. Both are
         // implemented now, so neither holds anything and a row for either would
@@ -3847,7 +5070,21 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         // `ExecutionUpdatableTask`, `finally:`, `Subflow` and `WorkingDirectory`
         // are the five, and every one of them is unclaimed or opaque today.
         ("sla:", 5, &["\nsla:"]),
-        ("CREATE_NEW_EXECUTION retry", 4, &["CREATE_NEW_EXECUTION"]),
+        // **The `CREATE_NEW_EXECUTION retry` row was here with 4 and is
+        // removed by W6 Task 4**, under the same rule that removed
+        // `disabled: true` and `runIf:`: the construct is implemented
+        // (`worker::replay`), all four entries are banked, and the needle
+        // `"CREATE_NEW_EXECUTION"` now matches **no baselined entry at all**.
+        //
+        // That last clause is measured rather than assumed, and the assumption
+        // it replaces was written down first: a draft of this comment kept the
+        // row at 0 "because `valids/retry-flowable-parallel` is the fifth flow
+        // declaring `CREATE_NEW_EXECUTION` and deleting the row would orphan
+        // it". **It declares no such thing** -- its `retry:` is a bare
+        // `type: constant` on a `Loop`, so its behaviour is the default
+        // `RETRY_FAILED_TASK`, and it is held by the `Loop` row. Only four
+        // corpus flows in 345 write the word, and they are the four this task
+        // banked.
         (
             "WorkingDirectory",
             4,
@@ -3897,6 +5134,36 @@ fn the_residual_baseline_is_attributed_to_a_construct_or_named() {
         (
             "valids/dag",
             "one `order` pair a clockless machine cannot reach",
+        ),
+        // **The six W6 Task 3 moved here from the `Subflow` row**, each with
+        // the cause that actually holds it now that `Subflow` runs. Five of the
+        // six are pinned from a second direction as well:
+        // `STILL_OVER_ACCEPTED_AT_RUNTIME` names three of them and
+        // `no_corpus_subflow_turns_transmit_failed_off`'s two companions in
+        // `executor::state::apply` name the other two.
+        (
+            "valids/restart-parent",
+            "its child `valids/restart-child`'s `1 / taskrun.attemptsCount`              renders Infinity here and throws in Java, so the child SUCCEEDS              and the parent transmits a SUCCESS Kestra never had",
+        ),
+        (
+            "valids/retry-subflow",
+            "`state::apply` rule 1: Kestra accumulates a retried `Subflow`'s              sub-execution retries INSIDE the parent's attempt, so its attempt              reads `... FAILED RETRYING CREATED RUNNING FAILED` where a              terminated attempt here takes no further state",
+        ),
+        (
+            "valids/subflow-parent-retry",
+            "the same rule 1, twice: `subflow1` and `subflow2` each carry two              attempts of that shape",
+        ),
+        (
+            "valids/sla-parent-flow",
+            "`sla:` in its child `valids/sla-subflow`, which egret does not              implement, so the child SUCCEEDS and the parent transmits it",
+        ),
+        (
+            "valids/subflow-secret-output-parent",
+            "the flow-level `outputs:` block, which nothing in egret evaluates;              on the artifact the PARENT fails while extracting the child's              SECRET output",
+        ),
+        (
+            "valids/task-runif",
+            "`io.kestra.plugin.core.output.OutputValues`, which has no handler.              Its `Subflow` is the corpus's only unresolvable target and a falsy              `runIf:` SKIPS it, so `Subflow` was never what held this entry",
         ),
         (
             "valids/flow-with-outputs-failed",
@@ -4158,12 +5425,15 @@ async fn the_kill_path_cannot_move_the_ratchet_and_the_named_kill_entries_are_no
         named,
         vec![
             "valids/exit-killed".to_string(),
-            "valids/flow-concurrency-parallel-subflow-kill".to_string(),
-            "valids/flow-concurrency-parallel-subflow-kill-child".to_string(),
             "valids/flow-concurrency-queue-killed-after-execution".to_string(),
             "valids/pause-kill-delay".to_string(),
         ],
-        "the five baselined ids whose name contains `kill`"
+        "the baselined ids whose name contains `kill`. It was FIVE through W5; \
+         W6 Task 3 banked two of them -- `valids/flow-concurrency-parallel-subflow-kill` \
+         and its `-child` -- and neither is a kill at all: the name is the \
+         Java test's, the flows declare `concurrency:` with `behavior: QUEUE`, and \
+         what QUEUE changes is WHEN a child starts, which a parent's trace does \
+         not record"
     );
 
     // Not one of them declares a `timeout:` anywhere, so leg 1 excludes every
@@ -4321,8 +5591,11 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
     );
     assert_eq!(
         (declaring.len(), without, baseline.len()),
-        (4, 139, 143),
-        "the baselined population that declares a `timeout:`, and the rest: {:#?}",
+        (4, 123, 127),
+        "the baselined population that declares a `timeout:`, and the rest. It \
+         was (4, 139, 143) through W5: W6 Task 3 banked 12 and W6 Task 4 banked \
+         4, and not one of the 16 declares a `timeout:` anywhere, so the \
+         numerator has not moved through either: {:#?}",
         declaring
     );
     assert_eq!(
@@ -4408,19 +5681,36 @@ fn the_baselined_timeout_declarations_are_derived_and_none_can_move_the_ratchet(
 ///    which holds of every field. So the retry population splits into a half
 ///    the ratchet speaks for and a half it cannot, and only the second half is
 ///    the waker's.
-/// 2. **By `behavior:`**, because `CREATE_NEW_EXECUTION` never writes a
-///    `not_before` at all: `executor::retry::scan`'s `CreateNewExecution` arm
-///    emits `SetRunState`/`SetExecutionState` and no `ScheduleRetry`, so no run
-///    of those entries ever reaches `RETRYING` and no waker could have touched
-///    one. The default is `RETRY_FAILED_TASK` (`RetryBehavior`'s `#[default]`,
-///    from `AbstractRetry`'s own), so this is read from the parsed model rather
-///    than from the presence of the key — seven of the ten never write it.
+/// 2. **By `behavior:`**, because the two behaviours reach the waker
+///    differently. **This item read *"`CREATE_NEW_EXECUTION` never writes a
+///    `not_before` at all … no waker could have touched one"*, and W6 Task 4
+///    made both halves false in the commit that could have left them
+///    standing.** That arm now emits the `ScheduleRetry` the artifact's own
+///    `ExecutionDelay` is (`ExecutorService.java:600-609` builds one for both
+///    behaviours and differs only in its `delayType`), the run it names goes
+///    `RETRIED` rather than `RETRYING`, and `claim::due_retries` has a second
+///    arm for exactly that state — which is how the replacement execution
+///    knows when to start. The default is `RETRY_FAILED_TASK`
+///    (`RetryBehavior`'s `#[default]`, from `AbstractRetry`'s own), so this is
+///    read from the parsed model rather than from the presence of the key.
 /// 3. **Flow-level against task-level**, because `Flow::retry` is the same
 ///    `AbstractRetry` type and a walk over `tasks:` alone would miss the five
 ///    entries that declare it there.
 ///
 /// What the ratchet says about the waker, after all that, is **nothing** — see
-/// the coverage statement's item 11 for the mechanism and its measurement.
+/// the coverage statement's item 11 for the mechanism and its measurement. That
+/// is unchanged by W6 Task 4 and is worth saying twice, because the four
+/// entries it banked DO now depend on a due deadline being noticed: the oracle
+/// notices it with `driver::pass_time`, which rewinds `executions.created_at`
+/// and calls `worker::resume` itself, and never through `worker::wake`. The
+/// waker's own arm is driven by `tests/worker.rs`'s
+/// `a_due_replay_is_woken_and_the_waker_stops_naming_it_once_it_exists`, in
+/// real time, which is the only instrument that covers it.
+///
+/// **The name still holds and is worth re-reading rather than assuming**: it
+/// is about the BASELINED population, and the waker reaches none of that —
+/// after Task 4 those ten are all `RETRY_FAILED_TASK`, and the ratchet does not
+/// exercise the waker for either behaviour.
 #[test]
 fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     use egret_workflow::models::{Retry, RetryBehavior};
@@ -4495,7 +5785,7 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         .partition(|id| baseline.contains(id.as_str()));
     assert_eq!(
         (baselined.len(), matching.len(), declaring.len()),
-        (14, 11, 25),
+        (10, 15, 25),
         "the split the coverage question turns on: a `retry:` on a MATCHING \
          entry is one the ratchet would report a change to, and a `retry:` on \
          a baselined entry is one it would not. matching: {matching:?}"
@@ -4507,10 +5797,6 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/full",
             "valids/retry-failed-flow-duration",
             "valids/retry-flowable-parallel",
-            "valids/retry-new-execution-flow-attempts",
-            "valids/retry-new-execution-flow-duration",
-            "valids/retry-new-execution-task-attempts",
-            "valids/retry-new-execution-task-duration",
             "valids/retry-subflow",
             "valids/retry-success",
             "valids/retry-with-flowable-errors",
@@ -4518,7 +5804,10 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
             "valids/task-allow-failure-runnable",
             "valids/task-allow-warning-runnable",
         ],
-        "the fourteen, by name. W4's spec said twelve"
+        "the ten, by name. W4's spec said twelve, W4 Task 1 derived fourteen, \
+         and W6 Task 4 banked the four `retry-new-execution-*` entries out of \
+         the list -- which is the whole of the difference between fourteen and \
+         ten"
     );
 
     // The behaviour split over the baselined fourteen: only `RETRY_FAILED_TASK`
@@ -4535,19 +5824,11 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     }
     assert_eq!(
         (new_execution.len(), failed_task.len(), baselined.len()),
-        (4, 10, 14),
-        "four `CREATE_NEW_EXECUTION` entries write no `not_before` at all, so \
-         the waker's whole baselined population is the other ten"
-    );
-    assert_eq!(
-        new_execution,
-        vec![
-            "valids/retry-new-execution-flow-attempts",
-            "valids/retry-new-execution-flow-duration",
-            "valids/retry-new-execution-task-attempts",
-            "valids/retry-new-execution-task-duration",
-        ],
-        "and they are these four"
+        (0, 10, 10),
+        "**every remaining baselined `retry:` is a `RETRY_FAILED_TASK` one**, \
+         because W6 Task 4 banked all four `CREATE_NEW_EXECUTION` entries. The \
+         assertion under this used to name them; the successor is the matching \
+         side below, which is where they went: {new_execution:?}"
     );
 
     // **The half the ratchet DOES speak for.** A `retry:` on a matching entry
@@ -4556,18 +5837,38 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
     // The waker is the part that is not, and these two counts are what keep the
     // two claims apart.
     let mut matching_failed_task: Vec<&str> = Vec::new();
+    let mut matching_new_execution: Vec<&str> = Vec::new();
     for id in &matching {
         let (behaviours, _) = &declaring[*id];
-        if !behaviours.contains(&RetryBehavior::CreateNewExecution) {
-            matching_failed_task.push(id);
+        match behaviours.contains(&RetryBehavior::CreateNewExecution) {
+            true => matching_new_execution.push(id),
+            false => matching_failed_task.push(id),
         }
     }
     assert_eq!(
-        (matching_failed_task.len(), matching.len()),
-        (11, 11),
-        "every matching entry that declares a `retry:` declares the behaviour that writes a \
-         `not_before`, so all eleven are entries whose retry the ratchet would report a change to: \
-         {matching_failed_task:?}"
+        (
+            matching_failed_task.len(),
+            matching_new_execution.len(),
+            matching.len()
+        ),
+        (11, 4, 15),
+        "the matching half, split the same way. It was (11, 0, 11): every \
+         matching entry declared the behaviour that writes a `not_before`, and \
+         W6 Task 4 moved the four `CREATE_NEW_EXECUTION` entries across, which \
+         is the FIRST time the ratchet speaks for that behaviour at all. \
+         failed_task: {matching_failed_task:?}; new_execution: \
+         {matching_new_execution:?}"
+    );
+    assert_eq!(
+        matching_new_execution,
+        vec![
+            "valids/retry-new-execution-flow-attempts",
+            "valids/retry-new-execution-flow-duration",
+            "valids/retry-new-execution-task-attempts",
+            "valids/retry-new-execution-task-duration",
+        ],
+        "and they are these four, by name -- the entries whose whole replay \
+         chain the ratchet would now report a change to"
     );
 
     // Flow-level against task-level, over the whole 25: a walk over `tasks:`
@@ -4581,5 +5882,362 @@ fn the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them() {
         flow_level.len(),
         5,
         "golden entries whose `retry:` is the FLOW's: {flow_level:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W6 Task 3: the three derivations `src/` cites for `Subflow`
+// ---------------------------------------------------------------------------
+
+/// Every `Subflow` task id a corpus flow declares, from all four root lists and
+/// through `children()` **and** `error_children()`.
+///
+/// Wider than `publish::resolve_task`'s walk on purpose and for
+/// `driver::subflow_targets`' reason — the question here is *what would a
+/// resolver have to reach*, not *what does publish reach today*.
+fn subflow_tasks(source: &str) -> BTreeMap<String, egret_workflow::models::Subflow> {
+    let mut out = BTreeMap::new();
+    let Ok(flow) = egret_workflow::spec::parse(source) else {
+        return out;
+    };
+    fn walk(
+        t: &egret_workflow::models::Task,
+        out: &mut BTreeMap<String, egret_workflow::models::Subflow>,
+    ) {
+        if let egret_workflow::models::TaskKind::Subflow(s) = &t.kind {
+            out.insert(t.id.clone(), s.clone());
+        }
+        for c in t.children().into_iter().chain(t.error_children()) {
+            walk(c, out);
+        }
+    }
+    for list in [
+        &flow.tasks,
+        &flow.errors,
+        &flow.finally_,
+        &flow.after_execution,
+    ] {
+        for t in list {
+            walk(t, &mut out);
+        }
+    }
+    out
+}
+
+/// **The measurement W6 opened `src/executor/` for: no `Subflow` run in the
+/// golden carries `SUBMITTED`.**
+///
+/// `SUBMITTED` is the one state in Kestra's record that separates a task the
+/// worker ran from one the executor ran (`RunState::Submitted`'s own doc: 580
+/// of the golden's 840 run histories), and `flowable::start` emits it for every
+/// [`TaskKind::Runnable`]. So a `Subflow` left planned `Runnable` mismatches
+/// **every** entry W6 exists to bank, whatever else it gets right — which is
+/// why "keep it opaque and let a handler spawn and wait", the cheaper answer,
+/// banks nothing.
+///
+/// Derived over the golden rather than remembered, per the plan's rule that a
+/// figure is safe only if a running program compares it. The counts are
+/// asserted too: a walk that found no `Subflow` run at all would pass the
+/// `SUBMITTED` half vacuously, which is the shape this programme has paid for
+/// ten times.
+#[test]
+fn no_subflow_run_in_the_golden_passes_through_submitted() {
+    let (mut executed, mut skipped, mut entries) = (0usize, 0usize, 0usize);
+    for entry in golden().iter().filter(|e| e.verdict == Verdict::Runs) {
+        let subflows = subflow_tasks(&corpus_source(&entry.id));
+        if subflows.is_empty() {
+            continue;
+        }
+        let trace = Trace::from(entry);
+        let mut here = 0usize;
+        let mut stack: Vec<&Trace> = vec![&trace];
+        while let Some(t) = stack.pop() {
+            for run in &t.runs {
+                if !subflows.contains_key(&run.task) {
+                    continue;
+                }
+                here += 1;
+                assert!(
+                    !run.state.iter().any(|s| s == "SUBMITTED"),
+                    "{}: `Subflow` run {:?} reads {:?} in the golden. If this ever \
+                     carries SUBMITTED, `TaskKind::Executable` is the wrong shape \
+                     and plan.rs's whole argument for opening src/executor/ falls",
+                    entry.id,
+                    run.task,
+                    run.state
+                );
+                assert!(
+                    !run.attempts.iter().flatten().any(|s| s == "SUBMITTED"),
+                    "{}: `Subflow` attempt of {:?} carries SUBMITTED",
+                    entry.id,
+                    run.task
+                );
+                match run.state.as_slice() {
+                    [c, s] if c == "CREATED" && s == "SKIPPED" => skipped += 1,
+                    _ => executed += 1,
+                }
+            }
+            stack.extend(t.spawned.iter());
+        }
+        if here > 0 {
+            entries += 1;
+        }
+    }
+    assert_eq!(
+        (executed, skipped, entries),
+        (24, 1, 22),
+        "the population this claim rests on: 24 executed `Subflow` runs and one \
+         SKIPPED (`valids/task-runif`'s `notexecutedflowable`), over 22 entries. \
+         Three of the 24 are inside a loop sub-execution rather than at the top \
+         level (`valids/loop-with-subflow` twice, `valids/restart-parent-loop` \
+         once), which is why `planning_the_loop_removed_forty_spurious_submitted_emissions` \
+         -- whose reconstruction excludes a loop body, because Task 5's builder \
+         had no plan for one -- counts 22 and not 25"
+    );
+}
+
+/// **The corpus names exactly one `Subflow` target no corpus flow holds, and
+/// the run that names it is SKIPPED before anything resolves it.**
+///
+/// That is what makes `worker::subflow`'s unresolvable-target decision safe to
+/// take: egret fails the RUN rather than refusing the FLOW, matching the
+/// artifact (`egret.probe/probe-unresolvable`), and the one shape where the two
+/// still differ — Kestra never emits `RUNNING`, egret does — is unreachable
+/// here. A `build_plan` that refused the flow instead would turn
+/// `valids/task-runif` from `runs` into `refused`, which is a regression rather
+/// than a bank.
+#[test]
+fn the_only_unresolvable_subflow_target_in_the_corpus_is_skipped() {
+    let held: BTreeSet<String> = corpus()
+        .iter()
+        .filter_map(|e| egret_workflow::spec::parse(&corpus_source(&e.id)).ok())
+        .map(|f| format!("{}/{}", f.namespace, f.id))
+        .collect();
+    let mut unresolvable: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in corpus() {
+        for (task, sub) in subflow_tasks(&corpus_source(&entry.id)) {
+            let (Some(ns), Some(id)) = (&sub.namespace, &sub.flow_id) else {
+                continue;
+            };
+            // The one target that is not a name at all --
+            // `valids/task-flow-dynamic`'s `{{ inputs.namespace }}` -- is left
+            // out here rather than counted as missing: `driver::target_census`
+            // owns it as `SUBFLOW_TARGETS_UNRENDERED`, and a flow that has no
+            // golden entry cannot be regressed by this decision anyway.
+            let name = format!("{ns}/{id}");
+            if name.contains("{{") || held.contains(&name) {
+                continue;
+            }
+            unresolvable
+                .entry(name)
+                .or_default()
+                .push((entry.id.clone(), task));
+        }
+    }
+    assert_eq!(
+        unresolvable
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect::<Vec<_>>(),
+        vec![(
+            "dummy_namespace/dummy_flow",
+            &[(
+                "valids/task-runif".to_string(),
+                "notexecutedflowable".to_string()
+            )][..]
+        )],
+        "the whole population of unresolvable literal `Subflow` targets in the \
+         corpus. `driver::SUBFLOW_TARGETS_ABSENT` counts the same one from the \
+         other side"
+    );
+
+    let entry = golden()
+        .into_iter()
+        .find(|e| e.id == "valids/task-runif")
+        .expect("valids/task-runif has a golden entry");
+    let run = entry
+        .runs
+        .iter()
+        .find(|r| r.task == "notexecutedflowable")
+        .expect("its `notexecutedflowable` run is in the golden");
+    assert_eq!(
+        run.state,
+        ["CREATED", "SKIPPED"],
+        "the only unresolvable target in the corpus belongs to a run a falsy \
+         `runIf:` skips, so nothing egret does when a target does not resolve is \
+         visible to the ratchet -- which is why `worker::subflow` measured the \
+         artifact for it instead"
+    );
+}
+
+/// **No corpus `Subflow` writes `transmitFailed: false`.**
+///
+/// Cited twice in `src/`: by `executor::state::apply`, for the attempt-history
+/// rule its two-step terminal would break, and by `worker::subflow::guess_state`,
+/// which implements the branch anyway. Both statements are only safe while this
+/// holds, so it is derived rather than remembered.
+///
+/// The default is `true` (`Subflow.java:132`) and `models::Subflow` carries the
+/// same default, so this reads the effective value and not the presence of a
+/// key.
+#[test]
+fn no_corpus_subflow_turns_transmit_failed_off() {
+    let mut declarers = 0usize;
+    let mut subflows = 0usize;
+    for entry in corpus() {
+        let tasks = subflow_tasks(&corpus_source(&entry.id));
+        if tasks.is_empty() {
+            continue;
+        }
+        declarers += 1;
+        for (task, sub) in tasks {
+            subflows += 1;
+            assert!(
+                sub.transmit_failed,
+                "{}: `Subflow` {task:?} turns `transmitFailed` off, which makes \
+                 `guess_state`'s second branch reachable -- and `executor::state::apply` \
+                 rule 1 would then drop the second state off the attempt. Both \
+                 doc comments say this cannot happen",
+                entry.id
+            );
+        }
+    }
+    assert_eq!(
+        (declarers, subflows),
+        (25, 27),
+        "the population: corpus flows declaring at least one `Subflow`, and the \
+         `Subflow` tasks between them"
+    );
+}
+
+/// **The deepest chain of `Subflow` targets the corpus holds is 2 links — three
+/// flows — and its only cycle is a self-cycle both sides refuse.**
+///
+/// Both halves matter to `worker::subflow`, which is where the one answer this
+/// package gives that is not the artifact's lives. The **cycle** half is the
+/// load-bearing one: nothing on either side refuses A -> B -> A, and if the
+/// corpus ever grew one the driver would run it — into a recursion that
+/// overflowed a stack when it was measured. The **depth** half says that
+/// `MAX_SPAWN_CHAIN` cannot be reached by anything here.
+///
+/// **This measures the SUBFLOW GRAPH, and that is narrower than what the guard
+/// walks** — the name says so since fix round 1's Minor 3, which pointed out
+/// that the old one (`…_is_far_inside_the_bound`) promised a bound that at the
+/// time did not exist. `worker::subflow::chain_holds` walks the EXECUTION
+/// chain, which counts
+/// a `Loop` sub-execution as a link too; this walk cannot see loop nesting at
+/// all. So the 2 below is a lower bound on the real chain, and what says
+/// `MAX_SPAWN_CHAIN` refuses nothing real is the ratchet: **127** with the same
+/// twelve — `131` when the bound went in and `127` since W6 Task 4's four
+/// replay banks, re-run at both.
+///
+/// Walked over `(namespace, flowId)` pairs with a visited set, because the
+/// graph **can** cycle — `spec::validate`'s `self_dependency` refuses only a
+/// flow that names itself, so A → B → A is publishable on both sides. A walk
+/// without one would not terminate, which is the same fact the constant exists
+/// for.
+#[test]
+fn the_corpus_subflow_graph_has_no_cycle_and_no_deep_chain() {
+    let by_name: BTreeMap<String, String> = corpus()
+        .iter()
+        .filter_map(|e| {
+            let src = corpus_source(&e.id);
+            egret_workflow::spec::parse(&src).ok().map(|f| {
+                (
+                    format!("{}/{}", f.namespace, f.id),
+                    // The first file to claim a name wins, which is
+                    // `driver::publish_corpus`'s rule and `UNIQUE (workspace_id,
+                    // namespace, flow_id)`'s.
+                    src,
+                )
+            })
+        })
+        .fold(BTreeMap::new(), |mut acc, (k, v)| {
+            acc.entry(k).or_insert(v);
+            acc
+        });
+
+    fn depth(name: &str, by_name: &BTreeMap<String, String>, seen: &mut BTreeSet<String>) -> usize {
+        let Some(src) = by_name.get(name) else {
+            return 0;
+        };
+        if !seen.insert(name.to_string()) {
+            // A cycle. Reported as the bound rather than as infinity: this test
+            // is about how deep a chain the corpus really has, and a cycle in it
+            // would be caught by the assertion below.
+            return usize::MAX;
+        }
+        let mut best = 0;
+        for (_task, sub) in subflow_tasks(src) {
+            let (Some(ns), Some(id)) = (&sub.namespace, &sub.flow_id) else {
+                continue;
+            };
+            let target = format!("{ns}/{id}");
+            if target.contains("{{") {
+                continue;
+            }
+            let d = depth(&target, by_name, seen);
+            best = best.max(if d == usize::MAX { d } else { d + 1 });
+        }
+        seen.remove(name);
+        best
+    }
+
+    let mut deepest = (0usize, String::new());
+    let mut cyclic: BTreeSet<String> = BTreeSet::new();
+    for name in by_name.keys() {
+        let d = depth(name, &by_name, &mut BTreeSet::new());
+        if d == usize::MAX {
+            cyclic.insert(name.clone());
+            continue;
+        }
+        if d > deepest.0 {
+            deepest = (d, name.clone());
+        }
+    }
+
+    // **The corpus holds exactly one cycle and it is a SELF-cycle**, which both
+    // sides already refuse: `spec::validate`'s `self_dependency` is egret's
+    // half, and Kestra's own verdict for the entry is `refused`. A cycle of
+    // length two or more is what nothing refuses, and there is none — if one
+    // ever appears here, the driver will run it, into the recursion that
+    // overflowed a stack when `worker::subflow`'s cycle guard was measured.
+    assert_eq!(
+        cyclic.iter().cloned().collect::<Vec<_>>(),
+        vec!["io.kestra.tests/recursive-flow".to_string()],
+        "every cycle of `Subflow` targets in the corpus"
+    );
+    assert!(
+        egret_workflow::executor::build_plan(&corpus_source("invalids/recursive-flow")).is_err(),
+        "and egret refuses to plan it, so nothing reaches the cycle guard for it"
+    );
+    assert_eq!(
+        subflow_tasks(&corpus_source("invalids/recursive-flow"))
+            .values()
+            .map(|s| format!(
+                "{}/{}",
+                s.namespace.as_deref().unwrap_or(""),
+                s.flow_id.as_deref().unwrap_or("")
+            ))
+            .collect::<Vec<_>>(),
+        vec!["io.kestra.tests/recursive-flow".to_string()],
+        "it is a SELF-cycle -- length one -- which is the case `self_dependency` \
+         catches. The case nothing catches is A -> B -> A, and the corpus has none"
+    );
+
+    assert_eq!(
+        deepest,
+        (
+            2,
+            "io.kestra.tests/flow-concurrency-parallel-subflow-kill".to_string()
+        ),
+        "the deepest chain, counted in LINKS and named so a change says which \
+         flow moved: `flow-concurrency-parallel-subflow-kill -> -child -> \
+         -grandchild` is two links and three flows, and \
+         `io.kestra.tests/subflow-parent -> subflow-child -> \
+         subflow-grand-child` is the other. Two nested settles is nowhere near \
+         what overflowed a stack when the cycle was measured (it did so before \
+         16 links), so nothing in the corpus reaches the hazard \
+         `worker::subflow`'s cycle guard leaves open"
     );
 }

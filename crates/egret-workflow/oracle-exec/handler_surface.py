@@ -409,7 +409,17 @@ W3B_HANDLERS = {
 }
 
 # The flowables `advance()` already drives and decides for (W3a Tasks 3-6).
-# `Loop` is here because W3b's `SpawnExecution` executor is what completes it.
+# `Loop` is here because W3b's `SpawnExecution` executor is what completes it,
+# and `Subflow` is here since W6 Task 3 for the same shape: `build_plan` gives
+# it a `TaskKind::Executable`, `advance()` starts it and waits, and
+# `worker::subflow` creates the child execution and reports its terminal back.
+# It is NOT a `W3B_HANDLERS` entry, because no worker ever claims it -- a
+# `TaskKind::Executable` gets no `task_runs.type_id`.
+#
+# **The name is no longer only W3a's, and it stopped being so before W6.** It
+# is kept because `oracle-exec/README.md` cites it verbatim; what it means is
+# "every task type this executor drives itself", which is what both use sites
+# below actually ask.
 W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.Sequential",
     "io.kestra.plugin.core.flow.Parallel",
@@ -417,6 +427,7 @@ W3A_FLOWABLES = {
     "io.kestra.plugin.core.flow.If",
     "io.kestra.plugin.core.flow.Switch",
     "io.kestra.plugin.core.flow.Loop",
+    "io.kestra.plugin.core.flow.Subflow",
 }
 
 # `executor::RunState::ALL`, which is 9 of the golden's 13 states.  A trace
@@ -700,8 +711,10 @@ def check_inputs(flows, kinds, golden, baseline):
     runs = [e for e in golden if e["verdict"] == "runs"]
     if len(runs) != 266:
         bail(f"golden.json holds {len(runs)} `runs` entries, not 266")
-    if len(baseline) != 143:
-        bail(f"baseline.txt holds {len(baseline)} ids, not 143; the split "
+    # 143 through W5; 131 after W6 Task 3 banked the 12 `Subflow` entries; 127
+    # since W6 Task 4 banked the four `retry-new-execution-*` replays.
+    if len(baseline) != 127:
+        bail(f"baseline.txt holds {len(baseline)} ids, not 127; the split "
              f"between what egret reproduces and what it does not has moved")
     missing = sorted(e["id"] for e in golden if e["id"] not in flows)
     if missing:
@@ -1335,8 +1348,8 @@ def self_test():
          "not 266",
          lambda: run(golden_=[{"id": e["id"], "verdict": "refused"} if e is first_run
                               else e for e in golden]))
-    case("baseline.txt is no longer 143",
-         "not 143",
+    case("baseline.txt is no longer 127",
+         "not 127",
          lambda: run(baseline_=set(list(baseline)[:-1])))
     # Swapped, not added: the size check comes first and would otherwise be the
     # guard this case actually exercises -- which is how a self-test passes a

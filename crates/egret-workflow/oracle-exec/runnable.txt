@@ -1413,3 +1413,70 @@ that is the COMPILED BINARY's scope, not the file's: tests/executor.rs pulls the
 driver in with `#[path = "../oracle-exec/driver.rs"] mod driver;` and contains
 no such call in its own text.  Read 143 as a statement about a state machine and a driver, not
 about a deployment.
+
+
+======================================================================
+W6 (subflow, replay, and four triggers) -- THE RATCHET MOVED: 143 -> 127
+======================================================================
+
+Everything above this heading is W3a's, W3b's and W4's, kept as the record of
+what a task measured on the day it ran.  W6 banked SIXTEEN entries -- twelve
+because `Subflow` executes (Task 3) and four because the `CREATE_NEW_EXECUTION`
+replay creates its replacement execution (Task 4) -- and then built a schedule
+trigger, a flow trigger and a webhook trigger, which reach ZERO entries and are
+judged entirely by their own tests.  Named here rather than rewritten in place,
+which is this file's convention for every earlier block.
+
+  W4's `measured now` table above says   measured now (W6 Task 8, on this tree)
+  ------------------------------------   -------------------------------------
+  matching   151   (128 + 23)            matching   167   (144 + 23)
+  baselined  143   (138 +  5)            baselined  127   (122 +  5)
+
+  ordered pairs REPORTABLE       357     ordered pairs REPORTABLE       360
+    top level 255 / nested 102             top level 258 / nested 102
+  NOT reportable                 747     NOT reportable                 744
+    top level 622 / nested 125             top level 619 / nested 125
+
+  17 of the 41 MATCH                     22 of the 41 MATCH
+   8 differ only INSIDE `spawned`         4 differ only INSIDE `spawned`
+  16 differ on something else            15 differ on something else
+
+  entries producing a `spawned`   35     entries producing a `spawned`   39
+  executions left unfinished      63     executions left unfinished      59
+
+The flip and corruption experiments above are NOT re-run: their right-hand
+columns read `green at 143` / `144 mismatching` and would read 127 / 128 now.
+They are experimental records on a different tree, and an adjusted experimental
+result is a number no program ever produced.  Both mechanisms are still checked
+on every run -- by the pairs test and by
+`a_corrupted_golden_terminal_now_breaks_the_entry_it_used_to_be_fed_to`.
+
+The four executions that left the unfinished population NEVER STALLED: the
+`retry-new-execution-*` entries declare only `core.execution.Fail`, which HAS a
+handler and ran it, and `is_stalled` omitted `RETRIED` from its terminal list
+while `RunState::Retried`'s own doc and Kestra's `State.isTerminated()` both
+call it terminal.  A classifier artefact leaving the population, not four
+executions that started finishing.
+
+  the four constructs W6 shipped, and what this file says about them
+  ----------------------------------------------------------------------
+
+  webhook trigger      15 corpus flows, 14 golden entries      0 banked
+  schedule / cron       7 corpus flows,  6 golden entries      0 banked
+  flow trigger         17 corpus flows, 12 golden entries      0 banked
+  backfill              0 LIVE declarations (2 commented)      0 banked
+
+Zero is not one fact here, it is FOUR.  `harvest.py` never sends the webhook
+POST (the string `executions/webhook` appears once in that file, as the reason
+`valids/webhook-inputs` is excluded); a schedule-fired execution carries no link
+at all, so no walk can reach it; a flow-fired one carries `trigger_execution_id`,
+which no arm of `descendants()` reads; and backfill has no population to be
+blind to.  28 of the 167 MATCHING entries declare one of the three triggers, and
+their matching is evidence the trigger was evaluated on NEITHER side.
+
+Derived on every run by
+`the_sixteen_banked_entries_are_derived_and_the_four_triggers_reach_none`, which
+also asserts 0 sub-executions under every one of the 31 trigger-declaring golden
+entries against the 142 = 134 + 8 the golden does hold -- the control that makes
+the zero a statement about the LINK rather than about an instrument that records
+nothing.  See README, *The coverage statement* -> the W6 section.

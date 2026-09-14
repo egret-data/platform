@@ -57,9 +57,14 @@
 //! `tests/executor.rs` counts and names them, which keeps
 //! that population from growing silently.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
+use egret_core::UserId;
+use egret_metastore::Db;
 use egret_workflow::worker::{self, Handlers};
+use egret_workflow::{CreateFlowInput, FlowRepo, WorkflowRefs};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -138,6 +143,651 @@ pub fn registry() -> Handlers {
         egret_workflow::worker::handlers::sleep::Sleep::capped(Duration::ZERO),
     ));
     r
+}
+
+// ---------------------------------------------------------------------------
+// the corpus, in `workflow.flows` — W6 Task 1
+// ---------------------------------------------------------------------------
+
+/// What happened to one corpus flow on its way into `workflow.flows`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Filed {
+    /// A draft row exists AND a version of it is live. The product's whole
+    /// path ran.
+    Live,
+    /// A draft row exists; `publish` refused it. The message is the refusal.
+    DraftOnly(String),
+    /// No row at all: the flow does not parse, or `FlowRepo::create` refused
+    /// it. The message is the refusal.
+    Absent(String),
+}
+
+/// **Put the whole corpus into `workflow.flows`, so a `(namespace, flowId)`
+/// pair has a table to resolve against.** W6 Task 1.
+///
+/// # Why this exists at all
+///
+/// [`run`] hands `start_execution` a flow *source* and `None` for the flow id.
+/// Nothing about that ever wrote a row to `workflow.flows`, so
+/// `FlowRepo::find_by_name` — the one lookup a `core.subflow` task's
+/// `(namespace, flowId)` pair can go through — had nothing to find, and egret
+/// could not execute a `Subflow` at all. 25 corpus flows declare one.
+///
+/// # Two passes, and the order is `harvest.py`'s, not the alphabet's
+///
+/// Every draft is created before anything is published, for the reason
+/// `harvest.py`'s own capture loop records: **ten corpus flows name another
+/// corpus flow that sorts later**, and a publish-then-next loop would resolve
+/// against a table that is still being filled. `harvest.py` measured that on
+/// `valids/loop-with-subflow` — harvested flow-by-flow it failed with one loop
+/// iteration, harvested after everything was published it succeeds with two,
+/// "which is the whole of the 141-vs-142 gap".
+///
+/// The iteration order is `corpus.json`'s own array order — the order
+/// `harvest.py` POSTed in — and **not** the sorted order [`super::corpus_json`]
+/// hands back. That is load-bearing rather than tidy: three
+/// `(namespace, flowId)` pairs are claimed by more than one corpus file
+/// (`io.kestra.tests/switch-impossible` by 2, `/duplicate` by 3, `/empty` by
+/// 4), `UNIQUE (workspace_id, namespace, flow_id)` (migration 0132) lets only
+/// the first of each win, and sorted order would hand
+/// `io.kestra.tests/switch-impossible` to `invalids/switch-invalid` instead of
+/// to `valids/switch-impossible` — the one member of the three groups that
+/// Kestra published and executed. [`NAME_CONTESTED`] is the guard.
+///
+/// # The path is the product's, and it is the product's that refuses
+///
+/// Pass 1 is `routes::create_flow` without the HTTP: `spec::parse`, the plan as
+/// `serde_json::to_value(&flow)`, `FlowRepo::create`. Pass 2 is
+/// `routes::publish_flow` without the HTTP: `publish::publish` through the real
+/// [`WorkflowRefs`]. Nothing here inserts a row itself.
+///
+/// **`publish` refuses almost the whole corpus, and that is this task's
+/// finding rather than its bug** — see this module's `PUBLISH_REFUSED_*`
+/// constants and `oracle-exec/README.md`'s *The corpus in `workflow.flows`*
+/// section for the mechanism and what it costs the rest of W6.
+///
+/// # What this deliberately does NOT do
+///
+/// It does not hand the flow's id to [`run`]'s `start_execution`. That would
+/// set `executions.flow_id`, which `worker::claim` LEFT JOINs to read
+/// `flows.created_by` as the run's `principal_id` — a second widening, with a
+/// second population to attribute, bought for a field no corpus flow can
+/// reach (`handlers::sql` is its only reader and
+/// `no_corpus_entry_can_exercise_the_egret_sql_handler` measures that no
+/// corpus entry reaches that handler). W6's `Subflow` links its child by its
+/// own column, not by `parent_execution_id`, and can take the target's id from
+/// this table directly.
+pub async fn publish_corpus(pool: &PgPool, ws: Uuid, by: UserId) -> BTreeMap<String, Filed> {
+    let repo = FlowRepo::new(Db { pool: pool.clone() });
+
+    // The census below counts rows this function wrote. A table that was not
+    // empty when it started would make every one of those figures a count of
+    // somebody else's rows as well, and the process's own clone is created
+    // from the migrated template, so this is a fact and not a hope.
+    let already: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow.flows")
+        .fetch_one(pool)
+        .await
+        .expect("count workflow.flows");
+    assert_eq!(
+        already, 0,
+        "workflow.flows must be empty before the corpus is filed into it, or \
+         the census this function asserts counts rows it did not write"
+    );
+
+    let entries = super::corpus();
+    let mut filed: BTreeMap<String, Filed> = BTreeMap::new();
+    let mut drafts: Vec<(String, Uuid)> = Vec::new();
+    // `"{namespace}/{flowId}"` for every `core.subflow` in the corpus, and the
+    // same key for every corpus flow that HOLDS one of those names. The two
+    // together are what [`target_census`] joins — see its doc for why the
+    // population that matters is the targets and not the declarers.
+    let mut targets: BTreeSet<String> = BTreeSet::new();
+    let mut holder: BTreeMap<String, String> = BTreeMap::new();
+
+    // Pass 1 — the draft. `routes::create_flow`'s three steps, minus the HTTP.
+    for entry in &entries {
+        let source = super::corpus_source(&entry.id);
+        let flow = match egret_workflow::spec::parse(&source) {
+            Ok(f) => f,
+            Err(e) => {
+                filed.insert(
+                    entry.id.clone(),
+                    Filed::Absent(format!("parse: {}", e.message)),
+                );
+                continue;
+            }
+        };
+        let plan = serde_json::to_value(&flow).expect("a parsed flow serialises");
+        let input = CreateFlowInput {
+            namespace: flow.namespace.clone(),
+            flow_id: flow.id.clone(),
+            source,
+            plan,
+            folder_id: None,
+        };
+        // Collected from every corpus flow that PARSES, before the create can
+        // refuse it: a `Subflow`'s target is a name its author wrote, and the
+        // population is not narrowed by whether the flow naming it won a
+        // `(namespace, flowId)` contest.
+        subflow_targets(&flow, &mut targets);
+        match repo.create(ws, by, &input).await {
+            Ok(row) => {
+                holder.insert(format!("{}/{}", flow.namespace, flow.id), entry.id.clone());
+                drafts.push((entry.id.clone(), row.id));
+            }
+            Err(e) => {
+                filed.insert(entry.id.clone(), Filed::Absent(format!("create: {e}")));
+            }
+        }
+    }
+
+    name_contest_won_by_the_right_file(&repo, &drafts).await;
+
+    // Pass 2 — the version. `routes::publish_flow`, minus the HTTP, through the
+    // real `WorkflowRefs`: `RefKind::Subflow` resolves through the same
+    // `FlowRepo::find_by_name` the product uses, over the table pass 1 has just
+    // finished filling.
+    let refs = CountingRefs {
+        inner: WorkflowRefs {
+            flows: FlowRepo::new(Db { pool: pool.clone() }),
+            dataapi_endpoints: Arc::new(NoDataApi),
+            notebooks: Arc::new(NoNotebooks),
+        },
+        subflow_lookups: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let (mut on_published, mut on_refused) = (0usize, 0usize);
+    for (corpus_id, flow) in &drafts {
+        let before = refs.count();
+        let outcome =
+            match egret_workflow::publish::publish(&repo, &refs, ws, by, *flow, "oracle").await {
+                Ok(_) => Filed::Live,
+                Err(e) => Filed::DraftOnly(format!("{e}")),
+            };
+        // Attributed to the publish that made them, because a lookup on a flow
+        // that goes on to be refused proves nothing about a flow that ships.
+        let made = refs.count() - before;
+        match outcome {
+            Filed::Live => on_published += made,
+            _ => on_refused += made,
+        }
+        filed.insert(corpus_id.clone(), outcome);
+    }
+    lookup_census(on_published, on_refused);
+
+    census(&filed);
+    target_census(&filed, &targets, &holder);
+    filed
+}
+
+/// Every `(namespace, flowId)` a `core.subflow` in `flow` names, as
+/// `"{namespace}/{flowId}"` — the exact key `publish::subflow_ref_name` builds
+/// and `FlowRepo::find_by_name` splits back apart.
+///
+/// # This walk is deliberately WIDER than the product's, and the corpus cannot
+/// tell
+///
+/// All four root lists, then `Task::children()` **and**
+/// `Task::error_children()` at every depth. Neither `spec::validate`
+/// (`validate.rs:1283`) nor `publish::resolve_task` recurses through
+/// `error_children()` — both walk `children()` only — so **a `Subflow` nested
+/// inside a flowable's `errors:` would never have its reference resolved at
+/// publish.** That is the same blind spot W3b Task 5 found in
+/// `worker::claim`'s `leaf_spec`, one seam over; it is latent rather than a
+/// live defect, and it belongs to whoever owns `Subflow` resolution.
+///
+/// This census asks a different question from `publish` — *what would a
+/// resolver have to reach* — so it takes the wider walk on purpose. **Measured:
+/// the extra arm is redundant on today's corpus.** Deleting it (fix round 1
+/// mutation 4) changes no figure and fails no test, because no corpus flow puts
+/// a `core.subflow` inside an `errors:`. Recorded rather than removed, per
+/// W4's rule that a redundant guard and a weak one look identical in a mutation
+/// table unless somebody measures the difference and writes it down.
+fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<String>) {
+    fn walk(t: &egret_workflow::models::Task, out: &mut BTreeSet<String>) {
+        if let egret_workflow::models::TaskKind::Subflow(s) = &t.kind {
+            if let (Some(namespace), Some(flow_id)) = (&s.namespace, &s.flow_id) {
+                out.insert(format!("{namespace}/{flow_id}"));
+            }
+        }
+        for child in t.children() {
+            walk(child, out);
+        }
+        for child in t.error_children() {
+            walk(child, out);
+        }
+    }
+    for list in [
+        &flow.tasks,
+        &flow.errors,
+        &flow.finally_,
+        &flow.after_execution,
+    ] {
+        for task in list {
+            walk(task, out);
+        }
+    }
+}
+
+/// **`RefKind::Subflow` resolutions `publish` made inside a publish that
+/// SUCCEEDED** — the size of the surface steps 4-7 were actually exercised on.
+///
+/// One per `core.subflow` task in the 16 flows that reach a live version, and
+/// zero from anywhere else: no corpus flow declares an `egret.*` type (so no
+/// other `RefKind` is reachable at all), and none of the 16 declares a
+/// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
+const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 18;
+
+/// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
+/// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
+/// refused the flow. Counted apart because a lookup on a flow nobody can
+/// publish is not evidence the reference resolution shipped.
+const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 4;
+
+/// Count and assert the reference lookups, so the claim about how big this
+/// task's genuinely-new surface is has a running program behind it rather than
+/// a sentence.
+fn lookup_census(on_published: usize, on_refused: usize) {
+    eprintln!(
+        "[publish_corpus] {on_published} `RefKind::Subflow` lookup(s) inside a publish that \
+         succeeded, {on_refused} inside one that failed"
+    );
+    assert_eq!(
+        on_published, SUBFLOW_LOOKUPS_ON_PUBLISHED,
+        "Subflow lookups on a flow that reached a live version"
+    );
+    assert_eq!(
+        on_refused, SUBFLOW_LOOKUPS_ON_REFUSED,
+        "Subflow lookups on a flow publish then refused"
+    );
+}
+
+/// The real [`WorkflowRefs`], wrapped so the lookups it is asked for can be
+/// counted. It delegates every call unchanged — the port under test is still
+/// the product's.
+struct CountingRefs {
+    inner: WorkflowRefs,
+    subflow_lookups: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingRefs {
+    fn count(&self) -> usize {
+        self.subflow_lookups
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl egret_workflow::WorkflowRefPort for CountingRefs {
+    async fn workspace_of(
+        &self,
+        kind: egret_workflow::RefKind,
+        name_or_id: &str,
+    ) -> Result<Option<(Uuid, Uuid)>, egret_core::Error> {
+        if matches!(kind, egret_workflow::RefKind::Subflow) {
+            self.subflow_lookups
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.inner.workspace_of(kind, name_or_id).await
+    }
+}
+
+/// Every distinct string a corpus `core.subflow` names as its target, including
+/// the one that is not a name at all — see [`SUBFLOW_TARGETS_UNRENDERED`].
+const SUBFLOW_TARGETS: usize = 21;
+
+/// **Targets whose corpus flow has a live version — what a resolver that went
+/// through `flow_versions` would reach, and it is 2 of the 20 literal names.**
+const SUBFLOW_TARGETS_LIVE: usize = 2;
+
+/// Targets whose corpus flow has a draft row and no version — reachable only by
+/// a resolver that reads `workflow.flows`, which is what
+/// `FlowRepo::find_by_name` does.
+const SUBFLOW_TARGETS_DRAFT_ONLY: usize = 17;
+
+/// A literal `(namespace, flowId)` no corpus flow holds: `dummy_namespace/
+/// dummy_flow`, named by `valids/task-runif`. Task 3's decision, not this
+/// task's — and explicitly not to be "fixed" by inventing a target.
+const SUBFLOW_TARGETS_ABSENT: usize = 1;
+
+/// **Not a name: `{{inputs.namespace}}/{{inputs.flowId}}`, counted apart so the
+/// literal-name population is exactly 20.**
+///
+/// `valids/task-flow-dynamic`'s dynamic target, read out of the UNRENDERED
+/// source because that is where `publish` reads it too. No corpus flow can hold
+/// it, and it is not "a target that is missing" — it is the recorded
+/// `executor::mod::PUBLISHED_BUT_REFUSED` row, the thing egret structurally
+/// cannot express. Counted in the total rather than dropped, so a reader sees
+/// the exclusion instead of inheriting it.
+const SUBFLOW_TARGETS_UNRENDERED: usize = 1;
+
+/// **What a `Subflow` resolver would actually reach, by target rather than by
+/// declarer — and this is the figure Task 3's choice of resolution source turns
+/// on.**
+///
+/// Fix round 1. The first version of this section published a figure that no
+/// running program compared, and it was wrong twice over: it said "seven of the
+/// nine remaining `Subflow` declarers" would be missed by a `flow_versions`
+/// resolver. All nine of those declarers have a draft row, so nothing about
+/// them is missed — and **declarers is the wrong population entirely.** What a
+/// resolver has to reach is the set of names `Subflow` tasks POINT AT, and a
+/// declarer that publishes says nothing about whether its target did.
+///
+/// So this is asserted here, beside the rest, rather than written into a
+/// document nothing executes.
+fn target_census(
+    filed: &BTreeMap<String, Filed>,
+    targets: &BTreeSet<String>,
+    holder: &BTreeMap<String, String>,
+) {
+    let (mut live, mut draft_only, mut absent) = (Vec::new(), Vec::new(), Vec::new());
+    let mut unrendered = Vec::new();
+    for target in targets {
+        // Split BEFORE the lookup, not after: a template is not a name that
+        // happens to be missing, and folding it into `absent` is how the
+        // literal-name denominator would silently become 21.
+        if target.contains("{{") {
+            unrendered.push(target.clone());
+            continue;
+        }
+        match holder
+            .get(target)
+            .and_then(|corpus_id| filed.get(corpus_id))
+        {
+            Some(Filed::Live) => live.push(target.clone()),
+            Some(_) => draft_only.push(target.clone()),
+            None => absent.push(target.clone()),
+        }
+    }
+
+    eprintln!(
+        "[publish_corpus] {} distinct `Subflow` target(s) = {} literal name(s) \
+         ({} live, {} draft-only, {} held by no corpus flow) + {} unrendered",
+        targets.len(),
+        live.len() + draft_only.len() + absent.len(),
+        live.len(),
+        draft_only.len(),
+        absent.len(),
+        unrendered.len(),
+    );
+    eprintln!("[publish_corpus]   targets live: {live:?}");
+    eprintln!("[publish_corpus]   targets held by no corpus flow: {absent:?}");
+    eprintln!("[publish_corpus]   targets unrendered: {unrendered:?}");
+
+    assert_eq!(
+        targets.len(),
+        SUBFLOW_TARGETS,
+        "distinct `Subflow` targets: {targets:?}"
+    );
+    assert_eq!(
+        live.len(),
+        SUBFLOW_TARGETS_LIVE,
+        "targets a `flow_versions` resolver would reach: {live:?}"
+    );
+    assert_eq!(
+        draft_only.len(),
+        SUBFLOW_TARGETS_DRAFT_ONLY,
+        "targets only a DRAFT-row resolver reaches: {draft_only:?}"
+    );
+    assert_eq!(
+        absent.len(),
+        SUBFLOW_TARGETS_ABSENT,
+        "targets no corpus flow holds -- Task 3's decision, not this task's: {absent:?}"
+    );
+    assert_eq!(
+        unrendered.len(),
+        SUBFLOW_TARGETS_UNRENDERED,
+        "targets that are not names at all: {unrendered:?}"
+    );
+    assert_eq!(
+        live.len() + draft_only.len() + absent.len() + unrendered.len(),
+        targets.len(),
+        "every target is classified exactly once"
+    );
+}
+
+/// The three `(namespace, flowId)` pairs more than one corpus file claims, and
+/// **which file must win each** — the first of the group in `corpus.json`'s
+/// array order.
+///
+/// Only the first line of each group matters to anything downstream, and only
+/// the first is a flow Kestra published (`publish_status` 200) and executed:
+/// `valids/switch-impossible` runs and has a golden entry; every other member
+/// of every group is an `invalids/` flow Kestra itself refused with a 422 for
+/// its own invalidity. A `Subflow` naming `io.kestra.tests/switch-impossible`
+/// must therefore find the flow that runs, not the one that does not exist on
+/// Kestra's side either.
+///
+/// This is a guard whose failure mode is nameable: swap the iteration in
+/// [`publish_corpus`] to [`super::corpus_json`]'s sorted keys and
+/// `invalids/switch-invalid` takes the name, silently, because it parses
+/// perfectly well — egret's refusal of it is `validate`'s, at publish, and by
+/// then the row is already in the table.
+const NAME_CONTESTED: &[(&str, &str)] = &[
+    (
+        "io.kestra.tests/switch-impossible",
+        "valids/switch-impossible",
+    ),
+    ("io.kestra.tests/duplicate", "invalids/duplicate"),
+    ("io.kestra.tests/empty", "invalids/empty"),
+];
+
+/// Every contested `(namespace, flowId)` resolves — through the product's own
+/// `FlowRepo::find_by_name`, the lookup a `core.subflow` actually goes through —
+/// to the file [`NAME_CONTESTED`] names, and to no other.
+///
+/// Asserted against the table rather than against the loop that filled it: the
+/// question is what a `Subflow` will find, and only the table can answer that.
+async fn name_contest_won_by_the_right_file(repo: &FlowRepo, drafts: &[(String, Uuid)]) {
+    for (name, winner) in NAME_CONTESTED {
+        let (namespace, flow_id) = name.split_once('/').expect("a contested name is ns/id");
+        let found = repo
+            .find_by_name(namespace, flow_id)
+            .await
+            .expect("resolve a contested name")
+            .unwrap_or_else(|| panic!("{name} resolves to nothing at all"));
+        let drafted = drafts
+            .iter()
+            .find(|(_, id)| *id == found.0)
+            .map(|(corpus_id, _)| corpus_id.as_str())
+            .unwrap_or("a row this function did not write");
+        assert_eq!(
+            drafted, *winner,
+            "{name} must resolve to {winner}; it resolves to {drafted}. The iteration \
+             order in publish_corpus is corpus.json's array order for exactly this \
+             reason — see NAME_CONTESTED."
+        );
+    }
+}
+
+/// A corpus flow whose YAML `spec::parse` refuses outright, so no draft row can
+/// exist for it at all: `namespace`/`flow_id` are `NOT NULL` columns and there
+/// is nothing to put in them. Kestra refused all of these too.
+const PARSE_REFUSED: usize = 5;
+
+/// A corpus flow that parses but loses its `(namespace, flowId)` to an earlier
+/// file — the six losers of [`NAME_CONTESTED`]'s three groups.
+const CREATE_REFUSED: usize = 4;
+
+/// How many corpus flows reach a **live version**.
+const LIVE: usize = 16;
+
+/// How many corpus flows have a draft row that `publish` refused **because a
+/// task names a type `spec::registry::TASK_TYPES` does not hold** — the
+/// finding, and the reason `LIVE` is 16 and not 295.
+///
+/// `registry::known_type` is an allow-list of the eight `egret.*` types plus
+/// `core.http`/`core.slack`/`core.log`, and the corpus is Kestra's: every leaf
+/// in it is an `io.kestra.plugin.core.*` (or `io.kestra.core.*`) FQCN, and a
+/// `TaskKind::Leaf` whose type is not in the table is `InvalidInput` at
+/// publish step 4. The 16 that DO reach a version are exactly the corpus flows
+/// whose every task is control flow or a `core.subflow` — a `Subflow` is a
+/// typed `TaskKind`, dispatched before any `Leaf` arm exists to consult the
+/// registry, so it never meets the allow-list at all.
+///
+/// **This is not a hole in the product**; egret's publish refusing an unported
+/// Kestra plugin is exactly the behaviour W1 built the table for. It is a
+/// statement about what the ORACLE can drive through the product's publish
+/// path, and it is why a `Subflow` at run time has to resolve against the
+/// draft row rather than a live version.
+const UNKNOWN_TYPE_REFUSED: usize = 301;
+
+/// How many corpus flows have a draft row that `publish` refused for a reason
+/// of **egret's own validate** — a real disagreement about the flow, not an
+/// unported plugin. Nineteen, and [`census`] prints all of them by name.
+const VALIDATE_REFUSED: usize = 19;
+
+/// Every corpus flow that has a draft row and no live version — the sum of the
+/// two above, derived rather than written down a third time.
+const DRAFT_ONLY: usize = UNKNOWN_TYPE_REFUSED + VALIDATE_REFUSED;
+
+/// Assert the census, print it, and name the refusal classes.
+///
+/// A figure nothing compares is stale the moment the code moves, so every
+/// number this task publishes is a constant above and an `assert_eq!` here.
+fn census(filed: &BTreeMap<String, Filed>) {
+    let mut live = Vec::new();
+    let mut unknown_type = Vec::new();
+    let mut validate_refused: Vec<(String, String)> = Vec::new();
+    let mut parse_refused = Vec::new();
+    let mut create_refused = Vec::new();
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for (id, what) in filed {
+        match what {
+            Filed::Live => live.push(id.clone()),
+            Filed::DraftOnly(why) => {
+                let class = publish_class(why);
+                if class.starts_with("unknown task type ") {
+                    unknown_type.push(id.clone());
+                } else {
+                    // The whole message, not the class: these nineteen are
+                    // egret disagreeing with the flow rather than lacking a
+                    // plugin, and three of them are flows Kestra PUBLISHED.
+                    validate_refused.push((id.clone(), why.clone()));
+                }
+                *reasons.entry(class).or_default() += 1;
+            }
+            Filed::Absent(why) if why.starts_with("parse: ") => parse_refused.push(id.clone()),
+            Filed::Absent(_) => create_refused.push(id.clone()),
+        }
+    }
+
+    eprintln!(
+        "[publish_corpus] {} corpus flows: {} live, {} draft-only ({} unported task type, \
+         {} egret's own validate), {} unparseable, {} name-contested",
+        filed.len(),
+        live.len(),
+        unknown_type.len() + validate_refused.len(),
+        unknown_type.len(),
+        validate_refused.len(),
+        parse_refused.len(),
+        create_refused.len(),
+    );
+    for (class, n) in &reasons {
+        eprintln!("[publish_corpus]   publish refused {n:>3} × {class}");
+    }
+    for (id, why) in &validate_refused {
+        eprintln!("[publish_corpus]   validate refused {id}: {why}");
+    }
+    eprintln!("[publish_corpus]   unparseable: {parse_refused:?}");
+    eprintln!("[publish_corpus]   name-contested losers: {create_refused:?}");
+    eprintln!("[publish_corpus]   live: {live:?}");
+
+    assert_eq!(filed.len(), 345, "every corpus flow is accounted for");
+    assert_eq!(live.len(), LIVE, "live versions: {live:?}");
+    assert_eq!(
+        unknown_type.len() + validate_refused.len(),
+        DRAFT_ONLY,
+        "drafts publish refused"
+    );
+    assert_eq!(
+        unknown_type.len(),
+        UNKNOWN_TYPE_REFUSED,
+        "drafts refused for an unported task type"
+    );
+    assert_eq!(
+        validate_refused.len(),
+        VALIDATE_REFUSED,
+        "drafts refused by egret's own validate: {validate_refused:?}"
+    );
+    assert_eq!(
+        parse_refused.len(),
+        PARSE_REFUSED,
+        "corpus flows that do not parse: {parse_refused:?}"
+    );
+    assert_eq!(
+        create_refused.len(),
+        CREATE_REFUSED,
+        "corpus flows that lost their name: {create_refused:?}"
+    );
+}
+
+/// Group a publish refusal by its cause, so the census names classes rather
+/// than 300 individual messages.
+fn publish_class(message: &str) -> String {
+    match message.split_once("unknown type '") {
+        Some((_, rest)) => format!(
+            "unknown task type '{}'",
+            rest.split_once('\'').map(|(t, _)| t).unwrap_or(rest)
+        ),
+        None => message.chars().take(60).collect(),
+    }
+}
+
+/// `RefKind::DataApiEndpoint` and `RefKind::Notebook` are structurally
+/// unreachable from this corpus, and these two doubles are how that is
+/// asserted rather than assumed.
+///
+/// Both kinds are declared by an `egret.*` task type
+/// (`spec::registry::TASK_TYPES`), `publish` only reads a `RefField` after
+/// `registry::known_type` has already matched, and
+/// `no_corpus_entry_can_exercise_the_egret_sql_handler` measures that no corpus
+/// flow names an `egret.*` type at all. A double that answered `Ok(None)`
+/// instead would turn a corpus that had grown one into a silent `NotFound`
+/// indistinguishable from the 300-odd refusals beside it. Same shape, and the
+/// same reason, as `refs.rs`'s own `UnreachableDataApi`/`UnreachableNotebooks`.
+struct NoDataApi;
+
+#[async_trait::async_trait]
+impl egret_dataapi_api::DataApiEndpointPort for NoDataApi {
+    async fn workspace_of(&self, _id: Uuid) -> Result<Option<Uuid>, egret_core::Error> {
+        unreachable!("no corpus flow names an `egret.dataapi.call`")
+    }
+}
+
+/// See [`NoDataApi`].
+struct NoNotebooks;
+
+#[async_trait::async_trait]
+impl egret_analytics_api::NotebookDocsPort for NoNotebooks {
+    async fn get_summary(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<(egret_analytics_api::NotebookSummary, Uuid)>, egret_core::Error> {
+        unreachable!("no corpus flow names an `egret.python`")
+    }
+    async fn list_engine_options(
+        &self,
+        _ws: Uuid,
+    ) -> Result<Vec<egret_analytics_api::EngineOption>, egret_core::Error> {
+        unreachable!()
+    }
+    async fn record_output(
+        &self,
+        _nb: Uuid,
+        _cid: Uuid,
+        _outputs: &[egret_analytics_api::CellOutput],
+        _execution_count: Option<i32>,
+        _elapsed_ms: Option<i32>,
+    ) -> Result<(), egret_core::Error> {
+        unreachable!()
+    }
+    async fn build_runtime(
+        &self,
+        _ws: Uuid,
+        _user_id: UserId,
+    ) -> Result<egret_analytics_api::NotebookRuntime, egret_core::Error> {
+        unreachable!()
+    }
 }
 
 /// What one entry's run produced.
@@ -358,7 +1008,39 @@ async fn read_trace_inner(
         }
     }
 
-    let children: Vec<(Uuid, i32, String)> = sqlx::query_as(
+    // **This query is why `Subflow` gets a column of its own** (W6 Task 2). It
+    // keys on `parent_execution_id`, and all 41 golden `spawned`-carrying
+    // entries have ZERO `Subflow` children -- so a subflow child linked this
+    // way would turn the entries W6 exists to bank into `spawned` mismatches.
+    // Migration 0138 makes that unrepresentable rather than merely
+    // discouraged: `workflow_executions_one_link_kind` forbids a row carrying
+    // both links, and `a_subflow_child_is_invisible_to_the_query_that_builds_spawned`
+    // below drives this function over one and asserts the empty `spawned`.
+    //
+    // **Widened by W6 Task 4, which is the commit that starts writing the row
+    // it could not decode.** The tuple was `(Uuid, i32, String)`, which was
+    // exactly right while 0135's CHECK made a child with a parent and no loop
+    // index unrepresentable. 0138 made that child representable and
+    // `worker::replay` now creates it: the `CREATE_NEW_EXECUTION` replay, whose
+    // `parent_run_ix`, `loop_index` and `loop_value` are all NULL and whose
+    // four golden entries want `{"parent_run": null, "value": null}` in
+    // `spawned`. Decoding a NULL into `i32` is a `ColumnDecode` error, so the
+    // narrow tuple would have turned all four into `Broken` -- the verdict
+    // `every_mismatching_entry_is_attributed_to_the_field_it_differs_on`
+    // asserts at 0 -- rather than into a mismatch.
+    //
+    // **`ORDER BY parent_run_ix, loop_index` is unchanged, and the NULLs are
+    // measured rather than sorted by accident.** Postgres puts NULLs LAST in an
+    // ascending order, so a replay would sort after every loop child of the
+    // same parent. Nothing can observe that: over the 710 descendants in
+    // `traces.json`, 40 carry a NULL `loopIndex`, **no parent carries more than
+    // one of them, and no parent mixes one with a loop child** -- and on
+    // egret's side the same holds by construction, because
+    // `worker::replay::spawn_due` refuses to replay a `Loop` sub-execution at
+    // all (the artifact cannot do it either; see that function's doc) and
+    // migration 0138's `NULLS NOT DISTINCT` unique index admits one replay per
+    // parent.
+    let children: Vec<(Uuid, Option<i32>, Option<String>)> = sqlx::query_as(
         "SELECT id, parent_run_ix, loop_value FROM workflow.executions \
           WHERE parent_execution_id = $1 ORDER BY parent_run_ix, loop_index",
     )
@@ -371,8 +1053,8 @@ async fn read_trace_inner(
             Box::pin(read_trace_inner(
                 pool,
                 child,
-                Some(run_ix.max(0) as usize),
-                Some(loop_value),
+                run_ix.map(|ix| ix.max(0) as usize),
+                loop_value,
             ))
             .await?,
         );
@@ -396,4 +1078,101 @@ fn strings(v: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// --------------------------------------------------------------------------
+// W6 Task 2: the constraint the whole package's banks depend on
+// --------------------------------------------------------------------------
+
+#[cfg(test)]
+mod w6_subflow_link {
+    use super::*;
+
+    /// Insert one execution, optionally linked to `parent` the LOOP way or to
+    /// `trigger` the SUBFLOW way.
+    ///
+    /// Written here rather than driven through `worker::start_execution`
+    /// because nothing spawns a subflow child yet -- W6 Task 3 does -- and the
+    /// property under test is a property of the QUERY, which reads rows and
+    /// does not care who wrote them.
+    async fn child(
+        pool: &PgPool,
+        ws: Uuid,
+        parent: Option<(Uuid, i32, i32, &str)>,
+        trigger: Option<(Uuid, i32)>,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO workflow.executions \
+               (workspace_id, namespace, flow_key, source, state, history, \
+                parent_execution_id, parent_run_ix, loop_index, loop_value, \
+                trigger_execution_id, trigger_run_ix) \
+             VALUES ($1, 't', 'f', 'src', 'SUCCESS', \
+                     '[\"CREATED\",\"RUNNING\",\"SUCCESS\"]'::jsonb, \
+                     $2, $3, $4, $5, $6, $7) \
+             RETURNING id",
+        )
+        .bind(ws)
+        .bind(parent.map(|p| p.0))
+        .bind(parent.map(|p| p.1))
+        .bind(parent.map(|p| p.2))
+        .bind(parent.map(|p| p.3))
+        .bind(trigger.map(|t| t.0))
+        .bind(trigger.map(|t| t.1))
+        .fetch_one(pool)
+        .await
+        .expect("insert an execution")
+    }
+
+    /// **A subflow child must not appear in `spawned`, and a loop child must.**
+    ///
+    /// This is the single assertion the rest of W6 rests on. [`read_trace`]
+    /// builds `spawned` from `parent_execution_id`; measured over the golden,
+    /// all **41** `spawned`-carrying entries have **zero** `Subflow` children,
+    /// and Kestra's own artifact agrees -- `valids/subflow-parent` ran its
+    /// `Subflow` to SUCCESS in all five rounds and `traces.json` records
+    /// `"descendants": []` for it, because `harvest.py` follows `parentId` and
+    /// Kestra leaves `parentId` NULL for a subflow child.
+    ///
+    /// **The loop child is the positive control and it is not optional.**
+    /// Without it, deleting the whole `spawned` query would leave this test
+    /// green: an empty `spawned` is what a subflow child is supposed to
+    /// produce, so "no children found" cannot be the only thing asserted.
+    #[sqlx::test(migrations = "../../migrations")]
+    async fn a_subflow_child_is_invisible_to_the_query_that_builds_spawned(pool: PgPool) {
+        egret_test_db::assert_database_url_is_exported();
+        let db = Db { pool: pool.clone() };
+        let (ws, _user) = crate::common::seed_workspace(&db).await;
+
+        let root = child(&pool, ws, None, None).await;
+        child(&pool, ws, None, Some((root, 0))).await;
+
+        let trace = read_trace(&pool, root)
+            .await
+            .expect("read the root's trace");
+        assert!(
+            trace.spawned.is_empty(),
+            "a subflow child reached the oracle's `spawned`. It is linked by \
+             `trigger_execution_id`; this query keys on `parent_execution_id`; \
+             the two are kept apart by migration 0138's \
+             `workflow_executions_one_link_kind`. All 41 golden \
+             `spawned`-carrying entries have zero `Subflow` children, so this \
+             turns W6's intended banks into `spawned` mismatches. Got: {:?}",
+            trace.spawned
+        );
+
+        let loop_child = child(&pool, ws, Some((root, 0, 0, "a")), None).await;
+        let trace = read_trace(&pool, root)
+            .await
+            .expect("read the root's trace again");
+        assert_eq!(
+            trace.spawned.len(),
+            1,
+            "the positive control: a LOOP child of the same parent must still \
+             be found by the same query, or the assertion above passes because \
+             the query is broken rather than because the link is right"
+        );
+        assert_eq!(trace.spawned[0].parent_run, Some(0));
+        assert_eq!(trace.spawned[0].value.as_deref(), Some("a"));
+        assert_ne!(loop_child, root, "sanity: the child is a row of its own");
+    }
 }

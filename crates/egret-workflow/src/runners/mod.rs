@@ -50,5 +50,7 @@ mod yamlfmt;
 // thread, no rewrite, no `{% raw %}` protection, no context-scope
 // sentinel). `render_str` is the supported entry point -- see
 // `env::environment`'s doc for the measured table.
-pub use env::{render_str, RenderContext, RenderError};
+pub use env::{
+    referenced_roots, render_str, render_str_guarded, GuardedRender, RenderContext, RenderError,
+};
 pub use rewrite::{rewrite, RewriteError};

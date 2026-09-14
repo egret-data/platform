@@ -52,7 +52,7 @@ pub use plan::{
     build_plan, DagNode, Plan, PlanError, PlanTask, RetryBehavior, RetryDelay, RetryPolicy, TaskIx,
     TaskKind,
 };
-pub use state::{apply, Attempt, ExecutionState, RunIx, RunState, TaskRun, Tick};
+pub use state::{apply, Attempt, ExecutionMeta, ExecutionState, RunIx, RunState, TaskRun, Tick};
 
 /// Kestra's `FlowableUtils.resolveValues`, over a rendered `Loop.values`.
 ///
@@ -437,18 +437,30 @@ mod tests {
         );
     }
 
-    /// **A `Runnable` is `SUBMITTED` before it is `RUNNING`; a flowable is not.**
+    /// **A `Runnable` is `SUBMITTED` before it is `RUNNING`; a flowable is not,
+    /// and neither is a [`TaskKind::Executable`].**
     ///
-    /// Measured on `valids/sequential`, which nests both: the `Sequential` runs
-    /// go `CREATED RUNNING SUCCESS` and every `Return` goes `CREATED SUBMITTED
-    /// RUNNING SUCCESS`. Deleting the `SUBMITTED` emission leaves a trace that
-    /// still has the right runs in the right order and matches nothing.
+    /// Measured on `valids/sequential`, which nests the first two: the
+    /// `Sequential` runs go `CREATED RUNNING SUCCESS` and every `Return` goes
+    /// `CREATED SUBMITTED RUNNING SUCCESS`. Deleting the `SUBMITTED` emission
+    /// leaves a trace that still has the right runs in the right order and
+    /// matches nothing.
+    ///
+    /// **The third arm is W6's whole reason for opening `src/executor/`**, and
+    /// `valids/subflow-parent` is the flow that pins it: its one `Subflow` run
+    /// reads `CREATED RUNNING SUCCESS` in `golden.json`, and it read
+    /// `CREATED SUBMITTED RUNNING SUCCESS` here for as long as a `Subflow` was
+    /// planned an opaque `Runnable`. The golden side of the same claim is
+    /// derived over all 25 declarers by `tests/executor.rs`'s
+    /// `no_subflow_run_in_the_golden_passes_through_submitted`; this is the
+    /// egret side of it.
     #[test]
     fn only_a_runnable_passes_through_submitted() {
         // One flow per flowable this executor drives, so the discriminator is
         // pinned on all three and not only on the one Task 3 shipped.
         let mut flowables = 0;
         let mut runnables = 0;
+        let mut executables = 0;
         for (corpus_id, renders) in [
             ("valids/sequential", &[][..]),
             ("valids/parallel", &[][..]),
@@ -456,6 +468,7 @@ mod tests {
             ("valids/if-condition", &[("if", "true")][..]),
             ("valids/switch", &[("parent-seq", "FIRST")][..]),
             ("valids/loop-serial", &[][..]),
+            ("valids/subflow-parent", &[][..]),
         ] {
             let plan = plan_of(corpus_id);
             let state = run_to_fixpoint_rendering(&plan, RunState::Success, renders);
@@ -484,6 +497,16 @@ mod tests {
                             plan.tasks[run.task].id
                         );
                     }
+                    TaskKind::Executable { .. } => {
+                        executables += 1;
+                        assert_eq!(
+                            wire(&run.history),
+                            ["CREATED", "RUNNING", "SUCCESS"],
+                            "{corpus_id}: executable {} must NOT pass through SUBMITTED -- \
+                             no Subflow run in golden.json carries it",
+                            plan.tasks[run.task].id
+                        );
+                    }
                 }
                 assert_eq!(
                     run.attempts.len(),
@@ -498,10 +521,11 @@ mod tests {
             }
         }
         assert!(
-            flowables >= 8 && runnables >= 21,
-            "the six flows must exercise both sides, and the two Task 5 added \
-             plus the one Task 6 added must each contribute a flowable; saw \
-             {flowables} flowable(s) and {runnables} runnable(s)"
+            flowables >= 8 && runnables >= 21 && executables >= 1,
+            "the seven flows must exercise all three sides, and the two Task 5 \
+             added plus the one Task 6 added must each contribute a flowable; \
+             saw {flowables} flowable(s), {runnables} runnable(s) and \
+             {executables} executable(s)"
         );
     }
 
@@ -1239,7 +1263,7 @@ mod tests {
             let in_flight = (0..state.runs.len()).find(|&ix| {
                 matches!(
                     plan.tasks[state.runs[ix].task].kind,
-                    TaskKind::Runnable { .. } | TaskKind::Loop { .. }
+                    TaskKind::Runnable { .. } | TaskKind::Loop { .. } | TaskKind::Executable { .. }
                 ) && state.runs[ix].history.last() == Some(&RunState::Running)
             });
             match in_flight {
@@ -3774,18 +3798,23 @@ mod tests {
         );
     }
 
-    /// `CREATE_NEW_EXECUTION` ends the execution `RETRIED`, and marks every
-    /// ancestor run with it.
+    /// `CREATE_NEW_EXECUTION` ends the execution `RETRIED`, marks every
+    /// ancestor run with it, **and schedules the replay**.
     ///
     /// `markWithTaskRunAs(execution, taskRunId, RETRIED, true)` — the `true` is
     /// `markParents`, which recurses up `getParentTaskRunId()` and then sets the
     /// execution too, where `RETRY_FAILED_TASK` passes `false` and leaves every
-    /// ancestor alone. `RETRIED` is terminal, so this is where egret stops:
-    /// Kestra replays the whole flow as a **different execution**, which no
-    /// [`Command`] can ask for and which [`ExecutionState`] has no field for.
-    /// The four `retry-new-execution-*` entries are baselined for that and for
-    /// nothing else — they reproduce every run, history and attempt Kestra
-    /// recorded, and differ only on `spawned`.
+    /// ancestor alone. `RETRIED` is terminal, so this is where this EXECUTION
+    /// stops and Kestra replays the whole flow as a **different execution**.
+    ///
+    /// **The last assertion used to read `now == Tick(0)`, under "no
+    /// `ScheduleRetry`: the delay belongs to the replay, not to this run", and
+    /// W6 Task 4 measured that the artifact says the opposite.** Both arms of
+    /// `ExecutorService.java:603-608` build one `ExecutionDelay` on THIS taskrun at
+    /// `nextRetryDate`; only its `delayType` differs. The delay is how the
+    /// replay knows when to happen, and `maxDuration` is measured against the
+    /// instant it names, so a `CREATE_NEW_EXECUTION` arm that emitted none left
+    /// the replay with no clock at all.
     #[test]
     fn create_new_execution_ends_the_execution_retried() {
         let plan = plan_of("valids/retry-new-execution-task-attempts");
@@ -3809,8 +3838,17 @@ mod tests {
         );
         assert_eq!(
             now,
-            Tick(0),
-            "no `ScheduleRetry`: the delay belongs to the replay, not to this run"
+            Tick(1_000),
+            "the replay's own `ExecutionDelay`: `interval: PT1S` past the \
+             instant the run failed, which this harness advances to. It is the \
+             only deadline in this execution, and `reopen_due` never consumes \
+             it -- the run it names is `RETRIED`, not `RETRYING`"
+        );
+        assert_eq!(
+            state.runs[0].not_before,
+            Some(Tick(1_000)),
+            "and it is written on the run that failed, which is where the \
+             artifact's `ExecutionDelay.taskRunId` puts it"
         );
     }
 
@@ -3869,6 +3907,110 @@ mod tests {
             retry::next_retry_at(&policy(RetryBehavior::CreateNewExecution), &state, 0, at),
             None,
             "5000 + 1000 IS after 0 (the execution's creation) + 3000"
+        );
+    }
+
+    /// **The two `ExecutionMeta` fields decide where a replay chain ends, and
+    /// each is asserted against the constants it replaced.**
+    ///
+    /// W6 Task 4. `next_retry_at`'s `CREATE_NEW_EXECUTION` arm read
+    /// `(1, Tick(0))` — literally "attempt 1, and this execution's own
+    /// creation" — which is true of the first execution of a chain and false of
+    /// every replay. Both halves are driven here on the SAME state, so the
+    /// difference between them is the metadata and nothing else:
+    ///
+    /// - `attempt` against `maxAttempts`: `attemptNumber >= maxAttempts` is
+    ///   `Integer >=` in Kestra (`TaskRun.java:311`), so attempt 3 of 3 is the
+    ///   last and refuses;
+    /// - `origin` against `maxDuration`: a replay's origin is a NEGATIVE tick,
+    ///   the original execution's creation measured back from its own, so the
+    ///   same policy at the same instant answers differently at different
+    ///   depths of one chain.
+    ///
+    /// **Split into two assertions per field rather than one per behaviour**,
+    /// because a single "it stops" would pass against an arm that stopped
+    /// always: each pair moves ONE field across the boundary and asserts both
+    /// sides of it.
+    #[test]
+    fn the_execution_metadata_is_what_ends_a_create_new_execution_chain() {
+        let plan = plan_of("valids/retry-new-execution-task-attempts");
+        let mut state = ExecutionState::new(&plan);
+        apply(
+            &mut state,
+            &Command::CreateRun {
+                task: 0,
+                parent: None,
+                value: None,
+            },
+        );
+        apply(
+            &mut state,
+            &Command::StartRun {
+                run: 0,
+                at: Tick(0),
+            },
+        );
+        apply(
+            &mut state,
+            &Command::SetRunState {
+                run: 0,
+                state: RunState::Failed,
+            },
+        );
+
+        let attempts = RetryPolicy {
+            max_attempts: Some(3),
+            delay: RetryDelay::Constant {
+                interval: std::time::Duration::from_secs(1),
+            },
+            max_duration: None,
+            behavior: RetryBehavior::CreateNewExecution,
+            warning_on_retry: false,
+        };
+        state.metadata = ExecutionMeta {
+            attempt: 2,
+            origin: Tick(0),
+        };
+        assert_eq!(
+            retry::next_retry_at(&attempts, &state, 0, Tick(10)),
+            Some(Tick(1_010)),
+            "attempt 2 of 3: one more replay is due, an interval away"
+        );
+        state.metadata.attempt = 3;
+        assert_eq!(
+            retry::next_retry_at(&attempts, &state, 0, Tick(10)),
+            None,
+            "attempt 3 of 3 exhausts the policy. With the constant `1` this \
+             arm used to read, `1 >= 3` is false at every depth and the chain \
+             never ends -- which the two `retry-new-execution-*-attempts` \
+             entries would have measured as an unbounded driver run"
+        );
+
+        let duration = RetryPolicy {
+            max_attempts: None,
+            delay: RetryDelay::Constant {
+                interval: std::time::Duration::from_secs(2),
+            },
+            max_duration: Some(std::time::Duration::from_secs(6)),
+            behavior: RetryBehavior::CreateNewExecution,
+            warning_on_retry: false,
+        };
+        state.metadata = ExecutionMeta {
+            attempt: 2,
+            origin: Tick(-2_000),
+        };
+        assert_eq!(
+            retry::next_retry_at(&duration, &state, 0, Tick(10)),
+            Some(Tick(2_010)),
+            "the second execution of the chain: 2010 is not after -2000 + 6000"
+        );
+        state.metadata.origin = Tick(-4_010);
+        assert_eq!(
+            retry::next_retry_at(&duration, &state, 0, Tick(10)),
+            None,
+            "the third: 2010 IS after -4010 + 6000 = 1990. With the constant \
+             `Tick(0)` this arm used to read, the bound is 6000 at every depth \
+             and no elapsed time ever accumulates"
         );
     }
 

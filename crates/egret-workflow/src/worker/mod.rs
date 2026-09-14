@@ -77,13 +77,25 @@ pub mod handlers;
 mod reaper;
 mod registry;
 mod render;
+mod replay;
 mod spawn;
+mod subflow;
 mod timeout;
 
 pub use claim::CREATE_BESIDE_A_CREATED_SIBLING;
-pub use claim::{apply_outcome, claim, resume, start_execution, tick, wake, Claimed};
+pub use claim::{
+    apply_outcome, claim, resume, start_execution, start_execution_with_trigger, tick, wake,
+    Claimed,
+};
 pub use reaper::reap;
 pub use registry::Handlers;
+/// **How far down a chain of child executions this worker will spawn** — the
+/// backstop beside `subflow`'s cycle guard, and the second half of the one
+/// answer that module gives that is not the artifact's. See its own doc.
+///
+/// Exported so `tests/worker.rs`'s positive control asserts against the bound
+/// itself rather than against a copy of the number.
+pub use subflow::MAX_SPAWN_CHAIN;
 
 use crate::executor::RunState;
 use crate::runners::RenderContext;

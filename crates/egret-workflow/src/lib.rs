@@ -15,6 +15,8 @@
 //! - `runners`   — W2 (expression rendering)
 //! - `executor`  — W3 (`advance()`, the pure state machine)
 //! - `worker`    — W4 (claim loops, handlers, reaper)
+//! - `trigger`   — W6 (the schedule trigger, backfill, the injected clock, and
+//!   the flow trigger's window-free arm)
 //! - `plugins`   — W5 (handler registry)
 //!
 //! `models`, `runners`, and `executor` must never touch the database or the
@@ -32,6 +34,16 @@ pub mod repo;
 pub mod routes;
 pub mod runners;
 pub mod spec;
+// W6 Tasks 5 and 6: the schedule trigger, its backfill, and the flow
+// trigger's window-free arm. `pub` because the routes
+// that create a backfill and the loop that drives the clock both live outside
+// this module -- and because NOTHING in `oracle-exec/` can reach it, so its own
+// tests are the whole instrument (see the module doc).
+pub mod trigger;
+
+/// The anonymous webhook surface (W6 Task 7). Mounted OUTSIDE `/api` and
+/// outside the CSRF layer -- see the module doc.
+pub mod webhook_routes;
 // W3b Task 2: the claim loop and the reaper -- the FIRST real caller of
 // `advance()`. `pub` for the same reason `executor` is: `tests/worker.rs` is an
 // integration test and sees only the public API.
@@ -42,6 +54,11 @@ pub use refs::WorkflowRefs;
 pub use repo::{CreateFlowInput, FlowRepo, FlowRow, FlowVersionRow, ListFilter, UpdateFlowInput};
 pub use routes::{management_router, openapi, WorkflowState};
 pub use runners::{render_str, rewrite, RenderContext, RenderError, RewriteError};
+pub use webhook_routes::{
+    webhook_router, webhook_router_with_guard, WebhookGuard, WebhookResponse,
+    MAX_WEBHOOK_BODY_BYTES, WEBHOOK_ATTEMPTS_PER_WINDOW, WEBHOOK_ATTEMPT_WINDOW,
+    WEBHOOK_MAX_CONCURRENCY,
+};
 // Task 6: `RefKind` moved to `egret-workflow-api` so `WorkflowRefPort` (also
 // re-exported here) can name it without this crate's engine dependencies.
 // Re-exported at the crate root -- not just via `spec::registry::RefKind` --

@@ -195,6 +195,38 @@ pub const FEATURES: &[Feature] = &[
         // `data_api` record above: an unmatched prefix rule is inert, but a
         // route that lands before its rule fails OPEN. W1's management routes
         // land under `/api/ws/{ws}/workflows/...` and are claimed on arrival.
+        //
+        // The WEBHOOK surface (W6 Task 7) is deliberately NOT covered, exactly
+        // as `data_api`'s serving path above is not: it lives at
+        // `/workflows/v1/{ws}/executions/webhook/...`, outside `/api/ws/`, and
+        // authenticates with the key in the URL rather than with a session --
+        // there is no `WsContext` for the gate to run in.
+        //
+        // Its path parameter is spelled `{ws}` rather than `{workspace}`
+        // following `data_api`'s serving router, but for THAT surface the
+        // spelling is load-bearing and for this one it is only a signal to a
+        // reader: `feature_route_coverage` reads the OpenAPI document, and the
+        // webhook route contributes nothing to it. This comment claimed
+        // otherwise until fix round 2's claim 14 -- the same sentence was
+        // corrected in `webhook_routes` in fix round 1 and this copy was
+        // missed, which is the "correction applied where it was found and not
+        // swept for" shape.
+        //
+        // The surface is also OFF by default: `[workflow] webhooks_enabled`,
+        // i.e. `EGRET_WORKFLOW__WEBHOOKS_ENABLED`, reaches
+        // `egret_server::AppState::workflow_webhooks_enabled` through
+        // `egret_config::Config`, so this exemption describes a group that is
+        // not mounted unless an operator asks for it.
+        //
+        // (The flat `EGRET_WORKFLOW_WEBHOOKS_ENABLED` this paragraph named
+        // until fix round 4 was the round-2 spelling and has not existed since
+        // round 3. Third consecutive round with something open in this same
+        // paragraph, and neither doc instrument can see it: they read `///`
+        // and `//!`, not `//`, and they resolve Rust items, not env vars.)
+        //
+        // Turning this module off therefore stops flows being authored and
+        // published; stopping webhook traffic is `state = 'disabled'` on the
+        // flow, which `webhook_routes` answers with a 409.
         rules: &[prefix("workflows")],
     },
 ];
