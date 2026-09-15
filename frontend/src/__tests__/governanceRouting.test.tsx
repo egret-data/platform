@@ -118,7 +118,7 @@ describe("Governance routing in App", () => {
     await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
   }, 15_000);
 
-  it("403s an infra-only user in Governance and keeps their Control Plane landing", async () => {
+  it("403s an infra-only user who opens a Governance URL, without changing the URL", async () => {
     openApp("/governance/policies", INFRA_ONLY);
     expect(await screen.findByText("403 — Forbidden", {}, TIMEOUT)).toBeInTheDocument();
     expect(currentUrl()).toBe("/governance/policies");
