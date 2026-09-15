@@ -1426,16 +1426,56 @@ transaction that releases exactly ONE lease; widened it releases n, and two
 durability tests pass with both fences effectively gone.  A savepoint per run is
 the named way back.
 
-  production callers of `worker::tick`                            0
+  production callers of `worker::tick`      W4: 0    W10 (2026-09-15): 1
 
-`egret-bin` wires a `WorkflowState` and no claim loop, so nothing in this
-workspace runs this worker.  A grep for `tick(`, `reap(` and `start_execution(`
-over every `crates/*/src` finds no call site; the four files that call them are
-oracle-exec/driver.rs and tests/{worker,executor,sql_starrocks_live}.rs -- and
-that is the COMPILED BINARY's scope, not the file's: tests/executor.rs pulls the
-driver in with `#[path = "../oracle-exec/driver.rs"] mod driver;` and contains
-no such call in its own text.  Read 143 as a statement about a state machine and a driver, not
-about a deployment.
+*** FALSE SINCE W10 TASK 2 -- corrected here, W10 Task 7, 2026-09-15. ***
+
+W4 wrote, and it was true for three packages:
+
+  `egret-bin` wires a `WorkflowState` and no claim loop, so nothing in this
+  workspace runs this worker.  A grep for `tick(`, `reap(` and
+  `start_execution(` over every `crates/*/src` finds no call site; the four
+  files that call them are oracle-exec/driver.rs and
+  tests/{worker,executor,sql_starrocks_live}.rs -- and that is the COMPILED
+  BINARY's scope, not the file's: tests/executor.rs pulls the driver in with
+  `#[path = "../oracle-exec/driver.rs"] mod driver;` and contains no such call
+  in its own text.  Read 143 as a statement about a state machine and a driver,
+  not about a deployment.
+
+W10 Task 2 wired the worker into the binary.  `egret_workflow::runtime::spawn`
+is the claim loop and the lease reaper -- two tokio tickers -- and
+crates/egret-bin/src/main.rs:1733 starts it.  Derived over `git ls-files`, doc
+and comment lines dropped, FIVE production call sites in THREE files:
+
+  runtime.rs:304        worker::tick                 the claim ticker
+  runtime.rs:328        worker::reap                 the lease reaper
+  routes.rs:1436        worker::start_execution      the API's start
+  routes.rs:1633        worker::start_execution      replay's replacement
+  webhook_routes.rs:651 worker::start_execution_with_trigger   W6's webhook
+
+`worker::resume` gained one too (routes.rs:1523), and a second through the
+chain runtime -> tick -> wake -> resume.
+
+The W4 grep was true AND misleading: it searched `start_execution(`, which does
+not match `start_execution_with_trigger(`, so W6 Task 7's webhook had been
+creating executions in production since W6.  Nothing ADVANCED one.  The
+load-bearing half of the proposition was always the tick, never the start.
+
+WHAT STILL BOUNDS THE NUMBER, because "the worker runs now" is not a licence to
+read 109 as "the worker is fine in production":
+
+  1. `[workflow] worker_enabled` defaults FALSE, and `spawn` returns before
+     spawning anything when it is unset.
+  2. The shipped registry is FOUR handlers (core.log.Log, core.debug.Return,
+     core.execution.Fail, core.flow.Sleep).  egret.sql, egret.container and
+     egret.script.python are registered in NEITHER registry.
+  3. The ratchet is 109 with the wiring and 109 with runtime.rs deleted,
+     measured both ways.  109 is still a statement about a state machine and a
+     driver -- for a reason that SURVIVED the wiring rather than one the wiring
+     removed.
+
+See README, *The coverage statement* -> the W10 section, and item 15, which is
+CLOSED.
 
 
 ======================================================================

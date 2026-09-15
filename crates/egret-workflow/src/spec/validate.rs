@@ -2941,20 +2941,42 @@ mod tests {
     /// `TaskKind::Leaf` arm would silence that type -- reproducing this
     /// task's original bug one layer further out. This makes that collision
     /// impossible to introduce quietly.
+    ///
+    /// # It read only `r#type` for a while, and a later task's own change made
+    /// it blind
+    ///
+    /// `registry::known_type` matches a row by its `r#type` **or by any of its
+    /// `aliases`**, and this guard walked `r#type` alone -- so the silencing it
+    /// exists to prevent could be introduced through an alias without it
+    /// noticing, and the "impossible to introduce quietly" above was no longer
+    /// true in its own scope. **SWAP proof** (W10 Task 5 fix round 2): putting
+    /// `aliases: &["core.pause"]` on the `core.http` row -- which has no handler
+    /// -- left `--lib` at **820 passed, 0 failed**.
+    ///
+    /// The guard now walks every name `known_type` can match, so the two cannot
+    /// disagree about what "registered" means. **That is the fix rather than a
+    /// narrowed doc sentence**: the sentence was describing the property worth
+    /// having, and the guard was the half that had fallen behind.
     #[test]
     fn the_registry_and_the_control_flow_table_are_disjoint() {
         use crate::models::canonical_flow_type;
         use crate::spec::registry;
 
         for spec in registry::TASK_TYPES {
-            if let Some(canonical) = canonical_flow_type(spec.r#type) {
-                assert!(
-                    !super::KESTRA_FLOW_CONTROL.contains(&canonical.as_str()),
-                    "registry type '{}' canonicalises to '{canonical}', which collides with a \
-                     KESTRA_FLOW_CONTROL row -- registering it would silence the \
-                     unported-control-flow warning for that class",
-                    spec.r#type
-                );
+            // **Every name `known_type` can match**, not just the primary one.
+            // A `chain` rather than two loops so a name added to either half is
+            // covered by construction.
+            for name in std::iter::once(spec.r#type).chain(spec.aliases.iter().copied()) {
+                if let Some(canonical) = canonical_flow_type(name) {
+                    assert!(
+                        !super::KESTRA_FLOW_CONTROL.contains(&canonical.as_str()),
+                        "registry type '{}' (matched here as '{name}') canonicalises to \
+                         '{canonical}', which collides with a KESTRA_FLOW_CONTROL row -- \
+                         registering it would silence the unported-control-flow warning \
+                         for that class",
+                        spec.r#type
+                    );
+                }
             }
         }
     }

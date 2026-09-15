@@ -16,31 +16,47 @@ use egret_core::Result;
 /// over-acceptance shape the spec §7 forbids, and a `FAILED` would report the
 /// author's flow as wrong when it is egret that is incomplete.
 ///
-/// # The type-id spellings here and `spec::registry::TASK_TYPES` do not agree
+/// # The type-id spellings here and `spec::registry::TASK_TYPES` agree, and a
+/// # single table is why
 ///
-/// Publish's table (`crate::spec::registry::TASK_TYPES`) names egret's own
-/// short spellings — `core.log`, `egret.sql`, `core.http` — and its own doc
-/// says *"W3's handlers are the implementation half and must stay in step with
-/// it"*. They are not in step, and this is where that shows:
+/// **They did not, for four packages.** This doc used to end by reporting the
+/// disagreement and declining to settle it: the four handlers registered
+/// Kestra's FQCNs, because that is what the corpus writes and what
+/// `executor::build_plan` puts in `TaskKind::Runnable::type_id` (verbatim from
+/// `Task::type`, `plan.rs:742`), while `TASK_TYPES` held `core.log` and none of
+/// the four FQCNs. The intersection was **empty**, and W10 Task 6's end-to-end
+/// test — the first thing in this repository to drive publish and the worker in
+/// one process — is what made that have a consequence: `POST …/publish`
+/// answered **400 `unknown type 'io.kestra.plugin.core.log.Log'`** for the only
+/// flow the shipped worker can run, and **no Kestra flow pasted into egret
+/// could be published at all**.
 ///
-/// - the four registered below are Kestra's FQCNs, because that is what the
-///   corpus writes and what `executor::build_plan` puts in
-///   `TaskKind::Runnable::type_id` (verbatim from `Task::type`, `plan.rs:742`);
-/// - `TASK_TYPES` holds `core.log` and **not** `core.debug.Return`,
-///   `core.execution.Fail` or `core.flow.Sleep`, so a flow using three of the
-///   four is unpublishable through egret's own publish path, while a flow
-///   using `core.log` publishes and then finds no handler.
+/// **It was never an open question.** Programme spec §8 item 4 had already
+/// decided: *"`type:` accepts Kestra's full FQCN as the canonical form
+/// (`io.kestra.plugin.core.log.Log`); short aliases are secondary. A Kestra
+/// flow pasted into egret runs, and looking a task up in Kestra's docs lands on
+/// the right page."* `TASK_TYPES` was the side that was wrong, and W10 Task 6
+/// fix round 1 moved it: the four FQCNs are canonical rows there, `core.log` is
+/// an **alias** on the `Log` row, and this registry reads that alias list
+/// rather than repeating it.
 ///
-/// **This is reported rather than papered over**, because deciding whether
-/// egret's public task vocabulary is Kestra's FQCN, a short alias, or both is
-/// a spec-level choice and not a handler's to make. [`Handlers::register`]
-/// takes an arbitrary key so that whichever answer wins is one line here.
+/// **The agreement is held by construction in the direction that matters.**
+/// [`Handlers::add_publishable`] takes the alias list from `TASK_TYPES` and
+/// **panics if the handler's `type_id()` has no row there**, so a handler that
+/// publish would refuse cannot reach [`Handlers::with_core_tasks`] and
+/// `egret-bin` will not start. An incomplete edit fails loudly at startup and
+/// in every test that builds the registry, rather than waiting for someone to
+/// paste a Kestra flow.
 ///
-/// W3b Task 6 adds the one type where the two halves **do** agree:
-/// [`handlers::sql`] serves `egret.sql`, which is what `TASK_TYPES` already
-/// publishes under and what `publish` already resolves a `database` reference
-/// for. It is the only one of the five that a flow can publish through egret's
-/// own path and then find a handler for.
+/// [`Handlers::register`] still takes an arbitrary key, for a handler wired in
+/// by a deployment under a spelling of its own; it is [`add_publishable`] that
+/// carries the invariant.
+///
+/// W3b Task 6 added [`handlers::sql`], which serves `egret.sql` — the one type
+/// where the two halves agreed all along, and the shape the other four now
+/// have.
+///
+/// [`add_publishable`]: Handlers::add_publishable
 #[derive(Default)]
 pub struct Handlers {
     by_type: HashMap<String, Arc<dyn TaskHandler>>,
@@ -82,18 +98,63 @@ impl Handlers {
     ///
     /// ```ignore
     /// let mut reg = Handlers::with_core_tasks();
-    /// reg.add(std::sync::Arc::new(handlers::sql::Sql::new(port)));
+    /// // `add_publishable`, not `add`: `egret.sql` HAS a `TASK_TYPES` row, and
+    /// // this is the invariant documented above — a handler wired in by a
+    /// // deployment is still a handler whose type publish has to accept.
+    /// reg.add_publishable(std::sync::Arc::new(handlers::sql::Sql::new(port)));
     /// ```
+    ///
+    /// **This example said `reg.add(…)` until W10 Task 6 fix round 2**, which
+    /// is the one handler deployments actually wire — so the snippet directly
+    /// under the invariant's own paragraph was the one place showing how to
+    /// bypass it.
     ///
     /// `oracle-exec/README.md`'s coverage statement says the same thing, so a
     /// green ratchet is not read as covering a handler it never ran.
     pub fn with_core_tasks() -> Self {
         let mut r = Self::new();
-        r.add(Arc::new(handlers::log::Log::new()));
-        r.add(Arc::new(handlers::ret::Return));
-        r.add(Arc::new(handlers::fail::Fail::new()));
-        r.add(Arc::new(handlers::sleep::Sleep::new()));
+        // `add_publishable`, not `add`: each of these must be a type publish
+        // accepts, and each of publish's alias spellings must dispatch here.
+        // Before W10 Task 6 fix round 1 that was true of none of them.
+        r.add_publishable(Arc::new(handlers::log::Log::new()));
+        r.add_publishable(Arc::new(handlers::ret::Return));
+        r.add_publishable(Arc::new(handlers::fail::Fail::new()));
+        r.add_publishable(Arc::new(handlers::sleep::Sleep::new()));
         r
+    }
+
+    /// Register `handler` under its own [`TaskHandler::type_id`] **and under
+    /// every alias `spec::registry::TASK_TYPES` accepts for it** — the one
+    /// call that keeps publish's vocabulary and the worker's from drifting.
+    ///
+    /// # Panics
+    ///
+    /// If `type_id()` has **no row** in `TASK_TYPES`, i.e. publish would refuse
+    /// a flow using this handler's own canonical spelling. That is a
+    /// programming error in the pair of tables, not a runtime condition, and it
+    /// is a panic rather than a `Result` deliberately: this runs at process
+    /// start (`egret-bin` builds the registry before the server listens) and in
+    /// every test that builds one, so an incomplete edit is loud immediately
+    /// instead of surfacing as a 400 the first time somebody pastes a flow —
+    /// which is exactly how the four-package divergence survived. A handler a
+    /// deployment wants under a spelling of its own uses [`Self::register`].
+    pub fn add_publishable(&mut self, handler: Arc<dyn TaskHandler>) -> &mut Self {
+        let canonical = handler.type_id();
+        let row = crate::spec::registry::known_type(canonical).unwrap_or_else(|| {
+            panic!(
+                "handler type_id `{canonical}` has no row in spec::registry::TASK_TYPES, \
+                 so publish would refuse every flow that names it. Add the row (canonical \
+                 spelling = the FQCN, per programme spec section 8 rule 4) or register the \
+                 handler with `Handlers::register` if it is deliberately unpublishable."
+            )
+        });
+        // The aliases come FROM the publish table, so a spelling publish
+        // accepts for this task is a spelling this registry serves, without
+        // anybody having to write it twice.
+        for alias in row.aliases {
+            self.register(*alias, handler.clone());
+        }
+        self.add(handler)
     }
 
     /// Register a handler under its own [`TaskHandler::type_id`].
@@ -158,20 +219,75 @@ mod tests {
     use super::*;
     use crate::executor::RunState;
 
-    /// The four are registered under the spellings `build_plan` produces, and
-    /// the list is asserted whole rather than probed one at a time — a
-    /// `contains` check passes just as well with a fifth entry nobody meant.
+    /// The four are registered under the spellings `build_plan` produces —
+    /// **plus the one alias publish accepts** — and the list is asserted whole
+    /// rather than probed one at a time: a `contains` check passes just as well
+    /// with a fifth entry nobody meant.
+    ///
+    /// `core.log` is here because `TASK_TYPES` names it an alias of
+    /// `io.kestra.plugin.core.log.Log`, not because this function mentions it.
+    /// Delete that alias and this list loses an entry without anybody editing
+    /// `with_core_tasks`.
     #[test]
-    fn the_core_registry_holds_exactly_the_four_kestra_type_ids() {
+    fn the_core_registry_holds_the_four_kestra_type_ids_and_the_one_alias() {
         assert_eq!(
             Handlers::with_core_tasks().type_ids(),
             vec![
+                "core.log",
                 "io.kestra.plugin.core.debug.Return",
                 "io.kestra.plugin.core.execution.Fail",
                 "io.kestra.plugin.core.flow.Sleep",
                 "io.kestra.plugin.core.log.Log",
             ]
         );
+    }
+
+    /// **Every spelling the shipped registry dispatches is a spelling publish
+    /// accepts** — the invariant that was false for four packages, asserted in
+    /// the direction `add_publishable` enforces.
+    ///
+    /// Held by construction: the aliases come from `TASK_TYPES` and a canonical
+    /// id with no row panics. This test is the *witness* rather than the
+    /// mechanism, and it is worth having because a future
+    /// `with_core_tasks` that went back to `add` would compile and pass
+    /// everything else in this file.
+    #[test]
+    fn every_type_the_shipped_registry_serves_is_publishable() {
+        let reg = Handlers::with_core_tasks();
+        let ids = reg.type_ids();
+        assert!(!ids.is_empty(), "the registry must not be empty");
+        for id in &ids {
+            assert!(
+                crate::spec::registry::known_type(id).is_some(),
+                "the worker dispatches `{id}` and publish refuses it: {ids:?}"
+            );
+        }
+        // The control for the loop above: a spelling NOTHING serves is also a
+        // spelling publish refuses, so the assertion is not vacuously true of
+        // every string.
+        assert!(crate::spec::registry::known_type("io.kestra.plugin.core.log.NotAThing").is_none());
+    }
+
+    /// **Both spellings of `Log` reach the same handler**, which is what
+    /// "aliases are secondary" has to mean at run time: the FQCN a pasted
+    /// Kestra flow writes, and the short form egret has published since W1.
+    ///
+    /// Asserted on dispatch rather than on the key list, because a key present
+    /// in the map and a key that reaches the right handler are different
+    /// claims.
+    #[tokio::test]
+    async fn both_spellings_of_log_dispatch_to_the_log_handler() {
+        let reg = Handlers::with_core_tasks();
+        for spelling in ["io.kestra.plugin.core.log.Log", "core.log"] {
+            let out = reg
+                .run(&input(spelling, serde_json::json!({"message": "hi"})))
+                .await
+                .unwrap_or_else(|e| panic!("`{spelling}` must dispatch: {e}"));
+            assert_eq!(out.state, RunState::Success, "{spelling}");
+            // `Log` has no output at all; `Return`'s `{"value": …}` is how a
+            // wrong handler would show itself.
+            assert_eq!(out.outputs, None, "{spelling} reached the wrong handler");
+        }
     }
 
     /// Dispatch reaches the right handler — asserted on the **output**, which

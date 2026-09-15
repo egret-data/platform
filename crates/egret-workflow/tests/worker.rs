@@ -3398,10 +3398,20 @@ tasks:
 /// the resolver reads the same table the product writes, and a fixture that
 /// wrote the row itself could keep passing after that stopped being true.
 ///
-/// It is deliberately NOT published to a live version. W6 Task 1 measured why
-/// that has to work: only 16 of the corpus's 345 flows reach one, so a resolver
-/// reading `flow_versions` would resolve 2 of the 20 `Subflow` targets. See
-/// `worker::subflow::resolve`.
+/// It is deliberately NOT published to a live version, and **the reason this
+/// doc used to give for that has been overturned**. It read: *"W6 Task 1
+/// measured why that has to work: only 16 of the corpus's 345 flows reach one,
+/// so a resolver reading `flow_versions` would resolve 2 of the 20 `Subflow`
+/// targets."* Both figures are gone — W10 Task 6 fix round 1 put the four core
+/// Kestra FQCNs into `spec::registry::TASK_TYPES`, and the census now measures
+/// **248 of 345** flows reaching a live version and **18 of the 20** targets
+/// live (`driver::LIVE`, `driver::SUBFLOW_TARGETS_LIVE`).
+///
+/// **The fixture is unchanged and so is the decision it mirrors**, because the
+/// binding reason was never the corpus's shape: `worker::subflow::resolve`
+/// reads the DRAFT row so that a parent and its child cannot disagree about
+/// which version of the world they are in. This fixture files a draft because
+/// that is what the resolver reads — not because a version would be rare.
 async fn file_flow(db: &Db, ws: Uuid, by: egret_core::UserId, source: &str) -> Uuid {
     let flow = egret_workflow::spec::parse(source).expect("the fixture flow parses");
     let input = egret_workflow::CreateFlowInput {
@@ -3737,6 +3747,176 @@ async fn a_subflow_target_in_another_workspace_does_not_resolve(pool: sqlx::PgPo
          that does not exist at all. The SAME source, filed into THIS workspace, \
          is what `a_subflow_child_is_linked_by_the_trigger_columns_and_never_by_parent_execution_id` \
          runs, so a failure here is the scoping and nothing else"
+    );
+}
+
+/// **A `Subflow` target switched off by its own YAML does not run.** W10 Task 5
+/// fix round 2's Critical.
+///
+/// A flow can be switched off two ways and this path honoured only one. The
+/// failure was concrete: an operator writes `disabled: true`, the API's
+/// `POST .../flows/{id}/executions` answers 409, and a sibling flow naming that
+/// flow as a `Subflow` target **ran it anyway**. `worker::subflow::resolve`
+/// tests `state <> 'disabled'` -- the column -- and never parses the YAML;
+/// `.disabled` occurred **0** times under `src/worker/` (positive control:
+/// `.namespace`, 11 occurrences across 4 files).
+///
+/// **The control is the same source with the line removed**, so a failure here
+/// is `disabled:` and not the fixture: one flow runs, the other does not, and
+/// nothing else differs.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_disabled_by_its_own_yaml_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    file_flow(
+        &db,
+        ws,
+        user,
+        &format!("{}disabled: true\n", one_task("child")),
+    )
+    .await;
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a flow whose own YAML says `disabled: true` must not be reachable as a \
+         Subflow target -- and it answers exactly what the column door answers, \
+         because one switch must give one answer"
+    );
+
+    // The control: the SAME fixture without the `disabled:` line spawns a child
+    // and reaches SUCCESS. Without it, a spawn broken for any other reason would
+    // pass the assertion above.
+    let (ws2, user2) = common::seed_workspace(&db).await;
+    file_flow(&db, ws2, user2, &one_task("child")).await;
+    let ok = start_execution(
+        &pool,
+        ws2,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+    assert_eq!(
+        (
+            children_by_trigger(&pool, ok).await.len(),
+            run_state(&pool, ok, "sub").await,
+        ),
+        (1, Some("SUCCESS".to_string())),
+        "the control: the identical flow without `disabled:` runs"
+    );
+}
+
+/// **A `Subflow` target switched off by the `state` COLUMN does not run.**
+///
+/// `resolve`'s `state <> 'disabled'` predicate. It had **no test**: W10 Task 5
+/// fix round 2 measured that deleting the predicate left `--test worker` at
+/// **59 passed / 0 failed**, while the positive control on the same statement
+/// (dropping `workspace_id = $1`) failed one test -- so the instrument reached
+/// that SQL and the predicate was simply undefended.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_subflow_target_disabled_by_the_state_column_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = file_flow(&db, ws, user, &one_task("child")).await;
+    sqlx::query("UPDATE workflow.flows SET state = 'disabled' WHERE id = $1")
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("disable the flow by column");
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "the state column is the management UI's switch and it must reach this \
+         path too"
+    );
+}
+
+/// **A TRASHED `Subflow` target does not run.**
+///
+/// `resolve`'s `deleted_at IS NULL` predicate, and it had no test either --
+/// removing it as well still left `--test worker` at **59 passed / 0 failed**.
+/// `FlowRepo`'s delete is soft, so without this predicate a flow an author put
+/// in the trash stays executable by name for ever.
+#[sqlx::test(migrations = "../../migrations")]
+async fn a_trashed_subflow_target_does_not_run(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    let child = file_flow(&db, ws, user, &one_task("child")).await;
+    sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE id = $1")
+        .bind(child)
+        .execute(&pool)
+        .await
+        .expect("trash the flow");
+
+    let parent = start_execution(
+        &pool,
+        ws,
+        None,
+        &subflow_parent("parent", "child", ""),
+        serde_json::json!({}),
+    )
+    .await
+    .expect("start execution");
+    settle_everything(&pool, &Handlers::with_core_tasks()).await;
+
+    assert_eq!(
+        (
+            children_by_trigger(&pool, parent).await.len(),
+            run_state(&pool, parent, "sub").await,
+            run_message(&pool, parent, "sub").await,
+        ),
+        (
+            0,
+            Some("FAILED".to_string()),
+            Some("unable to find flow 't'.'child'".to_string()),
+        ),
+        "a trashed flow is as invisible to a Subflow target as one that never \
+         existed"
     );
 }
 
@@ -6283,8 +6463,21 @@ fn a_pause(id: &str, bound: Option<&str>) -> String {
 /// reaches these same runs through a different door. All eight pause entries
 /// banked in W8 Task 3 with the gate narrow and stay banked with it wide:
 /// `baseline.txt` cannot move for this fix and cannot move if it is reverted.
-/// That is W4 item 15's shape — a property proved about a path no deployment
-/// takes — and it is why the assertion has to be here.
+/// That is W4 item 15's shape — a property whose only instrument is an
+/// integration test, because the oracle reaches the same runs through a door
+/// that cannot fail — and it is why the assertion has to be here.
+///
+/// **The gloss item 15 used for that shape — "a path no deployment takes" — is
+/// no longer true of this one, and this doc said it for seventeen commits.**
+/// Since W10 Task 2 `egret-bin` runs the claim loop
+/// (`egret_workflow::runtime::spawn`), so `runtime` → `tick` → `wake` →
+/// `claim::due_retries` is a production path. `due_retries`' own doc was
+/// corrected in that task and **this copy was not**; W10 Task 7's sweep found
+/// it, and only by widening the pattern from the proposition item 15 states to
+/// the *gloss* it states it in — the two share no words. The ratchet's
+/// blindness is unchanged; what changed is that it is now blindness about
+/// **shipping** behaviour rather than about a driver's, which makes this
+/// assertion more load-bearing than it was, not less.
 ///
 /// # Nothing rewinds a clock here
 ///

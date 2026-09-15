@@ -402,6 +402,41 @@ async fn spawn_one(
             .await;
         }
     };
+    // **The THIRD door, and it has to be here rather than in [`resolve`].**
+    //
+    // A flow can be switched off two ways -- the `state` column the management
+    // UI writes, and the YAML's own `disabled: true` -- and until W10 Task 5 fix
+    // round 2 this path honoured only the first. `resolve`'s SQL tests
+    // `deleted_at IS NULL AND state <> 'disabled'`; `disabled:` is not a column,
+    // so no predicate can see it and the check cannot live there. It lives here
+    // because this is the first line at which the parsed flow exists.
+    //
+    // **The failure it closes was concrete**: an operator writes
+    // `disabled: true`, `POST .../flows/{id}/executions` answers 409, and a
+    // sibling flow naming that flow as a `Subflow` target ran it anyway.
+    // `routes::startable_flow` closed both doors for the API in fix round 1 and
+    // its comment claimed this function agreed -- it did not, and that claim is
+    // corrected there.
+    //
+    // **The message is `resolve`'s miss verbatim, deliberately.** Both other
+    // doors already answer "unable to find flow": they are inside `resolve`,
+    // which returns `Option` and cannot distinguish. Giving this door its own
+    // wording would mean an operator who typed `disabled: true` and an operator
+    // who set the column got DIFFERENT answers for the same intent. One switch,
+    // one answer. **It is a divergence from the artifact and a deliberate one**
+    // -- `ExecutableUtils` raises a distinct error for `isDisabled()` -- but the
+    // divergence is pre-existing on the column door and this keeps it at one
+    // rather than two.
+    if child.disabled {
+        return fail_run(
+            conn,
+            ctx,
+            r.run,
+            &format!("unable to find flow '{namespace}'.'{flow_id}'"),
+        )
+        .await;
+    }
+
     let plan = match build_plan(&source) {
         Ok(p) => p,
         Err(e) => {
@@ -879,15 +914,27 @@ async fn fail_run(
 /// # Two decisions, both forced by measurement
 ///
 /// **1. It resolves against the DRAFT row, `workflow.flows.source`, and not
-/// through `flow_versions`.** W6 Task 1 filed the whole corpus through the
-/// product's own create-then-publish path and measured the result: only **16 of
-/// 345** flows reach a live version, because publish step 4 asks
-/// `registry::known_type` about `io.kestra.plugin.core.*` leaves egret has not
-/// ported. Of the **20 distinct literal `Subflow` targets**, **2** are live and
-/// **17** are draft-only — so a resolver reading `flow_versions` would resolve
-/// 2 of 20 and this package would bank nothing. `driver::target_census`
-/// asserts those figures on every run, so this paragraph is compared by a
-/// running program.
+/// through `flow_versions`.**
+///
+/// **The measurement this paragraph used to lead with has been overturned, and
+/// the conclusion has not.** It read: *"only 16 of 345 flows reach a live
+/// version … of the 20 distinct literal `Subflow` targets, 2 are live and 17
+/// are draft-only — so a resolver reading `flow_versions` would resolve 2 of 20
+/// and this package would bank nothing."* That was true while publish refused
+/// almost the whole corpus for an unported task type, and W10 Task 6 fix round
+/// 1 is what ended it: `spec::registry::TASK_TYPES` now carries the four core
+/// FQCNs the worker implements, so **248 of 345** corpus flows reach a live
+/// version (was 21), unported-type refusals fell from **296 to 68**, and of the
+/// 20 literal `Subflow` targets **18 are live and 1 is draft-only** (was 2 and
+/// 17). A `flow_versions` resolver would now reach almost all of them.
+///
+/// So this is no longer a reason, and it is kept as a **retired** one rather
+/// than deleted, because a paragraph that silently drops its evidence reads as
+/// though it never had any. The decision is unchanged and now rests on reasons
+/// 1 and 3 below alone — which is exactly as it should be: the binding reason
+/// was never the corpus's shape. `driver::target_census` asserts every figure
+/// above on every run, so this paragraph is still compared by a running
+/// program.
 ///
 /// It is also the consistent choice today rather than merely the possible one:
 /// `FlowRepo::find_by_name`, which is what `publish` resolves a
@@ -910,22 +957,32 @@ async fn fail_run(
 ///    world they are in** — the sentence this paragraph already carried, and
 ///    now the binding one. A webhook-started flow whose task is a `Subflow`
 ///    would otherwise run a published parent against a draft child.
-/// 2. **A version-snapshot resolver would reach almost nothing.** W6 Task 1
-///    filed the whole corpus through the product's own create-then-publish path
-///    and measured **16 of 345** flows reaching a live version, because publish
-///    step 4 asks `registry::known_type` about `io.kestra.plugin.core.*` leaves
-///    egret has not ported. `driver::target_census` asserts those figures on
-///    every run.
+/// 2. ~~**A version-snapshot resolver would reach almost nothing.**~~
+///    **RETIRED at W10 Task 6 fix round 1** — it was measured at *16 of 345*
+///    flows reaching a live version (21 by W8 Task 3) because publish refused
+///    every `io.kestra.plugin.core.*` leaf egret had not listed in
+///    `spec::registry::TASK_TYPES`; that table now carries the four FQCNs the
+///    worker implements and **248 of 345** flows reach a live version. Reasons
+///    1 and 3 are what carry the decision, and always were. Kept struck through
+///    rather than deleted so the next reader knows this argument was made and
+///    what happened to it. `driver::target_census` asserts the new figures.
 /// 3. Kestra's own `findByIdForExecution` reads the flow repository, not a
 ///    version archive; its `revision` parameter is a separate opt-in that
 ///    egret's model has no field for at all.
 ///
+/// **W10 Task 5 added the THIRD site**, `routes::start_flow_execution` — the
+/// management API's start button — and it takes the same decision for reason 1
+/// again. Note the ordinal moved with the count: this paragraph said "two
+/// files" below and an ordinal shares no letters with the number it names, so
+/// both had to be corrected or they would disagree.
+///
 /// **What it costs, stated rather than discovered**: an author editing a draft
-/// changes what a live webhook URL runs, with no publish step in between. That
-/// is a real operational hazard and it is the reason this is written down in
-/// two files. The fix, when someone wants it, is a `flow_versions`-backed
-/// execution path — and it has to arrive HERE and in `webhook_routes` together,
-/// for reason 1.
+/// changes what a live webhook URL — or a start button — runs, with no publish
+/// step in between. That is a real operational hazard and it is the reason this
+/// is written down in three files. The fix, when someone wants it, is a
+/// `flow_versions`-backed execution path — and it has to arrive HERE, in
+/// `webhook_routes` and in `routes::start_flow_execution` together, for
+/// reason 1.
 ///
 /// **2. It is scoped to `workspace_id`, and `FlowRepo::find_by_name` is not.**
 /// That method's own doc records why it cannot be: `WorkflowRefPort::workspace_of`
@@ -954,9 +1011,22 @@ async fn fail_run(
 /// load-bearing — and this repository has already shipped a cross-workspace
 /// read once, on a column whose guard everyone assumed existed.
 ///
-/// A trashed or disabled flow does not resolve, which is Kestra's own pair of
-/// refusals one step earlier: `if (flow.isDisabled())` and
-/// `if (flow instanceof FlowWithException)` (`ExecutableUtils.java:192-205`).
+/// **This function closes TWO of the three doors, and the third is not here.**
+/// The SQL tests `deleted_at IS NULL` (the trash) and `state <> 'disabled'` (the
+/// column). It does **not** test the YAML's own `disabled: true`, and it cannot:
+/// that field is inside `source`, not a column, so no predicate can reach it.
+/// [`spawn_one`] parses the source and checks it there, with the same refusal
+/// message these two produce.
+///
+/// The sentence here used to read *"a trashed or disabled flow does not
+/// resolve"*, which papered over exactly that gap -- "disabled" names two
+/// different switches and this function sees one of them. W10 Task 5 fix round 2
+/// found the YAML half honoured nowhere on this path at all.
+///
+/// Kestra makes the pair of refusals one step earlier:
+/// `if (flow.isDisabled())` -- which reads the YAML field, `Flow::disabled` at
+/// `models/flow.rs` -- and `if (flow instanceof FlowWithException)`
+/// (`ExecutableUtils.java:192-205`).
 async fn resolve(
     conn: &mut PgConnection,
     workspace_id: Uuid,

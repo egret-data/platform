@@ -194,7 +194,8 @@ là đồ trang trí.
 ```
 workflow.flows          draft: yaml nguồn + plan đã parse, state draft/live/disabled
 workflow.flow_versions  snapshot đóng băng: yaml + plan chuẩn hoá + tham chiếu ĐÃ GIẢI
-workflow.executions     một lần chạy, ghim flow_version_id; không bao giờ đọc draft
+workflow.executions     một lần chạy, mang bản sao đóng băng yaml nguồn của DRAFT
+                        -- không hề có cột flow_version_id (xem bên dưới)
 workflow.task_runs      một lần thử của một node: attempt, state, not_before, deadline_at, output
 workflow.triggers       cron/webhook, hàng claim được -- CHƯA DỰNG: W12 (xem
                         bảng ở mục 9). W6 ship trigger dưới dạng hàm thuần trên
@@ -203,6 +204,82 @@ workflow.triggers       cron/webhook, hàng claim được -- CHƯA DỰNG: W12 
 workflow.task_logs      dòng log, có retention_days như automation.schedules
                         -- CHƯA DỰNG: W11 (xem bảng ở mục 9)
 ```
+
+**Đính chính (W10 Task 5, vòng sửa 1): execution chạy DRAFT, và không hề có
+`flow_version_id`.** Dòng trên từng ghi *"một lần chạy, ghim `flow_version_id`;
+không bao giờ đọc draft"*. Cả hai vế đều sai, và vế về cột thì kiểm được bằng
+một lệnh: `flow_version_id` xuất hiện **0** lần trong `migrations/` (đối chứng
+dương: `flow_key`, tại `0134:32`). Thứ `workflow.executions` thật sự giữ là
+`source` — một bản sao đóng băng của `workflow.flows.source`, chụp lúc start.
+
+Có **ba** nơi khởi tạo execution và cả ba đều đọc hàng draft:
+
+| nơi | đọc gì |
+|---|---|
+| `worker::subflow::resolve` | `SELECT id, source FROM workflow.flows …` |
+| `webhook_routes::handle` | `SELECT id, source, state FROM workflow.flows …` |
+| `routes::start_flow_execution` (W10 Task 5) | `FlowRepo::get` → `flows.source` |
+
+Không đường chạy nào chạm vào `workflow.flow_versions`. Lý do ràng buộc đã ghi
+tại `worker::subflow::resolve` và không xét lại ở đây: **cha và con không được
+bất đồng về việc chúng đang ở phiên bản nào của thế giới**. Lý do thứ hai mà câu
+này từng mang — *"một resolver đọc version snapshot sẽ với tới gần như không gì
+cả (W6 Task 1 … đo được 16 trên 345 flow đạt tới live version)"* — **đã bị rút
+tại W10 Task 6 fix round 1**: §8 mục 4 nói `type:` nhận FQCN của Kestra làm dạng
+chuẩn, `spec::registry::TASK_TYPES` lại không cài đặt luật ấy, nên publish từ
+chối mọi flow Kestra dán vào. Sau khi bốn FQCN lõi vào bảng, **248 trên 345**
+flow corpus đạt tới live version và 18 trong 20 target `Subflow` dạng tên thật
+là live — một resolver snapshot bây giờ với tới gần hết. Quyết định vẫn đứng trên
+đúng lý do ràng buộc; `driver::target_census` khẳng định các con số mới mỗi lần
+chạy. Cái giá đúng như đoạn đó đã nêu: tác giả sửa draft là đổi luôn thứ mà một
+URL webhook đang sống — hay một nút start — sẽ chạy, không có bước publish nào ở
+giữa.
+
+**Tính cứng của §6.2 không suy suyển, nhưng bằng một CƠ CHẾ khác với điều câu
+trên đã tuyên.** Publish vẫn giải mọi tham chiếu và vẫn đóng băng id đã giải vào
+snapshot; thứ ngăn một start-từ-draft chạy với tham chiếu chưa giải không phải
+là "executor không bao giờ giữ tham chiếu chưa giải" — nó CÓ giữ — mà là handler
+từ chối. Đo được, và HẸP HƠN câu "start chỉ chạy được flow không có tham chiếu":
+
+* **Đúng một handler trên tám** trong `worker/handlers/` parse một trường spec
+  thành UUID và từ chối nếu không phải. `handlers::sql` trả lời *"`database` là
+  … không phải UUID. `publish` viết lại trường này thành connection id đã giải;
+  một execution mà nguồn còn giữ tên do tác giả viết là đã được khởi chạy từ
+  nguồn chưa giải"* (`handlers/sql.rs:294`). Nghĩa là flow có task `egret.sql`
+  với `database:` viết bằng tên vẫn **start được**, rồi **task đó fail** — chỗ
+  từ chối nằm ở task, không nằm ở route.
+* **Tham chiếu `Subflow` là trường hợp ngược lại và chạy bình thường**, đó chính
+  là lý do câu tổng quát kia sai: `subflow::resolve` giải theo
+  `(namespace, flowId)` trên bảng draft lúc chạy và không bao giờ đọc id đã viết
+  lại. ~~và nó đóng đúng hai cánh cửa bằng SQL
+  (`AND deleted_at IS NULL AND state <> 'disabled'`) mà
+  `routes::startable_flow` đóng bằng Rust.~~
+
+  **Mệnh đề cuối đó SAI và được đính chính ở đây (W10 Task 7 fix round 1,
+  2026-09-15), sau khi `24855ba7` đã sửa trong mã mà không sửa trong file này.**
+  `routes::startable_flow` đóng **ba** cánh cửa — thùng rác, cột `state`, và
+  `disabled: true` trong chính YAML, thứ nó đọc bằng cách gọi `parse`.
+  `subflow::resolve` đóng **hai**, và không thể đóng cửa thứ ba: `disabled:`
+  không phải một cột, nên không predicate SQL nào với tới được. Khoảng hở ấy là
+  thật — một operator viết `disabled: true`, `POST …/flows/{id}/executions` trả
+  **409**, rồi một flow anh em vẫn chạy đúng flow đó với tư cách `Subflow`
+  target. Cửa thứ ba nay nằm ở `worker::subflow::spawn_one`, ngay sau
+  `spec::parse`, và trả lời **y nguyên** thông điệp miss của `resolve`, để hai
+  cách viết "tắt" cho operator cùng một câu trả lời. **Không cửa nào trong hai
+  cửa gốc của `resolve` có test**: xoá từng cái đều để `--test worker` ở 59/0,
+  trong khi control workspace fail 58/1. Giờ cả ba đều có một test.
+
+  **Bài học phải trả giá, ghi ngay chỗ câu tiếp theo kiểu đó sẽ được viết:** một
+  comment khẳng định điều một hàm KHÁC làm thì cần test của riêng nó, đặt trong
+  hàm đó. Khẳng định về mã của chính mình được test quanh nó kiểm; khẳng định về
+  mã của người khác thì **không gì kiểm cả**, và đọc lên như một tham chiếu chéo
+  chứ không như một khẳng định.
+
+`a_start_runs_the_draft_even_when_a_published_version_exists`
+(`tests/executions_routes.rs`) là thứ giữ cho đính chính này khỏi mốc: nó publish
+một version, sửa draft bên dưới, rồi khẳng định start chạy draft. Trước nó, không
+fixture nào trong cây có version đã publish, nên không gì phân biệt được đọc
+draft với đọc `flow_versions`.
 
 ### 6.2 Tham chiếu được giải lúc publish, không phải lúc chạy
 

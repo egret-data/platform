@@ -1727,9 +1727,19 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     // takes; `egret.container` and `egret.script.python` are not here because
     // running containers in a workspace's name on a schedule is the governance
     // question W5 raises for plugin jars, arriving early, and it is a separate
-    // and deliberate decision (programme spec §3.3). A flow whose task type is
-    // unregistered fails loudly with `WorkerError::NoHandler` rather than
-    // silently doing nothing.
+    // and deliberate decision (programme spec §3.3).
+    //
+    // **A flow whose task type is unregistered HANGS, and this sentence used to
+    // claim the opposite.** `WorkerError::NoHandler` does not fail the run: it
+    // propagates out of `run_one`, the run keeps its lease, `reap` clears only
+    // `claimed_at` a `working_timeout` later, `claim` re-selects it on
+    // `state='RUNNING' AND claimed_at IS NULL`, and the cycle repeats for ever.
+    // No counter moves -- `attempts` is pushed only by `state.rs`'s StartRun /
+    // SkipRun, which are off the reclaim path -- so one `warn` per cycle
+    // (`runtime.rs:311`) is the only signal. With four handlers against
+    // thirteen publishable rows, **nine of thirteen types hang in production**.
+    // `oracle-exec/README.md` item 19 carries this and its second cause (a
+    // handler that OUTRUNS `working_timeout`; `Sleep::new()` is uncapped).
     egret_workflow::runtime::spawn(
         db.pool.clone(),
         std::sync::Arc::new(egret_workflow::worker::Handlers::with_core_tasks()),

@@ -144,9 +144,12 @@
 //! "whoever adds a product route that starts an execution"; this is that route,
 //! and the decision plus its three reasons and its one real cost are written
 //! down **in both files**, because a parent and its child must not disagree
-//! about which version of the world they are in. See that function's doc for
-//! the measured figure behind reason 2 (16 of 345 corpus flows reach a live
-//! version).
+//! about which version of the world they are in. **Reason 2 — "a
+//! version-snapshot resolver would reach almost nothing", measured at 16 of 345
+//! corpus flows reaching a live version — was RETIRED at W10 Task 6 fix round
+//! 1**, which made egret able to publish a pasted Kestra flow at all and took
+//! that figure to **248 of 345**. The decision is unchanged; see that
+//! function's doc for why reasons 1 and 3 are what it rests on.
 //!
 //! The cost, restated here so a reader of this file does not have to find it:
 //! **an author editing a draft changes what a live webhook URL runs, with no
