@@ -1328,7 +1328,7 @@ pub struct StartExecutionRequest {
 /// The fix is not "remember to add the checks to replay too". It is that there
 /// is now **one** place to add a door to, and a route that wants to run a flow
 /// cannot reach one without coming through here —
-/// `replay_closes_the_same_two_doors_start_does` drives both routes over the
+/// `replay_closes_the_same_three_doors_start_does` drives both routes over the
 /// same fixtures so a fourth door added to one is added to both or the test
 /// says so.
 ///

@@ -2133,7 +2133,7 @@ async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool)
 
 // ── Fix round 1 ─────────────────────────────────────────────────────────────
 
-/// **Replay closes the same two doors start does.** Fix round 1's shipped
+/// **Replay closes the same THREE doors start does.** Fix round 1's shipped
 /// over-acceptance, made into a test.
 ///
 /// `replay_execution` used to check terminality and nothing else — measured as
@@ -2146,7 +2146,7 @@ async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool)
 /// two tests that could drift the way the two handlers did. A door added to one
 /// route and not the other fails here.
 #[tokio::test]
-async fn replay_closes_the_same_two_doors_start_does() {
+async fn replay_closes_the_same_three_doors_start_does() {
     let Some(db) = common::db().await else { return };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage"]).await;
