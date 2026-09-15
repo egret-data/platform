@@ -11,6 +11,7 @@ import {
   listProfiles,
 } from "@/api/policies";
 import { ApiError } from "@/api/client";
+import { useAuth } from "@/auth/useAuth";
 import { FacetSelect, FACET_ALL } from "@/components/explore/FacetSelect";
 import { FilterableTable, type Column } from "@/components/explore/FilterableTable";
 import { ListSkeleton } from "@/components/explore/ListSkeleton";
@@ -57,6 +58,9 @@ export const profilesQueryKey = ["control-plane", "profiles"] as const;
  * config or delete the profile (only when no engine still enforces it).
  */
 export default function Policies() {
+  const { me } = useAuth();
+  const canProvisionEngine =
+    (me?.platform_roles.includes("platform_admin") ?? false) || (me?.permissions?.includes("engine:create") ?? false);
   const queryClient = useQueryClient();
   const [configTarget, setConfigTarget] = useState<string | null>(null);
   const [typeFacet, setTypeFacet] = useState(FACET_ALL);
@@ -228,12 +232,14 @@ export default function Policies() {
             <Plus className="mr-1.5 h-4 w-4" />
             New profile
           </Button>
-          <Button asChild variant="outline" size="sm">
-            <Link to="/control-plane/engines">
-              <Server className="mr-1.5 h-4 w-4" />
-              Provision an engine
-            </Link>
-          </Button>
+          {canProvisionEngine && (
+            <Button asChild variant="outline" size="sm">
+              <Link to="/control-plane/engines">
+                <Server className="mr-1.5 h-4 w-4" />
+                Provision an engine
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
 
