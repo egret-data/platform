@@ -197,7 +197,8 @@ flow would change the behaviour of tonight's run and versioning would be decorat
 ```
 workflow.flows          draft: yaml source + parsed plan, state draft/live/disabled
 workflow.flow_versions  frozen snapshot: yaml + normalised plan + RESOLVED references
-workflow.executions     one run, pinned to a flow_version_id; never reads the draft
+workflow.executions     one run, carrying its own frozen copy of the DRAFT's yaml
+                        source -- there is no flow_version_id column (see below)
 workflow.task_runs      one attempt of one node: attempt, state, not_before, deadline_at, output
 workflow.triggers       cron/webhook rows, claimable -- NOT BUILT: W12 (see the
                         table in section 9). W6 shipped the trigger as a pure
@@ -206,6 +207,60 @@ workflow.triggers       cron/webhook rows, claimable -- NOT BUILT: W12 (see the
 workflow.task_logs      log lines, with retention_days as automation.schedules has
                         -- NOT BUILT: W11 (see the table in section 9)
 ```
+
+**Correction (W10 Task 5, fix round 1): executions run the DRAFT, and there is
+no `flow_version_id`.** The line above used to read *"one run, pinned to a
+`flow_version_id`; never reads the draft"*. Both halves were false, and the
+column half is checkable in one command: `flow_version_id` occurs **zero** times
+across `migrations/` (positive control: `flow_key`, at `0134:32`). What
+`workflow.executions` actually holds is `source` — a frozen copy of
+`workflow.flows.source`, taken at start.
+
+There are **three** places that start an execution and all three read the draft
+row:
+
+| site | reads |
+|---|---|
+| `worker::subflow::resolve` | `SELECT id, source FROM workflow.flows …` |
+| `webhook_routes::handle` | `SELECT id, source, state FROM workflow.flows …` |
+| `routes::start_flow_execution` (W10 Task 5) | `FlowRepo::get` → `flows.source` |
+
+Nothing in any execution path touches `workflow.flow_versions`. The binding
+reason is recorded at `worker::subflow::resolve` and is not being revisited
+here: **a parent and its child must not disagree about which version of the
+world they are in**, and a version-snapshot resolver would reach almost nothing
+(W6 Task 1 filed the whole corpus through the product's own create-then-publish
+path and measured **16 of 345** flows reaching a live version;
+`driver::target_census` asserts that on every run). The cost is the one that
+paragraph already states: an author editing a draft changes what a live webhook
+URL — or a start button — runs, with no publish step in between.
+
+**§6.2's rigidity is untouched, but by a different mechanism than the sentence
+above claimed.** Publish still resolves every reference and still freezes the
+resolved ids into the snapshot; what keeps a *draft* start from running against
+an unresolved reference is not that the executor never holds one — it does —
+but that the handler refuses it. Measured, and narrower than "a start can only
+run reference-free flows":
+
+* **Exactly one handler of the eight** in `worker/handlers/` parses a spec field
+  as a UUID and refuses otherwise. `handlers::sql` answers
+  *"`database` is … which is not a UUID. `publish` rewrites this field to the
+  resolved connection id; an execution whose source still holds the author's
+  name was started from unresolved source"* (`handlers/sql.rs:294`). So a flow
+  with an `egret.sql` task whose `database:` is written by name **starts**, and
+  then **that task fails** — the refusal is at the task, not at the route.
+* **A `Subflow` reference is the opposite case and works fine**, which is why
+  the general sentence would have been wrong: `subflow::resolve` resolves by
+  `(namespace, flowId)` against the draft table at run time and never reads a
+  rewritten id — and it closes the same two doors in SQL
+  (`AND deleted_at IS NULL AND state <> 'disabled'`) that
+  `routes::startable_flow` closes in Rust.
+
+`a_start_runs_the_draft_even_when_a_published_version_exists`
+(`tests/executions_routes.rs`) is what stops this correction going stale: it
+publishes a version, edits the draft underneath it, and asserts the start runs
+the draft. Before it, no fixture anywhere had a published version at all, so
+nothing discriminated a draft read from a `flow_versions` read.
 
 ### 6.2 References are resolved at publish, not at run
 

@@ -1210,6 +1210,28 @@ async fn get_execution(
 // `Subflow` child. The cost is stated there and is unchanged here: an author
 // editing a draft changes what a start button runs, with no publish in between.
 //
+// **The consequence for REFERENCES, which fix round 1 found unrecorded.**
+// Publish resolves each of the six `RefKind`s and rewrites the resolved id into
+// the snapshot; a draft start runs the un-rewritten source, so any handler that
+// needs the rewritten id is handed the author's name instead. Measured, and
+// deliberately narrower than "a start can only run reference-free flows":
+//
+// * **Exactly one handler of the eight** in `worker/handlers/` parses a spec
+//   field as a UUID. `handlers::sql` refuses with *"an execution whose source
+//   still holds the author's name was started from unresolved source"*
+//   (`handlers/sql.rs:294`), so a flow whose `egret.sql` task names its
+//   `database:` by name **starts** and then **that task fails**. The refusal is
+//   at the task, not at this route — §6.2's rigidity survives, by that
+//   mechanism and not by the executor never holding an unresolved id.
+// * **A `Subflow` reference is unaffected**, which is why the general sentence
+//   would have been false: `subflow::resolve` resolves by `(namespace, flowId)`
+//   against the draft table at run time and never reads a rewritten id.
+//
+// Recorded in `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md`
+// §6.1, whose schema line claimed a `flow_version_id` column that has never
+// existed (**0** occurrences across `migrations/`; control `flow_key` at
+// `0134:32`).
+//
 // # The kill finding
 //
 // `POST .../executions/{id}/kill` is **not** shipped. It needs a capability
@@ -1235,9 +1257,40 @@ async fn get_execution(
 //    W8's — W8 shipped no such path. There is no channel from an HTTP handler to
 //    the worker task holding the `TaskHandler`.
 //
-// What kill needs is therefore a *mechanism*, not an endpoint: a kill-request
-// column the tick reads, a lease-clearing writer, and a `Command` that spells
-// `KILLED`. Reported rather than improvised.
+// What kill needs is therefore a *mechanism*, not an endpoint. Fix round 1
+// widened this bill, because the first version of it — "a migration plus a
+// `Command` that spells `KILLED`" — reads like an afternoon's work and is not.
+// **Four more costs, each measured:**
+//
+// 4. **"Kill requested" is UNREPRESENTABLE in the executor's state.**
+//    `executor::RunState` has no `Killing` variant — `Killing` occurs **0**
+//    times in `executor/state.rs` (control: **9** times in `models/state.rs`,
+//    which is the wire model the harvester reads, not the state machine). So a
+//    kill cannot even be recorded as pending while the worker is asked to stop;
+//    it is one atomic transition or nothing, and `RunState::ALL` is round-tripped
+//    against `slot()` by a test, so adding a variant is not a local edit.
+// 5. **Clearing `claimed_at` RE-OPENS the run rather than closing it.**
+//    `claim`'s predicate is `state = 'RUNNING' AND claimed_at IS NULL`, so the
+//    obvious way to make `apply_outcome`'s fence miss — null the lease — hands
+//    the run straight back to the next `claim` batch. The lease must be cleared
+//    *and* the run moved out of `RUNNING` in the same statement, which is the
+//    same transition item 4 says is unrepresentable.
+// 6. **No in-process channel is sufficient, because the killer is a different
+//    PROCESS.** `worker::cancel`'s module doc establishes this from the pinned
+//    artifact: the API node and the worker node are not the same process, so a
+//    `tokio::sync` handle reaching the `TaskHandler` cannot exist. The signal
+//    has to go through the database and be *polled* by the tick.
+// 7. **At least one shipped handler cannot be cancelled at all.**
+//    `handlers::sql::cancel` returns `Err` by construction — *"`QueryExecPort`
+//    has no cancellation verb, so the statement continues on the engine after
+//    the run is abandoned … on StarRocks that connector does not read
+//    `Limits::timeout` at all, so it is not bounded by anything"* — and
+//    `cancel_refuses_rather_than_claiming_to_have_stopped_the_statement` holds
+//    it to that. So even a complete kill mechanism would leave a statement
+//    running on StarRocks with nothing to stop it.
+//
+// Reported rather than improvised. An understated cost invites someone to try
+// it in an afternoon and ship half of it.
 
 /// `POST .../flows/{id}/executions`'s body. Optional in whole: a flow with no
 /// `inputs:` is started with `{}` and a caller should not have to send a body
@@ -1257,6 +1310,71 @@ pub struct StartExecutionRequest {
     /// that only refuses is indistinguishable from one that refuses everything.
     #[serde(default)]
     pub inputs: Option<serde_json::Value>,
+}
+
+/// **The one gate every write that RUNS a flow passes through** — workspace
+/// scoping, the trash, and both doors a flow can be switched off by.
+///
+/// # It is one function because two copies already diverged
+///
+/// Fix round 1, shipped over-acceptance. `start_flow_execution` closed all
+/// three and `replay_execution` closed **none** of them: measured as 7
+/// occurrences of `deleted_at|disabled` inside the first handler and **0**
+/// inside the second, and probed live on one flow — `start` answered **404**
+/// where `replay` answered **201**, linking the replacement to a flow that was
+/// both trashed and disabled. Replay walked around every door start had just
+/// built.
+///
+/// The fix is not "remember to add the checks to replay too". It is that there
+/// is now **one** place to add a door to, and a route that wants to run a flow
+/// cannot reach one without coming through here —
+/// `replay_closes_the_same_two_doors_start_does` drives both routes over the
+/// same fixtures so a fourth door added to one is added to both or the test
+/// says so.
+///
+/// It agrees with `worker::subflow::resolve`, which closes the same two doors
+/// in SQL (`AND deleted_at IS NULL AND state <> 'disabled'`) — a flow egret
+/// will not start from an API is a flow egret will not reach as a `Subflow`
+/// target either.
+///
+/// **Refusals, and why each has the status it has**
+///
+/// * **404** — no such flow in this workspace, or it is in the trash.
+///   Indistinguishable from an id that never existed, because a 409 would
+///   confirm the id is real.
+/// * **400** — the flow's stored source does not parse, so the YAML door
+///   cannot be evaluated at all. For `replay` this is a refusal about the
+///   **draft**, not about the frozen source it would have run; the two are
+///   different strings and only the draft can answer "is this flow switched
+///   off right now".
+/// * **409** — disabled, by either door.
+async fn startable_flow(
+    st: &WorkflowState,
+    ws: Uuid,
+    flow_id: Uuid,
+) -> EgretResult<crate::repo::FlowRow> {
+    // `FlowRepo::get` carries the workspace predicate, so a foreign id is a
+    // `NotFound` here and never a 403 -- the `chart_id` class this package
+    // keeps guarding against.
+    let flow = st.repo.get(ws, flow_id).await?;
+    // **`FlowRepo::get` does NOT filter `deleted_at`** -- its own doc says so,
+    // and `get_flow` deliberately still serves a trashed draft so the UI can
+    // show what is in the trash. Running one is different.
+    if flow.deleted_at.is_some() {
+        return Err(Error::NotFound("flow".into()));
+    }
+    // **Both doors a flow can be switched off by.** The `state` column is the
+    // one the management UI writes and `disabled: true` is the one the YAML
+    // does; reading only the column let a disabled flow fire through the
+    // webhook, which was that route's fix round 1 Critical 1.
+    let parsed = parse(&flow.source)
+        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
+    if parsed.disabled || flow.state == "disabled" {
+        return Err(Error::Conflict(
+            "Cannot execute flow: flow is disabled.".into(),
+        ));
+    }
+    Ok(flow)
 }
 
 /// The `inputs` object a start will actually run with.
@@ -1305,30 +1423,10 @@ async fn start_flow_execution(
     body: Option<Json<StartExecutionRequest>>,
 ) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
-    // `FlowRepo::get` carries the workspace predicate, so a foreign id is a
-    // `NotFound` here and never a 403 -- the `chart_id` class this package
-    // keeps guarding against.
-    let flow = st.repo.get(ctx.workspace_id.0, id).await?;
-    // **`FlowRepo::get` does NOT filter `deleted_at`** -- its own doc says so,
-    // and `get_flow` above deliberately still serves a trashed draft so the UI
-    // can show what is in the trash. Starting one is different, and the refusal
-    // matches `subflow::resolve`'s and the webhook's `deleted_at IS NULL`:
-    // indistinguishable from absent, because a 409 here would confirm the id.
-    if flow.deleted_at.is_some() {
-        return Err(Error::NotFound("flow".into()));
-    }
-    // Parsed here as well as inside `start_execution`, for one reason the
-    // webhook has too: **both doors a flow can be switched off by**. The
-    // `state` column is the one the management UI writes and `disabled: true`
-    // is the one the YAML does; reading only the column let a disabled flow
-    // fire through the webhook, which was that route's fix round 1 Critical 1.
-    let parsed = parse(&flow.source)
-        .map_err(|e| Error::InvalidInput(format!("the flow does not parse: {}", e.message)))?;
-    if parsed.disabled || flow.state == "disabled" {
-        return Err(Error::Conflict(
-            "Cannot execute flow: flow is disabled.".into(),
-        ));
-    }
+    // Scoping, the trash and both disabled doors, in the one place `replay`
+    // also has to come through -- see [`startable_flow`] for the over-acceptance
+    // that made it a function instead of a run of `if`s in this handler.
+    let flow = startable_flow(&st, ctx.workspace_id.0, id).await?;
     let inputs = start_inputs(body)?;
     // **`start_execution`, not a second creation path.** The webhook calls
     // `start_execution_with_trigger` because it HAS a trigger record; an API
@@ -1445,11 +1543,11 @@ async fn resume_execution(
     ),
     responses(
         (status = 201, description = "A NEW execution, started from the replayed one's frozen source and inputs. The body is the new execution, not the old one — read its `id`.", body = ExecutionDto),
-        (status = 400, description = "The replayed execution's frozen source no longer parses or plans", body = egret_core::http::ErrorBody),
+        (status = 400, description = "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans", body = egret_core::http::ErrorBody),
         (status = 401, description = "Not authenticated", body = egret_core::http::ErrorBody),
         (status = 403, description = "Missing workflow:manage permission, or the workflows module is disabled for this workspace. **workflow:read is not enough.**", body = egret_core::http::ErrorBody),
-        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed", body = egret_core::http::ErrorBody),
-        (status = 409, description = "The execution has not finished. A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.", body = egret_core::http::ErrorBody),
+        (status = 404, description = "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.", body = egret_core::http::ErrorBody),
+        (status = 409, description = "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.", body = egret_core::http::ErrorBody),
         (status = 500, description = "Internal error", body = egret_core::http::ErrorBody),
     ),
 )]
@@ -1498,6 +1596,30 @@ async fn replay_execution(
 ) -> EgretResult<(StatusCode, Json<ExecutionDto>)> {
     egret_core::authz::require(&*st.pdp, &ctx, WF_MANAGE).await?;
     let source = st.executions.get(ctx.workspace_id.0, id).await?;
+    // **The same gate `start_flow_execution` passes**, and fix round 1 is what
+    // put it here: this handler used to check terminality and NOTHING else, so
+    // a replay ran a flow that was trashed, disabled, or both — every door
+    // start had just closed, walked around by the route beside it. A replay is
+    // a run of the flow, so it answers to the flow's current state, not to the
+    // state the flow was in when the execution being replayed started.
+    //
+    // **The frozen source is still what RUNS** (see this handler's doc); the
+    // flow row is consulted only for permission to run at all, and the returned
+    // row is deliberately discarded.
+    //
+    // An execution whose `flow_id` is NULL names no flow, so neither door can
+    // be asked. `executions_flow_id_fkey` is `ON DELETE SET NULL` and nothing
+    // in this crate issues that DELETE (`ExecutionRow::flow_id`'s own doc
+    // measures it: `DELETE FROM` over this crate's `src` returns 0, control
+    // `UPDATE workflow.` returns 10), so this arm is unreachable on the
+    // product's path — and it refuses rather than running, because a flow that
+    // has been hard-deleted is a stronger "this is gone" than a trashed one,
+    // not a weaker one.
+    let flow_id = source
+        .execution
+        .flow_id
+        .ok_or_else(|| Error::NotFound("flow".into()))?;
+    let _ = startable_flow(&st, ctx.workspace_id.0, flow_id).await?;
     // An unknown spelling is refused with the non-terminal ones rather than
     // treated as terminal: `from_wire` answers `None` only for a state this
     // build does not have, and guessing "finished" about it is the

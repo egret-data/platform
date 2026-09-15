@@ -1354,12 +1354,16 @@ async fn an_unauthenticated_caller_gets_401_from_every_write_route() {
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage"]).await;
     let flow = common::seed_flow(&db, ws, user, &runnable_source("anon-write"), "draft").await;
+    // **Linked to a real, open flow**, because `replay` gates on the flow's
+    // current state (fix round 1) and a flow-less execution is refused 404. An
+    // orphan fixture here would make the replay control below measure the
+    // orphan arm instead of the 401 this test is about.
     let done = insert_execution_with(
         &db,
         ws,
-        None,
+        Some(flow),
         "SUCCESS",
-        &runnable_source("anon-done"),
+        &runnable_source("anon-write"),
         serde_json::json!({}),
     )
     .await;
@@ -1430,12 +1434,15 @@ async fn workflow_read_alone_cannot_start_resume_or_replay() {
     common::grant(&db, ws, manager, &["workflow:manage"]).await;
 
     let flow = common::seed_flow(&db, ws, reader, &runnable_source("gate-write"), "draft").await;
+    // Linked, for `an_unauthenticated_caller_gets_401_from_every_write_route`'s
+    // stated reason: the `:manage` control must reach the 201, not the orphan
+    // 404.
     let done = insert_execution_with(
         &db,
         ws,
-        None,
+        Some(flow),
         "SUCCESS",
-        &runnable_source("gate-done"),
+        &runnable_source("gate-write"),
         serde_json::json!({}),
     )
     .await;
@@ -1491,9 +1498,9 @@ async fn writes_against_another_workspace_are_404_and_start_nothing() {
     let their_execution = insert_execution_with(
         &db,
         theirs,
-        None,
+        Some(their_flow),
         "SUCCESS",
-        &runnable_source("foreign-done"),
+        &runnable_source("foreign"),
         serde_json::json!({}),
     )
     .await;
@@ -1901,11 +1908,16 @@ async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:manage"]).await;
     let source = runnable_source("replay-state");
+    // One open flow behind every fixture: `replay` gates on the flow before it
+    // gates on the state (fix round 1), so a flow-less execution would be
+    // refused 404 and this test would measure the orphan arm rather than
+    // terminality.
+    let flow = common::seed_flow(&db, ws, user, &source, "draft").await;
     let mut unfinished = Vec::new();
     for state in ["CREATED", "RUNNING", "PAUSED", "RETRYING"] {
         unfinished.push((
             state,
-            insert_execution_with(&db, ws, None, state, &source, serde_json::json!({})).await,
+            insert_execution_with(&db, ws, Some(flow), state, &source, serde_json::json!({})).await,
         ));
     }
     let app = common::app(&db).await;
@@ -1933,7 +1945,8 @@ async fn a_replay_of_an_unfinished_execution_is_a_conflict() {
     for state in [
         "SUCCESS", "FAILED", "WARNING", "KILLED", "SKIPPED", "RETRIED",
     ] {
-        let id = insert_execution_with(&db, ws, None, state, &source, serde_json::json!({})).await;
+        let id =
+            insert_execution_with(&db, ws, Some(flow), state, &source, serde_json::json!({})).await;
         assert_eq!(
             common::post_no_body(
                 &app,
@@ -2062,4 +2075,271 @@ async fn an_unbounded_pause_is_not_ended_by_the_resume_route(pool: sqlx::PgPool)
         .status(),
         409
     );
+}
+
+// ── Fix round 1 ─────────────────────────────────────────────────────────────
+
+/// **Replay closes the same two doors start does.** Fix round 1's shipped
+/// over-acceptance, made into a test.
+///
+/// `replay_execution` used to check terminality and nothing else — measured as
+/// **0** occurrences of `deleted_at|disabled` inside that handler against **7**
+/// inside `start_flow_execution` — so on one and the same flow, `start`
+/// answered **404** and `replay` answered **201**, linking a fresh execution to
+/// a flow that was both trashed and disabled.
+///
+/// **Both routes are driven over the SAME fixtures**, in one loop, rather than
+/// two tests that could drift the way the two handlers did. A door added to one
+/// route and not the other fails here.
+#[tokio::test]
+async fn replay_closes_the_same_two_doors_start_does() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+
+    // Each case is one flow plus one SUCCESS execution of it: the same subject,
+    // reachable by both routes.
+    async fn case(
+        db: &Db,
+        ws: Uuid,
+        user: egret_core::UserId,
+        key: &str,
+        source: &str,
+        state: &str,
+        trash: bool,
+    ) -> (Uuid, Uuid) {
+        let flow = common::seed_flow(db, ws, user, source, state).await;
+        if trash {
+            sqlx::query("UPDATE workflow.flows SET deleted_at = now() WHERE id = $1")
+                .bind(flow)
+                .execute(&db.pool)
+                .await
+                .expect("trash the flow");
+        }
+        let execution =
+            insert_execution_with(db, ws, Some(flow), "SUCCESS", source, serde_json::json!({}))
+                .await;
+        let _ = key;
+        (flow, execution)
+    }
+
+    let (trashed_flow, trashed_ex) = case(
+        &db,
+        ws,
+        user,
+        "trashed",
+        &runnable_source("doors-trashed"),
+        "draft",
+        true,
+    )
+    .await;
+    let (column_flow, column_ex) = case(
+        &db,
+        ws,
+        user,
+        "column",
+        &runnable_source("doors-column"),
+        "disabled",
+        false,
+    )
+    .await;
+    let yaml_source = format!("{}disabled: true\n", runnable_source("doors-yaml"));
+    let (yaml_flow, yaml_ex) = case(&db, ws, user, "yaml", &yaml_source, "draft", false).await;
+    let (live_flow, live_ex) = case(
+        &db,
+        ws,
+        user,
+        "live",
+        &runnable_source("doors-live"),
+        "draft",
+        false,
+    )
+    .await;
+
+    let seeded = common::execution_count(&db, ws).await;
+    assert_eq!(seeded, 4, "one seeded execution per case");
+
+    let app = common::app(&db).await;
+    for (what, flow, execution, want) in [
+        ("in the trash", trashed_flow, trashed_ex, 404),
+        ("disabled by the state column", column_flow, column_ex, 409),
+        ("disabled by its own YAML", yaml_flow, yaml_ex, 409),
+    ] {
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+                user
+            )
+            .await
+            .status(),
+            want,
+            "start must refuse a flow {what}"
+        );
+        assert_eq!(
+            common::post_no_body(
+                &app,
+                &format!("/api/ws/{ws}/workflows/executions/{execution}/replay"),
+                user
+            )
+            .await
+            .status(),
+            want,
+            "replay must refuse a flow {what} with the SAME status start does"
+        );
+    }
+    assert_eq!(
+        common::execution_count(&db, ws).await,
+        seeded,
+        "six refusals, and not one of them created an execution"
+    );
+
+    // **An execution whose flow was hard-deleted names no flow, so neither door
+    // can be asked** — refused rather than run. Unreachable on the product's
+    // path (`ExecutionRow::flow_id`'s doc measures that this crate issues no
+    // `DELETE FROM`), which is exactly why it needs a test rather than a
+    // comment.
+    let orphan = insert_execution_with(
+        &db,
+        ws,
+        None,
+        "SUCCESS",
+        &runnable_source("doors-orphan"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{orphan}/replay"),
+            user
+        )
+        .await
+        .status(),
+        404,
+        "a replay whose flow no longer exists at all is refused, not run"
+    );
+
+    // **The control**, and it is what says the six refusals above are about the
+    // doors rather than about the routes: the identical pair of calls on a flow
+    // with every door open both answer 201.
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/flows/{live_flow}/executions"),
+            user
+        )
+        .await
+        .status(),
+        201
+    );
+    assert_eq!(
+        common::post_no_body(
+            &app,
+            &format!("/api/ws/{ws}/workflows/executions/{live_ex}/replay"),
+            user
+        )
+        .await
+        .status(),
+        201
+    );
+}
+
+/// **A start runs the DRAFT even when the flow has a published version.**
+///
+/// Until this test the three-site draft ruling (`worker::subflow::resolve`,
+/// `webhook_routes`, and this crate's start route) was pinned by **prose
+/// only**: no fixture anywhere had a published version at all, so nothing
+/// discriminated a draft read from a `flow_versions` read — every test would
+/// have passed unchanged against a handler that resolved through the version
+/// archive. Paragraphs go stale; this does not.
+///
+/// **The version is written with `FlowRepo::insert_version` + `set_live` rather
+/// than through `POST .../publish`**, and that is measured rather than lazy:
+/// `spec::registry` knows exactly three task types — `core.http`, `core.slack`
+/// and `core.log` — so `io.kestra.plugin.core.log.Log`, which is what every
+/// executable fixture in this file uses, cannot be published at all. The two
+/// repository calls leave precisely the row publish leaves: a `flow_versions`
+/// snapshot, `live_version_id` pointing at it, and `state = 'live'`.
+///
+/// The fixture's own control is asserted before the start, because a `set_live`
+/// that silently did nothing would make this test pass while proving nothing.
+#[tokio::test]
+async fn a_start_runs_the_draft_even_when_a_published_version_exists() {
+    let Some(db) = common::db().await else { return };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:manage"]).await;
+
+    let published = runnable_source("versioned");
+    let flow = common::seed_flow(&db, ws, user, &published, "draft").await;
+    let repo = egret_workflow::FlowRepo::new(db.clone());
+    let version = repo
+        .insert_version(
+            flow,
+            user,
+            &serde_json::json!({ "source": published, "plan": {}, "refs": {} }),
+            "the published one",
+        )
+        .await
+        .expect("insert version");
+    repo.set_live(flow, version.id).await.expect("set live");
+
+    // The draft moves on, and the two sources differ in a way an assertion can
+    // see. Same namespace and `flow_id`, so the row still matches.
+    let edited = format!(
+        "{published}  - id: b\n    type: io.kestra.plugin.core.log.Log\n    message: edited\n"
+    );
+    sqlx::query("UPDATE workflow.flows SET source = $2 WHERE id = $1")
+        .bind(flow)
+        .bind(&edited)
+        .execute(&db.pool)
+        .await
+        .expect("edit the draft");
+
+    // **The fixture's control**: the flow really is published, the snapshot
+    // really holds the OLD source, and the draft really holds the new one. All
+    // three before the route is called, so a start that answered with the draft
+    // for the wrong reason cannot pass.
+    let (live, snapshot_source, draft_source): (Option<Uuid>, String, String) = sqlx::query_as(
+        "SELECT f.live_version_id, v.snapshot->>'source', f.source \
+           FROM workflow.flows f JOIN workflow.flow_versions v ON v.id = f.live_version_id \
+          WHERE f.id = $1",
+    )
+    .bind(flow)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the published flow");
+    assert_eq!(live, Some(version.id), "the flow has a live version");
+    assert_eq!(
+        snapshot_source, published,
+        "the snapshot holds the OLD source"
+    );
+    assert_eq!(draft_source, edited, "the draft holds the NEW source");
+    assert_ne!(published, edited);
+
+    let app = common::app(&db).await;
+    let res = common::post_no_body(
+        &app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    // `state = 'live'` is not `'disabled'`, so the gate lets a published flow
+    // through -- asserted here rather than assumed, since `set_live` is what
+    // moves the column off `'draft'`.
+    assert_eq!(res.status(), 201, "a published flow is startable");
+    let dto = common::json(res).await;
+    assert_eq!(
+        dto["source"].as_str(),
+        Some(edited.as_str()),
+        "the start ran the DRAFT, not the live version's snapshot"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT source FROM workflow.executions WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(ws)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the started execution's frozen source");
+    assert_eq!(stored, edited, "and the row agrees with the response");
 }

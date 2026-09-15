@@ -25865,7 +25865,7 @@
             }
           },
           "400": {
-            "description": "The replayed execution's frozen source no longer parses or plans",
+            "description": "The **flow's current draft** does not parse, so whether it is disabled cannot be decided; or the replayed execution's frozen source no longer plans",
             "content": {
               "application/json": {
                 "schema": {
@@ -25895,7 +25895,7 @@
             }
           },
           "404": {
-            "description": "No such execution in this workspace, indistinguishably from one that never existed",
+            "description": "No such execution in this workspace, indistinguishably from one that never existed — **or its flow is in the trash, or no longer exists at all**. A replay is a run of the flow and answers to the flow's current state.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25905,7 +25905,7 @@
             }
           },
           "409": {
-            "description": "The execution has not finished. A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.",
+            "description": "The execution has not finished, **or its flow is disabled** (by the `state` column or by its own YAML's `disabled: true`). A replay of something still running would put two copies of one flow in flight with nothing recording that they are related — see the handler's doc for why no link column is available.",
             "content": {
               "application/json": {
                 "schema": {

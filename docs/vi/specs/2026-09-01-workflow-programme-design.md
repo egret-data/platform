@@ -194,7 +194,8 @@ là đồ trang trí.
 ```
 workflow.flows          draft: yaml nguồn + plan đã parse, state draft/live/disabled
 workflow.flow_versions  snapshot đóng băng: yaml + plan chuẩn hoá + tham chiếu ĐÃ GIẢI
-workflow.executions     một lần chạy, ghim flow_version_id; không bao giờ đọc draft
+workflow.executions     một lần chạy, mang bản sao đóng băng yaml nguồn của DRAFT
+                        -- không hề có cột flow_version_id (xem bên dưới)
 workflow.task_runs      một lần thử của một node: attempt, state, not_before, deadline_at, output
 workflow.triggers       cron/webhook, hàng claim được -- CHƯA DỰNG: W12 (xem
                         bảng ở mục 9). W6 ship trigger dưới dạng hàm thuần trên
@@ -203,6 +204,57 @@ workflow.triggers       cron/webhook, hàng claim được -- CHƯA DỰNG: W12 
 workflow.task_logs      dòng log, có retention_days như automation.schedules
                         -- CHƯA DỰNG: W11 (xem bảng ở mục 9)
 ```
+
+**Đính chính (W10 Task 5, vòng sửa 1): execution chạy DRAFT, và không hề có
+`flow_version_id`.** Dòng trên từng ghi *"một lần chạy, ghim `flow_version_id`;
+không bao giờ đọc draft"*. Cả hai vế đều sai, và vế về cột thì kiểm được bằng
+một lệnh: `flow_version_id` xuất hiện **0** lần trong `migrations/` (đối chứng
+dương: `flow_key`, tại `0134:32`). Thứ `workflow.executions` thật sự giữ là
+`source` — một bản sao đóng băng của `workflow.flows.source`, chụp lúc start.
+
+Có **ba** nơi khởi tạo execution và cả ba đều đọc hàng draft:
+
+| nơi | đọc gì |
+|---|---|
+| `worker::subflow::resolve` | `SELECT id, source FROM workflow.flows …` |
+| `webhook_routes::handle` | `SELECT id, source, state FROM workflow.flows …` |
+| `routes::start_flow_execution` (W10 Task 5) | `FlowRepo::get` → `flows.source` |
+
+Không đường chạy nào chạm vào `workflow.flow_versions`. Lý do ràng buộc đã ghi
+tại `worker::subflow::resolve` và không xét lại ở đây: **cha và con không được
+bất đồng về việc chúng đang ở phiên bản nào của thế giới**, và một resolver đọc
+version snapshot sẽ với tới gần như không gì cả (W6 Task 1 đẩy toàn bộ corpus
+qua chính đường create-then-publish của sản phẩm và đo được **16 trên 345** flow
+đạt tới live version; `driver::target_census` khẳng định con số đó mỗi lần
+chạy). Cái giá đúng như đoạn đó đã nêu: tác giả sửa draft là đổi luôn thứ mà một
+URL webhook đang sống — hay một nút start — sẽ chạy, không có bước publish nào ở
+giữa.
+
+**Tính cứng của §6.2 không suy suyển, nhưng bằng một CƠ CHẾ khác với điều câu
+trên đã tuyên.** Publish vẫn giải mọi tham chiếu và vẫn đóng băng id đã giải vào
+snapshot; thứ ngăn một start-từ-draft chạy với tham chiếu chưa giải không phải
+là "executor không bao giờ giữ tham chiếu chưa giải" — nó CÓ giữ — mà là handler
+từ chối. Đo được, và HẸP HƠN câu "start chỉ chạy được flow không có tham chiếu":
+
+* **Đúng một handler trên tám** trong `worker/handlers/` parse một trường spec
+  thành UUID và từ chối nếu không phải. `handlers::sql` trả lời *"`database` là
+  … không phải UUID. `publish` viết lại trường này thành connection id đã giải;
+  một execution mà nguồn còn giữ tên do tác giả viết là đã được khởi chạy từ
+  nguồn chưa giải"* (`handlers/sql.rs:294`). Nghĩa là flow có task `egret.sql`
+  với `database:` viết bằng tên vẫn **start được**, rồi **task đó fail** — chỗ
+  từ chối nằm ở task, không nằm ở route.
+* **Tham chiếu `Subflow` là trường hợp ngược lại và chạy bình thường**, đó chính
+  là lý do câu tổng quát kia sai: `subflow::resolve` giải theo
+  `(namespace, flowId)` trên bảng draft lúc chạy và không bao giờ đọc id đã viết
+  lại — và nó đóng đúng hai cánh cửa bằng SQL
+  (`AND deleted_at IS NULL AND state <> 'disabled'`) mà
+  `routes::startable_flow` đóng bằng Rust.
+
+`a_start_runs_the_draft_even_when_a_published_version_exists`
+(`tests/executions_routes.rs`) là thứ giữ cho đính chính này khỏi mốc: nó publish
+một version, sửa draft bên dưới, rồi khẳng định start chạy draft. Trước nó, không
+fixture nào trong cây có version đã publish, nên không gì phân biệt được đọc
+draft với đọc `flow_versions`.
 
 ### 6.2 Tham chiếu được giải lúc publish, không phải lúc chạy
 
