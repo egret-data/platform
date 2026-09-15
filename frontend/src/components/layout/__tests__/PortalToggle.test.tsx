@@ -1,7 +1,7 @@
 /**
  * PortalToggle tests
  *
- * Tests the two-way Admin↔Explorer toggle rendered inside Header.
+ * Tests the Explorer / Governance / Control Plane app switcher rendered inside Header.
  *
  * Header depends on:
  *   - AuthContext (me / platform_roles)
@@ -100,14 +100,79 @@ function renderHeader({ initialPath, me = ME_WITH_ROLE }: WrapperOptions) {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("PortalToggle – Control Plane portal", () => {
-  test("shows Explorer button when under /control-plane", () => {
-    renderHeader({ initialPath: "/control-plane" });
-    expect(screen.getByRole("button", { name: /explorer/i })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /control plane/i })).not.toBeInTheDocument();
+const withPerms = (permissions: string[]): Me => ({ ...ME_WITH_ROLE, platform_roles: [], permissions });
+
+describe("App switcher – which entries show", () => {
+  test("platform_admin sees Explorer, Governance and Control Plane", () => {
+    renderHeader({ initialPath: "/explore/my-workspace" });
+    expect(screen.getByRole("button", { name: "Explorer" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Governance" })).toHaveAttribute("href", "/governance");
+    expect(screen.getByRole("link", { name: "Control Plane" })).toHaveAttribute("href", "/control-plane");
   });
 
-  test("Explorer button navigates to stored workspace", async () => {
+  test("a policy-only user sees Governance but not Control Plane", () => {
+    renderHeader({ initialPath: "/explore/my-workspace", me: withPerms(["policy:read"]) });
+    expect(screen.getByRole("link", { name: "Governance" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Control Plane" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Explorer" })).toBeInTheDocument();
+  });
+
+  test("a tag-only user sees Governance", () => {
+    renderHeader({ initialPath: "/explore/my-workspace", me: withPerms(["tag:read"]) });
+    expect(screen.getByRole("link", { name: "Governance" })).toBeInTheDocument();
+  });
+
+  test("an infra-only user sees Control Plane but not Governance", () => {
+    renderHeader({ initialPath: "/explore/my-workspace", me: withPerms(["engine:read"]) });
+    expect(screen.getByRole("link", { name: "Control Plane" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Governance" })).not.toBeInTheDocument();
+  });
+
+  test("a user with neither app sees no switcher at all", () => {
+    renderHeader({ initialPath: "/explore/my-workspace", me: withPerms([]) });
+    expect(screen.queryByRole("link", { name: "Control Plane" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Governance" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Explorer" })).not.toBeInTheDocument();
+  });
+});
+
+describe("App switcher – active entry follows the URL", () => {
+  test.each([
+    ["/explore/my-workspace", "Explorer"],
+    ["/governance/policies", "Governance"],
+    ["/control-plane/users", "Control Plane"],
+  ])("on %s only %s is current", (initialPath, active) => {
+    renderHeader({ initialPath });
+    const entries = {
+      Explorer: screen.getByRole("button", { name: "Explorer" }),
+      Governance: screen.getByRole("link", { name: "Governance" }),
+      "Control Plane": screen.getByRole("link", { name: "Control Plane" }),
+    };
+    for (const [name, el] of Object.entries(entries)) {
+      if (name === active) expect(el).toHaveAttribute("aria-current", "page");
+      else expect(el).not.toHaveAttribute("aria-current");
+    }
+  });
+
+  test("the workspace switcher shows only in Explorer", () => {
+    renderHeader({ initialPath: "/governance/policies" });
+    expect(screen.queryByLabelText("Workspace")).not.toBeInTheDocument();
+  });
+});
+
+describe("App switcher – Explorer navigation", () => {
+  test("Explorer navigates to the stored workspace from Governance", async () => {
+    localStorage.setItem("egret:last-workspace", "my-workspace");
+    const user = userEvent.setup();
+    renderHeader({ initialPath: "/governance/policies" });
+
+    await user.click(screen.getByRole("button", { name: /explorer/i }));
+
+    expect(screen.getByTestId("loc").textContent).toBe("/explore/my-workspace");
+    localStorage.removeItem("egret:last-workspace");
+  });
+
+  test("Explorer navigates to the stored workspace from Control Plane", async () => {
     localStorage.setItem("egret:last-workspace", "my-workspace");
     const user = userEvent.setup();
     renderHeader({ initialPath: "/control-plane" });
@@ -118,7 +183,7 @@ describe("PortalToggle – Control Plane portal", () => {
     localStorage.removeItem("egret:last-workspace");
   });
 
-  test("Explorer button falls back to / when no stored workspace", async () => {
+  test("Explorer falls back to / when no stored workspace", async () => {
     localStorage.removeItem("egret:last-workspace");
     const user = userEvent.setup();
     renderHeader({ initialPath: "/control-plane" });
@@ -126,22 +191,6 @@ describe("PortalToggle – Control Plane portal", () => {
     await user.click(screen.getByRole("button", { name: /explorer/i }));
 
     expect(screen.getByTestId("loc").textContent).toBe("/");
-  });
-});
-
-describe("PortalToggle – Explorer portal", () => {
-  test("shows Control Plane link when under /explore/:workspace and user has a platform role", () => {
-    renderHeader({ initialPath: "/explore/my-workspace" });
-    expect(screen.getByRole("link", { name: /control plane/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /explorer/i })).not.toBeInTheDocument();
-  });
-
-  test("does NOT show Control Plane link when user has no platform roles", () => {
-    renderHeader({
-      initialPath: "/explore/my-workspace",
-      me: { ...ME_WITH_ROLE, platform_roles: [] },
-    });
-    expect(screen.queryByRole("link", { name: /control plane/i })).not.toBeInTheDocument();
   });
 
   test("visiting /explore/:workspace persists workspace to localStorage", async () => {

@@ -56,6 +56,11 @@ describe("Header on a narrow viewport", () => {
     // control that is merely narrower, not a control that is gone.
     expect(screen.queryByText("Control Plane")).toBeNull();
     expect(screen.getByRole("link", { name: "Control Plane" })).toBeInTheDocument();
+    // Same for the other two switcher entries.
+    expect(screen.queryByText("Governance")).toBeNull();
+    expect(screen.getByRole("link", { name: "Governance" })).toBeInTheDocument();
+    expect(screen.queryByText("Explorer")).toBeNull();
+    expect(screen.getByRole("button", { name: "Explorer" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Toggle theme" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "User menu" })).toBeInTheDocument();
   });
@@ -75,6 +80,8 @@ describe("Header on a narrow viewport", () => {
     renderHeader();
     expect(screen.getByText("Egret")).toBeInTheDocument();
     expect(screen.getByText("Control Plane")).toBeInTheDocument();
+    expect(screen.getByText("Governance")).toBeInTheDocument();
+    expect(screen.getByText("Explorer")).toBeInTheDocument();
     expect(screen.getByLabelText("Workspace").className).toContain("w-56");
   });
 });
