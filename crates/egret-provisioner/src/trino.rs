@@ -1273,86 +1273,29 @@ impl EngineProvisioner for TrinoProvisioner {
         Ok(())
     }
     async fn delete(&self, namespace: &str, name: &str) -> anyhow::Result<()> {
-        let _ = self
-            .kube
-            .delete(
-                "apps/v1",
-                "Deployment",
-                namespace,
-                &format!("{name}-coordinator"),
-            )
-            .await;
-        let _ = self
-            .kube
-            .delete(
-                "apps/v1",
-                "Deployment",
-                namespace,
-                &format!("{name}-worker"),
-            )
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Service", namespace, &format!("{name}-trino"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-config"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "ConfigMap", namespace, &format!("{name}-catalogs"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-env"))
-            .await;
-        // Best-effort delete the coordinator keystore + ingress TLS Secrets
-        // (managed by egret; previously orphaned on delete).
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-tls"))
-            .await;
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-ingress-tls"))
-            .await;
-        // Best-effort delete the image pull Secret (managed by egret).
-        let _ = self
-            .kube
-            .delete("v1", "Secret", namespace, &format!("{name}-pull"))
-            .await;
-        // Best-effort; harmless when no Ingress was ever applied.
-        let _ = self
-            .kube
-            .delete(
-                "networking.k8s.io/v1",
-                "Ingress",
-                namespace,
-                &format!("{name}-trino"),
-            )
-            .await;
-        // Best-effort delete BOTH autoscalers regardless of mode; harmless when
-        // the object was never applied.
-        let _ = self
-            .kube
-            .delete(
+        // Every object egret applies for a Trino engine, including the ones only
+        // some engines have (TLS/ingress/pull secrets, Ingress, both autoscalers):
+        // an object that was never applied is a 404, which `KubeClient::delete`
+        // treats as success. Anything else is an error the caller must see.
+        let objects = [
+            ("apps/v1", "Deployment", format!("{name}-coordinator")),
+            ("apps/v1", "Deployment", format!("{name}-worker")),
+            ("v1", "Service", format!("{name}-trino")),
+            ("v1", "ConfigMap", format!("{name}-config")),
+            ("v1", "ConfigMap", format!("{name}-catalogs")),
+            ("v1", "Secret", format!("{name}-env")),
+            ("v1", "Secret", format!("{name}-tls")),
+            ("v1", "Secret", format!("{name}-ingress-tls")),
+            ("v1", "Secret", format!("{name}-pull")),
+            ("networking.k8s.io/v1", "Ingress", format!("{name}-trino")),
+            (
                 "autoscaling/v2",
                 "HorizontalPodAutoscaler",
-                namespace,
-                &format!("{name}-worker"),
-            )
-            .await;
-        let _ = self
-            .kube
-            .delete(
-                "keda.sh/v1alpha1",
-                "ScaledObject",
-                namespace,
-                &format!("{name}-worker"),
-            )
-            .await;
-        Ok(())
+                format!("{name}-worker"),
+            ),
+            ("keda.sh/v1alpha1", "ScaledObject", format!("{name}-worker")),
+        ];
+        crate::kube_client::delete_objects(&*self.kube, namespace, &objects).await
     }
 }
 
@@ -2654,5 +2597,26 @@ mod tests {
         p.delete("egret-engines", "demo").await.unwrap();
         let d = kube.deleted.lock().unwrap();
         assert_eq!(d.len(), 12); // 2 deployments, service, 2 configmaps, env secret, tls secret, ingress-tls secret, pull secret, ingress, hpa, scaledobject
+    }
+
+    /// D6: every `let _ =` used to swallow a 403/timeout, so the row was deleted
+    /// and the cluster orphaned. A non-404 failure must now surface — after the
+    /// other objects have still been deleted.
+    #[tokio::test]
+    async fn delete_reports_a_failed_object_after_attempting_the_rest() {
+        use crate::kube_client::FakeKube;
+        let kube = std::sync::Arc::new(FakeKube::default());
+        kube.fail_delete("Deployment", "demo-coordinator", "forbidden");
+        let p = TrinoProvisioner::new(kube.clone());
+        let err = p
+            .delete("egret-engines", "demo")
+            .await
+            .expect_err("a non-404 failure must surface");
+        assert!(format!("{err:#}").contains("Deployment/demo-coordinator: forbidden"));
+        assert_eq!(
+            kube.deleted.lock().unwrap().len(),
+            11,
+            "the other 11 objects are deleted"
+        );
     }
 }
