@@ -32,7 +32,7 @@ const TYPES = [
 type PolicyType = (typeof TYPES)[number]["key"];
 
 /**
- * Control Plane → Policy profile detail (drill-down L2).
+ * Governance → Policies → a profile (drill-down L2).
  *
  * A card-less identity header (name, type, policy version, engine bindings)
  * with the seed / config actions, then one searchable, paginated policy table
@@ -74,7 +74,7 @@ export default function ProfileDetailPage() {
   return (
     <div className="space-y-5">
       <Link
-        to="/control-plane/policies"
+        to="/governance/policies"
         className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="h-4 w-4" />
@@ -188,7 +188,7 @@ export default function ProfileDetailPage() {
               listFrom={profile.tag_service}
               label="Tag"
               showType
-              newHref={`/control-plane/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
+              newHref={`/governance/policies/${encodeURIComponent(service)}/access/new?scope=tag`}
             />
           </TabsContent>
         )}
@@ -273,12 +273,12 @@ function PolicyTypeTable({
   const goToNew = () =>
     navigate(
       newHref ??
-        `/control-plane/policies/${encodeURIComponent(service)}/${type ?? "access"}/new`,
+        `/governance/policies/${encodeURIComponent(service)}/${type ?? "access"}/new`,
     );
   // Always edit through the main profile (`service`) with the row's own type, so
   // a tag policy loads in the By-tag editor that created it.
   const editPath = (id: number, rowType: string) =>
-    `/control-plane/policies/${encodeURIComponent(service)}/${rowType}/${id}`;
+    `/governance/policies/${encodeURIComponent(service)}/${rowType}/${id}`;
 
   // The policy name links to the editor, so there's no separate Edit action —
   // Delete is the only per-row button (mirrors the other list pages).

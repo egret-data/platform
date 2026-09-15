@@ -73,7 +73,13 @@ describe("ProfileDetailPage", () => {
     wrap(<ProfileDetailPage />);
     await screen.findByText("allow-analysts");
     await user.click(await screen.findByRole("button", { name: /new policy/i }));
-    expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino-prod/access/new");
+    expect(navigate).toHaveBeenCalledWith("/governance/policies/trino-prod/access/new");
+  });
+
+  it("links back to the Governance policies landing", async () => {
+    wrap(<ProfileDetailPage />);
+    await screen.findByText("allow-analysts");
+    expect(screen.getByRole("link", { name: "Policies" })).toHaveAttribute("href", "/governance/policies");
   });
 
   it("calls setPolicyEnabled when the enable toggle is clicked", async () => {

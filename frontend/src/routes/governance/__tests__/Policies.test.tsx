@@ -47,7 +47,7 @@ describe("Policies page (profiles landing)", () => {
   it("renders each profile as a link to its detail page", async () => {
     wrap(<Policies />);
     const link = await screen.findByRole("link", { name: "trino" });
-    expect(link).toHaveAttribute("href", "/control-plane/policies/trino");
+    expect(link).toHaveAttribute("href", "/governance/policies/trino");
   });
 
   it("renders the profile type badge", async () => {

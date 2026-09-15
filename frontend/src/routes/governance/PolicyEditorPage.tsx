@@ -266,7 +266,7 @@ function toFormState(kind: PolicyKind, service: string, body: Record<string, any
 }
 
 /**
- * Control Plane → full-page policy editor. Replaces the three modal dialogs
+ * Governance → Policies → full-page policy editor. Replaces the three modal dialogs
  * (`AccessPolicyDialog`/`MaskingPolicyDialog`/`RowFilterPolicyDialog`) with a
  * single Engine-style page handling all three policy kinds — create + edit.
  *
@@ -369,7 +369,7 @@ export default function PolicyEditorPage() {
     ? leafDef.accessTypeRestrictions
     : (def.data?.accessTypes?.map((a) => a.name) ?? DEFAULT_ACCESS_TYPES);
 
-  const profileUrl = `/control-plane/policies/${encodeURIComponent(service)}`;
+  const profileUrl = `/governance/policies/${encodeURIComponent(service)}`;
 
   // In Tag mode the wire `kind` becomes "tag-<kind>" and a `tag` field
   // carries the selected tag name; `service` stays the trino profile (the BE

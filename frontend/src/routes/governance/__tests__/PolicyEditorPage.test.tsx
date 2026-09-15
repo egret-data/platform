@@ -132,7 +132,7 @@ describe("PolicyEditorPage", () => {
     expect(updatePolicy).not.toHaveBeenCalled();
 
     await waitFor(() =>
-      expect(navigate).toHaveBeenCalledWith("/control-plane/policies/trino"),
+      expect(navigate).toHaveBeenCalledWith("/governance/policies/trino"),
     );
   });
 

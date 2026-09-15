@@ -181,6 +181,11 @@ describe("Classifications", () => {
     expect(screen.getByText("internal")).toBeInTheDocument();
   });
 
+  test("links each tag name to its Governance detail page", async () => {
+    renderPage();
+    expect(await screen.findByRole("link", { name: "PII" })).toHaveAttribute("href", "/governance/classifications/t1");
+  });
+
   test('"New tag" opens a create dialog and submitting calls useCreateTag with the entered fields', async () => {
     const user = userEvent.setup();
     const mutateAsync = vi.fn().mockResolvedValue(TAGS[0]);

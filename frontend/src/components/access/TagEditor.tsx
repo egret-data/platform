@@ -144,7 +144,7 @@ export function TagEditor({ ws, kind, id }: { ws: string; kind: string; id: stri
 
       {catalog.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No tags defined — create them in Control Plane → Classifications.
+          No tags defined — create them in Governance → Classifications.
         </p>
       ) : (
         <AddTagSelect ws={ws} kind={kind} id={id} available={available} />

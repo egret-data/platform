@@ -58,7 +58,7 @@ const ACCESS_LAYERS: {
     icon: ShieldCheck,
     name: "Data plane",
     desc: "Column masking & row filters by tag (Ranger), enforced in the query engine.",
-    to: "/control-plane/policies",
+    to: "/governance/policies",
     cta: "Policies",
   },
 ];

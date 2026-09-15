@@ -48,7 +48,7 @@ import { TrinoConfigDialog } from "@/components/policy/TrinoConfigDialog";
 export const profilesQueryKey = ["control-plane", "profiles"] as const;
 
 /**
- * Control Plane → Data governance → Policies (drill-down L1: profiles landing).
+ * Governance → Policies (drill-down L1: profiles landing).
  *
  * Lists Ranger policy profiles on the shared card-less list scaffold used across
  * the Control Plane (header → SummaryStrip → bordered FilterableTable + facet).
@@ -104,7 +104,7 @@ export default function Policies() {
       value: (p) => p.name,
       cell: (p) => (
         <Link
-          to={`/control-plane/policies/${encodeURIComponent(p.name)}`}
+          to={`/governance/policies/${encodeURIComponent(p.name)}`}
           className="font-medium text-primary hover:underline"
         >
           {p.name}

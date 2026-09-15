@@ -84,6 +84,12 @@ describe("TagDetail", () => {
     expect(screen.getByLabelText("Key")).toHaveAttribute("readonly");
   });
 
+  test("links back to Governance → Classifications", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "PII" });
+    expect(screen.getByRole("link", { name: "Classifications" })).toHaveAttribute("href", "/governance/classifications");
+  });
+
   test("picking a role and clicking Add persists the clearance", async () => {
     const user = userEvent.setup();
     renderPage();

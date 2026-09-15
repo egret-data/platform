@@ -40,7 +40,7 @@ function toIso(local: string): string | undefined {
 }
 
 /**
- * Control Plane → Data Governance → Audit log.
+ * Control Plane → System → Audit log.
  *
  * Every authorization decision and grant change, newest first. Reads the
  * platform-admin-only `GET /control-plane/audit` keyset-paginated feed, with
