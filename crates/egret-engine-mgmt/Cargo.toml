@@ -101,3 +101,5 @@ k8s-openapi.workspace = true
 # depend on pem 3, so 4 only adds a second copy.
 pem = "3"
 x509-parser = "0.18"
+# Reads back the log line the database-error backstop writes (tests/error_mapping.rs).
+tracing-subscriber.workspace = true
