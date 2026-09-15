@@ -7,6 +7,11 @@ use uuid::Uuid;
 
 use crate::error::EngineMgmtError;
 
+/// Stored lifecycle status written when an engine delete starts. A row still in
+/// this state means the cluster delete or the row delete did not finish, and the
+/// delete can be retried.
+pub const ENGINE_STATUS_DELETING: &str = "deleting";
+
 /// A provisioned query engine (control-plane, platform-global) wired to a
 /// warehouse. `spec` holds the desired provisioning parameters; `status` tracks
 /// the last-known lifecycle phase.

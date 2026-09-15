@@ -36,6 +36,8 @@ use uuid::Uuid;
 
 use egret_core::http::ErrorBody;
 
+use crate::dependents::DeleteEngineOutcome;
+use crate::store::ENGINE_STATUS_DELETING;
 use crate::EngineHttpError as CpError;
 use crate::EngineMgmtState as CpState;
 use crate::{Engine, EngineCatalog};
@@ -3531,37 +3533,47 @@ async fn get_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    let status = match st.engine_provisioner.as_ref() {
-        Some(prov) => match prov
-            .status(&engine.r#type, &engine.namespace, &engine.name)
-            .await
-        {
-            Ok(s) => EngineStatusDto {
-                phase: s.phase,
-                message: s.message,
-                pods: s
-                    .pods
-                    .into_iter()
-                    .map(|p| EnginePodDto {
-                        name: p.name,
-                        phase: p.phase,
-                        ready: p.ready,
-                    })
-                    .collect(),
+    // A `deleting` row is the retry state of an unfinished delete; the live
+    // status of a half-deleted cluster would hide it, so it wins.
+    let status = if engine.status == ENGINE_STATUS_DELETING {
+        EngineStatusDto {
+            phase: engine.status.clone(),
+            message: Some("a previous delete did not finish; retry the delete".into()),
+            pods: vec![],
+        }
+    } else {
+        match st.engine_provisioner.as_ref() {
+            Some(prov) => match prov
+                .status(&engine.r#type, &engine.namespace, &engine.name)
+                .await
+            {
+                Ok(s) => EngineStatusDto {
+                    phase: s.phase,
+                    message: s.message,
+                    pods: s
+                        .pods
+                        .into_iter()
+                        .map(|p| EnginePodDto {
+                            name: p.name,
+                            phase: p.phase,
+                            ready: p.ready,
+                        })
+                        .collect(),
+                },
+                // A live-status read failure shouldn't hide the engine; fall back to
+                // the recorded row status with the error as a message.
+                Err(msg) => EngineStatusDto {
+                    phase: engine.status.clone(),
+                    message: Some(msg),
+                    pods: vec![],
+                },
             },
-            // A live-status read failure shouldn't hide the engine; fall back to
-            // the recorded row status with the error as a message.
-            Err(msg) => EngineStatusDto {
+            None => EngineStatusDto {
                 phase: engine.status.clone(),
-                message: Some(msg),
+                message: None,
                 pods: vec![],
             },
-        },
-        None => EngineStatusDto {
-            phase: engine.status.clone(),
-            message: None,
-            pods: vec![],
-        },
+        }
     };
     Ok(Json(EngineDetailDto {
         engine: engine.into(),
@@ -3874,25 +3886,85 @@ async fn delete_engine(
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
-    // Collect any minted Catalog Clients referenced by the catalog rows before the
-    // engine (and its cascading catalogs) are removed.
-    let cats = st
-        .engine_mgmt
-        .list_engine_catalogs(engine.id)
-        .await
-        .unwrap_or_default();
-    if let Some(prov) = st.engine_provisioner.as_ref() {
-        prov.delete(&engine.r#type, &engine.namespace, &engine.name)
-            .await
-            .map_err(|e| CpError::BadRequest(format!("engine delete failed: {e}")))?;
+
+    // 1. Preflight. Nothing is touched while a user-authored asset still sits on
+    //    one of this engine's workspace connections: the row delete would fail on
+    //    it (endpoints RESTRICT, alerts CHECK) or silently destroy it (datasets).
+    let dependents = st.engine_mgmt.engine_dependents(id, None).await?;
+    if !dependents.is_empty() {
+        return Err(CpError::HasDependents(dependents));
     }
-    st.engine_mgmt.delete_engine(id).await?; // CASCADE removes engine_catalogs
-    for c in cats {
-        if let Some(cid) = client_row_id(&c.config) {
-            let _ = st.catalog.revoke_client(cid).await;
+
+    // 2. Same rule as create: without Kubernetes the cluster cannot be removed,
+    //    and deleting only the row would orphan it.
+    let Some(prov) = st.engine_provisioner.as_ref() else {
+        return Err(CpError::BadRequest("kubernetes not configured".into()));
+    };
+
+    // Catalog client ids, read before the catalogs cascade away with the row.
+    let cats = st.engine_mgmt.list_engine_catalogs(engine.id).await?;
+
+    // 3. Visible, retryable state for everything below that can fail.
+    st.engine_mgmt
+        .set_engine_status(id, ENGINE_STATUS_DELETING)
+        .await?;
+
+    // 4. The cluster. A 404 is already success inside the provisioners.
+    if let Err(msg) = prov
+        .delete(&engine.r#type, &engine.namespace, &engine.name)
+        .await
+    {
+        tracing::error!(engine = %engine.name, error = %msg, "engine cluster delete failed; row left deleting");
+        return Err(CpError::ClusterDeleteFailed(msg));
+    }
+
+    // 5. The row, re-checking dependents under locks (a dependent created since
+    //    step 1 answers 409; the row stays `deleting` and a retry finishes).
+    match st.engine_mgmt.delete_engine_unless_blocked(id).await? {
+        DeleteEngineOutcome::Deleted | DeleteEngineOutcome::NotFound => {}
+        DeleteEngineOutcome::Blocked(dependents) => {
+            return Err(CpError::HasDependents(dependents));
         }
     }
+
+    // 6. Cross-seam cleanup after commit: logged, never returned.
+    cleanup_deleted_engine(&st, &engine, &cats).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// What an engine leaves outside its own tables. Each seam owns its own pool, so
+/// none of this can share the row delete's transaction; a failure here is logged
+/// and leaves an orphan, never a half-deleted engine.
+async fn cleanup_deleted_engine(st: &CpState, engine: &Engine, cats: &[EngineCatalog]) {
+    // Only clients we minted; `mintedClient: false` belongs to someone else.
+    for c in cats {
+        let Some(cid) = client_row_id(&c.config) else {
+            continue;
+        };
+        if !is_minted_client(&c.config) {
+            continue;
+        }
+        if let Err(e) = st.catalog.revoke_client(cid).await {
+            tracing::warn!(engine = %engine.name, client = %cid, error = %e, "revoke engine catalog client failed");
+        }
+    }
+    // Secrets egret generated for this engine. `tls_cert_secret_ref` is an
+    // admin-provided secret and is deliberately not here.
+    for sid in [
+        engine.delegator_secret_id,
+        engine.root_secret_id,
+        engine.tls_secret_id,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        match st.secrets.delete(None, sid).await {
+            Ok(()) | Err(egret_secrets::SecretsError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(engine = %engine.name, secret = %sid, error = %e, "delete engine secret failed")
+            }
+        }
+    }
 }
 
 /// `POST /engines/{id}/restart` — roll the engine's pods without changing config

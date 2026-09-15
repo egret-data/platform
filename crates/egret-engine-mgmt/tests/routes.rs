@@ -380,10 +380,16 @@ async fn seed_unprovisioned_warehouse(f: &Fixture) -> Uuid {
 /// hold onto the fake and inspect it after the request completes). The
 /// kube-shaped ops (exec/pod-logs/coordinator-request) are NOT on this trait —
 /// `egret_provisioner::kube_client::FakeKube` covers those, passed separately as the
-/// fixture's `kube` field.
+/// fixture's `kube` field. `deleted` records each successful `delete` as
+/// `(kind, namespace, name)`; `delete_error`, when `Some`, makes `delete` fail
+/// with that message instead (and record nothing) — for the 502/retry tests.
 #[derive(Clone, Default)]
 struct FakeEnginePort {
     restarted: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// `(kind, namespace, name)` per successful `delete`.
+    deleted: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    /// When `Some`, `delete` fails with this message and records nothing.
+    delete_error: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -410,7 +416,14 @@ impl EngineProvisioningPort for FakeEnginePort {
     async fn update(&self, _req: &egret_engine_mgmt_api::EngineSpec) -> Result<(), String> {
         Ok(())
     }
-    async fn delete(&self, _kind: &str, _ns: &str, _name: &str) -> Result<(), String> {
+    async fn delete(&self, kind: &str, ns: &str, name: &str) -> Result<(), String> {
+        if let Some(msg) = self.delete_error.lock().unwrap().clone() {
+            return Err(msg);
+        }
+        self.deleted
+            .lock()
+            .unwrap()
+            .push((kind.to_string(), ns.to_string(), name.to_string()));
         Ok(())
     }
     async fn restart(&self, _kind: &str, ns: &str, name: &str) -> Result<(), String> {
@@ -2672,5 +2685,454 @@ async fn workspace_admin_assign_list_unassign_engine() {
         materialized_count(&f, ws, engine_id).await,
         0,
         "unassign removed the materialized connection"
+    );
+}
+
+// ── engine delete (SP1 Part A) ─────────────────────────────────────────────────
+
+/// The stored lifecycle status, or `None` when the row is gone.
+async fn engine_status(f: &Fixture, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT status FROM engine_mgmt.engines WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&f.db.pool)
+        .await
+        .expect("read engine status")
+}
+
+/// The materialized connection for (workspace, engine).
+async fn materialized_db_id(f: &Fixture, ws: Uuid, engine_id: Uuid) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM query.databases WHERE workspace_id = $1 AND engine_id = $2")
+        .bind(ws)
+        .bind(engine_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .expect("materialized connection")
+}
+
+/// `PUT /engines/{id}/workspaces` → 200.
+async fn put_workspaces(f: &Fixture, token: &str, engine_id: Uuid, ws: &[Uuid]) {
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/workspaces"),
+            token,
+            Some(serde_json::json!({ "workspaceIds": ws })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "put workspaces; body={j}");
+}
+
+/// Seed one blocking dependent of `kind` (a `dependents::EngineDependentKind`
+/// wire name) called `name` on connection `database_id`.
+async fn seed_dependent(f: &Fixture, ws: Uuid, database_id: Uuid, kind: &str, name: &str) {
+    match kind {
+        "dataapi_endpoint" | "dataapi_endpoint_trashed" => {
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO dataapi.endpoints (workspace_id, name, path, method, database_id, statements, state) \
+                 VALUES ($1, $2, $3, 'GET', $4, \
+                         jsonb_build_array(jsonb_build_object('name', 'main', 'sql', 'SELECT 1')), 'draft') \
+                 RETURNING id",
+            )
+            .bind(ws)
+            .bind(name)
+            .bind(format!("/{name}"))
+            .bind(database_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .expect("seed endpoint");
+            if kind == "dataapi_endpoint_trashed" {
+                sqlx::query("UPDATE dataapi.endpoints SET deleted_at = now() WHERE id = $1")
+                    .bind(id)
+                    .execute(&f.db.pool)
+                    .await
+                    .expect("trash endpoint");
+            }
+        }
+        "schedule" => {
+            sqlx::query(
+                "INSERT INTO automation.schedules (workspace_id, type, name, crontab, database_id, sql, validator_type) \
+                 VALUES ($1, 'alert', $2, '0 9 * * *', $3, 'SELECT 1', 'not_null')",
+            )
+            .bind(ws)
+            .bind(name)
+            .bind(database_id)
+            .execute(&f.db.pool)
+            .await
+            .expect("seed alert");
+        }
+        "dataset" => {
+            sqlx::query(
+                "INSERT INTO analytics.datasets (workspace_id, database_id, name, table_name) \
+                 VALUES ($1, $2, $3, 't')",
+            )
+            .bind(ws)
+            .bind(database_id)
+            .bind(name)
+            .execute(&f.db.pool)
+            .await
+            .expect("seed dataset");
+        }
+        other => panic!("unknown dependent kind {other}"),
+    }
+}
+
+/// D1/D2/D8: one blocking dependent → 409 naming it; the cluster and the row untouched.
+async fn assert_engine_delete_blocked_by(kind: &str) {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_blocked", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+    let ws = seed_workspace(&f).await;
+    put_workspaces(&f, &token, engine_id, &[ws]).await;
+    let db = materialized_db_id(&f, ws, engine_id).await;
+    seed_dependent(&f, ws, db, kind, "orders-by-day").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "kind={kind}; body={j}");
+    assert_eq!(j["code"], "engine_has_dependents", "body={j}");
+    let deps = j["dependents"].as_array().expect("dependents array");
+    assert_eq!(deps.len(), 1, "body={j}");
+    assert_eq!(deps[0]["workspaceId"], ws.to_string(), "body={j}");
+    assert_eq!(deps[0]["kind"], kind, "body={j}");
+    assert_eq!(deps[0]["count"], 1, "body={j}");
+    assert_eq!(
+        deps[0]["sample"],
+        serde_json::json!(["orders-by-day"]),
+        "body={j}"
+    );
+    assert!(
+        port.deleted.lock().unwrap().is_empty(),
+        "the cluster must not be touched"
+    );
+    assert_eq!(
+        engine_status(&f, engine_id).await.as_deref(),
+        Some("provisioning"),
+        "the row must survive with its status unchanged"
+    );
+    assert_eq!(
+        materialized_count(&f, ws, engine_id).await,
+        1,
+        "the connection survives"
+    );
+}
+
+#[tokio::test]
+async fn delete_engine_is_blocked_by_a_data_api_endpoint() {
+    assert_engine_delete_blocked_by("dataapi_endpoint").await;
+}
+
+#[tokio::test]
+async fn delete_engine_is_blocked_by_a_trashed_data_api_endpoint() {
+    assert_engine_delete_blocked_by("dataapi_endpoint_trashed").await;
+}
+
+#[tokio::test]
+async fn delete_engine_is_blocked_by_a_sql_alert() {
+    assert_engine_delete_blocked_by("schedule").await;
+}
+
+#[tokio::test]
+async fn delete_engine_is_blocked_by_a_dataset() {
+    assert_engine_delete_blocked_by("dataset").await;
+}
+
+/// D7: create refuses without Kubernetes, so delete must too — deleting only the
+/// row would orphan the cluster.
+#[tokio::test]
+async fn delete_engine_without_kubernetes_is_400_and_keeps_the_row() {
+    let Some(f) = setup_full(None, None).await else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_nokube", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={j}");
+    assert!(
+        j["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("kubernetes not configured"),
+        "body={j}"
+    );
+    assert_eq!(
+        engine_status(&f, engine_id).await.as_deref(),
+        Some("provisioning")
+    );
+}
+
+/// D4/D5/D6: a failed cluster delete is a 502 with the cause, leaves a visible
+/// `deleting` row, and the same request succeeds once the cluster answers.
+#[tokio::test]
+async fn delete_engine_cluster_failure_is_502_deleting_and_retryable() {
+    let port = FakeEnginePort::default();
+    *port.delete_error.lock().unwrap() = Some("apiserver: 500 Internal Server Error".into());
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_retry", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+    let uri = format!("/engines/{engine_id}");
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "body={j}");
+    assert_eq!(j["code"], "engine_cluster_delete_failed", "body={j}");
+    assert!(
+        j["error"].as_str().unwrap_or("").contains("apiserver: 500"),
+        "body={j}"
+    );
+    assert_eq!(
+        engine_status(&f, engine_id).await.as_deref(),
+        Some("deleting")
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("GET", &uri, &token, None))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={j}");
+    assert_eq!(
+        j["status"]["phase"], "deleting",
+        "stored status must not be masked; body={j}"
+    );
+
+    *port.delete_error.lock().unwrap() = None;
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req("DELETE", &uri, &token, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "retry succeeds");
+    assert_eq!(
+        engine_status(&f, engine_id).await,
+        None,
+        "row gone after the retry"
+    );
+}
+
+/// Happy path: 204, cluster deleted once, engine-generated secrets gone, the
+/// minted catalog client revoked, a client we did NOT mint left alone.
+#[tokio::test]
+async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
+    let port = FakeEnginePort::default();
+    let Some(f) = setup_full(
+        Some(Arc::new(port.clone())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_ok", true).await;
+    let wh_id = seed_provisioned_warehouse(&f).await;
+    let name = format!("trino-{}", Uuid::new_v4().simple());
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            "/engines",
+            &token,
+            Some(serde_json::json!({
+                "name": name, "warehouseId": wh_id,
+                "coordinatorReplicas": 1, "workerReplicas": 1,
+                "cpuMin": "1", "cpuMax": "2", "memory": "4Gi",
+            })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "create engine; body={j}");
+    let engine_id: Uuid = j["id"].as_str().unwrap().parse().unwrap();
+
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    let crypto =
+        egret_secrets::Crypto::new(b"0123456789abcdef0123456789abcdef").expect("build test crypto");
+    let secrets = egret_secrets::WorkspaceSecretStore::new(
+        f.db.clone(),
+        egret_secrets::SecretStore::new(f.db.clone(), Some(crypto)),
+    );
+    let delegator = secrets
+        .create(
+            None,
+            &format!("test-delegator-{}", Uuid::new_v4().simple()),
+            None,
+            "pw",
+        )
+        .await
+        .unwrap();
+    let root = secrets
+        .create(
+            None,
+            &format!("test-root-{}", Uuid::new_v4().simple()),
+            None,
+            "pw",
+        )
+        .await
+        .unwrap();
+    store
+        .set_delegator_secret(engine_id, delegator)
+        .await
+        .unwrap();
+    store.set_root_secret(engine_id, root).await.unwrap();
+    let engine = store.get_engine(engine_id).await.unwrap().unwrap();
+    let mut engine_secrets = vec![delegator, root];
+    engine_secrets.extend(engine.tls_secret_id);
+
+    let primary = store
+        .list_engine_catalogs(engine_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|c| c.is_primary)
+        .expect("primary catalog");
+    let minted: Uuid = primary.config["clientRowId"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let catalog_store = egret_catalog_engine::CatalogStore::new(f.db.clone());
+    let wh = catalog_store.get_warehouse(wh_id).await.unwrap().unwrap();
+    let role = catalog_store
+        .create_role(
+            wh_id,
+            "readonly_analyst",
+            "external",
+            Some("read-only role"),
+        )
+        .await
+        .unwrap();
+    let foreign = catalog_store
+        .create_client(&egret_catalog_engine::NewClient {
+            name: "not-minted-by-the-engine".into(),
+            consumer_type: "external".into(),
+            workspace_id: wh.workspace_id,
+            warehouse_id: wh_id,
+            catalog_role_id: role.id,
+        })
+        .await
+        .unwrap();
+    store
+        .create_engine_catalog(
+            engine_id,
+            "external",
+            "egret-warehouse",
+            &serde_json::json!({ "clientRowId": foreign.id, "mintedClient": false }),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "body={j}");
+
+    assert_eq!(
+        *port.deleted.lock().unwrap(),
+        vec![(
+            "trino".to_string(),
+            "egret-engines".to_string(),
+            name.clone()
+        )]
+    );
+    assert_eq!(engine_status(&f, engine_id).await, None, "row gone");
+    let secrets_left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM workspace_secrets WHERE id = ANY($1)")
+            .bind(engine_secrets.clone())
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        secrets_left, 0,
+        "engine-generated secrets {engine_secrets:?} must be deleted"
+    );
+    let client_count = |id: Uuid| {
+        let pool = f.db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM catalog.catalog_clients WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        client_count(minted).await,
+        0,
+        "the minted client is revoked"
+    );
+    assert_eq!(
+        client_count(foreign.id).await,
+        1,
+        "a client the engine did not mint survives"
     );
 }
