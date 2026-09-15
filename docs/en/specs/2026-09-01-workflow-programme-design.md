@@ -228,12 +228,18 @@ row:
 Nothing in any execution path touches `workflow.flow_versions`. The binding
 reason is recorded at `worker::subflow::resolve` and is not being revisited
 here: **a parent and its child must not disagree about which version of the
-world they are in**, and a version-snapshot resolver would reach almost nothing
-(W6 Task 1 filed the whole corpus through the product's own create-then-publish
-path and measured **16 of 345** flows reaching a live version;
-`driver::target_census` asserts that on every run). The cost is the one that
-paragraph already states: an author editing a draft changes what a live webhook
-URL — or a start button — runs, with no publish step in between.
+world they are in**. The second reason this sentence used to carry — *"a
+version-snapshot resolver would reach almost nothing (W6 Task 1 … measured 16 of
+345 flows reaching a live version)"* — **was retired at W10 Task 6 fix round
+1**: §8 rule 4 says `type:` accepts Kestra's FQCN as the canonical form, and
+`spec::registry::TASK_TYPES` did not implement that rule, so publish refused
+every pasted Kestra flow. With the four core FQCNs in the table, **248 of 345**
+corpus flows reach a live version and 18 of the 20 literal `Subflow` targets are
+live, so a snapshot resolver would now reach most of them. The decision stands
+on the binding reason alone; `driver::target_census` asserts the new figures on
+every run. The cost is the one that paragraph already states: an author editing
+a draft changes what a live webhook URL — or a start button — runs, with no
+publish step in between.
 
 **§6.2's rigidity is untouched, but by a different mechanism than the sentence
 above claimed.** Publish still resolves every reference and still freezes the

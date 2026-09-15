@@ -376,22 +376,30 @@ fn subflow_targets(flow: &egret_workflow::models::Flow, out: &mut BTreeSet<Strin
 /// no other `RefKind` is reachable at all), and none of them declares a
 /// `core.trigger.flow` (so `resolve_trigger_dependencies` makes none either).
 ///
-/// **18 through W8 Task 2, 19 now, and the pair below moved together**: exactly
-/// one of the five flows W8 Task 3's `TaskKind::Pause` lets publish declares a
-/// `core.subflow`, `valids/follow-dependencies-partial-parent`. Its lookup did
-/// not appear — it was already being made — it moved out of
-/// [`SUBFLOW_LOOKUPS_ON_REFUSED`], which is why the total is 22 before and
-/// after and why the two constants must be read as one measurement.
-const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 19;
+/// **18 through W8 Task 2, 19 through W10 Task 6, 47 now**, and the pair must
+/// still be read as one measurement — but the arithmetic that held them
+/// together has changed, and pretending otherwise would be the error this file
+/// keeps warning about.
+///
+/// Through W8 Task 3 the total was **conserved** at 22: a flow that stopped
+/// being refused moved its lookup from [`SUBFLOW_LOOKUPS_ON_REFUSED`] to here.
+/// W10 Task 6 fix round 1 is different: the total went **22 → 49**, because a
+/// publish that used to abort at the first unported `Leaf` now walks the whole
+/// flow and resolves every `Subflow` behind it. The lookups did not move — they
+/// had never been made at all. `resolve_all` reaching further is the surface
+/// this constant measures, and it is now more than twice the size it was.
+const SUBFLOW_LOOKUPS_ON_PUBLISHED: usize = 47;
 
 /// `RefKind::Subflow` resolutions made inside a publish that then FAILED — a
 /// `Subflow` that `resolve_all` reached before it met the unported `Leaf` that
 /// refused the flow. Counted apart because a lookup on a flow nobody can
 /// publish is not evidence the reference resolution shipped.
 ///
-/// **4 through W8 Task 2, 3 now** — see [`SUBFLOW_LOOKUPS_ON_PUBLISHED`]; the
-/// one that left is the same flow that stopped being refused.
-const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 3;
+/// **4 through W8 Task 2, 3 through W10 Task 6, 2 now** — see
+/// [`SUBFLOW_LOOKUPS_ON_PUBLISHED`], which is where the flows that stopped
+/// being refused went, and why this one falling by one while that one rose by
+/// 28 is not a contradiction.
+const SUBFLOW_LOOKUPS_ON_REFUSED: usize = 2;
 
 /// Count and assert the reference lookups, so the claim about how big this
 /// task's genuinely-new surface is has a running program behind it rather than
@@ -446,13 +454,23 @@ impl egret_workflow::WorkflowRefPort for CountingRefs {
 const SUBFLOW_TARGETS: usize = 21;
 
 /// **Targets whose corpus flow has a live version — what a resolver that went
-/// through `flow_versions` would reach, and it is 2 of the 20 literal names.**
-const SUBFLOW_TARGETS_LIVE: usize = 2;
+/// through `flow_versions` would reach.**
+///
+/// **2 of the 20 literal names through W10 Task 6; 18 of 20 now.** This is the
+/// figure `worker::subflow::resolve`'s reason 2 turned on, and fix round 1
+/// turned it over: with the four core FQCNs in `spec::registry::TASK_TYPES`
+/// (see [`LIVE`]) a snapshot resolver would reach almost every target rather
+/// than almost none. **The resolution source did not change** — a parent and
+/// its child must not disagree about which version of the world they are in,
+/// which was always the binding reason — and that doc now says so, with this
+/// argument marked retired rather than quietly dropped.
+const SUBFLOW_TARGETS_LIVE: usize = 18;
 
 /// Targets whose corpus flow has a draft row and no version — reachable only by
 /// a resolver that reads `workflow.flows`, which is what
-/// `FlowRepo::find_by_name` does.
-const SUBFLOW_TARGETS_DRAFT_ONLY: usize = 17;
+/// `FlowRepo::find_by_name` does. **17 through W10 Task 6, 1 now**; the 16 that
+/// left went to [`SUBFLOW_TARGETS_LIVE`], not out of the population.
+const SUBFLOW_TARGETS_DRAFT_ONLY: usize = 1;
 
 /// A literal `(namespace, flowId)` no corpus flow holds: `dummy_namespace/
 /// dummy_flow`, named by `valids/task-runif`. Task 3's decision, not this
@@ -635,14 +653,31 @@ const CREATE_REFUSED: usize = 4;
 /// so egret refusing them was a divergence this programme forbids in the
 /// direction the ratchet cannot see: a flow nobody can publish never reaches
 /// `golden.json` at all.
-const LIVE: usize = 21;
+///
+/// # 21 → **248** at W10 Task 6 fix round 1, and the same sentence explains it
+///
+/// The five above were an over-refusal closing one class at a time. This is the
+/// same class closing wholesale: `spec::registry::TASK_TYPES` held egret's short
+/// spellings and **none** of the four FQCNs `worker::Handlers::with_core_tasks`
+/// implements, so publish refused every flow whose leaves were
+/// `io.kestra.plugin.core.log.Log`, `…debug.Return`, `…execution.Fail` or
+/// `…flow.Sleep` — which is most of a Kestra corpus. Programme spec §8 rule 4
+/// had already decided that `type:` accepts the FQCN as canonical (*"a Kestra
+/// flow pasted into egret runs"*); the table did not implement the rule.
+///
+/// It was found by W10 Task 6's end-to-end test, the first thing in the
+/// repository to drive publish and the worker in one process, and the size of
+/// what it was hiding is this constant: **227 corpus flows egret refused and
+/// the pinned artifact published.** [`UNKNOWN_TYPE_REFUSED`] fell 296 → 68 in
+/// the same change, and the two must be read together.
+const LIVE: usize = 248;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
 /// finding, and the reason [`LIVE`] is 21 and not 295.
 ///
 /// (It read *"the reason `LIVE` is 16 and not 295"* until W8 Task 3 fix round
-/// 1 — **three lines below `const LIVE: usize = 21;`, in the same doc block
+/// 1 — **three lines below `const LIVE: usize = 248;`, in the same doc block
 /// that task had just rewritten.** A fact corrected where it was found and
 /// left standing three lines away is this branch's named failure mode; it is
 /// a `[LIVE]` link now, so the number cannot be restated here at all.)
@@ -657,19 +692,30 @@ const LIVE: usize = 21;
 /// any `Leaf` arm exists to consult the registry, so none meets the allow-list
 /// at all.
 ///
-/// **This is not a hole in the product**; egret's publish refusing an unported
-/// Kestra plugin is exactly the behaviour W1 built the table for. It is a
-/// statement about what the ORACLE can drive through the product's publish
-/// path, and it is why a `Subflow` at run time has to resolve against the
-/// draft row rather than a live version.
-/// **301 through W8 Task 2, 296 now** — the same five flows [`LIVE`] names,
-/// and nothing else moved in either direction.
-const UNKNOWN_TYPE_REFUSED: usize = 296;
+/// **This is not a hole in the product** *for the 68 that remain*: egret's
+/// publish refusing a genuinely unported Kestra plugin —
+/// `core.output.OutputValues`, `core.execution.Labels`, the `io.kestra.core.*`
+/// test-only classes — is exactly the behaviour W1 built the table for.
+///
+/// **301 through W8 Task 2, 296 through W10 Task 6, 68 now.** The 228 that left
+/// were NOT unported: `worker::handlers` has implemented all four of their types
+/// since W3b, and only `TASK_TYPES` did not say so. See [`LIVE`] for the
+/// mechanism and for why the figure was hiding behind a table rather than
+/// behind a missing handler; that is the difference between "egret has not
+/// ported this plugin" and "egret refuses a plugin it runs", and only the first
+/// is a statement about the oracle rather than a defect.
+const UNKNOWN_TYPE_REFUSED: usize = 68;
 
 /// How many corpus flows have a draft row that `publish` refused for a reason
 /// of **egret's own validate** — a real disagreement about the flow, not an
-/// unported plugin. Nineteen, and [`census`] prints all of them by name.
-const VALIDATE_REFUSED: usize = 19;
+/// unported plugin. [`census`] prints all of them by name.
+///
+/// **19 → 20 at W10 Task 6 fix round 1**, and the direction is the informative
+/// part: a flow that used to die at step 4 on an unported type now gets far
+/// enough to be judged on its own merits, so this population can only grow when
+/// [`UNKNOWN_TYPE_REFUSED`] shrinks. One flow moved between the two buckets;
+/// nothing became newly wrong.
+const VALIDATE_REFUSED: usize = 20;
 
 /// Every corpus flow that has a draft row and no live version — the sum of the
 /// two above, derived rather than written down a third time.

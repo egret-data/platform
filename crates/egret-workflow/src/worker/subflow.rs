@@ -879,15 +879,27 @@ async fn fail_run(
 /// # Two decisions, both forced by measurement
 ///
 /// **1. It resolves against the DRAFT row, `workflow.flows.source`, and not
-/// through `flow_versions`.** W6 Task 1 filed the whole corpus through the
-/// product's own create-then-publish path and measured the result: only **16 of
-/// 345** flows reach a live version, because publish step 4 asks
-/// `registry::known_type` about `io.kestra.plugin.core.*` leaves egret has not
-/// ported. Of the **20 distinct literal `Subflow` targets**, **2** are live and
-/// **17** are draft-only — so a resolver reading `flow_versions` would resolve
-/// 2 of 20 and this package would bank nothing. `driver::target_census`
-/// asserts those figures on every run, so this paragraph is compared by a
-/// running program.
+/// through `flow_versions`.**
+///
+/// **The measurement this paragraph used to lead with has been overturned, and
+/// the conclusion has not.** It read: *"only 16 of 345 flows reach a live
+/// version … of the 20 distinct literal `Subflow` targets, 2 are live and 17
+/// are draft-only — so a resolver reading `flow_versions` would resolve 2 of 20
+/// and this package would bank nothing."* That was true while publish refused
+/// almost the whole corpus for an unported task type, and W10 Task 6 fix round
+/// 1 is what ended it: `spec::registry::TASK_TYPES` now carries the four core
+/// FQCNs the worker implements, so **248 of 345** corpus flows reach a live
+/// version (was 21), unported-type refusals fell from **296 to 68**, and of the
+/// 20 literal `Subflow` targets **18 are live and 1 is draft-only** (was 2 and
+/// 17). A `flow_versions` resolver would now reach almost all of them.
+///
+/// So this is no longer a reason, and it is kept as a **retired** one rather
+/// than deleted, because a paragraph that silently drops its evidence reads as
+/// though it never had any. The decision is unchanged and now rests on reasons
+/// 1 and 3 below alone — which is exactly as it should be: the binding reason
+/// was never the corpus's shape. `driver::target_census` asserts every figure
+/// above on every run, so this paragraph is still compared by a running
+/// program.
 ///
 /// It is also the consistent choice today rather than merely the possible one:
 /// `FlowRepo::find_by_name`, which is what `publish` resolves a
@@ -910,12 +922,15 @@ async fn fail_run(
 ///    world they are in** — the sentence this paragraph already carried, and
 ///    now the binding one. A webhook-started flow whose task is a `Subflow`
 ///    would otherwise run a published parent against a draft child.
-/// 2. **A version-snapshot resolver would reach almost nothing.** W6 Task 1
-///    filed the whole corpus through the product's own create-then-publish path
-///    and measured **16 of 345** flows reaching a live version, because publish
-///    step 4 asks `registry::known_type` about `io.kestra.plugin.core.*` leaves
-///    egret has not ported. `driver::target_census` asserts those figures on
-///    every run.
+/// 2. ~~**A version-snapshot resolver would reach almost nothing.**~~
+///    **RETIRED at W10 Task 6 fix round 1** — it was measured at *16 of 345*
+///    flows reaching a live version (21 by W8 Task 3) because publish refused
+///    every `io.kestra.plugin.core.*` leaf egret had not listed in
+///    `spec::registry::TASK_TYPES`; that table now carries the four FQCNs the
+///    worker implements and **248 of 345** flows reach a live version. Reasons
+///    1 and 3 are what carry the decision, and always were. Kept struck through
+///    rather than deleted so the next reader knows this argument was made and
+///    what happened to it. `driver::target_census` asserts the new figures.
 /// 3. Kestra's own `findByIdForExecution` reads the flow repository, not a
 ///    version archive; its `revision` parameter is a separate opt-in that
 ///    egret's model has no field for at all.

@@ -222,11 +222,16 @@ Có **ba** nơi khởi tạo execution và cả ba đều đọc hàng draft:
 
 Không đường chạy nào chạm vào `workflow.flow_versions`. Lý do ràng buộc đã ghi
 tại `worker::subflow::resolve` và không xét lại ở đây: **cha và con không được
-bất đồng về việc chúng đang ở phiên bản nào của thế giới**, và một resolver đọc
-version snapshot sẽ với tới gần như không gì cả (W6 Task 1 đẩy toàn bộ corpus
-qua chính đường create-then-publish của sản phẩm và đo được **16 trên 345** flow
-đạt tới live version; `driver::target_census` khẳng định con số đó mỗi lần
-chạy). Cái giá đúng như đoạn đó đã nêu: tác giả sửa draft là đổi luôn thứ mà một
+bất đồng về việc chúng đang ở phiên bản nào của thế giới**. Lý do thứ hai mà câu
+này từng mang — *"một resolver đọc version snapshot sẽ với tới gần như không gì
+cả (W6 Task 1 … đo được 16 trên 345 flow đạt tới live version)"* — **đã bị rút
+tại W10 Task 6 fix round 1**: §8 mục 4 nói `type:` nhận FQCN của Kestra làm dạng
+chuẩn, `spec::registry::TASK_TYPES` lại không cài đặt luật ấy, nên publish từ
+chối mọi flow Kestra dán vào. Sau khi bốn FQCN lõi vào bảng, **248 trên 345**
+flow corpus đạt tới live version và 18 trong 20 target `Subflow` dạng tên thật
+là live — một resolver snapshot bây giờ với tới gần hết. Quyết định vẫn đứng trên
+đúng lý do ràng buộc; `driver::target_census` khẳng định các con số mới mỗi lần
+chạy. Cái giá đúng như đoạn đó đã nêu: tác giả sửa draft là đổi luôn thứ mà một
 URL webhook đang sống — hay một nút start — sẽ chạy, không có bước publish nào ở
 giữa.
 

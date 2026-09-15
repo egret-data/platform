@@ -55,35 +55,46 @@
 //! *naming the non-terminal state*, and because in six months that message is
 //! the only thing the next reader gets.
 //!
-//! # What this test found on its first run: the flow it can PUBLISH is not the
-//! # flow it can RUN
+//! # What this test found on its first run, and what was done about it
 //!
 //! The brief for this file says *publish through the management API, then
-//! start*. It does not work, and the reason is not this test's:
-//! `POST .../flows/{id}/publish` answered **400 — `task 'greet' has unknown
-//! type 'io.kestra.plugin.core.log.Log'`** for the only flow the shipped
-//! worker can execute.
+//! start*. **On the first run it did not work**, and the reason was not this
+//! test's: `POST .../flows/{id}/publish` answered **400 — `task 'greet' has
+//! unknown type 'io.kestra.plugin.core.log.Log'`** for the only flow the
+//! shipped worker can execute.
 //!
-//! `spec::registry::TASK_TYPES` — publish's table — spells egret's tasks
+//! `spec::registry::TASK_TYPES` — publish's table — spelled egret's tasks
 //! `core.log`, `egret.sql`, `core.http`; `Handlers::with_core_tasks()`, which
-//! is what `egret-bin` hands to the runtime, registers Kestra's FQCNs, because
+//! is what `egret-bin` hands the runtime, registers Kestra's FQCNs, because
 //! that is what `executor::build_plan` copies verbatim out of `Task::type`.
-//! **The intersection of the two is empty for every core task.** So a flow
-//! using `core.log` publishes and then finds no handler, and a flow using the
-//! FQCN runs but cannot be published. `worker::registry`'s own doc records this
-//! and declines to pick a winner, because *"deciding whether egret's public
-//! task vocabulary is Kestra's FQCN, a short alias, or both is a spec-level
-//! choice"*. Nothing had ever driven both halves in one process, so nothing had
-//! ever had to care.
+//! **The intersection was empty for every core task**, and worse: each of the
+//! four handler `TYPE_ID`s appeared in that table exactly **zero** times, so
+//! **no Kestra flow pasted into egret could be published at all**. Nothing had
+//! ever driven both halves in one process, so nothing had ever had to care.
 //!
-//! This file does not paper over it and does not pick the winner either:
-//! [`author_and_start`] drives the real publish route and **asserts the
-//! refusal, naming it**, and
-//! [`the_publish_table_and_the_shipped_registry_disagree_about_the_core_types`]
-//! pins both directions from the two tables themselves. When the spec answers,
-//! those are the two places that change — and the headline below is unaffected,
-//! because **publishing is not what makes a flow startable**: `start_flow_execution`
-//! runs the **draft's** source, measured and pinned in `tests/executions_routes.rs`.
+//! **It was not an open question.** Programme spec §8 item 4 had already
+//! decided it: *"`type:` accepts Kestra's full FQCN as the canonical form
+//! (`io.kestra.plugin.core.log.Log`); short aliases are secondary. A Kestra flow
+//! pasted into egret runs, and looking a task up in Kestra's docs lands on the
+//! right page."* `TASK_TYPES` was the side that was wrong. Fix round 1 moved
+//! it: the four FQCNs are canonical rows, `core.log` is an **alias** on the
+//! `Log` row, and `Handlers::add_publishable` takes the alias list **from that
+//! table** and panics on a handler whose `type_id()` has no row — so the two
+//! vocabularies cannot drift without `egret-bin` refusing to start.
+//!
+//! So this file now goes **through** publish rather than around it, which is
+//! the difference between *"the system works"* and *"the system works if you
+//! skip the step that refuses it"*.
+//! [`both_spellings_publish_and_both_dispatch`] keeps both directions pinned.
+//!
+//! **One thing to keep straight while reading the headline:** a published flow
+//! is not what makes a start possible. `create_flow` answers 201 with a
+//! validation report and **publish is the gate that used to refuse**, while
+//! `start_flow_execution` runs the **draft's** source either way — measured and
+//! pinned in `tests/executions_routes.rs`. Before the fix this file still
+//! reached a terminal state, *from the draft*, with the publish step refused;
+//! after it, the same bytes are also a live version. The assertions below say
+//! which is which rather than leaving it to be inferred.
 //!
 //! Run with:
 //!   export DATABASE_URL=postgres://egret:egret@localhost:5432/egret_test
@@ -162,16 +173,15 @@ fn cfg(enabled: bool) -> RuntimeConfig {
 // ── The setup, entirely over HTTP ───────────────────────────────────────────
 
 /// Everything up to and including the start, through the management API and
-/// nothing else: create the draft, drive the publish route, start an execution.
-/// Returns the app, the flow id, the execution id, and the execution DTO the
-/// start answered with.
+/// nothing else: create the draft, publish it, start an execution. Returns the
+/// app, the flow id, the execution id, and the execution DTO the start answered
+/// with.
 ///
-/// **The publish route is driven and its REFUSAL is asserted** — see this
-/// module's doc. It is here rather than dropped because the brief's path runs
-/// through it and because a reader who assumes this flow was published would be
-/// wrong about egret, not just about this test. It is not a property this file
-/// endorses: it is the shape of the divergence, recorded at the one place that
-/// exercises both halves.
+/// **The publish route is driven and its SUCCESS is asserted**, with the reason
+/// spelled out at the call: it answered 400 until fix round 1, and a 400 here
+/// again means the publish table and the worker registry have drifted apart
+/// once more. This is the only place in the repository where a flow goes
+/// through publish and then through the worker in one process.
 ///
 /// **The start's own 201 body is returned rather than discarded** because one
 /// assertion depends on it: `start_flow_execution` drives `advance()` to a
@@ -180,7 +190,7 @@ fn cfg(enabled: bool) -> RuntimeConfig {
 /// each test below proves the execution was **not** terminal before any worker
 /// existed — without it, "the execution is SUCCESS" would be satisfied by a
 /// start that had finished the whole thing itself.
-async fn author_and_start(
+async fn publish_and_start(
     db: &Db,
     ws: Uuid,
     user: egret_core::UserId,
@@ -209,7 +219,9 @@ async fn author_and_start(
         "the flow this suite runs must validate clean: {created}"
     );
 
-    // 2. Publish it — and be refused, by name.
+    // 2. Publish it. **This answered 400 until fix round 1** — see this
+    //    module's doc — so the status is asserted with the reason it matters,
+    //    not as a formality.
     let published = common::post(
         &app,
         &format!("/api/ws/{ws}/workflows/flows/{flow}/publish"),
@@ -217,26 +229,30 @@ async fn author_and_start(
         serde_json::json!({ "note": "end-to-end" }),
     )
     .await;
+    let status = published.status();
+    let body = common::body_text(published).await;
     assert_eq!(
-        published.status(),
-        400,
-        "egret cannot publish the flow its own worker can run; if this is now \
-         200 the spec has answered the vocabulary question and this file's \
-         module doc is the thing to update"
+        status, 200,
+        "a flow spelled the way the shipped worker dispatches it must publish; \
+         a 400 naming an `unknown type` here is the TASK_TYPES/registry split \
+         reopening: {body}"
     );
-    let refusal = common::body_text(published).await;
-    assert!(
-        refusal.contains("unknown type") && refusal.contains("io.kestra.plugin.core.log.Log"),
-        "the refusal must be the TYPE TABLE's, not some other 400: {refusal}"
-    );
+    let published: Value = serde_json::from_str(&body).expect("version dto");
+    assert_eq!(published["version"], 1, "{published}");
 
-    // The flow is therefore still a draft — and that is exactly what the start
-    // route runs, so nothing below depends on the refusal above.
+    // The flow is live, and the version it points at is the one just cut.
     let after = common::json(
         common::get(&app, &format!("/api/ws/{ws}/workflows/flows/{flow}"), user).await,
     )
     .await;
-    assert_eq!(after["state"], "draft", "{after}");
+    assert_eq!(after["state"], "live", "{after}");
+    assert_eq!(after["live_version_id"], published["id"], "{after}");
+
+    // **The start route runs the DRAFT's source, not this version** — measured
+    // and pinned in `tests/executions_routes.rs`. Here the two are the same
+    // bytes because nothing edits the draft in between, and saying so is the
+    // point: a reader who assumes the published version is what runs would be
+    // wrong about this engine, just not about this test.
 
     // 3. Start an execution — `POST .../flows/{id}/executions`, no body, which
     //    is what "run this flow" is for a flow with no `inputs:`.
@@ -322,11 +338,7 @@ async fn wait_for_terminal(
 
 // ── The headline ────────────────────────────────────────────────────────────
 
-/// **Author → start → SUCCESS, with no test driving the tick.**
-///
-/// (Author, not publish: [`author_and_start`] drives the publish route too, and
-/// this module's doc records why it is refused and why the start does not need
-/// it.)
+/// **Publish → start → SUCCESS, with no test driving the tick.**
 ///
 /// The runtime is started **after** the start deliberately, so that the 201's
 /// own body is an uncontested reading: at that instant no ticker exists, and
@@ -346,7 +358,7 @@ async fn wait_for_terminal(
 /// 4. `answer`'s output carries [`RETURN_VALUE`], which only the real
 ///    `core.debug.Return` from [`Handlers::with_core_tasks`] can write.
 #[sqlx::test(migrations = "../../migrations")]
-async fn an_authored_flow_runs_to_success_with_nobody_driving_the_tick(pool: sqlx::PgPool) {
+async fn a_published_flow_runs_to_success_with_nobody_driving_the_tick(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
@@ -354,7 +366,7 @@ async fn an_authored_flow_runs_to_success_with_nobody_driving_the_tick(pool: sql
     // once, so a grant written afterwards is invisible to that PDP.
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
 
-    let (app, _flow, execution, started) = author_and_start(&db, ws, user, "e2e-live").await;
+    let (app, _flow, execution, started) = publish_and_start(&db, ws, user, "e2e-live").await;
 
     let at_start = started["state"].as_str().expect("the start's own state");
     assert!(
@@ -462,7 +474,7 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
 
-    let (app, _flow, execution, started) = author_and_start(&db, ws, user, "e2e-off").await;
+    let (app, _flow, execution, started) = publish_and_start(&db, ws, user, "e2e-off").await;
     assert!(
         !is_terminal(started["state"].as_str().expect("state")),
         "{started}"
@@ -550,87 +562,122 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
     );
 }
 
-// ── The divergence this file was the first thing to drive ───────────────────
+// ── The vocabulary, pinned in both directions ───────────────────────────────
 
-/// **Both directions of the type-vocabulary split, from the two tables
-/// themselves.**
+/// **Both spellings publish, and both dispatch** — the invariant fix round 1
+/// established, driven from the outside.
 ///
-/// `author_and_start` asserts one half over HTTP — the FQCN flow the worker can
-/// run is unpublishable. That alone would be satisfiable by a publish route
-/// that refuses everything, so this test drives the other half: the SAME flow,
-/// with the SAME task, spelled `core.log`, publishes cleanly. Two spellings of
-/// one task, opposite answers; that is the split, not a broken route.
+/// This test is the inverse of the one it replaces. Until fix round 1 it
+/// measured the split: the same one-task flow spelled `core.log` published
+/// **200** and spelled `io.kestra.plugin.core.log.Log` published **400**, while
+/// the shipped registry served the FQCN and had never heard of `core.log`. Two
+/// spellings of one task, opposite answers at each end, and the two ends
+/// disagreeing about which was which.
 ///
-/// Then the registry is asked directly, because the HTTP half cannot say what
-/// the worker would do with the flow that *did* publish:
-/// `Handlers::with_core_tasks()` — the registry `egret-bin` hands to the
-/// runtime — holds the FQCN and has never heard of `core.log`, so the
-/// publishable flow is the one that would abort a tick with
-/// `WorkerError::NoHandler`.
+/// Now both halves are asserted for both spellings:
 ///
-/// **This asserts the state of the tree, not a property to keep.** When the
-/// spec decides the vocabulary, this test is where the decision lands: one line
-/// in `spec::registry::TASK_TYPES` or one `Handlers::register` alias makes it
-/// fail, and that failure is the reminder to publish a flow end to end above.
+/// 1. **publish accepts each** — over HTTP, through the real route, so this is
+///    the product's answer and not a table read;
+/// 2. **the shipped registry dispatches each** — `with_core_tasks()` is what
+///    `egret-bin` hands the runtime, and `type_ids()` is what it will serve.
+///
+/// Leg 2 is not redundant with leg 1: a publish route that accepted everything
+/// would pass leg 1 alone, which is why the **negative control** below is here
+/// — a plausible neighbouring FQCN that nothing implements must still be
+/// refused, in both places. Without it "both spellings publish" is satisfiable
+/// by a table that stopped refusing anything.
 #[sqlx::test(migrations = "../../migrations")]
-async fn the_publish_table_and_the_shipped_registry_disagree_about_the_core_types(
-    pool: sqlx::PgPool,
-) {
+async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     egret_test_db::assert_database_url_is_exported();
     let db = Db { pool: pool.clone() };
     let (ws, user) = common::seed_workspace(&db).await;
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
     let app = common::app(&db).await;
 
-    // One task, two spellings, one publish route.
-    let mut status = Vec::new();
-    for (name, type_id) in [
-        ("short", "core.log"),
-        ("fqcn", "io.kestra.plugin.core.log.Log"),
-    ] {
+    /// `POST /flows` then `POST /flows/{id}/publish` for a one-task flow of
+    /// `type_id`; returns publish's status.
+    async fn publish_one(
+        app: &common::App,
+        ws: Uuid,
+        user: egret_core::UserId,
+        name: &str,
+        type_id: &str,
+    ) -> u16 {
+        // **One flat literal, no `\`-continuations.** The first draft wrapped
+        // this string across source lines; the wrapping baked the source's own
+        // indentation into the YAML, `- id: greet` landed 15 columns in, and
+        // create answered 400 from the PARSER -- a refusal that looks exactly
+        // like the one this test is about. `\x20` is the spelling the rest of
+        // this file uses to keep a leading space visible.
         let source = format!(
-            "id: split-{name}\nnamespace: a.e2e\ntasks:\n  \
-             - id: greet\n    type: {type_id}\n    message: hi\n"
+            "id: vocab-{name}\nnamespace: a.e2e\ntasks:\n\x20 - id: greet\n\x20   type: {type_id}\n\x20   message: hi\n"
         );
-        let created = common::json(
-            common::post(
-                &app,
-                &format!("/api/ws/{ws}/workflows/flows"),
-                user,
-                serde_json::json!({ "source": source }),
-            )
-            .await,
+        let res = common::post(
+            app,
+            &format!("/api/ws/{ws}/workflows/flows"),
+            user,
+            serde_json::json!({ "source": source }),
         )
         .await;
+        let status = res.status();
+        let body = common::body_text(res).await;
+        // **`create` is not the gate and must not become one.** It answers 201
+        // with a validation report for every spelling here, including the type
+        // egret does not implement -- publish is where a type is refused. If
+        // this panics, the refusal has moved routes and the assertion below is
+        // measuring the wrong door.
+        assert_eq!(status, 201, "create refused `{type_id}`: {body}");
+        let created: Value = serde_json::from_str(&body).expect("flow dto");
         let flow = created["id"].as_str().expect("created id");
-        let res = common::post(
-            &app,
+        common::post(
+            app,
             &format!("/api/ws/{ws}/workflows/flows/{flow}/publish"),
             user,
             serde_json::json!({}),
         )
-        .await;
-        status.push((type_id, res.status().as_u16()));
+        .await
+        .status()
+        .as_u16()
     }
+
+    const FQCN: &str = "io.kestra.plugin.core.log.Log";
+    const ALIAS: &str = "core.log";
+    /// A neighbour in the same package that egret does not implement. Kestra
+    /// really has it; egret has no handler and no row, and both ends must say
+    /// so — this is the control that keeps "both spellings publish" from being
+    /// satisfiable by a table that refuses nothing.
+    const UNIMPLEMENTED: &str = "io.kestra.plugin.core.output.OutputValues";
+
+    let measured = [
+        (FQCN, publish_one(&app, ws, user, "fqcn", FQCN).await),
+        (ALIAS, publish_one(&app, ws, user, "alias", ALIAS).await),
+        (
+            UNIMPLEMENTED,
+            publish_one(&app, ws, user, "nope", UNIMPLEMENTED).await,
+        ),
+    ];
     assert_eq!(
-        status,
-        vec![
-            ("core.log", 200u16),
-            ("io.kestra.plugin.core.log.Log", 400u16)
-        ],
-        "publish accepts the short spelling and refuses the FQCN"
+        measured,
+        [(FQCN, 200u16), (ALIAS, 200u16), (UNIMPLEMENTED, 400u16)],
+        "publish accepts the canonical FQCN and its alias, and still refuses a \
+         type nothing implements"
     );
 
-    // And the shipped registry answers the other way round.
-    let registered = Handlers::with_core_tasks();
-    let type_ids = registered.type_ids();
+    // And the registry `egret-bin` hands the runtime serves the same two, and
+    // not the third.
+    let shipped = Handlers::with_core_tasks();
+    let type_ids = shipped.type_ids();
     assert!(
-        type_ids.contains(&"io.kestra.plugin.core.log.Log"),
-        "the runtime's registry serves the spelling publish refuses: {type_ids:?}"
+        type_ids.contains(&FQCN),
+        "the runtime must serve the canonical spelling: {type_ids:?}"
     );
     assert!(
-        !type_ids.contains(&"core.log"),
-        "and has never heard of the one publish accepts, so a published flow \
-         aborts its tick with NoHandler: {type_ids:?}"
+        type_ids.contains(&ALIAS),
+        "and the alias publish accepts, which it takes from TASK_TYPES rather \
+         than repeating: {type_ids:?}"
+    );
+    assert!(
+        !type_ids.contains(&UNIMPLEMENTED),
+        "a type nothing implements must not appear to be served: {type_ids:?}"
     );
 }
