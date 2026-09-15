@@ -3,7 +3,14 @@ import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router-
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider } from "@/auth/AuthProvider";
-import { RequireAuth, RequireControlPlaneAccess, RequireGlobalAdmin, RequirePermission, RequireWorkspace } from "@/auth/guards";
+import {
+  RequireAuth,
+  RequireControlPlaneAccess,
+  RequireGlobalAdmin,
+  RequireGovernanceAccess,
+  RequirePermission,
+  RequireWorkspace,
+} from "@/auth/guards";
 import { AppShell } from "@/components/layout/AppShell";
 import { LoginPage } from "@/auth/LoginPage";
 import { NotFound } from "@/routes/NotFound";
@@ -82,6 +89,7 @@ import AccessOverview from "@/routes/control-plane/access/AccessOverview";
 import WhoCanAccess from "@/routes/control-plane/access/WhoCanAccess";
 import Classifications from "@/routes/control-plane/governance/Classifications";
 import TagDetail from "@/routes/control-plane/governance/TagDetail";
+import { LegacyGovernanceRedirect } from "@/routes/governance/LegacyGovernanceRedirect";
 
 function HomeRedirect() {
   const { me, isLoading } = useAuth();
@@ -259,7 +267,6 @@ const FIRST_SECTION_BY_PERM: { path: string; perm: string }[] = [
   { path: "warehouses", perm: "warehouse:read" },
   { path: "storage", perm: "storage:read" },
   { path: "secrets", perm: "secret:read" },
-  { path: "policies", perm: "policy:read" },
   { path: "users", perm: "user:read" },
   { path: "groups", perm: "group:read" },
   { path: "roles", perm: "role:read" },
@@ -292,13 +299,6 @@ function ControlPlaneRoutes() {
           <Route path="storage/:id/browse" element={<RequirePermission perm="storage:read"><StorageBrowser /></RequirePermission>} />
           <Route path="secrets" element={<RequirePermission perm="secret:read"><ControlPlaneSecrets /></RequirePermission>} />
           <Route path="secrets/:id" element={<RequirePermission perm="secret:read"><SecretDetail /></RequirePermission>} />
-          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
-          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
-          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
-          <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
-          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
-          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
           <Route path="users" element={<RequirePermission perm="user:read"><UsersPage /></RequirePermission>} />
           <Route path="users/:id" element={<RequirePermission perm="user:read"><UserDetail /></RequirePermission>} />
           <Route path="groups" element={<RequirePermission perm="group:read"><GroupsPage /></RequirePermission>} />
@@ -317,6 +317,48 @@ function ControlPlaneRoutes() {
   );
 }
 
+// Governance (SP2): the data-plane rules a data steward manages, split out of
+// the system-admin Control Plane. Same shape as `ControlPlaneRoutes` — one area
+// gate, then a per-route permission. First section (in preference order) each
+// Governance read permission unlocks, for the landing below.
+const GOVERNANCE_FIRST_SECTION: { path: string; perm: string }[] = [
+  { path: "/governance/policies", perm: "policy:read" },
+  { path: "/governance/classifications", perm: "tag:read" },
+];
+
+function GovernanceIndex() {
+  const { me } = useAuth();
+  if (me?.platform_roles.includes("platform_admin")) return <Navigate to="/governance/policies" replace />;
+  const perms = me?.permissions ?? [];
+  const first = GOVERNANCE_FIRST_SECTION.find((s) => perms.includes(s.perm));
+  // Absolute targets: this also renders for the `*` catch-all, where react-router 7
+  // resolves a relative target against the unmatched URL and loops (see
+  // `exploreRedirectTo`). `RequireGovernanceAccess` already admitted this user,
+  // so `first` exists; the fallback only satisfies the type.
+  return <Navigate to={first ? first.path : "/governance/policies"} replace />;
+}
+
+function GovernanceRoutes() {
+  return (
+    <RequireGovernanceAccess>
+      <AppShell>
+        <Routes>
+          <Route index element={<GovernanceIndex />} />
+          <Route path="policies" element={<RequirePermission perm="policy:read"><Policies /></RequirePermission>} />
+          <Route path="policies/:service" element={<RequirePermission perm="policy:read"><ProfileDetailPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/new" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="policies/:service/:kind/:id" element={<RequirePermission perm="policy:read"><PolicyEditorPage /></RequirePermission>} />
+          <Route path="classifications" element={<RequirePermission perm="tag:read"><Classifications /></RequirePermission>} />
+          <Route path="classifications/:id" element={<RequirePermission perm="tag:read"><TagDetail /></RequirePermission>} />
+          {/* Platform-wide (cross-workspace) placeholder; admin-only until the real feature and its permission land. */}
+          <Route path="data-lineage" element={<RequireGlobalAdmin><Placeholder title="Data Lineage" /></RequireGlobalAdmin>} />
+          <Route path="*" element={<GovernanceIndex />} />
+        </Routes>
+      </AppShell>
+    </RequireGovernanceAccess>
+  );
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -332,7 +374,17 @@ export default function App() {
               <Route path="/embed/print/:kind/:id" element={<PrintObject />} />
               <Route path="/" element={<RequireAuth><HomeRedirect /></RequireAuth>} />
               <Route path="/explore/:workspace/*" element={<RequireAuth><ExploreRoutes /></RequireAuth>} />
+              <Route path="/governance/*" element={<RequireAuth><GovernanceRoutes /></RequireAuth>} />
               <Route path="/control-plane/*" element={<RequireAuth><ControlPlaneRoutes /></RequireAuth>} />
+              {/* Old Control Plane URLs of the pages that moved to Governance. Mounted
+                  here, not inside ControlPlaneRoutes: that tree is behind
+                  RequireControlPlaneAccess, which a governance-only user fails, so
+                  they would get a 403 for their own bookmark. More static segments
+                  outrank `/control-plane/*` in react-router 7, so order does not
+                  matter. No RequireAuth: the destination carries it. */}
+              <Route path="/control-plane/policies/*" element={<LegacyGovernanceRedirect />} />
+              <Route path="/control-plane/classifications/*" element={<LegacyGovernanceRedirect />} />
+              <Route path="/control-plane/data-lineage" element={<LegacyGovernanceRedirect />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AuthProvider>
