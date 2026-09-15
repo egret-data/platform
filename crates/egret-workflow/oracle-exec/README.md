@@ -7705,14 +7705,14 @@ output is a sweep that cannot show a numerator.
 
 | # | population | examined | corrected |
 |---|---|---:|---:|
-| 1 | the proposition, **verbatim, across the whole repository** — every tracked file, **flattened to one line before matching**, for `no production caller`, `nothing (in this workspace) runs this worker`, `no claim loop`, `no deployment runs/executes`, `a deployment runs none`, `wires the worker` | **3696 files**, 14 matching, **29 occurrences** | **13** |
+| 1 | the proposition **and its gloss**, verbatim, across the whole repository — every tracked file, **flattened to one line before matching**, for `no production caller`, `nothing (in this workspace) runs this worker`, `no claim loop`, `no deployment runs/executes/takes`, `a deployment runs none`, `wires the worker`, `a path no deployment`, `item 15's shape` | **3696 files**, 17 matching, **38 occurrences** | **15** |
 | 2 | **ordinals and counts** in the four regions population 1 landed in — this statement's preamble, the W4 section's six facts, the W4 subsection, and item 15 | **95 tokens** | **9** |
 | 3 | **data that feeds a generator** — the seven committed data files in `oracle-exec/` plus `harvest.py`, `normalise.py` and `handler_surface.py`, which emit prose into `runnable.txt` | **10 inputs** | **0** |
-| 4 | **the other language** — every file under `docs/vi/` | **279 files** | **0** |
+| 4 | **the other language** — every file under `docs/vi/`, flattened, for `vòng claim`, `caller production`, `không deployment`, `deployment nào chạy`, `không có gì gọi`, `mục 15`, `16 trên 345` | **279 files**, 6 matching, **17 occurrences** | **0** |
 | 5 | **references to something deleted** — every backticked identifier of 15 characters or more in this file, checked for existence anywhere in the tree | **194 identifiers**, 6 absent | **1** |
 
-**Population 1's handed list was eight sites; the sweep found thirteen false
-ones**, and the gap is not carelessness on whoever compiled the list — it is the
+**Population 1's handed list was eight sites; the sweep found fifteen false
+occurrences, in three files rather than one**, and the gap is not carelessness on whoever compiled the list — it is the
 instrument. **The most consequential instance is invisible to a line-oriented
 grep**, because it wraps a line break: this statement's own preamble reads
 *"…the sixth fact of the W4 section above: nothing in this workspace ⏎ runs this
@@ -7728,7 +7728,7 @@ shortest distinctive fragment, or use a matcher that spans lines*. **No earlier
 pass missed this sentence** — it was true until W10 Task 2, so there was nothing
 to find — which is what makes the miss precise rather than general: the first
 enumeration taken after it went false was built line-wise and came out eight
-where the answer is thirteen. Meanwhile the *same rule's* ordinals half **was**
+where the answer is fifteen. Meanwhile the *same rule's* ordinals half **was**
 reached for, twice, inside this package: W10 Task 5 corrected `worker::subflow`'s
 *"two files"* to three with the note *"the ordinal moved with the count"*, and
 Task 6 removed an ordinal from `claim.rs` rather than maintain it. So the
@@ -7739,26 +7739,48 @@ which did not prevent its own recurrence). The only durable form is the
 mechanical one: **flatten before you match, always, so remembering is not part
 of it.**
 
-The thirteen are eleven in this file — the preamble (the wrapped one), the W4
+The fifteen are **eleven in this file** — the preamble (the wrapped one), the W4
 section's sixth fact and the pointer under it, the four sentences of the W4
-subsection *Nothing runs this worker*, and the four inside item 15 — and two in
-`runnable.txt`, which this file's own reading instructions say outranks it for
-anything in the harvest section. **Two further occurrences in this file were
+subsection *Nothing runs this worker*, and the four inside item 15 — **two in
+`runnable.txt`**, which this file's own reading instructions say outranks it for
+anything in the harvest section, and **two in
+`crates/egret-workflow/tests/worker.rs`**, which is the one site outside those
+two files and is dealt with next. **Two further occurrences in this file were
 examined and left**, and they are the reason the numerator is not just "every
 hit": `no production caller` at the W6 trigger paragraph is about
 `trigger::tick` and is **still true** (re-measured at this commit, in that
 section), and `no production caller` in item 11 is W3b history about `resume`,
-correctly tensed.
+correctly tensed. **Four more are re-pointed rather than corrected** — the
+*"item 15's shape one level in"* pointers in this preamble, the W6 section and
+the W8 section, which name a shape the item recorded and not the item's verdict.
 
-**Zero sites were found outside this file and `runnable.txt`, and that zero is
-reportable rather than empty**: Tasks 1–6 had already corrected the five that
-would otherwise be here — `egret-config/src/lib.rs:437`,
-`egret-workflow/src/lib.rs:21`, `worker::claim`'s `wake` doc, `runtime.rs`'s
-module doc, and the programme spec's W3b row **in both languages**, each as a
-dated correction rather than a deletion. The remaining repository-wide matches
-are `egret-dataapi`'s, about a different subject entirely, and the W10 plan's
-and spec's quotations of the sentence being corrected; together they are the
-control that says the grep was capable of a hit somewhere other than here.
+**The one site outside this file and `runnable.txt` was reachable only by
+widening the pattern from the proposition to its GLOSS, and the two share no
+words.** `tests/worker.rs`'s doc for
+`a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`
+read *"That is W4 item 15's
+shape — a property proved about a path **no deployment takes**"*, present tense,
+about `claim::due_retries`. W10 Task 2 corrected exactly that gloss in
+`due_retries`' **own** doc — *"'a path no deployment takes' is no longer true of
+this query"* — and left this copy standing, which is this branch's *corrected
+where found, missed elsewhere* one more time, in the same package that wrote the
+correction. Population 1's first pattern, built from the proposition, returns
+**nothing** for it: it contains neither *worker*, nor *runs*, nor *caller*.
+**That is the same lesson as the line break, one level down** — the first
+instrument you reach for is built from the sentence you already know.
+
+**Everything else outside this file is already right, and that is reportable
+rather than empty**: Tasks 1–6 corrected `egret-config/src/lib.rs:437`,
+`egret-workflow/src/lib.rs:21`, `worker::claim`'s `wake` doc **and** its
+`due_retries` gloss, `runtime.rs`'s module doc, and the programme spec's W3b row
+**in both languages**, each as a dated correction rather than a deletion. The
+remaining repository-wide matches are `egret-dataapi`'s, about a different
+subject entirely, the W8 plan's and spec's *"a path no deployment takes"* — W8-era
+documents describing the state as it was, left as records — and the W10 plan's
+and spec's quotations of the sentence being corrected, which are correctly
+tensed (*"Until W10 ships…"*, *"Chừng nào W10 chưa ship…"*). Together they are
+the control that says the matcher was capable of a hit somewhere other than
+here.
 
 **Population 2's nine**: five are the item-list total — `thirteen`,
 `seventeen`, `seventeenth`, `eighteen`, `eighteenth` — retired as a family by
@@ -7778,13 +7800,19 @@ not about a scan that was reading nothing. `runnable.txt`'s block **is**
 corrected, but it sits below `HANDWRITTEN_SENTINEL`, in the half
 `--rewrite-runnable` preserves, so it belongs to population 1.
 
-**Population 4's zero has two positive controls**, and they matter because the
-Vietnamese is a *translation* and shares no letters with an English grep: the VI
-programme spec carries this proposition at §9's W3b row — *"vòng claim và
-reaper ship ra dưới dạng hàm KHÔNG có caller production nào"* — written by Task
-1 as a dated correction naming W10 as the row that closes it, and it carries the
-publish census at **248 trên 345**, written by Task 6. Both were already right.
-The sweep found them; it did not need to change them.
+**Population 4's zero has three positive controls**, and they matter because the
+Vietnamese is a *translation* and shares no letters with an English grep — so a
+pattern built from the English would return zero for a file full of the thing.
+Seventeen occurrences across six files, all already right: the VI programme spec
+carries this proposition at §9's W3b row — *"vòng claim và reaper ship ra dưới
+dạng hàm KHÔNG có caller production nào"* — written by Task 1 as a dated
+correction naming W10 as the row that closes it; it carries the publish census
+at **248 trên 345** and the retired *"16 trên 345"* argument **inside its own
+retirement**, both written by Task 6; and the VI W10 spec is correctly tensed
+(*"Chừng nào W10 chưa ship…"* — *"until W10 ships"*). The sweep found them; it
+did not need to change any of them. **This sweep was re-run flattened after the
+first pass used `grep`**, and the flattening is what surfaced *"mã không ⏎
+deployment nào chạy"* — the same wrap, in the other language.
 
 **Population 5's one correction is the shape this population exists for.** The
 W3c section says a guard *"was not left that way"* and names
@@ -7821,6 +7849,7 @@ family below is why the rule is worth stating: it has now moved **three times**
 | *W8 Task 3*, *Five corpus flows PUBLISH now* | `LIVE` 16 → 21, `UNKNOWN_TYPE_REFUSED` 301 → 296, the lookup pair 18/4 → 19/3 | correct as W8's record of W8's move; **pointer added** to where the family stands now, because a reader landing on the most recent-looking of the three copies gets the middle one |
 | this statement's preamble | *"it was thirteen and it is seventeen … item 15 … nothing in this workspace runs this worker"* | the proposition is false since W10 Task 2, **in the sentence that tells a reader where to start**. The total is now **not stated at all** rather than corrected to nineteen, for the rule above |
 | *W3c*, the M11 paragraph | *"`a_skipped_run_still_gets_a_happens_before_endpoint` drives `simulate_with` with a `skipping_machine` of its own"* | **no test by that name exists**; it was deleted at W3b Task 5 with no successor. Annotated in place — the guard it claims to have closed is open |
+| `tests/worker.rs`, `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken` | *"W4 item 15's shape — a property proved about a path **no deployment takes**"* | false since W10 Task 2. **W10 Task 2 corrected this exact gloss in `claim::due_retries`' own doc and left this copy standing** — *corrected where found, missed elsewhere*, inside the package that wrote the correction. Reachable only by sweeping the **gloss** as well as the proposition, and the two share no words: this sentence contains neither *worker*, nor *runs*, nor *caller*. Corrected in place |
 | item 3 / item 3b | *"reaches zero corpus entries"* | still true, and now **not the only reason**: `egret.sql`, `egret.container` and `egret.script.python` are registered in **neither** registry. Added rather than replaced |
 | the **provenance rule** under its own table | *"everything in **rows 2–7** is a figure a reader must treat as a measurement someone took"* | the table ended at row 7 when that was written and three packages have appended under it since — **found while appending to it**, which is the only reason it was found at all. Replaced by *"every row the second column marks `no`"*, and **no count put in its place**. This is the third time this file has caught a rule that ages by position rather than by content (*"every number below"*, *"rows 2–7"*, and the ordinals), and it is the same defect each time: a pointer that the next append silently invalidates |
 
@@ -9131,7 +9160,7 @@ already names.** The statement's opening sentence — the one it tells a reader 
 start at — asserts the proposition across a **line break**. It was *true* until
 W10 Task 2, so passes 1–5 missed nothing by it; what the line break did was keep
 it out of the enumeration **this** task was handed, which was built with a
-line-oriented grep and named eight sites where there were thirteen. The rule two
+line-oriented grep and named eight sites where there are fifteen. The rule two
 sections up — *a wrapped phrase returns nothing quietly* — has been written here
 since W8 Task 6 fix round 2, and was still not reached for on the first occasion
 it mattered. **A rule in a document is not an instrument**: it is applied where

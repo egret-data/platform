@@ -6293,8 +6293,21 @@ fn a_pause(id: &str, bound: Option<&str>) -> String {
 /// reaches these same runs through a different door. All eight pause entries
 /// banked in W8 Task 3 with the gate narrow and stay banked with it wide:
 /// `baseline.txt` cannot move for this fix and cannot move if it is reverted.
-/// That is W4 item 15's shape — a property proved about a path no deployment
-/// takes — and it is why the assertion has to be here.
+/// That is W4 item 15's shape — a property whose only instrument is an
+/// integration test, because the oracle reaches the same runs through a door
+/// that cannot fail — and it is why the assertion has to be here.
+///
+/// **The gloss item 15 used for that shape — "a path no deployment takes" — is
+/// no longer true of this one, and this doc said it for seventeen commits.**
+/// Since W10 Task 2 `egret-bin` runs the claim loop
+/// (`egret_workflow::runtime::spawn`), so `runtime` → `tick` → `wake` →
+/// `claim::due_retries` is a production path. `due_retries`' own doc was
+/// corrected in that task and **this copy was not**; W10 Task 7's sweep found
+/// it, and only by widening the pattern from the proposition item 15 states to
+/// the *gloss* it states it in — the two share no words. The ratchet's
+/// blindness is unchanged; what changed is that it is now blindness about
+/// **shipping** behaviour rather than about a driver's, which makes this
+/// assertion more load-bearing than it was, not less.
 ///
 /// # Nothing rewinds a clock here
 ///
