@@ -251,9 +251,29 @@ từ chối. Đo được, và HẸP HƠN câu "start chỉ chạy được flow
 * **Tham chiếu `Subflow` là trường hợp ngược lại và chạy bình thường**, đó chính
   là lý do câu tổng quát kia sai: `subflow::resolve` giải theo
   `(namespace, flowId)` trên bảng draft lúc chạy và không bao giờ đọc id đã viết
-  lại — và nó đóng đúng hai cánh cửa bằng SQL
+  lại. ~~và nó đóng đúng hai cánh cửa bằng SQL
   (`AND deleted_at IS NULL AND state <> 'disabled'`) mà
-  `routes::startable_flow` đóng bằng Rust.
+  `routes::startable_flow` đóng bằng Rust.~~
+
+  **Mệnh đề cuối đó SAI và được đính chính ở đây (W10 Task 7 fix round 1,
+  2026-09-15), sau khi `24855ba7` đã sửa trong mã mà không sửa trong file này.**
+  `routes::startable_flow` đóng **ba** cánh cửa — thùng rác, cột `state`, và
+  `disabled: true` trong chính YAML, thứ nó đọc bằng cách gọi `parse`.
+  `subflow::resolve` đóng **hai**, và không thể đóng cửa thứ ba: `disabled:`
+  không phải một cột, nên không predicate SQL nào với tới được. Khoảng hở ấy là
+  thật — một operator viết `disabled: true`, `POST …/flows/{id}/executions` trả
+  **409**, rồi một flow anh em vẫn chạy đúng flow đó với tư cách `Subflow`
+  target. Cửa thứ ba nay nằm ở `worker::subflow::spawn_one`, ngay sau
+  `spec::parse`, và trả lời **y nguyên** thông điệp miss của `resolve`, để hai
+  cách viết "tắt" cho operator cùng một câu trả lời. **Không cửa nào trong hai
+  cửa gốc của `resolve` có test**: xoá từng cái đều để `--test worker` ở 59/0,
+  trong khi control workspace fail 58/1. Giờ cả ba đều có một test.
+
+  **Bài học phải trả giá, ghi ngay chỗ câu tiếp theo kiểu đó sẽ được viết:** một
+  comment khẳng định điều một hàm KHÁC làm thì cần test của riêng nó, đặt trong
+  hàm đó. Khẳng định về mã của chính mình được test quanh nó kiểm; khẳng định về
+  mã của người khác thì **không gì kiểm cả**, và đọc lên như một tham chiếu chéo
+  chứ không như một khẳng định.
 
 `a_start_runs_the_draft_even_when_a_published_version_exists`
 (`tests/executions_routes.rs`) là thứ giữ cho đính chính này khỏi mốc: nó publish

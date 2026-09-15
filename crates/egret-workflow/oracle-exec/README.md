@@ -7668,14 +7668,13 @@ will trip over it.**
   `with_core_tasks` and `egret-bin` will not start — loud, at startup. The other
   direction — a `TASK_TYPES` row with no handler, which is `core.http`,
   `core.slack` and every `egret.*` a deployment declines to wire — is **not**
-  guarded, and it is worse than its mirror: `claim` takes the run and writes its
-  lease, `Registry::run` returns `WorkerError::NoHandler`, the error propagates
-  out through `tick` where `runtime::spawn` logs a `warn` and ticks again, **the
-  run keeps the lease**, the reaper clears it a `working_timeout` later, the next
-  tick claims it and fails again, for ever. The execution never terminates.
-  Guarding it symmetrically would refuse to start every deployment that does not
-  wire `egret.sql` — i.e. every deployment — so the asymmetry is deliberate and
-  the cost is written down here rather than discovered.
+  guarded, and it is worse than its mirror. Guarding it symmetrically would
+  refuse to start every deployment that does not wire `egret.sql` — i.e. every
+  deployment — so the asymmetry is deliberate and the cost is written down here
+  rather than discovered. **Item 19 carries the mechanism**, and it is narrower
+  than this bullet used to state: `reap` clears only `claimed_at` and leaves the
+  run `RUNNING`, which is what `claim` re-selects — and **it is one of two
+  causes, not the only one.**
 - **Logs are W11 and the trigger loop is W12**, and both deferrals carry a
   measurement rather than a preference. Logs: **`LogSink` has three
   implementations under `crates/egret-workflow/src/` and none of them persists a
@@ -7862,6 +7861,102 @@ total — derived here and not quoted. It was `16` when W8 Task 2 measured it an
 `19` since `bf0782ea`; it is a count of what a wrong instrument misses, so it
 moves whenever anybody adds an async test, and **a figure like that is wrong the
 moment it is carried undated.**
+
+#### Fix round 1 — a file that retracts a claim and then goes on making it
+
+**Two stale claims were named to this round and the sweep found a third**, in a
+surface neither of the two lives in and in **both languages**. All three are one
+shape: *a correction landed where it was found and nowhere else.*
+
+**The population, and why it is not "the two I was handed".** The same three
+mechanisms that made W10 Task 7's own sweep 8→15 apply again, so the scan is
+defined the same way: every tracked file, **flattened before matching**, for the
+claim **and its gloss**, and separately over `docs/vi/` where the text shares no
+words with the English at all.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the retired `flow_versions`-resolver argument — `2 of (the) 20`, `would resolve 2`, `bank nothing`, `17 are draft`, plus the glosses `version-based resolver`, `resolver reading flow_versions`, `two of the twenty` | **3696 files**, 11 occurrences | **3** |
+| 2 | the route claim — `no product route`, `version snapshot`, `starts one at all`, `starts an execution from a` | **3696 files**, 9 occurrences | **2** |
+| 3 | **the false cross-reference the Critical named** — `same two doors`, `both doors`, `closes in Rust`, `startable_flow`, and the Vietnamese `đóng đúng hai cánh cửa`, `đóng bằng Rust` | **3696 files**, 22 occurrences | **2** |
+| 4 | the generator's inputs (7 data files + 3 Python sources) | **10 inputs** | **0** |
+| 5 | `docs/vi/`, flattened, for all three claims | **279 files** | **1** (inside population 3) |
+
+**Population 1 — 3 corrected, and the site is this file's own voice.** The
+argument *"a `flow_versions` resolver would resolve 2 of 20 … this package would
+bank nothing"* was retired at W10 Task 6 fix round 1 in `worker::subflow`'s doc,
+in the programme spec **in both languages**, in `tests/worker.rs`'s `file_flow`
+fixture, in `driver.rs`'s `SUBFLOW_TARGETS_LIVE`, and in this file's *W6 Task 1*
+section. It then stood **unannotated 340 lines below this file's own
+retraction**, in *Resolution: the draft row*, stated flat. **A file that
+retracts a claim and then repeats it further down has not retracted it** — and
+the reason the earlier sweep's population 1 did not catch it is that the sweep
+was defined over *the proposition about the worker*, not over this one. Two
+neighbouring sentences in the corrected paragraph went with it.
+
+**Population 2 — 2 corrected, and only half the sentence was false.** *"Nothing
+in `crates/*/src` starts an execution from a version snapshot — there is no
+product route that starts one at all yet."* The second clause is false: there
+are **three** start routes plus replay, and W10 Task 5 added the third. The
+first clause is **still true**, and is now the stronger statement because there
+are routes for it to be true of — `flow_versions` is read in `crates/*/src`
+only by `repo.rs` and surfaced by the read-only `routes::list_flow_versions`,
+and every start path passes either `flows.source` or `executions.source`.
+**Verified against the shipped routes rather than against the sentence**, which
+is what the brief asked and is the only reason the half that survived was not
+struck with the half that did not.
+
+**Population 3 — the sweep's own yield, and it is the Critical's false
+mechanism.** `24855ba7` corrected *"`resolve` closes the same two doors
+`routes::startable_flow` closes"* in `routes.rs` and `subflow.rs` — and left it
+standing in `docs/{en,vi}/specs/2026-09-01-workflow-programme-design.md` §6.1,
+where it reads as a cross-reference rather than an assertion. `startable_flow`
+closes **three** doors (trash, `state` column, YAML `disabled:`); `resolve`
+closes **two** and cannot close the third, because `disabled:` is not a column.
+Both language copies corrected, each pointing at `spawn_one` as where the third
+door actually lives. **The Vietnamese shares no words with the English** — it
+reads *"nó đóng đúng hai cánh cửa bằng SQL"* — so an English-pattern sweep
+returns zero for a file that carries the claim, which is population 5's whole
+reason for existing.
+
+**No denominator equals its numerator.** Populations 1–3 each left occurrences
+uncorrected **on purpose**, and naming them is what makes the numerators mean
+something: the retraction rows in this file's *figures W10 retires* table and in
+`driver.rs`/`subflow.rs`/`tests/worker.rs` are correct **as retractions** and
+quote the retired text deliberately; `repo.rs:33`'s *"version snapshots and
+notes"* and the EN spec's *"frozen into the version snapshot"* are a different
+subject; `tests/executor.rs:5191`'s *"bank nothing at all"* is about W8 Task 2's
+sixteen. Those are the controls that say the scan was capable of a hit it should
+not act on.
+
+#### What this round changed in item 19, and why the mechanism was too wide
+
+Item 19 said a handler-less publishable type hangs because *"the run keeps the
+lease"* and the reaper clears it. **That is one cause of two, and the mechanism
+was imprecise.** `reap` clears **only** `claimed_at`; the state stays `RUNNING`
+and the attempt stays open, and `claim`'s own predicate
+`state = 'RUNNING' AND claimed_at IS NULL` is what re-selects the row. Nothing
+counts the cycles — `attempts.push` is in one file and neither site is on this
+path — so one `warn` per cycle is the entire signal, and **9 of 13 publishable
+types** are in this condition on the shipped registry.
+
+**The second cause was not recorded anywhere in this statement**: a handler that
+**outruns** `working_timeout`. `Sleep::new()` is uncapped and is one of the four
+registered handlers, so `duration: PT2H` is reachable on a flow anyone may
+publish — reaped at 1 h, re-claimed, a *fresh* two-hour sleep started, and the
+first attempt meeting the fence with `LeaseLost`, for ever, each cycle costing a
+new handler. **The distinction is load-bearing rather than taxonomic**: a
+give-up-after-N rule closes the first and quietly converts the second into a
+**wrongly failed** run, so a statement that carried only the first would have
+recommended a fix that breaks the second.
+
+Item 19 also gains the Critical: **"off" means two things**, `resolve` read only
+one of them, and a flow whose YAML said `disabled: true` answered 409 to the API
+and **ran anyway as a `Subflow` target**. What belongs here is not the fix but
+the instrument: **neither of `resolve`'s two stated doors had a test** — both
+deleted, `--test worker` stayed at 59/0, against a workspace control that failed
+58/1 — and the ratchet reads **109** through every version of it.
+
 
 #### What this package could not settle
 
@@ -8904,23 +8999,51 @@ worker reached no deployment; it reaches one now, and **that is what makes this
 item necessary rather than what makes it unnecessary.** Four things a green
 `109` says nothing about, each derived rather than asserted:
 
-- **A flow whose task type has a `TASK_TYPES` row and no handler HANGS, and it
-  hangs silently.** `Handlers::add_publishable` panics at startup in the other
-  direction — a handler publish would refuse cannot reach `with_core_tasks` —
-  but a publishable type with no handler is not guarded and cannot be, because
-  guarding it symmetrically would refuse to start every deployment that declines
-  to wire `egret.sql`, `core.http` or the container tasks, which is every
-  deployment (`with_core_tasks` is **four** handlers against **thirteen**
-  `TASK_TYPES` rows: 7 `egret.*`, 2 short `core.*`, 4 Kestra FQCNs). What
-  happens instead: `claim` takes the run and writes its lease, `Registry::run`
-  returns `WorkerError::NoHandler`, the error propagates out through `tick`,
-  `runtime::spawn` logs a `warn` and ticks again, **the run keeps its lease**,
-  the reaper clears it a `working_timeout` later, and the next tick claims it
-  and fails identically. For ever. The execution never terminates and no
-  operator-visible state ever changes. **This is the corpus's own condition** —
-  the oracle drives 294 entries of flows whose types the driver's registry does
-  not all implement, and `driver::run`'s loop comments say so — so the ratchet
-  not only fails to score it, it is *built around* it.
+- **There are TWO ways a run hangs for ever, they are not the same way, and a
+  green `109` is silent about both.** Recorded on `worker::claim::tick` by W10
+  Task 5 fix round 2 and **deliberately not fixed**: they are liveness, not
+  correctness. *Correctness is fenced* — `apply_outcome`'s `claimed_at = $3`
+  fence rejects the stale worker every time, so no wrong value is ever written.
+  What no fence does is make the run finish, or make anything **notice** that it
+  has not.
+
+  **(a) A publishable type with no handler** — `with_core_tasks` registers
+  **4** handlers against **13** `TASK_TYPES` rows every one of which `publish`
+  accepts, so **9 of 13 publishable types** produce a run that is claimed, found
+  handler-less, and left `RUNNING`. The mechanism is narrower than *"the run
+  keeps its lease"*: [`reap`] clears **only** `claimed_at`
+  (`SET claimed_at = NULL, updated_at = now()`), the state stays `RUNNING`, the
+  attempt stays open, and `claim`'s own predicate
+  `state = 'RUNNING' AND claimed_at IS NULL` re-selects exactly that row. It is
+  re-claimed, re-missed, re-reaped, for ever. **Nothing counts it**:
+  `attempts.push` occurs in one file (`executor/state.rs`, 2 sites) and neither
+  is on this path, so the run's `attempts` array is the same length on the
+  ten-thousandth cycle as on the first. **One `warn` per cycle is the entire
+  signal.** Guarding it symmetrically at publish is not available — that would
+  refuse to start every deployment declining to wire `egret.sql`, `core.http` or
+  the container tasks, i.e. every deployment.
+
+  **(b) A handler that OUTRUNS `working_timeout`** — and this is a *slow*
+  handler, not a *missing* one. `DEFAULT_WORKING_TIMEOUT` is 3600 s;
+  `Sleep::new()` sets `cap: None`, uncapped, and is **one of the four
+  registered**, so this is reachable on the shipped registry with a flow anyone
+  may publish. `duration: PT2H`: claimed, sleeping, reaped at 1 h, **re-claimed**,
+  starts a *fresh* two-hour sleep; when the first handler returns it hits the
+  fence with `LeaseLost`. The second is reaped at its own hour, and so on — the
+  run never completes and **each cycle costs a new handler**.
+
+  **The two need different fixes, and that is why they are listed apart**: a
+  give-up-after-N rule closes (a) and quietly converts (b) into a **wrongly
+  failed** run. `Sleep::capped(cap)` already exists and is the shape of the
+  answer for (b); it does nothing for (a), which needs somewhere to record
+  *"tried, no handler"* — a schema question, not a patch.
+
+  **The oracle is built around (a) rather than blind to it by accident**: it
+  drives 294 entries of flows whose types `driver::registry()` does not all
+  implement, and `driver::run`'s loop comments say a worker error is not a
+  driver error. With `BATCH == 1` the refusal concerns only the run it names,
+  the driver carries on, and the trace still compares. **The ratchet cannot
+  score either cause in either direction.**
 - **Kill has no mechanism, and the endpoint is absent for that reason.**
   `RunState::Killed` has **zero** producing sites — no
   `Command::SetRunState { state: RunState::Killed }`, no `SetExecutionState`
@@ -8951,6 +9074,30 @@ item necessary rather than what makes it unnecessary.** Four things a green
   no route, holds no `WsContext` and never evaluates a Cedar decision. That is
   the `chart_id` class of defect, and the only instruments that can see it are
   `tests/executions_routes.rs` and `tests/execution_repo.rs`.
+
+- **"Off" means two different things, and the ratchet has never seen either
+  door.** A flow is switched off by the `state` column the management UI writes
+  **or** by its own YAML's `disabled: true`, and the same defect — reading the
+  column and never parsing the YAML — has now been found on **two** of the three
+  start paths. W6's webhook was the first (closed structurally). `24855ba7` is
+  the second and the worse one: `worker::subflow::resolve` tests
+  `deleted_at IS NULL AND state <> 'disabled'` and **never parses the source**,
+  so an operator could write `disabled: true`, watch
+  `POST …/flows/{id}/executions` answer **409**, and have a sibling flow run that
+  same flow as a `Subflow` target. The fix cannot live in `resolve` — `disabled:`
+  is not a column, so no predicate reaches it — and lives in `spawn_one` after
+  `spec::parse`, answering `resolve`'s miss **verbatim** so that both spellings
+  of "off" give an operator one answer.
+
+  **What belongs in a coverage statement is the instrument, not the fix**:
+  **neither of `resolve`'s two stated doors had a test at all.** Deleting
+  `state <> 'disabled'` left `--test worker` at **59 passed / 0 failed**;
+  deleting `deleted_at IS NULL` as well, still **59/0** — against a workspace
+  control that failed **58/1**, which is what says the instrument could have
+  spoken. The ratchet is **109** through all of it: no corpus flow declares
+  `disabled: true` on a `Subflow` *target*, and a cross-workspace or trashed
+  target is not a shape `golden.json` holds. **Three predicates now have one
+  test each.**
 
 **Logs are W11 and the trigger loop is W12.** The trigger half of that is
 re-measured in the W6 section at this commit and still reads zero uses outside
@@ -9941,12 +10088,52 @@ shape) and is caught by the test:
 
 ## Resolution: the draft row, and the workspace
 
-Against `workflow.flows.source`, not `flow_versions`: W6 Task 1 measured that
+Against `workflow.flows.source`, not `flow_versions`. ~~W6 Task 1 measured that
 only **2 of the 20** literal `Subflow` targets reach a live version, so a
 version-based resolver would resolve 2 of 20 and this package would bank
-nothing. It is also what `publish`'s own `FlowRepo::find_by_name` reads, and
-**nothing in `crates/*/src` starts an execution from a version snapshot** —
-there is no product route that starts one at all yet.
+nothing.~~ It is also what `publish`'s own `FlowRepo::find_by_name` reads, and
+~~**nothing in `crates/*/src` starts an execution from a version snapshot** —
+there is no product route that starts one at all yet.~~
+
+> **Both halves above are RETIRED — corrected at W10 Task 7 fix round 1,
+> 2026-09-15, and the decision they argued for is unchanged.**
+>
+> **The figure**: it is **18 of 20**, not 2 of 20, since W10 Task 6 fix round 1
+> put the four core Kestra FQCNs into `spec::registry::TASK_TYPES`
+> (`driver::SUBFLOW_TARGETS_LIVE`, asserted every run). A `flow_versions`
+> resolver would now reach almost all of them, so *"this package would bank
+> nothing"* is no longer a reason for anything. **This is the FOURTH site of one
+> retraction**: `worker::subflow`'s doc, the programme spec in both languages
+> and this file's own *W6 Task 1* section all retired it, and this paragraph —
+> 340 lines under this file's own retraction at *the 21 distinct target strings*
+> — went on making it in its own voice. *A file that retracts a claim and then
+> repeats it further down has not retracted it.*
+>
+> **The route count**: *"there is no product route that starts one at all yet"*
+> is false — there are **three**, and W10 Task 5 added the third. What is
+> **still true**, and is now the stronger statement because there are routes to
+> be true of, is that **none of them reads a version snapshot**. Derived at
+> `24855ba7` rather than quoted, and `flow_versions` is read in
+> `crates/*/src` only by `repo.rs` (insert/list/get) and surfaced by the
+> read-only `routes::list_flow_versions`:
+>
+> | site | what it starts from |
+> |---|---|
+> | `worker::subflow::resolve` (W6 Task 3) | `SELECT id, source FROM workflow.flows …` — the **draft** |
+> | `webhook_routes::handle` (W6 Task 7) | the same table, `SELECT id, source, state` — the **draft** |
+> | `routes::start_flow_execution` (W10 Task 5) | `FlowRepo::get` → `flows.source` — the **draft** |
+> | `routes::replay_execution` (W10 Task 5) | `executions.source`, the copy **frozen at the original start** — not a version either |
+>
+> `a_start_runs_the_draft_even_when_a_published_version_exists`
+> (`tests/executions_routes.rs`) is what keeps this from going stale: it
+> publishes a version, edits the draft underneath it, and asserts the start runs
+> the draft. **Before it, no fixture in the tree had a published version at
+> all**, so nothing in this repository could tell a draft read from a
+> `flow_versions` read — which is why the sentence could be false for a package
+> without any test noticing.
+>
+> The **binding** reason is untouched and was never either of these: a parent
+> and its child must not disagree about which version of the world they are in.
 
 **Scoped to `workspace_id`, where `find_by_name` cannot be.** That method's doc
 records why (`WorkflowRefPort::workspace_of` carries no caller-workspace

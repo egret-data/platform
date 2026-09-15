@@ -258,9 +258,29 @@ run reference-free flows":
 * **A `Subflow` reference is the opposite case and works fine**, which is why
   the general sentence would have been wrong: `subflow::resolve` resolves by
   `(namespace, flowId)` against the draft table at run time and never reads a
-  rewritten id — and it closes the same two doors in SQL
+  rewritten id. ~~and it closes the same two doors in SQL
   (`AND deleted_at IS NULL AND state <> 'disabled'`) that
-  `routes::startable_flow` closes in Rust.
+  `routes::startable_flow` closes in Rust.~~
+
+  **That last clause was false and is corrected here (W10 Task 7 fix round 1,
+  2026-09-15), after `24855ba7` corrected it in the code and not in this file.**
+  `routes::startable_flow` closes **three** doors — the trash, the `state`
+  column, and the YAML's own `disabled: true`, which it reads by calling
+  `parse`. `subflow::resolve` closes **two**, and cannot close the third:
+  `disabled:` is not a column, so no SQL predicate can reach it. The gap was
+  live — an operator wrote `disabled: true`, `POST …/flows/{id}/executions`
+  answered **409**, and a sibling flow ran that same flow as a `Subflow` target.
+  The third door now lives in `worker::subflow::spawn_one`, immediately after
+  `spec::parse`, and answers `resolve`'s miss message **verbatim** so that both
+  spellings of "off" give an operator the same answer. **Neither of `resolve`'s
+  two original doors had a test**: deleting each left `--test worker` at 59/0,
+  against a workspace control that failed 58/1. All three have one now.
+
+  **The rule this cost, stated where the next such sentence will be written:**
+  a comment that asserts what a *different* function does needs its own test, in
+  that function. A claim about your own code is checked by the tests around it;
+  a claim about somebody else's is checked by nothing, and reads as a
+  cross-reference rather than as an assertion.
 
 `a_start_runs_the_draft_even_when_a_published_version_exists`
 (`tests/executions_routes.rs`) is what stops this correction going stale: it
