@@ -3136,3 +3136,95 @@ async fn delete_engine_removes_cluster_row_secrets_and_minted_clients_only() {
         "a client the engine did not mint survives"
     );
 }
+
+/// Seed a trino profile named `name` with its `{name}_tag` tag service, as
+/// auto-bind creates them, and bind `engines` to it.
+async fn seed_ranger_profile(f: &Fixture, name: &str, engines: &[Uuid]) -> i64 {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::ensure_trino_def(&policy)
+        .await
+        .expect("trino def");
+    PolicyPort::ensure_tag_def(&policy).await.expect("tag def");
+    let tag = format!("{name}_tag");
+    PolicyPort::create_service(&policy, &tag, "tag", &serde_json::json!({}))
+        .await
+        .expect("tag service");
+    let profile = PolicyPort::create_service(
+        &policy,
+        name,
+        "trino",
+        &serde_json::json!({ "tagService": tag }),
+    )
+    .await
+    .expect("trino profile");
+    let store = egret_engine_mgmt::EngineMgmtStore::new(f.db.clone());
+    for e in engines {
+        store
+            .set_engine_authz_service(*e, Some(profile.id))
+            .await
+            .unwrap();
+    }
+    profile.id
+}
+
+async fn service_exists(f: &Fixture, name: &str) -> bool {
+    use egret_policy_api::PolicyPort;
+    let policy = egret_policy::PolicyStore::new(f.db.clone());
+    PolicyPort::get_service_opt(&policy, name)
+        .await
+        .unwrap()
+        .is_some()
+}
+
+/// D9, by user decision: a profile can hold admin-written policies and nothing
+/// records that egret created it, so engine delete unbinds and never deletes.
+#[tokio::test]
+async fn delete_engine_keeps_its_ranger_profile_and_tag_service() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "engine_delete_keeps_ranger", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+    let name: String = sqlx::query_scalar("SELECT name FROM engine_mgmt.engines WHERE id = $1")
+        .bind(engine_id)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+    let profile_id = seed_ranger_profile(&f, &name, &[engine_id]).await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert!(
+        service_exists(&f, &name).await,
+        "the profile survives the engine"
+    );
+    assert!(
+        service_exists(&f, &format!("{name}_tag")).await,
+        "and so does its tag service"
+    );
+    let bound: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM engine_mgmt.engines WHERE authz_service_id = $1")
+            .bind(profile_id)
+            .fetch_one(&f.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(bound, 0, "no engine is bound to it any more");
+}
