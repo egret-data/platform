@@ -7712,8 +7712,9 @@ output is a sweep that cannot show a numerator.
 | 5 | **references to something deleted** — every backticked identifier of 15 characters or more in this file, checked for existence anywhere in the tree | **194 identifiers**, 6 absent | **1** |
 
 **Population 1's handed list was eight sites; the sweep found fifteen false
-occurrences, in three files rather than one**, and the gap is not carelessness on whoever compiled the list — it is the
-instrument. **The most consequential instance is invisible to a line-oriented
+occurrences, in three files rather than one**, and the gap is not
+carelessness on whoever compiled the list — it is the instrument.
+**The most consequential instance is invisible to a line-oriented
 grep**, because it wraps a line break: this statement's own preamble reads
 *"…the sixth fact of the W4 section above: nothing in this workspace ⏎ runs this
 worker"*, and `grep` sees two lines that each say nothing. That is the sentence
@@ -7758,8 +7759,8 @@ the W8 section, which name a shape the item recorded and not the item's verdict.
 widening the pattern from the proposition to its GLOSS, and the two share no
 words.** `tests/worker.rs`'s doc for
 `a_bounded_pause_whose_wait_has_elapsed_is_woken_and_an_unbounded_one_is_never_woken`
-read *"That is W4 item 15's
-shape — a property proved about a path **no deployment takes**"*, present tense,
+read *"That is W4 item 15's shape — a property proved about a path
+**no deployment takes**"*, present tense,
 about `claim::due_retries`. W10 Task 2 corrected exactly that gloss in
 `due_retries`' **own** doc — *"'a path no deployment takes' is no longer true of
 this query"* — and left this copy standing, which is this branch's *corrected
