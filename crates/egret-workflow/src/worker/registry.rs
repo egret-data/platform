@@ -98,8 +98,16 @@ impl Handlers {
     ///
     /// ```ignore
     /// let mut reg = Handlers::with_core_tasks();
-    /// reg.add(std::sync::Arc::new(handlers::sql::Sql::new(port)));
+    /// // `add_publishable`, not `add`: `egret.sql` HAS a `TASK_TYPES` row, and
+    /// // this is the invariant documented above — a handler wired in by a
+    /// // deployment is still a handler whose type publish has to accept.
+    /// reg.add_publishable(std::sync::Arc::new(handlers::sql::Sql::new(port)));
     /// ```
+    ///
+    /// **This example said `reg.add(…)` until W10 Task 6 fix round 2**, which
+    /// is the one handler deployments actually wire — so the snippet directly
+    /// under the invariant's own paragraph was the one place showing how to
+    /// bypass it.
     ///
     /// `oracle-exec/README.md`'s coverage statement says the same thing, so a
     /// green ratchet is not read as covering a handler it never ran.

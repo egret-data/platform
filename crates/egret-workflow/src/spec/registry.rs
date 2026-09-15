@@ -49,11 +49,29 @@ pub struct TaskTypeSpec {
 /// `egret-bin` will not start. An alias added here is dispatched without
 /// anyone remembering to add it twice.
 ///
-/// **The converse does not hold and is not meant to**: a row here with no
-/// handler is a type egret publishes and does not run (`core.http`,
-/// `core.slack`, and every `egret.*` task the deployment does not wire in).
-/// That asymmetry is the shipping default `main.rs` documents, and
-/// `WorkerError::NoHandler` is what a flow using one gets.
+/// **The converse does not hold, is not meant to, and does NOT fail the way its
+/// mirror did.** A row here with no handler is a type egret publishes and does
+/// not run: `core.http`, `core.slack`, and every `egret.*` task a given
+/// deployment does not wire in.
+///
+/// It would be easy to read that as "the same defect facing the other way", and
+/// it is worse than that. The missing-row case was a **400 at publish** — loud,
+/// immediate, and about a flow nobody had started. This case is a **hang**:
+/// `claim` takes the run and writes its lease, `Registry::run` returns
+/// `WorkerError::NoHandler`, and that error propagates out of `run_one` and
+/// `tick` — where `runtime::spawn` logs a `warn` and ticks again — so **the run
+/// keeps the lease it was given**. `working_timeout` later, the reaper clears
+/// it (`worker::reap`), the next tick claims the run again, and it fails again,
+/// for ever. The execution never terminates and nothing in it ever moves.
+///
+/// **Not guarding it is still the right call**, and the reason is the panic in
+/// [`add_publishable`](crate::worker::Handlers::add_publishable): the same
+/// mechanism facing this way would refuse to start any deployment that declines
+/// to wire `egret.sql`, `core.http` or the container tasks — which is every
+/// deployment, since `with_core_tasks` is four handlers and this table is
+/// thirteen rows (7 `egret.*`, 2 short `core.*`, 4 Kestra FQCNs). The
+/// asymmetry is deliberate, `main.rs` documents the shipping set, and what a
+/// flow using an unwired type gets is the loop above rather than a refusal.
 pub const TASK_TYPES: &[TaskTypeSpec] = &[
     TaskTypeSpec {
         r#type: "egret.sql",

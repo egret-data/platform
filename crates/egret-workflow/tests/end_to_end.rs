@@ -529,6 +529,31 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
         "no claim was ever issued: the lease is what a claim writes, so a NULL \
          one is the only evidence no claim statement ran: {stalled}"
     );
+    // **The control for the line above, and it is not optional.** `is_null()`
+    // on a key nothing ever populates passes for free: a renamed column, a
+    // `#[serde(rename)]`, a DTO that dropped the field — every one of those
+    // makes the assertion vacuous while it still reads as a proof that no claim
+    // ran. So write a lease by hand and read it back through the SAME route:
+    // the field must go non-null. This pins the instrument, not the worker.
+    sqlx::query("UPDATE workflow.task_runs SET claimed_at = now() WHERE execution_id = $1")
+        .bind(execution)
+        .execute(&pool)
+        .await
+        .expect("write a lease by hand");
+    let leased = read(&app, ws, user, execution).await;
+    assert!(
+        !leased["runs"][0]["claimed_at"].is_null(),
+        "`claimed_at` must be able to come back non-null, or the NULL above is \
+         a fact about the DTO and not about the worker: {leased}"
+    );
+    // Put it back before the positive control below: a run that still holds a
+    // lease is a run `claim` will not take, and the enabled runtime would then
+    // stall for a reason that has nothing to do with the config gate.
+    sqlx::query("UPDATE workflow.task_runs SET claimed_at = NULL WHERE execution_id = $1")
+        .bind(execution)
+        .execute(&pool)
+        .await
+        .expect("release the hand-written lease");
     assert!(
         runs[0]["outputs"].is_null() || runs[0]["outputs"]["value"].is_null(),
         "no handler ran: {stalled}"
@@ -564,27 +589,45 @@ async fn with_the_worker_disabled_the_execution_stays_where_the_api_left_it(pool
 
 // ── The vocabulary, pinned in both directions ───────────────────────────────
 
-/// **Both spellings publish, and both dispatch** — the invariant fix round 1
-/// established, driven from the outside.
+/// The inert canary `Log` ignores and `Return` renders.
+///
+/// `handlers::log::Log`'s `Spec` deserializes only `message`/`level` and does
+/// not deny unknown fields, so a `format:` on a `Log` task is dead weight —
+/// **unless the task reached `Return` instead**, which is the only one of the
+/// four that reads `format:` and the only one that emits an output at all. So
+/// a `Log` run that comes back carrying `{"value": …}` is a run that reached
+/// the wrong handler, and it says which one.
+const WRONG_HANDLER_CANARY: &str = "this-came-out-of-Return-not-Log";
+
+/// **Both spellings publish, and both DISPATCH — dispatch measured by what the
+/// handler produced, not by a key in a map.**
 ///
 /// This test is the inverse of the one it replaces. Until fix round 1 it
 /// measured the split: the same one-task flow spelled `core.log` published
 /// **200** and spelled `io.kestra.plugin.core.log.Log` published **400**, while
-/// the shipped registry served the FQCN and had never heard of `core.log`. Two
-/// spellings of one task, opposite answers at each end, and the two ends
-/// disagreeing about which was which.
+/// the shipped registry served the FQCN and had never heard of `core.log`.
 ///
 /// Now both halves are asserted for both spellings:
 ///
-/// 1. **publish accepts each** — over HTTP, through the real route, so this is
-///    the product's answer and not a table read;
-/// 2. **the shipped registry dispatches each** — `with_core_tasks()` is what
-///    `egret-bin` hands the runtime, and `type_ids()` is what it will serve.
+/// 1. **publish accepts each** — over HTTP, through the real route;
+/// 2. **the shipped registry runs each, and the RIGHT handler runs it** — the
+///    flow is started through the API, finished by `runtime::spawn`, and the
+///    run's `outputs` read back through the read API.
 ///
-/// Leg 2 is not redundant with leg 1: a publish route that accepted everything
-/// would pass leg 1 alone, which is why the **negative control** below is here
-/// — a plausible neighbouring FQCN that nothing implements must still be
-/// refused, in both places. Without it "both spellings publish" is satisfiable
+/// # Leg 2 asserted `type_ids()` membership until fix round 2, and a swap walked through it
+///
+/// The doc said *dispatch* and the assertion said *the map has this key*. Those
+/// are different claims, and the review's mutation is what separated them:
+/// moving the `core.log` alias from the `Log` row to the `Return` row — so that
+/// `core.log` **dispatches to the wrong handler** — killed exactly **one test in
+/// 1090**, a unit test, and **this one passed**. A membership check cannot see
+/// which handler a key points at; only the handler's own output can.
+/// [`WRONG_HANDLER_CANARY`] is that output, and it is asserted **absent** here
+/// and **present** by its own control in
+/// [`the_canary_is_a_real_discriminator_and_not_a_field_nothing_reads`].
+///
+/// The **negative control** stays: a plausible neighbouring FQCN that nothing
+/// implements must still be refused, or "both spellings publish" is satisfiable
 /// by a table that stopped refusing anything.
 #[sqlx::test(migrations = "../../migrations")]
 async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
@@ -594,52 +637,6 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
     let app = common::app(&db).await;
 
-    /// `POST /flows` then `POST /flows/{id}/publish` for a one-task flow of
-    /// `type_id`; returns publish's status.
-    async fn publish_one(
-        app: &common::App,
-        ws: Uuid,
-        user: egret_core::UserId,
-        name: &str,
-        type_id: &str,
-    ) -> u16 {
-        // **One flat literal, no `\`-continuations.** The first draft wrapped
-        // this string across source lines; the wrapping baked the source's own
-        // indentation into the YAML, `- id: greet` landed 15 columns in, and
-        // create answered 400 from the PARSER -- a refusal that looks exactly
-        // like the one this test is about. `\x20` is the spelling the rest of
-        // this file uses to keep a leading space visible.
-        let source = format!(
-            "id: vocab-{name}\nnamespace: a.e2e\ntasks:\n\x20 - id: greet\n\x20   type: {type_id}\n\x20   message: hi\n"
-        );
-        let res = common::post(
-            app,
-            &format!("/api/ws/{ws}/workflows/flows"),
-            user,
-            serde_json::json!({ "source": source }),
-        )
-        .await;
-        let status = res.status();
-        let body = common::body_text(res).await;
-        // **`create` is not the gate and must not become one.** It answers 201
-        // with a validation report for every spelling here, including the type
-        // egret does not implement -- publish is where a type is refused. If
-        // this panics, the refusal has moved routes and the assertion below is
-        // measuring the wrong door.
-        assert_eq!(status, 201, "create refused `{type_id}`: {body}");
-        let created: Value = serde_json::from_str(&body).expect("flow dto");
-        let flow = created["id"].as_str().expect("created id");
-        common::post(
-            app,
-            &format!("/api/ws/{ws}/workflows/flows/{flow}/publish"),
-            user,
-            serde_json::json!({}),
-        )
-        .await
-        .status()
-        .as_u16()
-    }
-
     const FQCN: &str = "io.kestra.plugin.core.log.Log";
     const ALIAS: &str = "core.log";
     /// A neighbour in the same package that egret does not implement. Kestra
@@ -648,6 +645,7 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
     /// satisfiable by a table that refuses nothing.
     const UNIMPLEMENTED: &str = "io.kestra.plugin.core.output.OutputValues";
 
+    // ---- leg 1: publish, over HTTP ----
     let measured = [
         (FQCN, publish_one(&app, ws, user, "fqcn", FQCN).await),
         (ALIAS, publish_one(&app, ws, user, "alias", ALIAS).await),
@@ -663,21 +661,177 @@ async fn both_spellings_publish_and_both_dispatch(pool: sqlx::PgPool) {
          type nothing implements"
     );
 
-    // And the registry `egret-bin` hands the runtime serves the same two, and
-    // not the third.
+    // ---- leg 2: run each spelling and read what the handler produced ----
+    for spelling in [FQCN, ALIAS] {
+        let run = run_one_task(&pool, &app, ws, user, spelling).await;
+        assert_eq!(
+            run["state"], "SUCCESS",
+            "`{spelling}` must reach a handler and succeed: {run}"
+        );
+        // **The discrimination, and it is the whole of leg 2.** `Log` produces
+        // no output; `Return` produces `{"value": …}` from the `format:` this
+        // flow carries. A non-null `outputs` here means the spelling dispatched
+        // to the wrong handler, and the value names which.
+        assert!(
+            run["outputs"].is_null(),
+            "`{spelling}` reached a handler that produced an output; \
+             `core.log.Log` produces none, so this ran the wrong one: {run}"
+        );
+        assert_ne!(
+            run["outputs"]["value"].as_str(),
+            Some(WRONG_HANDLER_CANARY),
+            "`{spelling}` dispatched to `core.debug.Return`: {run}"
+        );
+    }
+
+    // Membership, kept as a secondary line rather than the claim: it says the
+    // alias is registered at all, which is necessary and — as the swap proved —
+    // nowhere near sufficient.
     let shipped = Handlers::with_core_tasks();
     let type_ids = shipped.type_ids();
-    assert!(
-        type_ids.contains(&FQCN),
-        "the runtime must serve the canonical spelling: {type_ids:?}"
-    );
-    assert!(
-        type_ids.contains(&ALIAS),
-        "and the alias publish accepts, which it takes from TASK_TYPES rather \
-         than repeating: {type_ids:?}"
-    );
+    assert!(type_ids.contains(&FQCN), "{type_ids:?}");
+    assert!(type_ids.contains(&ALIAS), "{type_ids:?}");
     assert!(
         !type_ids.contains(&UNIMPLEMENTED),
         "a type nothing implements must not appear to be served: {type_ids:?}"
     );
+}
+
+/// **The canary's own control: `Return` DOES emit it.**
+///
+/// Without this, `outputs.is_null()` above is satisfiable by a `format:` field
+/// nothing anywhere reads — the assertion would hold for a canary that could
+/// never fire, which is a guard that cannot fail. Here the identical `format:`
+/// value is put on a task whose type **is** `core.debug.Return`, and the run
+/// comes back carrying it.
+#[sqlx::test(migrations = "../../migrations")]
+async fn the_canary_is_a_real_discriminator_and_not_a_field_nothing_reads(pool: sqlx::PgPool) {
+    egret_test_db::assert_database_url_is_exported();
+    let db = Db { pool: pool.clone() };
+    let (ws, user) = common::seed_workspace(&db).await;
+    common::grant(&db, ws, user, &["workflow:read", "workflow:manage"]).await;
+    let app = common::app(&db).await;
+
+    let run = run_one_task(&pool, &app, ws, user, "io.kestra.plugin.core.debug.Return").await;
+    assert_eq!(run["state"], "SUCCESS", "{run}");
+    assert_eq!(
+        run["outputs"]["value"].as_str(),
+        Some(WRONG_HANDLER_CANARY),
+        "`core.debug.Return` reads `format:` and emits it; if it did not, the \
+         canary in the test above would be a field nothing reads and its \
+         absence would prove nothing: {run}"
+    );
+}
+
+/// The one-task flow both vocabulary tests run, carrying [`WRONG_HANDLER_CANARY`]
+/// as `format:` and a `message:` for the handler that reads one.
+fn one_task_source(name: &str, type_id: &str) -> String {
+    // One flat literal, no `\`-continuations: `cargo fmt` reflowed an earlier
+    // draft of this string and baked the source's own indentation into the
+    // YAML, so `create` answered 400 from the PARSER -- a refusal that looks
+    // exactly like the one these tests are about.
+    format!(
+        "id: vocab-{name}\nnamespace: a.e2e\ntasks:\n\x20 - id: greet\n\x20   type: {type_id}\n\x20   message: hi\n\x20   format: {WRONG_HANDLER_CANARY}\n"
+    )
+}
+
+/// `POST /flows` then `POST /flows/{id}/publish`; returns publish's status.
+async fn publish_one(
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    name: &str,
+    type_id: &str,
+) -> u16 {
+    let res = common::post(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows"),
+        user,
+        serde_json::json!({ "source": one_task_source(name, type_id) }),
+    )
+    .await;
+    let status = res.status();
+    let body = common::body_text(res).await;
+    // **`create` is not the gate and must not become one.** It answers 201 with
+    // a validation report for every spelling here, including the type egret
+    // does not implement -- publish is where a type is refused. If this panics,
+    // the refusal has moved routes and the assertion above is measuring the
+    // wrong door.
+    assert_eq!(status, 201, "create refused `{type_id}`: {body}");
+    let created: Value = serde_json::from_str(&body).expect("flow dto");
+    let flow = created["id"].as_str().expect("created id");
+    common::post(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/publish"),
+        user,
+        serde_json::json!({}),
+    )
+    .await
+    .status()
+    .as_u16()
+}
+
+/// Publish a one-task flow of `type_id`, start it, let the **runtime** finish
+/// it, and return the single task run's DTO.
+///
+/// The flow name is derived from `type_id` so two calls in one test never
+/// collide on `(namespace, flowId)`.
+async fn run_one_task(
+    pool: &sqlx::PgPool,
+    app: &common::App,
+    ws: Uuid,
+    user: egret_core::UserId,
+    type_id: &str,
+) -> Value {
+    let name: String = type_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let status = publish_one(app, ws, user, &name, type_id).await;
+    assert_eq!(status, 200, "`{type_id}` must publish before it can be run");
+
+    let flows = common::json(
+        common::get(
+            app,
+            &format!("/api/ws/{ws}/workflows/flows?namespace=a.e2e"),
+            user,
+        )
+        .await,
+    )
+    .await;
+    let flow = flows
+        .as_array()
+        .expect("flow list")
+        .iter()
+        .find(|f| f["flow_id"] == format!("vocab-{name}"))
+        .unwrap_or_else(|| panic!("the flow just created is in the list: {flows}"))["id"]
+        .as_str()
+        .expect("flow id")
+        .to_string();
+
+    let started = common::post_no_body(
+        app,
+        &format!("/api/ws/{ws}/workflows/flows/{flow}/executions"),
+        user,
+    )
+    .await;
+    assert_eq!(started.status(), 201, "start `{type_id}`");
+    let execution: Uuid = common::json(started).await["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    spawn(
+        pool.clone(),
+        Arc::new(Handlers::with_core_tasks()),
+        cfg(true),
+        cancel.clone(),
+    );
+    let dto = wait_for_terminal(app, ws, user, execution, Duration::from_secs(60))
+        .await
+        .unwrap_or_else(|why| panic!("`{type_id}` never finished: {why}"));
+    cancel.cancel();
+    dto["runs"][0].clone()
 }

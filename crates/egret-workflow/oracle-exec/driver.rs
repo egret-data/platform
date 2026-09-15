@@ -674,23 +674,35 @@ const LIVE: usize = 248;
 
 /// How many corpus flows have a draft row that `publish` refused **because a
 /// task names a type `spec::registry::TASK_TYPES` does not hold** — the
-/// finding, and the reason [`LIVE`] is 21 and not 295.
+/// finding, and the reason [`LIVE`] is not 345.
 ///
 /// (It read *"the reason `LIVE` is 16 and not 295"* until W8 Task 3 fix round
-/// 1 — **three lines below `const LIVE: usize = 248;`, in the same doc block
-/// that task had just rewritten.** A fact corrected where it was found and
-/// left standing three lines away is this branch's named failure mode; it is
-/// a `[LIVE]` link now, so the number cannot be restated here at all.)
+/// 1, and *"is 21 and not 295"* until W10 Task 6 fix round 2 — **three lines
+/// below `const LIVE`, inside the doc block the previous round had just
+/// rewritten, two lines from the parenthesis warning about exactly this.** A
+/// fact corrected where it was found and left standing three lines away is this
+/// branch's named failure mode, and it has now happened *twice in the same
+/// paragraph*: the `[LIVE]` link was supposed to make the number unrestatable
+/// and the sentence restated it anyway, because "21" is not the token a reader
+/// sweeping for "16" is looking for. **The figure is gone entirely now** —
+/// there is no numeral in this sentence to go stale.)
 ///
-/// `registry::known_type` is an allow-list of the eight `egret.*` types plus
-/// `core.http`/`core.slack`/`core.log`, and the corpus is Kestra's: every leaf
-/// in it is an `io.kestra.plugin.core.*` (or `io.kestra.core.*`) FQCN, and a
-/// `TaskKind::Leaf` whose type is not in the table is `InvalidInput` at
-/// publish step 4. The [`LIVE`] flows that DO reach a version are exactly the
-/// corpus flows whose every task is control flow, a `core.subflow` or — since
-/// W8 Task 3 — a `core.pause`: each is a typed `TaskKind`, dispatched before
-/// any `Leaf` arm exists to consult the registry, so none meets the allow-list
-/// at all.
+/// `registry::known_type` is an allow-list of thirteen rows — **seven**
+/// `egret.*` types (this sentence said "eight" from W6 until W10 Task 6 fix
+/// round 2; counted, not quoted, at `TASK_TYPES`),
+/// `core.http`/`core.slack`, and — **since W10 Task 6 fix round 1** — the four
+/// Kestra FQCNs `worker::Handlers::with_core_tasks` implements
+/// (`…core.log.Log`, `…core.debug.Return`, `…core.execution.Fail`,
+/// `…core.flow.Sleep`) plus the `core.log` alias.
+///
+/// **That last clause is what makes [`LIVE`] 248.** This paragraph used to end
+/// *"the flows that DO reach a version are exactly the corpus flows whose every
+/// task is control flow, a `core.subflow` or a `core.pause` … so none meets the
+/// allow-list at all"*, which was true when only 21 flows published and is
+/// **false for 227 of the 248 now**: the overwhelming majority of live corpus
+/// flows are live precisely *because* their leaves meet the allow-list. The old
+/// sentence survives here only as the description of the **21**, which is the
+/// population it was written for.
 ///
 /// **This is not a hole in the product** *for the 68 that remain*: egret's
 /// publish refusing a genuinely unported Kestra plugin —

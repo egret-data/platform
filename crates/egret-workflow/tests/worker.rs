@@ -3398,10 +3398,20 @@ tasks:
 /// the resolver reads the same table the product writes, and a fixture that
 /// wrote the row itself could keep passing after that stopped being true.
 ///
-/// It is deliberately NOT published to a live version. W6 Task 1 measured why
-/// that has to work: only 16 of the corpus's 345 flows reach one, so a resolver
-/// reading `flow_versions` would resolve 2 of the 20 `Subflow` targets. See
-/// `worker::subflow::resolve`.
+/// It is deliberately NOT published to a live version, and **the reason this
+/// doc used to give for that has been overturned**. It read: *"W6 Task 1
+/// measured why that has to work: only 16 of the corpus's 345 flows reach one,
+/// so a resolver reading `flow_versions` would resolve 2 of the 20 `Subflow`
+/// targets."* Both figures are gone — W10 Task 6 fix round 1 put the four core
+/// Kestra FQCNs into `spec::registry::TASK_TYPES`, and the census now measures
+/// **248 of 345** flows reaching a live version and **18 of the 20** targets
+/// live (`driver::LIVE`, `driver::SUBFLOW_TARGETS_LIVE`).
+///
+/// **The fixture is unchanged and so is the decision it mirrors**, because the
+/// binding reason was never the corpus's shape: `worker::subflow::resolve`
+/// reads the DRAFT row so that a parent and its child cannot disagree about
+/// which version of the world they are in. This fixture files a draft because
+/// that is what the resolver reads — not because a version would be rare.
 async fn file_flow(db: &Db, ws: Uuid, by: egret_core::UserId, source: &str) -> Uuid {
     let flow = egret_workflow::spec::parse(source).expect("the fixture flow parses");
     let input = egret_workflow::CreateFlowInput {
