@@ -288,7 +288,14 @@ function ControlPlaneIndex() {
   if (me?.platform_roles.includes("platform_admin")) return <Navigate to="workspaces" replace />;
   const perms = me?.permissions ?? [];
   const first = FIRST_SECTION_BY_PERM.find((s) => perms.includes(s.perm));
-  return <Navigate to={first ? first.path : "workspaces"} replace />;
+  if (first) return <Navigate to={first.path} replace />;
+  // `RequireControlPlaneAccess` admits anyone holding a Control Plane read
+  // permission (see `CONTROL_PLANE_PERMS`), but not every one of those unlocks
+  // a section above (e.g. `workspace:read` alone) — so a non-admin can land
+  // here matching nothing and 403 on the platform_admin-only "workspaces"
+  // fallback. If they can also enter Governance, send them there instead.
+  if (canEnterGovernance(me)) return <Navigate to="/governance" replace />;
+  return <Navigate to="workspaces" replace />;
 }
 
 function ControlPlaneRoutes() {

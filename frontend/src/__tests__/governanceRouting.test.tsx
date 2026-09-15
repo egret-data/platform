@@ -129,6 +129,17 @@ describe("Governance routing in App", () => {
     await waitFor(() => expect(currentUrl()).toBe("/control-plane/engines"), TIMEOUT);
   }, 15_000);
 
+  it("sends a Control Plane user who matches no section to Governance instead of 403ing", async () => {
+    // `workspace:read` alone unlocks Control Plane (`RequireControlPlaneAccess`)
+    // but matches nothing in `FIRST_SECTION_BY_PERM`, so `ControlPlaneIndex`
+    // used to fall back to the platform_admin-only "workspaces" section — a 403
+    // for anyone but an admin. With a Governance permission too, there is
+    // somewhere else to send them.
+    openApp("/control-plane", me(["workspace:read", "policy:read"]));
+    await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
+    expect(screen.queryByText("403 — Forbidden")).not.toBeInTheDocument();
+  }, 15_000);
+
   it("sends a user with no workspace but Governance access from / to Governance", async () => {
     openApp("/", GOVERNANCE_ONLY);
     await waitFor(() => expect(currentUrl()).toBe("/governance/policies"), TIMEOUT);
