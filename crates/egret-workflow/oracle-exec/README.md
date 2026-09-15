@@ -5742,18 +5742,24 @@ shape it recorded, not its verdict, and the shape outlived it — W10's own chan
 is the third measurement of the same kind, 109 with the wiring and 109 without
 it.)*
 
-**W10 Task 7 re-derived them a sixth time, and this is the first package the
-ratchet cannot judge in either direction**: **109 before W10 Task 1, 109 at this
-commit, and 109 with every line of W10's wiring deleted** — the third number is
-what makes the first two mean anything, and it was measured rather than argued
-(*W10* below has the method). So this pass has no banked entries to report and
-no ratchet movement to attribute, and its whole yield is the sweep plus a
-boundary that moved without the number moving: **the worker runs in the product
-now**, so the sentence a reader was told to start at is false and item 15 is
-closed. The sweep ran over five populations rather than over this file, because
-the four passes before it each scoped themselves by surface; they are listed in
-*What W10 Task 7 swept, and what each population yielded* in the W10 section,
-with the denominator of each computed over `git ls-files` so it can be re-run.
+**W10 Task 7 did NOT re-derive them a sixth time, and that is this statement's
+own rule being applied rather than skipped.** Every count in the first row of
+the provenance table is compared by a named test on every run; the ratchet did
+not move (**109 before W10 Task 1, 109 at this commit, and 109 with every line
+of W10's wiring deleted** — the third number is what makes the first two mean
+anything, and it was measured rather than argued; *W10* below has the method);
+and the gate is green. Re-typing those figures here would be re-running what
+`cargo test` already ran, and would add a copy for the next package to find
+stale. **What this pass swept instead is the half the suite does not compare** —
+and the thing it found is not a figure at all but a **proposition**: *nothing
+wires the worker into the binary*, true for three packages and false since W10
+Task 2, in the sentence this statement tells a reader to start at. So this pass
+has no banked entries and no ratchet movement to attribute; its yield is the
+sweep, five populations wide, listed in *What W10 Task 7 swept, and what each
+population yielded* below with every denominator computed over `git ls-files` so
+it can be re-run. **It is five populations rather than a sixth surface because
+all five passes before it scoped themselves by surface**, which is the
+structural finding at the end of this file and not a preference here.
 
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
@@ -7686,12 +7692,16 @@ will trip over it.**
 
 #### What W10 Task 7 swept, and what each population yielded
 
-Five populations, because the five passes before this one each scoped themselves
-by **surface** when the property is about **mechanism**, and because a list of
+Five populations, because all five passes before this one scoped themselves by
+**surface** when the property is about **mechanism**, and because a list of
 sites handed to a sweep is the list of sites somebody already knew. Each
 denominator is computed over `git ls-files` so it can be re-run; **a denominator
 equal to its numerator would mean the sweep only found what it went looking
 for**, and none of these is.
+
+**Every figure in the table is taken at `054ebdf6`**, i.e. over the population
+as it stood *before* this task edited anything — a sweep reported over its own
+output is a sweep that cannot show a numerator.
 
 | # | population | examined | corrected |
 |---|---|---:|---:|
@@ -7703,27 +7713,31 @@ for**, and none of these is.
 
 **Population 1's handed list was eight sites; the sweep found thirteen false
 ones**, and the gap is not carelessness on whoever compiled the list — it is the
-instrument. **The single most consequential instance is invisible to a
-line-oriented grep**, because it wraps a line break: this statement's own
-preamble reads *"…the sixth fact of the W4 section above: nothing in this
-workspace ⏎ runs this worker"*, and `grep` sees two lines that each say nothing.
-That is the sentence this file points a reader at **first**. The sweep above
-flattens whitespace before matching for exactly that reason.
+instrument. **The most consequential instance is invisible to a line-oriented
+grep**, because it wraps a line break: this statement's own preamble reads
+*"…the sixth fact of the W4 section above: nothing in this workspace ⏎ runs this
+worker"*, and `grep` sees two lines that each say nothing. That is the sentence
+this file points a reader at **first**. The sweep above flattens whitespace
+before matching for exactly that reason.
 
-**And the rule that would have caught it was already written in this file.**
-*The rule this sweep ends with* has carried *"a phrase that WRAPS A LINE BREAK …
-returns nothing quietly, which is indistinguishable from being clean"* since W8
-Task 6 fix round 2, with the remedy beside it — *search for the shortest
-distinctive fragment, or use a matcher that spans lines*. **Two packages then
-ran sweeps over this document and neither applied it here**, on this file's own
-opening sentence, while the same rule's *ordinals* half was applied twice. So
-the finding is not the line break; the line break was a known hazard with a
-written remedy. The finding is that **a rule written into a document is not an
-instrument** — it gets applied where the person sweeping remembers it, which is
-the same failure mode as a warning written beside a figure not checking the
-figure (item 2's parenthesis, which also did not prevent its own recurrence).
-The only version of this that holds is the mechanical one: **flatten before you
-match, always, so remembering is not part of it.**
+**And the rule that would have put it on the list was already written in this
+file.** *The rule this sweep ends with* has carried *"a phrase that WRAPS A LINE
+BREAK … returns nothing quietly, which is indistinguishable from being clean"*
+since W8 Task 6 fix round 2, with the remedy beside it — *search for the
+shortest distinctive fragment, or use a matcher that spans lines*. **No earlier
+pass missed this sentence** — it was true until W10 Task 2, so there was nothing
+to find — which is what makes the miss precise rather than general: the first
+enumeration taken after it went false was built line-wise and came out eight
+where the answer is thirteen. Meanwhile the *same rule's* ordinals half **was**
+reached for, twice, inside this package: W10 Task 5 corrected `worker::subflow`'s
+*"two files"* to three with the note *"the ordinal moved with the count"*, and
+Task 6 removed an ordinal from `claim.rs` rather than maintain it. So the
+finding is not that the hazard is unknown. It is that **a rule in a document is
+applied where whoever is sweeping remembers it** — the same failure mode as a
+warning written beside a figure not checking the figure (item 2's parenthesis,
+which did not prevent its own recurrence). The only durable form is the
+mechanical one: **flatten before you match, always, so remembering is not part
+of it.**
 
 The thirteen are eleven in this file — the preamble (the wrapped one), the W4
 section's sixth fact and the pointer under it, the four sentences of the W4
@@ -9102,8 +9116,8 @@ one missed what the next found:**
 | 2 (W4 Task 6) | this README + `runnable.txt` | a row **inside its own correction table**, and the specs in two languages |
 | 3 (the review) | the files the task edited | four surfaces it had not read: `src/`, `tests/`, `driver.rs`, the plan |
 | 4 (this task, corrected predicate) | `src/`, `tests/`, `driver.rs` prose | the statement's **own preamble**, and `runnable.txt` nine lines from a figure the same sweep had superseded |
-| 5 (the re-review) | those two | ~~*(nothing yet — and the rule above is what a sixth should use instead of a sixth surface)*~~ **pass 6 found this statement’s opening sentence, false from W10 Task 2’s commit onward** |
-| 6 (W10 Task 7) | **not a surface** — five *populations* over `git ls-files`: the phrase flattened, the ordinals, the generator's inputs, the other language, the deleted names | *(nothing yet. But see below: pass 6's own biggest find was a hazard **this section had already named**, which is the thing a seventh should not repeat)* |
+| 5 (the re-review) | those two | *(nothing — and the rule above is what a sixth should use instead of a sixth surface)* |
+| 6 (W10 Task 7) | **not a surface** — five *populations* over `git ls-files`: the phrase flattened, the ordinals, the generator's inputs, the other language, the deleted names | *(nothing yet. Pass 6's subject was a **proposition** rather than a figure, which is a class none of the five above was looking for at all)* |
 
 **Pass 6 is the first that did not choose a surface**, and the first whose
 subject was a *proposition* rather than a figure — *"nothing wires the worker
@@ -9112,15 +9126,18 @@ populations are in the W10 section with an N/M each, computed over `git ls-files
 so the denominators can be re-derived; an earlier pass's could not be, because
 it counted over `.superpowers/`, which is gitignored and growing.
 
-**And pass 6's largest find was a hazard this very section already names.** The
-statement's opening sentence — the one it tells a reader to start at — asserted
-the proposition across a **line break**, so every grep-shaped pass went past it
-quietly, exactly as the table two sections up says a wrapped phrase does. The
-rule had been written here since W8 Task 6 fix round 2 and two passes ran after
-it. **A rule in a document is not an instrument**: it is applied where whoever
-is sweeping happens to remember it. The mechanical form is the only durable one
-— *flatten whitespace before matching, every time* — and pass 6's population 1
-is defined that way rather than as a reminder.
+**And pass 6 nearly missed its own subject, to a hazard this very section
+already names.** The statement's opening sentence — the one it tells a reader to
+start at — asserts the proposition across a **line break**. It was *true* until
+W10 Task 2, so passes 1–5 missed nothing by it; what the line break did was keep
+it out of the enumeration **this** task was handed, which was built with a
+line-oriented grep and named eight sites where there were thirteen. The rule two
+sections up — *a wrapped phrase returns nothing quietly* — has been written here
+since W8 Task 6 fix round 2, and was still not reached for on the first occasion
+it mattered. **A rule in a document is not an instrument**: it is applied where
+whoever is sweeping happens to remember it. The mechanical form is the only
+durable one — *flatten whitespace before matching, every time* — and pass 6's
+population 1 is defined that way rather than as a reminder.
 
 **Every one of them, the reviews included, scoped by surface — and the predicate
 is about mechanism.** "Sweep this file" is a question about where somebody
