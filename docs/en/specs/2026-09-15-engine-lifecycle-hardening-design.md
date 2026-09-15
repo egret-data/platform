@@ -34,9 +34,9 @@ revoke catalog clients (errors ignored). The row delete cascades to `engine_cata
 | D9 | Nothing cleans up: the auto-created Ranger profile and `<name>_tag` service, secrets (`delegator_secret_id`, `tls_secret_id`, `tls_cert_secret_ref`, `root_secret_id`), and revocation ignores `is_minted_client`. Re-creating an engine with the same name hits `AlreadyExists` in `create_service`, logs a warning and continues **unbound → Trino allow-all while Ranger is enabled**. | |
 | D10 | Unassigning an engine from a workspace (`DELETE …/workspaces/{ws}`, `PUT /engines/{id}/workspaces`) deletes the materialized database → same D1/D2 500. `PUT` is non-atomic (can apply assigns, then fail on an unassign). Assigning to an unknown workspace is a 500, not 404. | |
 
-**No purge exists for trashed Data API endpoints** (no production `DELETE FROM dataapi.endpoints`;
-only tests). Blocking on trashed endpoints therefore needs a purge action, or an engine with any
-past endpoint could never be deleted. See §3.3. **V**
+**Correction (plan review):** a purge already exists — `DELETE /api/ws/{ws}/data-api/endpoints/{id}`
+hard-deletes (`EndpointStore::delete`, `endpoints.rs:1215`) and the trash view has "Delete permanently".
+The earlier "no purge" check read a truncated grep. §3.3 is reduced to a test pinning what purge removes.
 
 ### 2.2 Provisioning
 
@@ -90,8 +90,9 @@ RESTRICT or NOT-NULL-vs-SET-NULL child of `query.databases` appears that the pre
 6. **One DB transaction:** re-run the blocking preflight under the transaction (race with a
    concurrent endpoint create → 409, row stays `deleting`, cluster already gone — acceptable, the
    next retry succeeds once dependents are handled); delete the engine row (cascades as today);
-   delete the engine's secret rows; delete the Ranger profile and its tag service **when auto-created
-   for this engine and no other engine is bound**.
+   delete the engine's secret rows (`delegator_secret_id`, `root_secret_id`, `tls_secret_id` — never the
+   admin-provided `tls_cert_secret_ref`). **Ranger profiles and tag services are never deleted** (user decision
+   2026-09-15): the row delete unbinds; Part B reuses an orphan profile on re-create.
 7. After commit: revoke catalog clients where `is_minted_client`; failures are logged, not returned.
 8. **204.**
 
@@ -100,12 +101,8 @@ SQLSTATE `23503` (FK) and `23514` (CHECK) to **409** `constraint_violation` nami
 
 ### 3.3 Purging trashed Data API endpoints
 
-New route `DELETE /api/ws/{ws}/data-api/endpoints/{id}/permanent`, gated like the existing trash
-routes (`data_api_endpoint:manage`), allowed only when `deleted_at IS NOT NULL` (else 409). Hard-deletes
-the endpoint; its children cascade (versions, grants, `dataapi_alert` schedules via
-`dataapi_endpoint_id ON DELETE CASCADE`; the planner verifies `access_log` behaviour). Audit
-`data_api_endpoint:purge`. The Data API trash view gets a "Delete permanently" action with a
-type-the-name confirmation.
+The purge route and UI already exist (see §2.1 correction). Part A adds only a test pinning that purge
+removes the endpoint's versions and `dataapi_alert` schedules and keeps `access_log` rows (no FK by design).
 
 ### 3.4 Unassign
 
@@ -169,14 +166,14 @@ Unknown workspace → 404.
 - **FakeKube**: delete returning 404 → success; returning 500 → 502 and `status = deleting`; retry after
   fixing → 204.
 - **Error mapping**: a forced FK violation → 409 `constraint_violation`, and the log contains the SQLSTATE.
-- **Purge route** (`crates/egret-dataapi/tests/trash.rs`): purge of a live endpoint → 409; purge of a
-  trashed endpoint → gone with children; permission denied for viewer.
+- **Purge** (`crates/egret-dataapi/tests/trash.rs`): purging a trashed endpoint removes its versions and
+  `dataapi_alert` schedules and keeps `access_log` rows. Engine delete keeps the Ranger profile (pinned).
 - **Part B**: re-create same name binds the orphan profile (regression for allow-all); rotate-secrets
   changes the rendered env secret and the password.db hash; update failure restores the spec;
   `remove_catalog` failure keeps row and client; redaction for a `postgresql` catalog with an inline
   password; adding a `mysql` catalog succeeds after the migration.
-- **Frontend**: dependents table rendering from a 409 fixture; retry-delete badge; purge action.
-- **Live on kind**: `DELETE` `demo-trino` → 409 listing 26 endpoints and the alerts (not 500). No
+- **Frontend**: dependents table rendering from a 409 fixture; retry-delete badge.
+- **Live on kind**: count `demo-trino`'s dependents read-only first; then `DELETE` → 409 listing them (not 500). No
   data on the cluster is modified without the user's decision.
 
 ## 6. Out of scope
