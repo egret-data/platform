@@ -4192,6 +4192,20 @@ it kills **1**. The comment beside the arm claimed the five ordered pairs W3c
 removed as its evidence; that was wrong — those five are two entries producing
 fewer runs — and the mutation is what said so.
 
+> **`a_skipped_run_still_gets_a_happens_before_endpoint` NO LONGER EXISTS, so
+> the guard above is left that way after all — found by W10 Task 7's population
+> 5, 2026-09-15.** It was deleted with the four-tier harness at W3b Task 5, and
+> `tests/executor.rs`'s own deleted-test registry lists it with an **empty**
+> successor and the note *"There is no successor: the tier each pinned does not
+> exist."* `simulate_with` and `skipping_machine` went with it. So the paragraph
+> that says a guard-nobody-could-see-fail was closed is now the only thing
+> standing where the guard was, which is strictly worse than the state it
+> reports: a reader checking this hole finds a citation instead of a test.
+> **Recorded rather than fixed** — writing a successor means choosing which tier
+> it pins, and that is a W3a decision this task has no standing to take. The
+> shape is the one this file has already named twice: *a sentence citing a test
+> is a claim like any other, and it ages like one.*
+
 ### A guard that could not fail, and it was this file's own numbers
 
 `the_state_vocabulary_this_enum_holds_is_derived_from_the_golden` is the test
@@ -5681,13 +5695,22 @@ property is about *mechanism*. **The rule that would have caught all seventeen
 is in *The rule this sweep ends with* at the end, and it is the third
 formulation, not the first.** They
 are in *The stale twins W4 retires* at the end, with what each is now. The one
-number that moved in this package's own arithmetic is the count of things this
-statement does not prove: it was thirteen and it is seventeen — and the
-seventeenth is not the last one a reader should look at. **Item 15 is**, which is
-why it is also the sixth fact of the W4 section above: nothing in this workspace
-runs this worker. *(**It is eighteen since W6 Task 8**, and the eighteenth is the
-four trigger constructs — the largest uncovered surface this programme has
-added. The W6 section derives it.)*
+number that moved in this package's own arithmetic used to be the count of
+things this statement does not prove — thirteen when it was first written,
+seventeen after W4, eighteen after W6 Task 8 — and **that total is no longer
+stated, because maintaining it is what made this paragraph disagree with itself
+twice.** The list below is numbered; the reader who wants the size of it can
+count the headings. What a total cannot say is which item to read first, so that
+is named instead: **item 15**, which was *"nothing in this workspace runs this
+worker"* and is **CLOSED since W10 Task 2** with a bound that replaces it,
+**item 18**, the four trigger constructs, and **item 19**, what the execution
+API W10 shipped still cannot do. *(The sentence this paragraph carried for four
+packages — *"it was thirteen and it is seventeen, and the seventeenth is not the
+last one a reader should look at; item 15 is, which is why it is also the sixth
+fact of the W4 section above: nothing in this workspace runs this worker"* — was
+**true when written and false from W10 Task 2 onward**, in the one place this
+statement tells a reader to start. Kept here as the record, because the
+proposition it states is the one W10 Task 7 swept the repository for.)*
 
 **W6 Task 8 re-derived them a fourth time, and this is the first package whose
 ratchet MOVED under a re-derivation**: 143 before Task 1, **127** at this
@@ -5714,12 +5737,29 @@ the ratchet scores in neither direction** — `claim::due_retries` would never
 wake a `PAUSED` run — measured at **109 with the fix and 109 without it**, which
 is item 15's shape one level in and is why the rule this statement ends with is
 extended there: *a figure is safe only if a running program compares it — and so
-is a **predicate***.
+is a **predicate***. *(Item 15 is **closed since W10 Task 2**; this names the
+shape it recorded, not its verdict, and the shape outlived it — W10's own change
+is the third measurement of the same kind, 109 with the wiring and 109 without
+it.)*
+
+**W10 Task 7 re-derived them a sixth time, and this is the first package the
+ratchet cannot judge in either direction**: **109 before W10 Task 1, 109 at this
+commit, and 109 with every line of W10's wiring deleted** — the third number is
+what makes the first two mean anything, and it was measured rather than argued
+(*W10* below has the method). So this pass has no banked entries to report and
+no ratchet movement to attribute, and its whole yield is the sweep plus a
+boundary that moved without the number moving: **the worker runs in the product
+now**, so the sentence a reader was told to start at is false and item 15 is
+closed. The sweep ran over five populations rather than over this file, because
+the four passes before it each scoped themselves by surface; they are listed in
+*What W10 Task 7 swept, and what each population yielded* in the W10 section,
+with the denominator of each computed over `git ls-files` so it can be re-run.
 
 **Where this section and anything above it disagree, this section is right**,
 and the disagreements are listed by name in *The stale twins this statement
 retires* at the end, for the ones W6 moved in *The figures W6 retires* in the W6
-section, and for W8's in *The figures W8 Task 7 retires* in the W8 section.
+section, for W8's in *The figures W8 Task 7 retires* in the W8 section, and for
+W10's in *The figures W10 retires* in the W10 section.
 
 **The provenance rule below used to be stated for the whole statement and was
 itself stale — the whole-branch review's Important 3.** It read: *"Every **count**
@@ -5748,11 +5788,22 @@ So the rule is restated per family rather than for everything:
 | W6's **claim classification** (149 claims → MEASURED 91 / DERIVED 33 / CHOSEN 25) | **no** — a hand audit, after a keyword classifier scoring 70/3/76 was built and thrown away |
 | W8's **eighteen banked entries**, the **six projections** of a baselined entry, and the **`(8, 17, 25)`** retry split | **yes** — `the_residual_baseline_is_attributed_to_a_construct_or_named`, `the_baselining_argument_covers_every_field_and_not_only_the_ordered_pairs`, `kept_ordered_pairs_are_not_all_asserted_and_the_baseline_is_the_line` and `the_retry_declarations_are_derived_and_the_waker_reaches_none_of_them`, on every run. **The prose copies of the six are NOT**, and five of them were stale — see the W8 section |
 | W8 Task 7's **instrumented `wake` over the oracle** (1 fire in one of five runs, 0 in four) | **no** — measured under an `eprintln!` that is not in the tree, over five runs, with `tests/worker.rs` as the positive control on the same build and the ratchet read at **109** in every one |
+| W10's **publish census** — `LIVE` **248** of 345, `UNKNOWN_TYPE_REFUSED` **68**, `VALIDATE_REFUSED` **20**, the `SUBFLOW_TARGETS_*` split **18/1**, the `SUBFLOW_LOOKUPS_ON_{PUBLISHED,REFUSED}` pair **47/2** | **yes** — every one is a `const` in `oracle-exec/driver.rs` that `driver::census`, `driver::target_census` and `driver::lookup_census` compare on every run of `executor_matches_golden`. This is the family that has now moved three times (16 → 21 → 248), and the **prose copies of it are not compared** — see *The figures W10 retires* |
+| W10's **production call sites** (5 across 3 files) and the **trigger isolation** re-measurement | **no** — a `git ls-files` grep with a positive control, re-runnable and written out beside each figure in the W10 section. Nothing in `cargo test` counts either |
+| W10's **"109 with the wiring deleted"** | **no** — one mutation run (`runtime.rs` deleted, the module declaration and re-export removed, the `egret-bin` call site commented out; `git diff --stat` showed `338` deletions before the verdict was read), against an unmutated control in the same session. Both read `109 mismatching, 109 baselined, 0 broken` |
 
-A figure is safe only if a running program compares it. Everything in rows 2–7
-is a figure a reader must treat as a measurement someone took, not as a fact the
-suite maintains — which is the honest statement, and the one that survives the
-next section being appended.
+A figure is safe only if a running program compares it. **Every row the second
+column marks `no`** is a figure a reader must treat as a measurement someone
+took, not as a fact the suite maintains — which is the honest statement, and the
+one that survives the next section being appended.
+
+*(That sentence read **"everything in rows 2–7"** until W10 Task 7. It was
+written when the table ended at row 7, and W6, W8 and W10 have each appended
+under it since — so a rule whose whole subject is figures that go stale when
+somebody appends **went stale when somebody appended**, in exactly the way
+*"every number below"* did in this file's opening reading instructions. The fix
+is the same one: name the property, never the row numbers. No count replaces the
+range, on purpose.)*
 
 ### Provenance, stated as narrowly as it is true
 
@@ -6443,7 +6494,13 @@ produced **six different facts** and one number:
 6. and **nothing in this workspace runs this worker at all** — `worker::tick`
    has no production caller, so `143` is a statement about a state machine and
    a driver and not about a deployment. That is item 15 below, and it bounds
-   every one of the five above.
+   every one of the five above. *(**CLOSED at W10 Task 2**, 2026-09-15:
+   `runtime::spawn` is the claim loop, `egret-bin` starts it under `[workflow]
+   worker_enabled`, and `worker::tick` has a production caller. The fact is kept
+   as W4's record because it was true for the whole of W4, W6 and W8; what
+   replaces it as a bound is in item 15 and in the W10 section, and it is
+   **narrower but not empty** — `143` was never about a deployment, and `109`
+   still is not, for a reason that survives the wiring.)*
 
 Only the first three are "the ratchet cannot see this". The fourth is a
 decision, the fifth is a population that does not exist, and **the sixth is the
@@ -6560,6 +6617,18 @@ it; this file's job is to make sure the 143 is not read as though nothing were
 available.
 
 #### Nothing runs this worker, and that bounds all five facts above
+
+> **RETIRED — false since W10 Task 2, annotated at W10 Task 7, 2026-09-15.**
+> Every sentence in this subsection was
+> true when W4 Task 6 wrote it and is false now: `worker::tick` has a production
+> caller (`crate::runtime::spawn`), `worker::reap` has one in the same file,
+> `worker::start_execution` has three in `routes.rs` and `webhook_routes.rs`,
+> and `egret-bin` starts the claim loop. **The subsection is kept rather than
+> rewritten**, because it is W4's record of what W4 measured and because the
+> proposition in it is the one this file then repeated across its own sections
+> and into `runnable.txt` — which is the finding W10 Task 7 exists for. The current derivation, the
+> current call-site count and the bound that *replaces* this one are in item 15
+> and in the W10 section.
 
 `worker::tick` has **no production caller**. A grep for `tick(`, `reap(` and
 `start_execution(` over every `crates/*/src` finds no call site; the four files
@@ -6810,6 +6879,19 @@ default is `false` (asserted in `egret-config`'s own tests, and `figment` makes 
 malformed value a hard startup error rather than a silent `false`). This is item
 15's shape one level in: the ratchet is a statement about a state machine and a
 driver, and for these four constructs it is not even that.
+
+*(**Re-measured at `054ebdf6`, 2026-09-15, and it still holds**, which is worth
+saying because the sentence one level up — *nothing runs this worker* — stopped
+holding in the same package. Over every tracked `*.rs` outside
+`crates/egret-workflow/src/trigger/`: `trigger::tick` **0**, `run_until_idle`
+**0**, `TriggerState` **0**, `WindowFreeFlowTrigger` **0**, and `ScheduleTrigger`
+**4** — all four in doc comments and a code comment (`models/trigger.rs:103`,
+`:147`, `spec/validate.rs:634`, `:1720`), none of them a use. Positive control on
+the same command: `RunState` **828**. **The trigger loop is W12**, so this is a
+scheduled gap rather than an accident; W10 shipped the worker loop and
+deliberately no trigger ticker, and its own spec says so. `item 15's shape` above
+names the shape that item recorded, not the item's current verdict — item 15 is
+closed.)*
 
 **The control that makes these zeros mean something** is the **142**
 sub-executions the golden does hold — `142 = 134` carrying a loop index `+ 8`
@@ -7273,6 +7355,14 @@ item 15's shape one level in — a property proved about a path no deployment
 takes — and it is **item 11**'s subject, where the measurement and the two tests
 that do score it are written out.
 
+*(Item 15 is **closed since W10 Task 2**, and this sentence names the shape that
+item recorded rather than its verdict. **The shape outlived the item**, which is
+the part worth keeping: a deployment takes this path now — `runtime::spawn` →
+`tick` → `wake` → `resume`, and `tick` calls the waker ahead of the claim — and
+the ratchet still reads 109 either way, because the oracle's second door was
+never the reason it could not see the arm. Wiring the worker changed which of
+the two sentences here is true and changed neither number.)*
+
 **One figure did move, and it is the one this file had recorded as a flat
 zero.** *Instrumented `wake`: 0 fires over the whole oracle* is now false as
 stated: widening the gate gave the oracle a second door to the same `resume`,
@@ -7400,6 +7490,364 @@ two tasks later — the row is still refused, for the narrower reason that
 **4 examined, 4 corrected**, and all four are the same shape as the figures: a
 sentence that went false without any number changing.
 
+### W10 — the worker runs in the product, and the oracle cannot speak for that at all
+
+**`109` before W10 Task 1, `109` at this commit, and `109` with every line of
+W10's wiring deleted.** The third number is the only reason the first two mean
+anything. Every package before this one could at least say *the ratchet did not
+move and here is what could have moved it*; W10 cannot, because **the channel
+between what it shipped and what this ratchet reads is empty by construction**,
+and a zero out of an instrument with no channel is not a measurement of anything
+until the instrument is shown to be capable of a different answer. That is what
+the third clause does.
+
+This section therefore reports the **route** rather than the total, in the
+discipline W6 and W8 used, and then says what the green does not cover.
+
+| | ratchet | what the task shipped |
+|---|---|---|
+| package base `92cfae9b` (W8's tip, on `main`) | 109 mismatching, 109 baselined, 0 broken | — |
+| Task 1 | 109 | the W10/W11/W12 spec rows; **the trigger loop named as W12**, so the gap in the W6 section above is scheduled rather than forgotten |
+| Task 2 | 109 | `runtime::spawn` — two config-gated tickers — and `egret-bin` starting it. **The first time egret runs a workflow in production** |
+| Task 3 | 109 | `ExecutionRepo`, the read layer nothing had over `workflow.executions` |
+| Task 4 | 109 | the two read endpoints |
+| Task 5 | 109 | the three write endpoints — start, resume, replay — and the pause egret cannot end |
+| Task 6 | 109 | the first end-to-end test, and the finding under it: **no Kestra FQCN was publishable at all** |
+| Task 7 | 109 | this section |
+
+#### The zero channel, and it was measured in both directions
+
+**The mechanism first, because it is nameable and short.** `driver::run` is
+`executor::build_plan` + `worker::start_execution` + a loop of
+`worker::tick(pool, BATCH, reg)` and `driver::pass_time`, and it **never calls
+`publish`, `validate` or `registry::known_type`**. `tick` is handed
+`driver::registry()` — a `Handlers` the driver builds itself, four handlers, one
+of them a `Sleep::capped(Duration::ZERO)` that does not exist in any deployment
+— so the oracle exercises the **body** of the loop W10 Task 2 wired up and is
+blind to the wiring by construction. It is blind to the publish path for a
+second, independent reason: `publish` writes `flow_versions`, and the runtime's
+subflow consumer resolves against the **draft** row, `workflow.flows.source`
+(`worker::subflow`'s own doc records that decision and the three reasons it
+rests on). Nothing W10 changed can reach `golden.json`.
+
+**Neither half of that is an argument here, because both were run.**
+
+- *The publish half*, measured by this branch's reviewer at `054ebdf6`:
+  `baseline.txt` emptied and `executor_matches_golden` run twice — at `HEAD`, and
+  with Task 6's five changed sources reverted to `53a8970b` — and the **1029
+  lines of per-entry detail are byte-identical**. Falsifiable in both
+  directions rather than assumed to be: the comparison's two failure modes were
+  both provoked and both printed — `REGRESSION:
+  valids/working-directory-taskrun-nested` for a mismatch outside the baseline,
+  `PROGRESS NOT BANKED` for a baselined id that now matches — so an
+  instrument that could only ever print "identical" is excluded. **227 corpus
+  flows becoming publishable moved
+  zero entries**, which is the expected answer for a change to publish's table
+  and would not have been for a change to the executor.
+- *The wiring half*, measured by Task 7 on this tree, 2026-09-15:
+  `crates/egret-workflow/src/runtime.rs` deleted, `pub mod runtime;` and
+  `pub use runtime::RuntimeConfig;` removed from `lib.rs`, and the
+  `egret_workflow::runtime::spawn(…)` call commented out of
+  `crates/egret-bin/src/main.rs`. Evidence printed **before** the verdict was
+  read — `git diff --stat` reporting `338` deletions in `runtime.rs`, `0`
+  occurrences of the call left in `main.rs`, and `ls` reporting the file gone —
+  because *a mutation that silently fails to land prints a result line identical
+  to the control's*. Both runs print
+  `294 golden entries, 109 mismatching, 109 baselined, 0 broken`. Unmutated
+  control in the same session, same build.
+
+That second run also says why the deletion cannot matter: the `executor` test
+binary never links `egret-bin` at all, and neither `oracle-exec/driver.rs` nor
+`tests/executor.rs` names the module — `runtime::spawn`, `RuntimeConfig`,
+`crate::runtime` and `egret_workflow::runtime` are each **0** occurrences in
+both, with `worker::` at **26** and **37** as the positive control on the same
+command. *(The bare word `runtime` is not the test: it occurs in both, in
+`build_runtime` and in `runtime_over_acceptance_is_registered_and_owned`, which
+have nothing to do with this module — a substring is not a reference, and
+counting one as the other is how a zero gets claimed for the wrong reason.)*
+**A structural zero and a measured zero, and the structural one is the stronger
+of the two** — it holds for every configuration, where the run holds for one.
+
+#### Item 15 is closed, and the bound that replaces it is narrower, not gone
+
+Item 15 read *"nothing in this workspace runs this worker, and that bounds every
+claim above"*. **W10 Task 2 made it false.** Derived on this tree rather than
+quoted — `git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs'` grepped for
+`worker::tick(`,
+`worker::reap(`, `worker::start_execution(` and
+`worker::start_execution_with_trigger(`, with doc and comment lines dropped:
+
+| production call site | what it is |
+|---|---|
+| `crates/egret-workflow/src/runtime.rs:304` | `worker::tick` — the claim ticker |
+| `crates/egret-workflow/src/runtime.rs:328` | `worker::reap` — the lease reaper |
+| `crates/egret-workflow/src/routes.rs:1436` | `worker::start_execution` — the management API's start |
+| `crates/egret-workflow/src/routes.rs:1633` | `worker::start_execution` — replay's replacement execution |
+| `crates/egret-workflow/src/webhook_routes.rs:651` | `worker::start_execution_with_trigger` — W6 Task 7's webhook |
+
+**Five sites in three files, and `runtime::spawn` itself is called from
+`crates/egret-bin/src/main.rs:1733`.** `worker::resume` gained one too
+(`routes.rs:1523`), and a second indirectly: `tick` calls `wake` ahead of the
+claim, so the chain `runtime` → `tick` → `wake` → `resume` runs in the product.
+
+**The fifth row is why the old grep was true and misleading at the same time.**
+W6 Task 7's webhook has been able to *create* an execution since W6 — behind
+`[workflow] webhooks_enabled`, which defaults to `false`, so no deployment had
+one unless it typed the flag — and the
+grep item 15 published searched for `start_execution(`, which does not match
+`start_execution_with_trigger(`. The proposition survived not because nothing
+started executions but because **nothing advanced them**: a webhook wrote a row
+and no claim loop ever picked it up. That is the sentence `runtime.rs`'s own
+module doc opens with, and it is the honest form of what item 15 was reaching
+for.
+
+**What replaces it as a bound**, because *"the worker runs now"* is not a licence
+to read `109` as *"the worker is fine in production"*:
+
+1. **The default is `false`.** `egret_config::WorkflowConfig::worker_enabled`
+   defaults `false` through a named function rather than `bool::default()`, and
+   `runtime::spawn` returns before spawning anything when it is unset. A
+   deployment that has not typed `EGRET_WORKFLOW__WORKER_ENABLED=true` behaves
+   exactly as every deployment did before W10.
+2. **The deployment's registry is not this oracle's registry, and neither is a
+   superset of the other.** `egret-bin` passes
+   `worker::Handlers::with_core_tasks()` — `core.log.Log`, `core.debug.Return`,
+   `core.execution.Fail`, `core.flow.Sleep`, registered through
+   `add_publishable` — and the oracle passes `driver::registry()`, the same four
+   registered through `add`, with `Sleep` capped at zero. **Four handlers is the
+   whole of what any egret deployment runs today.**
+3. **`109` is still not a statement about a deployment.** It is a statement about
+   `advance()` and a driver, for the reason the measurement above gives: the
+   ratchet is 109 with the wiring and 109 without it. The old bound said *no
+   deployment runs this code*; the new one says *a deployment runs this code and
+   this number still does not watch it*. The second is narrower and no weaker.
+
+#### What the runtime runs, and what a green `109` still does not cover
+
+**These are findings, not omissions, and each is recorded where a future task
+will trip over it.**
+
+- **`egret.container` and `egret.script.python` are registered nowhere.** Both
+  handlers exist, both have `TASK_TYPES` rows, and neither constructor is called
+  by `with_core_tasks` or by `driver::registry()`. **`egret.sql` is in neither
+  registry either**, and that one is structural: `handlers::sql::Sql` needs an
+  `Arc<dyn QueryExecPort>`, `with_core_tasks()` takes no arguments, and the
+  oracle's registry must never reach an engine. So items 3 and 3b below —
+  *"reaches zero corpus entries"* — now have a second, independent reason
+  standing beside the corpus one: **zero corpus entries and zero registrations.**
+- **Kill is a finding rather than a missing endpoint.**
+  `POST …/executions/{id}/kill` is not shipped and cannot be written without a
+  mechanism underneath it: `RunState::Killed` has **zero** producing sites
+  (`Command::SetRunState { state: RunState::Killed }` occurs nowhere; the variant
+  appears only in aggregation and terminality predicates); a killer holds **no
+  lease**, so `persist` cannot clear `claimed_at` and `apply_outcome`'s fence
+  `WHERE id = $2 AND claimed_at = $3` still matches — the worker would write a
+  terminal onto a killed run *afterwards*; and *kill-requested* is
+  **unrepresentable**, because `executor::RunState` has no `Killing` variant
+  (**0** occurrences in `executor/state.rs`, against a control of **9** in
+  `models/state.rs`, which is the wire model the harvester reads and not the
+  state machine). `routes.rs` carries the full bill. **A kill the worker can
+  overwrite is worse than no kill**, which is why nothing was shipped.
+- **An unbounded `Pause` cannot be ended by the resume route, and no number of
+  calls will change that.** `flowable::resume_paused` is the only thing that
+  moves a run out of `PAUSED`, it is pure over `(state, run, now)`, and its
+  `Resume::Never` arm returns `Step::Waiting` **before it reads `now`**. The
+  route is the right shape — gate, 404, 409 — and the missing piece is a
+  `Command` beneath it. `an_unbounded_pause_is_not_ended_by_the_resume_route`
+  pins it, so the arrival of that command makes a **test** fail rather than a
+  paragraph go stale.
+- **The converse of the publish guard is unguarded on purpose, and its symptom is
+  a HANG.** `Handlers::add_publishable` **panics** if a handler's `type_id()` has
+  no `TASK_TYPES` row, so a handler publish would refuse cannot reach
+  `with_core_tasks` and `egret-bin` will not start — loud, at startup. The other
+  direction — a `TASK_TYPES` row with no handler, which is `core.http`,
+  `core.slack` and every `egret.*` a deployment declines to wire — is **not**
+  guarded, and it is worse than its mirror: `claim` takes the run and writes its
+  lease, `Registry::run` returns `WorkerError::NoHandler`, the error propagates
+  out through `tick` where `runtime::spawn` logs a `warn` and ticks again, **the
+  run keeps the lease**, the reaper clears it a `working_timeout` later, the next
+  tick claims it and fails again, for ever. The execution never terminates.
+  Guarding it symmetrically would refuse to start every deployment that does not
+  wire `egret.sql` — i.e. every deployment — so the asymmetry is deliberate and
+  the cost is written down here rather than discovered.
+- **Logs are W11 and the trigger loop is W12**, and both deferrals carry a
+  measurement rather than a preference. Logs: **`LogSink` has three
+  implementations under `crates/egret-workflow/src/` and none of them persists a
+  line** — `TracingSink`, a test `Recorder` and `NameHintSink` (a fourth lives in
+  `tests/container_docker_live.rs`, which is why the count is scoped to `src/`;
+  unscoped it is false) — and the container handler records
+  `stdOutLineCount`/`stdErrLineCount`, i.e. counts and not content. A Logs panel
+  therefore needs a table, a persisting sink on every handler path, a retention
+  policy and a paginated read API, which is why W10's spec named it as the place
+  to stop. Triggers: re-derived in the W6 section at this commit — zero uses of
+  `trigger::tick`, `run_until_idle`, `TriggerState` and `WindowFreeFlowTrigger`
+  outside `crates/egret-workflow/src/trigger/`, four doc-comment mentions of
+  `ScheduleTrigger`, against a control of 828 for `RunState`.
+
+#### What W10 Task 7 swept, and what each population yielded
+
+Five populations, because the five passes before this one each scoped themselves
+by **surface** when the property is about **mechanism**, and because a list of
+sites handed to a sweep is the list of sites somebody already knew. Each
+denominator is computed over `git ls-files` so it can be re-run; **a denominator
+equal to its numerator would mean the sweep only found what it went looking
+for**, and none of these is.
+
+| # | population | examined | corrected |
+|---|---|---:|---:|
+| 1 | the proposition, **verbatim, across the whole repository** — every tracked file, **flattened to one line before matching**, for `no production caller`, `nothing (in this workspace) runs this worker`, `no claim loop`, `no deployment runs/executes`, `a deployment runs none`, `wires the worker` | **3696 files**, 14 matching, **29 occurrences** | **13** |
+| 2 | **ordinals and counts** in the four regions population 1 landed in — this statement's preamble, the W4 section's six facts, the W4 subsection, and item 15 | **95 tokens** | **9** |
+| 3 | **data that feeds a generator** — the seven committed data files in `oracle-exec/` plus `harvest.py`, `normalise.py` and `handler_surface.py`, which emit prose into `runnable.txt` | **10 inputs** | **0** |
+| 4 | **the other language** — every file under `docs/vi/` | **279 files** | **0** |
+| 5 | **references to something deleted** — every backticked identifier of 15 characters or more in this file, checked for existence anywhere in the tree | **194 identifiers**, 6 absent | **1** |
+
+**Population 1's handed list was eight sites; the sweep found thirteen false
+ones**, and the gap is not carelessness on whoever compiled the list — it is the
+instrument. **The single most consequential instance is invisible to a
+line-oriented grep**, because it wraps a line break: this statement's own
+preamble reads *"…the sixth fact of the W4 section above: nothing in this
+workspace ⏎ runs this worker"*, and `grep` sees two lines that each say nothing.
+That is the sentence this file points a reader at **first**. The sweep above
+flattens whitespace before matching for exactly that reason.
+
+**And the rule that would have caught it was already written in this file.**
+*The rule this sweep ends with* has carried *"a phrase that WRAPS A LINE BREAK …
+returns nothing quietly, which is indistinguishable from being clean"* since W8
+Task 6 fix round 2, with the remedy beside it — *search for the shortest
+distinctive fragment, or use a matcher that spans lines*. **Two packages then
+ran sweeps over this document and neither applied it here**, on this file's own
+opening sentence, while the same rule's *ordinals* half was applied twice. So
+the finding is not the line break; the line break was a known hazard with a
+written remedy. The finding is that **a rule written into a document is not an
+instrument** — it gets applied where the person sweeping remembers it, which is
+the same failure mode as a warning written beside a figure not checking the
+figure (item 2's parenthesis, which also did not prevent its own recurrence).
+The only version of this that holds is the mechanical one: **flatten before you
+match, always, so remembering is not part of it.**
+
+The thirteen are eleven in this file — the preamble (the wrapped one), the W4
+section's sixth fact and the pointer under it, the four sentences of the W4
+subsection *Nothing runs this worker*, and the four inside item 15 — and two in
+`runnable.txt`, which this file's own reading instructions say outranks it for
+anything in the harvest section. **Two further occurrences in this file were
+examined and left**, and they are the reason the numerator is not just "every
+hit": `no production caller` at the W6 trigger paragraph is about
+`trigger::tick` and is **still true** (re-measured at this commit, in that
+section), and `no production caller` in item 11 is W3b history about `resume`,
+correctly tensed.
+
+**Zero sites were found outside this file and `runnable.txt`, and that zero is
+reportable rather than empty**: Tasks 1–6 had already corrected the five that
+would otherwise be here — `egret-config/src/lib.rs:437`,
+`egret-workflow/src/lib.rs:21`, `worker::claim`'s `wake` doc, `runtime.rs`'s
+module doc, and the programme spec's W3b row **in both languages**, each as a
+dated correction rather than a deletion. The remaining repository-wide matches
+are `egret-dataapi`'s, about a different subject entirely, and the W10 plan's
+and spec's quotations of the sentence being corrected; together they are the
+control that says the grep was capable of a hit somewhere other than here.
+
+**Population 2's nine**: five are the item-list total — `thirteen`,
+`seventeen`, `seventeenth`, `eighteen`, `eighteenth` — retired as a family by
+**removing the total rather than raising it to nineteen**; three are the
+caller-file count (*"the four files that call them"*, *"Four files reach them,
+all four on the test side"*); and one is *"exercised by exactly two things"*.
+**Four of the nine are corrected by a dated retirement banner over the block
+that contains them rather than by editing the numeral**, because those blocks
+are W4's own record and renumbering a record makes it a worse record. *An
+ordinal shares no letters with what it names*, which is why this is its own
+population and not a by-product of population 1.
+
+**Population 3's zero has a positive control**: the same scan over `probe.json`
+for `why` returns **37** and over `harvest.py` for `runnable` returns **40**, so
+"the generator's inputs carry none of this" is a statement about the inputs and
+not about a scan that was reading nothing. `runnable.txt`'s block **is**
+corrected, but it sits below `HANDWRITTEN_SENTINEL`, in the half
+`--rewrite-runnable` preserves, so it belongs to population 1.
+
+**Population 4's zero has two positive controls**, and they matter because the
+Vietnamese is a *translation* and shares no letters with an English grep: the VI
+programme spec carries this proposition at §9's W3b row — *"vòng claim và
+reaper ship ra dưới dạng hàm KHÔNG có caller production nào"* — written by Task
+1 as a dated correction naming W10 as the row that closes it, and it carries the
+publish census at **248 trên 345**, written by Task 6. Both were already right.
+The sweep found them; it did not need to change them.
+
+**Population 5's one correction is the shape this population exists for.** The
+W3c section says a guard *"was not left that way"* and names
+`a_skipped_run_still_gets_a_happens_before_endpoint` as the test that closed it.
+**No test by that name exists**, and it is not a typo:
+`tests/executor.rs`'s own deleted-test registry lists it with an empty successor
+and the note *"Deleted with the four-tier harness at W3b Task 5. There is no
+successor: the tier each pinned does not exist."* So the paragraph asserting a
+hole was closed is the only thing standing where the guard used to be, and the
+hole is open. Annotated in place, not fixed — writing a successor means choosing
+which tier it pins, and that is a W3a decision this task has no standing to
+take. The other five absences are records that already say so: two are this
+file's own findings about names no test ever had, `dynamic_behavior` names a
+rule W8 Task 3 fix round 2 explicitly withdrew, `simulate_recording_spawns` is
+W3b Task 4's record of a harness Task 5 removed, and `egret_test_template` lives
+in `egret-test-db`.
+
+#### The figures W10 retires
+
+**The rule applied here is Task 6's**: *prefer removing a numeral to maintaining
+one.* Rewriting `driver.rs`'s *"the reason `LIVE` is 21 and not 295"* as *"the
+reason `LIVE` is not 345"* — no numeral left to go stale — immediately exposed
+**two more wrong counts** that a sweep for the numerals already known about
+would not have reached: *"an allow-list of the **eight** `egret.*` types"*, which
+had been **seven** since W6, and a *"this table is **fourteen** rows"* written
+in the same round's own fix round 1, which is **thirteen** (7 + 2 + 4). The
+family below is why the rule is worth stating: it has now moved **three times**
+(16 → 21 → 248) and every move left prose copies behind.
+
+| where | what it says | why it is not current |
+|---|---|---|
+| *W6 Task 1*, the census table and the paragraphs around it | `live version` **16**, `draft only — unported task type` **301**, `draft only — validate` **19**, *"301 of the 320 refusals are one rule"*, *"the 16 that do publish are not a random 16"*, *"16 flows and 18 `RefKind::Subflow` lookups"*, *"the other 301 drafts"* | **248 / 68 / 20**, 47 lookups on published and 2 on refused. Superseded **twice** — by W8 Task 3 (16 → 21) and by W10 Task 6 fix round 1 (21 → 248) — and the section carried no marker for either. **Banner added at the head of that section rather than renumbering a task's own record**; every current value is a `const` in `driver.rs` that `driver::census` compares on every run |
+| *W6 Task 1*, consequence 1 | *"A resolver that went through `flow_versions` would resolve **2 of 20**"* | **18 of 20.** This one is an **argument**, not a record, and W10 Task 6 retired it in `worker::subflow`'s doc and in the programme spec in both languages while this copy went on making it. Struck in place |
+| *W8 Task 3*, *Five corpus flows PUBLISH now* | `LIVE` 16 → 21, `UNKNOWN_TYPE_REFUSED` 301 → 296, the lookup pair 18/4 → 19/3 | correct as W8's record of W8's move; **pointer added** to where the family stands now, because a reader landing on the most recent-looking of the three copies gets the middle one |
+| this statement's preamble | *"it was thirteen and it is seventeen … item 15 … nothing in this workspace runs this worker"* | the proposition is false since W10 Task 2, **in the sentence that tells a reader where to start**. The total is now **not stated at all** rather than corrected to nineteen, for the rule above |
+| *W3c*, the M11 paragraph | *"`a_skipped_run_still_gets_a_happens_before_endpoint` drives `simulate_with` with a `skipping_machine` of its own"* | **no test by that name exists**; it was deleted at W3b Task 5 with no successor. Annotated in place — the guard it claims to have closed is open |
+| item 3 / item 3b | *"reaches zero corpus entries"* | still true, and now **not the only reason**: `egret.sql`, `egret.container` and `egret.script.python` are registered in **neither** registry. Added rather than replaced |
+| the **provenance rule** under its own table | *"everything in **rows 2–7** is a figure a reader must treat as a measurement someone took"* | the table ended at row 7 when that was written and three packages have appended under it since — **found while appending to it**, which is the only reason it was found at all. Replaced by *"every row the second column marks `no`"*, and **no count put in its place**. This is the third time this file has caught a rule that ages by position rather than by content (*"every number below"*, *"rows 2–7"*, and the ordinals), and it is the same defect each time: a pointer that the next append silently invalidates |
+
+**And one figure this section states with its date and its provenance, because
+that is what made its predecessor wrong.** The bare-`#[test]` shortfall over
+`tests/executor.rs` + `oracle-exec/driver.rs` is **19** at `054ebdf6` on
+2026-09-15 — 39 bare `#[test]`, 18 `#[tokio::test]`, 1 `#[sqlx::test]`, 58 in
+total — derived here and not quoted. It was `16` when W8 Task 2 measured it and
+`19` since `bf0782ea`; it is a count of what a wrong instrument misses, so it
+moves whenever anybody adds an async test, and **a figure like that is wrong the
+moment it is carried undated.**
+
+#### What this package could not settle
+
+**There is no ratchet movement to attribute and no mutation table to lean on**,
+which is the condition this package's Global Constraints named at the start: with
+nothing to lean on, every claim has to be pinned by a test that fails when the
+claim is false. The tests that do that for W10 are in `tests/runtime.rs`,
+`tests/executions_routes.rs`, `tests/execution_repo.rs` and
+`tests/end_to_end.rs`, and they are the package's evidence — not this file's
+`109`, which would read exactly the same if all four were wrong.
+
+**Three things this pass left open rather than closed, named so the next reader
+does not mistake them for finished:**
+
+1. **The W6 Task 1 census is annotated, not renumbered.** Its table still reads
+   16 / 301 / 19 under a banner saying all three are three generations stale.
+   That is a judgement — a task's own record is worth more unaltered than
+   rewritten — and it is the *weaker* option: a reader who skips the banner gets
+   three wrong numbers. The structural fix is the one `driver.rs` already has,
+   which is for prose to stop carrying the family at all.
+2. **The guard `a_skipped_run_still_gets_a_happens_before_endpoint` was meant to
+   close is still open.** Population 5 found the citation dangling; writing a
+   successor means deciding which tier it pins, which is a W3a decision this
+   task has no standing to take. Recorded in place, unfixed.
+3. **Every sweep here is a search, and a search is not a proof of absence.**
+   Populations 3 and 4 report zero, each beside a positive control that says the
+   instrument could have found something — which is the most a search can offer.
+   The only population with a mechanical guarantee is the call-site derivation,
+   because the compiler agrees with it.
+
 ### What this ratchet does **not** prove
 
 Each of these has a section of its own above with the derivation; they are
@@ -7467,6 +7915,18 @@ two flows that write `- type: …` as a list item.
 What the handler rests on instead is `tests/sql_starrocks_live.rs` against a real
 StarRocks and `worker::handlers::sql`'s own unit tests.
 
+**Since W10 there is a second, independent reason, and it is worth stating
+because the first one could have been read as an accident of harvesting:
+`egret.sql` is registered in NEITHER registry.** `worker::Handlers::with_core_tasks()`
+— what `egret-bin` hands `runtime::spawn`, and therefore the whole of what a
+deployment runs — is four handlers, and `driver::registry()` is the same four.
+`handlers::sql::Sql` is constructed from an `Arc<dyn QueryExecPort>` and neither
+constructor has one: `with_core_tasks()` takes no arguments, and the oracle's
+registry must never reach an engine. A deployment wires it in one line
+(`add_publishable`, not `add` — the type has a `TASK_TYPES` row and the
+invariant applies to it). So the zero above is *zero corpus entries*, and this is
+*zero registrations*, and a green ratchet is silent about both.
+
 **That suite used to self-skip, and this statement was wrong about what that
 looked like.** It said *"7 of the 26 tests W3b Task 6 added do not run by
 default"*, and the whole-branch review measured the observable in one command:
@@ -7491,8 +7951,15 @@ is the one assertion in that file that runs without an engine. See *W3b Task 6 �
 `egret.sql`, and the coverage this ratchet does NOT give it*.
 
 **3b. `egret.container` and `egret.script.python` reach zero corpus entries too,
-and for a reason the harvester cannot fix.** W4 Task 5 measured the whole corpus
-rather than trusting the brief:
+and for a reason the harvester cannot fix — and since W10 they are registered
+nowhere either, which is a second reason standing beside the first.** Both
+handlers exist and both have `spec::registry::TASK_TYPES` rows, so publish
+accepts a flow declaring them; **nothing constructs either one.** They are not
+in `with_core_tasks()` — the registry `egret-bin` hands `runtime::spawn`, and
+therefore the whole of what any egret deployment runs — and not in
+`driver::registry()`. A flow that names one publishes and then **hangs**, for
+the mechanism item 19 derives. W4 Task 5 measured the corpus half rather than
+trusting the brief:
 
 | population | flows naming a script/container/shell/command type | flows naming `core.log.Log` (the control) |
 |---|---|---|
@@ -8055,9 +8522,53 @@ the `Parallel`. That is `advance()` abandoning a run, and `advance()` has no
 worker to tell — a different seam from the budget, deliberately not wired to it.
 
 **15. Nothing in this workspace runs this worker, and that bounds every claim
-above.** *(Also stated as the sixth fact in W4's own section, and deliberately
-in both places: it was only here when this statement was first written, fifteenth
-of seventeen, six hundred lines under the section a reader is pointed at.)*
+above — CLOSED by W10 Task 2, and the bound that replaces it is narrower rather
+than absent.** *(Also stated as the sixth fact in W4's own section, and
+deliberately in both places: it was only here when this statement was first
+written, fifteenth of seventeen, six hundred lines under the section a reader is
+pointed at.)*
+
+**What is true now, measured on this tree at `054ebdf6` (2026-09-15).**
+`egret_workflow::runtime::spawn` is the claim loop and the lease reaper, two
+`tokio::time::interval` tickers, and `crates/egret-bin/src/main.rs:1733` starts
+it. `worker::tick`, `worker::reap`, `worker::start_execution` and
+`worker::resume` have **five production call sites across three files**, listed
+in the W10 section. **This was the most consequential sentence in this file and
+it stayed false for the seventeen commits between `6eb501a5` (W10 Task 2) and
+`054ebdf6` (the commit this sweep ran on)**, which is why the W10 section reports
+the sweep as five populations rather than as a fix.
+
+**Three things still bound `109`, and none of them is "no deployment runs it":**
+
+1. **`[workflow] worker_enabled` defaults to `false`**, through a named function
+   rather than `bool::default()`, and `spawn` returns before spawning anything
+   when it is unset. A deployment that has not typed
+   `EGRET_WORKFLOW__WORKER_ENABLED=true` behaves exactly as every deployment did
+   before W10.
+2. **The shipped registry is four handlers** —
+   `worker::Handlers::with_core_tasks()`, i.e. `core.log.Log`,
+   `core.debug.Return`, `core.execution.Fail` and `core.flow.Sleep` — and it is
+   **not** this oracle's registry, which builds the same four itself with
+   `Sleep::capped(Duration::ZERO)`. Neither is a superset of the other.
+3. **The ratchet is 109 with the wiring and 109 without it**, measured both ways
+   (W10 section, *The zero channel*). So `109` is still a statement about
+   `advance()` and a driver rather than about a deployment — for a reason that
+   **survived** the wiring rather than one the wiring removed, which is the
+   difference between this bound and the one it replaces.
+
+**The derivation as it stood is kept below**, unedited, because it is the thing
+seven other sites in this file, plus two in `runnable.txt`, were copies of, and
+because the
+grep in it is the one that was true-and-misleading at the same time: it searched
+for `start_execution(`, which does not match
+`start_execution_with_trigger(` — the webhook W6 Task 7 shipped. Nothing was
+*starting* executions in production, and then the webhook was, and still nothing
+*advanced* one. **The load-bearing half of the proposition was always the tick,
+not the start.**
+
+---
+
+*As W4 Task 6 left it:*
 
 `worker::tick` has **no production caller**: a grep for `tick(`, `reap(` and
 `start_execution(` over every `crates/*/src` finds no call site at all. Four
@@ -8342,6 +8853,65 @@ half a running program compares. **The webhook's verdict is EXPOSURE NOT
 APPROVED, and that approval rests on `[workflow] webhooks_enabled` defaulting to
 `false`.**
 
+**19. W10 wired the worker and shipped five execution endpoints, and this
+ratchet is 109 with all of it and 109 with none of it** — so everything in this
+item is judged by W10's own tests and by nothing here. Item 15 used to say the
+worker reached no deployment; it reaches one now, and **that is what makes this
+item necessary rather than what makes it unnecessary.** Four things a green
+`109` says nothing about, each derived rather than asserted:
+
+- **A flow whose task type has a `TASK_TYPES` row and no handler HANGS, and it
+  hangs silently.** `Handlers::add_publishable` panics at startup in the other
+  direction — a handler publish would refuse cannot reach `with_core_tasks` —
+  but a publishable type with no handler is not guarded and cannot be, because
+  guarding it symmetrically would refuse to start every deployment that declines
+  to wire `egret.sql`, `core.http` or the container tasks, which is every
+  deployment (`with_core_tasks` is **four** handlers against **thirteen**
+  `TASK_TYPES` rows: 7 `egret.*`, 2 short `core.*`, 4 Kestra FQCNs). What
+  happens instead: `claim` takes the run and writes its lease, `Registry::run`
+  returns `WorkerError::NoHandler`, the error propagates out through `tick`,
+  `runtime::spawn` logs a `warn` and ticks again, **the run keeps its lease**,
+  the reaper clears it a `working_timeout` later, and the next tick claims it
+  and fails identically. For ever. The execution never terminates and no
+  operator-visible state ever changes. **This is the corpus's own condition** —
+  the oracle drives 294 entries of flows whose types the driver's registry does
+  not all implement, and `driver::run`'s loop comments say so — so the ratchet
+  not only fails to score it, it is *built around* it.
+- **Kill has no mechanism, and the endpoint is absent for that reason.**
+  `RunState::Killed` has **zero** producing sites — no
+  `Command::SetRunState { state: RunState::Killed }`, no `SetExecutionState`
+  with it — and `advance()` is pure over `(plan, state, now)` and takes no
+  operator input, so it cannot grow one without widening a contract this
+  programme has held for four packages. A killer holds **no lease**, so
+  `persist` cannot clear `claimed_at` and `apply_outcome`'s fence
+  (`WHERE id = $2 AND claimed_at = $3`) still matches: the worker would write a
+  terminal onto a killed run **afterwards**. And *kill-requested* is
+  **unrepresentable** — `executor::RunState` has no `Killing` variant, **0**
+  occurrences in `executor/state.rs` against a control of **9** in
+  `models/state.rs`, which is the wire model the harvester reads and not the
+  state machine. Item 14 says this oracle has never reached the *budget* kill
+  path; this says the *operator* kill path does not exist to be reached.
+- **An unbounded `Pause` cannot be ended by the resume route.**
+  `flowable::resume_paused` is the only thing that moves a run out of `PAUSED`,
+  it is pure over `(state, run, now)`, and its `Resume::Never` arm returns
+  `Step::Waiting` **before it reads `now`** — so no value of the clock and no
+  number of calls to `POST …/executions/{id}/resume` ends such a wait. Seven
+  corpus flows are written that way and every one of them *"reached PAUSED and
+  stayed there for the full 90s"* on the pinned artifact, because such a pause
+  ends only on an explicit resume signal and egret has no command that carries
+  one. `an_unbounded_pause_is_not_ended_by_the_resume_route` pins it, so the
+  command's arrival breaks a test rather than this paragraph.
+- **Over-acceptance on these five endpoints is invisible here by construction.**
+  An endpoint that started a flow its caller may not read, or listed executions
+  across workspaces, would leave this ratchet at exactly 109 — the oracle calls
+  no route, holds no `WsContext` and never evaluates a Cedar decision. That is
+  the `chart_id` class of defect, and the only instruments that can see it are
+  `tests/executions_routes.rs` and `tests/execution_repo.rs`.
+
+**Logs are W11 and the trigger loop is W12.** The trigger half of that is
+re-measured in the W6 section at this commit and still reads zero uses outside
+`crates/egret-workflow/src/trigger/`.
+
 ### The stale twins this statement retires
 
 W3a's README ended up carrying **two true-at-different-moments figures for one
@@ -8532,7 +9102,25 @@ one missed what the next found:**
 | 2 (W4 Task 6) | this README + `runnable.txt` | a row **inside its own correction table**, and the specs in two languages |
 | 3 (the review) | the files the task edited | four surfaces it had not read: `src/`, `tests/`, `driver.rs`, the plan |
 | 4 (this task, corrected predicate) | `src/`, `tests/`, `driver.rs` prose | the statement's **own preamble**, and `runnable.txt` nine lines from a figure the same sweep had superseded |
-| 5 (the re-review) | those two | *(nothing yet — and the rule above is what a sixth should use instead of a sixth surface)* |
+| 5 (the re-review) | those two | ~~*(nothing yet — and the rule above is what a sixth should use instead of a sixth surface)*~~ **pass 6 found this statement’s opening sentence, false from W10 Task 2’s commit onward** |
+| 6 (W10 Task 7) | **not a surface** — five *populations* over `git ls-files`: the phrase flattened, the ordinals, the generator's inputs, the other language, the deleted names | *(nothing yet. But see below: pass 6's own biggest find was a hazard **this section had already named**, which is the thing a seventh should not repeat)* |
+
+**Pass 6 is the first that did not choose a surface**, and the first whose
+subject was a *proposition* rather than a figure — *"nothing wires the worker
+into the binary"*, true for three packages and false from W10 Task 2. Its five
+populations are in the W10 section with an N/M each, computed over `git ls-files`
+so the denominators can be re-derived; an earlier pass's could not be, because
+it counted over `.superpowers/`, which is gitignored and growing.
+
+**And pass 6's largest find was a hazard this very section already names.** The
+statement's opening sentence — the one it tells a reader to start at — asserted
+the proposition across a **line break**, so every grep-shaped pass went past it
+quietly, exactly as the table two sections up says a wrapped phrase does. The
+rule had been written here since W8 Task 6 fix round 2 and two passes ran after
+it. **A rule in a document is not an instrument**: it is applied where whoever
+is sweeping happens to remember it. The mechanical form is the only durable one
+— *flatten whitespace before matching, every time* — and pass 6's population 1
+is defined that way rather than as a reminder.
 
 **Every one of them, the reviews included, scoped by surface — and the predicate
 is about mechanism.** "Sweep this file" is a question about where somebody
@@ -8849,6 +9437,27 @@ unlisted over-refusal, reported by name with its message.
 
 # W6 Task 1 — the corpus in `workflow.flows`, and the publish path that refuses it
 
+> **Every publish figure in this section has been superseded TWICE and the
+> section carried no marker for either — annotated at W10 Task 7, 2026-09-15.**
+> `LIVE` went 16 → **21** (W8 Task 3, when `Pause` stopped reaching the `Leaf`
+> arm) → **248** (W10 Task 6 fix round 1, when `spec::registry::TASK_TYPES`
+> gained the four Kestra FQCNs the worker implements);
+> `UNKNOWN_TYPE_REFUSED` went 301 → 296 → **68**; `VALIDATE_REFUSED` 19 → **20**;
+> the `SUBFLOW_TARGETS_{LIVE,DRAFT_ONLY}` split 2/17 → **18/1**; and the
+> `SUBFLOW_LOOKUPS_ON_{PUBLISHED,REFUSED}` pair 18/4 → 19/3 → **47/2**.
+> **The current value of every one of them is a `const` in
+> `oracle-exec/driver.rs` that `driver::census`, `driver::target_census` and
+> `driver::lookup_census` compare on every run**, which is where a reader should
+> take them from; the numbers below are W6 Task 1's record of what W6 Task 1
+> measured and are left as such, because renumbering a task's own record makes
+> it a worse record and no truer. **The finding this section reports is the one
+> that decayed, not the counts**: *"the product's publish path cannot publish
+> this corpus"* was an accurate reading of a defect, and W10 Task 6 found the
+> defect — `TASK_TYPES` did not implement programme spec §8 rule 4, so egret
+> refused every pasted Kestra flow. One argument below is corrected in place
+> rather than dated, because it is an argument and not a measurement: see
+> consequence 1.
+
 Until this task `driver.rs` called `start_execution(pool, ws, None, source,
 inputs)` and **nothing ever wrote a row to `workflow.flows`**. A `core.subflow`
 task names its target by `(namespace, flowId)` and the only lookup that pair can
@@ -8942,12 +9551,21 @@ Two consequences the rest of W6 inherits:
    | — held by no corpus flow at all (`dummy_namespace/dummy_flow`) | 1 |
    | not a name: `{{inputs.namespace}}/{{inputs.flowId}}` | 1 |
 
-   **A resolver that went through `flow_versions` would resolve 2 of 20**
+   ~~**A resolver that went through `flow_versions` would resolve 2 of 20**
    (`io.kestra.tests/subflow-child` and
-   `io.kestra.tests/flow-concurrency-parallel-subflow-kill-child`) — not "miss
-   seven of nine". `FlowRepo::find_by_name` reads `workflow.flows` and does not
-   look at `live_version_id`, so the lookup the product already uses is the one
-   that reaches 19 of the 20. The 21st string is counted apart rather than
+   `io.kestra.tests/flow-concurrency-parallel-subflow-kill-child`)~~ — **RETIRED
+   at W10 Task 6 fix round 1: it is 18 of 20**, and this sentence is corrected
+   rather than dated because it is an *argument* for a design decision and not a
+   record of a measurement. The decision — a `Subflow` resolves against the
+   draft row — stands on the reason that always carried it: a parent and its
+   child must not disagree about which version of the world they are in.
+   `worker::subflow`'s own doc and the programme spec in both languages retired
+   this argument when the figure moved; **this copy went on making it**, which
+   is the third site of the same retraction and the reason population 1 of W10
+   Task 7's sweep is defined over the whole repository. It is still true that it
+   was not "miss seven of nine". `FlowRepo::find_by_name` reads `workflow.flows`
+   and does not look at `live_version_id`, so the lookup the product already uses
+   is the one that reaches 19 of the 20. The 21st string is counted apart rather than
    dropped so the denominator is visible: it is `valids/task-flow-dynamic`'s
    dynamic target, read unrendered because that is where `publish` reads it too,
    and it is the recorded `PUBLISHED_BUT_REFUSED` row rather than a name that
@@ -9950,6 +10568,17 @@ the ratchet structurally cannot see: a flow nobody can publish never reaches
 `LIVE` 16 → 21, `UNKNOWN_TYPE_REFUSED` 301 → 296, and the
 `SUBFLOW_LOOKUPS_ON_PUBLISHED`/`_ON_REFUSED` pair 18/4 → 19/3, which must be
 read as one measurement because the total is 22 either way.
+
+*(**Superseded at W10 Task 6 fix round 1, 2026-09-15**, and this note is a
+pointer rather than a correction: the move above is W8's record of W8's move and
+is right about it. The family has moved a third time — `LIVE` **248**,
+`UNKNOWN_TYPE_REFUSED` **68**, the lookup pair **47/2**, total **49** — because
+`spec::registry::TASK_TYPES` had no row for any Kestra FQCN the worker
+implements, so publish refused every pasted Kestra flow. **Three copies of one
+family in three sections, each correct on its day**, is exactly the shape W8
+Task 7's own sweep reported and the reason a reader must take these figures from
+`driver.rs`'s constants, which a running program compares, and not from any
+prose here. See *The figures W10 retires*.)*
 
 ### A figure this task invalidated without re-measuring it
 
