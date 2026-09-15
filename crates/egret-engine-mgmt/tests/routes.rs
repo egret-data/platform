@@ -3228,3 +3228,185 @@ async fn delete_engine_keeps_its_ranger_profile_and_tag_service() {
             .unwrap();
     assert_eq!(bound, 0, "no engine is bound to it any more");
 }
+
+// ── engine ↔ workspace preflight (SP1 Part A) ────────────────────────────────
+
+/// Every blocking kind refuses an unassign, and nothing changes.
+#[tokio::test]
+async fn unassign_is_refused_while_the_workspace_uses_the_engine() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "unassign_blocked", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    for kind in [
+        "dataapi_endpoint",
+        "dataapi_endpoint_trashed",
+        "schedule",
+        "dataset",
+    ] {
+        let engine_id = seed_jwt_engine(&f, wh).await;
+        let ws = seed_workspace(&f).await;
+        put_workspaces(&f, &token, engine_id, &[ws]).await;
+        let db = materialized_db_id(&f, ws, engine_id).await;
+        seed_dependent(&f, ws, db, kind, "nightly").await;
+
+        let resp = f
+            .app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/workspaces/{ws}/engines/{engine_id}"),
+                &token,
+                None,
+            ))
+            .await
+            .unwrap();
+        let (status, j) = into_json(resp).await;
+        assert_eq!(status, StatusCode::CONFLICT, "kind={kind}; body={j}");
+        assert_eq!(j["code"], "engine_has_dependents", "kind={kind}; body={j}");
+        assert_eq!(j["dependents"][0]["kind"], kind, "body={j}");
+        assert_eq!(
+            materialized_count(&f, ws, engine_id).await,
+            1,
+            "kind={kind}: connection kept"
+        );
+        let assigned: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM engine_mgmt.engine_workspaces WHERE engine_id = $1 AND workspace_id = $2",
+        )
+        .bind(engine_id)
+        .bind(ws)
+        .fetch_one(&f.db.pool)
+        .await
+        .unwrap();
+        assert_eq!(assigned, 1, "kind={kind}: assignment kept");
+    }
+}
+
+/// `PUT {wsB}` over `{wsA}` is one assign + one blocked unassign: nothing applies.
+#[tokio::test]
+async fn put_workspaces_applies_nothing_when_one_unassign_is_blocked() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "put_ws_blocked", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+    let ws_a = seed_workspace(&f).await;
+    let ws_b = seed_workspace(&f).await;
+    put_workspaces(&f, &token, engine_id, &[ws_a]).await;
+    let db = materialized_db_id(&f, ws_a, engine_id).await;
+    seed_dependent(&f, ws_a, db, "dataapi_endpoint", "orders").await;
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [ws_b] })),
+        ))
+        .await
+        .unwrap();
+    let (status, j) = into_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={j}");
+    assert_eq!(
+        j["dependents"][0]["workspaceId"],
+        ws_a.to_string(),
+        "body={j}"
+    );
+    assert_eq!(
+        materialized_count(&f, ws_a, engine_id).await,
+        1,
+        "A untouched"
+    );
+    assert_eq!(
+        materialized_count(&f, ws_b, engine_id).await,
+        0,
+        "B was NOT assigned first"
+    );
+}
+
+#[tokio::test]
+async fn unknown_workspaces_are_404_and_apply_nothing() {
+    let Some(f) = setup_full(
+        Some(Arc::new(FakeEnginePort::default())),
+        Some(Arc::new(egret_provisioner::kube_client::FakeKube::default())),
+    )
+    .await
+    else {
+        eprintln!("skip: DATABASE_URL not set");
+        return;
+    };
+    let token = session_for(&f, "unknown_ws", true).await;
+    let wh = seed_provisioned_warehouse(&f).await;
+    let engine_id = seed_jwt_engine(&f, wh).await;
+    let real = seed_workspace(&f).await;
+    let ghost = Uuid::new_v4();
+
+    // PUT with one real and one unknown workspace: 404, the real one not assigned.
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "PUT",
+            &format!("/engines/{engine_id}/workspaces"),
+            &token,
+            Some(serde_json::json!({ "workspaceIds": [real, ghost] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "PUT unknown workspace (was 500)"
+    );
+    assert_eq!(materialized_count(&f, real, engine_id).await, 0);
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "POST",
+            &format!("/workspaces/{ghost}/engines"),
+            &token,
+            Some(serde_json::json!({ "engineId": engine_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "assign to unknown workspace (was 500)"
+    );
+
+    let resp = f
+        .app
+        .clone()
+        .oneshot(req(
+            "DELETE",
+            &format!("/workspaces/{ghost}/engines/{engine_id}"),
+            &token,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unassign from unknown workspace (was 204)"
+    );
+}

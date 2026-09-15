@@ -473,6 +473,20 @@ impl EngineMgmtStore {
         .await?)
     }
 
+    /// The ids in `ids` that name no workspace.
+    pub async fn missing_workspace_ids(&self, ids: &[Uuid]) -> Result<Vec<Uuid>, EngineMgmtError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(sqlx::query_scalar(
+            "SELECT x FROM unnest($1::uuid[]) AS x \
+             WHERE NOT EXISTS (SELECT 1 FROM workspaces w WHERE w.id = x)",
+        )
+        .bind(ids.to_vec())
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     /// Engines assigned to a workspace.
     pub async fn list_engines_for_workspace(
         &self,

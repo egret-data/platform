@@ -4125,7 +4125,8 @@ async fn set_engine_workspaces(
     Json(b): Json<SetWorkspacesBody>,
 ) -> Result<Json<Vec<EngineWorkspaceDto>>, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
-    st.engine_mgmt
+    let engine = st
+        .engine_mgmt
         .get_engine(id)
         .await?
         .ok_or(CpError::NotFound)?;
@@ -4140,11 +4141,40 @@ async fn set_engine_workspaces(
         .map(|w| w.workspace_id)
         .collect();
     let desired: std::collections::HashSet<Uuid> = b.workspace_ids.into_iter().collect();
+    let to_assign: Vec<Uuid> = desired.difference(&current).copied().collect();
+    let to_unassign: Vec<Uuid> = current.difference(&desired).copied().collect();
+
+    // Validate the WHOLE change before writing any of it. The assignment service
+    // writes through two seams' pools, so it cannot be one transaction; every
+    // refusal it could hit is therefore checked here first.
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&to_assign)
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
+    if !to_assign.is_empty() && !engine.supports_delegation() {
+        return Err(CpError::BadRequest(
+            "engine must support delegation before it can be assigned".into(),
+        ));
+    }
+    if !to_unassign.is_empty() {
+        let dependents = st
+            .engine_mgmt
+            .engine_dependents(id, Some(&to_unassign))
+            .await?;
+        if !dependents.is_empty() {
+            return Err(CpError::HasDependents(dependents));
+        }
+    }
+
     let actor = p.user_id.0;
-    for ws in desired.difference(&current) {
+    for ws in &to_assign {
         st.assignment.assign(id, *ws, actor).await?;
     }
-    for ws in current.difference(&desired) {
+    for ws in &to_unassign {
         st.assignment.unassign(id, *ws).await?;
     }
 
@@ -4196,6 +4226,14 @@ async fn assign_workspace_engine(
     Json(b): Json<AssignEngineBody>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&[id])
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
     st.assignment.assign(b.engine_id, id, p.user_id.0).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4221,6 +4259,23 @@ async fn unassign_workspace_engine(
     Path((id, engine_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CpError> {
     egret_core::authz::require(&*st.pdp, &p, "engine:update").await?;
+    if !st
+        .engine_mgmt
+        .missing_workspace_ids(&[id])
+        .await?
+        .is_empty()
+    {
+        return Err(CpError::NotFound);
+    }
+    // Unassigning deletes the workspace's materialized connection, which fails on
+    // (endpoints, alerts) or destroys (datasets) whatever sits on it.
+    let dependents = st
+        .engine_mgmt
+        .engine_dependents(engine_id, Some(std::slice::from_ref(&id)))
+        .await?;
+    if !dependents.is_empty() {
+        return Err(CpError::HasDependents(dependents));
+    }
     st.assignment.unassign(engine_id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
