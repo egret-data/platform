@@ -25,6 +25,7 @@ import { useMutation, useQueryClient, type UseMutationResult } from "@tanstack/r
 import { ApiError } from "./client";
 import { authImpersonateStart } from "./generated/auth/auth";
 import type { StartImpersonation, StartWsImpersonation } from "./generated/model";
+import { clearUserScopedCache } from "./queryClient";
 import { workspaceMembersWsImpersonateStart } from "./generated/workspace-members/workspace-members";
 
 /** Redirects the browser to the OIDC re-auth URL carried by a `409 oidc_step_up`
@@ -45,9 +46,13 @@ export function useStartPlatformImpersonation(): UseMutationResult<void, ApiErro
     mutationFn: async (body) => {
       await authImpersonateStart(body);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["me"] });
-      qc.invalidateQueries({ queryKey: ["my-workspaces"] });
+    // Clear the admin's own cache (e.g. `["my-workspaces"]`) and await the
+    // `me` refetch: `ImpersonateDialog` navigates right after `await
+    // start.mutateAsync(...)`, and it must land on the impersonated
+    // identity's data, not the admin's cached one.
+    onSuccess: async () => {
+      clearUserScopedCache(qc);
+      await qc.invalidateQueries({ queryKey: ["me"] });
     },
     onError: redirectOnStepUp,
   });
@@ -60,9 +65,9 @@ export function useStartWsImpersonation(workspace: string): UseMutationResult<vo
     mutationFn: async (body) => {
       await workspaceMembersWsImpersonateStart(workspace, body);
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["me"] });
-      qc.invalidateQueries({ queryKey: ["my-workspaces"] });
+    onSuccess: async () => {
+      clearUserScopedCache(qc);
+      await qc.invalidateQueries({ queryKey: ["me"] });
     },
     onError: redirectOnStepUp,
   });
